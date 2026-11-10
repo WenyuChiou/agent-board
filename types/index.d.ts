@@ -72,7 +72,9 @@ export type QuestionLedger = {
 export type QuestionProofs = { retired: string[]; consumed: string[] }
 
 // `line` (0-based) and `raw` (the line as written) let a press tick exactly this line.
-export type ProgressStep = { text: string; status: ProgressStepStatus; depth: number; line: number; raw: string; questionToken?: string }
+// A question answered in its own agent's window (`<!-- native=… options=[…] -->` after the step): the board lists the options and where to answer, and offers no reply box.
+export type NativeAsk = { agent: string; options: string[] }
+export type ProgressStep = { text: string; status: ProgressStepStatus; depth: number; line: number; raw: string; questionToken?: string; native?: NativeAsk }
 
 // working: Claude is mid-turn · waiting: idle with open steps · done: every step done ·
 // ended: the session closed with open steps
@@ -111,6 +113,8 @@ export type ProgressAuto = {
   // started it, when the writer knew it. Absent on every block a person's conversation writes.
   isRun?: true
   parent?: string
+  // Timestamp when a prompt replied to a waiting question in chat before the next report (#401).
+  replied?: number
 }
 
 export type ProgressTask = {
@@ -160,6 +164,8 @@ export type ProgressMirrorTask = {
   blocked: string | null
   blockedBy: string[]
   questionRevision?: string
+  // The question is answered in the agent's own window (AskUserQuestion, a tool approval): the block carries it as a native line.
+  native?: NativeAsk
   // A confirmed transfer reported by this task's owner, not a suggestion or a transport receipt.
   handoffTo?: string
 }
@@ -217,7 +223,9 @@ export type ProgressMirror = {
   // separately so adding prompt events never reinterprets saved turn/end ranks.
   promptOrder?: number
   // Existing question steps provisionally answered by the latest prompt, never prompt text.
-  promptQuestion?: { order: number; state: ProgressSessionState; autoAsk: string | null; tasks: ProgressMirrorTask[] } | null
+  promptQuestion?: { order: number; turnKey?: string; state: ProgressSessionState; autoAsk: string | null; tasks: ProgressMirrorTask[] } | null
+  // Timestamp when a prompt replied to a waiting question in chat before the next report (#401).
+  replied?: number
   // A person's completion rejects older (or undated) inbox turns without stopping new work.
   confirmedAt?: number
   // Claude's steps the person has answered since they were asked: task id to the stepKey of
@@ -259,6 +267,8 @@ declare module 'claude-code' {
       theme: string
       today: number
       isLegendOpen: boolean
+      // The progress bar's style (#1085), as the board's settings file last said.
+      barStyle: 'ink' | 'blue' | 'green'
       opened: string[]
       doneSeen: Record<string, number>
       hiddenAsks: string[]

@@ -230,4 +230,71 @@ describe('L3 across agents and sessions', () => {
       await world.close()
     }
   })
+
+  test('across sessions: turn-start hooks push only the three relevant board changes once and stay silent on unrelated changes (#869)', async () => {
+    const world = makeWorld()
+    try {
+      const session = 'synthetic-push-owner-869'
+      const { createHash } = await import('node:crypto')
+      const owner = createHash('sha256').update(`codex:${session}`).digest('hex').slice(0, 8)
+      world.env.CODEX_THREAD_ID = session
+      const report = await run(world, ['--codex-report'], {
+        input: JSON.stringify({
+          project: 'api-gateway',
+          title: 'Frontend integration',
+          state: 'waiting',
+          steps: ['- [>] Waiting on Backend schema migration'],
+        }),
+      })
+      assert.equal(report.status, 0, report.stderr)
+
+      // Unrelated changes: a question for the person and an unrelated done block.
+      block(world, { project: 'api-gateway', agent: 'claude', session: '11112222', state: 'waiting', title: 'Design review', steps: ['- [?] Should the header be sticky?'] })
+      block(world, { project: 'api-gateway', agent: 'gemini', session: '33334444', state: 'done', title: 'Docs cleanup', steps: ['- [x] Fix broken links'] })
+
+      const silentTurn = await hook(world, 'codex', 'UserPromptSubmit', { session_id: session, turn_id: 'turn-silent', prompt: 'Continue frontend' })
+      assert.equal(silentTurn.status, 0, silentTurn.stderr)
+      assert.equal(silentTurn.stdout, '', 'unrelated board changes must not be pushed at turn start')
+
+      // Relevant changes: a question for this session, a hand-off, and the waited-on task finishing.
+      block(world, { project: 'api-gateway', agent: 'claude', session: '77778888', state: 'waiting', title: 'Auth contract', steps: [`- [?] @${owner} does frontend send Bearer tokens?`] })
+      block(world, { project: 'api-gateway', agent: 'claude', session: '55556666', state: 'done', title: 'Backend schema migration', steps: [`- [x] Added user_id column — Handed to ${owner}`] })
+
+      const pushedTurn = await hook(world, 'codex', 'UserPromptSubmit', { session_id: session, turn_id: 'turn-pushed', prompt: 'Check backend status' })
+      assert.equal(pushedTurn.status, 0, pushedTurn.stderr)
+      const output = JSON.parse(pushedTurn.stdout)
+      const context = output.hookSpecificOutput.additionalContext
+      assert.ok(context.includes('Auth contract'), context)
+      assert.ok(context.includes('Backend schema migration'), context)
+      assert.ok(!context.includes('Design review'), context)
+      assert.ok(!context.includes('Docs cleanup'), context)
+
+      // Pure unit check on sessionPushNote for all three kinds and noise exclusion.
+      const { registerHooks } = await import('node:module')
+      const resolver = registerHooks({ resolve(specifier, context, next) {
+        try { return next(specifier, context) } catch (error) {
+          if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+          return next(`${specifier}.ts`, context)
+        }
+      } })
+      let sessionPushNote, parseProgress
+      try {
+        ;({ sessionPushNote } = await import('../../hooks/others.ts'))
+        ;({ parseProgress } = await import('../../hooks/parse.ts'))
+      } finally { resolver.deregister() }
+      const pureProjects = parseProgress(world.read('progress.md'))
+      const pureOwn = { sessionId: owner, agent: 'codex', resume: session, steps: ['- [>] Waiting on Backend schema migration'] }
+      const pureFirst = sessionPushNote(pureProjects, ['api-gateway'], pureOwn, new Set(), Date.now(), EN)
+      assert.ok(pureFirst.note !== null)
+      assert.equal(pureFirst.keys.length, 3)
+      assert.equal(sessionPushNote(pureProjects, ['api-gateway'], pureOwn, new Set(pureFirst.keys), Date.now(), EN).note, null)
+
+      // Next turn-start must not push the same changes a second time.
+      const nextTurn = await hook(world, 'codex', 'UserPromptSubmit', { session_id: session, turn_id: 'turn-next', prompt: 'Wrap up' })
+      assert.equal(nextTurn.status, 0, nextTurn.stderr)
+      assert.equal(nextTurn.stdout, '', 'already pushed changes must not be pushed again')
+    } finally {
+      await world.close()
+    }
+  })
 })

@@ -23,6 +23,23 @@ try {
 }
 `
 
+// Renames many files in one Node start, so a batch of receipts does not pay a cold PowerShell
+// start per file. `renameSync` replaces an existing target. A failed pair does not stop the rest;
+// stdout names the failed pairs by index as JSON, for a person reading a log (the caller looks at
+// the files instead). Run it as `node -e LEDGER_RENAMES -- from1 to1 from2 to2 …`.
+export const LEDGER_RENAMES = `
+const { renameSync } = require('node:fs')
+const args = process.argv.slice(1), failed = []
+for (let at = 0; at + 1 < args.length; at += 2) {
+  try {
+    renameSync(args[at], args[at + 1])
+  } catch {
+    failed.push(at / 2)
+  }
+}
+process.stdout.write(JSON.stringify(failed))
+`
+
 export const PENDING_STAGE = `
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), crypto = require('node:crypto')
 const [target] = process.argv.slice(1)

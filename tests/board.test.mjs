@@ -3,7 +3,7 @@
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -17,7 +17,7 @@ import childProcess from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
-import { pickSurface, AGENT_ENV_VARS } from '../hooks/surface.ts'
+import { pickSurface, AGENT_ENV_VARS, sshTargetOf, pagePortOf } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
@@ -624,7 +624,15 @@ test('a --serve whose server cannot start says so without mentioning a page', ()
     'zh-CN': '打不开看板网页：服务器没有启动。',
   }
   for (const [lang, line] of Object.entries(lines)) {
-    const text = run(lang, ['--serve', '--no-open', '--port', '65536'])
+    let text = ''
+    try {
+      run(lang, ['--serve', '--no-open', '--port', '65536'])
+      assert.fail('a --serve that started no page exits non-zero (#1292)')
+    } catch (error) {
+      if (error.code === 'ERR_ASSERTION') throw error
+      assert.equal(error.status, 1, 'a --serve that started no page exits 1 (#1292)')
+      text = error.stdout
+    }
     assert.equal(text.trim().split('\n').at(-1), line)
     assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
     assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
@@ -884,6 +892,148 @@ test('the terminal board quarantines torn ledgers and rebuilds captured identiti
     assert.equal(saved.length, 1)
     assert.equal(ran.files[saved[0]], torn)
   }
+})
+
+// A virus scanner or indexer can hold the ledger for a moment on Windows (#696): the
+// rename is refused, then lands after a short wait, instead of failing the press. The
+// refusal here is a stubbed rename, not a held file: it stands in for the transient
+// EPERM the scanner gives, so the retry itself runs on every system, while the test
+// below it holds the file open for real on Windows. The tick rewrites the ledger (the
+// answered question's record changes); a hide writes only the hidden list, and the
+// default file's choice question has no tickable step, so neither would meet the rename.
+const HAND_FILE = '# Progress\n\n## demo\n### Hand task\n- [?] Ship it, OK?\n'
+test('a ledger rename refused for a moment waits and lands instead of failing the press', () => {
+  const seed = chatRun(['--keys', ''], { file: () => HAND_FILE, inspect: questionFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const original = JSON.parse(seed.files['progress-questions.json'])
+  assert.equal(original.records.length, 1)
+  const inspect = dir => ({ ...questionFiles(dir), progress: readFileSync(join(dir, 'progress.md'), 'utf8') })
+  const ran = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    // Four refusals: the three tight retries of the old code all meet one, and the
+    // rename after the waits is the one that lands.
+    preload: questionFault(`let refused = 0
+const originalRename = fs.renameSync
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === ledger && refused < 4) {
+    refused += 1
+    throw Object.assign(new Error('synthetic held ledger'), { code: 'EPERM' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(ran.status, 0, ran.stderr)
+  assert.ok(ran.progress.includes('- [x] Ship it, OK?'), ran.progress)
+  assert.notEqual(ran.files['progress-questions.json'], seed.files['progress-questions.json'], 'the tick rewrote the ledger')
+})
+
+test('a refused rename retry rechecks the destination and preserves another writer\'s progress or question update', () => {
+  const seed = chatRun(['--keys', ''], { file: () => HAND_FILE, inspect: questionFiles })
+  assert.equal(seed.status, 0, seed.stderr)
+  const peerFile = '# Progress\n\n## demo\n### Concurrent task\n- [?] Keep peer question, OK?\n'
+  const peerAnswered = chatRun(['--keys', 'x'], { file: () => peerFile, inspect: questionFiles })
+  assert.equal(peerAnswered.status, 0, peerAnswered.stderr)
+  const peerRecord = JSON.parse(peerAnswered.files['progress-questions.json']).records[0]
+  assert.equal(peerRecord.isWaiting, false)
+  const concurrentLedger = JSON.stringify({
+    ...JSON.parse(seed.files['progress-questions.json']),
+    records: [...JSON.parse(seed.files['progress-questions.json']).records, peerRecord],
+  })
+  const inspect = dir => ({
+    ...questionFiles(dir),
+    progress: readFileSync(join(dir, 'progress.md'), 'utf8'),
+    temps: readdirSync(dir).filter(name => name.endsWith('.board-tmp')),
+  })
+
+  // 1. A refused progress rename preserves another writer's task and the requested tick.
+  const progressRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+let refused = false
+fs.renameSync = (from, to, ...rest) => {
+  if (!refused && String(to) === progress) {
+    refused = true
+    fs.writeFileSync(progress, fs.readFileSync(progress, 'utf8') + '\\n### Concurrent task\\n- [~] Added while progress rename was refused\\n')
+    throw Object.assign(new Error('synthetic held progress'), { code: 'EPERM' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(progressRan.status, 0, progressRan.stderr)
+  assert.ok(progressRan.progress.includes('- [x] Ship it, OK?'), progressRan.progress)
+  assert.ok(progressRan.progress.includes('### Concurrent task\n- [~] Added while progress rename was refused'), progressRan.progress)
+  assert.deepEqual(progressRan.temps, [])
+
+  // 2. A refused question-ledger rename preserves a concurrent question update and the requested answer,
+  // without running the missing-ledger fallback or leaving stale temp files.
+  const ledgerRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+const originalLink = fs.linkSync
+const originalSpawn = cp.spawnSync
+const probe = { links: 0, moves: 0, sources: [] }
+let refused = false
+fs.linkSync = (from, to) => {
+  if (String(to) === ledger && String(from).endsWith('.board-tmp')) probe.links += 1
+  return originalLink(from, to)
+}
+cp.spawnSync = (tool, argv, options) => {
+  if (Array.isArray(argv) && argv.some(arg => String(arg).includes('.board-tmp'))) probe.moves += 1
+  return originalSpawn(tool, argv, options)
+}
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === ledger && fs.readFileSync(progress, 'utf8').includes('- [x] Ship it, OK?')) {
+    probe.sources.push(path.basename(String(from)))
+    if (!refused) {
+      refused = true
+      fs.writeFileSync(ledger, ${JSON.stringify(concurrentLedger)})
+      throw Object.assign(new Error('synthetic held ledger'), { code: 'EPERM' })
+    }
+  }
+  return originalRename(from, to, ...rest)
+}
+process.on('exit', () => fs.writeFileSync(ledger + '.probe', JSON.stringify(probe)))`),
+  })
+  assert.equal(ledgerRan.status, 0, ledgerRan.stderr)
+  const finalLedger = JSON.parse(ledgerRan.files['progress-questions.json'])
+  const tickedRecord = finalLedger.records.find(one => one.words.includes('Ship it'))
+  const concurrentRecord = finalLedger.records.find(one => one.words.includes('Keep peer question'))
+  assert.ok(tickedRecord, ledgerRan.files['progress-questions.json'])
+  assert.equal(tickedRecord.isWaiting, false)
+  assert.ok(concurrentRecord, ledgerRan.files['progress-questions.json'])
+  const probe = JSON.parse(ledgerRan.files['progress-questions.json.probe'])
+  assert.equal(probe.links, 0)
+  assert.equal(probe.moves, 0)
+  assert.equal(probe.sources.length, 2)
+  assert.notEqual(probe.sources[0], probe.sources[1], 'the stale temp was discarded and a fresh temp was written from current contents')
+  assert.deepEqual(ledgerRan.temps, [])
+
+  // 3. A changed destination after a refused rename does not count a replacement or run onReplaced:
+  // if the restarted rewrite then fails persistently, the journal line is still rolled back.
+  const rollbackRan = chatRun(['--keys', 'x'], {
+    file: () => HAND_FILE, beside: seed.files, inspect,
+    preload: questionFault(`const progress = path.join(__dirname, 'progress.md')
+const originalRename = fs.renameSync
+let refused = false
+fs.renameSync = (from, to, ...rest) => {
+  if (String(to) === progress) {
+    if (!refused) {
+      refused = true
+      fs.writeFileSync(progress, fs.readFileSync(progress, 'utf8') + '\\n### Concurrent task\\n- [~] Still preserved\\n')
+      throw Object.assign(new Error('synthetic held progress'), { code: 'EPERM' })
+    }
+    throw Object.assign(new Error('persistent progress refusal'), { code: 'EACCES' })
+  }
+  return originalRename(from, to, ...rest)
+}`),
+  })
+  assert.equal(rollbackRan.status, 1)
+  assert.match(rollbackRan.stdout + rollbackRan.stderr, /nothing was changed/)
+  assert.ok(rollbackRan.progress.includes('- [?] Ship it, OK?'), rollbackRan.progress)
+  assert.ok(rollbackRan.progress.includes('### Concurrent task\n- [~] Still preserved'), rollbackRan.progress)
+  assert.deepEqual(rollbackRan.temps, [])
 })
 
 test('the terminal board preserves unknown JSON ledgers and never overwrites a quarantine collision', () => {
@@ -2561,7 +2711,7 @@ test('served questions keep hidden identities across reordered reports and a fre
 test('the terminal board and the page retire a resolution once the agent ticks its step', { timeout: 30_000 }, async () => {
   for (const surface of ['terminal', 'page']) {
     const dir = surface === 'terminal' ? mkdtempSync(join(tmpdir(), 'board-resolve-')) : null
-    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true }) }
+    const board = dir === null ? await page() : { dir, path: join(dir, 'progress.md'), close: async () => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
     try {
       const script = join(board.dir, 'agent-board.mjs')
       if (surface === 'terminal') writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: board.path, lang: 'en' })}\n${BOARD_SCRIPT}`)
@@ -2740,19 +2890,198 @@ test('ticking twin steps from the page ticks each line it showed', { timeout: 30
     assert.equal(lines.length, 2)
     assert.ok(lines.every(line => typeof line === 'number'), 'the board names each step by its file line')
     // The second twin first: its press must not tick the first line.
-    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.fp } })
+    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.tickFp } })
     assert.equal(second.status, 200, second.body)
     let left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[lines[1]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
     assert.equal(left[lines[0]], '- [ ] Draft the notes')
     // Then the first twin, with the board drawn again.
     const again = await rowOf('Draft the notes')
-    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.fp } })
+    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.tickFp } })
     assert.equal(first.status, 200, first.body)
     left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[lines[0]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
   } finally {
     await board.close()
+  }
+})
+
+test('fresh untitled checkbox presses from the page tick the second twin and then the first', { timeout: 30_000 }, async () => {
+  const board = await page('## Untitled project\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
+  try {
+    for (const index of [1, 0]) {
+      const row = (await board.rows()).find(one => one.project === 'Untitled project' && one.title === EN.unnamed)
+      assert.ok(row)
+      const step = row.steps[index]
+      const response = await board.call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: step.text, line: step.fileLine, fp: row.tickFp } })
+      assert.equal(response.status, 200, response.body)
+      const lines = readFileSync(board.path, 'utf8').split('\n')
+      assert.match(lines[step.fileLine], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      if (index === 1) assert.equal(lines[row.steps[0].fileLine], '- [ ] Inspect the map')
+    }
+  } finally {
+    await board.close()
+  }
+})
+
+test('a saved checkbox press refuses after another card moves its twin lines (#1204)', { timeout: 30_000 }, async () => {
+  const board = await page('## home\n### Earlier card\n- [ ] Check the sample\n### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
+  try {
+    const { path, call, rowOf } = board
+    const row = await rowOf('Twin steps')
+    const request = { key: row.key, type: 'tick', text: 'Inspect the map', line: row.steps[1].fileLine, fp: row.tickFp }
+    const shifted = readFileSync(path, 'utf8').replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    writeFileSync(path, shifted)
+    const stale = await call('POST', '/api/act', { body: request })
+    assert.equal(stale.status, 409)
+    assert.equal(readFileSync(path, 'utf8'), shifted, 'refusing the stale checkbox must not write either twin')
+    const fresh = await rowOf('Twin steps')
+    const ticked = await call('POST', '/api/act', { body: { ...request, fp: fresh.tickFp, line: fresh.steps[1].fileLine } })
+    assert.equal(ticked.status, 200, ticked.body)
+    const left = readFileSync(path, 'utf8').split('\n')
+    assert.equal(left[fresh.steps[0].fileLine], '- [ ] Inspect the map')
+    assert.match(left[fresh.steps[1].fileLine], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+  } finally {
+    await board.close()
+  }
+})
+
+for (const ordering of ['lock', 'retry', 'readback', 'replacement', 'folded-visible', 'folded-lock', 'card-lock', 'card-readback', 'untitled-lock']) test('a checkbox keeps its original twin through the actual write boundary: ' + ordering, { timeout: 30_000 }, async () => {
+  const isLocked = ordering.endsWith('lock')
+  const isCards = ordering.startsWith('card-')
+  const isHiddenNext = ordering === 'folded-lock'
+  const isFoldedVisible = ordering === 'folded-visible'
+  const isUntitled = ordering === 'untitled-lock'
+  const faults = mkdtempSync(join(tmpdir(), 'board-checkbox-write-'))
+  const preload = join(faults, 'boundary.cjs')
+  const armed = join(faults, 'armed')
+  const blocked = join(faults, 'blocked')
+  const release = join(faults, 'release')
+  const injected = join(faults, 'injected')
+  const env = { NODE_OPTIONS: '--require ' + JSON.stringify(preload), AGENT_BOARD_TEST_CHECKBOX_PROGRESS: '' }
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const progress = process.env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS
+const arm = ${JSON.stringify(armed)}, blocked = ${JSON.stringify(blocked)}, injected = ${JSON.stringify(injected)}
+const ordering = ${JSON.stringify(ordering)}
+const open = fs.openSync, rename = fs.renameSync
+const change = () => {
+  const before = fs.readFileSync(progress, 'utf8')
+  const after = ordering === 'replacement'
+    ? before.replace('### Twin steps', '### Replacement task')
+    : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  fs.writeFileSync(progress, after)
+  fs.writeFileSync(injected, '')
+}
+fs.openSync = (file, ...args) => {
+  try { return open(file, ...args) } catch (error) {
+    if (ordering.endsWith('lock') && String(file) === progress + '.agent-board-lock' && error.code === 'EEXIST' && fs.existsSync(arm) && !fs.existsSync(blocked)) fs.writeFileSync(blocked, '')
+    throw error
+  }
+}
+fs.renameSync = (from, to, ...args) => {
+  const controlled = !ordering.endsWith('lock') && ordering !== 'folded-visible' && String(to) === progress && fs.existsSync(arm) && !fs.existsSync(injected)
+  if (controlled && !ordering.endsWith('readback')) {
+    change()
+    throw Object.assign(new Error('synthetic competing write before rename'), { code: 'EPERM' })
+  }
+  const result = rename(from, to, ...args)
+  if (controlled) change()
+  return result
+}
+syncBuiltinESMExports()
+`)
+  let board, holder, holderExit, watcher
+  try {
+    const twins = '### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+    const manual = isUntitled ? '## Untitled project\n' + twins.replace('### Twin steps\n', '') : isCards ? twins.repeat(2) : isHiddenNext ? '### Twin steps\n' + Array.from({ length: 5 }, (_, i) => '- [ ] Ordinary step ' + i + '\n').join('') + '- [~] Inspect the map\n- [~] Inspect the map\n' : isFoldedVisible ? '### Twin steps\n- [x] Completed one\n- [x] Completed two\n' + '- [ ] Inspect the map\n'.repeat(6) : twins
+    board = await page('## home\n### Earlier card\n- [ ] Check the sample\n' + manual, env, [], undefined, BOARD_SCRIPT, (_dir, path) => { env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS = path })
+    const row = isUntitled ? (await board.rows()).find(one => one.project === 'Untitled project' && one.title === EN.unnamed) : isCards ? (await board.rows()).filter(one => one.title === 'Twin steps').at(-1) : await board.rowOf('Twin steps')
+    const before = readFileSync(board.path, 'utf8')
+    const shifted = isUntitled ? before.replace('## Untitled project', '> Synthetic extra context\n## Untitled project') : isFoldedVisible ? before : isHiddenNext ? before.replace('- [ ] Check the sample\n', '') : before.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    const replaced = before.replace('### Twin steps', '### Replacement task')
+    const at = before.lastIndexOf('### Twin steps')
+    const changedCard = before.slice(0, at) + before.slice(at).replace('### Twin steps\n', '### Twin steps\n> Changed selected card\n')
+    const visible = row.steps.filter(step => step.text === 'Inspect the map' && typeof step.fileLine === 'number')
+    const body = { key: row.key, type: 'tick', text: 'Inspect the map', line: isHiddenNext ? row.nextFileLine : visible[1].fileLine, fp: row.tickFp }
+    if (isHiddenNext) assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the primary target is outside the folded display')
+    if (isLocked) {
+      const worker = join(faults, 'holder.mjs')
+      writeFileSync(worker, `import { withLocalLock } from ${JSON.stringify(new URL('../scripts/local-lock.ts', import.meta.url).href)}
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+const ordering = ${JSON.stringify(ordering)}
+withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
+  process.stdout.write('held\\n')
+  const deadline = Date.now() + 5000
+  while (!existsSync(${JSON.stringify(release)})) {
+    if (Date.now() >= deadline) throw new Error('CONTROL_NOT_RELEASED')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+  }
+  const file = ${JSON.stringify(board.path)}
+  const before = readFileSync(file, 'utf8')
+  const at = before.lastIndexOf('### Twin steps')
+  const after = ordering === 'untitled-lock' ? before.replace('## Untitled project', '> Synthetic extra context\\n## Untitled project') : ordering === 'folded-lock' ? before.replace('- [ ] Check the sample\\n', '') : ordering === 'card-lock' ? before.slice(0, at) + before.slice(at).replace('### Twin steps\\n', '### Twin steps\\n> Changed selected card\\n') : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  writeFileSync(file, after)
+})
+`)
+      holder = spawn(process.execPath, [worker], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      holderExit = new Promise((done, fail) => { holder.once('error', fail); holder.once('exit', done) })
+      const held = new Promise(done => holder.stdout.once('data', done))
+      await Promise.race([held, holderExit.then(code => { throw new Error('the lock holder exited before its barrier: ' + code) })])
+    }
+    const observed = !isLocked ? null : new Promise((done, fail) => {
+      watcher = fs.watch(faults, () => { if (existsSync(blocked)) done() })
+      watcher.on('error', fail)
+    })
+    writeFileSync(armed, '')
+    const sent = board.call('POST', '/api/act', { body })
+    if (isLocked) {
+      // The real server must already have failed to acquire the real shared lock.
+      await Promise.race([observed, sent.then(() => { throw new Error('the action ended before the blocked lock boundary') })])
+      writeFileSync(release, '')
+      assert.equal(await holderExit, 0)
+    }
+    const response = await sent
+    const after = readFileSync(board.path, 'utf8')
+    if (!isLocked && !isFoldedVisible) assert.ok(existsSync(injected), 'the competing write must reach the intended production boundary')
+    const journal = readdirSync(board.dir).filter(name => /^progress-journal-/.test(name)).map(name => readFileSync(join(board.dir, name), 'utf8')).join('\n')
+    if (ordering === 'replacement' || ordering === 'card-lock') {
+      assert.equal(response.status, 409, 'a replaced task must not receive the old checkbox press')
+      assert.equal(after, ordering === 'card-lock' ? changedCard : replaced)
+      assert.doesNotMatch(journal, /Inspect the map/, 'a refused tentative tick must not leave a false journal entry')
+    } else if (response.status === 409) {
+      assert.equal(ordering.endsWith('readback') || isFoldedVisible, false, 'a landed tick or a fresh visible checkbox must remain a single completed action')
+      assert.equal(after, shifted)
+      assert.doesNotMatch(journal, /Inspect the map/)
+    } else if (isCards || isHiddenNext || isFoldedVisible || isUntitled) {
+      assert.equal(response.status, 200, response.body)
+      const expected = shifted.split('\n')
+      const header = isUntitled ? expected.indexOf('## Untitled project') : isCards ? expected.lastIndexOf('### Twin steps') : expected.indexOf('### Twin steps')
+      const target = header + (isHiddenNext ? 6 : isFoldedVisible ? 4 : 2)
+      const raw = isHiddenNext ? '- [~] Inspect the map' : '- [ ] Inspect the map'
+      assert.equal(expected[target], raw)
+      const actual = after.split('\n')
+      assert.match(actual[target], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      actual[target] = raw
+      assert.equal(actual.join('\n'), shifted, 'only the original selected source checkbox may change')
+      assert.equal(journal.split('\n').filter(line => line.includes('Inspect the map')).length, 1)
+    } else {
+      assert.equal(response.status, 200, response.body)
+      const lines = after.split('\n')
+      const task = lines.indexOf('### Twin steps')
+      assert.equal(lines[task + 1], '- [ ] Inspect the map', 'the first twin must remain open after the original second-twin press')
+      assert.match(lines[task + 2], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      assert.equal(after.replace(/- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->/, '- [ ] Inspect the map'), shifted)
+    }
+  } finally {
+    watcher?.close()
+    if (holder !== undefined && holder.exitCode === null) {
+      writeFileSync(release, '')
+      const timer = setTimeout(() => holder.kill(), 5000)
+      try { await holderExit } finally { clearTimeout(timer) }
+    }
+    if (board !== undefined) await board.close()
+    rmSync(faults, { recursive: true, force: true })
   }
 })
 
@@ -2775,7 +3104,7 @@ test('ticking the next step from the page still works when the step list folded 
     assert.equal(row.next, 'Step six')
     assert.equal(typeof row.nextFileLine, 'number')
     assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the next step is folded out of the shown steps')
-    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.fp } })
+    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.tickFp } })
     assert.equal(ticked.status, 200, ticked.body)
     const left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[row.nextFileLine], /^- \[x\] Step six <!-- done \d{4}-\d\d-\d\d -->$/)
@@ -2787,7 +3116,7 @@ test('ticking the next step from the page still works when the step list folded 
 
 const relayFragment = (at, state = 'waiting', step = '- [?] Ship it Friday, OK?') => `## launch\n<!-- auto session=c0ffee12 agent=muse state=${state} updated=${at} -->\n### Draft the launch post\n${step}\n<!-- /auto session=c0ffee12 -->`
 
-test('Connect a web chat copies the prompt in the guide, and a block filled in from it is accepted', { timeout: 30_000 }, async () => {
+test('a block filled in from the web-chat guide is accepted', { timeout: 30_000 }, async () => {
   // Run the actual CLI sources in the scratch directory, before the maintainer rebuilds the bundle.
   const root = new URL('../', import.meta.url).href
   const source = `import { registerHooks, stripTypeScriptTypes } from 'node:module'
@@ -2807,15 +3136,6 @@ await import(${JSON.stringify(new URL('../scripts/board-cli.ts', import.meta.url
     assert.equal(home.status, 200, home.body)
     const guide = readFileSync(new URL('../docs/REMOTE_REPORTERS.md', import.meta.url), 'utf8').replaceAll('\r\n', '\n')
     const prompt = guide.split('### Chat relay: a prompt to paste')[1].split('```text\n')[1].split('\n```')[0]
-    const encoded = home.body.match(/<script type="application\/json" id="relay-prompt">([\s\S]*?)<\/script>/)?.[1]
-    assert.ok(encoded)
-    assert.ok(!encoded.includes('<'))
-    assert.equal(JSON.parse(encoded), prompt)
-    const dom = await pageDom(home.body, redesignModel(), { clipboard: true })
-    dom.node('connect-web-chat').click()
-    await dom.settle()
-    assert.deepEqual(dom.copied, [prompt])
-    assert.ok(dom.node('.pfoot').textContent.includes(EN.webChatCopied))
     // One second in the past: the board refuses any source time ahead of its own clock, and this test's
     // process and the board's can read a few milliseconds apart on Windows (#954).
     const text = prompt.slice(prompt.indexOf('## <project>'), prompt.indexOf('<!-- /auto session=<ID> -->') + '<!-- /auto session=<ID> -->'.length)
@@ -3199,6 +3519,24 @@ test('with explicit legacy opt-in a reply goes into a closed Grok session once, 
   }
 })
 
+test('a press on the page still acts after a block above its card grows, so its lines moved (#1170)', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const { call, path, rowOf } = board
+    const row = await rowOf('Pick the cache')
+    assert.equal(row.canArchive, true)
+    // Another task is written above the card after the page drew it: every line below moves down.
+    const grown = readFileSync(path, 'utf8').replace('## api-gateway\n', '## Notes\n### Read the logs\n- [ ] Open the file\n- [ ] Find the error\n\n## api-gateway\n')
+    writeFileSync(path, grown)
+    const archived = await call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: row.session, fp: row.fp } })
+    assert.equal(archived.status, 200, archived.body)
+    assert.ok(!readFileSync(path, 'utf8').includes('b2c3d4e5'))
+    assert.ok(readFileSync(path, 'utf8').includes('### Read the logs'))
+  } finally {
+    await board.close()
+  }
+})
+
 test('a press on the page for a task whose block another session took under the same title is refused, and nothing is archived until the page draws the block that is there now', { timeout: 30_000 }, async () => {
   const board = await page()
   try {
@@ -3239,8 +3577,9 @@ test('a tick on the page for a hand-kept question that was reworded since the pa
     assert.equal(drawn.text, 'Ask two referees')
     const reworded = text().replace('- [?] Ask two referees', '- [?] Submit the replacement application')
     writeFileSync(path, reworded)
-    const press = fp => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp } })
-    const refused = await press(drawn.fp)
+    // The press is what the page's Done button sends: the tick fingerprint and the step's line (#1204).
+    const press = one => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp: one.tickFp, line: one.fileLine } })
+    const refused = await press(drawn)
     assert.equal(refused.status, 409, refused.body)
     assert.equal(refused.json().note, LINE_CHANGED)
     assert.equal(text(), reworded)
@@ -3248,7 +3587,7 @@ test('a tick on the page for a hand-kept question that was reworded since the pa
     const now = await ask()
     assert.equal(now.key, drawn.key)
     assert.notEqual(now.fp, drawn.fp)
-    assert.equal((await press(now.fp)).status, 200)
+    assert.equal((await press(now)).status, 200)
     assert.ok(text().includes('- [x] Submit the replacement application'))
   } finally {
     await board.close()
@@ -3321,7 +3660,10 @@ const viewed = model => {
 // it sends. `redraw` hands it the next board, as the page's next poll would get it.
 // `width`: the window's width in pixels (the page folds and moves its sidebar by it); `storage`: a Map behind localStorage;
 // `motion`: 'reduce' or 'full', what the person's system asks for (left out: the page never moves, as in the other tests).
-const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now } = {}) => {
+// The stub now reads every static button with its attributes (#1163). The bulk tidy's confirm and
+// cancel start disabled and wait for a preview, online or not, so the offline checks leave them out.
+const WAITS_FOR_PREVIEW = ['tidy-confirm', 'tidy-cancel']
+const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now, notification, sessionStore, onReload, onFocus } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -3339,6 +3681,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       nodes.set(value, this)
     }
     get id() { return this.attributes.id ?? '' }
+    get hidden() { return 'hidden' in this.attributes }
+    set hidden(value) { if (value) this.attributes.hidden = ''; else delete this.attributes.hidden }
     get tagName() { return this.tag.toUpperCase() }
     set textContent(value) {
       this.textWrites += 1
@@ -3391,36 +3735,49 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     }
     click() {
       if (this.disabled) return
-      this.events.click?.()
+      this.events.click?.({ target: this })
       if (this.tag === 'summary' && this.parentNode?.tag === 'details') {
         this.parentNode.open = !this.parentNode.open
         this.parentNode.events.toggle?.()
       }
     }
     focus() { document.activeElement = this }
+    closest(selector) {
+      for (let node = this; node; node = node.parentNode) if (matches(node, selector)) return node
+      return null
+    }
     blur() { if (document.activeElement === this) document.activeElement = null }
     scrollIntoView() { this.scrolled = true }
     setSelectionRange() {}
     select() { this.isSelected = true }
+    cloneNode() {
+      const copy = new Element(this.tag)
+      for (const [name, value] of Object.entries(this.attributes)) copy.setAttribute(name, value)
+      return copy
+    }
   }
   const get = id => {
     if (!nodes.has(id)) nodes.set(id, new Element(id))
     return nodes.get(id)
   }
   get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
-  const relay = html.match(/<script[^>]*id="relay-prompt"[^>]*>([\s\S]*?)<\/script>/)
-  if (relay) get('relay-prompt').textContent = relay[1]
-  for (const id of ['connect-web-chat', 'import-clipboard']) {
-    if (!html.includes(`id="${id}"`)) continue
-    get(id).tag = 'button'
-    get('.pfoot').appendChild(get(id))
+  // The logo, the icons and the tab icon the server wrote (#1262): a node for each, with its attributes, so the page can paint the light.
+  // The first run's mark waits in a <template>, which the page does not search.
+  for (const [index, found] of [...html.replace(/<template\b[\s\S]*?<\/template>/g, '').matchAll(/<(svg|link)\b([^>]*)>/g)].entries()) {
+    const attrs = Object.fromEntries([...found[2].matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]]))
+    if (found[1] === 'svg' ? !/\bab-(?:logo|icon)\b/.test(attrs.class ?? '') : attrs.rel !== 'icon') continue
+    const node = get(found[1] + '-' + index)
+    node.tag = found[1]
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value)
   }
   get('.pfoot').appendChild(get('close'))
   for (const id of ['close']) get(id).tag = 'button'
   const matches = (node, selector) => {
+    if (selector.includes(',')) return selector.split(',').some(one => matches(node, one.trim()))
     if (selector === 'button') return node.tag === 'button'
     if (selector === 'button:not([data-local])') return node.tag === 'button' && node.getAttribute('data-local') === null
     if (selector === 'button[data-static]') return node.tag === 'button' && node.getAttribute('data-static') !== null
+    if (/^\.ab-(?:logo|icon)$/.test(selector)) return String(node.getAttribute('class') ?? '').split(' ').includes(selector.slice(1))
     const tag = selector.match(/^[a-z]+/)?.[0]
     const attrs = [...selector.matchAll(/\[([^=\]]+)(?:=["']?([^\]"']+)["']?)?\]/g)]
     if (tag && node.tag !== tag) return false
@@ -3431,12 +3788,13 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   for (const found of html.matchAll(/<button\b([^>]*)>/g)) {
     const id = found[1].match(/id="([^"]+)"/)?.[1]
     if (!id) continue
-    for (const attr of ['data-local', 'data-static']) if (found[1].includes(attr)) get(id).setAttribute(attr, '')
+    get(id).tag = 'button'
+    for (const attr of found[1].matchAll(/([\w-]+)(?:="([^"]*)")?/g)) get(id).setAttribute(attr[1], attr[2] ?? '')
   }
   const copied = []
   const copies = []
   const document = {
-    getElementById: id => ['relay-prompt', 'connect-web-chat', 'import-clipboard'].includes(id) && !nodes.has(id) ? null : get(id),
+    getElementById: id => get(id),
     createElement: tag => new Element(tag),
     createTextNode: text => {
       const node = new Element('text')
@@ -3449,9 +3807,27 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     title: '',
     hidden: false,
     events: {},
-    addEventListener(name, run) { this.events[name] = run },
+    addEventListener(name, run) {
+      const previous = this.events[name]
+      this.events[name] = event => { previous?.(event); run(event) }
+    },
     body: new Element('body'),
     execCommand: () => { copies.push(document.body.childNodes.find(node => node.tag === 'textarea')?.value); return copyAllowed },
+  }
+  // Parse the static Settings controls too, so tests exercise the rendered panel's real order.
+  // Only the panel: the static controls after it (the bulk tidy, the footer) stay out, as before Settings.
+  const settingsMarkup = html.match(/<div id="settings"[\s\S]*?<p id="settings-result"[^>]*><\/p><\/div><\/div>/)?.[0] ?? ''
+  const parents = [document.body]
+  for (const token of settingsMarkup.matchAll(/<\/?([a-z][\w-]*)\b([^>]*)>|([^<]+)/g)) {
+    if (token[3]) { parents.at(-1).text += token[3]; continue }
+    if (token[0].startsWith('</')) { parents.pop(); continue }
+    const attrs = Object.fromEntries([...token[2].matchAll(/([\w-]+)(?:="([^"]*)")?/g)].map(one => [one[1], one[2] ?? '']))
+    const node = attrs.id ? get(attrs.id) : new Element(token[1])
+    node.tag = token[1]
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value)
+    if ('hidden' in attrs) node.hidden = true
+    parents.at(-1).appendChild(node)
+    if (!token[0].endsWith('/>')) parents.push(node)
   }
   let model = viewed(first)
   let clockNow = now === undefined ? Date.now() : now
@@ -3460,6 +3836,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   const windowEvents = {}
   const win = {
     confirm, isSecureContext: !!clipboard,
+    focus: onFocus,
+    location: { reload: onReload },
     ...(width === undefined ? {} : { innerWidth: width, addEventListener: (name, run) => { windowEvents[name] = run } }),
     ...(motion === undefined ? {} : { matchMedia: () => ({ matches: motion === 'reduce', addEventListener: () => {} }) }),
   }
@@ -3474,6 +3852,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     URLSearchParams,
     navigator: clipboard ? { clipboard: { writeText: async text => { copied.push(text) }, ...(readClipboard ? { readText: readClipboard } : {}) } } : {},
     window: win,
+    ...(notification === undefined ? {} : { Notification: notification }),
+    ...(sessionStore === undefined ? {} : { sessionStorage: { getItem: key => sessionStore.get(key), setItem: (key, value) => sessionStore.set(key, value), removeItem: key => sessionStore.delete(key) } }),
     ...(storage === undefined ? {} : { localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { storage.set(key, value) }, removeItem: key => { storage.delete(key) } } }),
     ...(motion === undefined ? {} : { requestAnimationFrame: run => { run(); return 1 } }),
     crypto: { randomUUID: () => `synthetic-offline-attempt-${requests.length}` },
@@ -3492,6 +3872,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
           const answer = await getBoard(options)
           return { ...answer, json: async () => { const data = await answer.json(); return data.model ? { ...data, model: viewed(data.model) } : data } }
         }
+        if (target === '/api/agents') return { ok: true, json: async () => ({ rows: [] }) }
         requests.push({ path: target, body: JSON.parse(options.body) })
         sent.push({ path: target, headers: options.headers, keepalive: options.keepalive })
         if (post) return post(requests.at(-1))
@@ -3522,6 +3903,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     allButtons: () => document.querySelectorAll('button'),
     query: selector => document.querySelectorAll(selector),
     node: get,
+    element: tag => new Element(tag),
     paste: (text, target = document.body) => {
       let prevented = false
       document.events.paste?.({ target, clipboardData: { getData: type => { assert.equal(type, 'text/plain'); return text } }, preventDefault: () => { prevented = true } })
@@ -3573,6 +3955,132 @@ const pageLostResults = (dom, label) => {
   return pressWalk(card).filter(node => node.className?.includes('press-result'))
 }
 
+// The light in the logo is the board's status (#1262): the page sets one of four classes on the name and on each icon.
+const LIGHT_CLASSES = ['is-idle', 'is-working', 'is-waiting', 'is-offline']
+const lightsOf = dom => dom.query('.ab-logo,.ab-icon').map(node => String(node.getAttribute('class')).split(' ').filter(name => LIGHT_CLASSES.includes(name)).join(' '))
+const lightHtml = () => run('en', ['--chat'], {}, FILE, `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`)
+const quietBoard = { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }
+const askedBoard = { ...quietBoard, asks: [{ key: 'ask-demo', task: 'Question card', project: 'Demo', text: 'Ship it, OK?', kind: 'confirm', chip: 'Confirm', answers: ['Yes', 'No'], canTick: true, canHide: true, command: 'echo demo', reopen: 'claude --resume synthetic-session', send: 'copy', fp: 'first' }] }
+const busyBoard = (() => {
+  const model = viewed({ ...quietBoard, groups: [{ project: 'Demo', rows: [{ key: 'row-demo', title: 'Task card', next: 'Next step', canArchive: true, steps: [], send: 'copy', fp: 'first' }] }] })
+  return { ...model, view: { ...model.view, working: model.view.all.open } }
+})()
+const polling = (read, isDown = () => false) => async () => {
+  if (isDown()) throw new Error('Synthetic connection refused')
+  return { ok: true, json: async () => ({ model: read(), now: 1 }) }
+}
+
+test('the logo and the icons carry the board’s state as a class: idle, working, waiting, and offline when the page loses the board (#1262)', async () => {
+  const html = lightHtml()
+  let current = quietBoard
+  let isDown = false
+  const dom = await pageDom(html, quietBoard, { getBoard: polling(() => current, () => isDown) })
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-idle', 'is-idle', 'is-idle'], 'the name in the sidebar, the icon in the rail and the name in the narrow header: a quiet, connected board is idle')
+  for (const [name, model, expected] of [['an agent is busy', busyBoard, 'is-working'], ['something needs the person', askedBoard, 'is-waiting'], ['the board is quiet again', quietBoard, 'is-idle']]) {
+    current = model
+    await dom.redraw(model)
+    await dom.settle()
+    assert.deepEqual(lightsOf(dom), [expected, expected, expected], name)
+  }
+  // Something that needs the person outranks work in progress.
+  current = { ...busyBoard, view: { ...busyBoard.view, needs: { ...busyBoard.view.needs, n: 1 } } }
+  await dom.redraw(current)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-waiting', 'is-waiting', 'is-waiting'], 'a question outranks the work')
+  isDown = true
+  await dom.redraw(current)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-offline', 'is-offline', 'is-offline'], 'the page lost the board')
+  isDown = false
+  current = quietBoard
+  await dom.redraw(quietBoard)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-idle', 'is-idle', 'is-idle'], 'the board is back')
+  assert.ok(dom.query('.ab-icon').every(node => String(node.getAttribute('class')).split(' ').includes('ab-icon')), 'the picture keeps its own class while the state changes')
+})
+
+test('the tab icon turns to the needs-you icon while something needs the person, and back (#1262)', async () => {
+  const html = lightHtml()
+  const link = /<link rel="icon"[^>]*\bhref="([^"]+)" data-needs="([^"]+)"/.exec(html)
+  assert.ok(link, 'the page names a calm icon and a needs-you icon')
+  const [, calm, needs] = link
+  assert.notEqual(calm, needs)
+  let current = quietBoard
+  const dom = await pageDom(html, quietBoard, { getBoard: polling(() => current) })
+  await dom.settle()
+  const tab = () => dom.query('link[rel="icon"]')[0].getAttribute('href')
+  assert.equal(tab(), calm, 'calm to begin with')
+  for (const [model, expected, name] of [[askedBoard, needs, 'a question is waiting'], [busyBoard, calm, 'only work is going on'], [askedBoard, needs, 'a question is waiting again'], [quietBoard, calm, 'all is answered']]) {
+    current = model
+    await dom.redraw(model)
+    await dom.settle()
+    assert.equal(tab(), expected, name)
+  }
+})
+
+test('a page that stops, because a newer page took over or the board closed, greys its light and never keeps an amber tab (#1262)', async () => {
+  const html = lightHtml()
+  const calm = /<link rel="icon"[^>]*\bhref="([^"]+)"/.exec(html)?.[1]
+  assert.ok(calm, 'the page names a calm tab icon')
+  const tab = dom => dom.query('link[rel="icon"]')[0].getAttribute('href')
+  const offline = ['is-offline', 'is-offline', 'is-offline']
+  // A newer page takes over while a question waits: this one stops asking.
+  let isMoved = false
+  const moved = await pageDom(html, askedBoard, { getBoard: async () => ({ ok: true, json: async () => (isMoved ? { moved: true } : { model: askedBoard, now: 1 }) }) })
+  await moved.settle()
+  assert.deepEqual(lightsOf(moved), ['is-waiting', 'is-waiting', 'is-waiting'], 'the question waits')
+  assert.notEqual(tab(moved), calm, 'the tab is amber while the question waits')
+  isMoved = true
+  await moved.redraw(askedBoard)
+  await moved.settle()
+  assert.deepEqual(lightsOf(moved), offline, 'the replaced page shows no live status')
+  assert.equal(tab(moved), calm, 'the replaced page’s tab is calm again')
+  // The person closes the board while a question waits.
+  const closed = await pageDom(html, askedBoard, { getBoard: polling(() => askedBoard), post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  await closed.settle()
+  assert.notEqual(tab(closed), calm, 'the tab is amber before the board closes')
+  closed.node('close').click()
+  await closed.flush(); await closed.flush()
+  assert.deepEqual(lightsOf(closed), offline, 'the closed board shows no live status')
+  assert.equal(tab(closed), calm, 'the closed board’s tab is calm')
+})
+
+test('the first run drops its mark’s light into the corner once: a later empty board shows the mark at rest (#1262)', async () => {
+  const html = lightHtml()
+  const tag = /<template id="fresh-mark">(<svg[^>]*>)/.exec(html)?.[1] ?? ''
+  assert.match(tag, /class="ab-icon is-idle is-arriving"/, 'the template holds the arriving icon')
+  assert.match(tag, /width="44" height="44"/)
+  let current = busyBoard
+  const dom = await pageDom(html, busyBoard, { getBoard: polling(() => current) })
+  await dom.settle()
+  // The page clones the mark from the template's content, as a browser gives it.
+  const mark = dom.element('svg')
+  for (const [, name, value] of tag.matchAll(/([\w-]+)="([^"]*)"/g)) mark.setAttribute(name, value)
+  dom.node('fresh-mark').content = { firstChild: mark }
+  const freshMarks = () => [...new Set(dom.query('.ab-icon'))].filter(node => node.getAttribute('width') === '44')
+  const isArriving = node => String(node.getAttribute('class')).split(' ').includes('is-arriving')
+  assert.equal(freshMarks().length, 0, 'a board with work shows no first-run mark')
+  for (const [round, expected] of [['the first empty board', true], ['a later empty board', false], ['another empty board', false]]) {
+    current = quietBoard
+    await dom.redraw(quietBoard)
+    await dom.settle()
+    const shown = freshMarks()
+    assert.equal(shown.length, 1, round + ' shows one mark')
+    assert.equal(isArriving(shown[0]), expected, round + (expected ? ' plays the drop' : ' shows the mark at rest'))
+    current = busyBoard
+    await dom.redraw(busyBoard)
+    await dom.settle()
+    assert.equal(freshMarks().length, 0, 'the mark goes with the empty board')
+  }
+  // Without the template the empty board still draws.
+  dom.node('fresh-mark').content = null
+  current = quietBoard
+  await dom.redraw(quietBoard)
+  await dom.settle()
+  assert.equal(freshMarks().length, 0, 'no template, no mark, and no error')
+})
+
 test('the serve page and the terminal board answer every action with a visible line', async () => {
   const board = await page()
   try {
@@ -3596,12 +4104,13 @@ test('the serve page and the terminal board answer every action with a visible l
       dom.boxes().forEach(box => { box.value = 'A synthetic reply' })
       const button = dom.buttons()[index]
       const key = pageCard(button).getAttribute('data-card-key')
+      if (button.className === 'answer-send') selectAnswer(pageCard(button), 'Yes')
       button.click()
       await dom.flush()
       await dom.flush()
       // An answer that copies has its own failure line; the other copies show the text in a box to copy from.
       const isInCard = (() => { for (let node = button; node; node = node.parentNode) if (node.tag === 'article') return true; return false })()
-      const isAnswer = label.startsWith('Copy "') || label === words.pgCopyAnswer && isInCard
+      const isAnswer = button.className === 'answer-send' || label === words.pgCopyAnswer && isInCard
       const isCopy = isAnswer || /Copy/.test(label)
       // Read the board again at once so the offline advice becomes the plain failure.
       if (!isCopy) await dom.redraw(model)
@@ -3640,6 +4149,15 @@ const PRESS_KINDS = ['needs-you', 'live-ask', 'stopped', 'unknown-session', 'blo
 const PRESS_CELLS = PRESS_HOSTS.flatMap(agent => ['own', 'other'].flatMap(source => PRESS_KINDS.map(kind => ({ agent, source, kind, title: `${kind} ${agent} ${source}` }))))
 const PRESS_NOW = Date.parse('2026-10-17T09:00:00Z')
 const pressWalk = node => [node, ...node.childNodes.flatMap(pressWalk)]
+const selectAnswer = (card, answer) => {
+  const nodes = pressWalk(card)
+  const choice = nodes.find(node => node.className === 'choice' && node.textContent === answer)
+  const send = nodes.find(node => node.className === 'answer-send')
+  assert.ok(choice, `missing choice ${answer}`)
+  assert.ok(send, 'missing answer send button')
+  choice.click()
+  return send
+}
 
 // Exercise the generated entry point's real actions without launching its interactive loop.
 // Only the external clipboard and filesystem boundaries are replaced during an action.
@@ -3794,7 +4312,8 @@ const pressRuntime = async () => {
         syncBuiltinESMExports()
         process.exitCode = 0
         assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep))
-        rmSync(root, { recursive: true, force: true })
+        // A held file on Windows refuses the delete; retry it the way the page fixture does (#991).
+        rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
       },
     }
   } catch (error) {
@@ -3806,7 +4325,7 @@ const pressRuntime = async () => {
     fs.unlinkSync = originalUnlink
     childProcess.spawnSync = originalSpawn
     syncBuiltinESMExports()
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     throw error
   }
 }
@@ -3976,11 +4495,16 @@ test('every serve page action on every card kind from every agent answers with a
         } })
         // The line after a copy (Copy again, Answered) only exists once something was copied; it is not an offered action.
         const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain, runtime.s.pgAnswered]
-        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent))
+        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent)).flatMap(button =>
+          button.className === 'answer-send'
+            ? pressWalk(pageCard(button)).filter(node => node.className === 'choice').map(choice => ({ button, choice }))
+            : [{ button, choice: null }],
+        )
         assert.equal(actionButtons.length, projected.expected, `${cell.title}: exact offered button set`)
         dom.boxes().forEach(box => { box.value = 'Synthetic reply' })
-        const button = actionButtons[index]
+        const { button, choice } = actionButtons[index] ?? {}
         assert.ok(button, `${cell.title}: button ${index}`)
+        if (choice) choice.click()
         button.click()
         await dom.flush(); await dom.flush()
         const key = pageCard(button).getAttribute('data-card-key')
@@ -3988,7 +4512,7 @@ test('every serve page action on every card kind from every agent answers with a
         const label = key === 'recent' ? runtime.s.pgDone : card?.task || card?.title || card?.project
         assert.notEqual(label, undefined, `${cell.title}: the original card has a label`)
         const results = pageHasCard(refreshed, key) ? pageCardResults(dom, key) : pageLostResults(dom, label)
-        const context = `${cell.title} / ${button.textContent} / ${failing ? 'refused' : 'normal'}`
+        const context = `${cell.title} / ${choice?.textContent ?? button.textContent} / ${failing ? 'refused' : 'normal'}`
         if (serverNote !== undefined) {
           const result = results.find(node => node.text === serverNote)
           assert.ok(result, `${context}: the complete result line stays beside its card`)
@@ -4003,14 +4527,14 @@ test('every serve page action on every card kind from every agent answers with a
         } else {
           // An answer copied from a card has its own failure line and, on success, the card's line about where to paste.
           const isInCard = (() => { for (let node = button; node; node = node.parentNode) if (node.tag === 'article') return true; return false })()
-          const isAnswer = button.textContent.startsWith('Copy "') || button.textContent === runtime.s.pgCopyAnswer && isInCard
+          const isAnswer = !!choice || button.textContent === runtime.s.pgCopyAnswer && isInCard
           const expected = failing ? isAnswer ? runtime.s.pgCopyFailed : runtime.s.boardCopyFailedBelow : runtime.s.copied
           if (isAnswer && !failing) assert.ok(!results.some(node => node.textContent), `${context}: the card says where to paste, not a result line`)
           else assert.ok(results.some(node => node.textContent === expected), context)
           {
             const text = button.textContent === runtime.s.serveCopyResume ? projected.ask?.reopen ?? projected.row?.resume
               : button.textContent === runtime.s.serveCopyCommand ? projected.ask?.command : button.textContent === runtime.s.pgCopyAnswer ? 'Synthetic reply'
-                : button.textContent.startsWith('Copy "') ? button.textContent.slice(6, -1) : button.textContent
+                : choice ? choice.textContent : button.textContent
             assert.deepEqual(dom.copies, [text], `${context}: exact text reached the clipboard`)
             if (failing && !isAnswer) assert.ok(results.some(node => node.childNodes.some(child => child.tag === 'textarea' && child.value === text && child.isSelected)), context)
           }
@@ -4056,6 +4580,71 @@ test('a press on the terminal board shows its result under the pressed card', as
     assert.equal(footer.at(-1), 'Page opened')
     assert.match(footer.at(-2), /[↑↓]/)
   } finally { fixture.close() }
+})
+
+// A virus scanner or indexer can hold the ledger for a moment on Windows (#696), and the
+// rename onto it is refused until the hold lifts. This holds the ledger open the way a
+// scanner does — readable, but not renameable — and the press still lands. The rename
+// count proves the hold was in the rename's way: a rename that lands on the first try
+// means the hold was never there, and the test proved nothing.
+test('a press whose ledger is held open for a moment still lands on Windows', { skip: process.platform !== 'win32' && 'Windows file holds only', timeout: 60_000 }, async () => {
+  const fixture = await pressRuntime()
+  const { runtime } = fixture
+  const ledger = join(fixture.root, 'progress-questions.json')
+  const marker = join(fixture.root, 'ledger-held')
+  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const quote = text => `'${text.replaceAll("'", "''")}'`
+  let holder = null
+  try {
+    // A hand-kept question, ticked: the tick answers it, so the next view rewrites the
+    // ledger, which is the rename the hold must meet.
+    let found = null
+    for (const cell of PRESS_CELLS.filter(one => one.kind === 'hand-kept')) {
+      fixture.reset(cell)
+      const view = runtime.view()
+      const items = runtime.boardItems(view, runtime.pending(), true, true)
+      const item = pressItemFor(items, cell.title)
+      if (item === undefined) continue
+      if (!pressKeysFor(item).includes('x')) continue
+      found = { cell, items, item }
+      break
+    }
+    assert.ok(found, 'a tickable hand-kept question is offered')
+    const { items, item } = found
+    const at = items.indexOf(item)
+    const state = runtime.pinned({ ...runtime.emptyBoardState, selected: at, isIdleOpen: true, isOlderOpen: true }, items)
+    const offered = runtime.boardKey(state, 'x', items, runtime.s)
+    assert.equal(offered.action?.type, 'tick')
+    // Count the ledger renames from here: the search above may already have rewritten
+    // it, and only the renames under the hold prove anything.
+    let ledgerRenames = 0
+    const patchedRename = fs.renameSync
+    fs.renameSync = (from, to, ...rest) => {
+      if (resolve(String(to)) === resolve(ledger)) ledgerRenames += 1
+      return patchedRename(from, to, ...rest)
+    }
+    syncBuiltinESMExports()
+    // Readable, but not renameable, for 500 ms: inside the waits the rename allows, and
+    // long past the three tight retries that used to meet the hold.
+    let holderErr = ''
+    holder = spawn(powershell, ['-NoProfile', '-NonInteractive', '-Command',
+      `$fs = [System.IO.File]::Open(${quote(ledger)}, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read); [System.IO.File]::WriteAllText(${quote(marker)}, 'held'); Start-Sleep -Milliseconds 500; $fs.Close()`],
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    holder.stderr.on('data', chunk => { holderErr += chunk })
+    for (let tries = 0; !existsSync(marker) && tries < 300; tries++) await delay(100)
+    assert.ok(existsSync(marker), `the holder never took hold: ${holderErr}`)
+    const pressed = runtime.press(state, 'x')
+    assert.equal(pressed.state.note, pressExpected(runtime, offered.action), 'the tick lands while the ledger is held')
+    runtime.view()
+    pressChanged(fixture, offered.action, 'held ledger tick')
+    assert.ok(ledgerRenames >= 2, `the hold was in the rename's way: ${ledgerRenames} ledger renames`)
+    const exited = holder.exitCode !== null ? Promise.resolve() : new Promise(resolve => holder.once('exit', resolve))
+    await Promise.race([exited, delay(10_000)])
+    assert.ok(holder.exitCode !== null, 'the holder is still running')
+  } finally {
+    if (holder !== null && holder.exitCode === null) holder.kill()
+    fixture.close()
+  }
 })
 
 test('a long press result under a card wraps to the width instead of being cut', async () => {
@@ -4545,9 +5134,9 @@ test('the terminal board prints one final result for repeated empty actions and 
 
 test('the phone page explains how to open a new address in every language without LAN access', async () => {
   const lines = {
-    en: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
-    'zh-TW': '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
-    'zh-CN': '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
+    en: "Can't reach the board. On the computer, run agent-board --lan again and open the new address.",
+    'zh-TW': '連不上看板。請在電腦上再執行一次 agent-board --lan，再開啟新的網址。',
+    'zh-CN': '连不上看板。请在电脑上再运行一次 agent-board --lan，再打开新地址。',
   }
   for (const [lang, line] of Object.entries(lines)) {
     const source = `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS[${JSON.stringify(lang)}], 'synthetic', true))\n`
@@ -4692,14 +5281,14 @@ test('the page helper flush leaves a pending press available to resolve', async 
 
 test('L5 restarted server: an old page tab disables its buttons and says how to reconnect', { timeout: 30_000 }, async () => {
   const lines = {
-    en: "Can't reach the board. Run the board with --serve again; it opens a new page, and you can close this one.",
-    'zh-TW': '連不上看板。請用 --serve 重新啟動看板；新的頁面會自動開啟，這個分頁可以關閉。',
-    'zh-CN': '连不上看板。请用 --serve 重新启动看板；新页面会自动打开，这个标签页可以关闭。',
+    en: "Can't reach the board. Run agent-board again; it opens a new page, and you can close this one.",
+    'zh-TW': '連不上看板。請再執行一次 agent-board；新的頁面會自動開啟，這個分頁可以關閉。',
+    'zh-CN': '连不上看板。请再运行一次 agent-board；新页面会自动打开，这个标签页可以关闭。',
   }
   const phoneLines = {
-    en: "Can't reach the board. On the computer, run the board with --serve --lan again and open the new address.",
-    'zh-TW': '連不上看板。請在電腦上用 --serve --lan 重新啟動看板，再開啟新的網址。',
-    'zh-CN': '连不上看板。请在电脑上用 --serve --lan 重新启动看板，再打开新地址。',
+    en: "Can't reach the board. On the computer, run agent-board --lan again and open the new address.",
+    'zh-TW': '連不上看板。請在電腦上再執行一次 agent-board --lan，再開啟新的網址。',
+    'zh-CN': '连不上看板。请在电脑上再运行一次 agent-board --lan，再打开新地址。',
   }
   for (const [lang, line] of Object.entries(lines)) {
     const board = await page('', {}, ['--lang', lang])
@@ -4743,7 +5332,8 @@ test('L5 restarted server: an old page tab disables its buttons and says how to 
           await dom.settle()
         }
         assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).every(button => button.disabled), `${lang}: ${failure}`)
-        assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') !== null).every(button => !button.disabled))
+        const stuck = dom.allButtons().filter(button => button.getAttribute('data-local') !== null && button.className !== 'answer-send' && !WAITS_FOR_PREVIEW.includes(button.id) && button.disabled)
+        assert.deepEqual(stuck.map(button => button.id || button.className), [], `${lang}: ${failure}: local controls stay enabled`)
         assert.equal(dom.node('offline').textContent, line)
         // The line stays in view under the header while the page scrolls, with a rule under it.
         assert.match(html, /#offline\{[^}]*position:sticky;top:0;/)
@@ -4822,12 +5412,16 @@ test('an old page tab keeps its copy buttons working while the board is unreacha
     await dom.settle()
     const local = dom.allButtons().filter(button => button.getAttribute('data-local') !== null)
     assert.ok(local.length >= 6, 'reply, answers, command and both resume buttons are local')
-    assert.ok(local.every(button => !button.disabled), 'copy buttons enabled')
+    assert.ok(local.filter(button => button.className !== 'answer-send' && !WAITS_FOR_PREVIEW.includes(button.id)).every(button => !button.disabled), 'local controls enabled')
     assert.ok(dom.allButtons().filter(button => !local.includes(button)).every(button => button.disabled), 'server buttons disabled')
-    // The buttons that only open or reveal something (More, Write your own, a row) work without the server too, but copy nothing.
+    const choiceSend = local.find(button => button.className === 'answer-send')
+    assert.equal(choiceSend.disabled, true, 'copy needs a choice even when offline')
+    local.find(button => button.className === 'choice').click()
+    assert.equal(choiceSend.disabled, false)
+    // The buttons that only open or reveal something work without the server too, but copy nothing.
     for (const button of local.filter(button => button.getAttribute('data-nav') === null)) button.click()
     await dom.settle()
-    for (const text of ['Synthetic copied reply', 'synthetic command', 'synthetic resume', 'synthetic row resume', ...ask.answers]) assert.ok(dom.copied.includes(text), text)
+    for (const text of ['Synthetic copied reply', 'synthetic command', 'synthetic resume', 'synthetic row resume', ask.answers[0]]) assert.ok(dom.copied.includes(text), text)
     assert.deepEqual(dom.requests, [])
   } finally { await board.close() }
 })
@@ -4858,7 +5452,7 @@ test('a press that finds the board gone keeps the typed reply', async () => {
       const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
       // A message that did not go carries Send again and Copy message under its line.
       assert.ok(pageCardResults(dom, model.asks[0].key).some(node => node.textContent.startsWith(mode === 'connected' ? words.messagesFailed : words.serveOffline)), mode)
-      assert.ok(dom.node('offline').textContent.includes('--serve'))
+      assert.ok(dom.node('offline').textContent.includes('agent-board'))
       assert.equal(dom.requests.length, 1)
       isReachable = true
       await dom.redraw(model)
@@ -5011,13 +5605,13 @@ test('--serve --quiet-board prints only the page address lines', { timeout: 40_0
     assert.equal(first.trim(), address)
     const again = await board.serve(['--quiet-board', '--idle-minutes', '20'])
     assert.deepEqual(again.trim().split('\n'), [
-      'This board is configured to close after 10 minutes unused. Reopen with --serve.',
+      'This board is configured to close after 10 minutes unused. Reopen with agent-board.',
       address,
     ])
     writeFileSync(board.path, FILE)
     const ordinary = await board.serve()
-    assert.ok(ordinary.startsWith('Progress'), ordinary.slice(0, 200))
-    assert.ok(ordinary.includes('Rate-limit the public endpoints'))
+    assert.ok(ordinary.includes('The board you can click'), ordinary.slice(0, 200))
+    assert.ok(!ordinary.includes('Rate-limit the public endpoints'), 'no text board before the address')
   } finally { await board.end([url]) }
 })
 
@@ -5030,11 +5624,39 @@ test('--serve starts the page in the background once, and the next --serve bring
     const first = await board.serve()
     url = board.urlOf(first)
     assert.ok(url, first)
-    assert.ok(first.startsWith('Progress  ● 1 waiting'), first)
+    assert.ok(first.trimStart().startsWith('The board you can click'), first)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
     const again = await board.serve()
     assert.ok(again.includes(url), again)
   } finally { await board.end([url]) }
+})
+
+test('--serve takes a new port on every start: it saves no port and ignores one in the settings file (#1177)', { timeout: 60_000 }, async () => {
+  // A page that came back on the same port would keep its origin, and with it whatever a script on that origin
+  // left in the browser, such as a service worker, from one start to the next.
+  const board = serveIn()
+  const settings = board.path.replace(/\.md$/, '-settings.json')
+  const portOf = url => Number(new URL(url).port)
+  let first = null
+  let second = null
+  try {
+    first = board.urlOf(await board.serve())
+    assert.ok(first)
+    const saved = existsSync(settings) ? JSON.parse(readFileSync(settings, 'utf8')) : {}
+    assert.equal(saved.port, undefined, 'a start saves no port')
+    // Stop the first page but keep the fixture folder: end() would delete it.
+    const { port, searchParams } = new URL(first)
+    await new Promise(done => {
+      const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+      req.on('error', done)
+      req.end('{}')
+    })
+    for (let tries = 0; existsSync(board.served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
+    writeFileSync(settings, JSON.stringify({ ...saved, port: portOf(first) }))
+    second = board.urlOf(await board.serve())
+    assert.ok(second)
+    assert.notEqual(portOf(second), portOf(first), 'a port in the settings file is not used again')
+  } finally { await board.end([first, second].filter(Boolean)) }
 })
 
 test('/progress looks for the board script beside a Windows or a POSIX progress path', () => {
@@ -5072,6 +5694,9 @@ const serveIn = () => {
   }
   const serve = (extra = []) =>
     new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+  // A start that fails exits 1 (#1292): its output and status, for the tests of that failure.
+  const serveFailing = (extra = [], timeout = 20_000) =>
+    new Promise(done => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout }, (error, out) => done({ status: error ? error.code : 0, out })))
   const urlOf = out => out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0] ?? null
   const served = servedAt(run, path)
   // Closes every page it was given, and the one its address file names when a test could not read
@@ -5084,6 +5709,8 @@ const serveIn = () => {
       await new Promise(done => {
         const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
         req.on('error', done)
+        // A page that accepted the connection but never answers must not hold every test's cleanup.
+        req.setTimeout(5000, () => req.destroy(new Error('the close request timed out')))
         req.end('{}')
       })
     }
@@ -5097,9 +5724,357 @@ const serveIn = () => {
     }
     await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
-  return { dir, path, script, env, serve, urlOf, served, end }
+  return { dir, path, script, env, serve, serveFailing, urlOf, served, end }
 }
 
+// A test that may run out of time writes what it saw so far to stderr just before the test runner
+// would cut it off, so a CI log of a timeout still says which phase took the time (#1158).
+const phaseLog = (budgetMs, more = () => []) => {
+  const began = Date.now()
+  const lines = []
+  const line = (text, at) => `${String(at - began).padStart(6)} ms  ${text}`
+  const mark = text => { lines.push(line(text, Date.now())) }
+  // `more` gives lines other processes wrote, each starting with its Date.now(), read when the log is printed.
+  const text = () => `phase log:\n${[...lines, ...more().map(entry => line(entry.slice(entry.indexOf(' ') + 1), Number(entry.slice(0, entry.indexOf(' ')))))].sort().join('\n')}`
+  const watchdog = setTimeout(() => process.stderr.write(`\n[${budgetMs} ms passed and the test is still running] ${text()}\n`), budgetMs)
+  watchdog.unref()
+  return { mark, text, end: () => clearTimeout(watchdog) }
+}
+
+// Cursor's shell has two extra inheritable pipes as well as stdout and stderr. `mark` takes one line
+// per event, so a failure says which pipe stayed open and when the others closed.
+const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = () => {}) => {
+  const found = spawnSync('where.exe', ['bash.exe'], { encoding: 'utf8', windowsHide: true })
+  const bash = found.stdout.split(/\r?\n/).find(file => /[\\/]Git[\\/].*[\\/]bash\.exe$/i.test(file))
+  assert.ok(bash, 'Git Bash is needed to reproduce Cursor on Windows')
+  const child = spawn(bash, ['-c', 'exec "$@"', 'cursor', process.execPath, board.script, ...args], {
+    env: { ...board.env, ...env }, stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'ignore'], windowsHide: true,
+  })
+  mark(`bash ${child.pid} started ${args.join(' ')} through ${bash}`)
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const open = new Set(['stdout', 'stderr', 'fd3', 'fd4', 'bash exit'])
+  const end = (stream, name) => new Promise((done, fail) => { stream.once('end', () => { open.delete(name); mark(`${name} EOF`); done() }); stream.once('error', fail) })
+  const exited = new Promise((done, fail) => {
+    child.once('exit', (code, signal) => { open.delete('bash exit'); mark(`bash exit code=${code} signal=${signal}`); done({ code, signal }) })
+    child.once('error', fail)
+  })
+  let timer
+  try {
+    const [result] = await Promise.race([
+      Promise.all([exited, end(child.stdout, 'stdout'), end(child.stderr, 'stderr'), end(child.stdio[3], 'fd3'), end(child.stdio[4], 'fd4')]),
+      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
+    ])
+    assert.equal(result.code, 0, stderr)
+    return { stdout, stderr }
+  } catch (error) {
+    mark(`cursor shell failed: ${error.message.split('\n')[0]}`)
+    await stop()
+    mark('stop done')
+    throw error
+  } finally {
+    clearTimeout(timer)
+    if (child.exitCode === null && child.signalCode === null) child.kill()
+    child.stdout.destroy()
+    child.stderr.destroy()
+    child.stdio[3].destroy()
+    child.stdio[4].destroy()
+    await exited
+  }
+}
+
+const closeFixturePage = async board => {
+  if (!existsSync(board.served)) return
+  const { url } = JSON.parse(readFileSync(board.served, 'utf8'))
+  const { port, searchParams } = new URL(url)
+  await new Promise(done => {
+    const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+    req.on('error', done)
+    // A page that accepted the connection but never answers must not hold the test's cleanup.
+    req.setTimeout(5000, () => req.destroy(new Error('the close request timed out')))
+    req.end('{}')
+  })
+}
+
+const processAlive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
+
+// A stand-in browser: a small Windows program built here, so no real browser opens on the tester's
+// screen. `body` is its Main. Synthetic data only.
+// Each body is built once per test run and copied into place. The .NET Framework compiler that
+// ships with Windows builds one in about a second; Add-Type starts PowerShell and the compiler in
+// one process and took more than 15 s on a cold CI runner (#1166), so it is only the fallback.
+const standInBuilds = new Map()
+const buildStandIn = (body, env) => {
+  const built = standInBuilds.get(body)
+  if (built !== undefined) return built
+  const dir = mkdtempSync(join(tmpdir(), 'board-standin-'))
+  process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
+  const source = join(dir, 'browser.cs')
+  const exe = join(dir, 'browser.exe')
+  writeFileSync(source, `using System; using System.IO; using System.Diagnostics; using System.Threading;\npublic static class Browser { public static void Main() { ${body} } }`)
+  const windows = process.env.SystemRoot ?? 'C:\\Windows'
+  const csc = join(windows, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
+  if (existsSync(csc)) {
+    execFileSync(csc, ['/nologo', '/target:winexe', `/out:${exe}`, source], { windowsHide: true, stdio: 'pipe', timeout: 15_000 })
+  } else {
+    const powershell = join(windows, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
+      env: { ...env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: exe }, windowsHide: true, stdio: 'pipe', timeout: 15_000,
+    })
+  }
+  standInBuilds.set(body, exe)
+  return exe
+}
+const compileStandIn = (board, exe, body) => {
+  mkdirSync(resolve(exe, '..'), { recursive: true })
+  copyFileSync(buildStandIn(body, board.env), exe)
+}
+// Writes its PID for the test and stays up, as a browser window does.
+const SLEEPING_BROWSER = 'File.WriteAllText(Environment.GetEnvironmentVariable("BOARD_TEST_BROWSER_PID"), Process.GetCurrentProcess().Id.ToString()); Thread.Sleep(20000);'
+// Notes that it was started, then exits with an error at once, as a browser with no display does.
+const FAILING_BROWSER = 'File.AppendAllText(Environment.GetEnvironmentVariable("BOARD_TEST_FAILED_BROWSERS"), Process.GetCurrentProcess().Id.ToString() + "\\n"); Environment.Exit(1);'
+
+// Loaded into the `--html` process: notes every PowerShell it starts, with its exit code, time and
+// stderr (read here instead of dropped), so a run that lost Cursor's pipes says what its launcher did.
+const launchLogPreload = log => `const cp = require('node:child_process')
+const fs = require('node:fs')
+const note = line => { try { fs.appendFileSync(${JSON.stringify(log)}, Date.now() + ' ' + line + '\\n') } catch {} }
+const isPowerShell = file => /(?:^|[\\\\/])powershell(?:\\.exe)?$/i.test(String(file))
+const spawn = cp.spawn
+cp.spawn = function (file, args, options) {
+  if (!isPowerShell(file)) return spawn.apply(this, arguments)
+  const stdio = options?.stdio === 'ignore' ? ['ignore', 'ignore', 'pipe'] : options?.stdio
+  const child = spawn.call(this, file, args, { ...options, stdio })
+  const began = Date.now()
+  let err = ''
+  child.stderr?.on('data', chunk => { err += chunk })
+  note('powershell ' + child.pid + ' started, stdio ' + JSON.stringify(options?.stdio))
+  child.once('exit', (code, signal) => note('powershell ' + child.pid + ' exit code=' + code + ' signal=' + signal + ' after ' + (Date.now() - began) + ' ms, stderr ' + JSON.stringify(err.trim().slice(0, 600))))
+  return child
+}
+const execFileSync = cp.execFileSync
+cp.execFileSync = function (file) {
+  if (!isPowerShell(file)) return execFileSync.apply(this, arguments)
+  const began = Date.now()
+  try { return execFileSync.apply(this, arguments) } finally { note('powershell execFileSync took ' + (Date.now() - began) + ' ms') }
+}
+process.on('exit', code => note('--html process ' + process.pid + ' exit ' + code))
+require('node:module').syncBuiltinESMExports()
+`
+
+// The paths a browser-startup test uses: a Program Files of its own with Edge and Chrome slots, the
+// files the stand-ins and the `--html` process write, and the launcher log.
+const browserFixture = board => {
+  const programs = join(board.dir, 'Programs & Friends')
+  return {
+    programs,
+    edge: join(programs, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    chrome: join(programs, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    marker: join(board.dir, 'browser.pid'),
+    failed: join(board.dir, 'failed-browsers.txt'),
+    launcher: join(board.dir, 'launcher.pid'),
+    launchLog: join(board.dir, 'launch.log'),
+    preload: join(board.dir, 'launch-log.cjs'),
+  }
+}
+
+// Runs `--html` the way Cursor does against the fixture's browsers, with the launcher log loaded into
+// the `--html` process; `pid` is the stand-in that stays running, or undefined. Every step is marked.
+const htmlThroughCursor = async (board, fixture, log) => {
+  writeFileSync(fixture.preload, launchLogPreload(fixture.launchLog))
+  writeFileSync(board.script, `import { writeFileSync as recordLauncherPid } from 'node:fs'\nif (process.argv.includes('--html')) recordLauncherPid(${JSON.stringify(fixture.launcher)}, String(process.pid))\n${readFileSync(board.script, 'utf8')}`)
+  const served = await board.serve()
+  assert.ok(board.urlOf(served), served)
+  log.mark(`page served on port ${new URL(board.urlOf(served)).port}`)
+  const env = {
+    AGENT_BOARD_TEST_PID: '', ProgramFiles: fixture.programs, 'ProgramFiles(x86)': fixture.programs, BOARD_TEST_BROWSER_PID: fixture.marker,
+    BOARD_TEST_FAILED_BROWSERS: fixture.failed, NODE_OPTIONS: `--require ${JSON.stringify(fixture.preload)}`,
+  }
+  let pid
+  const stop = async () => {
+    if (existsSync(fixture.marker)) {
+      pid = Number(readFileSync(fixture.marker, 'utf8'))
+      if (processAlive(pid)) process.kill(pid)
+      for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    }
+    log.mark(`stand-in after the failed run: ${pid === undefined ? 'never started' : `${pid}, ${processAlive(pid) ? 'still alive' : 'stopped'}`}`)
+    await closeFixturePage(board)
+    await delay(200)
+  }
+  const result = await cursorShell(board, ['--html'], env, stop, log.mark)
+  for (let tries = 0; !existsSync(fixture.marker) && tries < 20; tries++) await delay(100)
+  if (existsSync(fixture.marker)) pid = Number(readFileSync(fixture.marker, 'utf8'))
+  log.mark(`stand-in ${pid === undefined ? 'never started' : `${pid} started, ${processAlive(pid) ? 'alive' : 'gone'}`}`)
+  return { ...result, pid: () => pid }
+}
+
+// What the `--html` process's launcher log holds so far, for the phase log.
+const launcherLines = fixture => existsSync(fixture.launchLog) ? readFileSync(fixture.launchLog, 'utf8').trim().split('\n').filter(Boolean).map(entry => entry.replace(' ', ' launcher: ')) : []
+
+// Stops the stand-in and the `--html` process the fixture may have left, then removes the fixture.
+const endBrowserFixture = async (board, fixture, log, pid) => {
+  if (pid === undefined && existsSync(fixture.marker)) pid = Number(readFileSync(fixture.marker, 'utf8'))
+  if (pid && processAlive(pid)) process.kill(pid)
+  if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+  if (pid) assert.ok(!processAlive(pid), 'the stand-in browser must stop before cleanup')
+  if (existsSync(fixture.launcher)) {
+    const launcherPid = Number(readFileSync(fixture.launcher, 'utf8'))
+    if (processAlive(launcherPid)) process.kill(launcherPid)
+    for (let tries = 0; processAlive(launcherPid) && tries < 50; tries++) await delay(100)
+    log.mark(`--html process ${launcherPid} ${processAlive(launcherPid) ? 'still alive' : 'gone'}`)
+    assert.ok(!processAlive(launcherPid), 'the board launcher must stop before cleanup')
+  }
+  await board.end([])
+  log.mark('fixture removed')
+}
+
+// Runs a browser-startup test body with the phase log; a failure, in the body or in the cleanup,
+// carries the whole log, and the cleanup never hides the body's error.
+const browserStartupTest = async body => {
+  const board = serveIn()
+  const fixture = browserFixture(board)
+  const log = phaseLog(23_000, () => launcherLines(fixture))
+  let pid
+  let failure
+  try {
+    pid = await body(board, fixture, log)
+  } catch (error) {
+    failure = error
+  } finally {
+    log.end()
+    try { await endBrowserFixture(board, fixture, log, pid) } catch (error) { log.mark(`cleanup failed: ${error.message.split('\n')[0]}`); failure ??= error }
+  }
+  if (failure !== undefined) {
+    failure.message = `${failure.message}\n${log.text()}`
+    throw failure
+  }
+}
+
+test('Windows server startup releases Cursor pipes while its page stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  try {
+    const result = await cursorShell(board, ['--serve', '--no-open'], {}, () => closeFixturePage(board))
+    assert.ok(board.urlOf(result.stdout), result.stdout)
+    const server = JSON.parse(readFileSync(board.served, 'utf8'))
+    assert.ok(processAlive(server.pid), 'the page must outlive the caller pipes')
+  } finally { await board.end([]) }
+})
+
+test('on Windows the page address reaches the shell exactly as served, with no wildcard escaping', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  const opened = join(board.dir, 'opened.txt')
+  const preload = join(board.dir, 'record-open.cjs')
+  // The launcher's own PowerShell runs, so its escaping is the real one, but Start-Process is swapped
+  // for a function that only notes -FilePath: no window opens on the tester's screen.
+  const needle = 'Microsoft.PowerShell.Management\\Start-Process'
+  const recorder = `function Record-Start { param($FilePath, $ArgumentList, $WorkingDirectory, [switch]$PassThru, $WindowStyle) [IO.File]::AppendAllText('${opened}', $FilePath + [Environment]::NewLine) }; `
+  writeFileSync(preload, `const cp = require('node:child_process')
+const spawn = cp.spawn
+cp.spawn = function (file, args, options) {
+  const at = Array.isArray(args) ? args.indexOf('-EncodedCommand') : -1
+  const command = at >= 0 ? Buffer.from(args[at + 1], 'base64').toString('utf16le') : ''
+  if (!command.includes(${JSON.stringify(needle)}) || command.includes('--serve-child')) return spawn.apply(this, arguments)
+  const copy = [...args]
+  copy[at + 1] = Buffer.from(${JSON.stringify(recorder)} + command.split(${JSON.stringify(needle)}).join('Record-Start'), 'utf16le').toString('base64')
+  return spawn.call(this, file, copy, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  let url = null
+  try {
+    const env = { ...board.env, AGENT_BOARD_TEST_PID: '', NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve'], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stdout}\n${stderr}`)) : done(stdout))))
+    url = board.urlOf(out)
+    assert.ok(url, out)
+    for (let tries = 0; !existsSync(opened) && tries < 50; tries++) await delay(100)
+    assert.deepEqual(readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean), [url], 'the address must not gain backticks')
+  } finally {
+    await board.end(url ? [url] : [])
+  }
+})
+
+test('a Windows page starts from a folder whose name holds a curly apostrophe, brackets and PowerShell text, and runs none of it', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  // ’ ends a PowerShell single-quoted string as ' does, and Start-Process reads -WorkingDirectory as a wildcard.
+  const folder = join(board.dir, '[x] x’;New-Item -ItemType File -Name injected -Force;#')
+  const path = join(folder, 'progress.md')
+  const script = join(folder, 'agent-board.mjs')
+  const mine = servedAt(join(board.dir, 'run'), path)
+  try {
+    mkdirSync(folder)
+    writeFileSync(path, FILE)
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const out = await new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open'], { env: board.env, cwd: board.dir, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stdout}\n${stderr}`)) : done(stdout))))
+    assert.ok(board.urlOf(out), out)
+    for (const where of [board.dir, folder]) assert.equal(existsSync(join(where, 'injected')), false, 'a folder name never runs as PowerShell code')
+  } finally {
+    const record = existsSync(mine) ? JSON.parse(readFileSync(mine, 'utf8')) : null
+    if (record !== null) {
+      spawnSync(process.execPath, [script, '--stop'], { env: board.env, cwd: board.dir, windowsHide: true })
+      for (let tries = 0; processAlive(record.pid) && tries < 50; tries++) await delay(100)
+    }
+    await board.end([])
+  }
+})
+
+test('Windows browser startup releases Cursor pipes while the browser stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+  // The Edge slot holds a file that is not a program, so the launcher has to move on to Chrome.
+  mkdirSync(resolve(fixture.edge, '..'), { recursive: true })
+  writeFileSync(fixture.edge, 'synthetic invalid executable')
+  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browser compiled')
+  const result = await htmlThroughCursor(board, fixture, log)
+  assert.ok(board.urlOf(result.stdout), result.stdout)
+  assert.match(result.stdout, /Opened Agent Board/, result.stdout)
+  assert.ok(result.pid() !== undefined, `the stand-in browser must start: ${result.stdout} ${result.stderr}`)
+  assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
+  return result.pid()
+}))
+
+test('a Windows browser that exits with an error at once gives way to the next browser, and Cursor pipes are still released', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+  // Start-Process returns once the program exists, so a browser that exits with an error right
+  // away (no display, no sandbox) would otherwise count as opened and the person would see nothing.
+  compileStandIn(board, fixture.edge, FAILING_BROWSER)
+  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browsers compiled')
+  const result = await htmlThroughCursor(board, fixture, log)
+  assert.ok(board.urlOf(result.stdout), result.stdout)
+  assert.match(result.stdout, /Opened Agent Board/, result.stdout)
+  assert.ok(existsSync(fixture.failed), 'the failing Edge stand-in must have been tried first')
+  assert.equal(readFileSync(fixture.failed, 'utf8').trim().split('\n').length, 1, 'the failing Edge stand-in is tried once')
+  assert.ok(result.pid() !== undefined, `the Chrome stand-in must start after Edge failed: ${result.stdout} ${result.stderr}`)
+  assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
+  return result.pid()
+}))
+
+test('Windows page startup times out without leaving its child or ready files', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'stall-child.cjs')
+  const marker = join(board.dir, 'stalled.pid')
+  writeFileSync(preload, `if (process.argv.includes('--serve-child')) { require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15000) }\n`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let pid
+  try {
+    const began = performance.now()
+    const { status, out } = await board.serveFailing()
+    const elapsed = performance.now() - began
+    assert.ok(elapsed >= 9000 && elapsed < 18000, `startup ended after ${elapsed} ms`)
+    assert.equal(out.trim(), EN.serveFailed(EN.serveNotStarted))
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
+    assert.ok(existsSync(marker), 'the child must start before the timeout')
+    pid = Number(readFileSync(marker, 'utf8'))
+    for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    assert.ok(!processAlive(pid), 'the timed-out child must stop')
+    assert.ok(!readdirSync(resolve(board.served, '..')).some(name => name.startsWith('.agent-board-ready-')), 'startup files must be removed')
+  } finally {
+    if (pid === undefined && existsSync(marker)) pid = Number(readFileSync(marker, 'utf8'))
+    if (pid && processAlive(pid)) process.kill(pid)
+    if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    await board.end([])
+  }
+})
 test('a page a test started stops by itself once that test process is gone, and opens no window (#959)', async () => {
   const board = serveIn()
   // Stands in for a test run that is killed before it can close its page.
@@ -5150,6 +6125,70 @@ test('the board command picks text, the terminal board or the page from where it
   assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: {} }), 'page')
   assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { DISPLAY: ':0' } }), 'page')
   assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { WAYLAND_DISPLAY: 'wayland-0' } }), 'page')
+})
+
+test('over SSH, in a terminal with no browser, plain agent-board runs the live terminal board as a real process (#810)', { timeout: 30_000 }, async () => {
+  const board = serveIn()
+  let child
+  try {
+    const shim = join(board.dir, 'ssh-terminal-shim.cjs')
+    // A terminal on both ends, with no display and no BROWSER, as an SSH login has.
+    writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
+    const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '' }
+    for (const name of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[name]
+    child = spawn(process.execPath, ['--require', shim, board.script], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    let out = ''
+    child.stdout.on('data', chunk => { out += chunk })
+    for (let tries = 0; tries < 150 && !(out.includes('\u001b[?1049h') && out.includes('Forward port')); tries++) await new Promise(done => setTimeout(done, 100))
+    assert.ok(out.startsWith('\u001b[?1049h'), `it draws on the alternate screen like --watch: ${JSON.stringify(out.slice(0, 80))}`)
+    assert.ok(out.includes('Rate-limit the public endpoints'), 'the live board shows the work')
+    assert.ok(out.includes('Forward port to open the page'), 'the page is offered through a forwarded port, not opened')
+    assert.doesNotMatch(out, /Opened Agent Board|window opened/i)
+    assert.equal(child.exitCode, null, 'the live board keeps running')
+  } finally {
+    if (child && child.exitCode === null) child.kill()
+    await board.end([])
+  }
+})
+
+test('over SSH with a config folder variable set, plain agent-board opens the page and says how to forward its port (#1283)', { timeout: 40_000 }, async () => {
+  for (const name of ['HERMES_HOME', 'OPENCODE_CONFIG_DIR']) {
+    const board = serveIn()
+    let url = null
+    try {
+      const shim = join(board.dir, 'ssh-page-shim.cjs')
+      writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
+      // A person's own profile can set an agent's config folder; that still picks the page.
+      const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '', [name]: join(board.dir, 'own-config') }
+      for (const key of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[key]
+      const out = await new Promise((done, fail) => {
+        execFile(process.execPath, ['--require', shim, board.script], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
+      })
+      url = board.urlOf(out)
+      assert.ok(url, `${name}: the page's address is printed: ${JSON.stringify(out)}`)
+      const port = Number(new URL(url).port)
+      const lines = out.trim().split('\n')
+      assert.equal(lines.at(-1), url, `${name}: the address stays the last line`)
+      assert.equal(lines.at(-2), EN.serveSshHint(port, '203.0.113.9', url), `${name}: the line before it says how to forward the port`)
+      assert.doesNotMatch(out, /\u001b\[\?1049h|Opened Agent Board|No browser found/, `${name}: no terminal board, no window, no browser note`)
+      const runAgain = extra => new Promise((done, fail) => {
+        execFile(process.execPath, ['--require', shim, board.script], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
+      })
+      // An SSH server on another port: the command must name it, or the forward reaches port 22.
+      const other = (await runAgain({ SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222' })).trim().split('\n')
+      assert.equal(other.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', url), `${name}: the SSH port is named`)
+      // A page already open somewhere on the remote computer: the person here still needs the forward.
+      await fetch(url)
+      const open = (await runAgain({})).trim().split('\n')
+      assert.equal(open.at(-1), EN.boardPageAlreadyOpen(url), `${name}: the page counts as open`)
+      assert.equal(open.at(-2), EN.serveSshHint(port, '203.0.113.9', url), `${name}: the forward is still offered`)
+      // The terminal board's `o` keeps its note to the address alone, so no two addresses run together.
+      const keys = spawnSync(process.execPath, [board.script, '--keys', 'o', '--no-open'], { env, encoding: 'utf8', timeout: 20_000, windowsHide: true })
+      assert.equal(keys.status, 0, keys.stderr)
+      assert.ok(keys.stdout.includes(url), keys.stdout)
+      assert.doesNotMatch(keys.stdout, /\?t=[\w-]+(?:http|Forward)/, `${name}: the address is not joined to another line`)
+    } finally { await board.end([url]) }
+  }
 })
 
 test('a second agent-board reuses the running page and prints the same bare URL', { timeout: 40_000 }, async () => {
@@ -5250,7 +6289,22 @@ test('the SSH hint links to the page with its token', () => {
     assert.ok(hint.includes(`ssh -L ${port}:127.0.0.1:${port} ${host}`), hint)
     assert.ok(hint.includes(url), hint)
   }
-  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshHost(), server.url)'))
+  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshTargetOf(process.env), server.url)'))
+  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(pagePortOf(opened.url), sshTargetOf(process.env), opened.url)'))
+})
+
+test('the SSH forwarding command names a valid non-22 SSH port and the page port a URL leaves out (#1283)', () => {
+  const at = port => ({ SSH_CONNECTION: `203.0.113.5 50000 203.0.113.9 ${port}`, HOSTNAME: 'board.example' })
+  assert.equal(sshTargetOf(at(22)), '203.0.113.9')
+  assert.equal(sshTargetOf(at(2222)), '-p 2222 203.0.113.9')
+  assert.equal(sshTargetOf(at(1)), '-p 1 203.0.113.9')
+  assert.equal(sshTargetOf(at(65535)), '-p 65535 203.0.113.9')
+  for (const bad of ['0', '65536', '99999', '-1', 'x22', '']) assert.equal(sshTargetOf(at(bad)), '203.0.113.9', `port ${JSON.stringify(bad)} is not passed to ssh -p`)
+  assert.equal(sshTargetOf({ SSH_CONNECTION: '203.0.113.5 50000', HOSTNAME: 'board.example' }), 'board.example')
+  assert.equal(sshTargetOf({ SSH_TTY: '/dev/pts/0' }), 'host')
+  assert.equal(pagePortOf('http://127.0.0.1:43210/?t=synthetic'), 43210)
+  assert.equal(pagePortOf('http://127.0.0.1:80/?t=synthetic'), 80, 'a URL drops :80, the command must not say 0')
+  assert.equal(pagePortOf('http://127.0.0.1/?t=synthetic'), 80)
 })
 
 test('an agent or a pipe running agent-board with no surface flag opens one page and prints one bare URL', async () => {
@@ -5372,6 +6426,27 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([]) }
 })
 
+test('a Windows page start names a runtime-folder access check that ran out of time instead of a protection failure', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'stalled-acls-empty.cjs')
+  writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
+cp.execFileSync = (file, ...args) => { if (/powershell\\.exe$/i.test(String(file))) throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: '' }); return original(file, ...args) }
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    for (const mode of ['--serve', '--serve-child']) {
+      const ran = spawnSync(process.execPath, [board.script, mode, '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+      assert.equal(ran.status, 1, ran.stderr)
+      assert.equal(mode === '--serve-child' ? ran.stderr.trim() : ran.stdout.trim(), EN.serveRuntimeCheckTimeout)
+      assert.equal(mode === '--serve-child' ? ran.stdout : ran.stderr, '')
+      assert.ok(!(ran.stdout + ran.stderr).includes(board.dir) && !(ran.stdout + ran.stderr).includes('http:'))
+      assert.ok(!existsSync(board.served))
+      assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [])
+    }
+  } finally { await board.end([]) }
+})
+
 test('the board command in a read-only sandbox reuses a running page\'s link', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'acl-denied.cjs')
@@ -5453,7 +6528,8 @@ test('Windows page startup refuses an existing address file granted to another a
     url = board.urlOf(await board.serve(['--quiet-board']))
     assert.ok(url)
     execFileSync(icacls, [board.served, '/grant', '*S-1-1-0:R', '/L'], { windowsHide: true, stdio: 'pipe' })
-    const again = await board.serve(['--quiet-board'])
+    const { status, out: again } = await board.serveFailing(['--quiet-board'])
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
     assert.ok(!again.includes(url), 'the widened address must not be used to contact or open the running page')
     assert.equal(again.trim(), EN.serveStoreFailed('MESSAGE_STORE_IN_USE', board.served.replace(/\.json$/, '-messages')))
   } finally {
@@ -5543,7 +6619,10 @@ require('node:module').syncBuiltinESMExports()
       renameSync(other.served, replay)
       const renamed = fs.lstatSync(replay)
       assert.deepEqual([renamed.dev, renamed.ino, renamed.size], [original.dev, original.ino, original.size])
-      victimUrl = victim.urlOf(await victim.serve(['--quiet-board']))
+      const started = await victim.serveFailing(['--quiet-board'])
+      victimUrl = victim.urlOf(started.out)
+      // Failing closed starts no page, so that start exits 1 (#1292).
+      assert.equal(started.status, location === 'legacy' ? 0 : 1, started.out)
       assert.deepEqual(readFileSync(requests, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)), [], 'a mismatched record authorizes no request to the other board')
       const pid = JSON.parse(otherBytes.toString('utf8')).pid
       assert.doesNotThrow(() => process.kill(pid, 0), 'the other owned board remains running')
@@ -5589,6 +6668,26 @@ test('Windows page ACL checks use the system module instead of an inherited modu
   } finally { await board.end([url]) }
 })
 
+test('Windows page launcher uses the system module while preserving the caller module path', { skip: process.platform !== 'win32', timeout: 30_000 }, async () => {
+  const board = serveIn()
+  const modules = join(board.dir, 'untrusted-modules')
+  const module = join(modules, 'Microsoft.PowerShell.Management')
+  const touched = join(board.dir, 'untrusted-launcher-loaded')
+  const received = join(board.dir, 'child-module-path')
+  const preload = join(board.dir, 'record-module-path.cjs')
+  mkdirSync(module, { recursive: true })
+  writeFileSync(join(module, 'Microsoft.PowerShell.Management.psd1'), "@{ RootModule = 'fake.psm1'; ModuleVersion = '99.0.0'; GUID = '34000000-0000-4000-8000-000000000002'; FunctionsToExport = @('Start-Process') }")
+  writeFileSync(join(module, 'fake.psm1'), `function Start-Process { Set-Content -LiteralPath '${touched.replaceAll("'", "''")}' -Value 'unexpected'; throw 'synthetic untrusted launcher' }; Export-ModuleMember -Function Start-Process`)
+  writeFileSync(preload, `if (process.argv.includes('--serve-child')) require('node:fs').writeFileSync(${JSON.stringify(received)}, process.env.PSModulePath ?? '')\n`)
+  Object.assign(board.env, { PSModulePath: modules, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  let url = null
+  try {
+    url = board.urlOf(await board.serve())
+    assert.ok(url)
+    assert.ok(!existsSync(touched), 'the inherited module must not start the server')
+    assert.equal(readFileSync(received, 'utf8'), modules, 'the server keeps the caller module path')
+  } finally { await board.end([url]) }
+})
 test('Windows page ACL checks work without PowerShell command discovery', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 40_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'no-module-discovery.cjs')
@@ -5628,7 +6727,7 @@ const countPowerShell = (board, firstMs = 0) => {
   return starts
 }
 
-test('a cold Windows page start runs one PowerShell for the command and the server it starts together, and one more only to read again a folder it took another account\'s grant from', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 60_000 }, async () => {
+test('a cold Windows page start checks access once and uses a separate detached launcher', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 60_000 }, async () => {
   const board = serveIn()
   const starts = countPowerShell(board)
   let url = null
@@ -5636,9 +6735,9 @@ test('a cold Windows page start runs one PowerShell for the command and the serv
     url = board.urlOf(await board.serve(['--quiet-board']))
     assert.ok(url)
     const cold = starts.cold()
-    assert.deepEqual(starts(), cold, `the command reads the folder once; the server reuses that check and reads its new address file through icacls${starts.detail()}`)
+    assert.deepEqual(starts(), [...cold, 'launcher'], `the command reads the folder once; the server reuses that check and reads its new address file through icacls${starts.detail()}`)
     assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
-    assert.deepEqual(starts(), [...cold, 'parent'], `a second start reads the folder and the running page's address file in one start${starts.detail()}`)
+    assert.deepEqual(starts(), [...cold, 'launcher', 'parent'], `a second start reads the folder and the running page's address file in one start${starts.detail()}`)
   } finally { await board.end([url]) }
 })
 
@@ -5650,7 +6749,7 @@ test('a Windows page start whose first PowerShell start takes over 10 s still op
     const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
     url = board.urlOf(out)
     assert.ok(url, out)
-    assert.deepEqual(starts(), starts.cold(), starts.detail())
+    assert.deepEqual(starts(), [...starts.cold(), 'launcher'], starts.detail())
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
   } finally { await board.end([url]) }
 })
@@ -5739,6 +6838,50 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
+// What the runtime folder really holds and allows, for a start the stalled-PowerShell mock let
+// through: when such a start fails on a runner, its message shows the folder as it was (#799).
+const runtimeFolderState = (folder, env) => {
+  try { return JSON.stringify({ files: readdirSync(folder), acl: windowsAcl(folder, env) }) } catch (error) { return String(error) }
+}
+
+// The address lines PowerShell printed before its limit are the whole answer, so a start
+// whose PowerShell has not exited still opens the page (#799).
+test('a Windows page start opens the page when its PowerShell printed every address line but has not exited', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  const preload = join(board.dir, 'stalled-acls.cjs')
+  const marker = join(board.dir, 'stalled-acls-fired')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+const marker = ${JSON.stringify(marker)}
+cp.execFileSync = (file, args, options) => {
+  // Only the folder check stalls: it is the one call that carries the file list, and the
+  // recovery is about that call. Any other PowerShell use runs for real.
+  if (/powershell\\.exe$/i.test(String(file)) && typeof options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH === 'string') {
+    // The lines it really prints, as if it had printed them and then not exited: made-up
+    // lines would hide what the folder really allows (#799: an admin runner's folder
+    // still holds SYSTEM and Administrators until the check removes them).
+    const lines = original(file, args, options)
+    fs.writeFileSync(marker, 'stalled')
+    throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
+  }
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    const out = await board.serve(['--quiet-board'])
+    url = board.urlOf(out)
+    // The parent's output names the check that refused, when one did.
+    assert.ok(url, `${out}\n${url === null ? runtimeFolderState(folder, board.env) : ''}`)
+    assert.ok(existsSync(marker), 'the stalled PowerShell mock fired')
+    assert.ok(existsSync(board.served))
+    const acl = windowsAcl(folder, board.env)
+    assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the runtime folder is private')
+  } finally { await board.end([url]) }
+})
+
 // The server child is told which folder the command just checked. It starts the page on that
 // folder when it is still the same plain folder, and checks in full when it is not.
 const startChild = (board, handoff, extra = {}) => new Promise(done => {
@@ -5749,6 +6892,44 @@ const startChild = (board, handoff, extra = {}) => new Promise(done => {
   child.stdout.on('data', chunk => { out += chunk; if (out.includes('\n')) done({ url: out.split('\n')[0].trim(), err }) })
   child.stderr.on('data', chunk => { err += chunk })
   child.once('exit', code => done({ url: null, code, out, err }))
+})
+
+// The child started on its own checks the folder in full: with no handoff, its own
+// PowerShell start is the one that stalls, so this splits the child's own check from
+// the parent-child handoff when the parent-mode recovery test fails.
+test('a Windows server child started on its own opens the page when its PowerShell printed every address line but has not exited', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  const preload = join(board.dir, 'stalled-acls-child.cjs')
+  const marker = join(board.dir, 'stalled-acls-child-fired')
+  writeFileSync(preload, `const cp = require('node:child_process'); const fs = require('node:fs'); const original = cp.execFileSync
+const marker = ${JSON.stringify(marker)}
+cp.execFileSync = (file, args, options) => {
+  // Only the folder check stalls: it is the one call that carries the file list, and the
+  // recovery is about that call. Any other PowerShell use runs for real.
+  if (/powershell\\.exe$/i.test(String(file)) && typeof options?.env?.AGENT_BOARD_RUNTIME_ACL_PATH === 'string') {
+    // The lines it really prints, as if it had printed them and then not exited: made-up
+    // lines would hide what the folder really allows (#799: an admin runner's folder
+    // still holds SYSTEM and Administrators until the check removes them).
+    const lines = original(file, args, options)
+    fs.writeFileSync(marker, 'stalled')
+    throw Object.assign(new Error('synthetic PowerShell stall'), { code: 'ETIMEDOUT', signal: 'SIGTERM', stdout: lines })
+  }
+  return original(file, args, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let url = null
+  try {
+    const started = await startChild(board, undefined)
+    url = started.url
+    assert.ok(url, `exit ${started.code}: ${started.err}\n${url === null ? runtimeFolderState(folder, board.env) : ''}`)
+    assert.ok(existsSync(marker), 'the stalled PowerShell mock fired in the child')
+    assert.ok(existsSync(board.served))
+    const acl = windowsAcl(folder, board.env)
+    assert.deepEqual(acl.Sids, [acl.CurrentSid], 'the runtime folder is private')
+  } finally { await board.end([url]) }
 })
 
 test('a Windows server child reuses the folder its command checked and checks any other folder in full', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 90_000 }, async () => {
@@ -5918,7 +7099,8 @@ require('node:module').syncBuiltinESMExports()
 `)
   board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
   try {
-    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
+    const { status, out } = await board.serveFailing(['--quiet-board'], 50_000)
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
     assert.equal(board.urlOf(out), null, out)
     assert.equal(out.trim(), EN.serveStoreFailed('ACL_CHECK_TIMEOUT', messages), out)
   } finally { await board.end([]) }
@@ -5969,8 +7151,40 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([url]) }
 })
 
-test('Windows page start discards a new address file whose owner cannot be set or whose access list is not private', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
-  for (const fault of ['owner', 'access']) {
+// An AI whose sandbox writes only inside its workspace is refused the address folder: the line says so
+// and names the way out, instead of saying the file could not be protected.
+test('Windows page start refused access to its address folder says this AI cannot write there', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const folder = join(board.env.XDG_RUNTIME_DIR, 'agent-board')
+  const preload = join(board.dir, 'folder-refused.cjs')
+  writeFileSync(preload, `const fs = require('node:fs'); const original = fs.mkdirSync
+fs.mkdirSync = (path, ...rest) => { if (String(path).toLowerCase() === ${JSON.stringify(folder.toLowerCase())}) throw Object.assign(new Error('synthetic sandbox denial'), { code: 'EPERM' }); return original(path, ...rest) }
+require('node:module').syncBuiltinESMExports()
+`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try {
+    for (const mode of ['--serve', '--serve-child']) {
+      const ran = spawnSync(process.execPath, [board.script, mode, '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+      assert.equal(ran.status, 1, ran.stderr)
+      assert.equal(mode === '--serve-child' ? ran.stderr.trim() : ran.stdout.trim(), EN.serveRuntimeDenied)
+      assert.ok(!(ran.stdout + ran.stderr).includes(board.dir) && !(ran.stdout + ran.stderr).includes('http:'))
+      assert.ok(!existsSync(board.served))
+    }
+  } finally { await board.end([]) }
+})
+
+test('the refused-access line exists in every language and is not the protect-the-file line', () => {
+  assert.match(EN.serveRuntimeDenied, /sandbox can't write/)
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    assert.ok(words.serveRuntimeDenied && words.serveRuntimeDenied !== words.serveRuntimePrivate)
+    assert.ok(!words.serveRuntimeDenied.includes(words.serveRuntimePrivate), 'the parent tells the two apart by what the child prints')
+  }
+})
+
+// The server child used to stop without a word here, so the command could only say the server
+// did not start; it now names the check that refused (#799).
+test('Windows page start discards a new address file whose owner cannot be set or whose access list is not private, and says why', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
+  for (const fault of ['owner', 'access', 'timeout']) {
     const board = serveIn()
     const preload = join(board.dir, `new-file-${fault}.cjs`)
     writeFileSync(preload, `const cp = require('node:child_process'); const original = cp.execFileSync
@@ -5978,6 +7192,7 @@ const target = ${JSON.stringify(board.served)}.toLowerCase()
 cp.execFileSync = (file, args, options) => {
   const isNewFile = /icacls\\.exe$/i.test(String(file)) && String(args[0]).toLowerCase() === target && args.includes('/setowner')
   if (isNewFile && ${fault === 'owner'}) throw Object.assign(new Error('synthetic owner denial'), { code: 'EACCES' })
+  if (isNewFile && ${fault === 'timeout'}) throw Object.assign(new Error('synthetic owner time-out'), { code: 'ETIMEDOUT', signal: 'SIGTERM' })
   const result = original(file, args, options)
   // As if the filesystem had not inherited the private list.
   if (isNewFile && ${fault === 'access'}) original(file, [args[0], '/grant', '*S-1-1-0:R', '/L'], options)
@@ -5988,7 +7203,8 @@ require('node:module').syncBuiltinESMExports()
     board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
     try {
       const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 30_000 })
-      assert.equal(ran.stdout.trim(), EN.serveFailed(EN.serveNotStarted), fault)
+      assert.equal(ran.stdout.trim(), EN.serveFailed(fault === 'timeout' ? EN.serveRuntimeCheckTimeout : EN.serveRuntimePrivate), fault)
+      assert.equal(ran.status, 1, `a --serve that started no page exits non-zero (#1292): ${fault}`)
       assert.ok(!existsSync(board.served), 'the empty file is discarded')
       assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [], fault)
       assert.ok(!ran.stdout.includes('http:'))
@@ -6193,6 +7409,67 @@ test('--serve forwards --stale-ms to the background browser child', { timeout: 6
   } finally { await board.end([url]) }
 })
 
+test('a page started with --progress-file shows that board, not the default one', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const other = join(board.dir, 'other')
+  mkdirSync(other)
+  const custom = join(other, 'progress.md')
+  writeFileSync(custom, `# Progress\n\n## custom-board\n### Custom board work\n- [ ] A custom step\n`)
+  const elsewhere = join(board.dir, 'elsewhere')
+  mkdirSync(elsewhere)
+  const titlesOf = async url => {
+    const res = await fetch(`http://127.0.0.1:${new URL(url).port}/api/board`, { headers: { 'x-board-token': new URL(url).searchParams.get('t') } })
+    assert.equal(res.status, 200)
+    const model = (await res.json()).model
+    // Rows and the questions the page asks: the default board's waiting session shows
+    // only as a question ("Per-key limit"), never as a row, so both must be checked.
+    return {
+      rows: [...model.groups.flatMap(group => group.rows), ...model.stopped].map(row => row.title),
+      asks: model.asks.map(ask => ask.text),
+    }
+  }
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board', '--progress-file', custom]))
+    assert.ok(url)
+    const shown = await titlesOf(url)
+    assert.ok(shown.rows.includes('Custom board work'), JSON.stringify(shown))
+    assert.ok(!shown.rows.includes('Rate-limit the public endpoints'), JSON.stringify(shown))
+    assert.ok(!shown.asks.includes('Per-key limit'), JSON.stringify(shown))
+    // A relative path given from another folder resolves the same way: the parent
+    // resolves it before handing it to the child, which runs in the board's folder.
+    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board', '--progress-file', '../other/progress.md'], { env: board.env, cwd: elsewhere, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout))))
+    const same = board.urlOf(out)
+    assert.ok(same, out)
+    const again = await titlesOf(same)
+    assert.ok(again.rows.includes('Custom board work'), JSON.stringify(again))
+    assert.ok(!again.rows.includes('Rate-limit the public endpoints'), JSON.stringify(again))
+    assert.ok(!again.asks.includes('Per-key limit'), JSON.stringify(again))
+    url = same
+  } finally {
+    // The custom board's address file is not the fixture's default one; close its page
+    // and wait for its server to exit before the fixture folder is removed (on Windows
+    // the server holds its working folder).
+    const customServed = servedAt(join(board.dir, 'run'), custom)
+    const record = existsSync(customServed) ? JSON.parse(readFileSync(customServed, 'utf8')) : null
+    if (url !== null) {
+      const { port, searchParams } = new URL(url)
+      await new Promise(done => {
+        const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+        req.on('error', done)
+        req.end('{}')
+      })
+    }
+    for (let tries = 0; existsSync(customServed) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
+    const pid = record?.pid
+    if (typeof pid === 'number' && pid !== process.pid) {
+      const alive = () => { try { process.kill(pid, 0); return true } catch { return false } }
+      for (let tries = 0; alive() && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
+    }
+    await board.end([])
+  }
+})
+
 test('running page reuses server when timeout matches and restarts when requested stale timeout differs', { timeout: 60_000 }, async () => {
   const board = serveIn()
   let url1 = null
@@ -6248,9 +7525,11 @@ const publicationSpawn340 = publicationCp340.spawn
 const publicationFds340 = new Map()
 let publicationReads340 = 0
 publicationCp340.spawn = (command, args, options) => {
-  if (process.argv.includes('--serve') && args.includes('--serve-child')) {
+  const encoded = args.indexOf('-EncodedCommand')
+  const startsChild = args.includes('--serve-child') || (encoded >= 0 && Buffer.from(args[encoded + 1], 'base64').toString('utf16le').includes('--serve-child'))
+  if (process.argv.includes('--serve') && startsChild) {
     publicationWrite340(${JSON.stringify(lost)}, 'lost')
-    return publicationSpawn340(command, ['--input-type=module', '-e', 'process.exit(0)'], options)
+    return publicationSpawn340(process.execPath, ['--input-type=module', '-e', 'process.exit(0)'], options)
   }
   return publicationSpawn340(command, args, options)
 }
@@ -6738,7 +8017,7 @@ test('with --lan the page also opens on the local network, with a token of its o
   }
 })
 
-test("--serve --lan prints the page's network address and a QR code of it, and a second run gives the same address", { timeout: 60_000 }, async t => {
+test("--serve --lan prints the page's network address, a QR code of it and that the link is unencrypted, and a second run gives the same address", { timeout: 60_000 }, async t => {
   const board = serveIn()
   const urls = []
   const serveLan = () =>
@@ -6755,6 +8034,8 @@ test("--serve --lan prints the page's network address and a QR code of it, and a
     }
     // NO_COLOR: the light modules are the ink, so the code's quiet zone prints as solid lines.
     assert.match(out, /scan this code:\n█{29,}\n█{29,}\n/)
+    // The link is plain HTTP on a shared network, and the output says so (#1146).
+    assert.ok(out.includes(EN.serveLanWarn), out)
     assert.ok(!out.includes('\u001b['))
     const again = await serveLan()
     assert.ok(again.includes(urls[0]), again)
@@ -9012,18 +10293,25 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
     removeAttribute: name => { delete attributes[name] },
     classList: { add: name => classes.add(name), remove: name => classes.delete(name) },
   }
-  // One icon button switches the theme on the live page.
-  const buttons = [...html.matchAll(/<button\b([^>]*data-theme-toggle[^>]*)>/g)].map(found => {
-    assert.match(found[1], /data-local/)
-    const attrs = { ...Object.fromEntries([...found[1].matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]])), 'data-theme-toggle': '' }
-    return { getAttribute: name => attrs[name] ?? null, setAttribute: (name, value) => { attrs[name] = value } }
-  })
+  const node = (tag, raw, flag) => {
+    assert.match(raw, /data-local/)
+    const attrs = { ...Object.fromEntries([...raw.matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]])), [flag]: attrs0(raw, flag) }
+    return { tag, focused: 0, getAttribute: name => attrs[name] ?? null, setAttribute: (name, value) => { attrs[name] = value }, focus() { this.focused += 1 } }
+  }
+  const attrs0 = (raw, flag) => (new RegExp(`${flag}="([^"]*)"`).exec(raw)?.[1] ?? '')
+  // Settings includes the same three themes and progress-bar styles.
+  const buttons = [...html.matchAll(/<button\b([^>]*data-settings-toggle[^>]*)>/g)].map(found => node('button', found[1], 'data-settings-toggle'))
   assert.equal(buttons.length, 1)
+  const themes = [...html.matchAll(/<button\b([^>]*data-theme-set[^>]*)>/g)].map(found => node('button', found[1], 'data-theme-set'))
+  assert.deepEqual(themes.map(item => item.getAttribute('data-theme-set')), ['light', 'dark', 'system'])
+  const styles = [...html.matchAll(/<button\b([^>]*data-bar-set[^>]*)>/g)].map(found => node('button', found[1], 'data-bar-set'))
+  assert.deepEqual(styles.map(item => item.getAttribute('data-bar-set')), ['ink', 'blue', 'green'])
+  const select = selector => selector === '[data-settings-toggle]' ? buttons : selector === '[data-theme-set]' ? themes : []
   const events = {}
   let finish
   runInNewContext(themeScript(html), {
     document: {
-      documentElement: root, querySelectorAll: () => buttons, addEventListener: (name, run) => { events[name] = run },
+      documentElement: root, querySelectorAll: select, addEventListener: (name, run) => { events[name] = run },
       get cookie() { return jar.value },
       set cookie(line) {
         const pair = line.split(';')[0]
@@ -9041,46 +10329,36 @@ const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '
   }, { timeout: 1000 })
   events.DOMContentLoaded()
   return {
-    attributes, classes, button: buttons[0],
-    toggle: () => events.click({ target: { parentNode: buttons[0] } }),
+    attributes, classes, themes, styles, button: buttons[0],
+    pick: theme => events.click({ target: themes.find(item => item.getAttribute('data-theme-set') === theme) }),
     finish: () => finish(),
   }
 }
 
-test('the serve page offers a light and a dark theme, follows the system until one is picked, and remembers the choice', () => {
+test('Settings offers light, dark and automatic themes, follows the system and remembers the browser choice', () => {
   const html = redesignPage()
   const storage = new Map()
   const jar = { value: '' }
   const dom = themeDom(html, storage, false, jar)
-  // One icon button; a first visit follows the system, and the button names the theme it switches to.
   assert.equal(dom.attributes['data-theme'], undefined)
-  assert.equal(dom.button.getAttribute('data-now'), 'light')
-  assert.equal(dom.button.getAttribute('aria-label'), EN.themeToDark)
-  assert.equal(dom.button.getAttribute('title'), EN.themeToDark)
-  const onDark = themeDom(html, new Map(), false, { value: '' }, 'dark')
-  assert.equal(onDark.button.getAttribute('data-now'), 'dark')
-  assert.equal(onDark.button.getAttribute('aria-label'), EN.themeToLight)
-  dom.toggle()
+  assert.equal(dom.button.getAttribute('aria-haspopup'), 'dialog')
+  assert.deepEqual(dom.themes.map(item => item.getAttribute('aria-checked')), ['false', 'false', 'true'])
+  assert.equal(themeDom(html, new Map(), false, { value: '' }, 'dark').button.getAttribute('data-now'), 'dark')
+  dom.pick('dark')
   assert.equal(storage.get('agent-board.theme'), 'dark')
   assert.equal(dom.attributes['data-theme'], 'dark')
-  assert.equal(dom.button.getAttribute('data-now'), 'dark')
-  assert.equal(dom.button.getAttribute('aria-label'), EN.themeToLight)
+  assert.deepEqual(dom.themes.map(item => item.getAttribute('aria-checked')), ['false', 'true', 'false'])
   assert.ok(dom.classes.has('theming'))
   dom.finish()
   assert.ok(!dom.classes.has('theming'))
-  // The live page starts on a new port each time, with empty storage; the cookie keeps the pick.
   assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], 'dark')
   const reload = themeDom(html, storage, false, jar)
-  assert.equal(reload.attributes['data-theme'], 'dark')
-  reload.toggle()
+  reload.pick('light')
   assert.equal(storage.get('agent-board.theme'), 'light')
-  assert.equal(reload.attributes['data-theme'], 'light')
-  assert.equal(reload.button.getAttribute('aria-label'), EN.themeToDark)
-  // A dark system flips to light on the first press.
-  const first = themeDom(html, new Map(), false, { value: '' }, 'dark')
-  first.toggle()
-  assert.equal(first.attributes['data-theme'], 'light')
-  assert.match(html, /<script nonce="synthetic">[\s\S]*agent-board.theme/)
+  reload.pick('system')
+  assert.equal(storage.has('agent-board.theme'), false)
+  assert.equal(reload.attributes['data-theme'], undefined)
+  assert.equal(themeDom(html, new Map(), false, jar).attributes['data-theme'], undefined)
   assert.match(html, /prefers-reduced-motion:reduce/)
 })
 
@@ -9091,7 +10369,7 @@ test('the theme is applied before the page paints and survives blocked browser s
     assert.ok(!themeScript(html).includes('(function ()'))
     const dom = themeDom(html, new Map(), true)
     assert.equal(dom.attributes['data-theme'], undefined)
-    dom.toggle()
+    dom.pick('dark')
     assert.equal(dom.attributes['data-theme'], 'dark')
     assert.equal(dom.button.getAttribute('data-now'), 'dark')
     assert.equal(themeDom(html, new Map([['agent-board.theme', 'unknown']])).attributes['data-theme'], undefined)
@@ -9242,13 +10520,14 @@ test("every card kind on the page carries its agent's mark", async () => {
   assert.ok(pressWalk(hidden).find(node => node.className === 'c-meta').textContent.includes('Codex'))
 })
 
-test('a question card puts the answer buttons first and the hide button last', async () => {
+test('a question card puts choices before its copy button and the hide button last', async () => {
   const dom = await pageDom(await sourcePage(), cardsModel())
   const card = cardWithKey(dom, 'ask')
   // The answers come first; what More holds follows: the command, the link, the resume command, then Already answered, hide.
-  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), ['Copy "Yes"', 'Copy "No"', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
   const answers = card.childNodes.flatMap(node => pressWalk(node)).find(node => node.className === 'answers')
-  assert.deepEqual(answers.childNodes.map(node => node.textContent).slice(0, 2), ['Copy "Yes"', 'Copy "No"'])
+  assert.deepEqual(answers.childNodes[0].childNodes.slice(0, 2).map(node => node.textContent), ['Yes', 'No'])
+  assert.equal(answers.childNodes.at(-1).getAttribute('aria-label'), EN.pgCopyChoice)
   // The box for the person's own words comes after the answers, and the line after a copy last.
   const kinds = card.childNodes.map(node => pressWalk(node).find(one => ['answers', 'composer', 'state'].includes(one.className))?.className)
   assert.deepEqual(kinds.filter(Boolean), ['answers', 'composer', 'state'])
@@ -9265,7 +10544,8 @@ test('a card with more than three actions shows three and the rest behind More',
   const card = cardWithKey(dom, 'ask')
   const actions = cardActionNodes(card)
   // Three answers show; the command, the link, the resume command and Already answered, hide wait behind More.
-  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), ['Copy "Yes"', 'Copy "No"', 'Copy "Maybe"'])
+  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), ['↑'])
+  assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No', 'Maybe'])
   const more = cardMore(card)
   assert.equal(more.length, 1)
   assert.equal(more[0].getAttribute('aria-expanded'), 'false')
@@ -9278,6 +10558,58 @@ test('a card with more than three actions shows three and the rest behind More',
   assert.ok(cardActionNodes(cardWithKey(dom, 'row')).length > 0)
 })
 
+test('a choose question selects one option and sends it only when its arrow is pressed', async () => {
+  const model = cardsModel()
+  model.asks[0] = { ...model.asks[0], text: 'Choose a colour', answers: ['Blue', 'Green', 'Red', 'Gold'], send: 'send', session: 'synthetic-session' }
+  let release
+  const dom = await pageDom(await sourcePage(), model, { post: () => new Promise(done => { release = () => done({ ok: true, json: async () => ({ ok: true }) }) }) })
+  const card = () => cardWithKey(dom, 'ask')
+  const choices = () => pressWalk(card()).filter(node => node.className === 'choice')
+  const send = () => pressWalk(card()).find(node => node.className === 'answer-send')
+  assert.deepEqual(choices().map(node => node.textContent), ['Blue', 'Green', 'Red', 'Gold'])
+  assert.ok(choices().every(node => node.getAttribute('aria-pressed') === 'false'))
+  assert.equal(send().getAttribute('aria-label'), EN.pgSendChoice)
+  assert.equal(send().textContent, '↑')
+  assert.equal(send().disabled, true)
+  send().click()
+  assert.deepEqual(dom.requests, [])
+  choices()[0].focus()
+  dom.key({ key: ' ' })
+  assert.deepEqual(choices().map(node => node.getAttribute('aria-pressed')), ['true', 'false', 'false', 'false'])
+  assert.equal(send().disabled, false)
+  assert.deepEqual(dom.requests, [])
+  cardMore(card())[0].click()
+  choices()[3].focus()
+  dom.key({ key: 'Enter' })
+  assert.deepEqual(choices().map(node => node.getAttribute('aria-pressed')), ['false', 'false', 'false', 'true'])
+  await dom.redraw(model)
+  assert.deepEqual(choices().map(node => node.getAttribute('aria-pressed')), ['false', 'false', 'false', 'true'])
+  const changed = { ...model, asks: [{ ...model.asks[0], fp: 'changed' }] }
+  await dom.redraw(changed)
+  assert.ok(choices().every(node => node.getAttribute('aria-pressed') === 'false'))
+  assert.equal(send().disabled, true)
+  selectAnswer(card(), 'Gold').click()
+  await dom.flush()
+  assert.deepEqual(dom.requests.map(request => [request.body.type, request.body.text]), [['send', 'Gold']])
+  assert.equal(send().disabled, true)
+  choices()[0].click()
+  send().click()
+  assert.deepEqual(dom.requests.map(request => request.body.text), ['Gold'])
+  release()
+  await dom.settle()
+})
+
+test('a question already sending disables every choice and its send arrow', async () => {
+  for (const mode of ['send', 'connected', 'mailbox']) {
+    const model = cardsModel()
+    model.asks[0] = { ...model.asks[0], answers: ['One', 'Two', 'Three', 'Four'], send: mode, isSending: true }
+    const dom = await pageDom(await sourcePage(), model)
+    const controls = pressWalk(cardWithKey(dom, 'ask'))
+    assert.ok(controls.filter(node => node.className === 'choice').every(node => node.disabled), mode)
+    assert.equal(controls.find(node => node.className === 'answer-send').disabled, true, mode)
+  }
+})
+
 test('a card with nothing behind More shows no More button', async () => {
   const html = await sourcePage()
   for (const canHide of [false, true]) {
@@ -9286,10 +10618,11 @@ test('a card with nothing behind More shows no More button', async () => {
     model.groups[0].rows[0] = { ...model.groups[0].rows[0], resume: null, canConfirm: canHide }
     const dom = await pageDom(html, model)
     const card = cardWithKey(dom, 'ask')
-    // With nothing to hide the two answers are all there is; Already answered, hide alone still goes behind More.
-    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['Copy "Yes"', 'Copy "No"'])
+    // Already answered, hide alone still goes behind More.
+    assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice').map(node => node.textContent), ['Yes', 'No'])
+    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
     assert.equal(cardMore(card).length, canHide ? 1 : 0)
-    assert.equal(cardActionNodes(card).length, canHide ? 3 : 2)
+    assert.equal(cardActionNodes(card).length, canHide ? 2 : 1)
     const row = cardWithKey(dom, 'row')
     assert.equal(cardActionNodes(row).length, canHide ? 2 : 1)
     assert.ok(cardActionNodes(row).every(isPageVisible) || !isPageVisible(row))
@@ -9302,12 +10635,15 @@ test('a question with four answers shows three and keeps the fourth behind More'
   model.asks[0] = { ...model.asks[0], kind: 'choose', answers: ['A', 'B', 'C', 'D'] }
   const dom = await pageDom(await sourcePage(), model)
   const card = cardWithKey(dom, 'ask')
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['Copy "A"', 'Copy "B"', 'Copy "C"'])
+  const visibleChoices = () => pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent)
+  assert.deepEqual(visibleChoices(), ['A', 'B', 'C'])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
   const more = cardMore(card)[0]
   assert.ok(more)
   more.click()
   assert.equal(more.getAttribute('aria-expanded'), 'true')
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['Copy "A"', 'Copy "B"', 'Copy "C"', 'Copy "D"', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(visibleChoices(), ['A', 'B', 'C', 'D'])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
 })
 
 test('More opens and closes by keyboard and keeps its state across a refresh', async () => {
@@ -9538,7 +10874,7 @@ test("the agent row shows each agent's counts and filters the page to that agent
     assert.ok(!sectionWords(dom, 'working').includes('Unblock'), sectionWords(dom, 'working'))
     // An agent with nothing waiting says so; pressing the icon again shows every agent again.
     rowAgent(dom, 'own').click()
-    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestions(EN.pgOwn)), shownWords(dom.node('needs')))
+    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestionsElsewhere(EN.pgOwn, model.view.needs.n)), shownWords(dom.node('needs')))
     rowAgent(dom, 'own').click()
     const all = shownWords(dom.node('needs'))
     assert.ok(all.includes('Blue or green?') && all.includes('Short or detailed?'), all)
@@ -9589,10 +10925,12 @@ test('a working Codex session with no block of its own names its project once an
     assert.equal(working.toLowerCase().split('demo-garden').length - 1, 1, working)
     assert.ok(!working.includes(EN.codexLifecycle), working)
   } finally { await board.close() }
-  // Once it waits, the hook's words are true and the row says them.
+  // Once it waits, the hook's words are true and the row says them, outside Working now (#1051).
   const waiting = await groupedPage(lifecycle('waiting'))
   try {
-    assert.ok(sectionWords(await pageDom(waiting.html, waiting.model), 'working').includes(EN.codexLifecycle))
+    const dom = await pageDom(waiting.html, waiting.model)
+    assert.ok(!sectionWords(dom, 'working').includes(EN.codexLifecycle), sectionWords(dom, 'working'))
+    assert.ok(sectionWords(dom, 'others').includes(EN.codexLifecycle), sectionWords(dom, 'others'))
   } finally { await waiting.board.close() }
 })
 
@@ -9639,18 +10977,18 @@ test('a reply button on an unconnected question says it copies and the card then
     const dom = await pageDom(html, model, { copyAllowed: true })
     assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
     const card = key => dom.node('needs').querySelectorAll('[data-ref-key]').find(one => shownWords(one).includes(key))
-    // No message button on a question the board cannot send to: every answer is a Copy button.
-    const labels = dom.buttons().map(button => button.textContent)
-    assert.ok(labels.includes(EN.pgCopyReply('Blue')), labels.join())
-    assert.ok(!labels.some(label => label.startsWith('Send "')), labels.join())
+    // A question the board cannot send to has one Copy button for its choices.
+    const labels = dom.buttons().map(button => button.getAttribute('aria-label'))
+    assert.ok(labels.includes(EN.pgCopyChoice), labels.join())
+    assert.ok(!labels.includes(EN.pgSendChoice), labels.join())
     // An agent that is open (Codex has working tasks) is told to paste into it; the answer is copied.
-    dom.buttons().find(button => button.textContent === EN.pgCopyReply('Blue')).click()
+    selectAnswer(card('Blue or green?'), 'Blue').click()
     await dom.settle()
     assert.ok(dom.copies.includes('Blue'))
     assert.deepEqual(dom.requests, [])
     assert.ok(shownWords(card('Blue or green?')).includes(EN.pgPasteIn('Blue', EN.agentNames.codex)), shownWords(card('Blue or green?')))
     // An agent the board has not seen lately is told to paste once it is open again.
-    dom.buttons().find(button => button.textContent === EN.pgCopyReply('Short')).click()
+    selectAnswer(card('Short or detailed?'), 'Short').click()
     await dom.settle()
     assert.ok(shownWords(card('Short or detailed?')).includes(EN.pgPasteLater('Short', EN.agentNames.gemini)), shownWords(card('Short or detailed?')))
     // And the same lines in the other two languages.
@@ -9735,35 +11073,6 @@ test('Ctrl+V in a text field pastes there and imports nothing', async () => {
   }
   await dom.settle()
   assert.equal(dom.requests.length, 0)
-})
-
-test('Import from clipboard posts a block, says when there is none, and says to use Ctrl+V when the browser refuses', async () => {
-  let text = relayFragment(ago(60_000))
-  let isRefused = false
-  const html = await sourcePage()
-  const dom = await pageDom(html, redesignModel(), { clipboard: true, readClipboard: async () => {
-    if (isRefused) throw new Error('Synthetic refusal')
-    return text
-  } })
-  dom.node('import-clipboard').click()
-  await dom.settle()
-  assert.deepEqual(dom.requests, [{ path: '/api/paste', body: { text } }])
-  text = 'not a block'
-  dom.node('import-clipboard').click()
-  await dom.settle()
-  assert.ok(dom.node('.pfoot').textContent.includes(EN.importNoBlock))
-  assert.equal(dom.requests.length, 1)
-  isRefused = true
-  dom.node('import-clipboard').click()
-  await dom.settle()
-  assert.ok(dom.node('.pfoot').textContent.includes(EN.importUseKeys))
-  for (const clipboard of [false, true]) {
-    const missing = await pageDom(html, redesignModel(), { clipboard })
-    missing.node('import-clipboard').click()
-    await missing.settle()
-    assert.ok(missing.node('.pfoot').textContent.includes(EN.importUseKeys))
-    assert.equal(missing.requests.length, 0)
-  }
 })
 
 test('a block the parser would read is posted once while it is on its way, and not at all on a closed page', async () => {
@@ -9870,7 +11179,7 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   // The message is sent: the card says it is sending, then that it was sent; the next board brings the reply.
   let release
   const dom = await pageDom(html, model, { post: () => new Promise(done => { release = () => done({ ok: true, json: async () => ({ note: '' }) }) }) })
-  dom.buttons().find(button => button.textContent === EN.pgSendReply('Yes')).click()
+  selectAnswer(card(dom), 'Yes').click()
   await dom.flush()
   assert.deepEqual(dom.requests.map(request => request.body.text), ['Yes'])
   assert.equal(pageCardResults(dom, 'ask-send')[0].textContent, EN.serveSending(EN.agentNames.codex))
@@ -9883,7 +11192,7 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   assert.ok(shownWords(card(dom)).includes(`${EN.messagesAcknowledged} · Shipped`), shownWords(card(dom)))
   // A message the board refused: the line says so and the card offers Send again and Copy message.
   const refused = await pageDom(html, model, { post: async () => ({ ok: false, json: async () => ({ note: 'Synthetic refusal' }) }) })
-  refused.buttons().find(button => button.textContent === EN.pgSendReply('No')).click()
+  selectAnswer(card(refused), 'No').click()
   await refused.settle()
   const failure = pageCardResults(refused, 'ask-send').find(node => node.textContent.startsWith('Synthetic refusal'))
   assert.ok(failure, pageCardResults(refused, 'ask-send').map(node => node.textContent).join())
@@ -9908,7 +11217,7 @@ test('words sent again after a Claude message went nowhere are a new message, no
   model.asks = [ask]
   const dom = await pageDom(html, model, { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
   const answer = ask.answers[0]
-  const press = () => dom.buttons().find(button => button.textContent === EN.pgSendReply(answer)).click()
+  const press = () => selectAnswer(cardWithKey(dom, ask.key), answer).click()
   const ids = []
   for (const ending of [{ status: 'uncertain', error: 'DISMISSED' }, { status: 'uncertain', error: 'EXPIRED' }, { status: 'rejected', error: 'STOPPED' }, { status: 'acknowledged', error: '' }]) {
     await dom.redraw(model)
@@ -9978,13 +11287,12 @@ test('an agent with no open session shows as offline and its answers copy', asyn
   assert.equal(rowAgent(dom, 'codex').getAttribute('data-presence'), 'open')
   assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label').includes(EN.pgOffline), false)
   // Its question offers Copy, never Send; the card then says to paste once it is open again.
-  const labels = dom.buttons().map(button => button.textContent)
-  assert.ok(labels.includes(EN.pgCopyReply('Yes')), labels.join())
-  assert.ok(!labels.some(label => label.startsWith('Send "')), labels.join())
+  const labels = dom.buttons().map(button => button.getAttribute('aria-label'))
+  assert.ok(labels.includes(EN.pgCopyChoice), labels.join())
+  assert.ok(!labels.includes(EN.pgSendChoice), labels.join())
   const copying = await pageDom(await sourcePage(), model, { copyAllowed: true })
   const card = copying.node('needs').querySelectorAll('[data-ref-key]').find(one => shownWords(one).includes('Beta question'))
-  const yes = pressWalk(card).find(node => node.tag === 'button' && node.textContent === EN.pgCopyReply('Yes'))
-  yes.click()
+  selectAnswer(card, 'Yes').click()
   await copying.settle()
   assert.ok(copying.copies.includes('Yes'))
   assert.ok(shownWords(card).includes(EN.pgPasteLater('Yes', EN.agentNames.gemini)), shownWords(card))
@@ -10298,6 +11606,13 @@ test('a new question from an agent the board does not know by name uses the gene
   assert.equal(awayLine(dom), 'Away for 10 min · 1 agent asked a question')
 })
 
+test('a new question from an agent named like an object member counts as one question (#974)', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-ctor', agent: 'constructor', task: 'Ctor plan', text: 'Ctor, OK?' }] }
+  const dom = await awayAfter(base, later, 10)
+  assert.equal(awayLine(dom), 'Away for 10 min · 1 agent asked a question')
+})
+
 test('new questions from two agents show the agent count', async () => {
   const base = cardsModel('codex')
   const later = {
@@ -10497,6 +11812,25 @@ test('picking a view shows only that section', async () => {
   } finally { await board.close() }
 })
 
+test('with a project filter on, an empty Needs you says how many questions wait elsewhere, not that nothing needs you (#1144)', async () => {
+  const { board, model, html } = await projectBoard()
+  try {
+    const dom = await pageDom(html, model, { width: 1280 })
+    assert.equal(dom.node('count-needs').textContent, '3')
+    sideProject(dom, 'other-fix-project').click()
+    const needs = shownWords(dom.node('needs'))
+    assert.ok(needs.includes(EN.pgNoQuestionsElsewhere('other-fix-project', 3)), needs)
+    assert.ok(!needs.includes(EN.pgNothing), needs)
+    assert.ok(needs.includes(EN.clearFilters), needs)
+    // The project that holds the questions shows them, with no empty line at all.
+    sideProject(dom, 'other-fix-project').click()
+    sideProject(dom, 'shared-fix-project').click()
+    const shared = shownWords(dom.node('needs'))
+    assert.ok(shared.includes('Blue or green?'), shared)
+    assert.ok(!shared.includes(EN.pgNoQuestions('shared-fix-project')) && !shared.includes('more wait elsewhere'), shared)
+  } finally { await board.close() }
+})
+
 test('a project and an agent filter combine', async () => {
   const { board, model, html } = await projectBoard()
   try {
@@ -10517,7 +11851,7 @@ test('a project and an agent filter combine', async () => {
     // A project the pressed agent has nothing in says so; each filter clears on its own.
     sideProject(dom, 'other-fix-project').click()
     assert.deepEqual(open(), ['', '', ''])
-    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestions(EN.agentNames.cursor)), shownWords(dom.node('needs')))
+    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestionsElsewhere(EN.agentNames.cursor, 3)), shownWords(dom.node('needs')))
     sideProject(dom, 'other-fix-project').click()
     assert.equal(sideProject(dom, 'other-fix-project').getAttribute('aria-pressed'), 'false')
     assert.deepEqual(open(), ['1', '', ''])
@@ -10759,7 +12093,7 @@ test('the sidebar and the theme button keep working while the board is unreachab
   assert.equal(dom.node('shell').getAttribute('data-view'), 'needs')
   assert.equal(dom.requests.length, 0)
   const theme = themeDom(html)
-  theme.toggle()
+  theme.pick('dark')
   assert.equal(theme.attributes['data-theme'], 'dark')
 })
 
@@ -10771,12 +12105,17 @@ test('the page uses ink for actions and amber only for what needs you', async ()
   assert.ok(html.includes('--act:var(--ink)') && html.includes('--on-act:var(--surface)') && html.includes('--btn-line:'))
   const primary = rules.find(([selector]) => selector === 'button.primary')[1]
   assert.ok(primary.includes('var(--act)') && primary.includes('var(--on-act)'), primary)
-  // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words and the Needs you view.
-  assert.deepEqual(using('waiting'), ['.badge', '.flag', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
-  assert.deepEqual(using('accent'), [], 'the blue accent is not on the live page')
+  // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words, the Needs you view, and a progress-bar cell for a step that waits on the person (#1085).
+  assert.deepEqual(using('waiting'), ['.badge', '.flag', '.pbar .c-w', '.pbar.cont u.c-w', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
+  // The blue accent is on the live page only when the person picks the Blue progress-bar style (#1085), and on its swatch in the look menu.
+  assert.deepEqual(using('accent'), ['[data-bar="blue"] .pbar .c-x,[data-bar="blue"] .pbar .c-c,[data-bar="blue"] .pbar.cont b,[data-bar="blue"] .pbar.cont u.c-c,[data-sw="blue"] .sw .c-x,[data-sw="blue"] .sw .c-c'], 'the blue accent is only the Blue bar style')
+  // The question card's send arrow is an action, so it is ink on the page colour, like a primary button (#1107).
+  const arrow = rules.find(([selector]) => selector === '.answers button.answer-send')[1]
+  assert.ok(arrow.includes('var(--act)') && arrow.includes('var(--on-act)'), arrow)
   // Green is for what is alive, red for what is wrong, and a finished task is muted.
   assert.ok(html.includes('--alive:var(--done)'))
-  assert.deepEqual(using('alive'), ['.chip.working::after', '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', '.s-agent.working .ag::after', '.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after', '.s-running', '.v-working>svg.i'].sort())
+  // A progress-bar cell for a step that runs (CI, handed over) is alive too (#1085).
+  assert.deepEqual(using('alive'), ['.chip.working::after', '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', '.pbar .c-r', '.pbar.cont u.c-r', '.s-agent.working .ag::after', '.s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after', '.s-running', '.v-working>svg.i'].sort())
   for (const selector of ['#offline', '.t-alert', '.badge.bad', '.s-blocked']) assert.ok(using('alert').includes(selector), selector)
   assert.ok(rules.some(([selector, body]) => selector.includes('.s-done') && body.includes('var(--muted)')))
 })
@@ -10797,32 +12136,50 @@ test('buttons keep desktop size in a narrow window with a mouse', async () => {
   assert.ok(narrow.includes('.col{padding-left') && !/\.btn|\.answers button/.test(narrow))
 })
 
-test('the actions at the foot of the sidebar look like buttons, not underlined links', () => {
+test('Close the board uses the quiet button look, the page hit size, and room for its name (#1145)', () => {
   const html = redesignPage()
-  // The owner's rule (product principles): an action is a button. Only GitHub stays a link.
-  const rules = [...html.matchAll(/([^{}]*\.side \.pfoot[^{}]*)\{([^}]*)\}/g)].map(found => ({ selector: found[1], body: found[2] }))
-  const actions = rules.filter(rule => /#close|\.btn\b/.test(rule.selector))
-  assert.ok(actions.length > 0)
-  for (const rule of actions) assert.doesNotMatch(rule.body, /underline|background:transparent|border-color:transparent/, rule.selector)
-  assert.match(html, /\.btn,[^{}]*\.pfoot #close[^{}]*\{[^}]*border:1px solid var\(--btn-line\)/)
-  const foot = html.match(/<footer class="pfoot"[\s\S]*?<\/footer>/)[0]
-  for (const id of ['connect-web-chat', 'import-clipboard', 'close']) assert.match(foot, new RegExp('<button type="button"[^>]*id="' + id + '"'))
+  // Settings' footer button shares the rule (#1163), so the selector may be a list.
+  const rule = html.match(/(?:^|[}\s])\.pfoot #close(?:,\.pfoot #settings-toggle)?\{([^}]*)\}/)[1]
+  assert.match(rule, /(?:^|;)width:auto(?:;|$)/)
+  assert.match(rule, /min-width:var\(--hit\)/)
+  assert.match(rule, /(?:^|;)height:var\(--hit\)/)
+  const touch = mediaBlocks(html, '(pointer:coarse)').join('\n')
+  assert.match(touch, /\.pfoot #close(?:,[^{}]*)?\{[^}]*height:48px;[^}]*min-width:48px/)
+  assert.doesNotMatch(touch, /\.pfoot #close(?:,[^{}]*)?\{(?:[^}]*;)?width:48px/)
+  assert.match(html, /\.icon-btn\{[^}]*background:transparent;[^}]*color:var\(--muted\)/)
 })
 
-test('the sidebar foot actions are small quiet buttons and the version line is quieter', () => {
+test('the sidebar version line is quiet', () => {
   const html = redesignPage()
-  const rule = html.match(/\.side \.pfoot #close,\.side \.pfoot \.btn\{([^}]*)\}/)[1]
-  // The page's smallest text size, a token and not a number; at least 24px tall; still a button.
-  assert.match(rule, /font-size:var\(--text-xs\)/)
-  assert.match(rule, /color:var\(--muted\)/)
-  const height = Number(rule.match(/min-height:(\d+)px/)[1])
-  assert.ok(height >= 24 && height <= 28, rule)
-  assert.doesNotMatch(rule, /font-size:\d/)
   // The version line takes the smallest size and a colour fainter than the muted one, in both themes (the colour mixes tokens).
   const ver = html.match(/\.ver-link\{([^}]*)\}/)[1]
   assert.match(ver, /font-size:var\(--text-xs\)/)
   assert.match(ver, /color:color-mix\(in srgb,var\(--muted\) \d+%,var\(--surface\)\)/)
-  assert.match(html, /\.ver-link svg\.i\{width:12px;height:12px\}/)
+  // The GitHub mark is a filled shape, drawn at the page's icon size so it reads at a glance.
+  assert.match(html, /\.ver-link svg\.i\{width:16px;height:16px;fill:currentColor;stroke:none\}/)
+})
+
+test('the page footer has no web-chat or clipboard button and Close the board is a red power sign named in every language (#1145)', async () => {
+  const { servePage } = await sourceBoard()
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    for (const isLan of [false, true]) {
+      const html = servePage(words, 'synthetic', isLan)
+      const foot = html.match(/<footer class="pfoot"[\s\S]*?<\/footer>/)?.[0]
+      assert.ok(foot)
+      for (const id of ['connect-web-chat', 'import-clipboard']) assert.ok(!foot.includes(`id="${id}"`))
+      const close = foot.match(/<button\b([^>]*\bid="close"[^>]*)>([\s\S]*?)<\/button>/)
+      assert.ok(close)
+      assert.match(close[1], /\btype="button"/)
+      assert.match(close[1], /\bclass="icon-btn"/)
+      assert.match(close[1], /\bdata-static\b/)
+      // The button shows only a power sign, so its name is what a screen reader says and the tooltip.
+      assert.ok(close[1].includes(`aria-label="${words.serveClose}"`) && close[1].includes(`title="${words.serveClose}"`))
+      assert.match(close[2], /^<svg class="i"[^>]*aria-hidden="true"><path d="M8 1\.5v6M[^"]+"\/><\/svg>$/)
+    }
+  }
+  const css = servePage(EN, 'synthetic', false)
+  assert.match(css, /\.pfoot #close\{[^}]*color:var\(--alert\)/)
+  assert.match(css, /\.pfoot #close:hover\{[^}]*color:var\(--alert\)/)
 })
 
 test('a row whose title is its current step shows the step once', async () => {
@@ -10887,9 +12244,10 @@ test('the footer links to the project', async () => {
   assert.match(link, /target="_blank"/)
   assert.match(link, /rel="noopener"/)
   assert.ok(link.includes(`title="${EN.pgGithub}"`))
-  // The footer reads "v<version> · GitHub": the version is filled in by the page, and Close the board stays once.
+  // The footer reads "<GitHub mark> v<version>": the mark stands for the word, the version is filled in by the page, and Close the board stays once.
   const footer = html.slice(html.indexOf('<footer class="pfoot"'), html.indexOf('</footer>'))
-  assert.ok(footer.includes('<span id="versions"></span><span aria-hidden="true">·</span>GitHub'))
+  assert.match(footer, /<svg class="i" viewBox="0 0 16 16" role="img" aria-label="GitHub"><path d="M8 0c[^"]+"\/><\/svg><span id="versions"><\/span><\/a>/)
+  assert.ok(!footer.includes('>GitHub<'))
   assert.equal(html.split('id="close"').length - 1, 1)
   const { board, model } = await groupedPage()
   try {
@@ -11270,9 +12628,9 @@ test('the page of a grouped board draws each question once, copies an answer and
     assert.ok(working.length > 0)
     assert.equal(working.length, model.view.working.length)
     assert.doesNotMatch(drawn, /\b(?:Send|Undo|Message (?:Codex|Gemini|Cursor))\b/)
-    const answer = dom.buttons().find(button => button.textContent === 'Copy "Blue"')
-    assert.ok(answer, drawn)
-    answer.click()
+    const ask = model.asks.find(one => one.text === 'Blue or green?')
+    assert.ok(ask, drawn)
+    selectAnswer(cardWithKey(dom, ask.key), 'Blue').click()
     await dom.settle()
     assert.ok(dom.copies.includes('Blue') || dom.copied.includes('Blue'))
     assert.deepEqual(dom.requests, [])
@@ -11863,12 +13221,13 @@ test('after Send the hide button named by each README is visible without More', 
     const model = cardsModel()
     model.asks[0].send = 'send'
     const dom = await pageDom(html, model, { confirm: () => true, post: async () => ({ ok: true, json: async () => ({ ok: true, note: 'Synthetic sent notice' }) }) })
-    const send = dom.buttons().find(button => button.textContent === words.pgSendReply.replace('\u0001', 'Yes'))
+    const card = pressWalk(dom.node('board')).find(node => node.getAttribute('data-ref-key') === 'ask')
+    const send = selectAnswer(card, 'Yes')
+    assert.equal(send.getAttribute('aria-label'), words.pgSendChoice)
     assert.ok(send)
     send.click()
     await dom.flush()
     await dom.flush()
-    const card = pressWalk(dom.node('board')).find(node => node.getAttribute('data-ref-key') === 'ask')
     const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
     assert.ok(hide, 'the documented hide button is visible after sending')
     assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), readme)
@@ -11876,4 +13235,242 @@ test('after Send the hide button named by each README is visible without More', 
     await dom.flush()
     assert.equal(dom.requests.at(-1).body.type, 'hide')
   }
+})
+
+test('#1085: the page draws a cell per step up to 12, one fill with a mark at the current step above, and the count alone for one step', async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const rowOf = (title, cells, done, total) => ({ ...model.groups[0].rows[0], key: title, title, due: '', cells, done, total, steps: [{ text: 'Synthetic step', status: 'doing', isCurrent: true, line: [{ text: 'Synthetic step' }] }] })
+  model.groups[0].rows = [
+    rowOf('Seven steps', 'xxxx~ -', 4, 6),
+    rowOf('Thirty steps', `x ~${' '.repeat(27)}`, 1, 30),
+    rowOf('One step', '~', 0, 1),
+  ]
+  const dom = await pageDom(html, model)
+  const all = pressWalk(dom.node('board'))
+  const progress = title => {
+    const row = all.find(node => node.tag === 'li' && pressWalk(node).some(one => one.className === 'r-title' && one.textContent === title))
+    assert.ok(row, title)
+    return pressWalk(row).find(node => node.className === 'prog')
+  }
+  const seven = progress('Seven steps')
+  assert.equal(seven.getAttribute('aria-label'), '4/6 · Synthetic step')
+  const bar = pressWalk(seven).find(node => node.className === 'pbar')
+  assert.equal(bar.getAttribute('aria-hidden'), 'true')
+  assert.deepEqual(bar.childNodes.map(node => node.className), ['c-x', 'c-x', 'c-x', 'c-x', 'c-c', 'c-t', 'c-n'])
+  assert.equal(pressWalk(seven).find(node => node.className === 'pcount').textContent, '4/6')
+  const thirty = pressWalk(progress('Thirty steps')).find(node => node.className === 'pbar cont')
+  const [fill, mark] = thirty.childNodes
+  assert.equal(fill.style.width, '3.3%')
+  // The mark sits at the [~] step (the third), not at the open step before it.
+  assert.equal(mark.className, 'c-c')
+  assert.equal(mark.style.left, 'calc(6.7% - 1px)')
+  const one = progress('One step')
+  assert.equal(pressWalk(one).some(node => String(node.className).startsWith('pbar')), false)
+  assert.equal(pressWalk(one).find(node => node.className === 'pcount').textContent, '0/1')
+})
+
+test('#1085: a style picked on the page is written to the settings file with its other keys, served at once, and a bad pick or an unreadable file changes nothing', { timeout: 30_000 }, async () => {
+  const board = await page()
+  try {
+    const settings = join(board.dir, 'progress-settings.json')
+    writeFileSync(settings, '{"historyDays":3}')
+    assert.equal((await board.call('GET', '/api/board')).json().barStyle, 'ink')
+    const picked = await board.call('POST', '/api/style', { body: { style: 'green' } })
+    assert.equal(picked.status, 200)
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green' })
+    // Served at once: the server keeps its own pick without waiting for its 10-second read.
+    assert.equal((await board.call('GET', '/api/board')).json().barStyle, 'green')
+    for (const body of [{ style: 'pink' }, { style: 3 }, {}]) assert.equal((await board.call('POST', '/api/style', { body })).status, 400)
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green' })
+    writeFileSync(settings, '{"historyDays":3,')
+    assert.equal((await board.call('POST', '/api/style', { body: { style: 'blue' } })).status, 409)
+    assert.equal(readFileSync(settings, 'utf8'), '{"historyDays":3,')
+  } finally { await board.close() }
+})
+
+test('Settings has one labelled button and four accessible sections in every language and keeps focus inside until closed', async () => {
+  for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
+    const html = await sourcePage(lang)
+    assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
+    assert.doesNotMatch(html, /data-theme-toggle|data-look-menu/)
+    assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
+    const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
+    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 4)
+    const dom = await pageDom(html, redesignModel(), { width: 375 })
+    assert.equal(dom.node('settings').hidden, true)
+    dom.node('settings-toggle').click()
+    assert.equal(dom.node('settings').hidden, false)
+    assert.equal(dom.node('shell').inert, true)
+    assert.equal(dom.active(), dom.node('settings-close'))
+    let prevented = false
+    dom.node('settings-lang').focus()
+    dom.key({ key: 'Tab', shiftKey: true, preventDefault: () => { prevented = true } })
+    assert.equal(prevented, false, 'normal Tab moves through the panel')
+    dom.node('settings-close').focus()
+    dom.key({ key: 'Tab', shiftKey: true, preventDefault: () => { prevented = true } })
+    assert.equal(prevented, true)
+    assert.notEqual(dom.active(), dom.node('settings-toggle'), 'Shift+Tab remains in the panel')
+    dom.key({ key: 'Escape', preventDefault() {} })
+    assert.equal(dom.node('settings').hidden, true)
+    assert.equal(dom.node('shell').inert, false)
+    assert.equal(dom.active(), dom.node('settings-toggle'))
+    dom.node('settings-toggle').click()
+    dom.node('settings-close').click()
+    assert.equal(dom.active(), dom.node('settings-toggle'))
+  }
+})
+
+test('Settings language in the file beats baked and system language, --lang beats the file, and Automatic follows the system', () => {
+  const code = `process.env.LANG = 'zh-CN'\n${BOARD_SCRIPT}`
+  const saved = { 'progress-settings.json': '{"lang":"en"}' }
+  assert.ok(run('zh-TW', [], saved, FILE, code).startsWith('Progress'))
+  assert.ok(run('en', [], { 'progress-settings.json': '{"lang":"zh-TW"}' }, FILE, code).startsWith('進度'))
+  assert.ok(run('en', [], { 'progress-settings.json': '{"lang":"zh-CN"}' }, FILE, code).startsWith('进度'))
+  assert.ok(run('en', ['--lang', 'zh-TW'], saved, FILE, code).startsWith('進度'))
+  assert.ok(run('zh-TW', [], { 'progress-settings.json': '{"lang":"auto"}' }, FILE, code).startsWith('进度'))
+  assert.ok(run('zh-TW', ['--lang', 'auto'], saved, FILE, code).startsWith('进度'))
+  assert.ok(run('zh-TW', [], { 'progress-settings.json': '{"lang":"unknown"}' }, FILE, code).startsWith('進度'))
+  assert.ok(run('zh-TW', [], {}, FILE, code).startsWith('進度'))
+  assert.ok(run('', [], {}, FILE, code).startsWith('进度'))
+})
+
+test('Settings language saves alongside other keys, reloads the running page, localizes later actions and refuses damaged settings', { timeout: 30_000 }, async () => {
+  const board = await page('', { LANG: 'zh-TW' })
+  try {
+    const settings = join(board.dir, 'progress-settings.json')
+    writeFileSync(settings, '{"historyDays":3,"style":"green"}')
+    for (const [lang, words] of [['zh-CN', ZH_CN], ['zh-TW', ZH_TW], ['en', EN], ['auto', ZH_TW]]) {
+      const picked = await board.call('POST', '/api/language', { body: { lang } })
+      assert.equal(picked.status, 200)
+      assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { historyDays: 3, style: 'green', lang })
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      assert.ok(html.includes(`<h2 id="settings-title">${words.settingsTitle}</h2>`))
+      assert.ok(html.includes(`<option value="${lang}" selected>`))
+      assert.equal((await board.call('GET', '/api/board')).json().lang, lang)
+      assert.equal((await board.call('POST', '/api/style', { body: { style: 'wrong' } })).json().note, words.pressFailed)
+    }
+    for (const lang of ['wrong', 3, null, {}, 'zh']) assert.equal((await board.call('POST', '/api/language', { body: { lang } })).status, 400)
+    for (const damaged of ['{"historyDays":3,', 'null', '[]']) {
+      writeFileSync(settings, damaged)
+      const failed = await board.call('POST', '/api/language', { body: { lang: 'en' } })
+      assert.equal(failed.status, 409)
+      assert.equal(failed.json().note, ZH_TW.barStyleUnreadable)
+      assert.equal(readFileSync(settings, 'utf8'), damaged)
+    }
+  } finally { await board.close() }
+})
+
+test('Settings shows the setup language the board uses when no language is saved, not Automatic', { timeout: 30_000 }, async () => {
+  // The helper's board script holds English from setup; the system says Traditional Chinese.
+  const board = await page('', { LANG: 'zh-TW' })
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    assert.ok(html.includes('<option value="en" selected>'), 'the setup language is the one shown')
+    assert.ok(!html.includes('<option value="auto" selected>'))
+  } finally { await board.close() }
+})
+
+test('Settings language reloads after a successful change, restores its notice, and reports a failed write without reloading', async () => {
+  const html = await sourcePage()
+  const sessionStore = new Map()
+  let reloads = 0
+  let isOk = true
+  const dom = await pageDom(html, redesignModel(), {
+    sessionStore, onReload: () => { reloads += 1 },
+    post: async request => {
+      assert.equal(request.path, '/api/language')
+      return { ok: isOk, json: async () => ({ note: isOk ? EN.settingsLanguageChanged : EN.barStyleUnreadable }) }
+    },
+  })
+  dom.node('settings-lang').value = 'zh-TW'
+  dom.node('settings-lang').events.change()
+  await dom.settle()
+  assert.equal(reloads, 1)
+  assert.deepEqual(dom.requests[0].body, { lang: 'zh-TW' })
+  const reloaded = await pageDom(await sourcePage('zh-TW'), redesignModel(), { sessionStore })
+  assert.equal(reloaded.node('settings').hidden, false)
+  assert.equal(reloaded.node('settings-result').textContent, ZH_TW.settingsLanguageChanged)
+  isOk = false
+  dom.node('settings-lang').value = 'zh-CN'
+  dom.node('settings-lang').events.change()
+  await dom.settle()
+  assert.equal(reloads, 1)
+  assert.equal(dom.node('settings-result').textContent, EN.barStyleUnreadable)
+  assert.equal(dom.node('settings-lang').value, 'zh-TW', 'a failed write restores the last saved choice')
+  assert.equal(dom.node('settings-lang').disabled, false)
+})
+
+test('Settings notifications start off, ask permission once, notify each new waiting card once across reloads and focus the page on a click', async () => {
+  const notices = []
+  let prompts = 0
+  let focuses = 0
+  class Notification {
+    static permission = 'default'
+    static async requestPermission() { prompts += 1; this.permission = 'granted'; return 'granted' }
+    constructor(title, options) { this.title = title; this.options = options; notices.push(this) }
+    close() { this.closed = true }
+  }
+  const storage = new Map()
+  const model = redesignModel()
+  model.asks = [{ ...model.asks[0], questionId: 'settings-question-one', agent: 'codex', text: 'Review this change?', isSending: false }]
+  const html = await sourcePage()
+  const dom = await pageDom(html, model, { storage, notification: Notification, onFocus: () => { focuses += 1 } })
+  assert.equal(notices.length, 0)
+  assert.equal(dom.node('settings-notify').getAttribute('aria-checked'), 'false')
+  dom.node('settings-notify').click()
+  await dom.flush()
+  assert.equal(prompts, 1)
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0].title, 'Review this change?')
+  assert.equal(notices[0].options.body, 'Codex')
+  notices[0].onclick()
+  assert.equal(focuses, 1)
+  assert.equal(notices[0].closed, true)
+  await dom.redraw(model)
+  assert.equal(notices.length, 1)
+  const reloaded = await pageDom(html, model, { storage, notification: Notification })
+  assert.equal(notices.length, 1)
+  assert.equal(prompts, 1)
+  const approval = { ...model, asks: [...model.asks, { ...model.asks[0], key: 'new-approval', questionId: 'settings-approval-two', text: 'Approve this change?' }] }
+  await reloaded.redraw(approval)
+  assert.equal(notices.length, 2)
+  await reloaded.redraw(approval)
+  assert.equal(notices.length, 2)
+  reloaded.node('settings-notify').click()
+  assert.equal(storage.get('agent-board.notifications'), 'off')
+})
+
+test('Settings notifications stay off after denial or dismissal without another prompt and unavailable phone notifications are hidden', async () => {
+  for (const answer of ['denied', 'default']) {
+    let prompts = 0
+    class Notification {
+      static permission = 'default'
+      static async requestPermission() { prompts += 1; this.permission = answer; return answer }
+    }
+    const storage = new Map()
+    const html = await sourcePage()
+    const dom = await pageDom(html, redesignModel(), { storage, notification: Notification })
+    dom.node('settings-notify').click()
+    await dom.flush()
+    assert.equal(dom.node('settings-notify').getAttribute('aria-checked'), 'false')
+    if (answer === 'denied') assert.equal(dom.node('settings-result').textContent, EN.settingsDenied)
+    dom.node('settings-notify').click()
+    await dom.flush()
+    const reload = await pageDom(html, redesignModel(), { storage, notification: Notification })
+    reload.node('settings-notify').click()
+    await reload.flush()
+    assert.equal(prompts, 1)
+    assert.equal(storage.get('agent-board.notifications'), 'off')
+  }
+  const { servePage } = await sourceBoard()
+  const phone = await pageDom(servePage(EN, 'synthetic', true), redesignModel())
+  assert.equal(phone.node('settings-notifications').hidden, true)
+  class InsecureNotification {
+    static permission = 'denied'
+    static async requestPermission() { throw Error('an insecure phone must not ask') }
+  }
+  const insecure = await pageDom(servePage(EN, 'synthetic', true), redesignModel(), { notification: InsecureNotification })
+  assert.equal(insecure.node('settings-notifications').hidden, true)
 })

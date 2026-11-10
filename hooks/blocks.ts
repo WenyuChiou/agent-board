@@ -12,6 +12,7 @@ import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
 import { isOutranked, pickParent } from './runs'
 import { cutLine, oneLine, plain } from './step-words'
+import { isSilenceTask, isWorkingTask } from './grouping'
 import { isStale, observedTime } from './parse'
 import type { JournalEntry } from './journal'
 
@@ -98,6 +99,7 @@ const markerOf = (mirror: ProgressMirror, parent?: string): string => {
     mirror.cwd ? `dir=${encodeURIComponent(mirror.cwd)}` : '',
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
+    mirror.replied !== undefined && Number.isFinite(mirror.replied) ? `replied=${new Date(mirror.replied).toISOString()}` : '',
     // A session an agent started for itself (#399); a person's has no such mark.
     mirror.isRun === true ? 'origin=run' : '',
     mirror.isRun === true && parent !== undefined && RESUME.test(parent) ? `parent=${parent}` : '',
@@ -136,6 +138,15 @@ export const cutEntries = (mirror: ProgressMirror, s: Strings = ZH_TW): Omit<Jou
   ]
 }
 
+// The line that says a question is answered in its agent's own window. A comment must not hold `--` or `>`,
+// so both are written as JSON escapes; only a waiting step carries it.
+export const nativeLine = (task: ProgressMirrorTask): string => {
+  if (task.native === undefined || task.waiting !== 'you') return ''
+  const options = task.native.options.slice(0, 8).map(one => one.replace(/\s+/g, ' ').trim().slice(0, 120)).filter(one => one !== '')
+
+  return `<!-- native=${task.native.agent}${options.length === 0 ? '' : ` options=${JSON.stringify(options).replace(/-/g, '\\u002d').replace(/>/g, '\\u003e')}`} -->`
+}
+
 export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, parent?: string): string[] => {
   const id = shortId(mirror.sessionId)
   const pr = mirror.pr ?? null
@@ -152,7 +163,8 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
       const task = isAnswered(mirror, asked) ? { ...asked, waiting: null, why: s.answeredNote } : asked
 
       const token = questionToken(task)
-      return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`])]
+      const native = nativeLine(task)
+      return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native])]
     }),
     ...retainedCancelledOf(mirror).map(text => `- [-] ${text}`),
     `<!-- /auto session=${id} -->`,
@@ -474,13 +486,19 @@ export type ConfirmRef = TaskRef & { expected: string }
 
 // All words and marks are part of this action, including steps below the next one. The
 // twin count prevents a same-word manual task from taking another task's selected row.
+// The hidden done date the board writes after a draw (done-stamp.ts) is not part of a task's
+// identity, unless another task shares its title: then a date may be all that tells the two apart.
 export const confirmKey = (project: string, task: ProgressTask, twins: number): string =>
-  sha256(JSON.stringify([project, task.title, task.auto, task.notes, task.steps.map(step => step.raw), task.auto === null ? twins : 0]))
+  sha256(JSON.stringify([project, task.title, task.auto, task.notes, task.steps.map(step => twins > 1 ? step.raw : withoutStamp(step.raw)), task.auto === null ? twins : 0]))
 
-export const confirmedTarget = (text: string, ref: ConfirmRef, s: Strings): ProgressTask | null => {
+const confirmedTasks = (text: string, ref: ConfirmRef, s: Strings): ProgressTask[] => {
   const tasks = parseProgress(text).filter(project => (project.name || s.uncategorized) === ref.project).flatMap(project => project.tasks)
   const twins = tasks.filter(task => task.title === ref.title).length
-  const matches = tasks.filter(task => task.title === ref.title && (task.auto?.session ?? null) === ref.session && confirmKey(ref.project, task, twins) === ref.expected)
+  return tasks.filter(task => task.title === ref.title && (task.auto?.session ?? null) === ref.session && confirmKey(ref.project, task, twins) === ref.expected)
+}
+
+export const confirmedTarget = (text: string, ref: ConfirmRef, s: Strings): ProgressTask | null => {
+  const matches = confirmedTasks(text, ref, s)
   return matches.find(task => task.line === ref.line) ?? (matches.length === 1 ? matches[0] ?? null : null)
 }
 
@@ -685,6 +703,8 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
     if (span === undefined || !span.isClosed) return null
     // Recheck ownership at the write boundary: a stopped row may have resumed since it
     // was drawn. Unknown clocks cannot prove that a working/waiting session stopped.
+    // A working row quiet past the Working now limit is no longer at work (#1000), so
+    // its archive goes through, as the row offers; a waiting row keeps today's refusal.
     if (span.state === 'working' || span.state === 'waiting') {
       const tasks = parseProgress(text).flatMap(project => project.tasks)
       const task = tasks.find(one => one.line === span.heading)
@@ -692,7 +712,13 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       // The older block of a twin pair is offered for archive while it still looks live (#399):
       // a newer block with the same agent and full id is the one that runs.
       const isTwin = ref.isDuplicate === true && task !== undefined && isOutranked(tasks, task)
-      if (auto === null || !isTwin && !isStale(auto, now, observedTime(auto, now, observations).updated, staleMs)) return null
+      const updated = auto === null ? 0 : observedTime(auto, now, observations).updated
+      // A silence-classified row is kept for review: the write guard refuses its archive
+      // as the row does (#1051, #1000).
+      const isSilence = span.state === 'working' && task !== undefined && isSilenceTask(task.steps, updated, now)
+      // The quiet-time path needs a readable time: unknown age never archives (#1000).
+      const stopped = isTwin || auto !== null && isStale(auto, now, updated, staleMs) || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
+      if (auto === null || !stopped) return null
     }
 
     return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }
@@ -745,13 +771,31 @@ export const manualTaskCount = (text: string, entry: QuickEntry): number => {
 // without its hidden done date (done-stamp.ts), so a press on a line drawn before the board
 // stamped it still finds it. With `now`, a step the press makes done or cancelled is stamped
 // that day (one that was already done keeps its date); any other mark carries no stamp.
-export const setManualStep = (text: string, ref: StepRef, mark: string, now?: number): string => {
+// A guarded page/terminal press must retain its task, candidate set and source positions
+// inside every write snapshot. Ambiguous movement refuses; content alone cannot identify twins.
+export const manualStepRef = (text: string, ref: StepRef, s: Strings = ZH_TW): StepRef | null => {
+  const guard = ref.guard
+  if (guard === undefined) return ref
+  const matches = confirmedTasks(text, guard.task, s)
+  const lines = matches.map(task => task.line >= 0 ? task.line : task.steps[0]?.line ?? -1).sort((a, b) => a - b)
+  if (lines.length !== guard.lines.length || lines.some((line, index) => line !== guard.lines[index])) return null
+  const task = matches.find(task => task.line === guard.task.line && task.steps.length === guard.steps.length && task.steps.every((step, index) => step.line === guard.steps[index]))
+  if (task === undefined) return null
+  const step = task.steps.find(step => step.line === ref.line)
+  return step !== undefined && withoutStamp(step.raw) === withoutStamp(ref.raw)
+    ? { ...ref, line: step.line, raw: step.raw, guard: undefined }
+    : null
+}
+
+export const setManualStep = (text: string, ref: StepRef, mark: string, now?: number, s: Strings = ZH_TW): string => {
+  const selected = manualStepRef(text, ref, s)
+  if (selected === null) return text
   const eol = eolOf(text)
   const lines = linesOf(text)
   const seen = seenOf(lines)
-  const wanted = withoutStamp(ref.raw)
+  const wanted = withoutStamp(selected.raw)
   const isStep = (index: number): boolean => withoutStamp(lines[index] ?? '') === wanted && seen[index] !== HIDDEN
-  let at = isStep(ref.line) ? ref.line : -1
+  let at = isStep(selected.line) ? selected.line : -1
   if (at < 0) {
     const same = lines.flatMap((_line, index) => (isStep(index) ? [index] : []))
     if (same.length === 1) at = same[0] ?? -1

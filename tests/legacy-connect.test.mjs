@@ -25,7 +25,7 @@ const fixture = async fn => {
   writeFileSync(config, JSON.stringify(foreign))
   writeFileSync(script, bundle)
   const request = (mode, extra = {}) => ({ mode, home, progress, lang: 'en', node: process.version, codexExecutable: join(home, 'missing-control.exe'), ...extra })
-  const command = (value, options = {}) => spawnSync(process.execPath, [script, '--legacy-connect-request', JSON.stringify(value)], { encoding: 'utf8', windowsHide: true, timeout: 10000, ...options })
+  const command = (value, options = {}) => spawnSync(process.execPath, [script, '--legacy-connect-request', JSON.stringify(value)], { encoding: 'utf8', windowsHide: true, timeout: 10000, env: { ...process.env, HERMES_HOME: join(home, '.hermes') }, ...options })
   const run = value => {
     const result = command(value)
     assert.equal(result.status, 0, result.stderr + result.stdout)
@@ -144,8 +144,9 @@ const setupThenProbe = agent => withSetup(agent, ({ f, run, owned, before }) => 
 })
 
 test('a connector probe leaves Grok with only the setup hook and reports its installer', () => setupThenProbe('grok'))
+test('a connector probe leaves Hermes with only the setup hooks and reports its installer', () => setupThenProbe('hermes'))
 
-const BOTH_INSTALLERS = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'openclaw']
+const BOTH_INSTALLERS = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw']
 test('connect and automatic probes leave setup managed agents unchanged', async t => {
   for (const agent of BOTH_INSTALLERS) await t.test(agent, () => setupThenProbe(agent))
 })
@@ -159,6 +160,24 @@ const withBothHooks = (agent, check) => withSetup(agent, async ({ f, run, record
   writeFileSync(recordFile, record)
   await check({ f, run, recordFile, owned, before })
 })
+
+test('a probe removes a prior Hermes plugin hook beside the setup hook', () => withBothHooks('hermes', ({ f, run, owned, before }) => {
+  const output = run('auto')
+  assert.equal(output.state.setup.agents.find(one => one.agent === 'hermes').hook, 'setup')
+  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file])
+  assert.equal(readFileSync(join(f.home, '.hermes', 'config.yaml'), 'utf8'), before[join(f.home, '.hermes', 'config.yaml')])
+}))
+
+test('a probe retires a lone Hermes plugin plan hook beside the setup hooks', () => withBothHooks('hermes', ({ f, run }) => {
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const partial = readFileSync(config, 'utf8').split('\n').filter(line => !line.includes('progress-report.')).join('\n')
+  assert.match(partial, /progress-hook\.mjs/)
+  writeFileSync(config, partial)
+  assert.equal(run('auto').state.setup.agents.find(one => one.agent === 'hermes').hook, 'setup')
+  const after = readFileSync(config, 'utf8')
+  assert.doesNotMatch(after, /progress-hook\.mjs/)
+  assert.match(after, /agent-board-hook\.mjs/)
+}))
 
 test('a probe takes out the hook an earlier probe left beside the setup hook', async t => {
   for (const agent of BOTH_INSTALLERS) await t.test(agent, () => withBothHooks(agent, ({ f, run, owned, before }) => {
@@ -236,6 +255,30 @@ test('a hook that cannot be taken out is named, and the other agents still conne
   }
   run('auto')
   assert.doesNotMatch(readFileSync(config, 'utf8'), /progress-report/)
+}))
+
+test('a Hermes config that cannot be changed keeps the worker and board script until a later remove succeeds', { skip: process.getuid?.() === 0 ? 'root ignores the read-only folder this test needs' : false }, () => withBothHooks('hermes', ({ f, run }) => {
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const worker = join(dirname(f.progress), 'progress-hook.mjs')
+  const board = join(dirname(f.progress), 'agent-board.mjs')
+  const lock = isLocked => process.platform === 'win32'
+    ? execFileSync('attrib', [isLocked ? '+R' : '-R', config])
+    : chmodSync(join(f.home, '.hermes'), isLocked ? 0o555 : 0o755)
+  assert.ok(existsSync(worker))
+  assert.ok(existsSync(board))
+  lock(true)
+  try {
+    const output = run('remove')
+    assert.ok(output.result.problems.some(one => one.key === `removeFailed:${config}`))
+    assert.ok(output.result.problems.some(one => one.key.startsWith('boardRetained:')))
+    assert.ok(existsSync(worker))
+    assert.ok(existsSync(board))
+  } finally {
+    lock(false)
+  }
+  run('remove')
+  assert.equal(existsSync(worker), false)
+  assert.equal(existsSync(board), false)
 }))
 
 test('a config that cannot be parsed is named when its hook cannot be taken out', () => withBothHooks('muse', ({ f, run }) => {
@@ -381,7 +424,7 @@ test('a setup record that cannot be read leaves Codex without fallback instructi
   assert.ok(existsSync(join(f.home, '.codex', 'AGENTS.md')))
 }))
 
-for (const [agent, parts] of [['gemini', ['.gemini', 'commands', 'board.toml']], ['opencode', ['.config', 'opencode', 'commands', 'board.md']]]) test(`${agent} remove leaves no board command naming the script it deleted`, () => withSetup(agent, ({ f, run, recordFile, owned, before }) => {
+for (const [agent, parts] of [['gemini', ['.gemini', 'commands', 'agent-board.toml']], ['opencode', ['.config', 'opencode', 'commands', 'agent-board.md']]]) test(`${agent} remove leaves no board command naming the script it deleted`, () => withSetup(agent, ({ f, run, recordFile, owned, before }) => {
   // A record from setup beside a /board command the connector wrote.
   const command = join(f.home, ...parts)
   const record = readFileSync(recordFile, 'utf8')
@@ -399,8 +442,31 @@ for (const [agent, parts] of [['gemini', ['.gemini', 'commands', 'board.toml']],
   for (const file of owned) if (file !== command) assert.equal(readFileSync(file, 'utf8'), before[file], file)
 }))
 
+for (const [agent, sign, parts] of [['gemini', '.gemini', ['commands', 'board.toml']], ['opencode', '.config/opencode', ['commands', 'board.md']]]) test(`a connect takes the unchanged 0.24.2 /board file of ${agent} away and leaves an edited one`, () => fixture(async f => {
+  mkdirSync(join(f.home, sign), { recursive: true })
+  f.run(f.request('connect'))
+  const now = join(f.home, sign, 'commands', parts[1].replace('board', 'agent-board'))
+  const old = join(f.home, sign, ...parts)
+  assert.ok(existsSync(now), 'the connect writes /agent-board')
+  // 0.24.2's connect wrote the same bytes under the old name.
+  const text = readFileSync(now, 'utf8')
+  writeFileSync(old, text)
+  const upgraded = f.run(f.request('connect'))
+  assert.deepEqual(upgraded.state.setup.problems.filter(one => one.key !== 'codex:approval'), [])
+  assert.equal(existsSync(old), false)
+  assert.equal(readFileSync(now, 'utf8'), text)
+  writeFileSync(old, `${text}# mine\n`)
+  const kept = f.run(f.request('connect'))
+  assert.deepEqual(kept.state.setup.problems.filter(one => one.key !== 'codex:approval'), [])
+  assert.equal(readFileSync(old, 'utf8'), `${text}# mine\n`)
+  assert.equal(readFileSync(now, 'utf8'), text)
+  f.run(f.request('remove'))
+  assert.equal(existsSync(now), false)
+  assert.equal(readFileSync(old, 'utf8'), `${text}# mine\n`)
+}))
+
 test('remove keeps a board command naming setup, and an edited one keeps the board script it runs', () => withSetup('gemini', ({ f, run, recordFile, before }) => {
-  const command = join(f.home, '.gemini', 'commands', 'board.toml')
+  const command = join(f.home, '.gemini', 'commands', 'agent-board.toml')
   const script = join(dirname(f.progress), 'agent-board.mjs')
   assert.deepEqual(run('remove').result.problems, [])
   assert.equal(readFileSync(command, 'utf8'), before[command])
@@ -429,20 +495,6 @@ test('setup taking over Codex takes out the connector fallback instructions and 
   assert.equal(state.setup.agents.find(one => one.agent === 'codex').hook, 'setup')
   assert.equal(result.problems.some(one => one.key === 'codex:approval'), false)
   assert.equal(readFileSync(instructions, 'utf8').trim(), 'Keep this line.')
-}))
-
-test('setup gives Hermes a skill, so a probe keeps the connector reporter it still needs', () => withSetup('hermes', ({ f, run, owned, before }) => {
-  const config = join(f.home, '.hermes', 'config.yaml')
-  const { state } = run('auto')
-  assert.notEqual(state.setup.agents.find(one => one.agent === 'hermes')?.hook, 'setup')
-  const reporter = readFileSync(config, 'utf8')
-  assert.match(reporter, /progress-report/)
-  assert.deepEqual(run('auto').result.problems.filter(one => one.key !== 'codex:approval'), [])
-  assert.equal(readFileSync(config, 'utf8'), reporter)
-  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], file)
-  run('remove')
-  assert.doesNotMatch(readFileSync(config, 'utf8'), /progress-report/)
-  for (const file of owned) assert.equal(readFileSync(file, 'utf8'), before[file], file)
 }))
 
 test('removing the connector takes out its hook and leaves the setup hook', () => withBothHooks('grok', ({ f, run, owned, before }) => {
@@ -691,6 +743,60 @@ test('a YAML command with combined apostrophe quoting or non-JSON escapes keeps 
   })
 })
 
+test('a Hermes plugin connection reports todo plans and removes only its own hooks', () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const original = 'model: synthetic\nhooks:\n  post_tool_call:\n    - {command: "my-todo.sh", matcher: terminal, timeout: 5}\n    - {command: "/mine/my-progress-hook.mjs --hook-version 1 --hook-event post_tool_call --plan-event --agent hermes --progress-file /mine/progress.md", matcher: other, timeout: 5}\n'
+  writeFileSync(config, original)
+  const connected = f.run(f.request('connect'))
+  assert.ok(connected.result.done.includes('Hermes Agent'))
+  const text = readFileSync(config, 'utf8')
+  const matched = [...text.matchAll(/^\s+- \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+), matcher: todo\}$/gm)]
+  assert.equal(matched.length, 1)
+  assert.equal(Number(matched[0][2]), 10)
+  const command = JSON.parse(matched[0][1])
+  const argv = [...command.matchAll(/"(?:\\.|[^"\\])*"/g)].map(match => JSON.parse(match[0]))
+  assert.ok(argv.includes('--plan-event'))
+  const todo = { hook_event_name: 'post_tool_call', tool_name: 'todo', session_id: 'hermes-legacy-plan', tool_input: { merge: true, todos: [{ id: 'b' }] }, extra: { result: JSON.stringify({ todos: [{ id: 'a', content: 'Legacy first', status: 'completed' }, { id: 'b', content: 'Legacy second', status: 'in_progress' }] }) } }
+  const fired = spawnSync(argv[0], argv.slice(1), { input: JSON.stringify(todo), encoding: 'utf8', windowsHide: true, timeout: 15000, env: { ...process.env, HOME: f.home, USERPROFILE: f.home } })
+  assert.equal(fired.status, 0, fired.stderr)
+  assert.equal(fired.stdout, '')
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[x\] Legacy first$/m)
+  assert.match(readFileSync(f.progress, 'utf8'), /^- \[~\] Legacy second$/m)
+  f.run(f.request('auto'))
+  assert.equal(readFileSync(config, 'utf8'), text)
+  f.run(f.request('remove'))
+  assert.equal(readFileSync(config, 'utf8'), original)
+}))
+
+test('a Hermes plan hook refolded over several lines is kept by connect and removed whole', () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const original = 'model: synthetic\nhooks:\n  on_session_start:\n    - {command: "person-hook.sh", timeout: 5}\n'
+  writeFileSync(config, original)
+  assert.ok(f.run(f.request('connect')).result.done.includes('Hermes Agent'))
+  const connected = readFileSync(config, 'utf8')
+  const item = connected.match(/^    - \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+), matcher: todo\}$/m)
+  assert.ok(item)
+  const words = JSON.parse(item[1]).replaceAll("'", "''").split(' ')
+  const lines = [`  - command: '${words[0]}`]
+  for (const word of words.slice(1)) {
+    if (lines.at(-1).length + 1 + word.length > 80) lines.push(`    ${word}`)
+    else lines[lines.length - 1] += ` ${word}`
+  }
+  assert.ok(lines.length > 1)
+  assert.ok(lines.some(line => line.includes('progress-hook.mjs')))
+  assert.ok(!lines.some(line => line.includes('progress-hook.mjs') && line.includes('--progress-file')))
+  const folded = `${lines.join('\n')}'\n    matcher: todo\n    timeout: ${item[2]}`
+  const saved = connected.replace(item[0], folded)
+  assert.notEqual(saved, connected)
+  writeFileSync(config, saved)
+  f.run(f.request('auto'))
+  assert.equal(readFileSync(config, 'utf8'), saved)
+  f.run(f.request('remove'))
+  assert.equal(readFileSync(config, 'utf8'), original)
+}))
+
 test('an ordinary update of our own Hermes hook does not claim a repair', () => fixture(async f => {
   rmSync(join(f.home, '.codex'), { recursive: true })
   mkdirSync(join(f.home, '.hermes'))
@@ -926,7 +1032,7 @@ test('connecting by hand from a second data folder moves the hosts and says so',
   const output = f.run(f.request('connect', { progress: join(f.home, 'other-root', 'progress.md'), openclawVersion: '2026.10.1' }))
   assert.match(output.result.text, /These agents now report to this board/)
   assert.equal(output.result.problems.some(problem => problem.message === 'connectOtherData' || problem.message === 'connectPreserved'), false)
-  for (const path of [f.config, join(f.home, '.gemini/settings.json'), join(f.home, '.cursor/hooks.json'), join(f.home, '.hermes/config.yaml'), join(f.home, '.agents/skills/agent-board/SKILL.md'), join(f.home, '.gemini/commands/board.toml')]) {
+  for (const path of [f.config, join(f.home, '.gemini/settings.json'), join(f.home, '.cursor/hooks.json'), join(f.home, '.hermes/config.yaml'), join(f.home, '.agents/skills/agent-board/SKILL.md'), join(f.home, '.gemini/commands/agent-board.toml')]) {
     assert.ok(decoded(readFileSync(path, 'utf8')).includes('other-root'), path)
   }
 }))

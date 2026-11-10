@@ -32,12 +32,14 @@ export class BoardPage {
     await this.page.locator(`[data-agent="${agent}"]:visible`).first().click()
   }
 
-  // One icon button switches between the two themes; it shows the theme it will switch to.
+  // Theme choices live in the shared Settings panel.
   async chooseTheme(theme) {
     const want = theme.toLowerCase()
-    const toggle = this.page.locator('[data-theme-toggle]:visible').first()
+    const toggle = this.page.locator('[data-settings-toggle]:visible').first()
     if ((await toggle.getAttribute('data-now')) === want) return
-    await toggle.click()
+    if (!(await this.page.locator('#settings').isVisible())) await toggle.click()
+    await this.page.locator(`[data-theme-set="${want}"]:visible`).first().click()
     await this.page.waitForFunction(value => document.documentElement.getAttribute('data-theme') === value, want)
+    await this.page.locator('#settings-close').click()
   }
 }

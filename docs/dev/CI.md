@@ -48,14 +48,17 @@ does `installers_os`. Pushes to main, the weekly run, a manual run and a release
 run Node 22 and 24 on both systems and plugin on both. Browser checks use
 Node 24/Chromium on both systems. Plugin checks keep the pinned offline Claude
 runner. Legacy installers and the Python reporter run without installing Claude.
-Board and messaging have separate ten-minute jobs. On Windows the board set runs in four parts
-and the journeys in two. Each Windows part runs its files one at a time (`CI_TEST_SERIAL`), and the
-other Windows jobs run at most two files at once. When
+Board and messaging have separate ten-minute jobs. On Windows the board set runs in six parts
+and the journeys in two (#1059: Windows runners vary 1.5-1.9x between jobs of one commit, and
+four parts left `tests/codex-local.test.mjs` too close to its budget). Each Windows part runs its
+files one at a time (`CI_TEST_SERIAL`), and the other Windows jobs run at most two files at once. When
 three spawn-heavy files ran side by side on the 4-vCPU runner, every test ran about 1.35x slower, and
 the tests with the tightest time limits failed, a different one each run (#910). Each part runs every
-fourth (or second) file in one Node run. `tests/codex-local.test.mjs` and `tests/board.test.mjs` take
+sixth (or second) file in one Node run. `tests/codex-local.test.mjs` and `tests/board.test.mjs` take
 far longer than the rest (about 8 and 5 minutes there), so every part runs them, each part taking an
-equal share of their tests. A serial run times one file at a time and records the times, and a step
+equal share of their tests. On Ubuntu the board set runs in two parts: files run side by side there, but
+Node runs one file's tests one after another, so a single part ran about as long as `codex-local` alone
+(449.9 s of that file in a 498.5 s run, over the 480 s part budget; #1130). A serial run times one file at a time and records the times, and a step
 after the tests checks them against the budgets in `scripts/ci-impact.mjs` (#902 step 4): a file over
 its budget, or a part over 480 s, fails the job and names the slow files. The file budgets come from
 step 1 of #902 (each file's share of the Windows board logs, x 1.5); the part budget is re-derived

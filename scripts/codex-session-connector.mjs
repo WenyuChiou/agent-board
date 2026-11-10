@@ -1,4 +1,4 @@
-import { boardClient, deliveryPrompt } from './message-client.mjs'
+import { ackLine, boardClient, deliveryPrompt } from './message-client.mjs'
 
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
@@ -34,9 +34,10 @@ export const attachCodexSession = async ({ boardUrl, transport, thread, state, v
     return false
   }
   const settle = () => {
-    if (!pending?.turn || pending.observed?.turn !== pending.turn || pending.finished?.id !== pending.turn) return
-    if (pending.finished.status === 'completed') pending.done(pending.observed.line)
-    else pending.reject(new Error('TURN_NOT_COMPLETED'))
+    if (!pending?.turn || pending.finished?.id !== pending.turn) return
+    if (pending.finished.status !== 'completed') pending.reject(new Error('TURN_NOT_COMPLETED'))
+    else if (pending.observed?.turn === pending.turn) pending.done(pending.observed.line)
+    else pending.reject(new Error('ACK_REQUIRED'))
   }
   const listen = transport.listen(value => {
     const p = value.params
@@ -47,9 +48,9 @@ export const attachCodexSession = async ({ boardUrl, transport, thread, state, v
       return
     }
     if (value.method !== 'item/completed' || p.item?.type !== 'agentMessage') return
-    const line = String(p.item.text ?? '').split(/\r?\n/).find(line => line === 'ACK ' + pending.nonce || line.startsWith('ACK ' + pending.nonce + ' '))
+    const line = ackLine(String(p.item.text ?? ''), pending.nonce)
     if (!line) return
-    pending.observed = { turn: p.turnId, line: line.length > 200 ? 'ACK ' + pending.nonce : line }
+    pending.observed = { turn: p.turnId, line }
     // Keep the owned turn pending through Stop hooks. ACK text may precede native
     // turn/completed; releasing early lets a poll mistake our own turn for a foreign one.
     settle()
@@ -74,6 +75,7 @@ export const attachCodexSession = async ({ boardUrl, transport, thread, state, v
         pending.turn = result.turn.id
         settle()
         await accepted()
+        clearTimeout(timer)
         return await answer
       } finally { clearTimeout(timer); pending = null }
     },

@@ -112,7 +112,9 @@ childProcess.spawn = (file, args, ...rest) => {
 syncBuiltinESMExports()`)
   const request = (mode, extra = {}) => ({ mode, home, progress: join(home, 'data', 'progress.md'), lang: 'en', node: process.version, codexExecutable: executable, ...extra })
   const run = (mode, extra = {}, env) => {
-    const result = spawnSync(process.execPath, ['--import', pathToFileURL(executable).href, script, '--legacy-connect-request', JSON.stringify(request(mode, extra))], { encoding: 'utf8', windowsHide: true, timeout: 10000, ...(env ? { env: { ...process.env, ...env } } : {}) })
+    // A HERMES_HOME of the machine running the tests would move Hermes out of the scratch home.
+    const { HERMES_HOME: _hermes, ...base } = process.env
+    const result = spawnSync(process.execPath, ['--import', pathToFileURL(executable).href, script, '--legacy-connect-request', JSON.stringify(request(mode, extra))], { encoding: 'utf8', windowsHide: true, timeout: 10000, env: { ...base, ...env } })
     assert.equal(result.status, 0, result.stderr + result.stdout)
     return JSON.parse(result.stdout)
   }
@@ -179,6 +181,9 @@ test('codex fallback: re-applying with the same board path writes nothing', () =
   assert.equal(statSync(f.instructions).mtimeMs, before)
 }))
 
+// Hermes keeps its folder in AppData\Local on Windows, as hooks/hermes-home.ts finds it for another account's home (#1115).
+const hermesFolder = home => process.platform === 'win32' ? join(home, 'AppData', 'Local', 'hermes') : join(home, '.hermes')
+
 test('connect status: a host config that names a missing board script is reported by host name', () => fixture(async f => {
   f.run('connect')
   const missing = join(f.home, 'removed scratch $literal', 'agent-board.mjs')
@@ -186,9 +191,9 @@ test('connect status: a host config that names a missing board script is reporte
   const plain = join(f.home, 'removed plain', 'agent-board.mjs')
   const files = new Map([
     [f.override, '<!-- agent-board:start -->\n' + codexFallbackCommand(missing, progress) + '\n<!-- agent-board:end -->\n'],
-    [join(f.home, '.gemini', 'commands', 'board.toml'), geminiBoardCommand('Synthetic board', 'Run the board', boardRun(missing))],
+    [join(f.home, '.gemini', 'commands', 'agent-board.toml'), geminiBoardCommand('Synthetic board', 'Run the board', boardRun(missing))],
     [join(f.home, '.cursor', 'hooks.json'), JSON.stringify({ hooks: { stop: [{ command: `"${process.execPath}" "${plain}" --codex-event` }] } })],
-    [join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md'), `Run \`node "${plain}" --chat\`.\n`],
+    [join(hermesFolder(f.home), 'skills', 'agent-board', 'SKILL.md'), `Run \`node "${plain}" --chat\`.\n`],
   ])
   for (const [file, text] of files) {
     mkdirSync(join(file, '..'), { recursive: true })
@@ -232,7 +237,7 @@ test('connect status: only command lines a reconnect refreshes raise the missing
   assert.deepEqual(warned(), ['missingBoard:codex'])
   writeFileSync(f.override, 'Personal override rules.\n')
   // Agent Board never writes a relative, ~ or variable path, and where one points depends on where the session started.
-  const skill = join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  const skill = join(hermesFolder(f.home), 'skills', 'agent-board', 'SKILL.md')
   mkdirSync(join(skill, '..'), { recursive: true })
   writeFileSync(skill, 'Run `node "scripts/agent-board.mjs" --chat`, `node "~/board/agent-board.mjs"`, `node "%USERPROFILE%\\board\\agent-board.mjs"` or `node "/tmp/$USER/agent-board.mjs"`.\n')
   assert.deepEqual(warned(), [])

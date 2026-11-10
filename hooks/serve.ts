@@ -1,14 +1,17 @@
 import type { AskKind } from './ask'
-import { answersOf, boardItems, fingerprint, olderKey, remainingInbox } from './board'
+import { answersOf, boardItems, fingerprint, guardStep, olderKey, remainingInbox } from './board'
 import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, Quiet, RepoOf } from './grouping'
-import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead, themeToggle } from './page-look'
+import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardIcon, boardLogo, faviconLink, ICON_CSS, LOGO_CSS, LOGO_STATES, filterStore, GITHUB_PATH, htmlLang, motionCss, pageBaseCss, pageTokens, POWER_PATH, sheetCss, themeHead } from './page-look'
+import { settingsCss, settingsPanel, settingsScript, settingsToggle } from './page-settings'
+import type { SettingsLang } from './board-settings'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { agentLabel } from './strings'
 import type { Tone } from './palette'
+import { cellCode } from './progress-bar'
 import { RESUME } from './parse'
 import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
@@ -16,7 +19,7 @@ import type { Connection, Message } from './messaging'
 import { deliveryTargets } from './hook-messages'
 import { address, isMailboxTarget, isOpen } from './messaging'
 
-// The board's page: what `agent-board.mjs --serve` shows in a browser for agents other than
+// The board's page: what `agent-board` shows in a browser for agents other than
 // Claude Code, and what a press on it does. It does what the pane does: tick a hand-kept step,
 // archive, copy an answer, answer another agent, and tidy the board.
 // Pure: scripts/board-serve.ts runs the server, writes the files and starts the agents.
@@ -27,7 +30,7 @@ import { address, isMailboxTarget, isOpen } from './messaging'
 // that Claude Code session; none: copied, then pasted into the agent's chat.
 export type SendMode = 'send' | 'connected' | 'mailbox' | 'open' | 'claude' | 'none'
 type Delivery = { id: string; turn: string; agent: string }
-type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text'> & { when: string; isMailbox: boolean }
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted'> & { when: string; isMailbox: boolean }
 type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly Omit<Message, 'nonce' | 'hash'>[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
@@ -39,10 +42,20 @@ const reachable = (agent: string, session: string | undefined, target: AgentTarg
   const found = liveTarget(agent, session, targets)
   return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
 }
-const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[], now: number, s: Strings): { receipt?: Receipt } => {
-  const one = session === undefined ? undefined : messages.filter(message => message.to === address(agent || 'claude', session)).at(-1)
-  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
+const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[], now: number, s: Strings, answers?: string): { receipt?: Receipt } => {
+  // A kept question (no live session here) is found by the one message the board sent to answer it; a message
+  // with no such link is no receipt for it. Only the board sets that link, so the question id alone names the
+  // message. On a live question's card, an answer to another question is no receipt for this one (#725), while
+  // a message that answers no question still is.
+  const to = session === undefined ? undefined : address(agent || 'claude', session)
+  const one = to === undefined
+    ? answers === undefined ? undefined : messages.filter(message => message.answers === answers).at(-1)
+    : messages.filter(message => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1)
+  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...(one.hasAccepted === true ? { hasAccepted: true } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
+// The person's answer to this question reached its session: the session took it, or replied.
+const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
+  messages.some(message => message.answers === questionId && (message.status === 'acknowledged' || message.status === 'accepted' || message.status === 'uncertain' && message.hasAccepted === true))
 const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerCase() === 'claude'
 // What pressing Send does right now, for a Claude session that is receiving (#316).
 const claudeHint = (agent: string, isWorking: boolean, s: Strings): string => !isClaudeAgent(agent) ? '' : isWorking ? s.claudeSendWorking : s.claudeSendNow
@@ -129,9 +142,12 @@ export type ServeAsk = {
   answers: string[]
   command: string | null
   link: string | null
+  // Answered in the agent's own window: its options as plain text and the line that says where; the page draws no reply for it.
+  native?: { options: string[]; line: string }
   // A hand-kept question, the person's own (its agent is '', as Claude Code's is); absent otherwise.
   isOwn?: true
   canTick: boolean
+  fileLine: number | null
   // Another session's question can be marked answered: kept off the board until it changes.
   canHide: boolean
   unhideKey?: string
@@ -142,6 +158,7 @@ export type ServeAsk = {
   session: string
   // The line's fingerprint (hooks/board.ts): the page sends it back with every press.
   fp: string
+  tickFp: string
   // The folder a reply runs in, shown beside the box before it is sent.
   where: string
   // Why a reply cannot be sent from here, when it cannot.
@@ -175,8 +192,11 @@ export type ServeRow = {
   tone: Tone
   when: string
   agent: string
+  auto?: 'working' | 'waiting' | 'ended' | null
   done: number
   total: number
+  // One character per step for the progress bar (#1085, `hooks/progress-bar.ts` cellCode); '' with no steps.
+  cells: string
   due: string | null
   dueTone: Tone | null
   pr: string
@@ -202,6 +222,8 @@ export type ServeRow = {
   send: SendMode
   session: string
   fp: string
+  // A checkbox also binds the file lines drawn with the card, so a moved twin cannot replace it.
+  tickFp: string
   where: string
   info: string
   isSending: boolean
@@ -213,7 +235,7 @@ export type ServeRow = {
 // A question marked answered, listed so it can be shown again.
 export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string; questionId?: string }
 // key names the line in the action route; canHide is false for a retained source that is only for review.
-export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null }
+export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null; receipt?: Receipt }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
@@ -324,7 +346,8 @@ const noteLined = (text?: string): { noteLine?: string } => {
 // agent on the computer is offered as a copy instead.
 // A question on the reminder or Older shelf. The page may hide it under the key the action route names,
 // unless it is a retained source kept for review only.
-const retainedOf = (item: WaitingItem): ServeRetained => ({
+const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): ServeRetained => ({
+  ...receipt,
   key: olderKey(item),
   canHide: item.hideKey !== '' && item.canHide !== false,
   ...(item.hideKey !== '' && item.canHide !== false ? { unhideKey: `hidden:${item.hideKey}` } : {}),
@@ -345,6 +368,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
+  // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
+  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId))
   const asks: ServeAsk[] = []
   const groups = new Map<string, ServeRow[]>()
   const idle: ServeRow[] = []
@@ -356,6 +381,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   for (const item of items) {
     if (item.type === 'ask') {
       const { ask } = item
+      // A question gone from its agent's report is kept until it is answered; one the person answered
+      // here, and its session took, needs nothing more from the person.
+      if (!isLan && ask.key.startsWith('retained::') && ask.questionId !== undefined && isAnswerHanded(messaging?.messages ?? [], ask.questionId)) continue
       const isManual = ask.where === 'manual'
       const connection = isManual || isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)
       const isContested = !isManual && !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (ask.agent || 'claude') && one.session === ask.nativeSession) ?? false)
@@ -368,7 +396,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
-        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s)),
+        // A question the board knows gets the receipt of the answer sent to it, not of an earlier message
+        // to the same session.
+        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId)),
         key: item.key,
         ...(ask.questionId === undefined ? {} : { questionId: ask.questionId }),
         project: ask.project,
@@ -387,19 +417,22 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         answers: isManual ? [] : answersOf(ask, s),
         command: ask.command,
         link: ask.link,
+        ...(ask.native === undefined ? {} : { native: { options: ask.native.options, line: s.nativeAnswerIn(agentLabel(ask.native.agent, s)) } }),
         canTick: ask.step !== null,
+        fileLine: ask.step?.line ?? null,
         canHide: ask.hideKey !== '' && ask.canHide !== false,
         ...(ask.hideKey !== '' && ask.canHide !== false ? { unhideKey: `hidden:${ask.hideKey}` } : {}),
         send,
         session: connection?.session ?? ask.target?.session ?? '',
         fp: fingerprint(item, items),
+        tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (ask.target?.dir ?? '') : send === 'connected' ? claudeHint(ask.agent, false, s) : '',
         archiveNote: isManual ? '' : s.archiveLive,
         info: connection || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? infoOf(send, ask.agent, ask.task, '', s)),
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
-        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
+        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
         ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
       continue
@@ -439,9 +472,10 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         tone: row.tone,
         when: row.when,
         agent: row.agent,
-        ...(row.auto === null ? { isOwn: true as const } : {}),
+        ...(row.auto === null ? { isOwn: true as const } : { auto: row.auto }),
         done: row.done,
         total: row.total,
+        cells: cellCode(row.cells ?? []),
         due: row.due?.left ?? null,
         dueTone: row.due?.tone ?? null,
         pr: row.pr,
@@ -451,7 +485,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         ...(row.next === null ? {} : { nextFileLine: row.next.line }),
         canArchive: row.archive !== null,
         canConfirm: row.confirm != null,
-        archiveNote: row.auto === 'working' || row.auto === 'waiting' ? s.archiveLive : '',
+        archiveNote: row.archive === null && (row.auto === 'working' || row.auto === 'waiting') ? s.archiveLive : '',
         // The command to resume a session names its folder, and the account with it: the computer's only.
         resume: isLan ? null : row.resume,
         handoff: row.handoff,
@@ -461,10 +495,11 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         send,
         session: connection?.session ?? row.target?.session ?? '',
         fp: fingerprint(item, items),
+        tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (row.target?.dir ?? '') : send === 'connected' ? claudeHint(row.agent, row.auto === 'working', s) : '',
         // A row says why only when a reply could otherwise be expected here.
         info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
-        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.target === connection.id && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
+        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
         // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
         hasCopyBox: !(row.auto === 'ended' && row.question === null && send === 'none') && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined),
         // A Claude row has no target, so its closed session is the block's own state=ended.
@@ -510,14 +545,14 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     idle,
     stopped,
     hidden: view.hidden.map(item => ({ key: `hidden:${item.hideKey}`, project: item.project, agent: item.agent, ...(item.where === 'manual' ? { isOwn: true as const } : {}), task: item.task, text: item.text, ...(item.questionId === undefined ? {} : { questionId: item.questionId }) })),
-    reminder: (view.reminder ?? []).map(retainedOf),
-    older: (view.older ?? []).map(retainedOf),
+    reminder: (view.reminder ?? []).map(retained),
+    older: (view.older ?? []).map(retained),
     groups: [...groups].map(([project, rows]) => ({ project, rows })),
     turns,
     recent: view.recent.map(item => ({ project: item.project, title: item.title, ...lined(item.title), when: item.when, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')), ...askingFp(item.key) })),
   }
   if (group === undefined) return model
-  const extra = (item: WaitingItem): ServeRetained => ({ ...retainedOf(item), ...(item.at === undefined ? {} : { at: item.at }), dir: item.dir ?? null })
+  const extra = (item: WaitingItem): ServeRetained => ({ ...retained(item), ...(item.at === undefined ? {} : { at: item.at }), dir: item.dir ?? null })
   model.reminder = (view.reminder ?? []).map(extra)
   model.older = (view.older ?? []).map(extra)
   model.finished = (view.finished ?? []).map(item => ({ ...item, key: `row:${item.key}`, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')), ...askingFp(item.key) }))
@@ -573,7 +608,7 @@ export type ServeAction =
   | { type: 'hide'; key: string; text: string }
   | { type: 'unhide'; key: string | null }
   | { type: 'send'; target: AgentTarget; text: string; title: string }
-  | { type: 'message'; connection: Delivery; text: string; title: string }
+  | { type: 'message'; connection: Delivery; text: string; title: string; answers?: string }
   | { type: 'refuse'; note: string }
 
 const MAX_REPLY = 4000
@@ -599,7 +634,8 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   // can be reworded under it: the press goes through only on the block and words the page drew.
   const item = items.find(one => one.key === request.key)
 
-  return item !== undefined && request.fp === fingerprint(item, items) ? action : { type: 'refuse', note: s.boardLineChanged }
+  if (item === undefined || request.fp !== fingerprint(item, items, request.type === 'tick' && (item.type === 'ask' || request.line !== undefined))) return { type: 'refuse', note: s.boardLineChanged }
+  return action.type === 'tick' ? { ...action, ref: guardStep(action.ref, items) } : action
 }
 
 const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean): ServeAction => {
@@ -610,7 +646,9 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'tick') {
     if (item.type === 'ask') {
       const ref = item.ask.step
-      return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
+      if (ref === null) return { type: 'refuse', note: s.boardTickGone }
+      if (request.line !== ref.line) return { type: 'refuse', note: s.boardLineChanged }
+      return { type: 'tick', ref }
     }
     if (item.type !== 'row') return { type: 'refuse', note: s.boardTickGone }
     // A press names the step it showed by its file line, so two open steps with the same
@@ -657,7 +695,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'message') {
     const question = item.type === 'ask' ? item.ask.text : item.row.question ?? ''
     if (isLan || !connected || connected.id !== request.connection || connected.turn !== request.turn || connected.session !== request.session || (request.asked ?? '') !== question || !text) return { type: 'refuse', note: s.messagesFailed }
-    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title }
+    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
   }
   if (connected) return { type: 'refuse', note: s.boardLineChanged }
   if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }
@@ -735,56 +773,27 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
   return null
 }
 
-// The chat prompt goes as it is in every language: the chat reads it, not the person.
-const RELAY_PROMPT = `Report your progress on this work as one Agent Board block. After each step, and
-whenever you stop to wait for me, end your reply with the whole block again, inside
-a code block, written exactly like this:
-
-## <project>
-<!-- auto session=<ID> agent=<name> state=<working|waiting|done|ended> updated=<UTC time, like 2026-10-17T08:10:52Z> -->
-### <the outcome, in plain words>
-> Context: <one line on why this work exists>
-- [x] <a finished step>
-- [~] <the step you are on>
-- [?] <a step that needs me> — <one line saying what you need>
-- [ ] <the next step>
-<!-- /auto session=<ID> -->
-
-Rules:
-- <ID> is 8 random lower-case hex characters (0-9, a-f). Pick it once and keep it
-  for the whole conversation.
-- <name> is your own name in lower case, for example muse or dot.
-- If you are Claude, write claude-web. The name claude alone is refused.
-- <project> is the project's name; keep it the same every time.
-- Write the two marker lines exactly as shown, starting at the beginning of the line.
-  No other marker names.
-- The line after the start marker is the ### title. No other # headings, code
-  fences or HTML comments inside the block.
-- Marks: [x] done, [~] doing, [ ] to do, [?] needs me, [>] waiting on someone else,
-  [!] blocked, [-] cancelled. End a yes/no question in a [?] step with "OK?".
-- state=waiting when you hand back to me with steps left, working when you start
-  again, done when every step is [x] or [-], ended if you stop for good with steps
-  left. updated= is the time of this update in UTC, ending in Z.`
-
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
-  'webChatConnect', 'webChatCopied', 'importClipboard', 'importNoBlock', 'importUseKeys', 'pasteReview',
+  'importNoBlock', 'pasteReview',
   'claudeSendNow', 'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveQueueNextTurn', 'serveNextTurnHint', 'serveQueueNextOpen', 'serveNextOpenHint', 'messagesHandedNextTurn', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'serveQueueNextTurn', 'serveNextTurnHint', 'serveQueueNextOpen', 'serveNextOpenHint', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
-  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide',
+  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting',
   'archiveNow', 'cleanUp', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
-  'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt',
+  'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
+  'settingsLanguageChanged', 'settingsLanguageOverridden', 'settingsNotifications', 'settingsOn', 'settingsOff', 'settingsDenied', 'settingsUnavailable', 'settingsChanged', 'settingsLanguage',
+  'settingsAgentSetup', 'settingsAgentRemove', 'settingsAgentConfirm', 'settingsAgentCancel', 'settingsAgentsBusy', 'settingsAgentsReadFailed',
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
-  'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyReply', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgSendReply', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
+  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -816,10 +825,7 @@ html{scrollbar-gutter:stable}
 body{overflow-wrap:anywhere}
 .col{width:100%;max-width:808px;margin:0 auto;padding-left:max(var(--s5),env(safe-area-inset-left,0px));padding-right:max(var(--s5),env(safe-area-inset-right,0px))}
 .head .topbar{flex-wrap:nowrap;min-height:56px;padding-block:0;gap:var(--s3)}
-.brand h1{white-space:nowrap}
-.live{display:inline-flex;align-items:center;gap:6px;flex:none;font-size:var(--text-xs);color:var(--muted);border:1px solid var(--line);border-radius:var(--radius-round);padding:1px 8px 1px 7px;white-space:nowrap}
-.live i{width:7px;height:7px;border-radius:var(--radius-round);background:var(--done)}
-body:has(#offline:not(:empty)) .live{display:none}
+.brand h1{white-space:nowrap}.brand h1 .ab-logo{display:block}
 #offline{position:sticky;top:0;color:var(--alert);overflow-wrap:anywhere;padding:var(--s2) 0;border-bottom:1px solid var(--line)}
 #offline:empty{display:none}
 #offline:not(:empty){top:var(--head-h,56px);z-index:5;padding:var(--s3) max(var(--s4),calc((100vw - 808px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--ground))}
@@ -855,13 +861,20 @@ ${sheetCss}
 .c-meta .who{color:var(--ink);font-weight:600}
 .q{margin:0;font-size:var(--text-lg);line-height:1.4;font-weight:600;overflow-wrap:anywhere}
 .note,.context{margin:0;color:var(--muted)}
+.native-options{margin:0;padding-left:var(--s5);color:var(--muted)}
 .answers{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;padding-top:var(--s1)}
-.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
+.answers:has(.answer-picks){flex-wrap:nowrap}
+.answer-picks{display:flex;flex:1 1 auto;min-width:0;flex-wrap:wrap;gap:var(--s2);align-items:center}
+.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)}
 button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
-.btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover,.pfoot #close:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
-button.quiet:hover,.side .pfoot #close:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
+.btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
+button.quiet:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
+.answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);background:color-mix(in srgb,var(--act) 12%,var(--hover))}
+.answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-lg)}
+.answers button.answer-send:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
+.answers button.answer-send:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:.35;cursor:default}
 .chev{display:inline-block;transition:transform var(--dur-base) var(--ease-out)}.chev::before{content:"▸"}
 .open>.shelf-head .chev{transform:rotate(90deg)}
 code{display:block;max-width:100%;overflow-x:auto;white-space:pre;font:var(--text-xs)/1.5 var(--font-mono);padding:6px var(--s2);border:1px solid var(--line);border-radius:var(--radius-s);background:var(--inset);color:var(--ink)}
@@ -903,6 +916,27 @@ div.row-btn{cursor:default}
 .row-btn[aria-expanded="true"] .r-chev{transform:rotate(90deg)}
 div.row-btn .r-chev{visibility:hidden}
 .r-meta .st{color:var(--ink)}
+.r-meta .prog{display:inline-flex;align-items:center;gap:var(--s2);vertical-align:-1px}
+.r-meta .prog span{margin-left:0}
+.pbar{display:inline-flex;align-items:center;gap:2px;width:96px;height:8px;flex:none}
+.pbar i,.sw i{flex:1 1 0;min-width:5px;height:6px;border-radius:var(--radius-round);background:var(--bar-done);transition:background-color var(--dur-layout) var(--ease-out),height var(--dur-layout) var(--ease-out)}
+.pbar .c-c,.sw .c-c{height:8px;background:var(--bar-now)}
+.pbar .c-w{background:var(--waiting)}
+.pbar .c-b{background:var(--alert)}
+.pbar .c-r{background:var(--alive)}
+.pbar .c-t,.sw .c-t{background:transparent;border:1px solid var(--line-strong)}
+.pbar .c-n{background:transparent;border:1px solid var(--line)}
+.pbar.cont{position:relative;display:block;height:6px;border-radius:var(--radius-round);border:1px solid var(--line-strong)}
+.pbar.cont b{position:absolute;left:0;top:0;bottom:0;border-radius:var(--radius-round);background:var(--bar-done);transition:width var(--dur-layout) var(--ease-out)}
+.pbar.cont u{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--bar-now)}
+.pbar.cont u.c-w{background:var(--waiting)}
+.pbar.cont u.c-b{background:var(--alert)}
+.pbar.cont u.c-r{background:var(--alive)}
+[data-bar="blue"] .pbar .c-x,[data-bar="blue"] .pbar .c-c,[data-bar="blue"] .pbar.cont b,[data-bar="blue"] .pbar.cont u.c-c,[data-sw="blue"] .sw .c-x,[data-sw="blue"] .sw .c-c{background:var(--accent)}
+[data-bar="green"] .pbar .c-x,[data-bar="green"] .pbar .c-c,[data-bar="green"] .pbar.cont b,[data-bar="green"] .pbar.cont u.c-c,[data-sw="green"] .sw .c-x,[data-sw="green"] .sw .c-c{background:var(--done)}
+.pcount{font-variant-numeric:tabular-nums;color:var(--ink)}
+.sw{display:inline-flex;align-items:center;gap:2px;width:36px;height:8px;flex:none}
+@media (max-width:560px){.pbar{width:auto;min-width:72px}.pbar.cont{width:72px}}
 .r-right.t-alert{color:var(--alert)}
 .r-right{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;max-width:9em;overflow:hidden;text-overflow:ellipsis}
 .row-open{background:var(--current);border-radius:0 0 var(--radius-m) var(--radius-m);padding:var(--s1) var(--s2) var(--s3) calc(var(--s2) + 36px);display:grid;gap:var(--s3);min-width:0;opacity:0;transition:opacity var(--dur-base) var(--ease-out)}
@@ -934,7 +968,7 @@ div.row-btn .r-chev{visibility:hidden}
 .hid p{margin:0}
 .fresh{display:grid;gap:var(--s4);padding:var(--s6) 0;max-width:560px}
 .fresh h2{margin:0;font-size:var(--text-lg);line-height:1.4}.fresh p{margin:0;color:var(--muted)}
-.fresh .mark{width:44px;height:44px}
+.fresh .ab-icon{display:block;justify-self:start}
 .fresh ul{list-style:none;margin:0;padding:0;display:grid;gap:var(--s3)}
 .fresh li{display:grid;grid-template-columns:24px minmax(0,1fr);gap:var(--s3);align-items:center}
 .fresh li b{font-weight:600}
@@ -952,7 +986,12 @@ ${CLIP_CSS}
 .side{display:none}
 .stage{min-width:0}
 .s-brand{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 var(--s2)}
-.s-brand .b-name{flex:1 1 auto;font-size:var(--text-md);font-weight:600;line-height:1.4;white-space:nowrap}
+.s-brand .b-logo{flex:1 1 auto;display:flex;align-items:center;min-width:0}.s-brand .b-logo svg,.s-brand .b-icon svg{display:block}
+.s-brand .b-icon{display:none}
+/* the logo and the icon: the light is the board's status (is-idle, is-working, is-waiting, is-offline) */
+${LOGO_CSS}
+${ICON_CSS}
+.ab-icon.is-arriving .ab-board{transform-box:view-box;transform-origin:32px 32px}
 .s-toggle{flex:none;width:32px;height:32px;display:inline-grid;place-items:center;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
 .s-toggle:hover{background:var(--hover);color:var(--ink)}
 .s-toggle:active{background:var(--press)}
@@ -978,17 +1017,22 @@ ${CLIP_CSS}
 .s-agent.working .ag::after{border-color:var(--ground);border-radius:var(--radius-round);background:var(--alive)}
 .s-agent[aria-pressed="true"].working .ag::after,.s-agent[aria-pressed="true"][data-presence="offline"] .ag::after,.s-agent[aria-pressed="true"][data-presence="notseen"] .ag::after{border-color:var(--current)}
 .shell[data-empty="1"] :is(.s-views,.s-projects){display:none}
-/* the settings at the foot of the sidebar: the language spot (reserved, in a row with the theme button), the project link, then Close the board */
+/* Settings occupies the reserved sidebar row and follows the work when the sidebar folds. */
 .s-foot{margin-top:auto;padding-top:var(--s3);border-top:1px solid var(--line)}
 .side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
 .side .pfoot .set-row{order:-1;flex-basis:100%;margin-left:calc(var(--s2) * -1)}
 .side .pfoot .grow{display:none}
-.side .pfoot #close,.side .pfoot .btn{min-height:24px;padding-inline:var(--s2);font-size:var(--text-xs);color:var(--muted)}
-.side .pfoot #close:hover,.side .pfoot .btn:hover{color:var(--ink)}
+/* Close the board shows its name beside the icon (#1145): an X alone did not say it stops the board */
+.pfoot #close,.pfoot #settings-toggle{display:inline-flex;gap:var(--s1);width:auto;height:var(--hit);min-width:var(--hit);min-height:var(--hit);padding:0 var(--s2);font:inherit;font-size:var(--text-xs)}
+/* Close the board is a red power sign with no words: its name is the tooltip and what a screen reader says. */
+.pfoot #close{justify-content:center;padding:0;color:var(--alert)}.pfoot #close svg.i{width:18px;height:18px;stroke-width:2}
+.pfoot #close:hover{color:var(--alert);background-color:color-mix(in srgb,var(--alert) 12%,transparent)}
+.side .pfoot .btn{min-height:24px;padding-inline:var(--s2);font-size:var(--text-xs);color:var(--muted)}
+.side .pfoot .btn:hover{color:var(--ink)}
 .side .pfoot p{order:3;flex-basis:100%}
 .ver-link{display:inline-flex;align-items:center;gap:var(--s1);color:color-mix(in srgb,var(--muted) 75%,var(--surface));font-size:var(--text-xs);line-height:1.2;text-decoration:none;border-radius:var(--radius-s);white-space:nowrap}
 .ver-link:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
-.ver-link svg.i{width:12px;height:12px}
+.ver-link svg.i{width:16px;height:16px;fill:currentColor;stroke:none}
 .set-row{display:inline-flex;align-items:center;gap:var(--s1)}
 .pfoot .grow{flex:1 1 auto}
 
@@ -1008,7 +1052,8 @@ ${CLIP_CSS}
   .shell[data-view="done"] #board>[data-sec]:not([data-sec="done"]){display:none}
   /* the rail: the views and the agents as 44px icons with their badges; names in the tooltip; the project link, the theme and Close the board in the footer */
   .shell[data-rail="1"] .side{padding:var(--s3) 10px;align-items:center}
-  .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-name){display:none}
+  .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-logo){display:none}
+  .shell[data-rail="1"] .s-brand .b-icon{display:block}
   .shell[data-rail="1"] .s-brand{flex-direction:column;gap:var(--s2);padding:0}
   .shell[data-rail="1"] .s-group{align-items:center;width:100%}
   .shell[data-rail="1"] :is(.s-views,.s-views+.s-group){border-top:1px solid var(--line);padding-top:var(--s3)}
@@ -1045,7 +1090,6 @@ ${CLIP_CSS}
   .head{position:static}
   .agents{top:0}
   #offline:not(:empty){top:0}
-  .live .lbl{display:none}.live{padding:var(--s1)}
   .page,#board{gap:var(--s5)}
   .page{padding-top:var(--s4)}
   .card{padding:var(--s3)}
@@ -1058,6 +1102,8 @@ ${CLIP_CSS}
   .link{min-height:44px}
   .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet{flex:0 0 auto;min-height:44px}
+  .answers button.answer-send{flex:0 0 48px;width:48px;min-width:48px;justify-content:center}
+  .pfoot #close,.pfoot #settings-toggle{height:48px;min-width:48px;min-height:48px}
   .s-toggle{width:44px;height:44px}
   #away-line .away-x{width:44px;height:44px}
   textarea{min-height:96px}
@@ -1078,7 +1124,7 @@ const sideView = (id: keyof typeof VIEW_ICONS, label: string, hasCount: boolean)
   `<button type="button" class="s-item v-${id}" id="view-${id}" data-view="${id}" data-local data-nav title="${esc(label)}" aria-pressed="${id === 'all'}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${VIEW_ICONS[id]}</svg><span class="s-txt">${esc(label)}</span>${hasCount ? `<span class="s-n${id === 'needs' ? ' hot' : ''}" id="count-${id}"></span>` : ''}</button>`
 
 // `isLan`: the page a phone opens on the local network, which closes sooner.
-export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0): string => `<!doctype html>
+export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, language: SettingsLang = 'auto', isLangOverridden = false): string => `<!doctype html>
 <html lang="${htmlLang(s)}">
 <head>
 <meta charset="utf-8">
@@ -1092,29 +1138,31 @@ ${pageTokens('56px')}
 ${pageBaseCss}
 ${agentMarkCss()}
 ${PAGE_CSS}
+${settingsCss}
 </style>
 </head>
 <body>
 <div class="shell" id="shell" data-view="all">
 <aside class="side" id="side" aria-label="Agent Board">
-<div class="s-brand">${boardMark}<span class="b-name">Agent Board</span><span class="live" title="${esc(s.serveLiveHint)}"><i></i></span><button type="button" class="s-toggle" id="side-toggle" data-local aria-expanded="true" aria-label="${esc(s.pgSideFold)}" title="${esc(s.pgSideFold)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6.5 2.5v11"/></svg></button></div>
+<div class="s-brand"><span class="b-logo">${boardLogo(esc(s.serveLiveHint))}</span><span class="b-icon">${boardIcon(28, esc(s.serveLiveHint))}</span><button type="button" class="s-toggle" id="side-toggle" data-local aria-expanded="true" aria-label="${esc(s.pgSideFold)}" title="${esc(s.pgSideFold)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6.5 2.5v11"/></svg></button></div>
 <nav class="s-group s-views" id="side-views" aria-label="${esc(s.pgViews)}">${sideView('all', s.pgOverview, false)}${sideView('needs', s.pgNeeds, true)}${sideView('working', s.pgWorking, true)}${sideView('others', s.pgOthers, true)}${sideView('done', s.pgDone, true)}</nav>
 <div class="s-group s-agents" id="side-agent-group" role="group" aria-labelledby="side-agents-label" hidden><p class="s-label" id="side-agents-label">${esc(s.pgAgents)}</p><div class="s-group" id="side-agents"></div></div>
 <div class="s-group s-projects" id="side-project-group" role="group" aria-labelledby="side-projects-label" hidden><p class="s-label" id="side-projects-label">${esc(s.pgProjects)}</p><div class="s-group" id="side-projects"></div></div>
 <div class="s-foot" id="side-foot"></div>
 </aside>
 <div class="stage">
-<header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i><span class="lbl">${esc(s.serveLive)}</span></span></div></div></header>
+<header class="head" id="head"><div class="col topbar"><div class="brand"><h1>${boardLogo(esc(s.serveLiveHint))}</h1></div></div></header>
+<template id="fresh-mark">${boardIcon(44, '', true, ' is-arriving')}</template>
 <div id="offline" role="status" aria-live="polite"></div>
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${themeToggle(s)}</span>${isLan ? '' : `<button type="button" class="btn" id="connect-web-chat" data-static>${esc(s.webChatConnect)}</button><button type="button" class="btn" id="import-clipboard" data-static>${esc(s.importClipboard)}</button>`}<button type="button" id="close" data-static>${esc(s.serveClose)}</button></footer>
+<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><svg class="i" viewBox="0 0 16 16" role="img" aria-label="GitHub"><path d="${GITHUB_PATH}"/></svg><span id="versions"></span></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${settingsToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static aria-label="${esc(s.serveClose)}" title="${esc(s.serveClose)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="${POWER_PATH}"/></svg></button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
 </div>
-${isLan ? '' : `<script type="application/json" id="relay-prompt">${JSON.stringify(RELAY_PROMPT).replace(/</g, '\\u003c')}</script>`}
+${settingsPanel(s, language, isLan, isLangOverridden)}
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
@@ -1274,12 +1322,14 @@ const PAGE_SCRIPT = String.raw`
     boardEtag = '';
     if (!isUnreachable) offlineButtons = Array.from(document.querySelectorAll('button:not([data-local])')).filter(function (node) { return !node.disabled; });
     isUnreachable = true;
+    paintLight();
     if (offline.textContent !== w('serveOffline')) offline.textContent = w('serveOffline');
     document.querySelectorAll('button:not([data-local])').forEach(function (node) { node.disabled = true; });
   }
   function reachable() {
     if (!isUnreachable) return;
     isUnreachable = false;
+    paintLight();
     offline.textContent = '';
     document.querySelectorAll('button[data-static]').forEach(function (node) { node.disabled = false; });
     offlineButtons.forEach(function (node) { node.disabled = false; });
@@ -1288,6 +1338,29 @@ const PAGE_SCRIPT = String.raw`
     Object.keys(results).forEach(function (key) { if (results[key].text === w('serveOffline')) { results[key].text = w('pressFailed'); paintResult(key); } });
     // Redraw even an unchanged model to restore each action's own sending state.
     last = '';
+  }
+  // The light in the logo is the board's status: offline when the page has lost the board, or stopped because the
+  // board closed or a newer page took over; waiting when something needs the person; working when an agent is busy;
+  // else idle. The tab icon turns amber only for waiting, so a page that stops never keeps an amber tab.
+  var LIGHT_STATES = ${JSON.stringify(LOGO_STATES)};
+  function lightState() {
+    if (isUnreachable || isClosed) return 'is-offline';
+    if (pg.waitingNow > 0) return 'is-waiting';
+    var view = pg.model && pg.model.view;
+    return view && view.working && view.working.length ? 'is-working' : 'is-idle';
+  }
+  function paintLight() {
+    var next = lightState();
+    document.querySelectorAll('.ab-logo,.ab-icon').forEach(function (node) {
+      var names = String(node.getAttribute('class') || '').split(' ').filter(function (one) { return one && LIGHT_STATES.indexOf(one) === -1; });
+      var value = names.concat(next).join(' ');
+      if (node.getAttribute('class') !== value) node.setAttribute('class', value);
+    });
+    var tab = document.querySelector('link[rel="icon"]');
+    if (!tab) return;
+    if (!tab.getAttribute('data-calm')) tab.setAttribute('data-calm', tab.getAttribute('href') || '');
+    var href = next === 'is-waiting' ? tab.getAttribute('data-needs') : tab.getAttribute('data-calm');
+    if (href && tab.getAttribute('href') !== href) tab.setAttribute('href', href);
   }
   // Names this page to the board, so it can tell one open page from another (#265).
   function newPageId() { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } }
@@ -1306,6 +1379,28 @@ const PAGE_SCRIPT = String.raw`
       });
     }).catch(function (error) { unreachable(); throw error; });
   }
+  ${settingsScript}
+  // The progress bar's style (#1085): the root's data-bar picks the colours, so a pick shows on every
+  // bar at once. A pick in Settings goes to the board, which keeps it for the pane and the
+  // terminal board too; one that does not land goes back to what it was.
+  function barStyleShown(style) {
+    var root = document.documentElement;
+    if (!root || (style !== 'ink' && style !== 'blue' && style !== 'green')) return;
+    if (root.getAttribute('data-bar') !== style) root.setAttribute('data-bar', style);
+    document.querySelectorAll('[data-bar-set]').forEach(function (item) { item.setAttribute('aria-checked', String(item.getAttribute('data-bar-set') === style)); });
+  }
+  document.querySelectorAll('[data-bar-set]').forEach(function (node) {
+    node.addEventListener('click', function () {
+      var before = document.documentElement && document.documentElement.getAttribute('data-bar') || 'ink';
+      var style = node.getAttribute('data-bar-set');
+      barStyleShown(style);
+      node.disabled = true;
+      call('/api/style', { style: style }).then(function (data) {
+        if (!data.ok) { barStyleShown(before); settingsSay(data.note || w('pressFailed'), true); }
+        else settingsSay(w('settingsChanged', w('barStyleHead'), w(style === 'blue' ? 'barStyleBlue' : style === 'green' ? 'barStyleGreen' : 'barStyleInk')));
+      }, function () { barStyleShown(before); settingsSay(w('pressFailed'), true); }).finally(function () { node.disabled = false; });
+    });
+  });
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
     try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
@@ -1473,7 +1568,8 @@ const PAGE_SCRIPT = String.raw`
     if (!receipt) return null;
     clearEnqueueResult(key, receipt);
     if (!agent || String(agent).toLowerCase() === 'claude') return claudeReceipt(receipt, key, canSend);
-    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: receipt.isMailbox ? 'messagesHandedNextTurn' : 'messagesAccepted', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
+    // DeepSeek is handed the message the moment it is idle, not at a turn it starts later (#725).
+    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : String(agent).toLowerCase() === 'deepseek' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     // A mailbox message that was handed over gets no ACK, so its id is done with here: the next send is a new message.
     if (receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
     // The server already took a nonce ACK off; a receipt kept from a version 1 store was
@@ -1481,9 +1577,11 @@ const PAGE_SCRIPT = String.raw`
     var reply = receipt.reply || '';
     var ack = 'ACK ' + receipt.id;
     if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
-    var isFailed = receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error);
-    var labelKey = receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error)
+    var isFailed = receiptFailed(receipt);
+    var isAcceptedUnconfirmed = receipt.status === 'uncertain' && receipt.hasAccepted === true;
+    var labelKey = isFailed && receipt.status === 'uncertain'
       ? 'messagesTimeout'
+      : isAcceptedUnconfirmed ? 'messagesAcceptedUnconfirmed'
       : receipt.status === 'accepted' && !receipt.isMailbox && receipt.error === 'DISCONNECTED'
         ? 'messagesAcceptedDisconnected'
         : labels[receipt.status];
@@ -1508,8 +1606,10 @@ const PAGE_SCRIPT = String.raw`
     var draftKey = input.getAttribute('data-key');
     // Cursor ignores what a hook gives it at a prompt, so its mailbox waits for the chat to open.
     var isOpenOnly = String(agent).toLowerCase() === 'cursor';
+    // DeepSeek's plugin takes its mailbox's message at once and wakes the session (#725): a plain Send, no Copy.
+    var isAtOnce = String(agent).toLowerCase() === 'deepseek';
     var go = mode === 'send' || mode === 'connected' || mode === 'mailbox'
-      ? button(w(mode === 'mailbox' ? (isOpenOnly ? 'serveQueueNextOpen' : 'serveQueueNextTurn') : 'serveSend', mode === 'connected' && (!agent || String(agent).toLowerCase() === 'claude') ? 'Claude' : agentName(agent)), function () {
+      ? button(w(mode === 'mailbox' && !isAtOnce ? (isOpenOnly ? 'serveQueueNextOpen' : 'serveQueueNextTurn') : 'serveSend', mode === 'connected' && (!agent || String(agent).toLowerCase() === 'claude') ? 'Claude' : agentName(agent)), function () {
         var text = input.value.trim();
         if (!text) { say(w('pressEmpty'), 'alert', key); return; }
         // The same text goes again through the same path; the box keeps it until it was sent.
@@ -1534,7 +1634,7 @@ const PAGE_SCRIPT = String.raw`
     if (where) add(footer, el('div', 'where', where));
     if (extras && extras.onCancel) add(footer, navButton(w('pgCancel'), extras.onCancel));
     add(box, input, add(footer, go));
-    if (mode === 'mailbox') {
+    if (mode === 'mailbox' && !isAtOnce) {
       add(footer, button(w('pgCopyAnswer'), function () {
         var text = input.value.trim();
         if (text) copy(text, key); else say(w('pressEmpty'), 'alert', key);
@@ -1565,6 +1665,7 @@ const PAGE_SCRIPT = String.raw`
   var pg = { filter: '', project: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
   var cardState = {};
   var cardParts = {};
+  var cardChoices = Object.create(null);
   // The first screen describes work, so diagnostic identifiers and logs stay out of its labels.
   function clean(value) {
     var text = String(value || '').trim();
@@ -1586,7 +1687,8 @@ const PAGE_SCRIPT = String.raw`
   // A row with a due date and no age (a hand-kept task) shows the date where the age would be; an
   // agent's row keeps its age, so how fresh its status is stays on the row.
   function dueOf(ref) { var one = source(ref); return one.when ? '' : clean(one.due || ''); }
-  function ageOf(ref) { return clean(source(ref).when || w('pgUnknownAge')); }
+  // A hand-kept task has no time of its own, so it shows none rather than "Unknown time" (#1145).
+  function ageOf(ref) { return clean(source(ref).when || (agentOf(ref) === 'own' ? '' : w('pgUnknownAge'))); }
   // 'own' for the person's hand-kept tasks, '?' for a finished task whose agent the model did not say.
   function agentOf(ref) { return source(ref).isOwn || ref.isOwn ? 'own' : ref.agent || '?'; }
   function markOf(ref) {
@@ -1610,12 +1712,15 @@ const PAGE_SCRIPT = String.raw`
   // The agent filter (icon row or sidebar) and the project filter (sidebar) both apply; either may be empty.
   function matchesAgent(id) { return !pg.filter || pg.filter === id; }
   function matches(id, project) { return matchesAgent(id) && (!pg.project || pg.project === project); }
+  function receiptFailed(receipt) {
+    return !!receipt && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error || ''));
+  }
   // A sent answer is on its way: its card stays on the sheet with its line, but it no longer waits for the person.
   // A message that timed out or was refused waits for the person again.
   function isSent(ref) {
     var one = source(ref);
     var receipt = one.receipt;
-    var isFailed = !!receipt && (receipt.status === 'rejected' || receipt.status === 'uncertain' && /TIMEOUT/.test(receipt.error || ''));
+    var isFailed = receiptFailed(receipt);
     return one.isSending === true && !isFailed;
   }
   function byTime(a, b) { return (b.at || 0) - (a.at || 0); }
@@ -1676,7 +1781,7 @@ const PAGE_SCRIPT = String.raw`
       var isNext = step.fileLine !== undefined ? step.fileLine === row.nextFileLine : step.text === row.next;
       if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && !isNext) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
-        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp, undefined, step.fileLine); }, 'btn');
+        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.tickFp, undefined, step.fileLine); }, 'btn');
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
         tick.title = step.text;
         add(line, tick);
@@ -1715,6 +1820,8 @@ const PAGE_SCRIPT = String.raw`
     if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
     var mode = ask.send;
     var answers = el('div', 'answers');
+    var choiceArea = answers;
+    var pickerSend = null;
     var others = [];
     var canWrite = false;
     if (isStuck) {
@@ -1722,17 +1829,47 @@ const PAGE_SCRIPT = String.raw`
     } else if (isOlder) {
       if (ask.canHide) add(answers, button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
       else add(body, el('p', 'note', w('questionReviewOnly')));
+    } else if (ask.native) {
+      // Answered in the agent's own window: the options are only listed, so no button, reply box or copy is offered.
+      if (ask.native.options.length) {
+        var choices = el('ul', 'native-options');
+        ask.native.options.forEach(function (option) { add(choices, el('li', '', clean(option))); });
+        add(body, choices);
+      }
+      add(body, el('p', 'note', ask.native.line));
+      if (ask.canHide) add(answers, button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
     } else if (ask.isOwn) {
-      if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
+      if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.tickFp, undefined, ask.fileLine); }, 'primary'));
     } else {
       var options = ask.answers || [];
       canWrite = true;
-      options.slice(0, 3).forEach(function (answer, index) {
-        var node = button(w(sends(mode) ? 'pgSendReply' : 'pgCopyReply', clean(answer)), function () { pressAnswer(ask, key, answer, node); }, '', !sends(mode));
-        node.disabled = sends(mode) && ask.isSending === true;
-        add(answers, node);
-      });
-      options.slice(3).forEach(function (answer) { others.push(button(w(sends(mode) ? 'pgSendReply' : 'pgCopyReply', clean(answer)), function () { pressAnswer(ask, key, answer, null); }, '', !sends(mode))); });
+      if (options.length) {
+        var identity = JSON.stringify([ask.session || '', ask.text || '', ask.fp || '', ask.delivery ? [ask.delivery.id, ask.delivery.turn] : '', options]);
+        var savedChoice = cardChoices[key];
+        var selected = savedChoice && savedChoice.identity === identity ? savedChoice.index : -1;
+        var choiceNodes = [];
+        choiceArea = el('div', 'answer-picks');
+        add(answers, choiceArea);
+        var makeChoice = function (answer, index) {
+          var node = navButton(clean(answer), function () {
+            if (pickerSend.dotsNode) return;
+            selected = index;
+            cardChoices[key] = { identity: identity, index: index };
+            choiceNodes.forEach(function (choice, i) { choice.setAttribute('aria-pressed', String(i === selected)); });
+            pickerSend.disabled = sends(mode) && (ask.isSending === true || isUnreachable);
+          });
+          node.className = 'choice';
+          node.setAttribute('aria-pressed', String(index === selected));
+          node.disabled = sends(mode) && ask.isSending === true;
+          choiceNodes.push(node);
+          return node;
+        };
+        options.slice(0, 3).forEach(function (answer, index) { add(choiceArea, makeChoice(answer, index)); });
+        options.slice(3).forEach(function (answer, index) { others.push(makeChoice(answer, index + 3)); });
+        pickerSend = button('↑', function () { if (selected >= 0) pressAnswer(ask, key, options[selected], pickerSend); }, 'answer-send', !sends(mode));
+        pickerSend.setAttribute('aria-label', w(sends(mode) ? 'pgSendChoice' : 'pgCopyChoice'));
+        pickerSend.disabled = selected < 0 || sends(mode) && ask.isSending === true;
+      }
       if (ask.command) others.push(button(w('serveCopyCommand'), function () { copy(ask.command, key); }, '', true));
       if (ask.link && /^https:\/\//i.test(ask.link)) {
         var link = el('a', 'btn', w('serveOpenLink'));
@@ -1763,14 +1900,15 @@ const PAGE_SCRIPT = String.raw`
       toggle.className = 'quiet';
       pg.mores.push({ key: key, box: more, fold: fold, toggle: toggle });
       toggle.setAttribute('aria-expanded', String(opened['more:' + key] === true));
-      add(answers, toggle);
+      add(choiceArea, toggle);
       add(askBlock, more);
     }
     if (canWrite) {
       var write = navButton(w('pgWriteOwn'), function () { setMode(key, 'write'); });
       write.className = 'quiet';
-      add(answers, write);
+      add(choiceArea, write);
     }
+    if (pickerSend) add(answers, pickerSend);
     parts.ask = fx(askBlock);
     if (canWrite) {
       parts.reply = fx(replyBox(key, w('serveReplyPlaceholder'), sends(mode) ? mode : 'copy', agent, sends(mode) ? ask.where : '', ask.isSending, ask.session, ask.text, ask.fp, ask.delivery, {
@@ -1808,6 +1946,42 @@ const PAGE_SCRIPT = String.raw`
   // A task as one row: its mark, title, one line (the step, with the project where no heading stands above it,
   // and a status word only when the section does not already say it) and its age. Pressing it opens its steps and
   // actions in place; the message box for a connected or sendable session is inside the open row.
+  // The progress bar (#1085): one cell per step up to 12, above that one fill with a mark at the
+  // current step, "n/m" beside it. One step: the text alone. The bar is aria-hidden; the label says it.
+  var BAR_CELLS = { x: 'c-x', '~': 'c-c', '?': 'c-w', '!': 'c-b', '>': 'c-r', ' ': 'c-t', '-': 'c-n' };
+  function progressNode(code, done, total, step) {
+    var node = el('span', 'prog');
+    node.setAttribute('role', 'img');
+    node.setAttribute('aria-label', step ? w('pgBarLabel', done + '/' + total, step) : done + '/' + total);
+    var cells = String(code).split('');
+    var live = cells.filter(function (one) { return one !== '-'; }).length;
+    if (live > 1 && live <= 12) {
+      var bar = el('span', 'pbar');
+      cells.forEach(function (one) { add(bar, el('i', BAR_CELLS[one] || 'c-t')); });
+      bar.setAttribute('aria-hidden', 'true');
+      add(node, bar);
+    } else if (live > 12) {
+      var counted = cells.filter(function (one) { return one !== '-'; });
+      var open = counted.indexOf('~');
+      if (open < 0) counted.some(function (one, index) { if (one !== 'x') { open = index; return true; } return false; });
+      var finished = counted.filter(function (one) { return one === 'x'; }).length;
+      var track = el('span', 'pbar cont');
+      var fill = el('b');
+      fill.style.width = (counted.length ? Math.round(finished / counted.length * 1000) / 10 : 0) + '%';
+      add(track, fill);
+      if (open >= 0) {
+        var mark = el('u', BAR_CELLS[counted[open]] === 'c-t' ? 'c-c' : BAR_CELLS[counted[open]] || 'c-c');
+        mark.style.left = 'calc(' + Math.round(open / counted.length * 1000) / 10 + '% - 1px)';
+        add(track, mark);
+      }
+      track.setAttribute('aria-hidden', 'true');
+      add(node, track);
+    }
+    var count = el('span', 'pcount', done + '/' + total);
+    count.setAttribute('aria-hidden', 'true');
+    add(node, count);
+    return node;
+  }
   function buildRow(ref, section, showProject) {
     var row = source(ref);
     var key = row.key || ref.key;
@@ -1835,7 +2009,7 @@ const PAGE_SCRIPT = String.raw`
         // the step list names a step, so the server can tell it from a twin with the same text.
         var nextStep = null;
         for (var index = 0; index < row.steps.length; index += 1) if (row.nextFileLine !== undefined && row.steps[index].fileLine === row.nextFileLine) { nextStep = row.steps[index]; break; }
-        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.fp, undefined, row.nextFileLine); }, 'primary');
+        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.tickFp, undefined, row.nextFileLine); }, 'primary');
         // A long step is named by its first words; the whole step is its title (#463).
         if (row.nextLabel) tickNext.title = row.next;
         add(acts, tickNext);
@@ -1861,12 +2035,14 @@ const PAGE_SCRIPT = String.raw`
     var lastFinished = lastDone.length ? clean(lastDone[lastDone.length - 1].text) : '';
     // A plan-tool block with no title takes its current step as the title; the step is then said once.
     if (sameName(step, clean(fullTitle(ref)))) step = '';
-    var detail = section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
+    var isAnsweredWaiting = row.status === w('answeredWaiting');
+    var detail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
     var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
     var project = showProject ? clean(ref.repo || row.project) : '';
     if (sameName(project, title)) project = '';
-    var meta = add(el('span', 'r-meta'), status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
+    var progress = isTask && row.total > 0 && (section === 'working' || section === 'stopped' || section === 'others') ? progressNode(row.cells || '', row.done, row.total, current ? clean(current.text) : '') : null;
+    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
     var titleNode = el('span', 'r-title', title);
     titleNode.setAttribute('title', title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
@@ -2033,9 +2209,11 @@ const PAGE_SCRIPT = String.raw`
   function isOfficer(id) { return Object.prototype.hasOwnProperty.call(W, 'agent:' + String(id).toLowerCase()); }
   // The agents that are unreadable or offline now, by id: 'unreadable' when the board
   // cannot read the agent, 'offline' when its sessions are closed and none is open.
+  // Maps keyed by agent name have no prototype: a custom agent may be named constructor
+  // or valueof, and a plain object would read Object's own members for it.
   function awayBadNow() {
-    var bad = {};
-    var unreadable = {};
+    var bad = Object.create(null);
+    var unreadable = Object.create(null);
     latest.view.agents.forEach(function (one) { if (one.isUnreadable) unreadable[String(one.agent).toLowerCase()] = true; });
     Object.keys(agentPresence).forEach(function (id) {
       if (unreadable[id]) bad[id] = 'unreadable';
@@ -2045,7 +2223,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function awaySnapshot() {
     if (!latest || !latest.view) return null;
-    var questions = {};
+    var questions = Object.create(null);
     latest.view.needs.cards.forEach(function (ref) {
       var id = agentOf(ref);
       if (!questions[id]) questions[id] = {};
@@ -2060,7 +2238,7 @@ const PAGE_SCRIPT = String.raw`
     var view = latest.view;
     var seen = {};
     Object.keys(snap.questions).forEach(function (id) { Object.keys(snap.questions[id]).forEach(function (key) { seen[key] = true; }); });
-    var questions = {};
+    var questions = Object.create(null);
     var newKeys = [];
     view.needs.cards.forEach(function (ref) {
       if (seen[ref.key]) return;
@@ -2237,10 +2415,13 @@ const PAGE_SCRIPT = String.raw`
     });
     setText(pg.nodes.needsCount, count.cards);
     if (pg.nodes.needsCount) pg.nodes.needsFlag.setAttribute('data-needs-count', String(count.cards));
-    setText(pg.nodes.needsText, pg.filter ? w('pgNoQuestions', nameOf(pg.filter)) : w('pgNothing'));
-    setText(pg.nodes.needsSub, pg.filter ? '' : w('pgNothingHint'));
-    reveal(pg.nodes.needsEmpty, count.shown === 0);
     var isFiltered = !!(pg.filter || pg.project);
+    // A filter that hides every question must not read as "nothing needs you" while some wait elsewhere (#1144).
+    var scope = pg.filter ? nameOf(pg.filter) : pg.project;
+    var elsewhere = isFiltered ? Math.max(0, (pg.waitingNow || 0) - count.cards) : 0;
+    setText(pg.nodes.needsText, !isFiltered ? w('pgNothing') : elsewhere > 0 ? w('pgNoQuestionsElsewhere', scope, elsewhere) : w('pgNoQuestions', scope));
+    setText(pg.nodes.needsSub, isFiltered ? '' : w('pgNothingHint'));
+    reveal(pg.nodes.needsEmpty, count.shown === 0);
     pg.nodes.needsClear = clearFilters(pg.nodes.needsEmpty, pg.nodes.needsClear, isFiltered);
     // The Other work view says so when it has nothing, here or on the Stopped shelf; Overview leaves the empty section out.
     setText(pg.nodes.othersText, isFiltered ? w('pgNoOthersFor', pg.filter ? nameOf(pg.filter) : pg.project) : w('pgNoOthers'));
@@ -2606,14 +2787,25 @@ const PAGE_SCRIPT = String.raw`
   }
   // The empty board: the agents that can report here, and how their work shows up.
   // With nothing connected it names no agent, so none is marked connected (#546).
+  // The first run's mark: its light drops into the corner once, the first time this page shows the empty board.
+  var isFreshPlayed = false;
+  function freshMark() {
+    var holder = document.getElementById('fresh-mark');
+    var mark = holder && holder.content && holder.content.firstChild;
+    if (!mark) return el('span');
+    var copy = mark.cloneNode(true);
+    if (isFreshPlayed) copy.setAttribute('class', String(copy.getAttribute('class')).split(' ').filter(function (one) { return one !== 'is-arriving'; }).join(' '));
+    isFreshPlayed = true;
+    return copy;
+  }
   function freshPage(view) {
     var ids = connectedIds(view);
-    if (!ids.length) return add(el('section', 'fresh'), el('h2', '', w('pgReady')), el('p', '', w('pgStartAny')));
+    if (!ids.length) return add(el('section', 'fresh'), freshMark(), el('h2', '', w('pgReady')), el('p', '', w('pgStartAny')));
     var list = el('ul');
     ids.forEach(function (id) {
       add(list, add(el('li'), agentMark(id), add(el('span'), el('b', '', agentName(id)), el('span', 'ok', ' ✓ ' + w('pgConnected')))));
     });
-    return add(el('section', 'fresh'), el('h2', '', w('pgReady')), list, el('p', '', w('pgStartIn', ids.map(agentName).join(' / '))));
+    return add(el('section', 'fresh'), freshMark(), el('h2', '', w('pgReady')), list, el('p', '', w('pgStartIn', ids.map(agentName).join(' / '))));
   }
   function sectionBlock(section, list) {
     var block = fx(section);
@@ -2633,6 +2825,9 @@ const PAGE_SCRIPT = String.raw`
     view.agents.forEach(function (agent) { if (pg.ids.indexOf(agent.agent) === -1) pg.ids.push(agent.agent); });
     pg.sources = {};
     [].concat(model.asks || [], model.reminder || [], model.older || [], model.idle || [], model.stopped || [], (model.groups || []).flatMap(function (group) { return group.rows; }), model.turns || [], model.recent || [], model.finished || []).forEach(function (item) { if (item.key) pg.sources[item.key] = Object.assign({}, pg.sources[item.key], item); });
+    var questionKeys = Object.create(null);
+    (model.asks || []).forEach(function (ask) { questionKeys[ask.key] = true; });
+    Object.keys(cardChoices).forEach(function (key) { if (!questionKeys[key]) delete cardChoices[key]; });
     if (!hasDrawn) pg.filter = savedFilter();
     // An answer that was sent stops counting as waiting for the person (tab title, flag, agent badges) until it comes back.
     pg.sentBy = Object.create(null);
@@ -2726,6 +2921,7 @@ const PAGE_SCRIPT = String.raw`
         if (caret) box.setSelectionRange(caret[0], caret[1]);
       }
     });
+    paintLight();
     hasDrawn = true;
   }
   function render(model) {
@@ -2763,6 +2959,7 @@ const PAGE_SCRIPT = String.raw`
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) {
         isClosed = true;
+        paintLight();
         var movedMain = document.querySelector('main');
         movedMain.textContent = '';
         add(movedMain, el('p', '', w('serveMoved')));
@@ -2776,6 +2973,9 @@ const PAGE_SCRIPT = String.raw`
         return;
       }
       reachable();
+      if (data.barStyle) barStyleShown(data.barStyle);
+      if (data.lang && !settingsLanguage.disabled) { languageKept = data.lang; settingsLanguage.value = data.lang; }
+      notifyWaiting(data.model);
       connections = data.messaging && data.messaging.connections || [];
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; })], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
       if (text !== last) {
@@ -2862,22 +3062,6 @@ const PAGE_SCRIPT = String.raw`
     beginPress();
     importBlock(text, true);
   });
-  var connectWebChat = document.getElementById('connect-web-chat');
-  if (connectWebChat) connectWebChat.addEventListener('click', function () {
-    if (isUnreachable) return;
-    beginPress();
-    var prompt = JSON.parse(document.getElementById('relay-prompt').textContent);
-    copy(prompt, 'close', function () { say(w('webChatCopied'), 'done', 'close'); });
-  });
-  var importClipboard = document.getElementById('import-clipboard');
-  if (importClipboard) importClipboard.addEventListener('click', function () {
-    if (isUnreachable) return;
-    beginPress();
-    function useKeys() { say(w('importUseKeys'), 'alert', 'close'); }
-    if (navigator.clipboard && navigator.clipboard.readText && window.isSecureContext) {
-      navigator.clipboard.readText().then(function (text) { importBlock(text); }, useKeys);
-    } else useKeys();
-  });
   if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
     if (event.key !== 'Escape') return;
     // Only the panel the focus is in (or its More button) closes; with no focus anywhere, every open one does.
@@ -2922,6 +3106,7 @@ const PAGE_SCRIPT = String.raw`
     say(w('pressPending'), '', 'close');
     var shut = function () {
       isClosed = true;
+      paintLight();
       clearTimeout(timer);
       var main = document.querySelector('main');
       main.textContent = '';

@@ -1,6 +1,6 @@
 import { boardPromptHelper, boardRequestWords } from './board-commands'
 import { STRINGS } from './strings'
-import { HOOK_VERSION, HOOK_WORKER_GRACE, hookBootstrap, hookGuardSource, hookTimeout, hostHookTimeout } from './hook-safety'
+import { HOOK_VERSION, HOOK_WORKER_GRACE, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookTimeout, hostHookTimeout } from './hook-safety'
 
 const BOARD_PROMPT_HELPER = boardPromptHelper(boardRequestWords(Object.values(STRINGS)))
 
@@ -42,6 +42,10 @@ export const statusEvents: Partial<Record<LocalAgent, Record<string, string>>> =
   gemini: { SessionStart: 'waiting', BeforeAgent: 'working', AfterAgent: 'waiting', SessionEnd: 'ended' },
   grok: { SessionStart: 'waiting', UserPromptSubmit: 'working', Stop: 'waiting', SessionEnd: 'ended' },
   muse: { UserPromptSubmit: 'working', Stop: 'waiting', SessionEnd: 'ended' },
+  // Hermes Agent's shell hooks (#1115): a session starts, a turn begins (pre_llm_call; it prints nothing, since Hermes
+  // reads its output as context for the model), a turn ends (the reply rides on post_llm_call),
+  // and on_session_end fires after every turn, so it is idle and not the end of the session.
+  hermes: { on_session_start: 'waiting', pre_llm_call: 'working', post_llm_call: 'waiting', on_session_end: 'waiting' },
   antigravity: { SessionStart: 'waiting', PreInvocation: 'working', PostInvocation: 'working', Stop: 'waiting' },
 }
 // The one tool call each agent's plan list rides on (#922): the group's own matcher picks it, so
@@ -51,12 +55,12 @@ export const planEvents: Partial<Record<LocalAgent, { event: string; matcher: st
   gemini: { event: 'AfterTool', matcher: '^write_todos$' },
   // Grok runs PostToolUse as a gate (600 s by default) and reads stdout: the hook prints nothing, timeout 5.
   grok: { event: 'PostToolUse', matcher: '^todo_write$' },
+  hermes: { event: 'post_tool_call', matcher: 'todo' },
 }
 // Plugin hosts have no hook groups: OpenCode's plugin sends todo.updated and OpenClaw's after_tool_call,
 // each as a --plan-event with the plan in the same shape as Codex's or Gemini's (#922).
 export const planPlugins: readonly LocalAgent[] = ['opencode', 'openclaw']
-export const lifecycleCapability = (agent: LocalAgent): string =>
-  agent === 'hermes' ? 'adapter-pending' : 'adapter-installed-unverified'
+export const lifecycleCapability = (_agent: LocalAgent): string => 'adapter-installed-unverified'
 
 // Antigravity groups events under a named definition, rather than hooks.<event>.
 // Stop ends an execution loop, not the conversation. No session-end event is invented.
@@ -154,8 +158,8 @@ export const cursorEvent = (input: Record<string, unknown>): Record<string, unkn
   return { session_id: input.conversation_id ?? input.session_id, turn_id: input.generation_id, hook_event_name: event }
 }
 
-// OpenCode supplies session status but no stable turn id on those status events. Keep
-// that limit explicit instead of manufacturing a turn id or fetching conversation text.
+// OpenCode supplies no stable turn id on status events. At idle, its last reply goes only
+// to the board script's stdin, which keeps just its closing question.
 export const opencodePlugin = (node: string, script: string, progress: string, description: string, home: string, stepFormat = STRINGS.en.localAgentStepFormat): string => `import { spawnSync } from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
 ${hookGuardSource(home, 'opencode')}
@@ -175,10 +179,14 @@ const run = (mode, payload, session, deadline) => {
   if (result.error?.code === 'ETIMEDOUT') throw Error('HOOK_TIMEOUT')
   // A refused report names the board's reason (INVALID_STEP, say), so the model can correct it (#217).
   const reason = result.error ? undefined : /^AGENT_BOARD_REASON ([A-Z][A-Z0-9_]{2,63})$/m.exec(result.stderr ?? '')?.[1]
-  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason : 'AGENT_BOARD_REPORT_FAILED')
+  let detail
+  if (reason === 'INVALID_STEP') {
+    try { detail = JSON.parse(/^AGENT_BOARD_DETAIL (".*")$/m.exec(result.stderr ?? '')?.[1] ?? 'null') } catch {}
+  }
+  if (result.error || result.status !== 0) throw new Error(reason ? 'AGENT_BOARD_REPORT_FAILED: ' + reason + (typeof detail === 'string' ? ': ' + detail : '') : 'AGENT_BOARD_REPORT_FAILED')
   return result.stdout
 }
-
+${REPORT_TOOL_REPLY}
 // A one-shot \`opencode run\` exits without session.deleted (#217). As OpenCode exits, the
 // top-level sessions reported here and not seen to end are ended, all within one hook limit;
 // a board that is too slow gets them queued or logged, and OpenCode's exit never waits longer.
@@ -188,6 +196,7 @@ const run = (mode, payload, session, deadline) => {
 const OPEN_SESSIONS = Symbol.for('agent-board.opencode-open-sessions')
 const isFirstLoad = globalThis[OPEN_SESSIONS] === undefined
 const open = globalThis[OPEN_SESSIONS] ??= new Map()
+const pendingIdle = globalThis[Symbol.for('agent-board.opencode-pending-idle')] ??= new Map()
 if (isFirstLoad) process.once('exit', () => {
   try {
     const deadline = Date.now() + ${hookTimeout('opencode') - 1000}
@@ -205,8 +214,24 @@ const folderOf = (info, directory) => {
   return typeof folder === 'string' ? { cwd: folder } : {}
 }
 
+// A pending idle lookup can report only until this session has newer activity.
+const withStatusEvent = (event, action) => {
+  const p = event?.properties ?? {}
+  const session = p.sessionID ?? p.info?.id
+  const isIdle = event?.type === 'session.idle' || event?.type === 'session.status' && p.status?.type === 'idle'
+  if (!isIdle || !session) return withHook((current, deadline) => action(current, deadline, isIdle, () => true))
+  const token = {}
+  pendingIdle.set(session, token)
+  const isLatest = () => pendingIdle.get(session) === token
+  return withHook((current, deadline) => action(current, deadline, isIdle, isLatest)).finally(() => {
+    // Even a timed-out lookup must leave no token behind; a newer lookup keeps its own.
+    if (isLatest()) pendingIdle.delete(session)
+  })
+}
+
 export const AgentBoardLocal = async ({ client, directory }) => ({
   'chat.message': async ({ sessionID }, output) => withHook(async (current, deadline) => {
+      pendingIdle.delete(sessionID)
       // A known session notes the new reply at once, as events do before their lookup.
       if (open.has(sessionID)) open.get(sessionID).isReplying = true
       const info = current(await client.session.get({ path: { id: sessionID } }))
@@ -219,7 +244,7 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
       else open.set(sessionID, { isReplying: true, where })
       run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...where, ...(isBoardRequest(output) ? { board_request: true } : {}) }, undefined, deadline)
   }),
-  event: async ({ event }) => withHook(async (current, deadline) => {
+  event: async ({ event }) => withStatusEvent(event, async (current, deadline, isIdle, isLatest) => {
     const p = event.properties ?? {}
     // The plan mirror (#922): OpenCode's own todo list, in full each time. Only the top-level session
     // is mirrored, as for status; only each todo's text and status are sent.
@@ -236,18 +261,43 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
     if (!session || !['session.created', 'session.status', 'session.idle', 'session.deleted'].includes(event.type)) return
     if (event.type === 'session.status' && !['busy', 'retry', 'idle'].includes(p.status?.type)) return
     const state = event.type === 'session.deleted' ? 'ended' : event.type === 'session.status' && p.status?.type !== 'idle' ? 'working' : 'waiting'
+    if (state === 'working') pendingIdle.delete(session)
     // A known session notes a finished reply at once: OpenCode may exit before the lookup returns.
     if (open.has(session) && state !== 'ended') open.get(session).isReplying = state === 'working'
     const info = event.type === 'session.deleted' ? { data: p.info } : current(await client.session.get({ path: { id: session } }))
     if (info.error) throw Error('HOST_METADATA_FAILED')
-    if (!info.data || info.data.id !== session || info.data.parentID) return
+    if (!info.data || info.data.id !== session || info.data.parentID || !isLatest()) return
     const where = folderOf(info.data, directory)
     // A known session keeps the state its latest event noted: an earlier lookup may return last.
     const known = open.get(session)
-    if (state === 'ended') open.delete(session)
-    else if (known) known.where = where
+    if (state === 'ended') {
+      pendingIdle.delete(session)
+      open.delete(session)
+    } else if (known) known.where = where
     else open.set(session, { isReplying: state === 'working', where })
-    run('--agent-status', { session_id: session, state, ...where }, undefined, deadline)
+    let reply
+    if (isIdle) {
+      // Leave time for the status even if the messages request never settles.
+      const wait = deadline - Date.now() - 1000
+      if (wait > 0) {
+        let timer
+        try {
+          const listed = await Promise.race([
+            client.session.messages({ path: { id: session } }),
+            new Promise(resolve => { timer = setTimeout(() => resolve(null), wait) }),
+          ])
+          if (!listed?.error && Array.isArray(listed?.data)) {
+            const last = [...listed.data].reverse().find(message => message.info?.role === 'assistant')
+            if (Array.isArray(last?.parts)) {
+              const text = last.parts.filter(part => part?.type === 'text' && !part.synthetic && !part.ignored && typeof part.text === 'string').map(part => part.text).join('\\n')
+              // An oversized message must not make the worker refuse the status with it.
+              if (Buffer.byteLength(JSON.stringify({ session_id: session, state, ...where, last_assistant_message: text }), 'utf8') <= 1048576) reply = text
+            }
+          }
+        } catch {} finally { clearTimeout(timer) }
+      }
+    }
+    if (isLatest()) run('--agent-status', { session_id: session, state, ...where, ...(reply === undefined ? {} : { last_assistant_message: reply }) }, undefined, deadline)
   }),
   tool: {
     agent_board_progress: tool({
@@ -255,7 +305,7 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
       // The board takes each step as one Markdown task line (#217).
       args: { title: tool.schema.string(), project: tool.schema.string(), state: tool.schema.enum(['working', 'waiting', 'done', 'ended']), steps: tool.schema.array(tool.schema.string().describe(${JSON.stringify(stepFormat)})) },
       execute: async (args, context) => {
-        try { return run('--codex-report', args, context.sessionID) }
+        try { return toolReply(run('--codex-report', args, context.sessionID)) }
         catch (error) {
           hookError(error?.message === 'HOOK_TIMEOUT' ? 'REPORTER_TIMEOUT' : 'REPORTER_FAILED')
           throw error

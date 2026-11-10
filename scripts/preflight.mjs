@@ -622,6 +622,17 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   const recoverHandovers = () => {
     const candidates = new Map()
     const protectedFolders = new Set()
+    const uid = userInfo().uid
+    const isOwnFolder = (path, isRegistered = false) => {
+      try {
+        const stat = lstatSync(path)
+        // Windows has no Unix uid; shared Unix temp folders must belong to this account.
+        return stat.isDirectory() && (uid === -1 || stat.uid === uid)
+      } catch (error) {
+        if (error?.code === 'ENOENT') return isRegistered
+        throw error
+      }
+    }
     const keyOf = path => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path)
     const containsCwd = path => {
       const part = relative(path, resolve(cwd))
@@ -637,25 +648,20 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
         protectedFolders.add(key)
         continue
       }
-      if (!isDeadHandover(temp)) continue
-      try {
-        if (!lstatSync(temp).isDirectory()) continue
-      } catch (error) {
-        if (error?.code !== 'ENOENT') throw error
-      }
+      if (!isDeadHandover(temp) || !isOwnFolder(temp, true)) continue
       candidates.set(key, { temp, checkout, isRegistered: true })
     }
     for (const item of readdirSync(tmpdir(), { withFileTypes: true })) {
       const temp = join(tmpdir(), item.name)
       const key = keyOf(temp)
-      if (item.isDirectory() && !protectedFolders.has(key) && !containsCwd(temp) && isDeadHandover(temp) && !candidates.has(key)) {
+      if (item.isDirectory() && !protectedFolders.has(key) && !containsCwd(temp) && isDeadHandover(temp) && !candidates.has(key) && isOwnFolder(temp)) {
         candidates.set(key, { temp, checkout: join(temp, 'repo'), isRegistered: false })
       }
     }
     let hasRemoved = false
     let hasFailed = false
     for (const { temp, checkout, isRegistered } of candidates.values()) {
-      if (!isDeadHandover(temp)) continue
+      if (!isDeadHandover(temp) || !isOwnFolder(temp, isRegistered)) continue
       hasRemoved = true
       try {
         const removed = command('git', ['worktree', 'remove', '--force', checkout])

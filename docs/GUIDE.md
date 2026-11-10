@@ -49,14 +49,15 @@ agent-board --help all
 | --- | --- |
 | `agent-board` | Open the terminal board over SSH or in an interactive terminal without a display, and the page otherwise |
 | `agent-board stop` | Stop the board page server for this progress file |
-| `--serve` | Interactive local web board; reusable background service |
-| `--watch` | Terminal board; arrows or `j`/`k` and Enter to select, `x` tick, `d` confirm done, `a` archive, `t` archive the done list now, `y`/`n` or `1`–`9` answer, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` page, `q` quit. Into a pipe it prints the board once as plain text |
+| `--serve` | The old spelling of plain `agent-board`: still accepted, and prints only the page address, with no text board |
+| `--lan` | Open the page and show the phone address too; no `--serve` needed |
+| `--watch` | Terminal board; arrows or `j`/`k` and Enter to select, `x` tick, `d` confirm done, `a` archive, `t` archive the done list now, `s` next progress bar style, `y`/`n` or `1`–`9` answer, `h` hide, `u` restore, `i` idle tasks, `c` copy, `o` page, `q` quit. Into a pipe it prints the board once as plain text |
 | `--json` | Versioned, redacted, read-only board data for an agent; see [Board JSON](BOARD-JSON.md) |
 | `--status` | One line for tmux or a shell prompt, e.g. `2 need you · 3 working`. Reads only `progress.md` once; no sidecar/inbox reads, writes, browser or service. Counts follow the page's Needs you and Working now rules for that snapshot; questions retained only in sidecars are not included. Always plain text, even with `FORCE_COLOR`. |
 
-The terminal board uses the page's colours: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the nearest of 256. It takes the light set with `--theme light` or when `COLORFGBG` names a light background; `NO_COLOR` or `--no-color` turns colour off and `FORCE_COLOR` turns it on for `| less -R`. An answer key sends the answer when the running page (`--serve`) can send it into the question's session; otherwise it copies it, and the line says so. The Chinese boards count symbols such as ● and ✓ as two columns.
+The terminal board uses the page's colours: 24-bit when `COLORTERM` is `truecolor` or `24bit`, else the nearest of 256. It takes the light set with `--theme light` or when `COLORFGBG` names a light background; `NO_COLOR` or `--no-color` turns colour off and `FORCE_COLOR` turns it on for `| less -R`. An answer key sends the answer when the running page can send it into the question's session; otherwise it copies it, and the line says so. The Chinese boards count symbols such as ● and ✓ as two columns.
 
-Add `--lang en`, `zh-TW` or `zh-CN` to select the board language. Windows/custom installations use the printed absolute paths. `$agent-board` is the Codex skill entry; OpenCode installs `/board`. Other hosts must load their installed skill/command first.
+Add `--lang en`, `zh-TW` or `zh-CN` to select the board language. Windows/custom installations use the printed absolute paths. `$agent-board` is the Codex skill entry; OpenCode installs `/agent-board`. Other hosts must load their installed skill/command first.
 
 Chat shows questions first, then unprocessed progress reports with their source age. These reports do not prove completion or a live connection. Claimed or processed inbox files do not appear twice; a fresh hook timestamp alone never hides a pending report. Long replies retain an omission count; chat writes nothing.
 
@@ -82,18 +83,18 @@ Pasted reports keep their source time. Repeats do nothing; older or equal-time c
 
 A card offers Send only when its exact session has a live adapter. Otherwise use Copy or open the agent yourself. [Messaging](MESSAGING.md) explains adapter setup, actual replies, duplicates, conflicts and timeouts. Setup does not attach receivers to arbitrary existing chats. Ordinary replies cannot approve tools, trust changes or PR merges.
 
-`--no-open` prints the address without opening the browser. Closing the browser tab leaves the local service running. Run the same `--serve` command to reopen it. **Close the board** stops it; wait if a delivery is in progress. Idle shutdown is disabled by default; `--idle-minutes 30` opts in. Legacy `--allow-resume` deliberately enables starting ended Codex/Grok sessions; it is off by default and never a live-message fallback.
+`--no-open` prints the address without opening the browser. Closing the browser tab leaves the local service running. Run the same command to reopen it. **Close the board**, the red power button, stops it; wait if a delivery is in progress. Idle shutdown is disabled by default; `--idle-minutes 30` opts in. Legacy `--allow-resume` deliberately enables starting ended Codex/Grok sessions; it is off by default and never a live-message fallback.
 
 #### On a phone
 
-The page fits a phone's screen. To open it from a phone on the same Wi-Fi as the computer, run `node "$HOME/.agent-board/agent-board.mjs" --serve --lan`. Besides the computer's address, it prints the page's address on your network and a QR code of it: point the phone's camera at the code. When the computer has more than one network address, `--lan 192.168.1.23` picks one. Windows may ask whether Node.js may use the network: allow it on private networks, and check that Windows counts your Wi-Fi as a private one (it calls a network it has just joined public), or the phone can't reach the page. Access from another network requires a separately configured remote connection.
+The page fits a phone's screen. To open it from a phone on the same Wi-Fi as the computer, run `node "$HOME/.agent-board/agent-board.mjs" --lan`. Besides the computer's address, it prints the page's address on your network and a QR code of it: point the phone's camera at the code. When the computer has more than one network address, `--lan 192.168.1.23` picks one. Windows may ask whether Node.js may use the network: allow it on private networks, and check that Windows counts your Wi-Fi as a private one (it calls a network it has just joined public), or the phone can't reach the page. Access from another network requires a separately configured remote connection.
 
 The page on your network comes with these limits:
 
 - It opens only when you add `--lan`, only at a private address of the computer (one starting with 192.168, 10, or 172.16 to 172.31, never a public one), and it answers only requests sent to that address.
 - Its address carries a key of its own, not the key of the computer's page. Anyone who has that address, or photographs the QR code, can use the page until it closes, so use it on a network you trust, such as your home Wi-Fi, not a café's.
 - On the network the page uses plain HTTP, which is not encrypted, so another device on the same Wi-Fi could read what passes, agents' answers included. That is why a phone can tick, archive, mark a question answered (and show it again), copy and close the board, but not answer an agent: a reply runs a program on the computer, so the phone shows the answer for you to copy, and you send it from the computer's page.
-- It closes after 10 minutes in which no phone looks at it, and whenever the computer's page closes. A second `--serve --lan` while it is open gives the same address.
+- It closes after 10 minutes in which no phone looks at it, and whenever the computer's page closes. A second `--lan` while it is open gives the same address.
 
 See [Security](../SECURITY.md) before sharing access.
 
@@ -112,9 +113,9 @@ claude plugin marketplace add WenyuChiou/agent-board
 claude plugin install agent-board@agent-board
 ```
 
-Open a new Claude Code session; `/progress` opens the pane. It mirrors Task tools and can summarize turns through its model. Questions and decisions appear above the task cards. The pane follows Claude's theme; the page follows the system theme until you pick Light or Dark on it.
+Open a new Claude Code session; `/progress` opens the pane. It mirrors Task tools and can summarize turns through its model. Questions and decisions appear above the task cards. From Claude Code 2.1.319, in a session with a Task list, a tool that waits for your approval also appears under Needs you; earlier versions do not tell the plugin that you must approve, so the approval shows only in Claude Code. The pane follows Claude's theme; the page follows the system theme until you pick Light or Dark on it.
 
-`/agent-board` starts or reuses the live board page and replies with its link, where you can answer questions and archive work. It leaves the pane as it is and works in every session. When the Claude desktop app's Code tab shows no pane, the footer shows the waiting count and `/agent-board opens the board`; `/progress` there does the same as `/agent-board`. If the live page cannot start, both explain why and show the command that starts it. Starting the page can take up to half a minute; the footer says it is starting meanwhile. The live page needs the board script installed by `/progress connect`, or updated at the next session start. Sessions and agents using the same installed board script reuse the running page. A page `/progress` or `/agent-board` starts closes 30 minutes after its last tab is closed, and running the command again gives a new link; a page you started yourself with `--serve` keeps its own setting. `/progress` and `/agent-board` replace a page started with `--allow-resume`, unless a reply there is still on its way; run `--serve --allow-resume` again afterwards when you need resumed replies. The Claude Code CLI shows the pane.
+`/agent-board` starts or reuses the live board page and replies with its link, where you can answer questions and archive work. It leaves the pane as it is and works in every session. When the Claude desktop app's Code tab shows no pane, the footer shows the waiting count and `/agent-board opens the board`; `/progress` there does the same as `/agent-board`. If the live page cannot start, both explain why and show the command that starts it. Starting the page can take up to half a minute; the footer says it is starting meanwhile. The live page needs the board script installed by `/progress connect`, or updated at the next session start. Sessions and agents using the same installed board script reuse the running page. A page `/progress` or `/agent-board` starts closes 30 minutes after its last tab is closed, and running the command again gives a new link; a page you started yourself with `agent-board` keeps its own setting. `/progress` and `/agent-board` replace a page started with `--allow-resume`, unless a reply there is still on its way; run `--allow-resume` again afterwards when you need resumed replies. The Claude Code CLI shows the pane.
 
 | Command / input | Action |
 | --- | --- |
@@ -125,11 +126,12 @@ Open a new Claude Code session; `/progress` opens the pane. It mirrors Task tool
 | `/progress tidy`, `/progress sync` | Archive eligible work; reread Tasks/PR |
 | `/progress report`, `/progress today` | Copy a weekly/daily report |
 | `/progress lang en`, `zh-TW`, `zh-CN`, `auto` | Pane language |
+| `/progress style ink`, `blue`, `green` | Progress bar style, the same on the page, the pane and the terminal board |
 | `/progress notify on`, `off` | Desktop notifications |
 
 The optional connector requires Node.js 18+ and reloads of older plugin sessions before migration. Its native worker shares the installer lock across data roots, keeps removal disabled durably, and preserves foreign edits. Background probes start after the pane and polling; missing Node or damaged setup records fail closed. `connect status` describes configuration, not native execution.
 
-The optional `scripts/setup.sh` / `scripts/setup.ps1` manages Claude-specific Task-tool/profile and marketplace settings. Preview its documented scope before changing a profile. These scripts are not required for independent setup. The older plugin inbox connector can retain conversation data and use Claude summaries; it is separate from metadata-only independent hooks. [Security](../SECURITY.md).
+The optional `scripts/setup.sh` / `scripts/setup.ps1` manages Claude-specific Task-tool/profile and marketplace settings. Preview its documented scope before changing a profile. These scripts are not required for independent setup. The older plugin inbox connector can retain conversation data and use Claude summaries; independent hooks keep only selected metadata and supported agents' closing questions. [Security](../SECURITY.md).
 
 ## How it keeps itself tidy
 
@@ -137,7 +139,7 @@ Strong Codex runs and Claude print-mode sessions write no new board block. The b
 
 The optional pane sweeps on session start and hourly: done blocks after 12 hours, other stopped/stale blocks after three days. The page, while it runs, also sweeps every hour. A hand-kept task with every step `[x]` or `[-]` counts toward the archive after three days observed done; in 0.24.1 scheduled sweeps only count these tasks and move none. The details line says "N finished tasks can be archived"; a zero count is omitted. A working or waiting agent block stays live for 12 hours after its last write: the pane, terminal and page explain why Archive is unavailable, and tidy keeps it. Once stopped or ended, open the row to archive it immediately. Automatic sweeps take a block with an unresolved `[?]` step only when the same complete question snapshot the explicit archive requires is saved and read back, and only when it has been quiet long enough: three days after its last write if it has ended or is done, seven days with no report if it is still working or waiting. A block whose snapshot cannot be saved stays. The question is kept and shows under Older unanswered questions, where it can be hidden and shown again. Explicit archive requires that snapshot at any age, preserving recovery after the source moves; storage failure leaves the source in place. Archiving a stopped task that still asks says its question stays under Older unanswered questions; the terminal board's `a` also works on a Done recently entry that still asks.
 
-Run `node "$HOME/.agent-board/agent-board.mjs" --tidy` for one normal age-based sweep without a Claude session or page. It installs no scheduler and does not write `progress-seen.json`: the pane, `--watch` or `--serve` must first observe a completed hand-kept task and record when the three-day rule first ran. The three days count from the later of those two observations, giving work seen done under 0.24.0 three days from the upgrade. A machine running only `--tidy` never arms that rule and counts nothing without the reserved entry. Unknown, future or unreadable observations retain manual tasks; `--tidy` can still archive eligible dated agent blocks. The page's hourly sweep skips its pass and writes nothing if the seen file cannot be read.
+Run `node "$HOME/.agent-board/agent-board.mjs" --tidy` for one normal age-based sweep without a Claude session or page. It installs no scheduler and does not write `progress-seen.json`: the pane, `--watch` or the page must first observe a completed hand-kept task and record when the three-day rule first ran. The three days count from the later of those two observations, giving work seen done under 0.24.0 three days from the upgrade. A machine running only `--tidy` never arms that rule and counts nothing without the reserved entry. Unknown, future or unreadable observations retain manual tasks; `--tidy` can still archive eligible dated agent blocks. The page's hourly sweep skips its pass and writes nothing if the seen file cannot be read.
 
 Clean up on the pane or page archives the finished hand-kept tasks whose three days are up, exactly the ones the count line counts, plus what the normal sweep moves. It writes to the same monthly archive before removing work from the board; tasks inside their three days, open tasks and `[?]` tasks stay. If the seen file cannot be read, Clean up archives nothing and says so. In 0.24.1 unattended sweeps (pane start and hourly, `--tidy`, and page hourly) only count hand-kept tasks and move none. The pane's Archive now and `/progress tidy`, the page's Archive now, and a row's Archive still move finished work at once; nothing is deleted. The pane and page offer one Clean up button with the size warning and whenever the count is above zero, even on a small board. Numbers and the count sit in the details line. The terminal board and explicit text print show the details without a button.
 
@@ -162,14 +164,28 @@ Question tags: [Confirm] yes or no · [Choose] pick an option · [Input] type a 
 
 Independent installations: update a clean checkout to the intended release, preview `node scripts/setup-agent.mjs`, then apply the approved plan. Edited files are conflicts, not overwritten. Existing host sessions may need reload. No unattended updater or startup service is installed.
 
-Preview and apply removal with the installed program, once for each agent you set up. The example removes Codex; for another agent, use its name (`cursor`, `opencode`, `gemini`, `grok`, `muse`, `hermes`, `openclaw`, `antigravity`, `deepseek`):
+Preview and apply removal across all touched agents in a single run with `agent-board remove`, or specify `--agent` to remove only one (`codex`, `cursor`, `opencode`, `gemini`, `grok`, `muse`, `hermes`, `openclaw`, `antigravity`, `deepseek`):
 
 ```sh
-node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
-node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
+npx @wenyuchiou/agent-board remove
+npx @wenyuchiou/agent-board remove --apply
 ```
 
-`--codex-remove` and `--codex-doctor` are retained maintenance names for all targets. Close that board before removal. Removal takes unchanged board files, its hook definitions, Codex trust entries for those hooks, an empty hooks config setup created, and empty folders setup made. Shared files stay while another target needs them. User changes stay.
+From a repository checkout:
+
+```sh
+node scripts/setup-agent.mjs --remove
+node scripts/setup-agent.mjs --remove --apply
+```
+
+Or remove an individual agent using the installed helper:
+
+```sh
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex --apply
+```
+
+`--remove` (and `--codex-remove`) previews what it will remove for all touched agents using short paths, and lists the user data files kept beside `progress.md`. Close that board before removal. Removal takes unchanged board files, its hook definitions, Codex trust entries for those hooks, an empty hooks config setup created, and empty folders setup made. Shared files stay while another target needs them. User changes stay.
 
 Your history stays: `progress.md`, `progress-archive-*.md`, `progress-journal-*.md`, `sessions/`, `pending/`, `hook-recovery-*.json`, `hook-errors.log`, `progress-answered.json`, `progress-questions*.json`, `progress-seen.json`, `progress-run-cursor.txt`, `progress-page-state.json`, `progress-page-state-done-*.json`, `progress-inbox/` (`dropped.log`). You can delete these by hand. Non-empty runtime `*-messages/` folders also stay. Names based on `progress.md` follow your selected progress filename.
 
@@ -226,9 +242,9 @@ Send private or security-sensitive reports through GitHub's [Report a vulnerabil
 
 ### Does anything leave my machine? What does it cost?
 
-Independent reporters retain selected session metadata locally and do not call a summarization model. Sending a message to an online agent uses the target agent’s model and allowance. The following model and conversation access applies to the optional Claude plugin flow: Board files are stored locally. Through your own Claude Code login/model access, turn summaries send prompt and reply text to Claude Haiku; titles send the session's first request plus step names; and handoff lines send up to 6,000 characters of a compaction summary. The pane's side-question box also sends your question to the model over the session's transcript through that same login. These calls use that account's allowance or billing. The pane runs `git branch --show-current` and, if GitHub's `gh` is installed, uses it to check your pull request and CI state. By default, replies require an exact online session. Legacy Codex/Grok process resumption requires explicit `--allow-resume` and uses that agent’s permissions and network. The independent OpenClaw plugin disables conversation access; the optional Claude connector instead sets `allowConversationAccess: true`.
+Independent reporters retain selected session metadata and the closing questions of Codex, Grok Build, Cursor CLI, OpenCode and Antigravity CLI locally; they do not call a summarization model. Antigravity's hooks carry no reply text, so the board reads the last reply from its own transcript file. Its format is undocumented and was checked on agy 1.5.2; only the closing question is kept. Sending a message to an online agent uses the target agent’s model and allowance. The following model and conversation access applies to the optional Claude plugin flow: Board files are stored locally. Through your own Claude Code login/model access, turn summaries send prompt and reply text to Claude Haiku; titles send the session's first request plus step names; and handoff lines send up to 6,000 characters of a compaction summary. The pane's side-question box also sends your question to the model over the session's transcript through that same login. These calls use that account's allowance or billing. The pane runs `git branch --show-current` and, if GitHub's `gh` is installed, uses it to check your pull request and CI state. By default, replies require an exact online session. Legacy Codex/Grok process resumption requires explicit `--allow-resume` and uses that agent’s permissions and network. The independent OpenClaw plugin disables conversation access; the optional Claude connector instead sets `allowConversationAccess: true`.
 
-`--serve` listens on loopback (`127.0.0.1`) by default; any program on this computer that has the link can use it. `--serve --lan` shares the page on your private network through an HTTP link with a token. The token is an access key, not encryption: anyone on that network with the LAN link can read the board, change board files (including importing blocks) and stop the server. The LAN page refuses replies that would start an agent and omits resume commands. A private network address does not make a café or hotel network trusted. Do not share the link or QR code. Use the page's **Close the board** button to stop serving; if a reply is running, wait and try again. Closing the tab alone leaves the local service running; idle shutdown is opt-in. A new token is issued each time the board server or its LAN listener restarts, so stopping it makes its old link useless. See [SECURITY.md](../SECURITY.md) for file changes, processes, network access and the limits of board redaction.
+The page listens on loopback (`127.0.0.1`) by default; any program on this computer that has the link can use it. `--lan` shares the page on your private network through an HTTP link with a token. The token is an access key, not encryption: anyone on that network with the LAN link can read the board, change board files (including importing blocks) and stop the server. The LAN page refuses replies that would start an agent and omits resume commands. A private network address does not make a café or hotel network trusted. Do not share the link or QR code. Use the page's **Close the board** button, the red power button, to stop serving; if a reply is running, wait and try again. Closing the tab alone leaves the local service running; idle shutdown is opt-in. A new token is issued each time the board server or its LAN listener restarts, so stopping it makes its old link useless. See [SECURITY.md](../SECURITY.md) for file changes, processes, network access and the limits of board redaction.
 
 ### Does it work on Windows?
 
@@ -240,7 +256,7 @@ The plugin was renamed in 0.10.0 and doesn't move over by itself. Run the steps 
 
 ### How do I uninstall it?
 
-Independent setup: close the board, preview `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`, then add `--apply` after review. Repeat for each installed agent. See [Update and uninstall](#update-and-uninstall) for the history files kept. For the optional Claude plugin:
+Independent setup: close the board, preview `npx @wenyuchiou/agent-board remove` (or `node scripts/setup-agent.mjs --remove`), then add `--apply` after review. This inspects and removes all installed agent setups in one go while listing and preserving your data files beside `progress.md`. To remove only one agent, specify `--agent <name>` or use `node "$HOME/.agent-board/agent-board.mjs" --remove --agent <name>`. See [Update and uninstall](#update-and-uninstall) for details. For the optional Claude plugin:
 
 ```sh
 claude -p "/progress connect remove"

@@ -21,14 +21,14 @@ One row per surface. The UI and the CLI of one vendor are separate rows.
 Every surface in this table appears in the record:
 - **Installed:** a row of its own.
 - **Not installed, or not checked this time:** it may share one line, for example "Not installed, so untested: …".
-- **No connector:** the row says what a user of that agent can do today, for example "opens the `--serve` page; copy only". Agents whose connectors are planned are tracked in #278.
+- **No connector:** the row says what a user of that agent can do today, for example "opens the page; copy only". Agents whose connectors are planned are tracked in #278.
 
 ## Checks per row
 
 | | Check | Pass when |
 |---|---|---|
 | a | Open the board from inside the agent (its skill, command or link) | The board or its link shows, with every agent's rows |
-| b | One synthetic turn that reports two steps and ends on a question | The card is on the terminal board and the `--serve` page within a few seconds |
+| b | One synthetic turn that reports two steps and ends on a question | The card is on the terminal board and the page within a few seconds |
 | c | Answer that question from the page | The answer reaches the agent, or the card names the copy fallback |
 | d | Archive, confirm done and hide its row, on the terminal and the page | Every press shows a result or a plain reason next to the card |
 | e | Send a message from this agent to its own other session and to another agent | Delivered, or the card names the fallback |
@@ -39,7 +39,7 @@ Each cell is one of:
 - **FAIL**, with an issue number
 - **untested**, with the reason
 - **needs owner**, with the screen that stopped the check (sign-in, trust, consent, usage limit or config) and its words, with account names, emails and paths masked
-- **via the page**: checks c and d run once on the shared `--serve` page and terminal board, which get rows of their own; a host whose own turn did not reach the board is marked this way
+- **via the page**: checks c and d run once on the shared page and terminal board, which get rows of their own; a host whose own turn did not reach the board is marked this way
 - **n/a**, with the reason: the check cannot apply, for example the agent has no connector or its service has ended
 
 A cell may add a short note, and a `*` that points to a sentence under the table. Also record the host version and quote any fallback or result text the screen shows.
@@ -51,7 +51,7 @@ A cell may add a short note, and a `*` that points to a sentence under the table
 - **Work in a scratch project folder, with synthetic prompts only** ("Synthetic test: …"). Board checks c, d and f use a synthetic board through `CLAUDE_PROGRESS_FILE`.
 - **Never open an existing conversation or project.** If an app opens on one, start a new chat in the scratch folder at once.
 - **Screenshots:** at least one per surface, and one inside every CLI. Crop each to the scratch window, with no sidebar, history, account name or real path. Do not commit them. Keep them in a local folder, give the count in the record, and say in the PR body who holds them. Pictures in the repository follow CONTRIBUTING's image rules.
-- **Approvals:** you may approve a one-time or this-session prompt to run the board's own command (`--serve`, `--json`) in the scratch folder, never an "always allow". The one exception is the board's own hooks approval in the kept test home, pressed after a yes (below).
+- **Approvals:** you may approve a one-time or this-session prompt to run the board's own command (plain `agent-board`, `--json`) in the scratch folder, never an "always allow". The one exception is the board's own hooks approval in the kept test home, pressed after a yes (below).
 - **Sign-ins stay with the person whose computer runs the check:** never type a password, a sign-in code or a token, and never create an account. Record "needs owner" and the words on the screen, masked as above.
 - **Some prompts the checker may press after a yes** (owner, 2026-11-03: 「理論上你要用computer use幫我做才對」). Press only after the person says yes in chat to that item, through computer use or the browser tools. The yes covers the items on this run's list and is given in this run. A blanket yes, or a yes from an earlier run, does not count.
   - a trust prompt for the scratch project folder;
@@ -76,12 +76,14 @@ Every isolated run (How to run it safely) uses one test home that is kept betwee
 - **One folder, kept.** It sits outside every repository and outside the real home's config folders. Every variable in the isolation list points into it. The scratch project folder sits inside it too, because a trust is kept for that folder's path. Do not empty it or start a new one between runs.
 - **The person's steps there are done once.** The person signs in to each agent in that home. The trust prompt for the scratch project folder and the board's hooks approvals are either done by the person or pressed by the checker after the person's yes (How to run it safely). Later runs reuse what is there. A step comes back only when its screen comes back, for example after an expired sign-in, or a hook approval after the release changed that hook.
 - **Each run starts by installing the release in it.** Run setup with `--apply` against the test home, never the real one. Then read each host's hooks version there, as the first rule above asks.
-- **Nothing comes in from the real home:** no credentials, config, history or `progress.md`.
+- **Nothing comes in from the real home:** no credentials, config, history or `progress.md` — except Codex CLI's user skills on Windows (next bullet).
+- **Codex CLI on Windows reads user skills from the real profile.** It resolves its home from the Windows profile, not from the environment, so the kept home does not move its user skills: Codex CLI 0.163 loaded the `agent-board` skill from the real profile's `.agents\skills` folder even with `HOME`, `USERPROFILE` and `CODEX_HOME` pointed at the kept home (found 2026-11-07, synthetic prompt for #884; only the read-only sandbox refusing the command kept real board data from reaching the model). A Codex row that uses the skill therefore runs on the person's own install, like an app row, after it has the release — never with a writable sandbox in the kept home.
+- **Other agents' skills homes were not checked for the same leak, except Claude Code.** Claude Code's user skills follow `CLAUDE_CONFIG_DIR` (and `%USERPROFILE%`), both already in the isolation list, so they come from the kept home. If a run finds another agent that reads its skills from the real profile the same way, say so here and route its skill rows the same way.
 - **Each check starts a new chat.** Earlier test chats build up in the kept home; none is reopened.
 - **It holds the person's sign-ins, so it stays on that computer.** It never goes into a repository, an issue, a pull request, a log or a screenshot, and the record does not name its path ([RULES.md, R8](../dev/RULES.md#r8-what-stays-off-github)).
 - **Replace it only on the person's word.** When the checker finds it broken, it says why and asks first. Move the old folder aside; do not delete it. A new home brings back the one-time steps.
 
-The app rows run on the person's own install, which they keep on the release. Every other row runs in the kept test home.
+The app rows run on the person's own install, which they keep on the release. Codex rows that use the skill run there too, after it has the release (never with a writable sandbox in the kept home). Every other row runs in the kept test home.
 
 ## What the person does, all at once
 

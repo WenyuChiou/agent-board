@@ -1,4 +1,5 @@
 import { AGENT_ICONS } from './agent-icons'
+import { isLifecycleStep } from './codex'
 import { ZH_TW } from './i18n'
 import { folderOf } from './question-merge'
 import type { Strings } from './i18n'
@@ -151,6 +152,19 @@ export type Grouping = {
 }
 
 export const WORKING_MS = 30 * 60 * 1000
+// A session killed mid-step never writes again; after this long quiet its open step is no longer
+// work in progress (#1000). A real long step comes back with its next report.
+export const DOING_QUIET_MS = 2 * 60 * 60 * 1000
+// The Working now rule, shared with the archive guard: a doing step counts for two quiet
+// hours, any other activity for thirty minutes (#1000).
+export const isWorkingTask = (steps: readonly { status: string }[], at: number, now: number): boolean => {
+  const isDoing = steps.some(step => step.status === 'doing') && (at <= 0 || now - at <= DOING_QUIET_MS)
+  return isDoing || (at > 0 && now - at <= WORKING_MS)
+}
+// A working row whose steps are only a hook's placeholders, quiet past thirty minutes, is
+// kept for review, not offered for archive (#1051, #1000). The caller adds the state check.
+export const isSilenceTask = (steps: readonly { text: string }[], at: number, now: number): boolean =>
+  at > 0 && now - at > WORKING_MS && (steps.length === 0 || steps.every(step => isLifecycleStep(step.text)))
 export const DONE_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_HOPS = 8
 
@@ -426,12 +440,22 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
       older: sortedOlder,
     },
     // Rows that wait on the person are on the Needs you list, and a hand-kept task is not an agent at work.
-    // A working row with a doing step remains counted even after 30 minutes.
+    // A working row with a doing step remains counted past 30 minutes, up to two quiet hours.
+    // A row whose only step is a hook's placeholder waits for its next instruction: it is not at
+    // work, whether the agent is idle or was closed without saying so (#1051). The same holds when
+    // the only other steps are closed, such as a question the hook marked answered (#1067).
+    // A waiting session whose question was hidden stays waiting on the agent, out of Working now (#1206).
     working: sortedTasks.filter(task => {
       if (task.shelf !== 'open' || task.hasCard || task.isOwn) return false
       const source = task.source
-      const isDoing = typeof source === 'object' && source !== null && 'steps' in source && Array.isArray(source.steps) && source.steps.some(step => step.status === 'doing')
-      return isDoing || (task.at > 0 && now - task.at <= WORKING_MS)
+      if (typeof source === 'object' && source !== null) {
+        if ('auto' in source && source.auto === 'waiting') return false
+        if ('status' in source && source.status === s.answeredWaiting) return false
+      }
+      const steps = typeof source === 'object' && source !== null && 'steps' in source && Array.isArray(source.steps) ? source.steps : []
+      if (steps.some(step => isLifecycleStep(step.text)) && steps.every(step => isLifecycleStep(step.text) || step.status === 'done' || step.status === 'cancelled')) return false
+      const isDoing = isWorkingTask(steps, task.at, now)
+      return isDoing
     }),
     quiet: quietOf(cards, sortedTasks, now),
     all: { ...bucketOf(one => !one.isOwn), isHidden: agents.length < 2 },

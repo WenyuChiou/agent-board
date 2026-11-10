@@ -492,6 +492,21 @@ test('a self-parted test file runs whole in every part and keeps its share, so t
   for (const path of selfPartedTests) assert.match(await readFile(path, 'utf8'), /^const test = partTest\(nodeTest\)$/m, path)
 })
 
+test('the budgeted slow files go to different parts, and the parts together run every other file once', async () => {
+  const { partFiles, selfPartedTests, BOARD_FILE_BUDGETS_MS } = await import('../scripts/ci-impact.mjs')
+  // The board set in the order main's Windows run 42281474369 listed it, where every-nth put all four budgeted files in part 2 of 6.
+  const files = ['answer-guidance', 'board-entry', 'board-json', 'board-status', 'board-storage', 'board-surfaces', 'board', 'classifier-exit-proof', 'codex-fallback', 'codex-host', 'codex-local', 'codex-project-move', 'connect-worker', 'folder-identity', 'host-upgrade', 'legacy-connect', 'local-agent-manifest', 'local-lock', 'mcp-tools', 'messaging-matrix', 'page-look', 'page-regressions', 'page-state', 'page-titles', 'parity', 'performance-budgets', 'preflight-lock-policy', 'prompt-hooks', 'question-clarity', 'readme-codex-trust', 'report-tail', 'report-validation', 'row-keys', 'runtime-folder', 'setup-guidance', 'setup-readme', 'tidy', 'view-index-mutation', 'ws-stdio'].map(name => 'tests/' + name + '.test.mjs')
+  const slow = Object.keys(BOARD_FILE_BUDGETS_MS).filter(path => !selfPartedTests.includes(path))
+  for (const total of [4, 6]) {
+    const shares = Array.from({ length: total }, (_, i) => partFiles(files, (i + 1) + '/' + total))
+    // Spread evenly: one per part while there are no more slow files than parts (Windows' 6), else at most one more.
+    for (const share of shares) assert.ok(share.filter(path => slow.includes(path)).length <= Math.ceil(slow.length / total), total + ' parts: ' + share.join(' '))
+    const others = shares.flat().filter(path => !selfPartedTests.includes(path))
+    assert.deepEqual([...others].sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
+    for (const share of shares) for (const path of selfPartedTests) assert.ok(share.includes(path))
+  }
+})
+
 test('the part given to a run reaches its test processes, even when the environment names another part', async () => {
   const { runTestFiles } = await import('../scripts/ci-impact.mjs')
   const saved = process.env.CI_TEST_PART
@@ -738,10 +753,11 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   assert.ok(text.includes(`plugin_os: \${{ ${onPr} && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}`))
   assert.match(text, /plugin_os:'\["ubuntu-latest","windows-latest"\]'/)
   // The board job and the journeys take the same pairs, with the Windows sets in serial parts so each
-  // keeps ten minutes: the board in four, the journeys in two (#910).
-  const parts = (node, n) => Array.from({ length: n }, (_, i) => `{"os":"windows-latest","node":${node},"part":"${i + 1}/${n}"}`).join(',')
+  // keeps ten minutes: the board in six (#1059), the journeys in two (#910). The Ubuntu board set runs in two
+  // parts, since its job lasts as long as codex-local alone (#1130).
+  const parts = (node, n, os = 'windows-latest') => Array.from({ length: n }, (_, i) => `{"os":"${os}","node":${node},"part":"${i + 1}/${n}"}`).join(',')
   const ubuntu = '{"os":"ubuntu-latest","node":22,"part":"1/1"}', ubuntu24 = '{"os":"ubuntu-latest","node":24,"part":"1/1"}'
-  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 4)}]' || '[${ubuntu},${ubuntu24},${parts(22, 4)},${parts(24, 4)}]' }}`))
+  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 6)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 6)},${parts(24, 6)}]' }}`))
   assert.ok(text.includes(`journeys_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 2)}]' || '[${ubuntu},${ubuntu24},${parts(22, 2)},${parts(24, 2)}]' }}`))
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]

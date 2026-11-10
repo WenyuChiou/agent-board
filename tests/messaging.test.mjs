@@ -137,6 +137,65 @@ test('a mailbox message a hook claimed but never accepted is handed out again af
   assert.equal(takeMailboxMessage(inbox, 'codex', 'mailbox-session', 'CLI', now + 10 * MAILBOX_LEASE_MS, '555555', 'a1b2c3d4e5f6').message, null)
 })
 
+test('a queued mailbox message shows busy on the card when a live poller connects, then moves to the poller in order without replay', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-live-poller-'))
+  let hub
+  try {
+    const now = Date.now()
+    const session = '00000001-2222-4333-8444-555555555555'
+    hub = createMessaging(dir)
+    hub.act('mailbox-turn', { agent: 'codex', session, surface: 'CLI' }, now)
+    hub.act('send', { id: 'mailbox-first', target: mailboxId('codex', session), turn: 'session', text: 'first from mailbox' }, now)
+    const live = hub.act('register', { agent: 'codex', session, surface: 'CLI', turn: 'turn1' }, now + 1)
+    const peer = hub.act('register', { agent: 'gemini', session: 'peer-session', surface: 'CLI', turn: 'peer-turn' }, now + 1)
+
+    const { servePage } = await import('../hooks/serve.ts')
+    const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+    const file = `## Synthetic
+<!-- auto session=abcdef01 agent=codex resume=${session} state=waiting updated=${new Date(now + 1).toISOString()} -->
+### Mailbox handoff
+- [?] Pick a path — A) Fast B) Safe
+<!-- /auto session=abcdef01 -->
+`
+    const view = buildView(parseProgress(file), [], null, now + 1, 0, {}, EN)
+    const model = serveModel(view, [], EN, new Set(), false, hub.snapshot(now + 1), false, { now: now + 1, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+    assert.equal(model.asks[0].send, 'connected')
+    assert.equal(model.asks[0].isSending, true)
+    const workingFile = file.replace('state=waiting', 'state=working').replace('- [?] Pick a path — A) Fast B) Safe', '- [~] Working on the path')
+    const workingModel = serveModel(buildView(parseProgress(workingFile), [], null, now + 1, 0, {}, EN), [], EN, new Set(), false, hub.snapshot(now + 1), false, { now: now + 1, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+    assert.equal(workingModel.groups[0].rows[0].send, 'connected')
+    assert.equal(workingModel.groups[0].rows[0].isSending, true)
+    const page = await pageDom(servePage(EN, 'synthetic'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
+    assert.equal(page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.serveSend('Codex')).disabled, true)
+    assert.ok(page.text().includes(EN.serveSendBusy('Codex')), page.text())
+
+    // A peer queues a live message behind the mailbox message; the poller takes them in order.
+    hub.act('send', { id: 'live-second', target: live.id, turn: 'turn1', text: 'second from peer', source: peer.id, secret: peer.secret }, now + 2)
+    const firstPoll = hub.act('poll', { connection: live.id, secret: live.secret, turn: 'turn1' }, now + 3)
+    assert.equal(firstPoll.messages.length, 1)
+    assert.deepEqual([firstPoll.messages[0].id, firstPoll.messages[0].target, firstPoll.messages[0].turn], ['mailbox-first', live.id, 'turn1'])
+    // Retrying the original mailbox send while moved returns the same message instead of conflicting.
+    assert.equal(hub.act('send', { id: 'mailbox-first', target: mailboxId('codex', session), turn: 'session', text: 'first from mailbox' }, now + 3).id, 'mailbox-first')
+
+    hub.act('receipt', { id: 'mailbox-first', connection: live.id, secret: live.secret, nonce: firstPoll.messages[0].nonce, status: 'acknowledged', reply: `ACK ${firstPoll.messages[0].nonce} done first` }, now + 4)
+    // Sending from the board to the live poller now succeeds instead of failing with PAIR_BUSY.
+    const third = hub.act('send', { id: 'live-third', target: live.id, turn: 'turn1', text: 'third from board' }, now + 5)
+    assert.equal(third.status, 'queued')
+
+    const secondPoll = hub.act('poll', { connection: live.id, secret: live.secret, turn: 'turn1' }, now + 6)
+    assert.deepEqual(secondPoll.messages.map(one => one.id), ['live-second'])
+    hub.act('receipt', { id: 'live-second', connection: live.id, secret: live.secret, nonce: secondPoll.messages[0].nonce, status: 'acknowledged', reply: `ACK ${secondPoll.messages[0].nonce} done second` }, now + 7)
+
+    const thirdPoll = hub.act('poll', { connection: live.id, secret: live.secret, turn: 'turn1' }, now + 8)
+    assert.deepEqual(thirdPoll.messages.map(one => one.id), ['live-third'])
+    hub.act('receipt', { id: 'live-third', connection: live.id, secret: live.secret, nonce: thirdPoll.messages[0].nonce, status: 'acknowledged', reply: `ACK ${thirdPoll.messages[0].nonce} done third` }, now + 9)
+
+    // None of the messages replay on a later mailbox turn.
+    assert.equal(hub.act('mailbox-turn', { agent: 'codex', session, surface: 'CLI' }, now + 10).message, null)
+  } finally { hub?.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('a hook that stops waiting after a running board claimed its message hands the claim back, so the message is not held', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mailbox-release-'))
   let hub, server
@@ -329,6 +388,36 @@ test('a Cursor mailbox card says the message waits for the chat to open, not for
   assert.ok(!page.text().includes(EN.serveNextTurnHint))
 })
 
+test('a DeepSeek mailbox card is a plain Send with no Copy, and an answer handed over says so without naming a next turn (#725)', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now(), seed = enrollMailbox({ messages: [] }, 'deepseek', 'mailbox-session', 'dsh', now, 43_200_000), mailbox = seed.mailboxes[0]
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=deepseek resume=mailbox-session state=waiting updated=${new Date(now).toISOString()} -->\n### Mailbox page\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  const model = messages => serveModel(view, [], EN, new Set(), false, { connections: [], mailboxes: [mailbox], messages }, false, group)
+  assert.equal(model([]).asks[0].send, 'mailbox')
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model([]), async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  const labels = page.cards().flatMap(card => page.buttons(card)).map(one => one.textContent)
+  assert.ok(labels.includes(EN.serveSend('DeepSeek')), labels.join(' | '))
+  assert.ok(!labels.includes(EN.serveQueueNextTurn('DeepSeek')))
+  assert.ok(!labels.includes(EN.pgCopyAnswer))
+  page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
+  assert.ok(!page.text().includes(EN.serveNextTurnHint))
+  page.inputs(page.cards()[0])[0].value = 'Blue'
+  page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.serveSend('DeepSeek')).click()
+  await page.flush()
+  assert.equal(page.requests[0].body.type, 'message')
+  assert.equal(page.requests[0].body.text, 'Blue')
+  // Handed over the moment the session was idle, not at a turn it starts later.
+  const queued = queueMessage(seed, { id: 'deepseek-accepted', target: mailbox.id, turn: 'session', text: 'Blue' }, 'board', mailbox, now).state
+  const taken = takeMailboxMessage(queued, 'deepseek', 'mailbox-session', 'dsh', now + 1, 43_200_000, 'abcdef')
+  const accepted = acceptMailboxMessage(taken.state, 'deepseek', 'mailbox-session', 'deepseek-accepted', 'abcdef', now + 2)
+  await page.redraw(model(accepted.messages))
+  assert.ok(!page.text().includes(EN.messagesHandedNextTurn))
+  assert.ok(page.text().includes(EN.messagesHandedNow), page.text())
+})
+
 test('the same text queued again after the first was handed over is a new message', async () => {
   const { servePage } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
@@ -389,6 +478,80 @@ test('the page offers Queue for next turn beside Copy, prefers a live poller, an
   assert.equal(received.asks[0].receipt.isMailbox, true)
   await page.redraw(received)
   assert.ok(page.text().includes(EN.messagesHandedNextTurn))
+})
+
+// A question the agent moved on from, kept on the Older shelf under the session that asked it (synthetic data).
+const keptQuestion = (id = 'synthetic-q1', text = 'Continue?') => ({ key: `retained::${id}`, questionId: id, ageStage: 'older', project: 'Synthetic', task: 'Mailbox page', context: '', text, note: '', when: '1h', at: 1, kind: 'open', options: [], command: null, link: null, where: 'other', agent: 'codex', session: 'abcdef01', nativeSession: 'mailbox-session', sessionId: null, resumeVia: null, reopen: null, hideKey: id, canHide: true, step: null, target: null })
+const keptModel = (messages, now, kept = [keptQuestion()]) => {
+  // A kept question from the view carries no live-session marker (#192): its receipt is found by the question id alone.
+  const view = { ...buildView(parseProgress('## Synthetic\n'), [], null, now, 0, {}, EN), older: kept.map(({ nativeSession: _live, ...item }) => item) }
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  return serveModel(view, [], EN, new Set(), false, { connections: [], mailboxes: enrollMailbox({ messages: [] }, 'codex', 'mailbox-session', 'CLI', now, 43_200_000).mailboxes, messages }, false, group)
+}
+// The board's message for one question, handed over at the session's next turn start.
+const answeredBy = (state, id, question, now) => {
+  const queued = queueMessage(state, { id, target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: id, answers: question }, 'board', state.mailboxes[0], now).state
+  return acceptMailboxMessage(mailboxTake(queued, now).state, 'codex', 'mailbox-session', id, 'abcdef', now + 2)
+}
+
+test('an answered question kept on the Older shelf still says its answer was handed to the session at its turn start', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now()
+  const accepted = answeredBy(mailboxSeed(now), 'kept-accepted', 'synthetic-q1', now)
+  const model = keptModel(accepted.messages, now)
+  assert.equal(model.older[0].receipt.status, 'accepted')
+  assert.equal(model.older[0].receipt.isMailbox, true)
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  assert.ok(page.text().includes(EN.messagesHandedNextTurn))
+})
+
+test('a question kept on the Older shelf shows no delivery line when nothing was sent to its session from the board', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const model = keptModel([], Date.now())
+  assert.equal(model.older[0].receipt, undefined)
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  assert.ok(!page.text().includes(EN.messagesHandedNextTurn))
+})
+
+test('of two answered questions from one session, each kept card shows the receipt of its own answer and no card borrows the other\'s', () => {
+  const now = Date.now()
+  const first = answeredBy(mailboxSeed(now), 'answer-one', 'synthetic-q1', now)
+  const second = answeredBy({ messages: first.messages, mailboxes: mailboxSeed(now).mailboxes }, 'answer-two', 'synthetic-q2', now + 10)
+  const model = keptModel(second.messages, now, [keptQuestion('synthetic-q1', 'First?'), keptQuestion('synthetic-q2', 'Second?')])
+  assert.deepEqual(model.older.map(one => one.receipt.id), ['answer-one', 'answer-two'])
+  // A message to the same session that names neither question is no receipt for either.
+  const unlinked = keptModel(second.messages.map(one => ({ ...one, answers: undefined })), now, [keptQuestion('synthetic-q1', 'First?')])
+  assert.equal(unlinked.older[0].receipt, undefined)
+})
+
+test('only the board marks which question a message answers: an agent\'s send loses the mark, so it is no receipt for a kept question', () => {
+  const now = Date.now()
+  const input = { id: 'agent-said', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'agent-said', answers: 'synthetic-q1' }
+  const seed = mailboxSeed(now)
+  const fromAgent = queueMessage(seed, input, 'gemini:synthetic-sender', seed.mailboxes[0], now).message
+  assert.equal(fromAgent.answers, undefined)
+  assert.equal(queueMessage(seed, input, 'board', seed.mailboxes[0], now).message.answers, 'synthetic-q1')
+  const accepted = acceptMailboxMessage(mailboxTake(queueMessage(seed, input, 'gemini:synthetic-sender', seed.mailboxes[0], now).state, now).state, 'codex', 'mailbox-session', 'agent-said', 'abcdef', now + 2)
+  assert.equal(keptModel(accepted.messages, now).older[0].receipt, undefined)
+})
+
+test('a page cannot name the question its message answers: the board takes it from the card it drew', async () => {
+  const { serveAction } = await import('../hooks/serve.ts')
+  const { fingerprint } = await import('../hooks/board.ts')
+  const mailbox = mailboxSeed().mailboxes[0]
+  const ask = keptQuestion('synthetic-q1', 'Continue?')
+  const items = [{ type: 'ask', key: 'ask::synthetic', ask }]
+  const request = { key: 'ask::synthetic', type: 'message', text: 'Yes', session: mailbox.session, asked: ask.text, fp: fingerprint(items[0], items), connection: mailbox.id, turn: mailbox.turn, answers: 'forged-question' }
+  const action = serveAction(items, request, EN, false, deliveryTargets([], [mailbox]), true)
+  assert.equal(action.type, 'message')
+  assert.equal(action.answers, 'synthetic-q1')
+  const unnamed = { ...ask, questionId: undefined }
+  const plain = [{ type: 'ask', key: 'ask::synthetic', ask: unnamed }]
+  const bare = serveAction(plain, { ...request, fp: fingerprint(plain[0], plain) }, EN, false, deliveryTargets([], [mailbox]), true)
+  assert.equal(bare.type, 'message')
+  assert.equal(bare.answers, undefined)
 })
 
 test('a private folder check accepts only a protected folder with one full-control entry for the current user', () => {
@@ -1055,7 +1218,10 @@ fs.readFileSync = (file, ...args) => {
 }
 const spawn = childProcess.spawn
 childProcess.spawn = (command, args, ...rest) => {
-  if (Array.isArray(args) && args.includes('--serve-child')) fs.appendFileSync(${JSON.stringify(spawns)}, 'spawn\\n')
+  // On Windows the server starts through PowerShell's Start-Process, so its arguments are inside -EncodedCommand.
+  const encoded = Array.isArray(args) ? args.indexOf('-EncodedCommand') : -1
+  const isServeChild = Array.isArray(args) && (args.includes('--serve-child') || (encoded >= 0 && Buffer.from(String(args[encoded + 1]), 'base64').toString('utf16le').includes('--serve-child')))
+  if (isServeChild) fs.appendFileSync(${JSON.stringify(spawns)}, 'spawn\\n')
   return spawn(command, args, ...rest)
 }
 require('node:module').syncBuiltinESMExports()
@@ -1137,7 +1303,10 @@ const childProcess = require('node:child_process')
 ${fault}
 const spawn = childProcess.spawn
 childProcess.spawn = (command, args, ...rest) => {
-  if (Array.isArray(args) && args.includes('--serve-child')) fs.appendFileSync(${JSON.stringify(spawns)}, 'spawn\\n')
+  // On Windows the server starts through PowerShell's Start-Process, so its arguments are inside -EncodedCommand.
+  const encoded = Array.isArray(args) ? args.indexOf('-EncodedCommand') : -1
+  const isServeChild = Array.isArray(args) && (args.includes('--serve-child') || (encoded >= 0 && Buffer.from(String(args[encoded + 1]), 'base64').toString('utf16le').includes('--serve-child')))
+  if (isServeChild) fs.appendFileSync(${JSON.stringify(spawns)}, 'spawn\\n')
   return spawn(command, args, ...rest)
 }
 require('node:module').syncBuiltinESMExports()
@@ -1478,7 +1647,7 @@ test('an uncertain message stops blocking after the age limit and is never hande
   assert.throws(() => messageReceipt(expired, connection, { id: input.id, nonce: 'abcdef', status: 'acknowledged', reply: 'ACK abcdef' }, now), /MESSAGE_EXPIRED/)
   assert.equal(disconnectMessages(expired, connection.id, now + 1).messages[0].error, 'EXPIRED')
   const accepted = { messages: [{ ...claimed.messages[0], status: 'accepted' }] }
-  assert.equal(pruneMessages(accepted, now).messages[0].error, 'EXPIRED')
+  assert.equal(pruneMessages(accepted, now).messages[0].status, 'accepted')
 })
 
 test('the person can dismiss an uncertain message and the next message is handed out', () => {
@@ -1665,14 +1834,23 @@ test('a closed Codex session keeps resume-Send when the hub is on', () => fixtur
 
 test('a second registration for the same agent and session leaves the card on Copy', async () => {
   for (const extra of [[], ['--allow-resume']]) await fixture(async (board, dir) => {
+    // A refused board read has a note instead of a model. Preserve that response
+    // before the card assertion hides it behind an undefined-model error (#835).
+    const readBoard = async phase => {
+      const response = await board.call('/api/board')
+      const diagnostic = JSON.stringify({ phase, allowResume: extra.length > 0, status: response.status, note: response.body?.note ?? null })
+      assert.equal(response.status, 200, diagnostic)
+      assert.ok(response.body?.model, diagnostic)
+      return response.body
+    }
     writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=11111111-2222-4333-8444-555555555555 dir=${encodeURIComponent(dir)} state=ended updated=${new Date().toISOString()} -->\n### Contested\n- [?] Continue, OK?\n<!-- /auto session=abcdef01 -->\n`)
-    assert.equal((await board.call('/api/board')).body.model.stopped[0].send, extra.length ? 'send' : 'open')
+    assert.equal((await readBoard('initial ended card')).model.stopped[0].send, extra.length ? 'send' : 'open')
     const registration = { agent: 'codex', session: '11111111-2222-4333-8444-555555555555', turn: 'turn1', surface: 'Synthetic' }
     const a = (await board.call('/api/messages/register', registration)).body
     await board.call('/api/messages/send', { ...input, target: a.id })
     const b = (await board.call('/api/messages/register', registration)).body
     assert.equal(b.contested, true)
-    assert.ok((await board.call('/api/board')).body.messaging.connections.every(one => one.contested))
+    assert.ok((await readBoard('contested registrations')).messaging.connections.every(one => one.contested))
     for (const one of [a, b]) {
       assert.deepEqual((await board.call('/api/messages/poll', { connection: one.id, secret: one.secret, turn: one.turn, receive: true })).body.messages, [])
       assert.equal((await board.call('/api/messages/send', { ...input, id: 'new-' + one.id, target: one.id })).body.error, 'CONTESTED')
@@ -1682,7 +1860,7 @@ test('a second registration for the same agent and session leaves the card on Co
       const isAsk = step.startsWith('- [?]')
       const state = isAsk ? 'waiting' : 'ended'
       writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=11111111-2222-4333-8444-555555555555 dir=${encodeURIComponent(dir)} state=${state} updated=${new Date().toISOString()} -->\n### Contested\n${step}\n<!-- /auto session=abcdef01 -->\n`)
-      const model = (await board.call('/api/board')).body.model
+      const model = (await readBoard(isAsk ? 'waiting ask after disconnect' : 'ended card after disconnect')).model
       const card = isAsk ? model.asks.find(one => one.session !== '') : model.stopped[0]
       assert.equal(card.send, 'open')
       assert.equal(card.delivery, undefined)
@@ -2493,7 +2671,7 @@ test('an adapter that fails before it begins delivery reports rejected, and afte
   }
 }))
 
-test('an adapter timeout becomes explicit uncertainty and never triggers another delivery', async () => fixture(async board => {
+test('an adapter that gives up after acceptance reads as delivered and never triggers another delivery', async () => fixture(async board => {
   let deliveries = 0
   const receiver = await boardClient(board.address).attach({
     agent: 'fixture', session: 'timeout-session', turn: 'turn1', surface: 'Synthetic timeout adapter', verify: async () => true,
@@ -2506,7 +2684,7 @@ test('an adapter timeout becomes explicit uncertainty and never triggers another
       const one = (await board.call('/api/board')).body.messaging.messages[0]
       return one?.status === 'uncertain' && one.error === 'ACK_TIMEOUT' && one
     })
-    assert.equal(uncertain.error, 'ACK_TIMEOUT')
+    assert.equal(uncertain.hasAccepted, true)
     await board.call('/api/messages/send', sent)
     await pause(2200)
     assert.equal(deliveries, 1)
@@ -2793,6 +2971,31 @@ test('an existing card sends only to its exact live receiver and preserves mark 
   assert.equal(hidden.asks.length, 0); assert.equal(hidden.hidden.length, 1)
   assert.equal((await board.call('/api/act', { key: hidden.hidden[0].key, type: 'unhide' })).status, 200)
   assert.equal((await board.call('/api/board')).body.model.asks.length, 1)
+}))
+
+test('after an answer reaches its session, that question leaves Needs you when the agent rewrites its report, and the next question starts with no receipt (#725)', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const block = steps => `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Answer fixture\n${steps}\n<!-- /auto session=abcdef01 -->\n`
+  writeFileSync(join(dir, 'progress.md'), block('- [?] Blue or green?'))
+  const connected = (await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: 'Synthetic Codex CLI' })).body
+  const ask = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  assert.ok(ask.questionId)
+  assert.equal((await board.call('/api/act', { key: ask.key, type: 'message', id: 'AB-TEST-003', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn })).status, 200)
+  const credentials = { connection: connected.id, secret: connected.secret }
+  const claimed = (await board.call('/api/messages/poll', { ...credentials, turn: 'turn1' })).body.messages[0]
+  await board.call('/api/messages/receipt', { ...credentials, id: 'AB-TEST-003', nonce: claimed.nonce, status: 'acknowledged', reply: 'ACK ' + claimed.nonce })
+  // The agent words the step its own way once it has the answer, and asks the next question.
+  writeFileSync(join(dir, 'progress.md'), block('- [x] Blue or green? Blue\n- [?] Apple or banana?'))
+  const model = (await board.call('/api/board')).body.model
+  assert.deepEqual(model.asks.map(one => one.text), ['Apple or banana?'])
+  assert.equal(model.asks[0].receipt, undefined)
+  // A question gone from a report whose answer its session turned down stays where the person sees it.
+  const apple = model.asks[0]
+  assert.equal((await board.call('/api/act', { key: apple.key, type: 'message', id: 'AB-TEST-004', text: 'Apple', session: apple.session, asked: apple.text, fp: apple.fp, connection: apple.delivery.id, turn: apple.delivery.turn })).status, 200)
+  const second = (await board.call('/api/messages/poll', { ...credentials, turn: 'turn1' })).body.messages[0]
+  await board.call('/api/messages/receipt', { ...credentials, id: 'AB-TEST-004', nonce: second.nonce, status: 'rejected' })
+  writeFileSync(join(dir, 'progress.md'), block('- [?] Pear or plum?'))
+  assert.deepEqual((await board.call('/api/board')).body.model.asks.map(one => one.text).sort(), ['Apple or banana?', 'Pear or plum?'])
 }))
 
 test('a card cannot infer a receiving connection from a matching title, prefix or another agent', async () => fixture(async (board, dir) => {
@@ -4040,5 +4243,234 @@ test('the board runs the Codex receiver for a Codex session it knows and ends it
     delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG
     await board?.close().catch(() => undefined)
     await removeKilledPageFolder(dir)
+
+test('1139 both ACK parsers accept the same complete lines', async () => {
+  const { ackLine: clientAck } = await import('../scripts/message-client.mjs')
+  const { ackLine: claudeAck } = await import('../hooks/receiver.ts')
+  assert.equal(typeof clientAck, 'function')
+  const cases = [
+    ['Done.\nACK abcdef', 'ACK abcdef'],
+    ['Done.\r\nACK abcdef received', 'ACK abcdef received'],
+    ['ACK abcdef', 'ACK abcdef'],
+    [`ACK abcdef ${'x'.repeat(300)}`, 'ACK abcdef'],
+    [' ACK abcdef', null],
+    ['ACK abcdefx', null],
+    ['ACK abcdef\rmore', null],
+    ['ACK 123456', null],
+  ]
+  for (const [answer, expected] of cases) {
+    assert.equal(clientAck(answer, 'abcdef'), expected, answer)
+    assert.equal(claudeAck(answer, 'abcdef'), expected, answer)
+  }
+})
+
+test('1139 accepted Codex and Antigravity deliveries keep listening after their ACK deadline', async t => {
+  for (const host of ['codex', 'antigravity']) await t.test(host, async t => {
+    const session = '11111111-2222-4333-8444-555555555555'
+    const receipts = [], errors = []
+    let listener, receiver, polled = false
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+      const action = new URL(url).pathname.split('/').at(-1)
+      const body = JSON.parse(options.body)
+      if (action === 'receipt') receipts.push({ status: body.status, reply: body.reply, error: body.error })
+      const messages = action === 'poll' && !polled ? (polled = true, [{ id: 'late-ack', nonce: 'abcdef', turn: 'session', prompt: 'Synthetic prompt' }]) : []
+      const result = action === 'register' ? { id: 'synthetic', secret: 'synthetic', expires: Date.now() + 120000 } : action === 'poll' ? { messages, leaseMs: 120000 } : { ok: true }
+      return { ok: true, json: async () => result }
+    })
+    const listen = callback => { listener = callback; return () => { listener = null } }
+    const onError = error => errors.push(error.message)
+    const boardUrl = 'http://127.0.0.1:12345/?t=synthetic'
+    try {
+      if (host === 'codex') {
+        const transport = { listen, request: async method => method === 'thread/loaded/list' ? { data: [session] } : { turn: { id: 'actual-turn' } } }
+        receiver = await attachCodexSession({ boardUrl, transport, thread: session, state: () => ({ thread: session, status: 'idle', turn: null }), verifyOwner: () => true, onError })
+      } else {
+        const transport = { listen, write: async () => listener({ event: 'step_update', step_update: { conversation_id: session, step_type: 'user_input', state: 'DONE', step_index: 0 } }) }
+        receiver = await attachAntigravitySession({ boardUrl, transport, session, state: () => ({ session, status: 'idle', turns: 0, step: -1 }), verifyOwner: () => true, onError })
+      }
+      await new Promise(done => setImmediate(done))
+      assert.deepEqual(receipts.map(one => one.status), ['accepted'])
+      t.mock.timers.tick(60001)
+      await new Promise(done => setImmediate(done))
+      assert.deepEqual(receipts.map(one => one.status), ['accepted'])
+      if (host === 'codex') {
+        listener({ method: 'item/completed', params: { threadId: session, turnId: 'actual-turn', item: { type: 'agentMessage', text: 'Done.\nACK abcdef received' } } })
+        listener({ method: 'turn/completed', params: { threadId: session, turn: { id: 'actual-turn', status: 'completed' } } })
+      } else {
+        listener({ event: 'result', result: { conversation_id: session, num_turns: 1, status: 'SUCCESS', response: 'Done.\nACK abcdef received' } })
+      }
+      await new Promise(done => setImmediate(done))
+      assert.deepEqual(receipts, [{ status: 'accepted', reply: undefined, error: undefined }, { status: 'acknowledged', reply: 'ACK abcdef received', error: undefined }])
+      assert.deepEqual(errors, [])
+    } finally { await receiver?.close() }
+  })
+})
+
+test('1139 accepted timeout records keep their acceptance and the page does not offer Retry', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now(), connection = { ...target, session: 'session1', expires: now + 120000 }
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=session1 state=waiting updated=${new Date(now).toISOString()} -->\n### Delivery\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  const model = messages => serveModel(view, [], EN, new Set(), false, { connections: [connection], messages }, false, group)
+  const page = await pageDom(servePage(EN, 'synthetic'), model([]), async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
+  const card = page.cards().find(one => page.inputs(one).length)
+  page.inputs(card)[0].value = 'Continue'
+  page.buttons(card).find(one => one.textContent === EN.serveSend('Codex')).click()
+  await page.flush()
+  const id = page.requests[0].body.id
+  const queued = queueMessage({ messages: [] }, { id, target: connection.id, turn: connection.turn, text: 'Continue' }, 'board', connection, now).state
+  const claimed = claimMessages(queued, connection, now + 1, 'abcdef').state
+  const accepted = messageReceipt(claimed, connection, { id, nonce: 'abcdef', status: 'accepted' }, now + 2)
+  await page.redraw(model(accepted.messages))
+  assert.ok(page.text().includes(EN.messagesAccepted), page.text())
+  assert.ok(!page.cards().flatMap(one => page.buttons(one)).some(one => one.textContent === EN.serveRetry))
+  const uncertain = messageReceipt(accepted, connection, { id, nonce: 'abcdef', status: 'uncertain', error: 'ACK_TIMEOUT' }, now + 3)
+  assert.equal(uncertain.messages[0].hasAccepted, true)
+  assert.equal(parseMessageStore(JSON.stringify({ version: 2, ...uncertain }), now + 4).messages[0].hasAccepted, true)
+  await page.redraw(model(uncertain.messages))
+  assert.ok(page.text().includes(EN.messagesAcceptedUnconfirmed), page.text())
+  assert.ok(!page.text().includes(EN.messagesTimeout), page.text())
+  assert.ok(!page.cards().flatMap(one => page.buttons(one)).some(one => one.textContent === EN.serveRetry))
+  const unknown = { ...uncertain.messages[0], hasAccepted: undefined }
+  await page.redraw(model([unknown]))
+  assert.ok(page.text().includes(EN.messagesTimeout), page.text())
+  assert.ok(page.cards().flatMap(one => page.buttons(one)).some(one => one.textContent === EN.serveRetry))
+  const rejected = messageReceipt(claimed, connection, { id, nonce: 'abcdef', status: 'rejected' }, now + 3)
+  await page.redraw(model(rejected.messages))
+  assert.ok(page.cards().flatMap(one => page.buttons(one)).some(one => one.textContent === EN.serveRetry))
+})
+
+test('1139 a live accepted delivery remains acknowledgeable beyond the open-message age limit', () => {
+  const connection = { ...target, expires: 1001 + OPEN_LIMIT_MS * 2 }
+  const claimed = claimMessages(queueMessage({ messages: [] }, input, 'board', connection, 1000).state, connection, 1001, 'abcdef').state
+  const accepted = messageReceipt(claimed, connection, { id: input.id, nonce: 'abcdef', status: 'accepted' }, 1002)
+  const later = 1003 + OPEN_LIMIT_MS
+  const stillOpen = pruneMessages(accepted, later)
+  assert.equal(stillOpen.messages[0].status, 'accepted')
+  const acknowledged = messageReceipt(stillOpen, connection, { id: input.id, nonce: 'abcdef', status: 'acknowledged', reply: 'ACK abcdef' }, later)
+  assert.equal(acknowledged.messages[0].status, 'acknowledged')
+  const disconnected = disconnectMessages(accepted, connection.id, 1003)
+  assert.equal(pruneMessages(disconnected, 1004 + OPEN_LIMIT_MS).messages[0].error, 'EXPIRED')
+})
+
+test('1139 a Codex turn that ends without an ACK stops waiting', async t => {
+  const thread = '11111111-2222-4333-8444-555555555555', receipts = []
+  let listener, receiver, polled = false
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const action = new URL(url).pathname.split('/').at(-1), body = JSON.parse(options.body)
+    if (action === 'receipt') receipts.push({ status: body.status, error: body.error })
+    const messages = action === 'poll' && !polled ? (polled = true, [{ id: 'missing-ack', nonce: 'abcdef', turn: 'session', prompt: 'Synthetic prompt' }]) : []
+    return { ok: true, json: async () => action === 'register' ? { id: 'synthetic', secret: 'synthetic', expires: Date.now() + 120000 } : action === 'poll' ? { messages, leaseMs: 120000 } : { ok: true } }
+  })
+  const transport = {
+    listen: callback => { listener = callback; return () => { listener = null } },
+    request: async method => method === 'thread/loaded/list' ? { data: [thread] } : { turn: { id: 'actual-turn' } },
+  }
+  try {
+    receiver = await attachCodexSession({ boardUrl: 'http://127.0.0.1:12345/?t=synthetic', transport, thread, state: () => ({ thread, status: 'idle', turn: null }), verifyOwner: () => true })
+    await new Promise(done => setImmediate(done))
+    assert.deepEqual(receipts, [{ status: 'accepted', error: undefined }])
+    listener({ method: 'turn/completed', params: { threadId: thread, turn: { id: 'actual-turn', status: 'completed' } } })
+    await new Promise(done => setImmediate(done))
+    assert.deepEqual(receipts, [{ status: 'accepted', error: undefined }, { status: 'uncertain', error: 'ACK_REQUIRED' }])
+  } finally { await receiver?.close() }
+})
+
+test('1139 a timeout before Antigravity acceptance remains uncertain', async t => {
+  const session = '11111111-2222-4333-8444-555555555555', receipts = []
+  let receiver, polled = false
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const action = new URL(url).pathname.split('/').at(-1), body = JSON.parse(options.body)
+    if (action === 'receipt') receipts.push({ status: body.status, error: body.error })
+    const messages = action === 'poll' && !polled ? (polled = true, [{ id: 'not-accepted', nonce: 'abcdef', turn: 'session', prompt: 'Synthetic prompt' }]) : []
+    return { ok: true, json: async () => action === 'register' ? { id: 'synthetic', secret: 'synthetic', expires: Date.now() + 120000 } : action === 'poll' ? { messages, leaseMs: 120000 } : { ok: true } }
+  })
+  const transport = { listen: () => () => {}, write: async () => {} }
+  try {
+    receiver = await attachAntigravitySession({ boardUrl: 'http://127.0.0.1:12345/?t=synthetic', transport, session, state: () => ({ session, status: 'idle', turns: 0, step: -1 }), verifyOwner: () => true })
+    await new Promise(done => setImmediate(done))
+    assert.deepEqual(receipts, [])
+    t.mock.timers.tick(60001)
+    await new Promise(done => setImmediate(done))
+    assert.deepEqual(receipts, [{ status: 'uncertain', error: 'ACK_TIMEOUT' }])
+  } finally { await receiver?.close() }
+})
+
+test('1139 a Codex timeout before acceptance remains uncertain when the start later returns', async t => {
+  const thread = '11111111-2222-4333-8444-555555555555', receipts = []
+  let receiver, polled = false, releaseStart
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const action = new URL(url).pathname.split('/').at(-1), body = JSON.parse(options.body)
+    if (action === 'receipt') receipts.push({ status: body.status, error: body.error })
+    const messages = action === 'poll' && !polled ? (polled = true, [{ id: 'late-start', nonce: 'abcdef', turn: 'session', prompt: 'Synthetic prompt' }]) : []
+    return { ok: true, json: async () => action === 'register' ? { id: 'synthetic', secret: 'synthetic', expires: Date.now() + 120000 } : action === 'poll' ? { messages, leaseMs: 120000 } : { ok: true } }
+  })
+  const start = new Promise(done => { releaseStart = done })
+  const transport = { listen: () => () => {}, request: async method => method === 'thread/loaded/list' ? { data: [thread] } : start }
+  try {
+    receiver = await attachCodexSession({ boardUrl: 'http://127.0.0.1:12345/?t=synthetic', transport, thread, state: () => ({ thread, status: 'idle', turn: null }), verifyOwner: () => true })
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(60001)
+    releaseStart({ turn: { id: 'actual-turn' } })
+    await new Promise(done => setImmediate(done))
+    assert.deepEqual(receipts, [{ status: 'accepted', error: undefined }, { status: 'uncertain', error: 'ACK_TIMEOUT' }])
+  } finally { releaseStart({}); await receiver?.close() }
+})
+
+test('1139 the proxy keeps a late ACK after transport acceptance', { timeout: 15000 }, async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'late-ack-proxy-'))
+  const thread = '11111111-2222-4333-8444-555555555555', marker = join(dir, 'ack-now'), fake = join(dir, 'proxy.mjs')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { existsSync } from 'node:fs'
+import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(thread)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+  if (value.method === 'turn/steer') {
+    emit({ id: value.id, result: { turnId: 'turn1' } })
+    const timer = setInterval(() => {
+      if (!existsSync(${JSON.stringify(marker)})) return
+      clearInterval(timer)
+      emit({ method: 'item/completed', params: { threadId: ${JSON.stringify(thread)}, turnId: 'turn1', item: { type: 'agentMessage', text: 'Done.\\nACK abcdef received' } } })
+    }, 10)
+  }
+} })
+`)
+  const receipts = [], errors = []
+  let receiver, polled = false, accepted, acknowledged
+  const hasAccepted = new Promise(done => { accepted = done })
+  const hasAcknowledged = new Promise(done => { acknowledged = done })
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const action = new URL(url).pathname.split('/').at(-1), body = JSON.parse(options.body)
+    if (action === 'receipt') {
+      receipts.push({ status: body.status, reply: body.reply, error: body.error })
+      if (body.status === 'accepted') accepted()
+      if (body.status === 'acknowledged') acknowledged()
+    }
+    const messages = action === 'poll' && !polled ? (polled = true, [{ id: 'late-proxy', nonce: 'abcdef', turn: 'turn1', prompt: 'Synthetic prompt' }]) : []
+    return { ok: true, json: async () => action === 'register' ? { id: 'synthetic', secret: 'synthetic', expires: Date.now() + 120000 } : action === 'poll' ? { messages, leaseMs: 120000 } : { ok: true } }
+  })
+  try {
+    receiver = await connectCodexProxy({ boardUrl: 'http://127.0.0.1:12345/?t=synthetic', executable: fake, thread, turn: 'turn1', onError: error => errors.push(error.message) })
+    await hasAccepted
+    await new Promise(done => setImmediate(done))
+    t.mock.timers.tick(60001)
+    await new Promise(done => setImmediate(done))
+    assert.deepEqual(receipts.map(one => one.status), ['accepted'])
+    writeFileSync(marker, '')
+    await hasAcknowledged
+    assert.deepEqual(receipts, [{ status: 'accepted', reply: undefined, error: undefined }, { status: 'acknowledged', reply: 'ACK abcdef received', error: undefined }])
+    assert.deepEqual(errors, [])
+  } finally {
+    await receiver?.close()
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })

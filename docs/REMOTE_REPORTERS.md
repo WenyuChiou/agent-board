@@ -116,15 +116,14 @@ Rules:
 - The line after the start marker is the ### title. No other # headings, code
   fences or HTML comments inside the block.
 - Marks: [x] done, [~] doing, [ ] to do, [?] needs me, [>] waiting on someone else,
-  [!] blocked, [-] cancelled. End a yes/no question in a [?] step with "OK?".
+  [!] blocked, [-] cancelled. When you need the user, mark the step [?] and write one line they can answer: end a yes/no question with "OK?", write a choice as "A or B?", put a command in backticks, start a wait with "waiting for".
 - state=waiting when you hand back to me with steps left, working when you start
   again, done when every step is [x] or [-], ended if you stop for good with steps
   left. updated= is the time of this update in UTC, ending in Z.
 ```
 
-On the board's page, **Connect a web chat** copies this prompt. After that, press
-Copy on the assistant's block and press Ctrl+V (Cmd+V on a Mac) on the board's page, or press
-**Import from clipboard**. Text that is not a block stays in the page. Without
+Copy the assistant's block and paste it on the board's page with Ctrl+V (Cmd+V on a Mac).
+Text that is not a block stays in the page. Without
 the page, save and merge it:
 
 Save each block the assistant prints, from `## <project>` to the end marker,

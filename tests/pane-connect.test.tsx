@@ -278,7 +278,7 @@ for (const isAuto of [true, false]) test(`OpenCode connect uses its effective co
   if (isAuto) await settledSetup($, world)
   if (!isAuto) await $.command.run({ ...TIDY, args: 'connect' })
   const plugin = `${root}/plugin/agent-board.js`
-  const command = `${root}/commands/board.md`
+  const command = `${root}/commands/agent-board.md`
   const skill = '/home/me/.agents/skills/agent-board/SKILL.md'
   expect(world.files.get(plugin)).toContain('export const AgentBoard')
   expect(world.files.get(command)).toContain('!`node "/home/me/.claude/agent-board.mjs"`')
@@ -312,10 +312,10 @@ test('OpenCode explicit config root wins over XDG when using the Windows reporte
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
   expect(world.files.get(`${root}/plugin/agent-board.js`)).toContain('export const AgentBoard')
-  expect(world.files.get(`${root}/commands/board.md`)).toContain('--json')
-  expect(world.files.get(`${root}/commands/board.md`)).not.toContain('--serve')
+  expect(world.files.get(`${root}/commands/agent-board.md`)).toContain('--json')
+  expect(world.files.get(`${root}/commands/agent-board.md`)).not.toContain('--serve')
   expect(world.files.has('/xdg/opencode/plugin/agent-board.js')).toBe(false)
-  expect(world.files.has('/xdg/opencode/commands/board.md')).toBe(false)
+  expect(world.files.has('/xdg/opencode/commands/agent-board.md')).toBe(false)
   expect(world.files.get(`${root}/opencode.json`)).toBe('{}')
 })
 
@@ -331,7 +331,7 @@ test('OpenCode config override wins over XDG and a stale default directory never
   expect((await $.command.run({ ...TIDY, args: 'connect status' })).text).toBe(`${EN.setupStatusTitle}\n${EN.connectNone}`)
   for (const root of ['/home/me/.config/opencode', '/tmp/xdg/opencode', '/tmp/missing']) {
     expect(world.files.has(`${root}/plugin/agent-board.js`)).toBe(false)
-    expect(world.files.has(`${root}/commands/board.md`)).toBe(false)
+    expect(world.files.has(`${root}/commands/agent-board.md`)).toBe(false)
   }
   expect(world.files.has('/home/me/.agents/skills/agent-board/SKILL.md')).toBe(false)
 })
@@ -361,16 +361,16 @@ test('connecting writes the board script and each installed agent’s board comm
   await settledSetup($, world)
   const board = world.files.get('/home/me/.claude/agent-board.mjs') ?? ''
   expect(board.split('\n')[0]).toBe('globalThis.AGENT_BOARD = {"hookVersion":1,"path":"/home/me/.claude/progress.md","lang":"zh-TW"}')
-  const geminiPrompt = /^prompt = (.*)$/m.exec(world.files.get('/home/me/.gemini/commands/board.toml') ?? '')?.[1] ?? 'null'
+  const geminiPrompt = /^prompt = (.*)$/m.exec(world.files.get('/home/me/.gemini/commands/agent-board.toml') ?? '')?.[1] ?? 'null'
   expect(JSON.parse(geminiPrompt)).toContain('!{node "/home/me/.claude/agent-board.mjs"}')
   expect(world.files.get('/home/me/.agents/skills/agent-board/SKILL.md')).toContain('node "/home/me/.claude/agent-board.mjs"')
-  expect(world.files.has('/home/me/.config/opencode/commands/board.md')).toBe(false)
+  expect(world.files.has('/home/me/.config/opencode/commands/agent-board.md')).toBe(false)
 
   const again = await $.command.run({ ...TIDY, args: 'connect' })
   expect(again.text).toContain('Codex 打 $agent-board')
   expect(again.text).toContain('node "/home/me/.claude/agent-board.mjs" --watch')
   await $.command.run({ ...TIDY, args: 'connect remove' })
-  for (const file of ['/home/me/.claude/agent-board.mjs', '/home/me/.gemini/commands/board.toml', '/home/me/.agents/skills/agent-board/SKILL.md']) {
+  for (const file of ['/home/me/.claude/agent-board.mjs', '/home/me/.gemini/commands/agent-board.toml', '/home/me/.agents/skills/agent-board/SKILL.md']) {
     expect(world.files.has(file)).toBe(false)
   }
 })
@@ -578,42 +578,42 @@ test('an agent whose config cannot be written is named, and the agents after it 
 })
 
 test('a board command that cannot be written is named as one, and the agent is still hooked in', { options: { autoConnect: true } }, async ($, on) => {
-  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}\n']]), mtime: 1, hasTasks: true, ran: [], unwritable: new Set(['/home/me/.gemini/commands/board.toml']) }
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}\n']]), mtime: 1, hasTasks: true, ran: [], unwritable: new Set(['/home/me/.gemini/commands/agent-board.toml']) }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
   expect(JSON.parse(world.files.get('/home/me/.gemini/settings.json') ?? '{}').hooks.AfterAgent).toHaveLength(1)
   const connected = await $.command.run({ ...TIDY, args: 'connect' })
-  expect(connected.text).toContain('看板指令檔寫不進去：/home/me/.gemini/commands/board.toml')
+  expect(connected.text).toContain('看板指令檔寫不進去：/home/me/.gemini/commands/agent-board.toml')
   expect(connected.text).not.toContain('的設定檔寫不進去')
 })
 
-test('a hand-run connect names each approval it needs once', { options: { autoConnect: false } }, async ($, on) => {
+// One test per language: the three languages ran in one test and shared its 5,000 ms limit, so a slow runner
+// that took 7,287 ms for the whole loop (#798) cannot do so now; each language is a third of that work.
+for (const s of Object.values(STRINGS)) test(`a hand-run connect names each approval it needs once, in ${s.lang}`, { options: { autoConnect: false } }, async ($, on) => {
   const world: World = { files: new Map([['/home/me/.codex/config.toml', ''], ['/home/me/.hermes/config.yaml', '']]), mtime: 1, hasTasks: true }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
-  for (const s of Object.values(STRINGS)) {
-    await $.command.run({ ...TIDY, args: `lang ${s.lang}` })
-    for (let run = 0; run < 2; run++) {
-      const connected = await $.command.run({ ...TIDY, args: 'connect' })
-      expect(connected.text.split(s.setupCodexTrust)).toHaveLength(2)
-      expect(connected.text.split(s.setupHermesTrust)).toHaveLength(2)
-      expect(connected.text.split('--accept-hooks')).toHaveLength(2)
-      expect(connected.text).toContain(s.setupCodexTrust)
-      expect(connected.text).toContain(s.setupHermesTrust)
-      expect(connected.text).not.toContain(s.connectCodexTrust)
-      expect(connected.text).not.toContain(s.connectHermesTrust)
-    }
-    const status = await $.command.run({ ...TIDY, args: 'connect status' })
-    expect(status.text.split(s.setupCodexTrust)).toHaveLength(2)
-    expect(status.text.split(s.setupHermesTrust)).toHaveLength(2)
+  await $.command.run({ ...TIDY, args: `lang ${s.lang}` })
+  for (let run = 0; run < 2; run++) {
+    const connected = await $.command.run({ ...TIDY, args: 'connect' })
+    expect(connected.text.split(s.setupCodexTrust)).toHaveLength(2)
+    expect(connected.text.split(s.setupHermesTrust)).toHaveLength(2)
+    expect(connected.text.split('--accept-hooks')).toHaveLength(2)
+    expect(connected.text).toContain(s.setupCodexTrust)
+    expect(connected.text).toContain(s.setupHermesTrust)
+    expect(connected.text).not.toContain(s.connectCodexTrust)
+    expect(connected.text).not.toContain(s.connectHermesTrust)
   }
+  const status = await $.command.run({ ...TIDY, args: 'connect status' })
+  expect(status.text.split(s.setupCodexTrust)).toHaveLength(2)
+  expect(status.text.split(s.setupHermesTrust)).toHaveLength(2)
 })
 
 for (const [kind, file] of [
   ['board script', '/home/me/.claude/agent-board.mjs'],
   ['reporter', '/home/me/.claude/progress-report.sh'],
-  ['board command', '/home/me/.gemini/commands/board.toml'],
+  ['board command', '/home/me/.gemini/commands/agent-board.toml'],
   ['configuration', '/home/me/.cursor/hooks.json'],
   ['legacy hook', '/home/me/.grok/hooks/progress-pane.json'],
 ] as const) test(`a ${kind} file that cannot be read is named as unreadable, not as unwritable`, { options: { autoConnect: false } }, async ($, on) => {
@@ -659,7 +659,7 @@ test('a Cursor configuration with invalid JSON is named as invalid, not as a rea
 
 test('a problem stored by an English session is shown in the language of the session that asks', { options: { autoConnect: false } }, async ($, on) => {
   const config = '/home/me/.codex/hooks.json'
-  const command = '/home/me/.gemini/commands/board.toml'
+  const command = '/home/me/.gemini/commands/agent-board.toml'
   const shared: Record<string, unknown> = { inboxDone: {}, lang: 'en' }
   const world: World = {
     files: new Map([['/home/me/.codex/config.toml', ''], ['/home/me/.gemini/settings.json', '{}'], [command, 'personal command']]),
@@ -1266,7 +1266,7 @@ test('connect status in a separate data folder keeps the result of a manual conn
 })
 
 test('automatic connection and removal preserve personal commands and skills, including edits after installation', { options: { autoConnect: true } }, async ($, on) => {
-  const files = ['/home/me/.gemini/commands/board.toml', '/home/me/.config/opencode/commands/board.md', '/home/me/.agents/skills/agent-board/SKILL.md', '/home/me/.hermes/skills/agent-board/SKILL.md', '/home/me/.gemini/config/skills/agent-board/SKILL.md']
+  const files = ['/home/me/.gemini/commands/agent-board.toml', '/home/me/.config/opencode/commands/agent-board.md', '/home/me/.agents/skills/agent-board/SKILL.md', '/home/me/.hermes/skills/agent-board/SKILL.md', '/home/me/.gemini/config/skills/agent-board/SKILL.md']
   const world: World = {
     files: new Map([
       ...files.map(file => [file, `personal content in ${file}\r\n`] as [string, string]),
@@ -1302,7 +1302,7 @@ test('automatic connection and removal preserve personal commands and skills, in
 })
 
 test('an empty personal file and an unowned legacy plugin are preserved, and a foreign reporter is never hooked in', { options: { autoConnect: true } }, async ($, on) => {
-  const empty = '/home/me/.gemini/commands/board.toml'
+  const empty = '/home/me/.gemini/commands/agent-board.toml'
   const old = '/home/me/.config/opencode/plugin/progress-pane.js'
   const reporter = '/home/me/.claude/progress-report.sh'
   const world: World = { files: new Map([[empty, ''], [old, '// personal plugin\n'], [reporter, '#!/bin/sh\necho personal\n']]), mtime: 1, hasTasks: true }
@@ -1323,7 +1323,7 @@ test('an empty personal file and an unowned legacy plugin are preserved, and a f
 
 test('a collision is announced even when all installed reporting hooks were already connected', { options: { autoConnect: true } }, async ($, on) => {
   const settings = '/home/me/.gemini/settings.json'
-  const command = '/home/me/.gemini/commands/board.toml'
+  const command = '/home/me/.gemini/commands/agent-board.toml'
   const hook = agentHooks(CONNECT).find(one => one.agent === 'gemini' && one.label !== '')
   const world: World = { files: new Map([[settings, String(hook?.edit('', false))], [command, 'personal']]), mtime: 1, hasTasks: true }
   engineBeneath(on, world)
@@ -1367,14 +1367,14 @@ test('board commands and skills written before --serve (0.17.1 to 0.18.1), with 
   })
   expect(notices).toEqual([])
   for (const file of BOARD_FILES) expect(world.files.get(file)).toBe(written.get(file))
-  expect(written.get('/home/me/.gemini/commands/board.toml')).toContain('--json')
-  expect(written.get('/home/me/.gemini/commands/board.toml')).not.toContain('--serve')
+  expect(written.get('/home/me/.gemini/commands/agent-board.toml')).toContain('--json')
+  expect(written.get('/home/me/.gemini/commands/agent-board.toml')).not.toContain('--serve')
 })
 
 test('a released file edited by hand, with no record, is still preserved byte for byte and named', { options: { autoConnect: true } }, async ($, on) => {
   const board = `${releasedBoard(RELEASE_0_20_5.board)}// my change\n`
   const gemini = `${here(RELEASE_0_18_1.gemini[0] ?? '')}# my change\n`
-  const command = '/home/me/.gemini/commands/board.toml'
+  const command = '/home/me/.gemini/commands/agent-board.toml'
   const { world, written, notices } = await fromEarlierRelease($, on, world => {
     world.files.set(BOARD_SCRIPT_FILE, board)
     world.files.set(command, gemini)
@@ -1395,7 +1395,7 @@ test('a released file edited by hand, with no record, is still preserved byte fo
 })
 
 test('failed and falsely successful deletes report exact leftovers, retain the board, and permit a later retry', { options: { autoConnect: true } }, async ($, on) => {
-  const command = '/home/me/.gemini/commands/board.toml'
+  const command = '/home/me/.gemini/commands/agent-board.toml'
   const skill = '/home/me/.agents/skills/agent-board/SKILL.md'
   const board = '/home/me/.claude/agent-board.mjs'
   const sibling = '/home/me/.agents/skills/agent-board/my-notes.txt'
@@ -1532,7 +1532,7 @@ test('a failed primary plugin deletion is not counted as disconnected and other 
 
 test('recorded generated bytes permit an upgrade while unreadable or subsequently edited artifacts stay intact', { options: { autoConnect: true } }, async ($, on) => {
   const board = '/home/me/.claude/agent-board.mjs'
-  const command = '/home/me/.gemini/commands/board.toml'
+  const command = '/home/me/.gemini/commands/agent-board.toml'
   const old = '# earlier generated version\n'
   const world: World = { files: new Map([[board, old], [command, 'personal file']]), mtime: 1, hasTasks: true, unreadable: new Set([command]), store: { inboxDone: {}, [`generated:${board}`]: old } }
   engineBeneath(on, world)
@@ -1546,7 +1546,7 @@ test('recorded generated bytes permit an upgrade while unreadable or subsequentl
 })
 
 test('Windows removal uses native verified deletion and preserves a retained file', { options: { autoConnect: true } }, async ($, on) => {
-  const command = '/home/me/.gemini/commands/board.toml'
+  const command = '/home/me/.gemini/commands/agent-board.toml'
   const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}']]), mtime: 1, hasTasks: true, ran: [], retainedOnRemove: new Set([command]), env: { HOME: '/home/me', LANG: 'en', OS: 'Windows_NT' } }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
@@ -1562,14 +1562,14 @@ test('an exact pre-ownership board and command from a release upgrade in the lan
   const board = '/home/me/.claude/agent-board.mjs'
   // 0.20.5's bundle, written in English by a session before the plugin kept a record.
   const old = `globalThis.AGENT_BOARD = ${JSON.stringify({ path: FILE, lang: 'en' })}\n${RELEASE_0_20_5.board}`
-  const command = String(agentHooks({ ...CONNECT, s: STRINGS.en }).find(hook => hook.file === '/home/me/.gemini/commands/board.toml')?.edit('', false))
-  const world: World = { files: new Map([[board, old], ['/home/me/.gemini/commands/board.toml', command]]), mtime: 1, hasTasks: true }
+  const command = String(agentHooks({ ...CONNECT, s: STRINGS.en }).find(hook => hook.file === '/home/me/.gemini/commands/agent-board.toml')?.edit('', false))
+  const world: World = { files: new Map([[board, old], ['/home/me/.gemini/commands/agent-board.toml', command]]), mtime: 1, hasTasks: true }
   engineBeneath(on, world)
   const seen = outside(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
   await settledSetup($, world)
   expect(world.files.get(board)).toBe(boardScript(FILE, 'en'))
-  expect(world.files.get('/home/me/.gemini/commands/board.toml')).toBe(command)
+  expect(world.files.get('/home/me/.gemini/commands/agent-board.toml')).toBe(command)
   expect(seen.notified.some(text => text.includes('已保留'))).toBe(false)
   const personal = `${old}\n// my addition\n`
   world.files.set(board, personal)
@@ -1581,6 +1581,26 @@ test('an exact pre-ownership board and command from a release upgrade in the lan
   expect(world.files.get(board)).toBe(personal)
 })
 
+test('the pane connect takes an unchanged 0.24.2 /board command away, writes /agent-board, and leaves an edited /board alone', { options: { autoConnect: true } }, async ($, on) => {
+  const board = '/home/me/.claude/agent-board.mjs'
+  const now = '/home/me/.gemini/commands/agent-board.toml'
+  const old = '/home/me/.gemini/commands/board.toml'
+  // 0.24.2 wrote these same bytes under the old name.
+  const command = String(agentHooks({ ...CONNECT, s: STRINGS['zh-TW'] }).find(hook => hook.file === now)?.edit('', false))
+  const world: World = { files: new Map([['/home/me/.gemini/settings.json', '{}\n'], [old, command]]), mtime: 1, hasTasks: true }
+  engineBeneath(on, world)
+  outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
+  await settledSetup($, world)
+  expect(world.files.get(now)).toBe(command)
+  expect(world.files.has(old)).toBe(false)
+  expect(world.files.has(board)).toBe(true)
+  const personal = `${command}# my addition\n`
+  world.files.set(old, personal)
+  await $.command.run({ ...TIDY, args: 'connect' })
+  expect(world.files.get(old)).toBe(personal)
+  expect(world.files.get(now)).toBe(command)
+})
 
 for (const failure of ['read', 'write'] as const) {
   test(`immutable question capture ${failure} failure marks same-batch end sources processed with the question pending`, { options: { autoConnect: true } }, async ($, on) => {

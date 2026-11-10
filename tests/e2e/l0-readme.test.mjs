@@ -22,23 +22,18 @@ const SECTIONS = {
   'zh-CN': ['快速开始', '常用命令', '支持的 agent', '你会看到什么', '怎么运作', '问题排查', '文档', '许可证'],
 }
 
-// Each cover's six scenes: the two lines of every caption as COVER_WORDS in docs/preview/render.ts
-// has them (none holds a character the SVG escapes, so they are written as they appear), the chip
-// that marks scene 5 as a preview (soon.send there), and the words scene 5 shows in the board's own
-// language: the page's Send button, its sending line and the reply receipt (serveSend,
-// serveSending and messagesAcknowledged in the strings tables).
+// The six scenes, the page's Settings button, and the Send and receipt labels in each locale.
 const SCENES = {
-  en: [[['Every agent,', 'one board.'], ['Watch steps', 'tick off live.'], ['Questions jump', 'to the top.'], ['Answer with', 'one key.'], ['Message agents', 'from the board.'], ['One command,', 'every agent.']], 'Coming in 0.24.2', ['Send to Codex', 'Sending to Codex; waiting for its reply…', '✓ Replied']],
-  'zh-TW': [[['每個 agent', '同一塊看板'], ['每一步', '即時打勾'], ['等你回答的', '排在最上面'], ['按一個鍵', '就能回答'], ['從看板直接', '傳訊息給 agent'], ['一行指令', '接上每個 agent']], '0.24.2 起提供', ['傳給 Codex', '正在傳給 Codex，等它回完…', '✓ 已回覆']],
-  'zh-CN': [[['每个 agent', '同一块看板'], ['每一步', '实时打勾'], ['等你回答的', '排在最上面'], ['按一个键', '就能回答'], ['从看板直接', '发消息给 agent'], ['一行命令', '接上每个 agent']], '0.24.2 起提供', ['发给 Codex', '正在发给 Codex，等它回完…', '✓ 已回复']],
+  en: [[['Every agent,', 'one board.'], ['Watch steps', 'tick off live.'], ['Questions jump', 'to the top.'], ['Make the board', 'yours.'], ['Send from', 'the board.'], ['One command', 'to start.']], 'Settings', ['Send to Codex', 'Sending to Codex; waiting for its reply…', '✓ Replied']],
+  'zh-TW': [[['每個 agent', '同一塊看板'], ['每一步', '即時打勾'], ['等你回答的', '排在最上面'], ['用你習慣的', '看板設定'], ['直接從看板', '傳送訊息'], ['一行指令', '開始使用']], '設定', ['傳給 Codex', '正在傳給 Codex，等它回完…', '✓ 已回覆']],
+  'zh-CN': [[['每个 agent', '同一块看板'], ['每一步', '实时打勾'], ['等你回答的', '排在最上面'], ['用你习惯的', '看板设置'], ['直接从看板', '发送消息'], ['一行命令', '开始使用']], '设置', ['发给 Codex', '正在发给 Codex，等它回完…', '✓ 已回复']],
 }
-// The command the last scene shows, which reduced motion keeps on screen: the program on one line
-// and its arguments on the next, as a terminal this narrow would wrap it.
-const COMMAND = ['npx @wenyuchiou/agent-board', 'setup --apply']
+// The first-run command stays on screen with reduced motion.
+const COMMAND = 'npx @wenyuchiou/agent-board'
 // The ten integrations the header names, in the support matrix's order (#407).
 const INTEGRATIONS = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode', 'Cursor', 'Grok Build', 'Muse Code', 'Hermes Agent', 'OpenClaw', 'DeepSeek Harness']
 // Each agent's board command, and the agents whose command is not run live yet.
-const BOARD_COMMANDS = { 'Claude Code': '/progress', Codex: '$agent-board', OpenCode: '/board' }
+const BOARD_COMMANDS = { 'Claude Code': '/progress', Codex: '$agent-board' }
 const boardCommand = agent => BOARD_COMMANDS[agent] ?? '/agent-board'
 // A live run is recorded in docs/parity-matrix.json with its date, host version and surface (#466).
 // An agent leaves this list in the same change that records its run.
@@ -46,15 +41,15 @@ const NOT_RUN_LIVE = ['Antigravity', 'Cursor', 'Grok Build', 'Muse Code', 'DeepS
 // The agents whose only check is the synthetic home: their row in the table of checks has no host version or record.
 const SYNTHETIC_ONLY = ['Cursor', 'Muse Code']
 // The setup and board commands still offered after #865 made the page the default.
-const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/board', '/agent-board', 'node "$HOME/.agent-board/agent-board.mjs"', 'node "$HOME/.agent-board/agent-board.mjs" --serve', 'node "$HOME/.agent-board/agent-board.mjs" --json', 'node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']
+const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/agent-board', 'node "$HOME/.agent-board/agent-board.mjs"', 'node "$HOME/.agent-board/agent-board.mjs" --lan', 'node "$HOME/.agent-board/agent-board.mjs" --json', 'node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']
 // The code each surface row holds: terminal or desktop, browser, agent read, one agent's setup.
-const SURFACE_COMMANDS = [['node "$HOME/.agent-board/agent-board.mjs"'], ['node "$HOME/.agent-board/agent-board.mjs" --serve'], ['node "$HOME/.agent-board/agent-board.mjs" --json'], ['node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']]
+const SURFACE_COMMANDS = [['node "$HOME/.agent-board/agent-board.mjs"'], ['node "$HOME/.agent-board/agent-board.mjs" --lan'], ['node "$HOME/.agent-board/agent-board.mjs" --json'], ['node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']]
 // Per language: the strip's label, the two command subsections, the caveat on a command
 // not run live yet, the board's page heading, and how each surface row starts.
 const WORDS = {
-  en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', checked: 'How each agent was checked', old: ['Untested'], notLive: '(checked in a synthetic home, not run live yet)', page: "The board's page", surfaces: ['A terminal or desktop', 'A browser', 'An agent reading the board', "Check one agent's setup"] },
-  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', checked: '各個 agent 是怎麼驗證的', old: ['未驗證', '還沒驗證'], notLive: '（在測試環境檢查過，還沒實機執行）', page: '看板的網頁', surfaces: ['終端機或桌面', '瀏覽器', 'Agent 讀取看板', '檢查某個 agent 的設定'] },
-  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', checked: '每个 agent 是怎么验证的', old: ['未验证', '还没验证'], notLive: '（在测试环境检查过，还没实机运行）', page: '看板的网页', surfaces: ['终端或桌面', '浏览器', 'Agent 读取看板', '检查某个 agent 的设置'] },
+  en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', checked: 'How each agent was checked', old: ['Untested'], notLive: '(checked in a synthetic home, not run live yet)', page: "The board's page", surfaces: ['A terminal or desktop', 'A phone on the same Wi-Fi', 'An agent reading the board', "Check one agent's setup"] },
+  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', checked: '各個 agent 是怎麼驗證的', old: ['未驗證', '還沒驗證'], notLive: '（在測試環境檢查過，還沒實機執行）', page: '看板的網頁', surfaces: ['終端機或桌面', '同一個 Wi-Fi 的手機', 'Agent 讀取看板', '檢查某個 agent 的設定'] },
+  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', checked: '每个 agent 是怎么验证的', old: ['未验证', '还没验证'], notLive: '（在测试环境检查过，还没实机运行）', page: '看板的网页', surfaces: ['终端或桌面', '同一个 Wi-Fi 的手机', 'Agent 读取看板', '检查某个 agent 的设置'] },
 }
 // A piece of text as a pattern that matches it and nothing else.
 const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -93,7 +88,7 @@ const groupsAround = (svg, at) => {
 }
 
 describe('L0 discover and install from the README', () => {
-  test('L0 README: each README opens with its title, tagline, badges and cover, and its Quick start holds the install commands, --serve --lan with its QR code and an I-use start for each main agent', () => {
+  test('L0 README: each README opens with its title, tagline, badges and cover, and its Quick start holds the install commands, --lan with its QR code and an I-use start for each main agent', () => {
     const agents = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode']
     const taglines = { en: 'See what every AI coding agent is doing, and answer the one that needs you, from one board.', 'zh-TW': '每個 AI coding agent 在做什麼，一個看板看完；哪個在等你，就在那裡回它。', 'zh-CN': '每个 AI coding agent 在做什么，一个看板看完；哪个在等你，就在那里回它。' }
     const labels = { en: agent => `I use ${agent}:`, 'zh-TW': agent => `我用 ${agent}：`, 'zh-CN': agent => `我用 ${agent}：` }
@@ -114,9 +109,9 @@ describe('L0 discover and install from the README', () => {
       const first = section(text, SECTIONS[lang][0])
       assert.ok(first, `${name}: Quick start exists`)
       const node = first.indexOf('Node.js 22')
-      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board setup\r?\nnpx @wenyuchiou\/agent-board setup --apply\r?\nnpx @wenyuchiou\/agent-board)\r?\n```/.exec(first)
-      assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then all three ordered install commands`)
-      const lanLines = first.split('\n').filter(line => line.includes('npx @wenyuchiou/agent-board --serve --lan'))
+      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board setup\r?\nnpx @wenyuchiou\/agent-board)\r?\n```/.exec(first)
+      assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then setup and the board command in order`)
+      const lanLines = first.split('\n').filter(line => line.includes('npx @wenyuchiou/agent-board --lan'))
       assert.equal(lanLines.length, 1, `${name}: one phone route in Quick start`)
       const lan = lanLines[0]
       assert.ok(first.indexOf(lan) > install.index + install[0].length, `${name}: LAN follows the install commands`)
@@ -241,7 +236,7 @@ describe('L0 discover and install from the README', () => {
       }
       assert.match(answer, checks[lang].answerQueue, `${name}: Send queues the answer and session confirmation means receipt`)
       for (const line of [answer, tell]) assert.match(line, checks[lang].copyPress, `${name}: Copy requires a button press`)
-      assert.ok(answer.includes('[`--messages-dir`](docs/MESSAGING.md#enable-locally)'), `${name}: Send links to the local messaging setup`)
+      assert.ok(answer.includes('](docs/MESSAGING.md#local-storage)'), `${name}: Send links to the default local message hub`)
       assert.match(page, checks[lang].lan, `${name}: the LAN page has no messaging`)
       const image = [...text.matchAll(/<img\b[^>]*>/g)].find(([tag]) => tag.includes(`docs/images/cover-${lang}-dark.svg`))?.[0] ?? ''
       const alt = (/\balt="([^"]*)"/.exec(image)?.[1] ?? '').replaceAll('&quot;', '"')
@@ -355,7 +350,7 @@ describe('L0 discover and install from the README', () => {
 
       // The six captions, in order. Each is one <text> of two <tspan> lines inside an animated group;
       // reduced motion keeps only the last scene's group.
-      const [scenes, soon, words] = SCENES[lang]
+      const [scenes, settings, words] = SCENES[lang]
       let at = -1
       scenes.forEach(([first, second], k) => {
         // String match: the journey safety check reads a call on a built RegExp as a process call.
@@ -366,20 +361,19 @@ describe('L0 discover and install from the README', () => {
         at = found.index
         assert.equal(found[1].split(/\s+/).includes('last'), k === scenes.length - 1, `${file}: only scene ${scenes.length}'s caption stays for reduced motion`)
       })
-      // Scene 5 carries its preview mark, and the mark leaves with the scene: a group that
-      // reduced motion keeps must not hold it.
-      const chips = [...svg.matchAll(new RegExp(`>${literal(soon)}</text>`, 'g'))]
-      assert.ok(chips.length > 0, `${file}: scene 5 says "${soon}"`)
-      for (const chip of chips) assert.ok(!groupsAround(svg, chip.index).some(classes => classes.includes('last')), `${file}: "${soon}" is not in the group that reduced motion keeps`)
+      // The Settings excerpt uses the page's localized label.
+      const footer = /<g [^>]*data-preview="page-footer"[^>]*>([\s\S]*?)<\/g>\s*<g class="a /.exec(svg)
+      assert.ok(footer, `${file}: the page footer is shown in an animated scene`)
+      assert.match(footer[1], new RegExp(`>${literal(settings)}</text>`), `${file}: the footer shows its localized Settings control`)
+      assert.doesNotMatch(svg, /Coming in 0\.24\.2|0\.24\.2 起提供|copied to the clipboard|已複製|已复制|progress\.html/i, `${file}: the cover does not teach the retired demo`)
       // A receipt is text without textLength: the terminal board's own rows carry it, so a row
       // that reads the same as a receipt cannot stand in for it.
       const receipt = word => `<text(?![^>]*textLength)[^>]*>${literal(word)}</text>`
       for (const word of words) assert.match(svg, new RegExp(receipt(word)), `${file}: scene 5 shows "${word}"`)
       // The end frame shows the setup command: reduced motion keeps every animated group round it.
-      const [program, args] = COMMAND
-      const commands = [...svg.matchAll(new RegExp(`${literal(program)}</tspan>\\s*<tspan\\b[^>]*>${literal(args)}</tspan>\\s*</text>`, 'g'))]
+      const commands = [...svg.matchAll(new RegExp(`${literal(COMMAND)}</text>`, 'g'))]
       const isKept = groups => groups.some(classes => classes.includes('last')) && groups.every(classes => !classes.includes('a') || classes.includes('last'))
-      assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND.join(' ')}"`)
+      assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND}"`)
     }
   })
 
@@ -556,7 +550,7 @@ describe('L0 discover and install from the README', () => {
       // One row per surface, in order, each beside its own board script command, so two swapped
       // commands fail.
       const surfaces = rows(anywhere, '|').slice(2)
-      assert.equal(surfaces.length, SURFACE_COMMANDS.length, `${name}: terminal or desktop, browser, agent read and one agent's setup`)
+      assert.equal(surfaces.length, SURFACE_COMMANDS.length, `${name}: terminal or desktop, phone, agent read and one agent's setup`)
       surfaces.forEach(([where, command], i) => {
         assert.ok(where.startsWith(words.surfaces[i]), `${name}: surface row ${i + 1} is "${words.surfaces[i]}"`)
         assert.deepEqual(codeSpans(command), SURFACE_COMMANDS[i], `${name}: "${words.surfaces[i]}" runs ${SURFACE_COMMANDS[i][0]}`)

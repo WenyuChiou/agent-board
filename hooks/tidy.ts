@@ -32,9 +32,10 @@ export const previewTidy = (text: string, selector: TidySelector, now: number, s
     const inside = tasks.filter(({ task }) => task.line > span.start && task.line < span.end)
     if (inside.length !== 1) continue
     const first = inside[0]
-    if (first === undefined || first.task.auto === null) continue
+    if (first === undefined) continue
+    const auto = first.task.auto
+    if (auto === null) continue
     const { task, project } = first
-    const auto = task.auto
     if (auto.state !== 'ended' && auto.state !== 'done' && !(auto.updated > 0 && now - auto.updated > staleMs)) continue
     if (selector.kind === 'agent' && auto.agent !== selector.value) continue
     if (selector.kind === 'older' && !(auto.updated > 0 && auto.updated < now - selector.days * 86400000)) continue

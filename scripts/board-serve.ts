@@ -25,6 +25,11 @@ import { createMessaging } from './board-messaging'
 import { startCodexReceiver } from './codex-receiver.mjs'
 import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
+import { isBarStyle } from '../hooks/progress-bar'
+import type { BarStyle } from '../hooks/progress-bar'
+import { isSettingsLang } from '../hooks/board-settings'
+import type { SettingsLang } from '../hooks/board-settings'
+import type { SettingsAgentControl } from './settings-agents'
 
 export type ServeOptions = {
   allowResume?: boolean
@@ -49,6 +54,14 @@ export type ServeOptions = {
   // The Clean up button: the sweep `--tidy` runs (agent blocks by age; hand-kept tasks only once the
   // move is on, #464), the line to show.
   clean: () => string
+  // The progress bar's style (#1085): read from the board's settings file, and written there by
+  // Settings so the pane and the terminal board show the same pick.
+  barStyle?: () => BarStyle
+  setBarStyle?: (style: BarStyle) => boolean
+  language?: () => SettingsLang
+  setLanguage?: (lang: SettingsLang) => boolean
+  isLangOverridden?: () => boolean
+  agents?: SettingsAgentControl
   sweep: () => void
   sweepMs: number
   paste: (text: string, reviewToken?: string) => { isAdded: boolean; note: string; review?: { token: string; current: string; incoming: string } }
@@ -431,10 +444,23 @@ export const startServer = (o: ServeOptions): void => {
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
-      res.end(servePage(o.s, nonce, isLan, o.idleMs))
+      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false))
       return
     }
     if (req.method === 'GET') {
+      if (url.pathname === '/api/agents' && o.agents !== undefined) {
+        try {
+          if (url.searchParams.has('agent') || url.searchParams.has('action')) {
+            if (isLan) return json(res, 403, {})
+            const result = await o.agents.preview(url.searchParams.get('agent'), url.searchParams.get('action'))
+            return json(res, result.status, result)
+          }
+          const rows = await o.agents.rows()
+          return json(res, 200, { rows: isLan ? rows.map(row => ({ agent: row.agent, name: row.name, state: row.state, button: null })) : rows })
+        } catch (error) {
+          return json(res, 409, { note: o.failure(error, isLan) ?? o.s.settingsAgentsReadFailed })
+        }
+      }
       if (url.pathname === '/api/board') {
         // An older page stops asking: it shows one line that the board moved to the newer page (#265).
         if (isReplaced) return json(res, 200, { moved: true })
@@ -445,7 +471,7 @@ export const startServer = (o: ServeOptions): void => {
           const view = o.view()
           const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, now }
+          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.
           const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
@@ -502,6 +528,12 @@ export const startServer = (o: ServeOptions): void => {
     // A press that met a file the board could not read or write is answered with why; any other
     // error stays a bare server error.
     try {
+      if (url.pathname === '/api/agents/setup' || url.pathname === '/api/agents/remove') {
+        if (isLan) return json(res, 403, {})
+        if (o.agents === undefined) return json(res, 400, { note: o.s.settingsAgentInvalid })
+        const result = await o.agents.change(body.agent, url.pathname.endsWith('/setup') ? 'setup' : 'remove')
+        return json(res, result.status, result)
+      }
       if (url.pathname === '/api/act') {
         const state = isLan ? undefined : messaging.snapshot(Date.now())
         // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
@@ -510,7 +542,7 @@ export const startServer = (o: ServeOptions): void => {
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})
           try {
-            const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text }, Date.now())
+            const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text, ...(action.answers === undefined ? {} : { answers: action.answers }) }, Date.now())
             const notes = { queued: o.s.messagesQueued, uncertain: o.s.messagesUncertain, accepted: o.s.messagesAccepted, acknowledged: o.s.messagesAcknowledged, rejected: o.s.messagesRejected }
             const note = 'status' in receipt ? notes[receipt.status] : o.s.messagesFailed
             return json(res, 200, { note, receipt })
@@ -535,6 +567,18 @@ export const startServer = (o: ServeOptions): void => {
         if (o.bulkTidy === undefined) return json(res, 400, { note: o.s.pressFailed })
         const result = o.bulkTidy(body as unknown as Parameters<Exclude<typeof o.bulkTidy, undefined>>[0])
         return json(res, result.ok ? 200 : 409, result)
+      }
+      if (url.pathname === '/api/style') {
+        const style = body.style
+        if (!isBarStyle(style) || o.setBarStyle === undefined) return json(res, 400, { note: o.s.pressFailed })
+        return o.setBarStyle(style) ? json(res, 200, { style }) : json(res, 409, { note: o.s.barStyleUnreadable })
+      }
+      if (url.pathname === '/api/language') {
+        const lang = body.lang
+        if (!isSettingsLang(lang) || o.setLanguage === undefined) return json(res, 400, { note: o.s.pressFailed })
+        if (!o.setLanguage(lang)) return json(res, 409, { note: o.s.barStyleUnreadable })
+        const isOverridden = o.isLangOverridden?.() ?? false
+        return json(res, 200, { lang, isOverridden, note: isOverridden ? o.s.settingsLanguageOverridden : o.s.settingsLanguageChanged })
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()

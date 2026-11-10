@@ -34,16 +34,16 @@ const usage = [
   `agent-board ${v}: a local board for coding agents.
 
 Set up, once per computer:
-  agent-board setup            preview what setup would change; writes nothing
+  agent-board setup            preview setup; in a terminal, confirm once to apply
   agent-board setup --apply    make those changes
   setup options: --agent <name>[,<name>] or all, --home <folder>, --data-dir <folder>
 
 The board:
   agent-board                  open the terminal board over SSH or without a display; open the page otherwise
   agent-board stop             stop the board's page
-  agent-board --json           read the board as JSON for an agent
+  agent-board --json           read the board as JSON for an agent (--days N for finished)
 
-All options: agent-board --help all (--watch, --serve, --print, --tidy, ...)
+All options: agent-board --help all (--watch, --print, --tidy, ...)
 
 The board runs the board script that setup installed (~/.agent-board/agent-board.mjs, or the
 Claude Code plugin's, beside its progress.md). Other options are passed to it unchanged.
@@ -52,16 +52,16 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：給程式 agent 用的本機看板。
 
 設定（每台電腦一次）：
-  agent-board setup            先看設定會改什麼，不寫入任何東西
+  agent-board setup            預覽設定；在終端機確認一次即可套用
   agent-board setup --apply    套用這些變更
   setup 選項：--agent <名稱>[,<名稱>] 或 all、--home <資料夾>、--data-dir <資料夾>
 
 看板：
   agent-board                  SSH 或無顯示器的終端機開終端看板，其他情況開網頁
   agent-board stop             停止看板網頁
-  agent-board --json           供 agent 以 JSON 讀取看板
+  agent-board --json           供 agent 以 JSON 讀取看板（--days N 包含已完成工作）
 
-所有選項：agent-board --help all（--watch、--serve、--print、--tidy...）
+所有選項：agent-board --help all（--watch、--print、--tidy...）
 
 看板執行的是 setup 安裝的看板程式（~/.agent-board/agent-board.mjs，或 Claude Code
 外掛放在 progress.md 旁的那份）。其他選項原樣交給它。
@@ -70,16 +70,16 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：给编程 agent 用的本机看板。
 
 设置（每台电脑一次）：
-  agent-board setup            先看设置会改什么，不写入任何东西
+  agent-board setup            预览设置；在终端确认一次即可应用
   agent-board setup --apply    应用这些更改
   setup 选项：--agent <名称>[,<名称>] 或 all、--home <文件夹>、--data-dir <文件夹>
 
 看板：
   agent-board                  SSH 或无显示器的终端打开终端看板，其他情况打开网页
   agent-board stop             停止看板网页
-  agent-board --json           供 agent 以 JSON 读取看板
+  agent-board --json           供 agent 以 JSON 读取看板（--days N 包含已完成工作）
 
-所有选项：agent-board --help all（--watch、--serve、--print、--tidy...）
+所有选项：agent-board --help all（--watch、--print、--tidy...）
 
 看板运行的是 setup 安装的看板程序（~/.agent-board/agent-board.mjs，或 Claude Code
 插件放在 progress.md 旁的那份）。其他选项原样交给它。
@@ -90,7 +90,7 @@ const usageAll = [
   `agent-board ${v}: a local board for coding agents.
 
 Set up, once per computer:
-  agent-board setup            preview what setup would change; writes nothing
+  agent-board setup            preview setup; in a terminal, confirm once to apply
   agent-board setup --apply    make those changes
   setup options: --agent <name>[,<name>] or all, --home <folder>, --data-dir <folder>
 
@@ -98,10 +98,10 @@ The board:
   agent-board                  open the board where you are
   agent-board stop             stop the board's page
   agent-board --print          print the board as text
-  agent-board --json           read the board as JSON for an agent
+  agent-board --json           read the board as JSON for an agent (--days N [--project name])
   agent-board --status         one line for a status bar: needs you and working
   agent-board --watch          the board in this terminal, with keys
-  agent-board --serve          the board's page in your browser
+  agent-board --serve          old; the same as no option: the board's page in your browser
   agent-board --tidy           archive eligible completed tasks
   agent-board --no-open        start the server without opening a browser
   agent-board --lan            open the board to devices on your local network
@@ -117,7 +117,7 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：給程式 agent 用的本機看板。
 
 設定（每台電腦一次）：
-  agent-board setup            先看設定會改什麼，不寫入任何東西
+  agent-board setup            預覽設定；在終端機確認一次即可套用
   agent-board setup --apply    套用這些變更
   setup 選項：--agent <名稱>[,<名稱>] 或 all、--home <資料夾>、--data-dir <資料夾>
 
@@ -125,10 +125,10 @@ Without installing: npx ${name} <the same options>`,
   agent-board                  在所在位置打開看板
   agent-board stop             停止看板網頁
   agent-board --print          印出純文字看板
-  agent-board --json           供 agent 以 JSON 讀取看板
+  agent-board --json           供 agent 以 JSON 讀取看板（--days N [--project 名稱]）
   agent-board --status         狀態列的一行摘要：等你與進行中項目
   agent-board --watch          在這個終端機開看板，可用按鍵操作
-  agent-board --serve          在瀏覽器開看板網頁
+  agent-board --serve          舊用法，同不加選項：在瀏覽器開看板網頁
   agent-board --tidy           封存符合條件的已完成工作
   agent-board --no-open        啟動伺服器但不打開瀏覽器
   agent-board --lan            開放區域網路連線
@@ -144,7 +144,7 @@ Without installing: npx ${name} <the same options>`,
   `agent-board ${v}：给编程 agent 用的本机看板。
 
 设置（每台电脑一次）：
-  agent-board setup            先看设置会改什么，不写入任何东西
+  agent-board setup            预览设置；在终端确认一次即可应用
   agent-board setup --apply    应用这些更改
   setup 选项：--agent <名称>[,<名称>] 或 all、--home <文件夹>、--data-dir <文件夹>
 
@@ -152,10 +152,10 @@ Without installing: npx ${name} <the same options>`,
   agent-board                  在所在位置打开看板
   agent-board stop             停止看板网页
   agent-board --print          打印纯文本看板
-  agent-board --json           供 agent 以 JSON 读取看板
+  agent-board --json           供 agent 以 JSON 读取看板（--days N [--project 名称]）
   agent-board --status         状态栏的一行摘要：等你与进行中项目
   agent-board --watch          在这个终端打开看板，可用按键操作
-  agent-board --serve          在浏览器打开看板网页
+  agent-board --serve          旧用法，同不加选项：在浏览器打开看板网页
   agent-board --tidy           归档符合条件的已完成工作
   agent-board --no-open        启动服务器但不打开浏览器
   agent-board --lan            开放局域网连接
@@ -176,8 +176,9 @@ const isWin = process.platform === 'win32'
 // --chat output may be pasted into a chat app, so it shows the home folder as ~, as the board's own --chat does.
 const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(home.toLowerCase()) : path.startsWith(home)) ? `~${path.slice(home.length)}` : path
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
-const run = (path, passed, { isSetup = false, env = process.env } = {}) => {
-  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : 'inherit', encoding: 'utf8', env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: `npx ${name} setup` } : env, windowsHide: true })
+const run = (path, passed, { isSetup = false, isRemove = false, env = process.env } = {}) => {
+  const setupCmd = isRemove ? `npx ${name} remove` : `npx ${name} setup`
+  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : 'inherit', encoding: 'utf8', env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: setupCmd } : env, windowsHide: true })
   if (result.error) {
     console.error(message(`agent-board: could not start ${shown(path)} (${code(result.error)}).`, `agent-board：無法啟動 ${shown(path)}（${code(result.error)}）。`, `agent-board：无法启动 ${shown(path)}（${code(result.error)}）。`))
     process.exit(1)
@@ -192,7 +193,7 @@ const run = (path, passed, { isSetup = false, env = process.env } = {}) => {
   process.exit(result.status ?? 1)
 }
 const unknown = word => {
-  console.error(message(`agent-board: unknown command "${word}". The board takes options such as --serve; run agent-board --help.`, `agent-board：不認得的指令「${word}」。看板用的是 --serve 這類選項；請執行 agent-board --help。`, `agent-board：不认识的命令「${word}」。看板用的是 --serve 这类选项；请运行 agent-board --help。`))
+  console.error(message(`agent-board: unknown command "${word}". The board takes options such as --print or --json; run agent-board --help.`, `agent-board：不認得的指令「${word}」。看板用的是 --print、--json 這類選項；請執行 agent-board --help。`, `agent-board：不认识的命令「${word}」。看板用的是 --print、--json 这类选项；请运行 agent-board --help。`))
   process.exit(2)
 }
 const isHelp = args.includes('--help') || args.includes('-h')
@@ -201,9 +202,11 @@ const showHelp = () => {
   console.log(isAll ? usageAll : usage)
   process.exit(0)
 }
-if (args[0] === 'setup') {
+if (args[0] === 'setup' || args[0] === 'remove') {
   if (isHelp) showHelp()
-  run(join(pkg, 'scripts/setup-agent.mjs'), args.slice(1), { isSetup: true })
+  const isRemove = args[0] === 'remove'
+  const forwarded = isRemove ? ['--remove', ...args.slice(1)] : args.slice(1)
+  run(join(pkg, 'scripts/setup-agent.mjs'), forwarded, { isSetup: true, isRemove })
 }
 if (args.includes('--version') || args.includes('-v')) { console.log(`agent-board ${v}`); process.exit(0) }
 if (args[0] === 'help' || isHelp) showHelp()
@@ -236,7 +239,18 @@ const candidates = [
     join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'agent-board.mjs'),
   ]),
 ]
-const installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
+let installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
+// Setup owns the preview and the single consent question for both entry points.
+if (!installed && args.length === 0 && process.stdin.isTTY && process.stdout.isTTY) {
+  const setup = [join(pkg, 'scripts/setup-agent.mjs')]
+  const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name} setup` }
+  const result = spawnSync(process.execPath, setup, { stdio: ['inherit', 'inherit', 'pipe'], encoding: 'utf8', env: setupEnv, windowsHide: true })
+  process.stderr.write(result.stderr ?? (result.error ? `${result.error.message}\n` : ''))
+  if (result.status !== 0) process.exit(result.status ?? 1)
+  installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
+  // A plugin-only setup opens its board in the next Claude session; a declined preview also ends here.
+  if (!installed) process.exit(0)
+}
 if (!installed) {
   const list = candidates.map(path => `  ${shown(path)}`).join('\n')
   console.error(message(`Agent Board is not set up for this account yet. No board script at:\n${list}\nSee what setup would change: npx ${name} setup\nThen apply it:               npx ${name} setup --apply`, `這個帳號還沒設定 Agent Board。以下位置都沒有看板程式：\n${list}\n先看設定會改什麼：npx ${name} setup\n再套用：          npx ${name} setup --apply`, `这个账号还没设置 Agent Board。以下位置都没有看板程序：\n${list}\n先看设置会改什么：npx ${name} setup\n再应用：          npx ${name} setup --apply`))

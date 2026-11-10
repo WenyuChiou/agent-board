@@ -29,7 +29,7 @@ const syntheticPr = () => ({
   template, changelogText: changelogData().text, added: changelogData().added,
   paths: ['CHANGELOG.md', 'tests/x.test.mjs'], changedPaths: ['CHANGELOG.md', 'tests/x.test.mjs'], testFiles: [{ path: 'tests/x.test.mjs', text: `test('${coveringTitle}', () => {})` }],
   issueData: { state: 'open' }, issueComments: [{ body: `Claim: codex, ${branch}, until 2030-01-01 00:00 UTC` }],
-  open: [], prComments: [], labels: [], isDraft: false,
+  open: [], prComments: [{ body: 'Review: APPROVE abcdef1234567890abcdef1234567890abcdef12 by independent reviewer' }], labels: [], isDraft: false,
 })
 
 const fragmentPr = (path = 'changelog.d/42-synthetic-check.md', text = entry) => ({
@@ -39,6 +39,7 @@ const fragmentPr = (path = 'changelog.d/42-synthetic-check.md', text = entry) =>
   added: text.split('\n').map((text, i) => ({ path, line: i + 1, text })),
 })
 
+let currentFixtureHead = null
 const fixture = (t, testTitle = coveringTitle) => {
   const directory = mkdtempSync(join(tmpdir(), 'synthetic-pr-check-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
@@ -65,6 +66,7 @@ const fixture = (t, testTitle = coveringTitle) => {
   git('switch', '-c', branch)
   put('CHANGELOG.md', `# Changelog\n\n## Unreleased\n\n- A synthetic change (#42). Tests: \`${testTitle}\`.\n\n## 1.0.0\n`)
   const head = commit()
+  currentFixtureHead = head
   put('body.txt', body)
   const run = (args = [], env = {}) => runMain(['--body-file', join(directory, 'body.txt'), '--title', 'fix: synthetic check', '--base', base, '--repo-dir', directory, '--offline', '--no-bundle', ...args], env)
   return { directory, put, git, base, head, run }
@@ -440,6 +442,42 @@ test('pr-check finds an email address in added docs and the body, but not git, n
   }
 })
 
+test('pr-check accepts public GitHub attachment IDs while checking every other private value', () => {
+  const asset = '12345678-abcd-4ef0-9876-abcdef123456'
+  const session = '87654321-dcba-4fed-9876-fedcba654321'
+  const url = `https://github.com/user-attachments/assets/${asset}`
+  for (const body of [url, `![Synthetic settings](${url})`, `<img alt="Synthetic settings" src="${url}">`, `<${url}>`]) {
+    assert.deepEqual(privateData({ added: [], body }).problems, [], body)
+    assert.deepEqual(privateData({ added: [{ path: 'docs/synthetic.md', line: 1, text: body }], body: '' }).problems, [], body)
+  }
+  for (const body of [
+    `${url} ${session}`,
+    `https://example.invalid/user-attachments/assets/${asset}`,
+    `https://example.invalid/https://github.com/user-attachments/assets/${asset}`,
+    `https://github.com.example.invalid/user-attachments/assets/${asset}`,
+    `https://github.com/other/${asset}`,
+    `https://github.com/USER-ATTACHMENTS/assets/${asset}`,
+    `https://github.com/${session}/../user-attachments/assets/${asset}`,
+    `https://github.com/%2e%2e/${session}/../user-attachments/assets/${asset}`,
+    `${url}/other`, `${url}?other=1`, `${url}#other`,
+    `https://someone@github.com/user-attachments/assets/${asset}`,
+  ]) {
+    assert.ok(privateData({ added: [], body }).problems.some(item => /session id/.test(item.message)), body)
+  }
+  for (const [value, kind] of [
+    ['https://example.invalid/?token=syntheticToken01234567890123456789', 'token'],
+    ['person.synthetic@gmail.com', 'email address'],
+    ['/home/private-synthetic/file', 'home-folder path'],
+  ]) {
+    const checked = privateData({ added: [], body: `${url} ${value}` })
+    assert.equal(checked.problems.length, 1)
+    assert.ok(checked.problems[0].message.includes(kind), kind)
+  }
+  const image = privateData({ added: [], body: `![Actual settings](${url})` })
+  assert.equal(image.problems.length, 1)
+  assert.match(image.problems[0].message, /image without synthetic alt text/)
+})
+
 test('pr-check asks for the rules page when CONTRIBUTING.md, team-process.md or RELEASING.md changes', () => {
   for (const path of ['CONTRIBUTING.md', 'docs/dev/team-process.md', 'docs/RELEASING.md']) {
     const checked = rulesPage({ paths: [path, 'tests/x.test.mjs'], body: '' })
@@ -546,6 +584,52 @@ test('pr-check reports the last review verdict and distinguishes current and old
   assert.deepEqual(reviewOf('Review: REQUEST CHANGES `ABCDEF0`'), { kind: 'REQUEST CHANGES', sha: 'abcdef0' })
   assert.equal(reviewOf('Checks complete without a verdict'), null)
   assert.match(verdict([{ body: `Checks complete\nReview: REQUEST CHANGES \`${head}\`` }], head).info[0], /REQUEST CHANGES.*current head/)
+})
+
+test('approval gate: a ready pull request requires a qualifying review approval on the exact head (#1219)', () => {
+  const head = syntheticPr().head
+  const basePr = { ...syntheticPr(), prComments: [] }
+
+  // 1. Ready PR with no review fails
+  const noReview = checkPr(basePr)
+  assert.ok(noReview.problems.some(p => p.check === 'review' && p.message.includes('needs a qualifying review approval')))
+
+  // 2. Draft PR with no review passes
+  const draftNoReview = checkPr({ ...basePr, isDraft: true })
+  assert.equal(draftNoReview.problems.filter(p => p.check === 'review').length, 0)
+
+  // 3. Ready PR with APPROVE on older head fails (stale approval after new push)
+  const staleApproval = checkPr({ ...basePr, prComments: [{ body: 'Review: APPROVE 1234567890abcdef1234567890abcdef12345678 by independent reviewer' }] })
+  assert.ok(staleApproval.problems.some(p => p.check === 'review' && p.message.includes('older head')))
+
+  // 4. Ready PR with REQUEST CHANGES on current head fails
+  const changesRequested = checkPr({ ...basePr, prComments: [{ body: `Review: REQUEST CHANGES ${head} by independent reviewer` }] })
+  assert.ok(changesRequested.problems.some(p => p.check === 'review' && p.message.includes('requested changes')))
+
+  // 5. Ready PR with self-approval fails (R2 violation)
+  const selfApproved = checkPr({ ...basePr, prComments: [{ body: `Review: APPROVE ${head} by codex (cloud)` }] })
+  assert.ok(selfApproved.problems.some(p => p.check === 'review' && p.message.includes('RULES.md, R2')))
+
+  // 6. Ready PR with qualifying APPROVE on exact head passes
+  const qualifying = checkPr({ ...basePr, prComments: [{ body: `Review: APPROVE ${head} by Muse Spark, Muse's reviewer` }] })
+  assert.equal(qualifying.problems.filter(p => p.check === 'review').length, 0)
+
+  // 7. Retrospective comparison: #1187 style passes, #1189 style fails
+  const pr1187 = checkPr({
+    ...basePr,
+    body: 'Author: codex, fix/test-branch\n\n' + basePr.body,
+    head: 'dce069670aa82e61e480e5f7831bf8548c18a63f',
+    prComments: [{ body: "Review: APPROVE dce069670aa82e61e480e5f7831bf8548c18a63f by Muse Spark, Muse's reviewer" }]
+  })
+  assert.equal(pr1187.problems.filter(p => p.check === 'review').length, 0)
+
+  const pr1189 = checkPr({
+    ...basePr,
+    body: 'Author: antigravity, fix/test-branch\n\n' + basePr.body,
+    head: '0031e5df25a34216c69c7421d21c0c301d8c7c68',
+    prComments: [{ body: 'Review: APPROVE 0031e5df25a34216c69c7421d21c0c301d8c7c68 by R2 reviewer (antigravity)' }]
+  })
+  assert.ok(pr1189.problems.some(p => p.check === 'review' && p.message.includes('RULES.md, R2')))
 })
 
 test('pr-check combines issue state and draft information without mutating inputs', () => {
@@ -781,7 +865,7 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
     assert.equal(url.searchParams.get('per_page'), '100')
     const isClaim = url.pathname.endsWith('/issues/42/comments')
     const isSecond = url.searchParams.has('page')
-    const payload = isClaim ? (isSecond ? [{ body: `Claim: codex, ${branch}` }] : []) : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
+    const payload = url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${setup.head} by independent reviewer` }] : isClaim ? (isSecond ? [{ body: `Claim: codex, ${branch}` }] : []) : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
     return { ok: true, status: 200, json: async () => payload, headers: new Headers(isClaim && !isSecond ? { link: '<https://api.example.invalid/repos/synthetic/example/issues/42/comments?per_page=100&page=2>; rel="next"' } : {}) }
   }
   const args = ['--event', event, '--repo-dir', setup.directory]
@@ -824,7 +908,7 @@ test('pr-check looks up each further issue with the token and reads a repeated i
   const answer = async (url, options) => {
     calls.push({ path: url.pathname, authorization: options.headers.Authorization })
     const issue = url.pathname.match(/\/issues\/(\d+)(\/comments)?$/)
-    const payload = !issue ? [] : !issue[2] ? { state: 'open' } : []
+    const payload = url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${head} by independent reviewer` }] : !issue ? [] : !issue[2] ? { state: 'open' } : []
     return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
   }
   const listed = body.replace('Fixes #42', 'Fixes #42\nFixes #43')
@@ -864,9 +948,14 @@ const eventArgs = (setup, association, login = 'newcomer') => {
   return ['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory]
 }
 const apiEnv = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' }
-const githubAnswers = (calls, { labels = [], comments = [], pulls = [] }) => async url => {
+const githubAnswers = (calls, { labels = [], comments = [], pulls = [], reviews = [] }) => async url => {
   calls.push(url.pathname)
-  const payload = url.pathname.endsWith('/issues/42') ? { state: 'open', labels } : url.pathname.endsWith('/issues/42/comments') ? comments : url.pathname.endsWith('/pulls') ? pulls : []
+  const isPrComments = url.pathname.endsWith('/issues/17/comments')
+  const defaultReview = currentFixtureHead ? [{ body: `Review: APPROVE ${currentFixtureHead} by independent reviewer` }] : []
+  const payload = isPrComments ? (reviews.length ? reviews : defaultReview) :
+    url.pathname.endsWith('/issues/42') ? { state: 'open', labels } :
+    url.pathname.endsWith('/issues/42/comments') ? comments :
+    url.pathname.endsWith('/pulls') ? pulls : []
   return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
 }
 const pullItem = (number, association, login) => ({ number, title: 'fix: synthetic', body: `Fixes #${number}\nAuthor: agent-${number}, fix/synthetic-${number}`, created_at: `2030-01-01T00:00:${String(number).padStart(2, '0')}Z`, labels: [], author_association: association, user: { login } })

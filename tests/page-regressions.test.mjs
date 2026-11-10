@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, renameSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { registerHooks, stripTypeScriptTypes } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
-import { pageFixture as fixture } from './page-reader-fixture.mjs'
+import { pageFixture as fixture, PAGE_NOW } from './page-reader-fixture.mjs'
 import { pageDom } from './e2e/lib/surfaces.mjs'
 
 registerHooks({ resolve(specifier, context, next) {
@@ -18,6 +18,7 @@ registerHooks({ resolve(specifier, context, next) {
 const livePage = await import('../hooks/live-page.ts')
 const { liveBoardArgv, liveBoardPage, pageStatePath } = livePage
 const { keepInboxDone, isInboxFile } = await import('../hooks/inbox.ts')
+const { LEDGER_RENAMES } = await import('../hooks/ledger-move.ts')
 const { addPruned, sizeWarnings, storageDetails, prunedNote } = await import('../hooks/retention.ts')
 const { turnsFor, redact } = await import('../hooks/board.ts')
 const { countManualDone, cutBlockLines } = await import('../hooks/blocks.ts')
@@ -25,9 +26,10 @@ const { handKeptSeenAt } = await import('../hooks/view.ts')
 const { sha256 } = await import('../hooks/sha256.ts')
 const { psQuote } = await import('../hooks/connect.ts')
 const { EN } = await import('../hooks/strings-en.ts')
-const NOW = Date.parse('2026-11-04T12:00:00Z')
+const NOW = PAGE_NOW
+const TODAY = new Date(NOW).toISOString().slice(0, 10)
 const POLL_MS = 2000
-const NAME = 'codex-turn-1793793600000-1.json'
+const NAME = `codex-turn-${NOW}-1.json`
 const turn = answer => JSON.stringify({ session_id: 'synthetic-turn', cwd: '/work/demo', prompt: 'Private prompt contents /home/demo/private', last_assistant_message: answer })
 
 // A board script run here must read its fixture, not a progress file named by the caller's environment (preflight sets one).
@@ -43,7 +45,7 @@ const publisher = () => {
     return source.slice(start, stop)
   }
   const selected = [
-    'const REWRITE_TRIES = 3; const AGAIN = Symbol("again"); let measuredStore = 0; let measuredPruned = { agent: 0, mirror: 0, turns: 0 }; let pendingCache = null; let pageStateFailure = null; let pageBacklogDueAt = null; let publishedPageDone = null; let publishedPageState = null; const verifiedPageDone = new Set(); let questionWrite = 0;',
+    'const REWRITE_TRIES = 3; const AGAIN = Symbol("again"); let measuredStore = 0; let measuredPruned = { agent: 0, mirror: 0, turns: 0 }; let pendingCache = null; let pageStateFailure = null; let pageBacklogDueAt = null; let publishedPageDone = null; let publishedPageState = null; const verifiedPageDone = new Set(); let questionWrite = 0; const LEDGER_RENAMES = d.LEDGER_RENAMES;',
     extract('const POLL_MS =', '\n'),
     extract('const PRUNED_PER_SWEEP =', '\n'),
     extract('const readText =', '\n\n// Every write this session'),
@@ -58,7 +60,7 @@ const publisher = () => {
     extract('const stalePageDone =', '\n\n// When each inbox file'),
   ].join('\n')
   return new Function('d', `const { pageStatePath, pageDonePath, pageDoneHash, readPageDone, readPageState, keepInboxDone, addPruned, progressPath, inboxPath, turnsFor, wordsOf, isInboxFile, sepOf, redact, isWindows, sha256, psQuote, sizeWarnings, storageDetails, prunedNote, countManualDone, cutBlockLines, handKeptSeenAt, messageOf } = d;\n${stripTypeScriptTypes(selected)}\nreturn { syncPageState, pendingTurns, stalePageDone, isVerified: file => verifiedPageDone.has(file), warning: () => warningOf({ size: 0, projects: [] }, d.s, {}, d.at).warning }`)({
-    ...livePage, keepInboxDone, addPruned, turnsFor, redact, isInboxFile, sha256, psQuote,
+    ...livePage, LEDGER_RENAMES, keepInboxDone, addPruned, turnsFor, redact, isInboxFile, sha256, psQuote,
     sizeWarnings, storageDetails, prunedNote, countManualDone, cutBlockLines, handKeptSeenAt,
     progressPath: async engine => engine.taskPath,
     inboxPath: path => join(dirname(path), 'progress-inbox'),
@@ -100,7 +102,7 @@ const publishingEngine = (f, { beforeWrite = async () => {}, afterWrite = async 
 
 test('a delayed page-state publisher cannot erase another session’s 51 processed inbox acknowledgements', async () => {
   const f = await fixture('', { [NAME]: turn('Publish the synthetic build?') }, { version: 1, inboxDone: {}, store: 0, pruned: {} })
-  const names = [NAME, ...Array.from({ length: 50 }, (_, n) => `codex-turn-1793793600000-${n + 2}.json`)]
+  const names = [NAME, ...Array.from({ length: 50 }, (_, n) => `codex-turn-${NOW}-${n + 2}.json`)]
   const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 50 + n}`]))
   const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
   const fileOf = name => livePage.pageDonePath(f.path, sha256(receipt(name)))
@@ -144,7 +146,7 @@ test('a delayed page-state publisher cannot erase another session’s 51 process
 
 test('a warmed publisher migrates all 51 peer acknowledgements after cleared counts change and then stays idle', async () => {
   const f = await fixture()
-  const names = Array.from({ length: 51 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
+  const names = Array.from({ length: 51 }, (_, n) => `codex-turn-${NOW}-${n + 1}.json`)
   const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 51 + n}`]))
   const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
   const fileOf = name => livePage.pageDonePath(f.path, sha256(receipt(name)))
@@ -165,7 +167,7 @@ test('a warmed publisher migrates all 51 peer acknowledgements after cleared cou
     assert.equal(production.warning(), undefined)
     const previous = JSON.parse(readFileSync(pageStatePath(f.path), 'utf8'))
     writeFileSync(pageStatePath(f.path), JSON.stringify({ ...previous, inboxDone: done }))
-    pruned = { '2026-11-04': { agent: 2, mirror: 3 } }
+    pruned = { [TODAY]: { agent: 2, mirror: 3 } }
     await production.syncPageState(engine, {})
     assert.equal(names.filter(name => existsSync(fileOf(name))).length, 50)
     assert.equal(existsSync(fileOf(names[0])), false, 'the oldest receipt waits for the next poll')
@@ -184,7 +186,7 @@ test('a warmed publisher migrates all 51 peer acknowledgements after cleared cou
 })
 
 test('five publication calls inside one poll write only one batch of a 60-name backlog', async () => {
-  const names = Array.from({ length: 60 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
+  const names = Array.from({ length: 60 }, (_, n) => `codex-turn-${NOW}-${n + 1}.json`)
   const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 60 + n}`]))
   const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
   const f = await fixture('', {}, { version: 1, inboxDone: done, store: 0, pruned: {} })
@@ -207,10 +209,63 @@ test('five publication calls inside one poll write only one batch of a 60-name b
   } finally { await f.close() }
 })
 
+test('a batch of 50 receipts starts one rename process, not one per file', async () => {
+  const names = Array.from({ length: 50 }, (_, n) => `codex-turn-${NOW}-${n + 1}.json`)
+  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 50 + n}`]))
+  const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
+  const f = await fixture('', {}, { version: 1, inboxDone: done, store: 0, pruned: {} })
+  try {
+    const production = publisher()
+    const engine = publishingEngine(f)
+    const run = engine.process.run
+    const starts = []
+    engine.process.run = async (argv, options) => { starts.push(argv.includes(LEDGER_RENAMES) ? 'rename' : argv[0]); return run(argv, options) }
+    await production.syncPageState(engine, {})
+    assert.equal(production.warning(), undefined)
+    // One start for the batch; a CI runner's deeper temp folder may split it in two, never one per file.
+    const renames = starts.filter(one => one === 'rename').length
+    assert.ok(renames >= 1 && renames <= 2, `rename starts: ${renames}`)
+    assert.deepEqual(starts.filter(one => one !== 'rename' && one !== 'node'), [], 'no per-file move command starts')
+    for (const name of names) assert.equal(readFileSync(livePage.pageDonePath(f.path, sha256(receipt(name))), 'utf8'), receipt(name))
+  } finally { await f.close() }
+})
+
+test('when the batch rename process is missing or fails, every receipt is still placed by the per-file move', async () => {
+  const names = Array.from({ length: 5 }, (_, n) => `codex-turn-${NOW}-${n + 1}.json`)
+  const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 5 + n}`]))
+  const receipt = name => JSON.stringify({ version: 1, name, stamp: done[name] })
+  for (const mode of ['missing', 'fails']) {
+    const f = await fixture('', {}, { version: 1, inboxDone: done, store: 0, pruned: {} })
+    try {
+      const production = publisher()
+      const engine = publishingEngine(f)
+      const run = engine.process.run
+      let moves = 0
+      // A stand-in for the system's move command keeps the test off a slow PowerShell start.
+      engine.process.run = async (argv, options) => {
+        if (argv[0] === 'node') {
+          if (mode === 'missing') throw new Error('ENOENT: synthetic missing node')
+          return { exitCode: 1, stdout: '', stderr: 'synthetic failure' }
+        }
+        const quoted = [...argv.join(' ').matchAll(/'([^']+)'/g)].map(one => one[1])
+        const [from, to] = argv[0] === 'mv' ? argv.slice(-2) : quoted
+        if (from === undefined || to === undefined || !argv.join(' ').includes(argv[0] === 'mv' ? 'mv' : 'Move-Item')) return run(argv, options)
+        moves += 1
+        renameSync(from, to)
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
+      await production.syncPageState(engine, {})
+      assert.equal(production.warning(), undefined)
+      assert.equal(moves, 5)
+      for (const name of names) assert.equal(readFileSync(livePage.pageDonePath(f.path, sha256(receipt(name))), 'utf8'), receipt(name))
+    } finally { await f.close() }
+  }
+})
+
 test('a concurrent successor at the 2000-name cap may replace the oldest acknowledgement without a warning', async () => {
-  const names = Array.from({ length: 2000 }, (_, n) => `codex-turn-1793793600000-${n + 1}.json`)
+  const names = Array.from({ length: 2000 }, (_, n) => `codex-turn-${NOW}-${n + 1}.json`)
   const done = Object.fromEntries(names.map((name, n) => [name, `synthetic:${NOW - 2000 + n}`]))
-  const newer = 'codex-turn-1793793600000-2001.json'
+  const newer = `codex-turn-${NOW}-2001.json`
   const f = await fixture('', {}, { version: 1, inboxDone: done, store: 4096, pruned: {} })
   let writes = 0
   try {
@@ -261,7 +316,7 @@ test('a concurrent successor may acknowledge the same name with a different stam
 
 test('a concurrent successor may publish its own store size and cleared counts without a warning', async () => {
   const f = await fixture()
-  const pruned = { '2026-11-04': { agent: 5, mirror: 7 } }
+  const pruned = { [TODAY]: { agent: 5, mirror: 7 } }
   let writes = 0
   try {
     const production = publisher()
@@ -279,7 +334,7 @@ test('a concurrent successor may publish its own store size and cleared counts w
 
 test('a fresh page and JSON reader keep valid receipts beside a partial receipt and retry its validation', async () => {
   const f = await fixture('', { [NAME]: turn('Publish the synthetic build?') })
-  const otherName = 'codex-turn-1793793600000-2.json'
+  const otherName = `codex-turn-${NOW}-2.json`
   const receipt = name => JSON.stringify({ version: 1, name, stamp: `synthetic:${NOW}` })
   const valid = receipt(NAME)
   const partial = receipt(otherName)
@@ -378,7 +433,7 @@ test('a refused page-state publication still returns pending questions and repor
 })
 
 test('a silently dropped page-state snapshot keeps its warning until an unchanged poll publishes it', async () => {
-  const initial = { version: 1, inboxDone: {}, store: 4096, pruned: { '2026-11-04': { agent: 2, mirror: 3 } } }
+  const initial = { version: 1, inboxDone: {}, store: 4096, pruned: { [TODAY]: { agent: 2, mirror: 3 } } }
   const f = await fixture('', { [NAME]: turn('Publish the synthetic build?') }, initial)
   let isDropped = true
   let writes = 0
@@ -407,7 +462,7 @@ test('a silently dropped page-state snapshot keeps its warning until an unchange
 })
 
 test('a page-state snapshot torn after its write keeps its warning until a later poll publishes a valid one', async () => {
-  const initial = { version: 1, inboxDone: {}, store: 4096, pruned: { '2026-11-04': { agent: 2, mirror: 3 } } }
+  const initial = { version: 1, inboxDone: {}, store: 4096, pruned: { [TODAY]: { agent: 2, mirror: 3 } } }
   const f = await fixture('', { [NAME]: turn('Publish the synthetic build?') }, initial)
   let isTorn = true
   try {
@@ -486,7 +541,7 @@ test('the production page API and rendered page retain cut-off block notices', a
 })
 
 test('the production page API renders the measured store warning and cleared counts', async () => {
-  const f = await fixture('', {}, { version: 1, at: NOW, inboxDone: {}, store: 2 * 1024 * 1024, pruned: { '2026-11-04': { agent: 2, mirror: 3 } } })
+  const f = await fixture('', {}, { version: 1, at: NOW, inboxDone: {}, store: 2 * 1024 * 1024, pruned: { [TODAY]: { agent: 2, mirror: 3 } } })
   try {
     const model = await f.api()
     assert.equal(model.warning, EN.boardLarge)
@@ -519,6 +574,17 @@ test('a question in a block updated 30 minutes ago is shown as 30 minutes old, n
     const model = await f.api()
     assert.equal(model.asks.length, 1, JSON.stringify(model.asks))
     assert.match(model.asks[0].when, /30/, model.asks[0].when)
+  } finally { await f.close() }
+})
+
+test('a hand-kept task with no due date shows no time rather than "Unknown time" (#1145)', async () => {
+  const f = await fixture('## demo\n### Renew the synthetic passport\n- [x] Photos\n- [ ] Fill the form\n')
+  try {
+    const model = await f.api()
+    const dom = await pageDom(f.runtime.servePage(EN, 'synthetic'), model)
+    const text = dom.node('board').readText
+    assert.ok(text.includes('Renew the synthetic passport'), text)
+    assert.ok(!text.includes(EN.pgUnknownAge), text)
   } finally { await f.close() }
 })
 

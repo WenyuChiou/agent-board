@@ -1,5 +1,5 @@
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
-import { cleanContext, cleanTitle, clip, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
+import { cleanContext, cleanTitle, clip, markAnswered, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
 import { answeredStep, oneLine } from './step-words'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -115,9 +115,118 @@ export const lastQuestion = (answer: string, isFull = false): string | null => {
   return prose === null ? null : lastQuestionInProse(prose, isFull)
 }
 
+// A web link, without the punctuation or closing quote that follows it in a sentence
+// (`… at https://x.dev/a?`, `“Review https://x.dev/a?”`).
+const LINK = /https?:\/\/[^\s<>"'`“”‘’「」『』，。！？、；：（）]*[^\s<>"'`“”‘’「」『』.,;:!?？。！，、；：（)\]）]/g
+
+// A question whose choices follow as a list (#1243) counts only under every guard below, since
+// a false question under Needs you costs more trust than a missed one. A summary's heading
+// (`What changed?`), a recap (`What did you ask for?`) and an answered FAQ (`**Should I make
+// any changes?**`) all sit over a list too, and none of them waits on the person.
+const LIST_ITEM = /^( {0,3})(?:(?:[-*+•]|\d+[.)]|[A-Za-z][.)])\s+|\d+、\s*)(.*)$/
+// A choice is a short label. An item that is a sentence, or asks, explains or answers instead.
+// One word may still end on a period (`1. PostgreSQL.`); a share (`Docker — 70%`) is a result.
+const isChoice = (item: string): boolean => {
+  const label = /^[^\s.]+\.$/.test(item) ? item.slice(0, -1) : item
+
+  return label !== '' && label.length <= 60 && !/[?？。！]|[.!]\s/.test(label) && !/[.!;；:：]$/.test(label) && !/\d\s*[%％]/.test(label)
+}
+// Words only the agent says to the person. With them an open `what` asks to pick too; a yes or
+// no (`Do you want the details?`) over a list does not.
+const ASKS_YOU = /\b(?:do you (?:want|prefer|need)|would you (?:like|prefer|rather)|want me to)\b|要我|[你您](?:要|想|希望|偏好|需要)/i
+// `Should I …?` is also how an FAQ heading words the person's own question. It counts only with
+// a word that asks to pick, on a line that is not set as a heading.
+const ASKS_ME = /\b(?:should|shall|can|could|may) (?:I|we)\b|我該|我應該|我应该|該用|该用|要用|要選|要选/i
+const PICKS = /\b(?:which|or)\b|哪|還是|还是|或是/i
+const PICKS_OPEN = /\bwhat\b|什麼|什么/i
+// A question about what already happened is a recap, whoever it names.
+const IS_PAST = /\b(?:did|was|were|had|have|has)\b|了|過|过|剛|刚|之前|先前|原先|上次/i
+// A bare `Which database first?` (`先用哪個資料庫？`, the #1243 report's own shape) asks for one
+// thing to do next. Only that exact shape counts: with a verb (`Which jobs ran first?`) or for
+// several (`先做哪些工作？`) it is a timeline's heading, answered by its list.
+// The one word must not be a verb in the past (`Which finished first?`, `Which ran first?`).
+const ASKS_ORDER = /^which (?:one|(?!(?:ran|went|came|began|broke|built|won|got|made|took|wrote|did|was|were|had|left|lost|fell|sent|spent|ate|saw|ended)\b)(?![\p{L}-]*ed\b)[\p{L}-]+) (?:first|next)[?？]$|^(?:先|下一步|接下來|接下来)[^，,。.]{0,4}哪(?:個|个|一)[^，,。.？?]{0,8}[？?]$/iu
+const asksToPick = (question: string, isHeading: boolean): boolean => {
+  // A heading, bold line or `Q:` over a list is a section the list answers (an FAQ, a survey's
+  // results), whoever its words name.
+  if (isHeading || IS_PAST.test(question)) return false
+  if (ASKS_YOU.test(question)) return PICKS.test(question) || PICKS_OPEN.test(question)
+
+  return PICKS.test(question) && ASKS_ME.test(question) || ASKS_ORDER.test(question)
+}
+const IS_HEADING = /^\s*(?:#|>|(?:Q|問|问)\s*[:：.])|^\s*([*_]{1,3})\S.*\1\s*$/i
+
+// The question line over a list of choices that ends the reply, or null. Blank lines may sit
+// between the question and the list and between the choices; any other line ends the list.
+// A question introduced by a label (`Survey results:`, `The CI timeline:`) or a caption with no
+// end mark (`Completed intake form with the customer's answers`) heads a section of a report,
+// so it is null too. A sentence the agent ends before it (`Done.`) leaves the question its own.
+const lineOverChoices = (prose: string): string | null => {
+  const lines = prose.split(/\r?\n/)
+  let at = lines.length
+  let count = 0
+  // Every choice sits at one indent: an item nested under another explains it.
+  let indent: string | undefined
+  while (at > 0) {
+    const line = lines[at - 1] ?? ''
+    const item = LIST_ITEM.exec(line)
+    if (line.trim() !== '' && (item === null || item[1] !== (indent ??= item[1]) || !isChoice(withoutEmphasis(item[2] ?? '').trim()))) break
+    if (item !== null) count += 1
+    at -= 1
+  }
+  const line = lines[at - 1] ?? ''
+  const lead = lines.slice(0, Math.max(at - 1, 0)).filter(one => one.trim() !== '').at(-1) ?? ''
+
+  const isCaption = lead.trim() !== '' && !/[.。!！?？)）」』"”'…]\s*$/.test(withoutEmphasis(lead).trim())
+
+  return count < 2 || LIST_ITEM.test(line) || isCaption ? null : line
+}
+
+const OPENERS: Record<string, string> = { '“': '”', '‘': '’', '「': '」', '『': '』' }
+const CLOSERS = new Set(Object.values(OPENERS))
+// A question mark inside a quote that follows other words is a question told about, not one
+// put to the person: `… and asked "Blue or green?"` (#1273). Two shapes do ask: a quote that
+// wraps the whole question, and a quoted last option after `or` (`"red" row or "blue row?"`),
+// unless the sentence reports what was asked or said (`The test asked either "x" or "Ready?"`).
+const REPORTS = /\b(?:ask(?:ed|s)?|sa(?:id|ys)|wr(?:ote|ites)|repl(?:ied|ies)|typed|prompt(?:ed|s)?)\b|問|问|說|说|寫|写|回覆|回复/i
+const isLoneQuote = (line: string, at: number): boolean => {
+  const before = line[at - 1] ?? ' '
+  return /\d/.test(before) || /\S/.test(before) && /^(?:\s|$)/.test(line.slice(at + 1))
+}
+const isQuoted = (line: string, mark: number): boolean => {
+  const open: number[] = []
+  let straight = -1
+  for (let i = 0; i < mark; i += 1) {
+    const char = line[i] ?? ''
+    if (char === '\\') i += 1
+    // A straight quote closes the open one. With none open, it also stands alone as an inch mark
+    // (`a 12" shelf`) or after a word with nothing after it (`fast" is`), and then opens nothing.
+    else if (char === '"') straight = straight >= 0 || isLoneQuote(line, i) ? -1 : i
+    else if (char in OPENERS) open.push(i)
+    else if (CLOSERS.has(char)) open.pop()
+  }
+  // A quote the reply talks about (`escape " here?`) has no partner after the mark.
+  if (straight >= 0 && line.indexOf('"', mark + 1) !== -1) open.push(straight)
+  // An apostrophe also sits inside words, so a single quote counts only when it closes right
+  // after the mark and opens at the start of a word.
+  if (/^[?？]["”」』)）]*'/.test(line.slice(mark))) {
+    for (let i = mark - 1; i >= 0; i -= 1) {
+      if (line[i] === "'" && !/[\p{L}\p{N}]/u.test(line[i - 1] ?? '')) { open.push(i); break }
+    }
+  }
+
+  return open.some(from => {
+    const before = line.slice(0, from).replace(/^.*[.。!！?？]/, '')
+    const lead = before.replace(/["'“‘「『(（\s]/g, '')
+    return lead !== '' && (REPORTS.test(before) || !/(?:\bor|還是|还是|或是|或)$/i.test(line.slice(0, from).trim()))
+  })
+}
+
 // For callers that already normalized the reply: do not parse it a second time.
 export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
-  const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, '$1')
+  // A straight quote in code (`name"`) is a character the reply shows, not a quotation: it stands
+  // in as another mark until the question is put back together.
+  const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, (_, code: string) => code.replace(/"/g, '\u0001'))
   const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '')
   const last = paragraphs.at(-1)
   if (last === undefined) return null
@@ -125,12 +234,31 @@ export const lastQuestionInProse = (answer: string, isFull = false): string | nu
     .split(/\r?\n/)
     .map(line => withoutEmphasis(line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')).trim())
     .filter(line => line !== '')
-  const tail = lines.at(-1) ?? ''
-  if (!/[?？]/.test(tail)) return null
+  // A link's own `?` and `.` (`http://127.0.0.1:5173/?t=…`) neither ask nor end a sentence
+  // (#1108): each link stands in as a mark with neither, and is put back in the question.
+  const links: string[] = []
+  const hidden = (line: string): string => line.replace(LINK, link => `\u0000${links.push(link) - 1}\u0000`)
+  let tail = hidden(lines.at(-1) ?? '')
+  const isOverList = !/[?？]/.test(tail)
+  let isHeading = false
+  if (isOverList) {
+    const line = lineOverChoices(prose)
+    if (line === null) return null
+    isHeading = IS_HEADING.test(line)
+    tail = hidden(withoutEmphasis(line).trim())
+    // The line must end on its question mark: a question the same line goes on to answer
+    // (`Why did it fail? The cache was stale.`) asks nothing.
+    if (!/[?？]$/.test(tail)) return null
+  }
   // Keep closing wrappers after the question mark so choice parsing can distinguish
   // a wrapped question from a word's own leading apostrophe, such as '90s.
-  const sentences = tail.match(/[^.。!！?？]*[?？]["'”」』)]*/g) ?? []
-  const question = (sentences.at(-1) ?? '').trim()
+  const sentence = [...tail.matchAll(/[^.。!！?？]*[?？]["'”」』)]*/g)].at(-1)
+  if (sentence === undefined) return null
+  if (isQuoted(tail, (sentence.index ?? 0) + sentence[0].search(/[?？]/))) return null
+  const question = sentence[0].replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '').replace(/\u0001/g, '"').trim()
+  // The question itself must be put to the person, not the line it ends: `You asked for a
+  // summary. What changed?` over a list asks nothing.
+  if (isOverList && !asksToPick(question, isHeading)) return null
 
   return question === '' ? null : isFull ? question : clip(question, 120)
 }
@@ -189,6 +317,13 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
   }
 }
 
+// A summary of an earlier report can add finished work without replacing the
+// original question or introducing an ask from before the person's reply.
+export const applyLateDigest = (mirror: ProgressMirror, digest: Digest, now: number, s: Strings, hasRunningTurnBackgroundJob = false): ProgressMirror => {
+  const next = applyDigest(mirror, { ...digest, ask: '', why: '' }, now, s, hasRunningTurnBackgroundJob)
+  return { ...next, updated: mirror.updated, autoAsk: mirror.autoAsk, tasks: [...next.tasks, ...mirror.tasks.filter(one => waitsOnYou(mirror, one))] }
+}
+
 // A turn that ended on a question, in a session whose list says nothing waits on the
 // person: the step in progress (else the next one) waits on them, with the question as its
 // note, until they answer.
@@ -206,7 +341,7 @@ export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTu
   }
   // Finished work stays finished when the closing reply asks a new question.
   const target = mirror.tasks.find(one => one.status === 'in_progress') ?? mirror.tasks.find(one => one.status === 'pending') ?? task('auto-question', question, 'pending', null)
-  const renewed = renewQuestion({ ...target, waiting: 'you', why: question, ask: null, options: [], command: null, link: null }, mirror.questionSequence)
+  const renewed = renewQuestion({ ...target, waiting: 'you', why: target.id === 'auto-question' ? null : question, ask: null, options: [], command: null, link: null }, mirror.questionSequence)
 
   return {
     ...mirror,
@@ -238,13 +373,52 @@ export const toolQuestions = (mirror: ProgressMirror, questions: unknown, call: 
   const added = questions.flatMap((given: unknown, index) => {
     if (given === null || typeof given !== 'object' || !('question' in given) || typeof given.question !== 'string' || given.question.trim() === '') return []
     const options = 'options' in given && Array.isArray(given.options) ? given.options.flatMap((option: unknown) => option !== null && typeof option === 'object' && 'label' in option && typeof option.label === 'string' ? [clip(option.label, 120)] : []) : []
-    return [{ ...task(`ask:${call}:${index}`, clip(given.question, 120), 'pending', clip(given.question, 120)), ask: 'choose' as const, options }]
+    // The question is written once, as the step itself; the native line says it is answered in Claude's own window.
+    return [{ ...task(`ask:${call}:${index}`, clip(given.question, 120), 'pending', null), waiting: 'you' as const, ask: 'choose' as const, options, native: { agent: 'claude', options } }]
   })
   return added.reduce((current, one) => {
     const renewed = renewQuestion(one, current.questionSequence)
     return { ...current, source: mirror.tasks.length === 0 ? 'turns' : mirror.source, tasks: [...current.tasks.filter(task => task.id !== one.id), renewed], questionSequence: renewed.questionRevision, updated: now }
-  }, mirror)
+  }, added.length === 0 ? mirror : settleChatReply(mirror))
 }
+
+// The id of the step a tool approval puts into a Task list (#1048): one at a time, in the dialog's own window.
+const APPROVAL = 'approval'
+
+// A tool is waiting for the person's yes in Claude's own dialog: the list gets one step that waits on
+// them, with the native line, so the board says where to answer. A list that already asks something
+// keeps its question, and a session without a Task list has nothing to hang the step on.
+export const markApproval = (mirror: ProgressMirror, step: string): ProgressMirror => {
+  if (mirror.source !== 'tasks' || mirror.tasks.length === 0) return mirror
+  const reported = settleChatReply(mirror)
+  if (reported.tasks.some(one => one.id !== APPROVAL && waitsOnYou(reported, one))) return mirror
+  const renewed = renewQuestion({ ...task(APPROVAL, step, 'pending', null), waiting: 'you', native: { agent: 'claude', options: [] } }, reported.questionSequence)
+
+  return { ...reported, questionSequence: renewed.questionRevision, tasks: [...reported.tasks.filter(one => one.id !== APPROVAL), renewed] }
+}
+
+// An approval that waited behind another question goes up once nothing else waits (#1106); a step
+// already there stays as it is, so its question token does not change on every save.
+export const raiseApproval = (mirror: ProgressMirror, step: string): ProgressMirror =>
+  mirror.tasks.some(one => one.id === APPROVAL) ? mirror : markApproval(mirror, step)
+
+// The dialog is over (answered, declined, or the turn ended): the step goes, it was never the model's.
+export const clearApproval = (mirror: ProgressMirror): ProgressMirror =>
+  mirror.tasks.some(one => one.id === APPROVAL) ? { ...mirror, tasks: mirror.tasks.filter(one => one.id !== APPROVAL) } : mirror
+
+// A TaskList refresh must not remove the only closure evidence before the ledger saves it.
+export const retainApproval = (previous: ProgressMirror, next: ProgressMirror): ProgressMirror => {
+  const approval = previous.tasks.find(one => one.id === APPROVAL)
+  return approval === undefined || next.tasks.some(one => one.id === APPROVAL)
+    ? next : { ...next, tasks: [...next.tasks, approval] }
+}
+
+// The ledger needs to see the approval closed before its temporary step goes away.
+export const closeApproval = (mirror: ProgressMirror): ProgressMirror =>
+  mirror.tasks.some(one => one.id === APPROVAL) ? {
+    ...mirror,
+    tasks: mirror.tasks.map(one => one.id === APPROVAL ? { ...one, status: 'completed' as const, waiting: null, why: null } : one),
+  } : mirror
 
 // The native prompt for these questions ended: their steps are finished, so no list keeps one open.
 export const closeToolQuestions = (mirror: ProgressMirror, call: string): ProgressMirror => ({
@@ -281,7 +455,7 @@ export const isPersonsAnswer = (e: Submitted): boolean => {
   return text !== '' && !APP_EVENT.test(text)
 }
 
-// Summed-up questions are answered by the next prompt: the waiting step counts as done.
+// A real agent report can keep an older summed-up question as a closed line.
 export const answerTurns = (mirror: ProgressMirror): ProgressMirror =>
   mirror.source !== 'turns'
     ? mirror
@@ -289,6 +463,24 @@ export const answerTurns = (mirror: ProgressMirror): ProgressMirror =>
         ...mirror,
         tasks: mirror.tasks.map(one => (one.waiting === 'you' ? answeredStep(one) : one)),
       }
+
+// Chat replies do not answer native permission or selection dialogs.
+const isChatQuestion = (mirror: ProgressMirror, one: ProgressMirrorTask): boolean => one.native === undefined && waitsOnYou(mirror, one)
+
+export const noteChatReply = (mirror: ProgressMirror, at: number): ProgressMirror =>
+  Number.isFinite(at) && at > (mirror.updated ?? 0) && mirror.tasks.some(one => isChatQuestion(mirror, one))
+    ? { ...mirror, replied: at } : mirror
+
+// Only the agent's next report settles a chat reply. Keep the previous words
+// so the question ledger has proof even when the report asks another question.
+export const settleChatReply = (mirror: ProgressMirror): ProgressMirror => {
+  if (mirror.replied === undefined) return mirror
+  const ids = mirror.tasks.filter(one => isChatQuestion(mirror, one)).map(one => one.id)
+  const next = mirror.source === 'turns'
+    ? { ...mirror, tasks: mirror.tasks.map(one => ids.includes(one.id) ? answeredStep(one) : one) }
+    : markAnswered(mirror, ids)
+  return { ...next, autoAsk: null, replied: undefined }
+}
 
 // Whether the list grew enough since the title and background were written to look again.
 export const needsRefresh = (mirror: ProgressMirror): boolean =>

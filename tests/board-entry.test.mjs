@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { registerHooks } from 'node:module'
@@ -169,4 +169,189 @@ test('a test folder that is busy for a moment is still removed, and one that sta
   calls = 0
   assert.throws(() => removeTree('synthetic-folder', { delayMs: 1, remove: () => { calls++; throw busy('EACCES') } }), { code: 'EACCES' })
   assert.equal(calls, 1, 'another error is not retried')
+})
+
+// A scratch board (its own home, temp and runtime folders) and the page cleanup every test below needs.
+const withBoard = async fn => {
+  const root = mkdtempSync(join(tmpdir(), 'board-entry-'))
+  const runtime = join(root, 'run')
+  const progress = join(root, 'progress.md')
+  const script = join(root, 'agent-board.mjs')
+  mkdirSync(runtime, { mode: 0o700 })
+  writeFileSync(progress, '## Synthetic\n### Entry plan\n- [ ] Continue the entry work\n')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${BOARD_SCRIPT}`)
+  const env = {
+    ...Object.fromEntries(['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SystemDrive', 'windir', 'ComSpec'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
+    CI: '', AGENT_BOARD_SESSION_ID: 'synthetic-entry-session', CLAUDE_PROGRESS_FILE: '', HOME: root, USERPROFILE: root, TEMP: root, TMP: root, TMPDIR: root, XDG_RUNTIME_DIR: runtime, NO_COLOR: '1',
+    AGENT_BOARD_TEST_PID: String(process.pid),
+  }
+  let pid = null
+  try {
+    await fn({ root, script, env })
+  } finally {
+    for (const name of (existsSync(runtime) ? readdirSync(runtime, { recursive: true }) : []).filter(name => String(name).endsWith('.json'))) {
+      try {
+        const record = JSON.parse(readFileSync(join(runtime, String(name)), 'utf8'))
+        if (record.path === progress && typeof record.pid === 'number' && typeof record.url === 'string') {
+          pid = record.pid
+          await closePage(record.url)
+        }
+      } catch {}
+    }
+    const alive = () => { try { process.kill(pid, 0); return true } catch { return false } }
+    if (typeof pid === 'number' && pid !== process.pid) {
+      for (let tries = 0; alive() && tries < 100; tries++) await new Promise(done => setTimeout(done, 50))
+      assert.equal(alive(), false, 'the page server exits before scratch cleanup')
+    }
+    assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep))
+    removeTree(root)
+  }
+}
+
+test('--serve from an older command file opens the page and prints no text board before its address (#868)', { timeout: 30_000 }, async () => {
+  await withBoard(async ({ script, env }) => {
+    const result = await run(script, ['--serve', '--no-open'], env)
+    assert.equal(result.stderr, '')
+    const lines = result.stdout.trim().split(/\r?\n/)
+    assert.equal(lines.length, 1, result.stdout)
+    assert.match(lines[0], /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/)
+    assert.ok(!result.stdout.includes('Entry plan') && !result.stdout.includes('Continue the entry work'), 'the board text is not printed')
+  })
+})
+
+test('--lan without --serve opens the page and shows the network address, as --serve --lan does (#868)', { timeout: 30_000 }, async () => {
+  await withBoard(async ({ script, env }) => {
+    const result = await run(script, ['--no-open', '--lan'], env)
+    assert.equal(result.stderr, '')
+    assert.match(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)
+    assert.match(result.stdout, /open http:\/\/[\d.]+:\d+\/\?t=[\w-]+ or scan this code:|This computer has no address on a local network/)
+    assert.ok(!result.stdout.includes('Entry plan'), 'no text board either')
+  })
+})
+
+test('--lan with the board page already open still shows the network address (#868)', { timeout: 30_000 }, async () => {
+  await withBoard(async ({ script, env }) => {
+    const first = await run(script, ['--no-open'], env)
+    const local = first.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
+    assert.ok(local, first.stdout)
+    // A page loading the address is what makes the board count it as open.
+    await new Promise((done, fail) => request(local, res => { res.resume(); res.on('end', done) }).on('error', fail).end())
+    const result = await run(script, ['--lan'], env)
+    assert.equal(result.stderr, '')
+    assert.match(result.stdout, /already open in your browser/)
+    assert.match(result.stdout, /open http:\/\/[\d.]+:\d+\/\?t=[\w-]+ or scan this code:|This computer has no address on a local network/)
+  })
+})
+
+test('the plain launcher help no longer lists --serve, and --help all marks it old (#868)', async () => {
+  const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const plain = await run(launcher, ['--help', '--lang', lang], process.env)
+    assert.ok(!plain.stdout.includes('--serve'), `${lang}: plain help`)
+    const all = await run(launcher, ['--help', 'all', '--lang', lang], process.env)
+    assert.match(all.stdout, /--serve +(old|舊用法|旧用法)/, lang)
+  }
+  const unknown = await run(launcher, ['serve'], process.env).catch(error => error)
+  assert.ok(!unknown.stderr.includes('--serve'), 'the unknown-command hint does not suggest --serve')
+})
+
+// The first run of a person: no board script anywhere, a keyboard to answer on.
+const firstRun = async (answer, check, extraEnv = {}) => {
+  const root = mkdtempSync(join(tmpdir(), 'board-first-'))
+  try {
+    const shim = join(root, 'tty-shim.cjs')
+    writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true;\n')
+    const home = join(root, 'home')
+    mkdirSync(home)
+    // One synthetic agent folder and a PATH with only Node on it, so setup finds the same agent on every machine.
+    mkdirSync(join(home, '.cursor'))
+    const env = {
+      ...Object.fromEntries(['SystemRoot', 'SystemDrive', 'windir', 'ComSpec'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
+      PATH: dirname(process.execPath),
+      CI: '', LANG: 'en_US.UTF-8', HOME: home, USERPROFILE: home, TEMP: root, TMP: root, TMPDIR: root, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid),
+      // The shim fakes a terminal for the launcher only; setup asks through its own test seam.
+      AGENT_BOARD_SETUP_TTY: '1', ...extraEnv,
+    }
+    const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
+    const result = await new Promise(done => {
+      const child = execFile(process.execPath, ['--require', shim, launcher], { env, encoding: 'utf8', timeout: 25_000, windowsHide: true }, (error, stdout, stderr) => done({ status: error ? (error.code ?? 1) : 0, stdout, stderr }))
+      // { after, text } types the answer only once the question is on screen, as a person does.
+      if (typeof answer === 'string') child.stdin.end(answer)
+      else {
+        let seen = ''
+        child.stdout.on('data', chunk => {
+          seen += chunk
+          if (seen.includes(answer.after) && !child.stdin.writableEnded) child.stdin.end(answer.text)
+        })
+      }
+    })
+    check(result, home)
+  } finally {
+    assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep))
+    removeTree(root)
+  }
+}
+
+test('the first plain agent-board in a terminal with nothing set up asks one question, and no changes nothing (#868)', { timeout: 40_000 }, async () => {
+  await firstRun('n\n', ({ status, stdout, stderr }, home) => {
+    const asked = stdout.indexOf('Set these up? [Y/n]')
+    assert.ok(asked > 0, stdout)
+    assert.equal(stdout.split('Set these up?').length - 1, 1, 'one question')
+    assert.ok(stdout.includes('would create') && stdout.indexOf('would create') < asked, 'the preview is printed before the question')
+    assert.ok(stdout.indexOf('--apply') > asked, 'a no keeps the manual apply step')
+    // Setup's no already says what to do next, so the launcher adds no "not set up" error.
+    assert.equal(status, 0, stderr)
+    assert.doesNotMatch(stderr, /not set up for this account yet/)
+    assert.equal(existsSync(join(home, '.agent-board')), false, 'nothing was written')
+  })
+})
+
+test('the first plain agent-board in a terminal with nothing set up applies setup on one yes (#868)', { timeout: 60_000 }, async () => {
+  await firstRun('y\n', ({ status, stdout, stderr }, home) => {
+    const asked = stdout.indexOf('Set these up? [Y/n]')
+    assert.ok(asked > 0 && stdout.includes('would create') && stdout.indexOf('would create') < asked, 'the preview is printed before the question')
+    assert.equal(stdout.split('Set these up?').length - 1, 1, 'one question')
+    assert.ok(existsSync(join(home, '.agent-board', 'agent-board.mjs')), stdout)
+    assert.doesNotMatch(stderr, /not set up for this account yet/)
+    assert.equal(status, 0, stderr)
+    // CI picks the text board, so no window opens; the same run shows the board after setup.
+    const after = stdout.slice(asked)
+    assert.match(after, /Nothing needs you|No work in progress|Progress/, after.slice(-400))
+    assert.ok(!stdout.includes('--serve'), 'setup output names the plain command')
+  }, { CI: '1' })
+})
+
+// A child started through Node gets a blocking fd 0, so the preload opens process.stdin in setup itself:
+// that makes fd 0 non-blocking, and a read before the answer is typed fails with EAGAIN. Setup must wait.
+test('the first plain agent-board waits for a yes typed after the question, though stdin is non-blocking (#1162)', { skip: process.platform === 'win32', timeout: 60_000 }, async () => {
+  const shimDir = mkdtempSync(join(tmpdir(), 'board-first-nonblock-'))
+  try {
+    const openStdin = join(shimDir, 'open-stdin.cjs')
+    writeFileSync(openStdin, "if ((process.argv[1] || '').endsWith('setup-agent.mjs')) process.stdin\n")
+    await firstRun({ after: 'Set these up?', text: 'y\n' }, ({ status, stdout, stderr }, home) => {
+      assert.equal(status, 0, stderr)
+      assert.ok(existsSync(join(home, '.agent-board', 'agent-board.mjs')), stdout)
+      assert.doesNotMatch(stdout, /Apply these changes: /)
+    }, { CI: '1', NODE_OPTIONS: `--require "${openStdin}"` })
+  } finally {
+    removeTree(shimDir)
+  }
+})
+
+test('a first-run setup preview that fails shows its own error and exit status, and asks nothing (#868)', { timeout: 40_000 }, async () => {
+  // The preload makes setup itself fail before it previews or asks; the launcher is untouched.
+  const shimDir = mkdtempSync(join(tmpdir(), 'board-first-fail-'))
+  try {
+    const failShim = join(shimDir, 'fail-preview.cjs')
+    writeFileSync(failShim, "if ((process.argv[1] || '').endsWith('setup-agent.mjs') && !process.argv.includes('--apply')) { process.stderr.write('setup preview failed for the test\\n'); process.exit(3) }\n")
+    await firstRun('y\n', ({ status, stdout, stderr }, home) => {
+      assert.equal(status, 3, stderr)
+      assert.match(stderr, /setup preview failed for the test/)
+      assert.doesNotMatch(stdout, /Set these up\?/)
+      assert.doesNotMatch(stderr, /not set up for this account yet/)
+      assert.equal(existsSync(join(home, '.agent-board')), false, 'nothing was written')
+    }, { NODE_OPTIONS: `--require "${failShim.replace(/\\/g, '/')}"` })
+  } finally {
+    removeTree(shimDir)
+  }
 })

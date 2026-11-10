@@ -22,11 +22,10 @@ try {
   ])
 } finally { loader.deregister() }
 
-const [{ pageTokens, boardMark }, { servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
+const [{ pageTokens, BOARD_PATH: boardPath }, { servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
 const SANS = 'Inter,"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
+const SANS_SC = 'Inter,"PingFang SC","Noto Sans SC","Microsoft YaHei UI","Microsoft YaHei","PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
-const MARK_PATH = 'M 51 14.5 V 36 C 51 46 52 54 57.5 59 C 50.6 59 43.71 56.77 40.01 51.67 Q 34.7 55 28 55 Q 18.47 55 11.74 48.26 Q 5 41.53 5 32 Q 5 22.47 11.74 15.74 Q 18.47 9 28 9 Q 34.9 9 40.34 12.54 Q 40.74 11.48 41.61 10.61 Q 43.22 9 45.5 9 Q 47.78 9 49.39 10.61 Q 51 12.22 51 14.5 Z M 40 32 Q 40 27.03 36.49 23.51 Q 32.97 20 28 20 Q 23.03 20 19.51 23.51 Q 16 27.03 16 32 Q 16 36.97 19.51 40.49 Q 23.03 44 28 44 Q 32.97 44 36.49 40.49 Q 40 36.97 40 32 Z'
-const SHAPES = `<path class="lg-mark" d="${MARK_PATH}"/>`
 const PRIVACY = /\b[\da-f]{8}\b|\b[\da-f]{40}\b|\b[\da-f]{64}\b|(?<![A-Za-z])[A-Za-z]:[\\/]|\/home\/|\/Users\//i
 const renders = (lang = 'en') => {
   const s = STRINGS[lang]
@@ -87,7 +86,7 @@ const styleRules = html => {
   }
   return rules
 }
-const isTokenRule = rule => /^:root(?:$|\[data-theme="dark"\]$|:not\(\[data-theme="light"\]\)$)/.test(rule.selector)
+const isTokenRule = rule => /^:root(?:$|\[data-theme="dark"\]$|:not\(\[data-theme="light"\]\)$|:lang\(zh-Hans\)$)/.test(rule.selector)
 const valuesOf = rule => Object.fromEntries(rule.declarations.filter(item => item.property.startsWith('--')).map(item => [item.property.slice(2), item.value]))
 const tokenRules = cssRules(pageTokens())
 const lightRule = tokenRules.find(rule => rule.selector === ':root')
@@ -105,8 +104,8 @@ const fontFamily = /^var\(--font-(?:sans|mono)\)$/
 const fontShorthand = /^(?:(?:normal|italic|oblique|small-caps|bold|bolder|lighter|\d{3})\s+)*var\(--text-(?:xs|sm|md|lg)\)(?:\s*\/\s*(?:normal|[\d.]+|var\(--[\w-]+\)))?\s+var\(--font-(?:sans|mono)\)$/
 const isMobile = rule => rule.ancestors.some(ancestor => /@media\s*\([^)]*max-width\s*:\s*(?:600|640|760)px\s*\)/.test(ancestor))
 // The sheet that holds Needs you is the one raised surface. A field, an outlined button (filled with the surface so it reads on the
-// ground and on the sheet alike) and a card of the Needs you view, which is its own sheet, may use it too.
-const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input)(?=$|[:[\s])/.test(selector) || /(?:^|\s)\.sheet$/.test(selector) ||
+// ground and on the sheet alike) and a card of the Needs you view, which is its own sheet, may use it too. A select is a field.
+const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input|select)(?=$|[:[\s])/.test(selector) || /(?:^|\s)\.sheet$/.test(selector) ||
   /(?:^|\s)(?:\.btn|\.shelf-head|button[\w.:-]*|#close)(?=$|[:\s])/.test(selector) || /\.cards>li$/.test(selector)
 
 test('the page uses only colour, size, radius, spacing and motion tokens from page-look', () => {
@@ -156,7 +155,7 @@ test('the page uses only colour, size, radius, spacing and motion tokens from pa
         if (property === 'border-radius') assert.match(value, /^(?:0|var\(--radius-(?:s|m|round)\))(?:\s+(?:0|var\(--radius-(?:s|m|round)\))){0,3}$/, `${where}: use the three radii`)
         // The only shadow is the focus ring around a field; everything else is flat.
         if (property === 'box-shadow') assert.ok(value === 'none' || value === 'var(--ring)' && /:focus/.test(rule.selector), `${where}: the page is flat; only the sheet is raised, by its border and surface`)
-        if (/^(?:transition|animation)(?:-(?:duration|timing-function|delay))?$/.test(property) && value !== 'none') {
+        if (/^(?:transition|animation)(?:-(?:duration|timing-function|delay))?$/.test(property) && value !== 'none' && !/^\.ab-(?:logo|icon)(?=$|[\s.:])/.test(rule.selector)) {
           if (property !== 'animation-delay') assert.doesNotMatch(value, /(?:^|[\s,])[\d.]+m?s\b/, `${where}: no literal duration`)
           assert.doesNotMatch(value, /cubic-bezier|linear\(/, `${where}: easing comes from the ease tokens`)
         }
@@ -254,7 +253,7 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
     if (name === 'page') {
       assert.equal(declared(rules, 'button.primary', 'background'), 'var(--act)', `${name}: a primary button is the ink fill`)
       assert.equal(declared(rules, 'button.primary', 'color'), 'var(--on-act)', `${name}: its text is the surface colour`)
-      assert.ok(declared(rules, '.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn,.pfoot #close', 'border')?.includes('var(--btn-line)'), `${name}: an outlined button has its 3:1 border`)
+      assert.ok(declared(rules, '.btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn', 'border')?.includes('var(--btn-line)'), `${name}: an outlined button has its 3:1 border`)
       assert.equal(declared(rules, '.s-running', 'color'), 'var(--alive)', `${name}: a running step is the alive green`)
       assert.equal(declared(rules, '.s-blocked', 'color'), 'var(--alert)', `${name}: a blocked step is the alert red`)
     }
@@ -324,92 +323,129 @@ test('the page embeds its fonts, makes no font request and allows only font-src 
   }
 })
 
-const attribute = (tag, name) => new RegExp(`\\b${name}=("|')([\\s\\S]*?)\\1`, 'i').exec(tag)?.[2]
-const logoSvg = html => /<svg\b(?=[^>]*\bclass="mark")[^>]*>[\s\S]*?<\/svg>/.exec(html)?.[0]
-const assertShapes = (svg, where) => {
-  assert.match(svg, /\bviewBox="0 0 64 64"/, `${where}: the Bubble a mark uses its 64 grid`)
-  const shapes = (svg.match(/<(?:rect|path)\b[^>]*\/>/g) ?? []).join('')
-  assert.equal(shapes, SHAPES, `${where}: the Bubble a mark is its one path`)
-  assert.doesNotMatch(svg, /class="m[1-4]"|lg-ink|lg-flag/, `${where}: the four-square and Signal Row marks are gone`)
-}
-
-test('the header and favicon show the Bubble a logo in light and dark', () => {
-  assertShapes(boardMark, 'the shared board mark')
+test('a zh-CN page lists the Simplified Chinese UI fonts before the Traditional ones', () => {
+  const hans = tokenRules.find(rule => rule.selector === ':root:lang(zh-Hans)')
+  assert.ok(hans, 'pageTokens declares a Simplified Chinese font rule')
+  const sans = valuesOf(hans)['font-sans']
+  assert.ok(sans, 'the Simplified Chinese rule sets --font-sans')
+  assert.ok(sans.startsWith('Inter,'), 'the Simplified Chinese stack still starts with Inter')
+  for (const [sc, tc] of [['"PingFang SC"', '"PingFang TC"'], ['"Noto Sans SC"', '"Noto Sans TC"'], ['"Microsoft YaHei"', '"Microsoft JhengHei"']]) {
+    assert.ok(sans.includes(sc) && sans.includes(tc), `${sc} and ${tc} are both in the stack`)
+    assert.ok(sans.indexOf(sc) < sans.indexOf(tc), `${sc} comes before ${tc}`)
+  }
+  assert.equal(sans, SANS_SC, 'the Simplified Chinese stack is Inter, the SC fonts, then the rest')
+  assert.equal(light['font-sans'], SANS, 'the base stack is unchanged for en and zh-TW')
   for (const lang of ['en', 'zh-TW', 'zh-CN']) {
-    for (const { name, html } of renders(lang)) {
-      const where = `${name}/${lang}`
-      const header = /<header\b(?=[^>]*\bclass="head")[^>]*>[\s\S]*?<\/header>/.exec(html)?.[0]
-      assert.ok(header, `${where}: the page has its header`)
-      const logo = logoSvg(header)
-      assert.ok(logo, `${where}: the header contains the board mark`)
-      assertShapes(logo, `${where} header`)
-      assert.match(logo, /\baria-hidden="true"/, `${where}: the decorative logo adds no wording`)
-      const heading = 'Agent Board'
-      assert.ok(header.includes(`${logo}<h1>${heading}</h1>`), `${where}: the logo sits beside the existing board heading`)
-      assert.match(html, /<title>[^<]*Agent Board<\/title>/, `${where}: the browser title names Agent Board`)
-      assert.doesNotMatch(html, /class="m[1-4]"|\.m[1-4]\s*\{/, `${where}: no old mark shapes or rules`)
-      const rules = styleRules(html)
-      for (const [selector, value] of [['.lg-mark', 'var(--brand)']]) assert.ok(rules.some(rule => rule.selector === selector && rule.declarations.some(item => item.property === 'fill' && item.value === value)), `${where}: ${selector} follows the theme token`)
-      if (name === 'grouped') {
-        const fresh = /<div\b(?=[^>]*\bid="fresh-mark")[^>]*>([\s\S]*?)<\/div>/.exec(html)?.[1]
-        assert.ok(fresh, `${where}: the fresh page keeps its logo`)
-        assertShapes(logoSvg(fresh), `${where} fresh mark`)
-      }
-      const links = (html.match(/<link\b[^>]*>/gi) ?? []).filter(link => attribute(link, 'rel') === 'icon')
-      assert.equal(links.length, 1, `${where}: there is one favicon`)
-      assert.equal(attribute(links[0], 'type'), 'image/svg+xml', `${where}: the favicon is SVG`)
-      const href = attribute(links[0], 'href')
-      assert.match(href, /^data:image\/svg\+xml,/, `${where}: the browser tab uses the inline logo`)
-      const favicon = decodeURIComponent(href.slice('data:image/svg+xml,'.length))
-      assertShapes(favicon, `${where} favicon`)
-      assert.doesNotMatch(favicon, /#/, `${where}: the data URL cannot encode hex colours into private-looking ids`)
-      const faviconStyle = /<style>([\s\S]*?)<\/style>/.exec(favicon)?.[1]
-      assert.ok(faviconStyle, `${where}: the favicon includes its theme colours`)
-      assert.match(faviconStyle, /@media\s*\(prefers-color-scheme:dark\)/, `${where}: the tab logo follows dark mode`)
-      const faviconRules = cssRules(faviconStyle)
-      for (const [mode, palette, tab] of [['light', light, '#dee1e6'], ['dark', dark, '#202124']]) {
-        for (const [selector, token, expected] of [['.lg-mark', 'brand', `rgb(${channels(palette.brand).join(',')})`]]) {
-          const rule = faviconRules.find(item => item.selector === selector && (mode === 'dark') === item.ancestors.some(ancestor => ancestor.includes('prefers-color-scheme:dark')))
-          const fill = rule?.declarations.find(item => item.property === 'fill')?.value
-          assert.equal(fill, expected, `${where}: ${mode} favicon ${token} matches its colour token`)
-          for (const [surface, colour] of [['page ground', palette.ground], ['browser tab', tab]]) assert.ok(contrast(fill, colour) >= 3, `${where}: ${mode} favicon ${token} on ${surface} is ${contrast(fill, colour).toFixed(3)}:1, requires 3:1`)
-        }
-      }
-      assert.doesNotMatch(html, PRIVACY, `${where}: the full output satisfies the privacy contract`)
+    const html = servePage(STRINGS[lang], 'n')
+    const rule = styleRules(html).find(item => item.selector === ':root:lang(zh-Hans)')
+    assert.ok(rule, `${lang}: the page ships the Simplified Chinese font rule`)
+    assert.equal(valuesOf(rule)['font-sans'], SANS_SC, `${lang}: the shipped rule lists the SC fonts first`)
+  }
+})
+
+const attribute = (tag, name) => new RegExp(`\\b${name}=("|')([\\s\\S]*?)\\1`, 'i').exec(tag)?.[2]
+const BOARD_PATH = 'M31.04 8H20A12 12 0 0 0 8 20V44A12 12 0 0 0 20 56H44A12 12 0 0 0 56 44V32.96A1 1 0 0 0 54.35 32.2A16 16 0 0 1 31.8 9.65A1 1 0 0 0 31.04 8Z'
+const withoutTemplates = html => html.replace(/<template\b[\s\S]*?<\/template>/g, '')
+const logosOf = html => [...withoutTemplates(html).matchAll(/<svg\b(?=[^>]*\bclass="ab-(?:logo|icon)\b)[^>]*>[\s\S]*?<\/svg>/g)].map(match => match[0])
+const isLogoRule = rule => /^\.ab-(?:logo|icon)(?=$|[\s.:])/.test(rule.selector)
+
+test('the sidebar, the rail and the narrow header carry the Corner Light logo, scoped and in the page’s theme', () => {
+  assert.equal(boardPath, BOARD_PATH, 'the board is the Corner Light outline')
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const { html } = renders(lang)[0]
+    const s = STRINGS[lang]
+    const logos = logosOf(html)
+    assert.equal(logos.length, 3, lang + ': the name in the sidebar, the icon for the rail and the name in the narrow header')
+    const [name, rail, narrow] = logos
+    for (const [where, svg] of [['the sidebar', name], ['the narrow header', narrow]]) {
+      assert.match(svg, /^<svg class="ab-logo is-idle" width="108" height="18" viewBox="-3 -103 830\.63 135\.66" role="img" aria-label="Agent Board">/, lang + ': ' + where + ' shows the designed name as one labelled picture, idle to begin with')
+      assert.ok(svg.includes('<title>' + s.serveLiveHint + '</title>'), lang + ': the live hint is the name’s tooltip in ' + where)
     }
+    assert.match(rail, /^<svg class="ab-icon is-idle" width="28" height="28" viewBox="0 0 64 64" role="img" aria-label="Agent Board">/, lang + ': the rail icon')
+    assert.ok(html.includes('<h1>' + narrow + '</h1>'), lang + ': the narrow header’s heading is the designed name, not typed text')
+    assert.doesNotMatch(html, /<h1>Agent Board<\/h1>/, lang + ': no typed name is left in the narrow header')
+    for (const svg of logos) {
+      assert.ok(Buffer.byteLength(svg) < 8192, lang + ': each inline picture stays under 8 KB')
+      assert.doesNotMatch(svg, /<style|xmlns|<image|<text|font/i, lang + ': paths and circles only; the page’s stylesheet carries the motion')
+    }
+    for (const svg of [rail]) assert.ok(svg.includes('d="' + BOARD_PATH + '"') && svg.includes('<circle class="ab-dot" cx="44" cy="20" r="12"/>'), lang + ': the icon is the board with its light')
+    assert.doesNotMatch(html, /class="live"|class="b-name"|lg-mark|class="mark"/, lang + ': the live pill, the typed name and the old mark are gone')
+    const template = /<template id="fresh-mark">(<svg[^>]*>)/.exec(html)?.[1] ?? ''
+    assert.match(template, /class="ab-icon is-idle is-arriving"[^>]*width="44"|width="44"[^>]*class="ab-icon is-idle is-arriving"|class="ab-icon is-idle is-arriving" width="44"/, lang + ': the first run’s 44 px mark waits in a template')
+    const rules = styleRules(html)
+    const logoRules = rules.filter(isLogoRule)
+    assert.ok(logoRules.length > 20, lang + ': the logo’s rules are in the page’s stylesheet')
+    const keyframes = [...html.matchAll(/@keyframes ([\w-]+)/g)].map(match => match[1]).filter(keyName => keyName.startsWith('ab-'))
+    assert.ok(keyframes.length >= 10 && keyframes.every(keyName => /^ab-[li]-/.test(keyName)), lang + ': the keyframes are named ab-l-* and ab-i-*')
+    for (const state of ['is-working', 'is-waiting', 'is-offline']) {
+      assert.ok(logoRules.some(rule => rule.selector.includes('.ab-logo.' + state)), lang + ': the name has a ' + state + ' look')
+      assert.ok(logoRules.some(rule => rule.selector.includes('.ab-icon.' + state)), lang + ': the icon has a ' + state + ' look')
+    }
+    for (const owner of ['.ab-logo', '.ab-icon']) {
+      assert.ok(rules.some(rule => rule.selector === owner + ' *' && rule.ancestors.some(ancestor => ancestor.includes('prefers-reduced-motion:reduce')) && rule.declarations.some(item => item.property === 'animation' && item.value.startsWith('none'))), lang + ': reduced motion stops ' + owner)
+    }
+    assert.doesNotMatch(html, PRIVACY, lang + ': the full output satisfies the privacy contract')
+  }
+})
+
+test('the tab icon is the Corner Light in ink, and in its needs-you form the light is amber, in light and dark', () => {
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const { html } = renders(lang)[0]
+    const links = (html.match(/<link\b[^>]*>/gi) ?? []).filter(link => attribute(link, 'rel') === 'icon')
+    assert.equal(links.length, 1, lang + ': there is one favicon')
+    assert.equal(attribute(links[0], 'type'), 'image/svg+xml', lang + ': the favicon is SVG')
+    const icons = { calm: attribute(links[0], 'href'), needs: attribute(links[0], 'data-needs') }
+    for (const [kind, href] of Object.entries(icons)) {
+      const where = lang + ' ' + kind + ' icon'
+      assert.match(href, /^data:image\/svg\+xml,/, where + ': an inline picture')
+      const svg = decodeURIComponent(href.slice('data:image/svg+xml,'.length))
+      assert.match(svg, /\bviewBox="0 0 64 64"/, where + ': the 64 grid')
+      assert.ok(svg.includes('<path class="b" d="' + BOARD_PATH + '"/>') && svg.includes('<circle class="d" cx="44" cy="20" r="12"/>'), where + ': the board and its light')
+      assert.doesNotMatch(svg, /#/, where + ': the data URL cannot encode hex colours into private-looking ids')
+      const style = /<style>([\s\S]*?)<\/style>/.exec(svg)?.[1]
+      assert.ok(style, where + ': carries its theme colours')
+      assert.match(style, /@media\s*\(prefers-color-scheme:dark\)/, where + ': follows dark mode')
+      const styleRules = cssRules(style)
+      for (const [mode, palette, tab] of [['light', light, '#dee1e6'], ['dark', dark, '#202124']]) {
+        const fillOf = selector => styleRules.find(rule => rule.selector === selector && (mode === 'dark') === rule.ancestors.some(ancestor => ancestor.includes('prefers-color-scheme:dark')))?.declarations.find(item => item.property === 'fill')?.value
+        const rgbOf = colour => 'rgb(' + channels(colour).join(',') + ')'
+        assert.equal(fillOf('.b'), rgbOf(palette.ink), where + ': the ' + mode + ' board is ink')
+        assert.equal(fillOf('.d'), rgbOf(kind === 'needs' ? palette.brand : palette.ink), where + ': the ' + mode + ' light is ' + (kind === 'needs' ? 'amber' : 'ink'))
+        for (const selector of ['.b', '.d']) for (const [surface, colour] of [['page ground', palette.ground], ['browser tab', tab]]) assert.ok(contrast(fillOf(selector), colour) >= 3, where + ': ' + mode + ' ' + selector + ' on the ' + surface + ' needs 3:1')
+      }
+    }
+    assert.notEqual(icons.calm, icons.needs, lang + ': the two icons differ')
   }
 })
 
 // docs/images/brand/ is drawn by docs/preview/render.ts; these are the files it wrote.
-test('the brand lockups and the mark are paths only, on a transparent background, in light and dark', () => {
-  const brand = name => readFileSync(new URL(`../docs/images/brand/${name}`, import.meta.url), 'utf8')
+test('the brand lockups and the mark are paths and circles only, on a transparent background, in light and dark', () => {
+  const brand = name => readFileSync(new URL('../docs/images/brand/' + name, import.meta.url), 'utf8')
   const grounds = { light: '#ffffff', dark: '#0d1117' }
   for (const [mode, palette] of Object.entries({ light, dark })) {
-    const svg = brand(`agent-board-lockup-${mode}.svg`)
-    const where = `the ${mode} lockup`
-    assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"[^>]*\brole="img"[^>]*\baria-label="agent-board"/, `${where}: one labelled picture`)
-    assert.ok(svg.includes(`d="${MARK_PATH}"`), `${where}: carries the page's mark`)
+    const svg = brand('agent-board-lockup-' + mode + '.svg')
+    const where = 'the ' + mode + ' lockup'
+    assert.match(svg, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"[^>]*\brole="img"[^>]*\baria-label="Agent Board"/, where + ': one labelled picture')
     const elements = [...svg.matchAll(/<([a-z]+)\b/gi)].map(match => match[1])
-    assert.deepEqual([...new Set(elements)].sort(), ['g', 'path', 'svg', 'title'], `${where}: paths only, no text, font, image or background`)
+    assert.deepEqual([...new Set(elements)].sort(), ['circle', 'path', 'svg', 'title'], where + ': paths and the light only, no text, font, image or background')
+    assert.equal(elements.filter(name => name === 'circle').length, 1, where + ': one light, between the two words')
     const fills = new Set([...svg.matchAll(/\bfill="([^"]+)"/g)].map(match => match[1].toLowerCase()))
-    assert.deepEqual([...fills].sort(), [palette.brand, palette.ink].map(colour => colour.toLowerCase()).sort(), `${where}: the mark and hyphen in brand, the word in ink`)
-    assert.doesNotMatch(svg, /stroke|font|<rect|<image|background/i, `${where}: no stroke, font or background`)
-    for (const colour of fills) assert.ok(contrast(colour, grounds[mode]) >= 3, `${where}: ${colour} on GitHub's ${mode} ground is ${contrast(colour, grounds[mode]).toFixed(3)}:1, requires 3:1`)
-    assert.doesNotMatch(svg, PRIVACY, `${where}: satisfies the privacy contract`)
+    assert.deepEqual([...fills].sort(), [palette.brand, palette.ink].map(colour => colour.toLowerCase()).sort(), where + ': the words in ink, the light in brand')
+    assert.doesNotMatch(svg, /stroke|font|<rect|<image|background/i, where + ': no stroke, font or background')
+    for (const colour of fills) assert.ok(contrast(colour, grounds[mode]) >= 3, where + ': ' + colour + ' on GitHub’s ' + mode + ' ground needs 3:1')
+    assert.doesNotMatch(svg, PRIVACY, where + ': satisfies the privacy contract')
   }
   const mark = brand('agent-board-mark.svg')
   assert.match(mark, /\bviewBox="0 0 64 64"/, 'the mark file uses the 64 grid')
-  assert.deepEqual([...mark.matchAll(/<path\b[^>]*\bd="([^"]+)"/g)].map(match => match[1]), [MARK_PATH], 'the mark file is the one mark path')
+  assert.deepEqual([...mark.matchAll(/<path\b[^>]*\bd="([^"]+)"/g)].map(match => match[1]), [BOARD_PATH], 'the mark file is the board')
+  assert.match(mark, /<circle class="brand" cx="44" cy="20" r="12"\/>/, 'the mark file has the light in its corner')
   assert.doesNotMatch(mark, /<(?:text|rect|image)\b|font|stroke/i, 'the mark file has no text, background or stroke')
-  const style = /<style>([\s\S]*?)<\/style>/.exec(mark)?.[1] ?? ''
-  assert.match(style, /^path\{fill:#B36A00\}@media \(prefers-color-scheme:dark\)\{path\{fill:#F8B500\}\}$/, 'the mark file follows the reader\'s theme')
+  assert.equal(/<style>([\s\S]*?)<\/style>/.exec(mark)?.[1], '.ink{fill:' + light.ink + '}.brand{fill:' + light.brand + '}@media (prefers-color-scheme:dark){.ink{fill:' + dark.ink + '}.brand{fill:' + dark.brand + '}}', 'the mark file follows the reader’s theme')
   // The README's title: the same lockup, coloured by its own style so it follows the reader's theme.
   const logo = brand('agent-board-logo.svg')
-  assert.ok(logo.includes(`d="${MARK_PATH}"`), 'the theme-following lockup carries the page\'s mark')
-  assert.deepEqual([...new Set([...logo.matchAll(/<([a-z]+)\b/gi)].map(match => match[1]))].sort(), ['g', 'path', 'style', 'svg', 'title'], 'the theme-following lockup is paths and its style only')
-  const paths = [...logo.matchAll(/<path\b[^>]*>/g)].map(match => /\bclass="([^"]+)"/.exec(match[0])?.[1])
-  assert.deepEqual(paths, ['brand', 'ink', 'brand'], 'the theme-following lockup: the mark and the hyphen in brand, the word in ink')
+  assert.deepEqual([...new Set([...logo.matchAll(/<([a-z]+)\b/gi)].map(match => match[1]))].sort(), ['circle', 'path', 'style', 'svg', 'title'], 'the theme-following lockup is paths, its light and its style only')
+  assert.deepEqual([...logo.matchAll(/<(?:path|circle)\b[^>]*>/g)].map(match => /\bclass="([^"]+)"/.exec(match[0])?.[1]), ['ink', 'brand'], 'the theme-following lockup: the words in ink, the light in brand')
   assert.doesNotMatch(logo, /\bfill="|stroke|font|<rect|<image|background/i, 'the theme-following lockup takes its colours from its style alone')
-  assert.equal(/<style>([\s\S]*?)<\/style>/.exec(logo)?.[1], `.ink{fill:${light.ink}}.brand{fill:${light.brand}}@media (prefers-color-scheme:dark){.ink{fill:${dark.ink}}.brand{fill:${dark.brand}}}`, 'the theme-following lockup uses the lockups\' colours')
+  assert.equal(/<style>([\s\S]*?)<\/style>/.exec(logo)?.[1], '.ink{fill:' + light.ink + '}.brand{fill:' + light.brand + '}@media (prefers-color-scheme:dark){.ink{fill:' + dark.ink + '}.brand{fill:' + dark.brand + '}}', 'the theme-following lockup uses the lockups’ colours')
   assert.doesNotMatch(logo, PRIVACY, 'the theme-following lockup satisfies the privacy contract')
 })

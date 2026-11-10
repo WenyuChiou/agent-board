@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { bundleFiles, bundleFromDir } from '../scripts/bundle-text.mjs'
+import { setupPrograms } from './helpers/setup-programs.mjs'
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
 const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
@@ -42,8 +43,8 @@ const fixture = fn => {
     // locked while the private-path scan reads it.
     AGENT_BOARD_TEST_PID: String(process.pid),
   }
-  const run = (pkg, args = [], extraEnv = {}) => spawnSync(process.execPath, [join(pkg, 'bin/agent-board.mjs'), ...args], {
-    cwd: box, env: { ...env, ...extraEnv }, encoding: 'utf8', windowsHide: true, timeout: 30000,
+  const run = (pkg, args = [], extraEnv = {}, input) => spawnSync(process.execPath, [join(pkg, 'bin/agent-board.mjs'), ...args], {
+    cwd: box, env: { ...env, ...extraEnv }, input, encoding: 'utf8', windowsHide: true, timeout: 30000,
   })
   try { return fn({ box, home, tmp, env, run }) }
   finally {
@@ -225,7 +226,7 @@ test('agent-board --help works in a scratch home with nothing installed and writ
     const result = f.run(pkg, args)
     success(result)
     assert.ok(result.stdout.includes('agent-board setup --apply'))
-    assert.ok(result.stdout.includes('--serve'))
+    assert.ok(!result.stdout.includes('--serve'), 'plain help does not name the old --serve')
     assert.ok(result.stdout.includes(`Without installing: npx ${manifest.name} <the same options>`))
     assert.equal(result.stderr, '')
   }
@@ -249,6 +250,57 @@ test('agent-board with no board installed says how to set it up and writes nothi
   assert.ok(result.stderr.includes(`  ${boardPath(f)}\n`))
   assert.ok(result.stderr.includes(`  ${join(f.env.CLAUDE_CONFIG_DIR, 'agent-board.mjs')}\n`))
   assert.deepEqual(filesUnder(f.home), [])
+}))
+
+const terminalLauncher = f => {
+  const preload = join(f.box, 'terminal.cjs')
+  // Only the launcher sees a fake TTY here; setup uses its own explicit test seam.
+  save(preload, `if (/[\\\\/]bin[\\\\/]agent-board\\.mjs$/.test(process.argv[1] || '')) { process.stdin.isTTY = true; process.stdout.isTTY = true }\n`)
+  return { NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, AGENT_BOARD_SETUP_TTY: '1', AGENT_BOARD_TEST_PID: String(process.pid), CI: '1' }
+}
+
+test('the bare terminal launcher accepts Enter once for files, trust and the Claude plugin', () => fixture(f => {
+  const commands = setupPrograms(f.box, f.env)
+  const result = f.run(packed(f), [], terminalLauncher(f), '\n')
+  success(result)
+  assert.equal(result.stdout.split('Set these up? [Y/n]').length - 1, 1)
+  assert.match(result.stdout, /Codex files: done\./)
+  assert.match(result.stdout, /Approve the board's hooks in Codex: done\./)
+  assert.match(result.stdout, /Approve the board's hooks in Hermes Agent: done\./)
+  assert.match(result.stdout, /Claude Code plugin: done\./)
+  assert.equal(statSync(boardPath(f)).isFile(), true)
+  assert.ok(readFileSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json'), 'utf8').includes('approvals'))
+  assert.equal(commands.calls().filter(call => call.method === 'config/batchWrite').length, 1)
+  assert.deepEqual(commands.calls().filter(call => call.program === 'claude').map(call => call.args), [
+    ['plugin', 'marketplace', 'add', 'WenyuChiou/agent-board'],
+    ['plugin', 'install', 'agent-board@agent-board'],
+  ])
+  assert.doesNotMatch(result.stdout, /Apply these changes\? \[y\/N\]/)
+}))
+
+test('declining the bare terminal launcher leaves the account unconfigured', () => fixture(f => {
+  const commands = setupPrograms(f.box, f.env)
+  const result = f.run(packed(f), [], terminalLauncher(f), 'n\n')
+  assert.ifError(result.error)
+  success(result)
+  assert.equal(result.stdout.split('Set these up? [Y/n]').length - 1, 1)
+  assert.match(result.stdout, /Apply these changes: .*--apply/)
+  assert.deepEqual(filesUnder(f.home), [])
+  assert.deepEqual(commands.calls(), [])
+}))
+
+test('the bare terminal launcher finishes a Claude-only setup before its next session creates the board', () => fixture(f => {
+  const commands = setupPrograms(f.box, f.env, ['claude'])
+  const result = f.run(packed(f), [], terminalLauncher(f), '\n')
+  success(result)
+  assert.equal(result.stdout.split('Set these up? [Y/n]').length - 1, 1)
+  assert.match(result.stdout, /Claude Code plugin: done\./)
+  assert.match(result.stdout, /Open a new session in Claude Code\.\r?\n\d\. Then type \/agent-board there\./)
+  assert.deepEqual(commands.calls().filter(call => call.program === 'claude').map(call => call.args), [
+    ['plugin', 'marketplace', 'add', 'WenyuChiou/agent-board'],
+    ['plugin', 'install', 'agent-board@agent-board'],
+  ])
+  assert.equal(filesUnder(f.home).some(path => path.endsWith('agent-board.mjs')), false)
 }))
 
 test('with --chat, a missing board names the home folder as ~ and nothing else changes', () => fixture(f => {
@@ -398,7 +450,7 @@ test('an unknown word prints the usage hint and exits 2', () => fixture(f => {
   assert.ifError(result.error)
   assert.equal(result.status, 2)
   assert.equal(result.stdout, '')
-  assert.equal(result.stderr, 'agent-board: unknown command "serve". The board takes options such as --serve; run agent-board --help.\n')
+  assert.equal(result.stderr, 'agent-board: unknown command "serve". The board takes options such as --print or --json; run agent-board --help.\n')
   assert.deepEqual(filesUnder(f.home), [])
 }))
 

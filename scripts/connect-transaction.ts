@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Lang, Strings } from '../hooks/i18n'
 import { BOARD_FOR, agentHooks, connectDataRoots, connectPath, isNodeSupported, isSetupState, setupOwnership, nodeVersionOf, setupSeed, setupProblemText, withoutSection } from '../hooks/connect-pure'
+import { hermesHome } from '../hooks/hermes-home'
 import { managedCommandLines } from '../hooks/codex-fallback'
 import { codexBinaryOf, codexConfigHash, findCodexExecutable, inspectCodexHooks } from './codex-host'
 import { codexApproval } from './codex-approval'
@@ -230,7 +231,7 @@ export const connectContext = (request: LegacyConnectRequest): ConnectContext =>
     board: join(folder, 'agent-board.mjs'),
     codexHome: request.dirs?.codex ?? join(request.home, '.codex'),
     grokHome: request.dirs?.grok ?? join(request.home, '.grok'),
-    hermesHome: request.dirs?.hermes ?? join(request.home, '.hermes'),
+    hermesHome: request.dirs?.hermes ?? hermesHome(request.home, isWindows ? '\\' : '/', process.env, process.platform),
     openclawHome: request.dirs?.openclaw ?? join(request.home, '.openclaw'),
     opencodeHome: request.dirs?.opencode ?? join(request.home, '.config', 'opencode'),
   }

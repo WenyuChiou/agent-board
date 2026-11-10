@@ -4,7 +4,7 @@ import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiv
 import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
-import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
+import { LEDGER_LINK, LEDGER_RENAMES, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
 import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
 import { atom, read, update } from 'claude-code'
@@ -39,6 +39,8 @@ import {
 } from './blocks'
 import type { ConfirmedTask, ConfirmRef } from './blocks'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from './history'
+import { barStyleFrom, barStyleName, barStyleOf, DEFAULT_BAR_STYLE, withBarStyle } from './progress-bar'
+import type { BarStyle } from './progress-bar'
 import { withRunMark } from './runs'
 import { ciFinished, GH_FIELDS, prFromGh } from './github'
 import {
@@ -56,14 +58,12 @@ import {
   pendingArchivePath,
   unwrittenEntries,
 } from './journal'
-import type { JournalEntry } from './journal'
+import type { JournalEntry, JournalRecord } from './journal'
 import {
   applyTaskCreate,
   applyTaskUpdate,
   applyTodoWrite,
   asData,
-  cleanContext,
-  cleanTitle,
   clip,
   completedSince,
   applyCompletionOverlay,
@@ -78,13 +78,14 @@ import {
   isAllDone,
   fromTaskList,
   markAnswered,
+  nameReply,
   noticesOf,
   resumeNote,
   stateOf,
 } from './mirror'
 import type { ListedTask } from './mirror'
 import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
-import { othersNote } from './others'
+import { othersNote, sessionPushNote } from './others'
 import type { ProgressProject } from '../types'
 import { boardRun } from './board-commands'
 import { peekInbox, redact, turnsFor } from './board'
@@ -97,9 +98,9 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, clearAsked, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, parseDigest, replyData, requestData, startBackgroundJob, closeToolQuestions, toolQuestions, turnTools } from './digest'
+import { answerTurns, applyDigest, applyLateDigest, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, noteChatReply, parseDigest, replyData, requestData, settleChatReply, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, retainApproval, markApproval, raiseApproval, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
-import { boardScript, isNodeSupported, isSetupState, isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
+import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
 import { liveBoardArgv, liveBoardPage, liveBoardScript, pageDoneHash, pageDonePath, pageStatePath, readPageDone, readPageState } from './live-page'
 import {
@@ -185,6 +186,9 @@ const theme = atom({ plugin: 'agent-board', key: 'theme' } as const, 'dark')
 // Steps finished today, from the journal.
 const today = atom({ plugin: 'agent-board', key: 'today' } as const, 0)
 const isLegendOpen = atom({ plugin: 'agent-board', key: 'isLegendOpen' } as const, false)
+// The progress bar's style (#1085), as the board's settings file last said: the page, the pane and
+// the terminal board all write it there, and each poll looks again.
+const barStyle = atom({ plugin: 'agent-board', key: 'barStyle' } as const, DEFAULT_BAR_STYLE as BarStyle)
 // The language the pane speaks (strings.ts resolveLang), settled at session start.
 const lang = atom({ plugin: 'agent-board', key: 'lang' } as const, 'zh-TW')
 // Which folded sections the person opened; kept across sessions in $.store.
@@ -205,9 +209,76 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 
 const wordsOf = async ($: EngineInterface): Promise<Strings> => STRINGS[langOf(await read($, lang)) ?? 'zh-TW']
 
+// The step for an approval that has waited long enough, only in a session that keeps a Task list (the
+// same rule as a closing question); a failed save leaves the tool's own dialog untouched.
+const showApproval = async ($: EngineInterface, id: string, tool: string): Promise<void> => {
+  const mirror = await read($, mine)
+  if (mirror === null || mirror.source !== 'tasks' || mirror.tasks.length === 0) return
+  const step = (await wordsOf($)).claudeApprovalStep(tool)
+  // The dialog can end while the words are read: the save checks again, and the flag is set first
+  // so a turn ending during the save still takes the step back.
+  if (!pendingApprovals.has(id)) return
+  hasApprovalStep = true
+  approvalRevision += 1
+  // Another question may hold the board now: saveMine raises this step once that one clears (#1106).
+  readyApprovals.set(id, step)
+  await saveMine($, one => pendingApprovals.has(id) ? markApproval(one, step) : one)
+  await settle($)
+}
+
+// A failed closure must leave its source available to the next ledger pass. Retry outside
+// the write queue, since settling the mirror itself queues a write and a poll.
+const finishApproval = async ($: EngineInterface): Promise<void> => {
+  if (!hasApprovalStep || pendingApprovals.size > 0 || isClosingApproval) return
+  const revision = approvalRevision
+  const isCurrent = (): boolean => approvalRevision === revision && pendingApprovals.size === 0
+  isClosingApproval = true
+  try {
+    await saveMine($, one => isCurrent() ? closeApproval(one) : one)
+    await settle($)
+    if (!isCurrent()) return
+    const path = await progressPath($)
+    if (!(await pollQuestions($, path, parseProgress(await readText($, path))))) return
+    // A new approval can arrive during any engine call, including the mirror update.
+    if (!isCurrent()) return
+    await saveMine($, one => {
+      if (!isCurrent()) return one
+      hasApprovalStep = false
+      return clearApproval(one)
+    })
+    await settle($)
+  } catch {
+    // The stored or rendered closure and the retry flag survive a denied write.
+  } finally {
+    isClosingApproval = false
+  }
+}
+
+// No id means the turn or session ended, whatever approvals were pending.
+const dropApproval = async ($: EngineInterface, id?: string): Promise<void> => {
+  if (id === undefined) {
+    pendingApprovals.clear()
+    readyApprovals.clear()
+  } else {
+    pendingApprovals.delete(id)
+    readyApprovals.delete(id)
+  }
+  await finishApproval($)
+}
+
 // Module state: reset by a reload, which only happens between turns.
 let isPolling = false
 let isTurnRunning = false
+// Tools the person is being asked to approve (#1048): tool_use_id to tool name. One that is still here
+// after APPROVAL_MS puts a waiting step on the board; its tool.call ending, or the turn or session
+// ending, takes the step back. `hasApprovalStep` is whether this session has written one.
+const APPROVAL_MS = 3000
+const pendingApprovals = new Map<string, string>()
+let hasApprovalStep = false
+// Approvals that have waited APPROVAL_MS, with their steps: one may sit behind another question until that one clears.
+const readyApprovals = new Map<string, string>()
+let approvalRevision = 0
+let isClosingApproval = false
 let receiver: Receiver | null = null
 let receiverTimer: { cancel: () => void } | null = null
 // A hub that does not answer within this holds no tick up: it is a poll that failed.
@@ -237,7 +308,6 @@ let isReminding = false
 let turnPrompt = ''
 // Whether the prompt starting the next turn is the person's own message, as prompt.submit
 // saw it.
-let isNextTurnAnswer = false
 // turn.start has no origin; undefined alone permits its legacy text fallback.
 let nextTurnNotification: boolean | undefined
 let hasTurnBackgroundLaunch = false
@@ -269,6 +339,7 @@ let pendingQuestionRetry: Promise<PendingTurn[]> | null = null
 let hasRestoredInboxQuestions = false
 const journalNoticesShown = new Set<string>()
 let journalNoticeKey = ''
+const pushedBySession = new Map<string, Set<string>>()
 
 // CLAUDE_PROGRESS_FILE wins; then CLAUDE_CONFIG_DIR, where Claude Code keeps its own files
 // when moved; otherwise ~/.claude/progress.md. USERPROFILE comes before HOME because that is
@@ -378,6 +449,38 @@ const replaceFile = async ($: EngineInterface, from: string, to: string, isWin: 
   return ran !== null && ran.exitCode === 0
 }
 
+// A batch of replacements in one Node start: each PowerShell start can take over 10 s on a slow
+// Windows machine, and 50 of them in a row made a receipt batch fail half way. The argv of one
+// run stays under ARGV_BUDGET characters, well inside Windows' 32,767-character command line with
+// the script itself, so a batch of 50 deep paths is still one start. A pair still not placed
+// afterwards (a failed rename, a missing or failing `node`) goes through the per-file move. The
+// answer is what the files hold, so the exit code alone never counts. True for each pair whose
+// source is gone.
+const ARGV_BUDGET = 24000
+const replaceFiles = async ($: EngineInterface, pairs: readonly (readonly [string, string])[], isWin: boolean): Promise<boolean[]> => {
+  const chunks: (readonly [string, string])[][] = []
+  let used = 0
+  for (const pair of pairs) {
+    const size = pair[0].length + pair[1].length + 4
+    if (chunks.length === 0 || used + size > ARGV_BUDGET) {
+      chunks.push([])
+      used = 0
+    }
+    chunks[chunks.length - 1]?.push(pair)
+    used += size
+  }
+  const placed: boolean[] = []
+  for (const chunk of chunks) {
+    await $.process.run(['node', '-e', LEDGER_RENAMES, '--', ...chunk.flat()], { timeoutMs: 10000 }).catch(() => null)
+    for (const [from, to] of chunk) {
+      if (await $.fs.exists(from)) placed.push(await replaceFile($, from, to, isWin) && !(await $.fs.exists(from)))
+      else placed.push(true)
+    }
+  }
+
+  return placed
+}
+
 type Completion = Awaited<ReturnType<EngineInterface['model']['complete']>>
 
 // A model call that gives up after MODEL_MS, answering undefined as a failed call does.
@@ -431,7 +534,7 @@ const answeredKeptSince = new Map<string, number>()
 let answersAdded = 0
 const rememberAnswered = (turns: readonly AgentTurn[]): void => {
   for (const turn of turns) {
-    if ((turn.event !== 'prompt' && (turn.event !== 'turn' || turn.answer.trim() === '')) || turn.at === undefined || !Number.isFinite(turn.at)) continue
+    if (turn.event !== 'turn' || turn.answer.trim() === '' || turn.at === undefined || !Number.isFinite(turn.at)) continue
     const key = JSON.stringify([turn.agent, turn.id, turn.session])
     if ((answeredPending.get(key)?.at ?? -Infinity) >= turn.at) continue
     answeredPending.set(key, { agent: turn.agent, id: turn.id, session: turn.session, event: turn.event, at: turn.at })
@@ -1054,6 +1157,21 @@ const questionPass = async ($: EngineInterface, path: string, projects: readonly
   await isDoneWithin($, pass, POLL_MS)
 }
 
+// A stat per poll; the file is read only when it changed. A pick made on the page or the terminal
+// board redraws the pane at the next poll.
+let barStyleSeen = ''
+const pollBarStyle = async ($: EngineInterface, path: string): Promise<void> => {
+  const file = settingsPath(path)
+  const stat = await $.fs.stat(file).catch(() => undefined)
+  const seen = stat === undefined ? '' : `${stat.mtimeMs}:${stat.size}`
+  if (seen === barStyleSeen) return
+  const style = barStyleOf(stat === undefined ? null : await readText($, file).catch(() => null))
+  barStyleSeen = seen
+  if ((await read($, barStyle)) === style) return
+  await update($, barStyle, () => style)
+  $.ui.invalidate('ui.render')
+}
+
 // Re-reads the file only when its mtime or size moved, so the 2s timer is a stat. Only the 2s
 // timer (`canReplace`) takes a held poll's place: the polls the write queue runs return at once,
 // as before, so no write waits behind a second held read.
@@ -1073,6 +1191,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
     pollStartedAt = await $.clock.now()
     const path = await progressPath($)
     await pollAnswered($, path).catch(() => undefined)
+    await pollBarStyle($, path).catch(() => undefined)
     const previous = await read($, snapshot)
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (!isCurrent()) return
@@ -1241,19 +1360,30 @@ const syncPageState = async ($: EngineInterface, done?: Record<string, string>):
       .filter(({ file }) => !verifiedPageDone.has(file))
     const dir = path.replace(/[\\/][^\\/]*$/, '')
     const existing = receipts.length === 0 ? new Set<string>() : new Set((await $.fs.list(dir)).filter(entry => entry.kind === 'file').map(entry => entry.name))
+    const isWin = await isWindows($, path)
+    const pending: { text: string; file: string; temporary: string }[] = []
     for (const { text, file } of receipts.slice(0, 50)) {
-      if (!existing.has(file.replace(/^.*[\\/]/, '')) || await readText($, file) !== text) {
-        const temporary = `${file}.tmp-${await $.session.id()}-${questionWrite++}`
-        const isWin = await isWindows($, path)
-        try {
-          await $.fs.write(temporary, text)
-          if (await $.fs.read(temporary) !== text || !(await replaceFile($, temporary, file, isWin))) throw new Error('PAGE_STATE_NOT_VERIFIED')
-          if (await $.fs.read(file).catch(() => null) !== text) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
-        } finally {
-          if (await $.fs.exists(temporary)) await removeFiles($, [temporary], isWin)
-        }
+      if (!existing.has(file.replace(/^.*[\\/]/, '')) || await readText($, file) !== text) pending.push({ text, file, temporary: `${file}.tmp-${await $.session.id()}-${questionWrite++}` })
+      else verifiedPageDone.add(file)
+    }
+    // Every temp is written and read back first; one process then places the whole batch.
+    try {
+      let isWhole = true
+      for (const { text, temporary } of pending) {
+        await $.fs.write(temporary, text)
+        if (await $.fs.read(temporary) !== text) isWhole = false
       }
-      verifiedPageDone.add(file)
+      if (isWhole) await replaceFiles($, pending.map(one => [one.temporary, one.file] as const), isWin)
+      let isVerified = isWhole
+      for (const { text, file } of pending) {
+        if (await $.fs.read(file).catch(() => null) === text) verifiedPageDone.add(file)
+        else isVerified = false
+      }
+      if (!isVerified) throw Object.assign(new Error('PAGE_STATE_NOT_VERIFIED'), { code: 'PAGE_STATE_NOT_VERIFIED' })
+    } finally {
+      const left: string[] = []
+      for (const { temporary } of pending) if (await $.fs.exists(temporary)) left.push(temporary)
+      await removeFiles($, left, isWin)
     }
     let before = ''
     let hasLanded = false
@@ -1324,7 +1454,7 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInt
   // and the CLI's existing running-page check.
   const script = liveBoardScript(path)
   const installed = await readText($, script).catch(() => '')
-  if (!Object.values(STRINGS).some(words => installed === boardScript(path, words.lang))) return { page: null, needsInstall: true }
+  if (!isOwnBoard(installed, path)) return { page: null, needsInstall: true }
   try {
     // Worst case: 2 s for the 0.19.0 address check + 8.5 s of checks + 10 s child
     // wait + 8.5 s of checks = 29 s, plus Node start. Going over is safe: the
@@ -1606,7 +1736,7 @@ const saveCutTextNow = async ($: EngineInterface): Promise<void> => {
   const tail = (line: string): string => line.replace(/^(?:> )?- \d{4}-\d{2}-\d{2} \d{2}:\d{2} · /, '')
   const seen = new Set(past.split(/\r?\n/).map(tail))
   const isNew = fresh.filter(entry => !seen.has(tail(journalLine(entry, at, s))))
-  if (isNew.length > 0) await journal($, isNew)
+  if (isNew.length > 0) await journal($, isNew.map(entry => ({ ...entry, isEvidence: true })))
   for (const entry of fresh) journaledCuts.add(JSON.stringify(entry))
 }
 
@@ -1660,7 +1790,7 @@ const countToday = async ($: EngineInterface): Promise<void> => {
 }
 
 // Keep the original month and timestamp across retries, including a module reload.
-const journal = ($: EngineInterface, entries: ReadonlyArray<Omit<JournalEntry, 'at'>> = [], storedKey?: string, outcome?: { isSaved: boolean; isDeferred?: boolean }): Promise<void> => {
+const journal = ($: EngineInterface, entries: ReadonlyArray<JournalRecord> = [], storedKey?: string, outcome?: { isSaved: boolean; isDeferred?: boolean }): Promise<void> => {
   let hasPending = entries.length > 0
   let key = storedKey ?? ''
   return enqueue(async () => {
@@ -1803,7 +1933,13 @@ const saveMine = async (
   change: (mirror: ProgressMirror) => ProgressMirror,
   quiet = false,
 ): Promise<void> => {
-  const { current, next } = await updateBackgroundMirror($, change)
+  const { current, next } = await updateBackgroundMirror($, one => {
+    const changed = change(one)
+    const kept = hasApprovalStep ? retainApproval(one, changed) : changed
+    // An approval that waited behind another question goes up on the first save after that one clears.
+    const ready = [...readyApprovals].find(([id]) => pendingApprovals.has(id))
+    return ready === undefined ? kept : raiseApproval(kept, ready[1])
+  })
   if (next === null || current === null) return
   await $.store.set(`mirror:${next.sessionId}`, { ...next, board: boardTag(await progressPath($)) })
   if (!quiet) {
@@ -1869,7 +2005,10 @@ const detectHere = async ($: EngineInterface): Promise<void> => {
 const loadMine = async ($: EngineInterface, cwd: string): Promise<void> => {
   const sessionId = await $.session.id()
   const held = await read($, mine)
-  if (held !== null && held.sessionId === sessionId) return
+  if (held !== null && held.sessionId === sessionId) {
+    hasApprovalStep ||= held.tasks.some(one => one.id === 'approval')
+    return
+  }
   const key = `mirror:${sessionId}`
   const raw = await $.store.get(key) as ProgressMirror | undefined
   const stored = (await completedMirror($, key, raw)).mirror
@@ -1878,6 +2017,8 @@ const loadMine = async ($: EngineInterface, cwd: string): Promise<void> => {
   // A print-mode session (`claude -p`) is a run an agent started for itself, not a conversation a person
   // typed into (#501); its mirror stays local and writeMine writes no block.
   await update($, mine, () => withRunMark(stored === undefined ? fresh : { ...clearBackgroundJobs({ ...fresh, ...stored }), isTurnRunning: false, cwd: stored.cwd || cwd }, !isInteractiveSession))
+  // Reloads happen between turns: a retained approval is closure work left by the old host.
+  hasApprovalStep = stored?.tasks.some(one => one.id === 'approval') === true
 }
 
 const completedMirror = async ($: EngineInterface, key: string, raw: ProgressMirror | undefined): Promise<{ mirror: ProgressMirror | undefined; barrier: number }> => {
@@ -1951,10 +2092,9 @@ const nameTask = async ($: EngineInterface): Promise<void> => {
     effort: 'low',
     prompt: (await wordsOf($)).namePrompt(requestData(mirror.firstPrompt), steps),
   })
-  const lines = asked?.isAnswered === true ? asked.text.split(/\r?\n/).filter(line => line.trim() !== '') : []
-  const title = cleanTitle(lines[0] ?? '')
-  const context = cleanContext(lines[1] ?? '')
-  if (title === '' && context === '') return
+  const named = asked?.isAnswered === true ? nameReply(asked.text) : null
+  if (named === null) return
+  const { title, context } = named
   await saveMine($, one => ({ ...one, title: title || one.title, context: context || one.context }))
   await queueWrite($)
 }
@@ -1973,10 +2113,9 @@ const refreshName = async ($: EngineInterface): Promise<void> => {
     effort: 'low',
     prompt: s.refreshPrompt(requestData(mirror.firstPrompt), steps, mirror.title || fallbackTitle(mirror), mirror.context),
   })
-  const lines = asked?.isAnswered === true ? asked.text.split(/\r?\n/).filter(line => line.trim() !== '') : []
-  const title = cleanTitle(lines[0] ?? '')
-  const context = cleanContext(lines[1] ?? '')
-  if (title === '' && context === '') return
+  const named = asked?.isAnswered === true ? nameReply(asked.text) : null
+  if (named === null) return
+  const { title, context } = named
   await saveMine($, one => ({ ...one, title: title || one.title, context: context || one.context }), true)
   await queueWrite($)
 }
@@ -2037,7 +2176,9 @@ const digestTurn = async ($: EngineInterface, prompt: string, answer: string, ha
   await saveCurrent($, current => {
     isEnded = current.state === 'ended'
     if (current.source === 'tasks' && current.tasks.length > 0) return current
-    return applyDigest(current, summed.digest, summed.now, summed.s, hasRunningTurnBackgroundJob)
+    return current.replied === undefined
+      ? applyDigest(current, summed.digest, summed.now, summed.s, hasRunningTurnBackgroundJob)
+      : applyLateDigest(current, summed.digest, summed.now, summed.s, hasRunningTurnBackgroundJob)
   })
   if (isEnded) await queueWrite($)
   else await settle($)
@@ -2090,7 +2231,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   const promptBarrier = normalizeTurnOrder(stored?.promptOrder) ?? -1
   const barrier = Math.max(stored?.confirmedAt ?? 0, completion.barrier)
   const isAfterLast = (turn: AgentTurn): boolean => (turnOrder(turn) ?? newest) >= newest && (barrier === 0 || (turnOrder(turn) ?? -1) > barrier * 2 + 1)
-  const isAfterPrompt = (turn: AgentTurn): boolean => promptBarrier < 0 || (turnOrder(turn) ?? -1) >= promptBarrier
+  const isAfterPrompt = (turn: AgentTurn): boolean => promptBarrier < 0 || (turnOrder(turn) ?? -1) > promptBarrier + 1
   const isNewer = (turn: AgentTurn): boolean => isAfterLast(turn) && isAfterPrompt(turn)
   // A turn written before the person's latest prompt but read after it (#145) still brings its finished
   // work; it may not reopen the question that prompt answered. A turn with no clock stays out.
@@ -2130,17 +2271,23 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
         }
         continue
       }
+      if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: promptKey(prompt) }
+      if (answer.trim() === '') continue
+      const isSettlingReply = !isLateTurn && mirror.replied !== undefined
+      if (!isSettlingReply && answerKey(answer) === mirror.lastAnswer) continue
+      if (isSettlingReply) mirror = settleChatReply(mirror)
       if (!isLateTurn) {
-        mirror = { ...mirror, promptQuestion: null }
+        mirror = { ...mirror, promptQuestion: null, replied: undefined }
         hasRestoredQuestion = false
       }
-      if (mirror.firstPrompt === '' && prompt !== '') mirror = { ...mirror, firstPrompt: promptKey(prompt) }
-      if (answer === '' || answerKey(answer) === mirror.lastAnswer) continue
       if (isLateTurn) hasLateWork = true
       if (digested.has(index)) {
-        mirror = answerTurns(mirror)
+        // A delayed report can contribute finished work, but cannot settle the
+        // pending question that the newer prompt replied to.
+        const hasPendingReply = isLateTurn && mirror.replied !== undefined
+        if (!hasPendingReply) mirror = answerTurns(mirror)
         const summed = await summarize($, mirror, prompt, answer, isLastTry ? 'keep' : 'retry', isLateTurn || questionless.has(turn))
-        if (summed !== null) mirror = applyDigest(mirror, summed.digest, summed.now, summed.s)
+        if (summed !== null) mirror = hasPendingReply ? applyLateDigest(mirror, summed.digest, summed.now, summed.s) : applyDigest(mirror, summed.digest, summed.now, summed.s)
       }
       mirror = { ...mirror, lastAnswer: answerKey(answer) }
     } finally {
@@ -2150,9 +2297,6 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
   // A board look is not an answer: its question stays waiting (#144). Board-request prompts never
   // come here; takeAgentPrompt skips them.
   const evidence = turns.filter(turn => isNewer(turn) && !boardTurns.has(turn))
-  // A late turn's question was answered by the prompt that came after it, whichever session took that
-  // prompt: the prompt's stored time stands in as the answer, so the ledger does not open it again (#145).
-  const answers = hasLateWork && promptBarrier >= 0 ? [...evidence, { ...last, event: 'prompt' as const, prompt: '', answer: '', at: Math.floor(promptBarrier / 2) }] : evidence
   const latest = turns.filter(turn => isNewer(turn) || isLate(turn)).at(-1)
   // Only older turns: the block already says more than they do, and writing it again would
   // bring back one archived since.
@@ -2178,7 +2322,7 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
       return
     }
     await $.store.set(owner, written)
-    rememberAnswered(answers)
+    rememberAnswered(evidence)
     const path = await progressPath($)
     const isKept = (check: string): boolean =>
       extractAutoBlock(check, written) === extractAutoBlock(upsertAutoBlock(check, written, s), written)
@@ -2197,10 +2341,10 @@ const takeAgentTurns = async ($: EngineInterface, turns: readonly AgentTurn[], a
       throw new Error(NOT_KEPT)
     }
     if (answeredLater !== undefined) {
-      answeredLater.push(...answers)
+      answeredLater.push(...evidence)
       return
     }
-    await pollAnsweredQuestions($, path, undefined, answers)
+    await pollAnsweredQuestions($, path, undefined, evidence)
     await poll($)
   })
   if (hasMoved) {
@@ -2242,14 +2386,11 @@ const takeAgentPrompt = async ($: EngineInterface, prompt: AgentTurn): Promise<v
     // No owner-key write: a later owner may advance while this await is pending.
     // Every receipt has its own key, so simultaneous prompts do not erase barriers.
     const key = `agentPrompt:${prompt.id}:${next.promptOrder}:${updated}`
-    const receipt = { id: prompt.id, agent: prompt.agent, session: prompt.session, at: prompt.at, updated }
+    const receipt = { id: prompt.id, agent: prompt.agent, session: prompt.session, at: prompt.at, updated, ...(prompt.turnKey === undefined ? {} : { turnKey: prompt.turnKey }) }
     await $.store.set(key, receipt)
-    // The stored receipt makes a retry skip this prompt, so its evidence is kept before the check.
-    rememberAnswered([prompt])
     // A successful call alone does not prove persistence. Keep the claimed input
     // until this immutable barrier can be read back with the same binding/time.
     if (JSON.stringify(await $.store.get(key)) !== JSON.stringify(receipt)) throw new Error('PROMPT_RECEIPT_NOT_KEPT')
-    await pollAnsweredQuestions($, path, undefined, [prompt])
     await poll($)
   })
 }
@@ -3409,6 +3550,33 @@ const othersNoteFor = async ($: EngineInterface): Promise<string | null> => {
   return othersNote((await read($, snapshot)).projects, await read($, here), mirror === null ? '' : { ...mirror, agent: mirror.agent || 'claude' }, await $.clock.now(), await wordsOf($))
 }
 
+const sessionPushNoteFor = async ($: EngineInterface): Promise<string | null> => {
+  const mirror = await read($, mine)
+  if (mirror === null || mirror.sessionId === '') return null
+  const seen = pushedBySession.get(mirror.sessionId) ?? new Set<string>()
+  const steps = mirror.tasks.map(one => `- [${one.waiting !== null ? '>' : one.blocked !== null ? '!' : one.status === 'completed' ? 'x' : ' '}] ${[one.subject, one.why ?? '', one.blocked ?? ''].filter(Boolean).join(' — ')}`)
+  const result = sessionPushNote(
+    (await read($, snapshot)).projects,
+    await read($, here),
+    {
+      sessionId: mirror.sessionId,
+      agent: mirror.agent || 'claude',
+      ...(mirror.resume === '' ? {} : { resume: mirror.resume }),
+      ...(mirror.title === '' ? {} : { title: mirror.title }),
+      steps,
+    },
+    seen,
+    await $.clock.now(),
+    await wordsOf($),
+  )
+  if (result.keys.length > 0) {
+    for (const key of result.keys) seen.add(key)
+    pushedBySession.set(mirror.sessionId, seen)
+  }
+
+  return result.note
+}
+
 // Keeps the store to what the board still needs (retention.ts, #373). A pass reads at most
 // its batch size (RETENTION.pruneStartReads at start, pruneReads hourly), in name order after where
 // the last pass stopped. A session start costs the same on a store of any size; the walk point is
@@ -3848,7 +4016,16 @@ const setNotify = ($: EngineInterface, requested?: boolean): Promise<boolean> =>
 
 const settle = async ($: EngineInterface, isWriteBlocking = true): Promise<void> => {
   const at = await $.clock.now()
-  await saveMine($, mirror => ({ ...mirror, state: stateOf(mirror, isTurnRunning), isTurnRunning, updated: at }))
+  await saveMine($, mirror => {
+    const isReplied = mirror.replied !== undefined && Number.isFinite(mirror.replied) && mirror.replied >= (mirror.updated ?? 0)
+    return {
+      ...mirror,
+      state: stateOf(mirror, isTurnRunning),
+      isTurnRunning,
+      updated: at,
+      ...(isReplied ? { replied: at } : {}),
+    }
+  })
   const writing = queueWrite($)
   if (isWriteBlocking) await writing
 }
@@ -3862,7 +4039,6 @@ const sendingOwn = new Map<string, Promise<PromptSubmitResult>>()
 const submitOwn = ($: EngineInterface, text: string): Promise<PromptSubmitResult> => {
   const sending = sendingOwn.get(text)
   if (sending !== undefined) return sending
-  isNextTurnAnswer = false
   nextTurnNotification = false
 
   const sent = $.prompt.submit({ text })
@@ -3874,12 +4050,20 @@ const submitOwn = ($: EngineInterface, text: string): Promise<PromptSubmitResult
   return sent
 }
 
-// The person wrote in this session: with a Task list, every step Claude asked them is answered.
-const answerHere = async ($: EngineInterface): Promise<void> => {
+// Keep the question intact in the file until Claude reports again.
+const replyHere = async ($: EngineInterface, at: number): Promise<void> => {
   const mirror = await read($, mine)
-  if (mirror === null || !isAskingYou(mirror)) return
-  await saveMine($, markAnswered, true)
-  await settle($)
+  if (mirror === null || noteChatReply(mirror, at) === mirror) return
+  await saveMine($, one => noteChatReply(one, at), true)
+  await settle($, false)
+}
+
+// A real list report can replace the old task entirely. Publish its closure
+// while the ledger can still match the original question's words and revision.
+const publishChatSettlement = async ($: EngineInterface, mirror: ProgressMirror | null): Promise<void> => {
+  if (mirror?.replied === undefined) return
+  await saveMine($, settleChatReply, true)
+  await queueWrite($)
 }
 
 // POSIX only: a folder that only this account can reach, and in it, when named, a plain file of its own.
@@ -3992,7 +4176,7 @@ export const register: Register = (on, options) => {
     // Work left running past a dispatch can outlive the module (a reload, the end): its
     // rejections are dropped rather than left unhandled.
     $.clock.every(POLL_MS, () => {
-      poll($, true).catch(() => undefined).then(() => retainInboxQuestions($)).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
+      finishApproval($).then(() => poll($, true)).catch(() => undefined).then(() => retainInboxQuestions($)).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
     })
     const startArchive = enqueue(() => archiveOld($)).catch(() => undefined)
     let isFirstInboxLook = true
@@ -4081,6 +4265,23 @@ export const register: Register = (on, options) => {
       return { text: (await wordsOf($)).langSet }
     }
     const s = await wordsOf($)
+    // One style for every surface (#1085): the pick is the `style` key of the board's settings file,
+    // which the page and the terminal board read too.
+    const styleArg = /^(?:style|樣式|样式)\s*(\S*)$/i.exec(arg)
+    if (styleArg !== null) {
+      const style = barStyleFrom(styleArg[1] ?? '')
+      if (style === null) return { text: s.barStyleUnknown }
+      const file = settingsPath(await progressPath($))
+      // A file that exists but cannot be read, or does not read as JSON, is left as it is.
+      let text: string
+      try { text = await readText($, file) } catch { return { text: s.barStyleUnreadable } }
+      const next = withBarStyle(text, style)
+      if (next === null) return { text: s.barStyleUnreadable }
+      try { await $.fs.write(file, next) } catch { return { text: s.pressFailed } }
+      await update($, barStyle, () => style)
+      $.ui.invalidate('ui.render')
+      return { text: s.barStyleSet(barStyleName(style, s)) }
+    }
     if (/^(整理|archive|tidy)$/i.test(arg)) {
       const moved = await enqueue(() => archiveOld($, true)).catch(() => null)
       if (moved === null) return { text: s.tidyUnreadable }
@@ -4163,20 +4364,16 @@ export const register: Register = (on, options) => {
   // Who wrote a prompt is known here, not at turn.start: only the person's own message answers
   // what waits on them. A pane button's answer is marked when it is pressed.
   on('prompt.submit', async ($, e, next) => {
-    const isAnswer = isPersonsAnswer(e)
+    const at = isPersonsAnswer(e) ? await $.clock.now() : undefined
     if (e.turnId === undefined) {
-      isNextTurnAnswer = isAnswer
       nextTurnNotification = e.origin.kind === 'task-notification'
     }
     const entered = await next(e)
-    // Dropped: no turn starts, so the next one must not take this prompt's answer.
     if (entered.drop !== undefined) {
-      isNextTurnAnswer = false
       nextTurnNotification = undefined
     }
-    // Typed over a running turn, or queued behind it: it answers what waited on the person
-    // when they wrote it, though no turn of its own starts now.
-    else if (e.turnId !== undefined && isAnswer) await answerHere($)
+    // A queued prompt can arrive inside another turn and still be the person's reply.
+    else if (at !== undefined) await replyHere($, at)
     else if (e.turnId !== undefined && e.origin.kind === 'task-notification')
       await saveBackground($, one => finishBackgroundJob(one, e.text, true, isTurnRunning))
 
@@ -4187,6 +4384,7 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     journal($).catch(() => undefined)
     isTurnRunning = true
+    await dropApproval($)
     hasTurnBackgroundLaunch = false
     observedTurnTools = []
     turnBackgroundJobIds = new Set()
@@ -4195,8 +4393,6 @@ export const register: Register = (on, options) => {
     // own records. Only its ACK goes back, as the message's receipt.
     const isDelivery = (await receiver?.turnStarted(e.text, e.turnId).catch(() => false)) === true
     turnPrompt = isDelivery ? '' : e.text.trim()
-    const isAnswer = isNextTurnAnswer && e.text.trim() !== ''
-    isNextTurnAnswer = false
     const isNotification = nextTurnNotification
     nextTurnNotification = undefined
     const hasPendingBackgroundSave = pendingBackgroundSaves > 0
@@ -4214,13 +4410,6 @@ export const register: Register = (on, options) => {
     if (mirror !== null && !isDelivery && mirror.firstPrompt === '' && e.text.trim() !== '') {
       await saveMine($, one => ({ ...one, firstPrompt: promptKey(e.text) }))
     }
-    // The person is answering: what waited on them from the last turn's question is settled.
-    // With a Task list, their own message also marks the steps Claude asked them answered,
-    // until Claude asks again. So an answered review does not stay up with a "Looks good"
-    // button that would say the opposite of what they wrote.
-    if (mirror !== null && (mirror.autoAsk !== null || mirror.source === 'turns' || (isAnswer && isAskingYou(mirror)))) {
-      await saveMine($, one => answerTurns(clearAsked(isAnswer && one.source === 'tasks' ? markAnswered(one) : one)), true)
-    }
     if (mirror !== null && (mirror.tasks.length > 0 || mirror.source === 'turns')) {
       await settle($, false)
     } else if (mirror !== null && (await $.store.get(`hinted:${mirror.sessionId}`)) === undefined) {
@@ -4231,6 +4420,13 @@ export const register: Register = (on, options) => {
         // sit in a fence, marked as data. The row has said `isMeta` since 0.12.0, which the
         // engine's types do not name, so it is built apart from the call.
         const message = { type: 'user' as const, isMeta: true, content: [{ type: 'text' as const, text: note }] }
+        await $.session.append({ message }).catch(() => undefined)
+      }
+    }
+    if (mirror !== null) {
+      const pushNote = await sessionPushNoteFor($)
+      if (pushNote !== null) {
+        const message = { type: 'user' as const, isMeta: true, content: [{ type: 'text' as const, text: pushNote }] }
         await $.session.append({ message }).catch(() => undefined)
       }
     }
@@ -4248,18 +4444,22 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     if (hasBackgroundActivity) await backgroundChanges
     isTurnRunning = false
+    await dropApproval($)
     const isDelivery = (await receiver?.turnEnded(e.turnId, e.answer, e.isAborted).catch(() => false)) === true
     const mirror = await read($, mine)
     const hasRunningTurnBackgroundJob = (mirror?.backgroundJobIds ?? []).some(id => turnBackgroundJobIds.has(id)) ||
       (turnBackgroundLaunchesWithoutId > 0 && (mirror?.backgroundJobs ?? 0) > (mirror?.backgroundJobIds?.length ?? 0))
     if ((mirror?.backgroundReleases?.length ?? 0) > 0 || (mirror?.backgroundReleaseCount ?? 0) > 0)
       await saveBackground($, one => ({ ...one, backgroundReleases: [], backgroundReleaseCount: 0 })).catch(() => undefined)
-    const question = e.isAborted || isDelivery ? null : lastQuestion(e.answer)
+    // A board message's ACK stays off the board, but a question its reply ends on waits on the
+    // person like any turn's, so answering from the board can go on past one round (#1050).
+    const question = e.isAborted ? null : lastQuestion(isDelivery ? e.answer.replace(/^\s*ACK \S+[ \t]*/, '') : e.answer)
     if (mirror !== null && mirror.tasks.length > 0) {
       const branch = await branchName($)
-      await saveMine($, one => ({ ...one, branch }))
+      const hasReport = !isDelivery && !e.isAborted && e.answer.trim() !== ''
+      await saveMine($, one => ({ ...(hasReport ? settleChatReply(one) : one), branch }), true)
       // A turn that ended on a question waits on the person even if Claude did not mark it.
-      if (question !== null && mirror.source === 'tasks') await saveMine($, one => markAsked(one, question, hasRunningTurnBackgroundJob))
+      if (question !== null && (mirror.source === 'tasks' || isDelivery)) await saveMine($, one => markAsked(one, question, hasRunningTurnBackgroundJob))
       await settle($)
       if (!mirror.isTitleFinal) {
         $.clock.after(1, () => {
@@ -4308,6 +4508,8 @@ export const register: Register = (on, options) => {
     if (boardToolName !== null && e.tool === boardToolName) return { result: (await openBoard($)).text }
     if (e.agentId !== undefined) return next(e)
     const ran = await next(e)
+    // Answered, declined or failed: the dialog this call waited on is over.
+    if (e.tool_use_id && pendingApprovals.has(e.tool_use_id)) await dropApproval($, e.tool_use_id)
     if (ran.deny !== undefined || ran.isError === true) return ran
     if (e.tool !== 'AskUserQuestion' && e.tool !== 'TaskList') observedTurnTools.push(e.tool)
     if (e.tool === 'Agent' || !('run_in_background' in e) || e.run_in_background !== true) return ran
@@ -4317,6 +4519,22 @@ export const register: Register = (on, options) => {
     // turn.complete drains the queue; the tool's result need not wait for pane reads.
     saveBackground($, one => startBackgroundJob(one, e.tool_use_id || undefined)).catch(() => undefined)
     return ran
+  })
+
+  // A tool that waits for the person's yes in Claude's own dialog (#1048). Only a main-loop call the
+  // person answers counts; a question or a plan has its own handling. The step comes after APPROVAL_MS,
+  // so an approval answered at once never reaches the board.
+  on('tool.check', async ($, e, next) => {
+    const checked = await next(e)
+    if (checked.decision !== 'ask' || e.approver !== 'person' || e.agentId !== undefined || !e.tool_use_id) return checked
+    if (e.tool === 'AskUserQuestion' || e.tool === 'ExitPlanMode') return checked
+    const id = e.tool_use_id
+    pendingApprovals.set(id, e.tool)
+    $.clock.after(APPROVAL_MS, () => {
+      if (pendingApprovals.has(id)) showApproval($, id, e.tool).catch(() => undefined)
+    })
+
+    return checked
   })
 
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
@@ -4343,6 +4561,7 @@ export const register: Register = (on, options) => {
     try {
       const id = ran.result.task.id
       const mirror = await read($, mine)
+      await publishChatSettlement($, mirror)
       const highest = Math.max(0, ...(mirror?.tasks ?? []).map(task => Number(task.id) || 0))
       if (Number(id) > highest + 1) await resync($)
       const at = await $.clock.now()
@@ -4367,6 +4586,7 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined || ran.deny !== undefined || ran.isError === true) return ran
     try {
       const mirror = await read($, mine)
+      await publishChatSettlement($, mirror)
       if (mirror !== null && !mirror.tasks.some(task => task.id === e.taskId)) await resync($)
       const at = await $.clock.now()
       await saveMine($, one => applyTaskUpdate(one, e, at))
@@ -4382,6 +4602,7 @@ export const register: Register = (on, options) => {
     const ran = await next(e)
     if (e.agentId !== undefined || ran.deny !== undefined || ran.isError === true) return ran
     try {
+      await publishChatSettlement($, await read($, mine))
       const at = await $.clock.now()
       await saveMine($, one => applyTodoWrite(one, e.todos, at))
       await settle($)
@@ -4412,6 +4633,7 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     if (hasBackgroundActivity) await backgroundChanges
+    await dropApproval($)
     await journal($)
     const mirror = await read($, mine)
     if (mirror !== null && (mirror.tasks.length > 0 || (mirror.backgroundJobs ?? 0) > 0)) {
@@ -4518,6 +4740,7 @@ export const register: Register = (on, options) => {
       isLegendOpen: await read($, isLegendOpen),
       hasQuestionsProblem: await read($, hasQuestionsProblem),
       palette,
+      barStyle: await read($, barStyle),
       s,
     }
     const failure = (text: string): PressOutcome => ({ text, tone: 'alert' })
@@ -4691,7 +4914,7 @@ export const register: Register = (on, options) => {
           const at = await $.clock.now()
           const frozen = cutOffScopes(projects, cutOffSpans(source, progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS))
           const view = buildView(projects, [], await read($, mine), at, 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen)
-          const items = [...view.stopped.flatMap(row => row.questions ?? []), ...view.recent.flatMap(row => row.questions ?? [])]
+          const items = [...(view.provisional ?? []), ...view.stopped.flatMap(row => row.questions ?? []), ...view.recent.flatMap(row => row.questions ?? [])]
           if (item.questionId === undefined || !items.some(question => question.questionId === item.questionId && question.text === item.text && question.note === item.note)) return result('changed')
           if (!(await pollQuestions($, path, projects, false, [], [], questionId))) return result(await savedResolution() ? 'resolved' : 'failed')
           return result((await read($, questionLedger)).records.some(record => record.id === item.questionId && record.isUnresolved === false) ? 'resolved' : 'failed')

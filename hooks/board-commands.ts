@@ -1,4 +1,5 @@
 import type { Strings } from './i18n'
+import { sha256 } from './sha256.ts'
 
 // Native command-file syntax is separate from the shell command it contains.
 export const boardRun = (path: string, args: string[] = []): string => {
@@ -25,13 +26,29 @@ export const normalizeCommandPath = (text: string, path: string, placeholder: st
   return text.split(encoded).join(placeholder).split(JSON.stringify(path).slice(1, -1)).join(placeholder).split(path).join(placeholder)
 }
 
-// Share the exact command names with generated prompt hooks and inbox readers.
+// Share the exact command names with generated prompt hooks and inbox readers. `/board` is
+// only recognised: since #868 no command file or text offers it, but an install that kept an
+// edited old /board file still has it, and its typed prompt is still a board request.
 export const BOARD_REQUEST = /^\s*(?:\/board|[$/]agent-board)\s*$/
 
 // The fields a prompt receipt keeps: who sent it and from which folder, never its words.
 export const RECEIPT_SESSION_KEYS = ['session_id', 'sessionId', 'sessionID', 'thread-id', 'thread_id', 'conversation_id', 'conversationId'] as const
 export const RECEIPT_FOLDER_KEYS = ['cwd', 'workspaceRoot', 'workspace', 'project_dir', 'directory'] as const
 export const RECEIPT_KEYS = [...RECEIPT_SESSION_KEYS, ...RECEIPT_FOLDER_KEYS, 'hook_event_name', 'hookEventName'] as const
+const HOST_TURN_ID = /^[A-Za-z0-9_-]+$/
+const HOST_TURN_ID_MAX = 128
+export const HOST_TURN_KEYS = ['turn_id', 'turnId', 'generation_id'] as const
+
+// Correlation also checks the owning agent and session. Receipts keep only the
+// digest of a host turn identity and never use text or a timestamp in its place.
+export const inboxTurnKey = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.length <= HOST_TURN_ID_MAX && HOST_TURN_ID.test(value) ? sha256(value) : undefined
+
+export const inboxTurnKeySource = `const inboxTurnKey = value =>
+  typeof value === 'string' && value.length <= ${HOST_TURN_ID_MAX} && ${HOST_TURN_ID}.test(value)
+    ? require('node:crypto').createHash('sha256').update(value).digest('hex')
+    : undefined
+`
 // Timeout receipts conservatively keep board requests from answering a question.
 export const BOARD_REQUEST_HINTS = ['board', '--chat', '--serve']
 
@@ -58,7 +75,7 @@ export const LEGACY_BOARD_PROMPTS = [
 // the person's words than a board command is (#318): a hook that reads it must not take it for an answer.
 export const boardRequestWords = (strings: readonly Strings[]): string[] => [
   ...[...strings, ...LEGACY_BOARD_PROMPTS].flatMap(s =>
-    [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''),
+  [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1).flatMap(words => [words, words.split('\n\n')[0] ?? words]), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''),
   ),
   ...strings.flatMap(s => [s.messagesDeliveryBoard, s.messagesDeliveryAgent('\u0000').split('\u0000')[0]!]),
 ]
@@ -104,12 +121,17 @@ const isBoardRequest = value => {
 // Strip prose from valid JSON before it reaches a temporary inbox file. Native
 // binding and workspace metadata remain usable by old readers.
 export const promptReceiptScript = (words: readonly string[]): string => `${boardPromptHelper(words)}
+${inboxTurnKeySource}
 try {
   const raw = JSON.parse((process.argv[1] ?? require('node:fs').readFileSync(0, 'utf8')).replace(/^\\uFEFF/, ''))
   const record = { ...(raw?.extra ?? {}), ...raw }
   const receipt = {}
   for (const key of [${RECEIPT_KEYS.map(key => `'${key}'`).join(', ')}]) {
     if (typeof record[key] === 'string') receipt[key] = record[key]
+  }
+  for (const key of ${JSON.stringify(HOST_TURN_KEYS)}) {
+    const digest = inboxTurnKey(record[key])
+    if (digest !== undefined) { receipt.turn_key = digest; break }
   }
   if (Array.isArray(record.workspace_roots)) receipt.workspace_roots = record.workspace_roots.filter(one => typeof one === 'string')
   if (record.board_request === true || isBoardRequest(record)) receipt.board_request = true

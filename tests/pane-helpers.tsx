@@ -293,7 +293,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
     value: world.hasTasks ? [{ name: 'TaskCreate', description: '', mcp: false }] : [{ name: 'Read', description: '', mcp: false }],
   }))
   on('process.run', async ($, e) => {
-    if (e.argv[0] === 'node' && e.argv[1] === '-e' && world.isAddressOwn !== undefined) {
+    if (e.argv[0] === 'node' && e.argv[1] === '-e' && typeof e.argv[2] === 'string' && e.argv[2].includes('process.getuid') && world.isAddressOwn !== undefined) {
       return { value: { exitCode: world.isAddressOwn ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (world.browserExitCode !== undefined && e.argv.some(arg => /\.html$/.test(arg))) {
@@ -568,9 +568,9 @@ const questionWorld = () => {
   const world: World = { files: new Map([[FILE, upsertAutoBlock('# Progress\n', mirror, ZH_TW)]]), mtime: 1, hasTasks: true, asked: [], reads: [], store: { inboxDone: {}, autoConnectOff: true, [`agent:${PROMPT_ID}`]: mirror }, reply: () => 'TITLE: Migration\nCONTEXT: fixture\nDONE: -\nNEXT: Continue\nASK: Old decision — OLD_QUESTION?' }
   return { world, mirror }
 }
-const addPrompt = (world: World, at: number, session = PROMPT_SESSION): string => {
+const addPrompt = (world: World, at: number, session = PROMPT_SESSION, turnId?: string): string => {
   const name = `codex-prompt-${at}-77.json`
-  world.files.set(`${INBOX}/${name}`, JSON.stringify({ session_id: session, prompt: 'PRIVATE_NEW_INPUT', last_assistant_message: 'PRIVATE_FAKE_REPLY?', transcript_path: '/home/me/.codex/sessions/2026/10/16/rollout-prompt.jsonl' }))
+  world.files.set(`${INBOX}/${name}`, JSON.stringify({ session_id: session, turn_id: turnId, prompt: 'PRIVATE_NEW_INPUT', last_assistant_message: 'PRIVATE_FAKE_REPLY?', transcript_path: '/home/me/.codex/sessions/2026/10/16/rollout-prompt.jsonl' }))
   world.mtime += 1
   return name
 }
@@ -1074,8 +1074,8 @@ const BOARD_SCRIPT_FILE = '/home/me/.claude/agent-board.mjs'
 const REPORTER_FILE = '/home/me/.claude/progress-report.sh'
 const BOARD_FILES = [
   '/home/me/.agents/skills/agent-board/SKILL.md',
-  '/home/me/.gemini/commands/board.toml',
-  '/home/me/.config/opencode/commands/board.md',
+  '/home/me/.gemini/commands/agent-board.toml',
+  '/home/me/.config/opencode/commands/agent-board.md',
   '/home/me/.hermes/skills/agent-board/SKILL.md',
   '/home/me/.gemini/config/skills/agent-board/SKILL.md',
 ]

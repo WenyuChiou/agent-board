@@ -58,8 +58,17 @@ const isPresent = (file: string): boolean => {
   }
 }
 
-export const privateFolder = (dir: string): void => {
+export const privateFolder = (dir: string, isWait = false): void => {
   if (process.platform !== 'win32') return
+  if (isWait) {
+    patiently(() => {
+      try { privateFolder(dir) } catch (error) {
+        if (!isTimeout(error)) throw Object.assign(error as Error, { code: 'EBUSY' })
+        throw error
+      }
+    })
+    return
+  }
   try {
     const root = resolve(dir)
     mkdirSync(root, { recursive: true, mode: 0o700 })
@@ -70,10 +79,12 @@ export const privateFolder = (dir: string): void => {
     const account = runningAccount(execFileSync(join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], options), process.env.COMPUTERNAME, hostname())
     if (account === undefined) throw new Error('PRIVATE_FOLDER')
     const { sid, own } = account
+    // The grant comes first: a folder that only grants Modify has no WRITE_OWNER, so taking
+    // ownership first fails with access denied, while the owner may always change the list.
     // /L acts on the folder itself: a folder swapped for a junction never passes its owner and
     // permissions on to the folder it points at.
-    execFileSync(icacls, [root, '/setowner', `*${sid}`, '/L'], options)
     execFileSync(icacls, [root, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '/L'], options)
+    execFileSync(icacls, [root, '/setowner', `*${sid}`, '/L'], options)
     // Another account may still hold rights here, so the saved copy gets a name it cannot guess,
     // must not exist before, and must be a plain file afterwards: icacls never writes through a
     // planted link.
@@ -121,9 +132,9 @@ export const privateFolder = (dir: string): void => {
 // have had it made the folder itself.
 export const privateFolderHandoff = (dir: string): string => {
   const root = resolve(dir)
-  const isCreated = !isPresent(root)
+  let isCreated = false
   try {
-    mkdirSync(root, { recursive: true, mode: 0o700 })
+    isCreated = mkdirSync(root, { recursive: true, mode: 0o700 }) !== undefined
     // The folder checked must be the folder handed over, whoever else could reach its parent.
     const identity = identityOf(root)
     privateFolder(root)

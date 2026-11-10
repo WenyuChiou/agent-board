@@ -16,7 +16,9 @@ import { displayColumns } from './board'
 import { agentLabel } from './strings'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { OLDER_SHOWN, progressBar, questionHead, replyHint } from './view'
+import { OLDER_SHOWN, questionHead, replyHint } from './view'
+import { barPieces, barRole, DEFAULT_BAR_STYLE } from './progress-bar'
+import type { BarStyle, Cell } from './progress-bar'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
 
 // The pane's drawing, from the view and a set of actions; it never touches the engine,
@@ -96,6 +98,8 @@ export type PaneModel = {
   hasQuestionsProblem?: boolean
   hasPendingQuestionsProblem?: boolean
   palette: Palette
+  // The progress bar's style, from the board's settings file (#1085); absent means Ink.
+  barStyle?: BarStyle
   s: Strings
 }
 
@@ -183,28 +187,39 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const color = (tone: Tone): string => toneColor(palette, tone)
   const isOpen = (id: string): boolean => model.opened.includes(id)
   const resultTask = model.resolveResult?.key.replace(/::[^:]*$/, '') ?? ''
-  const hasDetachedResult = resultTask !== '' && !view.stopped.some(row => row.key === resultTask) && !view.recent.some(item => item.key === resultTask)
+  const hasInlineReplyResult = resultTask !== '' && (view.provisional ?? []).some(item => item.key === model.resolveResult?.key && item.questionId === model.resolveResult?.questionId)
+    && (resultTask === 'mine' ? view.current !== null : model.expanded === resultTask && (
+      isOpen('due') && view.due.some(row => row.key === resultTask)
+      || isOpen('idle') && view.idle.some(row => row.key === resultTask)
+      || isOpen('others') && view.groups.some(group => group.rows.some(row => row.key === resultTask))
+    ))
+  const hasDetachedResult = resultTask !== '' && !hasInlineReplyResult && !view.stopped.some(row => row.key === resultTask) && !view.recent.some(item => item.key === resultTask)
   const hasResult = (item: WaitingItem): boolean => {
     const result = model.resolveResult
     return result !== null && result !== undefined && (result.kind === 'changed' ? item.key === result.key : item.questionId !== undefined && result.questionId === item.questionId)
   }
 
-  const shelfQuestions = (items: readonly WaitingItem[], key: string) => (
+  const shelfQuestions = (items: readonly WaitingItem[], key: string, showResult = true) => (
     <Box flexDirection="column">
       {items.map(item => (
         <Box key={`${item.key}::question`} flexDirection="column">
           <Text color={palette.muted}>{[item.text, item.note].filter(Boolean).join(' — ')}</Text>
           {item.questionId !== undefined && <Button key={`${item.key}::resolve`} plain onPress={() => actions.resolve(item)}>{s.resolveQuestion}</Button>}
-          {hasResult(item) && <Text color={palette.muted}>{model.resolveResult?.text}</Text>}
+          {showResult && hasResult(item) && <Text color={palette.muted}>{model.resolveResult?.text}</Text>}
         </Box>
       ))}
-      {model.resolveResult?.key.startsWith(`${key}::`) && !items.some(item => item.key === model.resolveResult?.key || item.questionId === model.resolveResult?.questionId) && (
+      {showResult && model.resolveResult?.key.startsWith(`${key}::`) && !items.some(item => item.key === model.resolveResult?.key || item.questionId === model.resolveResult?.questionId) && (
         <Box key={`${model.resolveResult.key}::question`} flexDirection="column">
           <Text color={palette.muted}>{model.resolveResult.text}</Text>
         </Box>
       )}
     </Box>
   )
+
+  const repliedQuestions = (key: string) => {
+    const items = (view.provisional ?? []).filter(item => item.key.replace(/::[^:]*$/, '') === key)
+    return items.length === 0 ? null : shelfQuestions(items, key, hasInlineReplyResult && resultTask === key)
+  }
 
   const spacer = () => <Box flexGrow={1} />
   const muted = (text: string, wrap: 'wrap' | 'truncate-end' = 'wrap') => (
@@ -227,19 +242,21 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
     </Box>
   )
 
-  // `━━━━───` in the accent, or in 若竹 once it is full.
-  const bar = (done: number, total: number, width: number, showPercent: boolean) => {
-    const { filled, rest } = progressBar(done, total, width)
-    const percent = total === 0 ? 0 : Math.round((done / total) * 100)
-
-    return (
-      <Box flexDirection="row">
-        <Text color={done === total && total > 0 ? palette.done : palette.accent}>{filled}</Text>
-        <Text color={palette.frame}>{rest}</Text>
-        {showPercent && <Text color={palette.muted}>{` ${percent}%`}</Text>}
-      </Box>
-    )
-  }
+  // One cell per step (#1085): `━` done, `╸` current, `─` todo, amber or red `━` for a step that
+  // waits on the person or is blocked, in the person's style; "n/m" stays beside it. One step: the text alone.
+  const style = model.barStyle ?? DEFAULT_BAR_STYLE
+  const barText = (cells: readonly Cell[], done: number, total: number, room: number, lead = '') => [
+    ...barPieces(cells, room).map((piece, index) => {
+      const role = barRole(piece.cell, style)
+      return (
+        <Text key={`bar${index}`} color={role === 'ink' ? undefined : palette[role]} bold={role === 'ink'}>
+          {index === 0 ? `${lead}${piece.text}` : piece.text}
+        </Text>
+      )
+    }),
+    ...(total > 0 ? [<Text key="count" color={palette.muted}>{`${cells.length > 1 ? ' ' : lead}${done}/${total}`}</Text>] : []),
+  ]
+  const bar = (cells: readonly Cell[], done: number, total: number, room: number) => <Box flexDirection="row">{barText(cells, done, total, room)}</Box>
 
   const stepRow = (step: ViewStep, room: number) => (
     <Box flexDirection="column">
@@ -286,6 +303,19 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
 
   // What the person can do about one waiting step, by what it asks and whose it is.
   const askActions = (item: WaitingItem) => {
+    // A native ask waits in the agent's own dialog (#1048, #1049): an answer sent from here would reach
+    // the model while that dialog is still open, so the pane only lists the options and says where.
+    const native = item.native
+    if (native !== undefined) {
+      return (
+        <Box flexDirection="column">
+          {native.options.map(option => (
+            <Text key={`${item.key}::native::${option}`} color={palette.muted} wrap="wrap">{`· ${option}`}</Text>
+          ))}
+          <Text color={palette.muted} wrap="wrap">{s.nativeAnswerIn(agentLabel(native.agent, s))}</Text>
+        </Box>
+      )
+    }
     // Another session's (or agent's) question is answered there, but a command to run or a
     // link to open is the person's to use from here, whoever asked.
     if (item.where === 'other') {
@@ -559,7 +589,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   // every step and what can be done with it.
   const taskRow = (row: TaskRow, showProject: boolean) => {
     const isRowOpen = model.expanded === row.key
-    const tail = row.due === null ? `${row.done}/${row.total}` : row.due.left
+    const tail = row.due?.left ?? ''
     const meta = [row.due === null ? '' : row.due.date, showProject ? row.project : '', row.auto === null ? '' : agentLabel(row.agent || 'claude', s), row.status, row.pr, row.when].filter(
       part => part !== '',
     )
@@ -571,7 +601,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             {`${isRowOpen ? '▾' : '▸'} ${row.title}`}
           </Button>
           {spacer()}
-          <Text color={row.due === null ? palette.muted : color(row.due.tone)}>{` ${tail}`}</Text>
+          {row.due === null ? (
+            barText(row.cells ?? [], row.done, row.total, 12, ' ')
+          ) : (
+            <Text color={color(row.due.tone)}>{` ${tail}`}</Text>
+          )}
         </Box>
         <Box paddingLeft={2}>
           <Text color={row.tone === 'quiet' ? palette.muted : color(row.tone)} wrap="truncate-end">
@@ -586,10 +620,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         {!isRowOpen && cardResult(row.key)}
         {isRowOpen && (
           <Box paddingLeft={2} flexDirection="column" marginTop={1}>
-            {bar(row.done, row.total, 12, true)}
+            {row.due !== null && bar(row.cells ?? [], row.done, row.total, 12)}
             {row.context !== '' && muted(s.contextLine(row.context))}
             {row.handoff !== '' && muted(s.handoffLine(row.handoff))}
             {steps(row.steps)}
+            {repliedQuestions(row.key)}
             {rowActions(row)}
             {cardResult(row.key)}
           </Box>
@@ -680,8 +715,6 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           <Text color={palette.project} wrap="truncate-end">
             {current.branch === '' ? current.project : `${current.project} · ${current.branch}`}
           </Text>
-          {spacer()}
-          <Text color={palette.muted}>{`${current.done}/${current.total}`}</Text>
         </Box>
         <Text bold wrap="wrap">
           {current.title}
@@ -691,10 +724,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             {s.contextLine(current.context)}
           </Text>
         )}
-        {bar(current.done, current.total, model.width, true)}
+        {bar(current.cells ?? [], current.done, current.total, model.width)}
         <Text color={current.tone === 'quiet' ? palette.muted : color(current.tone)} wrap="wrap">
           {current.status}
         </Text>
+        {repliedQuestions('mine')}
         {current.runs !== undefined && muted(current.runs, 'truncate-end')}
         {showAll ? (
           <Box flexDirection="column" marginTop={1}>

@@ -1,4 +1,4 @@
-import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressStep, ProgressStepStatus, ProgressTask, QuestionRecord } from '../types'
+import type { NativeAsk, ProgressAuto, ProgressMirror, ProgressProject, ProgressStep, ProgressStepStatus, ProgressTask, QuestionRecord } from '../types'
 import { askOf, askRank } from './ask'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -11,12 +11,14 @@ import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, WORKING_MS } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
+import { cellsOf, plainBar } from './progress-bar'
+import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
-import { observeQuestions, partsKey2, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
+import { inboxQuestionOrigin, observeQuestions, partsKey2, partsKey3, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
-import { identity } from './grouping'
+import { identity, isSilenceTask, isWorkingTask } from './grouping'
 import { closedCopies, mergeCopies, recordFolder } from './question-merge'
 import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
 import type { RunGroup } from './runs'
@@ -35,6 +37,7 @@ export type ViewStep = {
   text: string
   note: string
   status: ProgressStepStatus
+  isReplyPending?: true
   depth: number
   isCurrent: boolean
   number: number | null
@@ -54,12 +57,14 @@ export type CurrentView = {
   done: number
   total: number
   steps: ViewStep[]
+  // One cell per step, unfolded, for the progress bar (#1085).
+  cells: Cell[]
   // The runs this session started for itself, as one line; absent when it started none (#399).
   runs?: string
 }
 
 // A step of a hand-kept task, addressed so a press can tick exactly the line it showed.
-export type StepRef = { project: string; title: string; step: string; line: number; raw: string }
+export type StepRef = { project: string; title: string; step: string; line: number; raw: string; guard?: { task: ConfirmRef; steps: readonly number[]; lines: readonly number[] } }
 
 // What a row's 封存 press takes out: a session's block by its id, or a hand-kept task by its
 // heading line, checked against the title so a task that moved is still found once.
@@ -99,6 +104,8 @@ export type WaitingItem = {
   options: string[]
   command: string | null
   link: string | null
+  // Answered in the agent's own window (a native prompt, a tool approval): the options are listed, and no reply is offered.
+  native?: NativeAsk
   // here: this session's, answered from the pane · other: another live session's, answered
   // there · manual: a hand-kept step, ticked from the pane
   where: 'here' | 'other' | 'manual'
@@ -152,6 +159,7 @@ export type TaskRow = {
   status: string
   tone: Tone
   when: string
+  isChatReplied?: true
   hasFutureTime?: boolean
   isHere: boolean
   auto: 'working' | 'waiting' | 'ended' | null
@@ -159,6 +167,12 @@ export type TaskRow = {
   // stale or silent block, which does not mean the session is closed.
   isRecordedEnded?: true
   steps: ViewStep[]
+  // Source positions before display folding, including a next step outside the shown list.
+  stepLines?: readonly number[]
+  // Ticking is available even when an untitled task has no Confirm done action.
+  stepTask?: ConfirmRef
+  // One cell per step, unfolded, for the progress bar (#1085).
+  cells: Cell[]
   // Every open step, unfolded: what a take-over hands on.
   left: string[]
   next: StepRef | null
@@ -238,6 +252,9 @@ export type View = {
   overview: Overview
   focus: Focus | null
   waiting: WaitingItem[]
+  // Still-open questions the person replied to in chat. The pane can Resolve
+  // them from their row, outside the shared Needs you list and count.
+  provisional?: WaitingItem[]
   // Questions the person marked answered, until their session asks something else.
   hidden: WaitingItem[]
   reminder?: WaitingItem[]
@@ -408,7 +425,9 @@ export const foldSteps = (steps: readonly ViewStep[], room = 6, s: Strings = ZH_
 const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
   if (mirror.tasks.length === 0) return null
   const doing = doingTask(mirror)
-  const waitingYou = mirror.tasks.find(task => waitsOnYou(mirror, task))
+  const isReplied = mirror.replied !== undefined && Number.isFinite(mirror.replied) && (mirror.updated === null || mirror.replied >= (mirror.updated ?? 0))
+  const hasChatReply = (task: ProgressMirror['tasks'][number]): boolean => isReplied && task.native === undefined && waitsOnYou(mirror, task)
+  const waitingYou = mirror.tasks.find(task => waitsOnYou(mirror, task) && !hasChatReply(task))
   const blocked = mirror.tasks.find(task => task.status !== 'completed' && task.blocked !== null)
   const done = mirror.tasks.filter(task => task.status === 'completed' && !task.handoffTo).length
   let status = s.waitingReply
@@ -421,12 +440,15 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
   } else if (blocked !== undefined) {
     status = s.stuck(blocked.blocked || blocked.subject)
     tone = 'alert'
+  } else if (isReplied) {
+    status = s.answeredWaiting
+    tone = 'quiet'
   } else if (mirror.state === 'working') {
     status = doing === undefined ? ((mirror.backgroundJobs ?? 0) > 0 && !mirror.isTurnRunning ? s.backgroundRunning : s.claudeWorking) : s.doingStep(doing.activeForm || doing.subject)
     tone = 'accent'
   }
   const steps = mirror.tasks.map((task, index) => {
-    const hasAnswer = isAnswered(mirror, task)
+    const hasAnswer = isAnswered(mirror, task) || hasChatReply(task)
     let stepStatus: ProgressStepStatus = task.handoffTo ? 'cancelled' : task.status === 'completed' ? 'done' : 'todo'
     if (task.status !== 'completed') {
       if (task.blocked !== null) stepStatus = 'blocked'
@@ -439,6 +461,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
       text: `${task.subject}${suffixOf(stepStatus, s)}`,
       note,
       status: stepStatus,
+      ...(hasChatReply(task) ? { isReplyPending: true as const } : {}),
       depth: 0,
       isCurrent: task === doing,
       number: index + 1,
@@ -458,6 +481,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     done,
     total: mirror.tasks.filter(task => !task.handoffTo).length,
     steps: foldSteps(steps, 6, s),
+    cells: cellsOf(withCurrent(steps)),
   }
 }
 
@@ -563,19 +587,38 @@ const contextFor = (mirror: ProgressMirror): string => {
   return request === title || request.startsWith(title.replace(/…$/, '')) ? '' : request
 }
 
-const rowSteps = (task: ProgressTask, s: Strings): ViewStep[] => {
+// A plan with no step in progress still shows where it stands: its first open step is the current one.
+const withCurrent = (steps: readonly ViewStep[]): ViewStep[] => {
+  if (steps.some(step => step.isCurrent)) return [...steps]
+  const open = steps.findIndex(step => step.status !== 'done' && step.status !== 'cancelled')
+  return steps.map((step, index) => (index === open ? { ...step, isCurrent: true } : step))
+}
+
+const isRepliedStep = (step: ProgressStep, isReplied: boolean): boolean => isReplied && step.status === 'waiting' && step.native === undefined
+
+const rowCells = (task: ProgressTask, isReplied = false): Cell[] => {
+  const current = currentStepIndex(task)
+
+  return cellsOf(task.steps.map((step, index) => ({ status: isRepliedStep(step, isReplied) ? 'todo' : step.status, isCurrent: index === current })))
+}
+
+const rowSteps = (task: ProgressTask, s: Strings, isReplied = false): ViewStep[] => {
   const current = currentStepIndex(task)
 
   return foldSteps(
-    task.steps.map((step, index) => ({
-      ...shownStep(task, step.text, s),
-      status: step.status,
-      depth: step.depth,
-      isCurrent: index === current,
-      number: index + 1,
-      line: step.line,
-      raw: step.raw,
-    })),
+    task.steps.map((step, index): ViewStep => {
+      const isReplyPending = isRepliedStep(step, isReplied)
+      return {
+        ...shownStep(task, step.text, s),
+        status: isReplyPending ? 'todo' : step.status,
+        ...(isReplyPending ? { isReplyPending: true as const } : {}),
+        depth: step.depth,
+        isCurrent: index === current,
+        number: index + 1,
+        line: step.line,
+        raw: step.raw,
+      }
+    }),
     5,
     s,
   )
@@ -610,6 +653,7 @@ const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, strin
         command: task.command ?? undefined,
         link: task.link ?? undefined,
       }),
+      ...(task.native === undefined ? {} : { native: task.native }),
       where: 'here' as const,
       agent: '',
       session: shortId(mine.sessionId),
@@ -874,6 +918,7 @@ export const buildView = (
   }
   if (counts !== undefined && recordsByScope !== null) counts.indexRecords += records.length
   const waiting: WaitingItem[] = []
+  const provisional: WaitingItem[] = []
   const inactiveHidden: WaitingItem[] = []
   const due: Array<TaskRow & { days: number }> = []
   const active: Array<TaskRow & { rank: number; order: number }> = []
@@ -913,6 +958,12 @@ export const buildView = (
     repeats.set(base, repeat || 1)
     usedKeys.add(key)
     return key
+  }
+  const repliedQuestions = new Set<string>()
+  const replyRows = new Map<string, { key: string; at: number }>()
+  const replyFor = (agent: string, id: string, session: string | undefined, at: number) => {
+    const row = session === undefined || replyRows.size === 0 ? undefined : replyRows.get(partsKey3(agent, id, session))
+    return row !== undefined && row.at > at ? row : undefined
   }
   // How many tasks share each project and title, counted once rather than for every row (#371).
   const twins = new Map<string, number>()
@@ -955,8 +1006,14 @@ export const buildView = (
       const context = contextOf(task)
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now, updated, staleMs)
-      const isSilence = task.auto?.state === 'working' && hasTime(lastActive) && now - lastActive > WORKING_MS && (task.steps.length === 0 || task.steps.every(step => isLifecycleStep(step.text)))
+      const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
+      const repliedAt = task.auto?.replied
+      const isRepliedTask = repliedAt !== undefined && Number.isFinite(repliedAt) && repliedAt >= (task.auto?.updated ?? 0)
+      if (isRepliedTask && !isInactive && !isFrozen && task.auto !== null && task.auto.resume !== null && repliedAt <= now) {
+        const binding = partsKey3(task.auto.agent, task.auto.session, task.auto.resume)
+        if (repliedAt > (replyRows.get(binding)?.at ?? 0)) replyRows.set(binding, { key, at: repliedAt })
+      }
       if (isInactive) inactiveScopes.set(scope, updated)
       else if (!isManual) liveScopes.add(scope)
       const taskQuestions: WaitingItem[] = []
@@ -1020,7 +1077,9 @@ export const buildView = (
           return held
         }
         let value: boolean
-        if (isFrozen) {
+        if (isRepliedTask && task.steps[index]?.native === undefined) {
+          value = false
+        } else if (isFrozen) {
           const saved = savedAt(index)
           value = saved === undefined ? true : saved.isUnresolved === true && saved.source !== undefined && !marked.has(saved.id)
         } else if (marked.has(keys[index] ?? '')) {
@@ -1071,6 +1130,7 @@ export const buildView = (
           ...(lastActive === undefined ? {} : { at: lastActive }),
           dir: task.auto?.dir ?? null,
           ...askOf(parts.text, parts.note),
+          ...(step.native === undefined ? {} : { native: step.native }),
           where: isManual ? 'manual' : 'other',
           agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
           // Another agent's block id is a hash of its session; its own id is what its session
@@ -1099,7 +1159,13 @@ export const buildView = (
         if (counts !== undefined) counts.indexLookups += 1
         return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
       }))
-      if (!isInactive) waiting.push(...taskQuestions)
+      for (const item of taskQuestions) {
+        if (isRepliedTask && item.native === undefined) {
+          if (item.questionId) repliedQuestions.add(item.questionId)
+          if (item.hideKey) repliedQuestions.add(item.hideKey)
+          if (!isInactive) provisional.push(item)
+        } else if (!isInactive) waiting.push(item)
+      }
 
       let completion: DoneItem & { at: number } | null = null
       if (isComplete) {
@@ -1137,14 +1203,19 @@ export const buildView = (
       // A hook's placeholder step says the session waits; while it works the row shows no step (#612).
       const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
       const { done, total } = countSteps(shown)
+      const isAnsweredWaiting = !isBlocked && (auto === 'waiting' || isRepliedTask) && (task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index)) || isRepliedTask)
       const phrase =
-        auto === 'working'
-          ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
-          : auto === 'ended'
-            ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
-            : !isBlocked && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
-              ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
-              : stepPhrase(task, s, isPrompt)
+        auto === 'working' && isBlocked
+          ? stepPhrase(task, s, isPrompt)
+          : isAnsweredWaiting
+            ? { status: s.answeredWaiting, tone: 'quiet' as const }
+            : auto === 'working'
+            ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
+            : auto === 'ended'
+              ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
+              : !isBlocked && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
+                ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
+                : stepPhrase(task, s, isPrompt)
       const open = task.steps[currentStepIndex(task)]
       const group = folded.runs.get(task)
       const row: TaskRow = {
@@ -1156,12 +1227,15 @@ export const buildView = (
         total,
         ...phrase,
         when: isIdle && !clock.isFuture ? relativeTime(lastActive ?? 0, now, s) : when,
+        ...(isRepliedTask ? { isChatReplied: true as const } : {}),
         ...(lastActive === undefined ? {} : { at: lastActive }),
         dir: task.auto?.dir ?? null,
         ...(clock.isFuture ? { hasFutureTime: true } : {}),
         isHere,
         auto,
-        steps: rowSteps(shown, s),
+        steps: rowSteps(shown, s, isRepliedTask),
+        ...(isManual ? { stepLines: task.steps.map(step => step.line), stepTask: { project: name, title: task.title, line: task.line, session: null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) } } : {}),
+        cells: rowCells(shown, isRepliedTask),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
         questions: isInactive ? unresolved : [],
         question: isInactive ? unresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
@@ -1181,15 +1255,24 @@ export const buildView = (
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142). Nor does a row whose block state is
         // already done offer confirm (#876).
-        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && !isSilence)))
+        // A silence row past the stale time is accepted by both write guards (blocks.ts),
+        // so it offers what they accept instead of nothing (#898).
+        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && (!isSilence || stale))))
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
-            : auto === 'ended' && !isSilence && task.auto !== null
+            : auto === 'ended' && (!isSilence || stale) && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
-              : null,
+              // A working row quiet past the Working now limit is no longer at work: the
+              // person can archive it instead of waiting out the 12 h stale time (#1000).
+              // A row waiting on the person keeps today's refusal. The gate reads the
+              // writer time, like the write guard: an unknown age never archives, and
+              // the local observation the display falls back to proves nothing here.
+              : auto === 'working' && !isSilence && task.auto !== null && hasTime(updated) && !isWorkingTask(task.steps, updated, now)
+                ? { project: name, title: task.title, line: task.line, session: task.auto.session }
+                : null,
         target: targetOf(task.auto),
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         ...(group === undefined ? {} : { runs: runsText(group, now, s) }),
@@ -1237,7 +1320,7 @@ export const buildView = (
       row: {
         key,
         project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
-        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], left: [], next: null, due: null, pr: '',
+        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], cells: [], left: [], next: null, due: null, pr: '',
         agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
         archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
       },
@@ -1266,7 +1349,16 @@ export const buildView = (
     else group.rows.push(row)
   }
 
-  const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined).flatMap(turn => {
+  for (const turn of pending) {
+    if (turn.isQuestion && turn.id !== undefined && turn.replied !== undefined && turn.replied > turn.at) {
+      const scope = questionScope(turn.project, turn.agent, turn.id ?? '')
+      const id = observed?.keys[pendingQuestionSlot(scope, turn.text)] ?? observed?.ledger.records.find(record => record.scope === scope && record.isUnresolved && record.producerSources?.includes(JSON.stringify(turn)))?.id
+      if (id !== undefined) repliedQuestions.add(id)
+    }
+  }
+
+  const inbox = pending.filter(turn => turn.isQuestion && turn.id !== undefined && !(turn.replied !== undefined && turn.replied > turn.at)).flatMap(turn => {
+    if (replyFor(turn.agent, turn.id!, turn.session, turn.sourceAt ?? turn.at) !== undefined) return []
     const updated = inactiveScopes.get(questionScope(turn.project, turn.agent, turn.id ?? ''))
     if (updated !== undefined && turn.at <= updated) return []
     const scope = questionScope(turn.project, turn.agent, turn.id ?? '')
@@ -1275,7 +1367,15 @@ export const buildView = (
     const parts = splitNote(turn.text)
     return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
-  const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).map(item => ({ ...item, questionId: item.hideKey }))
+  const isRepliedMine = mine !== null && mine.replied !== undefined && Number.isFinite(mine.replied) && (mine.updated === null || mine.replied >= (mine.updated ?? 0))
+  const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).flatMap(item => {
+    if (!isRepliedMine || item.native !== undefined) return [{ ...item, questionId: item.hideKey }]
+    if (item.hideKey) {
+      repliedQuestions.add(item.hideKey)
+      provisional.push({ ...item, questionId: item.hideKey })
+    }
+    return []
+  })
   // Each record by its id, once: a board holds hundreds of questions and thousands of records.
   const recordOf = new Map<string, QuestionRecord>()
   const rankOf = new Map<string, number>()
@@ -1317,7 +1417,7 @@ export const buildView = (
   const runSessions = new Set(projects.flatMap(project => project.tasks.flatMap(task => task.auto?.isRun === true ? [sessionIdentity(task.auto)] : [])).filter(identity => identity !== null))
   const starterOf = startersOf(projects)
   for (const record of observed?.ledger.records ?? []) {
-    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id) || foldedScopes.has(record.scope)) continue
+    if (!record.isUnresolved || record.source === undefined || onShelf.has(record.id) || shownQuestions.has(record.id) || foldedScopes.has(record.scope) || repliedQuestions.has(record.id)) continue
     const source = record.source
     const saved = source.kind === 'block' ? sourceSnapshot(source.data) : null
     let agent = source.agent
@@ -1344,6 +1444,14 @@ export const buildView = (
     const isStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
     const stage = isStopped ? 'older' : age.stage
     const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, dir: recordFolder(record) ?? saved?.auto?.dir ?? null, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), at: record.firstObserved, ...askOf(parts.text, parts.note), where: 'other', agent: agent === 'claude' ? '' : agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
+    // The inbox file can be gone while its ledger copy still waits for the report.
+    // Require the full binding and a newer source clock before moving its Resolve action.
+    const origin = replyRows.size > 0 && !isStopped ? inboxQuestionOrigin(source) : null
+    const reply = origin === null ? undefined : replyFor(source.agent, source.session, origin.session, origin.at)
+    if (reply !== undefined && !marked.has(record.id)) {
+      provisional.push({ ...item, key: `${reply.key}::inbox-${sha256(record.id)}` })
+      continue
+    }
     if (marked.has(record.id)) hidden.push(item)
     else {
       retained.push(item)
@@ -1423,10 +1531,14 @@ export const buildView = (
   if (current !== null && !asks.some(item => item.where === 'here') && all.some(item => item.where === 'here' && item.ageStage !== 'pending')) {
     current.status = reminder.some(item => item.where === 'here') ? s.sectionQuestionReminders : s.sectionOlderQuestions
     current.tone = 'quiet'
-  } else if (current !== null && own.some(isResolved) && !all.some(item => item.where === 'here')) {
-    current.status = s.answeredNote
+  } else if (current !== null && (own.some(isResolved) || isRepliedMine) && !all.some(item => item.where === 'here')) {
+    current.status = isRepliedMine ? s.answeredWaiting : s.answeredNote
     current.tone = 'quiet'
   }
+  const replyActions = provisional.filter(item => {
+    const record = recordsById.get(item.questionId ?? '')
+    return record?.isUnresolved === true && record.source !== undefined
+  })
   return {
     now,
     current,
@@ -1434,6 +1546,7 @@ export const buildView = (
     overview: { waiting: asks.length, active: rows.length + due.length, due: due.length, today, idle: idle.length, stopped: stopped.length },
     focus,
     waiting: asks,
+    ...(replyActions.length === 0 ? {} : { provisional: replyActions }),
     hidden,
     reminder,
     older,
@@ -1459,28 +1572,28 @@ const clip = (text: string, room: number): string => {
   return chars.length > room ? `${chars.slice(0, room - 1).join('')}…` : text
 }
 
+// The session's task on the line under the prompt. With two steps or more the bar takes the place
+// of the clipped status words (#1085): `建立兩個內容為 hi… ━━━━╸── 5/7`. One step keeps the words.
+const currentPart = (current: CurrentView): string => {
+  const bar = plainBar(current.cells ?? [])
+  return bar === ''
+    ? `${clip(current.title, 14)} ${current.done}/${current.total} · ${clip(current.status, 18)}`
+    : `${clip(current.title, 14)} ${bar} ${current.done}/${current.total}`
+}
+
 // One line under the prompt for when the pane is not on screen: this session's task, what
 // waits on you, what is due soon, and the pull request.
 export const statusLine = (view: View, s: Strings = ZH_TW): string | undefined => {
   const current = view.current
   const urgent = view.overview.due
   const parts = [
-    current === null || current.state === 'done'
-      ? ''
-      : `${clip(current.title, 14)} ${current.done}/${current.total} · ${clip(current.status, 18)}`,
+    current === null || current.state === 'done' ? '' : currentPart(current),
     view.overview.waiting > 0 ? s.statusWaiting(view.overview.waiting) : '',
     urgent > 0 ? s.statusDue(urgent) : '',
     view.pr === null ? '' : view.pr.text,
   ].filter(part => part !== '')
 
   return parts.length === 0 ? undefined : `${s.statusPrefix} · ${parts.join(' · ')}`
-}
-
-export const progressBar = (done: number, total: number, width: number): { filled: string; rest: string } => {
-  const cells = Math.max(4, width)
-  const filled = total === 0 ? 0 : Math.round((done / total) * cells)
-
-  return { filled: '━'.repeat(filled), rest: '─'.repeat(cells - filled) }
 }
 
 // The board's view, built once for the same inputs (#373). After each change of the file the pane,

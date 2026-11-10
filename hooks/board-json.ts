@@ -1,11 +1,27 @@
 import { clipped, plain, redact } from './board'
 import type { PendingTurn } from './board'
+import { stampOf, withoutStamp } from './done-stamp'
 import type { Lang, Strings } from './i18n'
+import { localDay, parseJournal } from './journal'
+import { isTaskComplete, parseProgress } from './parse'
 import { serveModel } from './serve'
 import type { GroupOptions, ServeAsk, ServeModel, ServeRow, ServeTurn } from './serve'
 import type { View } from './view'
 
 export const BOARD_JSON_SCHEMA = 1
+
+export type FinishedStep = {
+  text: string
+  date?: string
+}
+
+export type FinishedTask = {
+  project: string
+  title: string
+  agent: string
+  finishedDate: string
+  steps: FinishedStep[]
+}
 
 type BoardNeed = {
   kind: 'question' | 'stuck' | 'task'
@@ -43,10 +59,198 @@ export type BoardDocument = {
   doneRecently: Array<{ project: string; title: string; agent: string; age: string }>
   doneToday: string[]
   notices: string[]
+  finished?: FinishedTask[]
 }
 
 type Ref = NonNullable<ServeModel['view']>['working'][number]
 type Source = Partial<ServeAsk & ServeRow & ServeTurn>
+
+export const collectFinished = (
+  progressText: string = '',
+  journalTexts: readonly string[] = [],
+  archiveTexts: readonly string[] = [],
+  days: number = 7,
+  now: number = Date.now(),
+  projectFilter?: string,
+  home: string = '',
+  isWindows: boolean = false,
+): FinishedTask[] => {
+  const fromDay = localDay(now - (days - 1) * 24 * 60 * 60 * 1000)
+  const toDay = localDay(now)
+
+  const clean = <T extends string>(text: T): T => redact(clipped(plain(text), home, isWindows), home, isWindows) as T
+  const folder = home.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) ?? ''
+  const named = (project: string): string => clean(folder !== '' && (isWindows ? project.toLowerCase() === folder.toLowerCase() : project === folder) ? '~' : project)
+
+  type TaskHolder = {
+    project: string
+    title: string
+    agent: string
+    date: string
+    steps: Map<string, { text: string; date: string }>
+  }
+  const tasks = new Map<string, TaskHolder>()
+  const keyOf = (project: string, title: string): string => `${project.toLowerCase()}:::${title.toLowerCase()}`
+
+  for (const text of journalTexts) {
+    if (!text) continue
+    const entries = parseJournal(text)
+    for (const entry of entries) {
+      if (entry.at < fromDay || entry.at > toDay) continue
+      const proj = named(entry.project)
+      const title = clean(entry.task)
+      // A journal line names no agent (docs/FORMAT.md, Journal): a step such as "Deploy (Windows)"
+      // keeps its words, and the agent comes only from a progress.md or archive block below.
+      const stepText = clean(entry.step)
+      const key = keyOf(proj, title)
+      const held = tasks.get(key) ?? {
+        project: proj,
+        title,
+        agent: '',
+        date: entry.at,
+        steps: new Map(),
+      }
+      if (entry.at > held.date) held.date = entry.at
+      const stepDate = entry.stamp || entry.at
+      const stepKey = stepText.toLowerCase()
+      const existingStep = held.steps.get(stepKey)
+      if (existingStep === undefined) {
+        held.steps.set(stepKey, { text: stepText, date: stepDate })
+      } else if (stepDate > existingStep.date) {
+        existingStep.date = stepDate
+      }
+      tasks.set(key, held)
+    }
+  }
+
+  if (progressText) {
+    const parsed = parseProgress(progressText)
+    for (const project of parsed) {
+      const proj = named(project.name)
+      for (const task of project.tasks) {
+        const title = clean(task.title)
+        const key = keyOf(proj, title)
+        if (task.auto !== null) {
+          if (task.auto.state === 'done' || isTaskComplete(task)) {
+            const taskDate = localDay(task.auto.updated || now)
+            if (taskDate >= fromDay && taskDate <= toDay) {
+              const held = tasks.get(key) ?? {
+                project: proj,
+                title,
+                agent: clean(task.auto.agent),
+                date: taskDate,
+                steps: new Map(),
+              }
+              if (!held.agent && task.auto.agent) held.agent = clean(task.auto.agent)
+              if (taskDate > held.date) held.date = taskDate
+              for (const step of task.steps) {
+                const stText = clean(withoutStamp(step.text))
+                const stDate = stampOf(step.raw) ?? taskDate
+                if (stDate >= fromDay && stDate <= toDay) {
+                  const stepKey = stText.toLowerCase()
+                  const existingStep = held.steps.get(stepKey)
+                  if (existingStep === undefined) {
+                    held.steps.set(stepKey, { text: stText, date: stDate })
+                  } else if (stDate > existingStep.date) {
+                    existingStep.date = stDate
+                  }
+                }
+              }
+              tasks.set(key, held)
+            }
+          }
+        } else {
+          for (const step of task.steps) {
+            if (step.status !== 'done' && step.status !== 'cancelled') continue
+            const stDate = stampOf(step.raw)
+            if (stDate !== null && stDate >= fromDay && stDate <= toDay) {
+              const stText = clean(withoutStamp(step.text))
+              const held = tasks.get(key) ?? {
+                project: proj,
+                title,
+                agent: '',
+                date: stDate,
+                steps: new Map(),
+              }
+              if (stDate > held.date) held.date = stDate
+              const stepKey = stText.toLowerCase()
+              const existingStep = held.steps.get(stepKey)
+              if (existingStep === undefined) {
+                held.steps.set(stepKey, { text: stText, date: stDate })
+              } else if (stDate > existingStep.date) {
+                existingStep.date = stDate
+              }
+              tasks.set(key, held)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (const text of archiveTexts) {
+    if (!text) continue
+    const parsed = parseProgress(text)
+    for (const project of parsed) {
+      const headingDate = project.name.match(/\s*·\s*(\d{4}-\d\d-\d\d)$/)?.[1] ?? null
+      const baseProjectName = project.name.replace(/\s*·\s*\d{4}-\d\d-\d\d$/, '')
+      const proj = named(baseProjectName)
+      for (const task of project.tasks) {
+        const title = clean(task.title)
+        const key = keyOf(proj, title)
+        const autoAgent = task.auto ? clean(task.auto.agent) : ''
+        const autoDate = task.auto ? localDay(task.auto.updated || now) : null
+        const taskFallbackDate = autoDate ?? headingDate
+        for (const step of task.steps) {
+          if (step.status !== 'done' && step.status !== 'cancelled') continue
+          const stDate = stampOf(step.raw) ?? taskFallbackDate
+          if (stDate !== null && stDate >= fromDay && stDate <= toDay) {
+            const stText = clean(withoutStamp(step.text))
+            const held = tasks.get(key) ?? {
+              project: proj,
+              title,
+              agent: autoAgent,
+              date: stDate,
+              steps: new Map(),
+            }
+            if (!held.agent && autoAgent) held.agent = autoAgent
+            if (stDate > held.date) held.date = stDate
+            const stepKey = stText.toLowerCase()
+            const existingStep = held.steps.get(stepKey)
+            if (existingStep === undefined) {
+              held.steps.set(stepKey, { text: stText, date: stDate })
+            } else if (stDate > existingStep.date) {
+              existingStep.date = stDate
+            }
+            tasks.set(key, held)
+          }
+        }
+      }
+    }
+  }
+
+  let result: FinishedTask[] = [...tasks.values()].map(t => ({
+    project: t.project,
+    title: t.title,
+    agent: t.agent,
+    finishedDate: t.date,
+    steps: [...t.steps.values()].map(s => ({
+      text: s.text,
+      date: s.date,
+    })).sort((a, b) => a.date.localeCompare(b.date) || a.text.localeCompare(b.text)),
+  }))
+
+  if (projectFilter) {
+    const filterClean = clean(projectFilter).toLowerCase()
+    const filterNamed = named(projectFilter).toLowerCase()
+    result = result.filter(t => {
+      const p = t.project.toLowerCase()
+      return p === filterClean || p === filterNamed || clean(t.project).toLowerCase() === filterClean
+    })
+  }
+
+  return result.sort((a, b) => b.finishedDate.localeCompare(a.finishedDate) || a.project.localeCompare(b.project) || a.title.localeCompare(b.title))
+}
 
 export const boardDocument = (
   view: View,
@@ -57,6 +261,7 @@ export const boardDocument = (
   isWindows: boolean,
   now: number,
   group?: GroupOptions,
+  finished?: readonly FinishedTask[],
 ): BoardDocument => {
   const model = serveModel(view, pending, s, new Set(), false, undefined, false, group)
   // Callers without filesystem metadata still use the page's pure row grouping.
@@ -151,5 +356,6 @@ export const boardDocument = (
     doneRecently,
     doneToday: done.map(clean),
     notices: [model.warning, model.details, model.pruned, ...(model.health ?? [])].filter((line): line is string => !!line).map(clean),
+    ...(finished !== undefined ? { finished: [...finished] } : {}),
   }
 }

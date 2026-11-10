@@ -7,7 +7,7 @@
 <p align="center">English · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
 
 <p align="center">
-<img alt="An animated board: agents report progress, questions and replies, and one setup command connects them. With messaging on and the Codex session connected, Send queues a reply. &quot;Accepted&quot; does not mean delivered; a confirmation from that session means it was received, not that the work is done. The LAN page has no messaging. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
+<img alt="An animated board: agents report progress and questions. The web board has a Settings button for language and theme. With messaging on and the Codex session connected, Send queues a reply. &quot;Accepted&quot; does not mean delivered; a confirmation from that session means it was received, not that the work is done. The LAN page has no messaging. Synthetic data." src="docs/images/cover-en-dark.svg" width="860">
 </p>
 
 <p align="center"><b>Integrations</b><br>
@@ -29,25 +29,26 @@ You have Claude Code on one project, Codex on another and Antigravity on a third
 
 ## Quick start
 
+**Major changes in 0.24.3.** In an agent, `/agent-board` opens the live page (`$agent-board` in Codex); the plain terminal command below opens the terminal board or page. The live page replaces the old static HTML and the plain text board for people; Claude Code keeps its `/progress` pane. Agents use the JSON read (`--json`). Old board commands and `--chat` still work in this version; running setup again refreshes the installed commands. Send works where there is a delivery path; other surfaces can still require Copy.
+
 With Node.js 22+, in any terminal:
 
 ```sh
 npx @wenyuchiou/agent-board setup
-npx @wenyuchiou/agent-board setup --apply
 npx @wenyuchiou/agent-board
 ```
 
-The first command finds the agents on this computer and shows what setup would change, writing nothing. The second makes the change, and the third opens the live terminal board over SSH or in an interactive terminal without a display, and the page otherwise. In an agent's chat, `/agent-board` opens the same page. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. To remove it, see [Update and uninstall](docs/GUIDE.md#update-and-uninstall). More in the [setup guide](docs/SETUP.md#install-with-npm). An agent that needs the board's status reads `agent-board --json`; the [Board JSON reference](docs/BOARD-JSON.md) describes its versioned, redacted fields.
+The first command finds the agents on this computer, shows what setup would change, and asks once: `Set these up? [Y/n]`. A yes writes the files, approves the board's hooks in Codex and Hermes Agent, and installs the Claude Code plugin when Claude Code is on this computer; a no writes nothing. Without a terminal to answer in, such as in an agent's chat, setup only previews: `setup --apply` then writes the files and lists the approval and plugin commands to run yourself. The second command opens the live terminal board over SSH or in an interactive terminal without a display, and the page otherwise. In an agent's chat, `/agent-board` opens the same page. If nothing is set up yet, the second command alone asks the same question first. To stop the board's page, run `npx @wenyuchiou/agent-board stop`. To start the page without opening a browser window, add `--no-open` (`npx @wenyuchiou/agent-board --no-open`). For the shorter `agent-board` command, install it once with `npm install -g @wenyuchiou/agent-board`. To set up one agent only, add `--agent` and its name, such as `--agent codex`. To remove touched agent setups in one go, run `npx @wenyuchiou/agent-board remove` (or `setup --remove`); see [Update and uninstall](docs/GUIDE.md#update-and-uninstall). More in the [setup guide](docs/SETUP.md#install-with-npm). An agent that needs the board's status reads `agent-board --json`; the [Board JSON reference](docs/BOARD-JSON.md) describes its versioned, redacted fields.
 
-The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise. To choose one, add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to both setup lines; the board, its page and `stop` then use it. An account connected through the Claude Code plugin uses `/progress lang` instead.
+The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise. To choose one, add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to the setup command; the board, its page and `stop` then use it. An account connected through the Claude Code plugin uses `/progress lang` instead. A language picked in **Settings** on the board's page wins over both; its **Automatic** follows the system language.
 
-Scan the QR code from `npx @wenyuchiou/agent-board --serve --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
+Scan the QR code from `npx @wenyuchiou/agent-board --lan` with a phone on the same Wi-Fi. Use it only on a network you trust: the link is not encrypted and anyone who has it can open the page. Details: [the board's page](#the-boards-page).
 
 Then:
 
 - Start a new session of each agent: a session that was already open is not connected.
-- **Claude Code** connects through its plugin instead: `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
-- **Codex:** trust its hooks in `/hooks` ([how](docs/CODEX.md)).
+- **Claude Code** connects through its plugin instead, which a yes to setup installs. If setup only previewed: `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
+- **Codex:** a yes to setup trusts its hooks. If setup only previewed, trust them in `/hooks` ([how](docs/CODEX.md)).
 - **OpenCode, OpenClaw:** reload their plugins.
 - **dot and other web chats:** paste [the last section of AGENTS.md](AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then save each block it writes and merge it into the progress file as [Remote reporters](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) shows.
 
@@ -56,7 +57,7 @@ In the new session, open the board with its entry:
 - **I use Claude Code:** `/agent-board`
 - **I use Codex:** `$agent-board`
 - **I use Antigravity:** `/agent-board` (checked in a synthetic home, not run live yet)
-- **I use OpenCode:** `/board`
+- **I use OpenCode:** `/agent-board`
 
 To add a task of your own, write a `### title` with `- [ ] step` lines in `progress.md` (a fresh install uses `~/.agent-board/progress.md`; [the format](docs/FORMAT.md)). With the Claude Code plugin, you can instead type `+ project: title; step; step` in the pane's box, or `/progress add …` in Claude Code's chat.
 
@@ -101,7 +102,7 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 | <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/progress` |
 | <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex CLI and App | `$agent-board` |
 | <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board` (checked in a synthetic home, not run live yet) |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/board` |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` |
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | `/agent-board` (checked in a synthetic home, not run live yet) |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board` (checked in a synthetic home, not run live yet) |
 | <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | `/agent-board` (checked in a synthetic home, not run live yet) |
@@ -118,7 +119,7 @@ In the Claude desktop app the agent can open the board too: ask it to open the b
 | Where | Command |
 |---|---|
 | A terminal or desktop | `node "$HOME/.agent-board/agent-board.mjs"` (terminal board over SSH or without a display, page otherwise) |
-| A browser | `node "$HOME/.agent-board/agent-board.mjs" --serve` |
+| A phone on the same Wi-Fi | `node "$HOME/.agent-board/agent-board.mjs" --lan` (scan the QR code it prints) |
 | An agent reading the board | `node "$HOME/.agent-board/agent-board.mjs" --json` ([field reference](docs/BOARD-JSON.md)) |
 | Check one agent's setup | `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` |
 
@@ -147,19 +148,19 @@ Finished work leaves the board by itself. The board writes `progress.md` as care
 
 | | Agent | Runs in | On the board | Reply from the board |
 |:-:|---|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | Its own pane: every task and turn | In the pane |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI, App | Seven hooks, plus the steps it reports | Copy; send to a [connected session](docs/MESSAGING.md#codex-exclusive-owner-adapter) |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI, App, IDE | Four hooks, plus the steps it reports | Copy; send to a [connected CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream) |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | Session events, plus steps from its progress tool | Copy |
-| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE, CLI | Hooks | Copy |
-| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | Four hooks | Copy; `--allow-resume` once a session ended |
-| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | CLI | Two hooks (stop, end) | Copy |
-| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | Chat | The board and its skill; its own hooks are still to come | Copy |
+| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | CLI | Its own pane: every task and turn | In the pane; Send to a connected CLI session from the page |
+| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | CLI, App | Seven hooks, closing questions and reported steps | [Send to a running CLI turn](docs/validation/2026-11-04-codex-cli-proxy-live.md); CLI next-prompt delivery is implemented and awaits a live check; App falls back to Copy |
+| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | CLI, App, IDE | Four hooks, CLI closing questions and reported steps | Send to a [connected CLI](docs/MESSAGING.md#antigravity-exclusive-owner-cli-stream); next-prompt mailbox awaits a live check; Copy without a connection |
+| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | CLI | Session events, closing questions and steps from its progress tool | Copy |
+| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | IDE, CLI | Hooks and CLI closing questions | Queue for when a chat opens; delivery on reopening a chat still needs a live check; Copy without a connection |
+| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | CLI | Four hooks and closing questions | Copy; `--allow-resume` once a session ended |
+| <img src="docs/images/agents/muse-code.svg" width="20" alt="Muse Code"> | Muse Code | CLI | Two reporting hooks (stop, end) | Next-prompt mailbox implemented; live delivery untested; Copy without a connection |
+| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | Chat | Four shell hooks, closing questions and reported steps | Copy |
 | <img src="docs/images/agents/openclaw.svg" width="20" alt="OpenClaw"> | OpenClaw | Chat | Its plugin's session events | Copy |
-| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | CLI | Its plugin's session events | Copy |
+| <img src="docs/images/agents/deepseek-harness.svg" width="20" alt="DeepSeek Harness"> | DeepSeek Harness | TUI, Web | Its plugin's session events | Send when idle: [verified on Web](docs/validation/2026-11-08-deepseek-harness-live.md); TUI not tested live |
 | | dot, other web chats | Web | A block you merge | Answer in its chat |
 
-Hooks say whether a session is working or waiting; its steps and when it is done come from the agent's own reports. Gemini CLI is still a target (`--agent gemini`) for paid and enterprise use: see [setup](docs/SETUP.md#legacy-gemini-cli-compatibility).
+Hooks say whether a session is working or waiting; task steps and when it is done come from the agent's own reports. The closing questions above reach Needs you as hook-owned steps. Antigravity CLI's hooks carry no reply text, so the board reads the last reply from its own transcript file; that format is undocumented and was checked on agy 1.5.2. Only the closing question is kept. Gemini CLI is still a target (`--agent gemini`) for paid and enterprise use: see [setup](docs/SETUP.md#legacy-gemini-cli-compatibility).
 
 ### Connected-session messaging
 
@@ -185,8 +186,8 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](hooks/receivers/hook-mailbox-cursor.ts) |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| DeepSeek Harness | TUI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/deepseek.ts](hooks/receivers/deepseek.ts) |
+| DeepSeek Harness | Web | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-08-deepseek-harness-live.md](docs/validation/2026-11-08-deepseek-harness-live.md) | [hooks/receivers/deepseek.ts](hooks/receivers/deepseek.ts) |
 | dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
 | dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
@@ -230,14 +231,14 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 
 ## What you see
 
-- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. With messaging on ([`--messages-dir`](docs/MESSAGING.md#enable-locally)) and that session connected, **Send** queues your answer, and a confirmation from that session means it was received; otherwise press **Copy** and paste it into that chat.
+- **Answer the one that is waiting.** A question from any agent sits at the top, with a button for each answer. With [messaging on](docs/MESSAGING.md#local-storage) and that session connected, **Send** queues your answer, and a confirmation from that session means it was received; otherwise press **Copy** and paste it into that chat.
 - **Check the others are still moving.** Each agent's task shows its current step and when it last reported. Work nobody has touched for a week folds into one **N idle 7+ days** line.
 - **Clear what is finished or dead.** Finished work moves to a monthly archive by itself. A session that stopped halfway can be archived, confirmed done or taken over.
 - **Tell an agent something without going there.** With messaging on and the session connected, type in the reply box and send it; otherwise press **Copy** and paste it there.
 
-**The terminal board** (`--watch`), with Codex's question open: `y` or `n` copies the answer.
+**The terminal board**, showing Codex's question under Needs you and a Claude Code task in progress.
 
-<img alt="The terminal board with a Codex CLI question open; y or n copies the answer. Synthetic data." src="docs/images/board/codex-en-dark.svg">
+<img alt="The terminal board lists a Codex question, then a Claude Code task in progress. Synthetic data." src="docs/images/board/codex-en-dark.svg">
 
 **Claude Code's pane**, beside the chat: the same board, with the question's answers as buttons.
 
@@ -247,19 +248,20 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 
 ### The board's page
 
-The board commands above open the board as a page in your browser (in a chat app they print plain text instead, with no link). From any terminal, `node "$HOME/.agent-board/agent-board.mjs" --serve` does the same; run it again to reopen the page. On the page you can:
+The commands above open the board in your browser. If the agent cannot open a window, it gives you a link. Run the same command again to reopen the page. On the page you can:
 
 - **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
+- **Settings** at the foot of the page changes the language, look and notifications, and sets up or removes an agent without going back to a terminal.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
 - **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent. This button is also visible directly on the card after Send. The Hidden notice offers **Show again** to restore that question.
 
-The page listens on 127.0.0.1 only, and its address carries a random key: anything on this computer that has the link can use it. It keeps running after you close the tab; **Close the board** stops it. Add `--lan` to open it on a phone on the same Wi-Fi: that link is plain HTTP and anyone who has it can use the page, so use it only on a network you trust. Details and limits are in [the guide](docs/GUIDE.md#the-boards-page).
+The page listens on 127.0.0.1 only, and its address carries a random key: anything on this computer that has the link can use it. It keeps running after you close the tab; **Close the board**, the red power button, stops it. Add `--lan` to the same command to open it on a phone on the same Wi-Fi: that link is plain HTTP and anyone who has it can use the page, so use it only on a network you trust. Details and limits are in [the guide](docs/GUIDE.md#the-boards-page).
 
 ## How it works
 
 <img alt="Claude Code sessions, other agents through their hooks, and you all write one Markdown file, progress.md; the pane, board page, archive and status line read it. Synthetic data." src="docs/images/flow-en.svg" width="100%">
 
-Each agent's hooks write what its session is doing into its own block of one local `progress.md` (a fresh install uses `~/.agent-board/progress.md`). Task steps come only from the agent's own reports, and no private conversation is read. The board reads the file without calling a model; the optional Claude plugin can sum up turns with Claude's model, as [the guide says](docs/GUIDE.md#does-anything-leave-my-machine-what-does-it-cost). You can read and edit the file too: [the file format](docs/FORMAT.md). In English, 繁體中文 and 简体中文.
+Each agent's hooks write what its session is doing into its own block of one local `progress.md` (a fresh install uses `~/.agent-board/progress.md`). Task steps come from the agent's own reports; supported hooks also read the last reply and keep only its closing question. The board reads the file without calling a model; the optional Claude plugin can sum up turns with Claude's model, as [the guide says](docs/GUIDE.md#does-anything-leave-my-machine-what-does-it-cost). You can read and edit the file too: [the file format](docs/FORMAT.md). In English, 繁體中文 and 简体中文.
 
 ### Three Core Pillars
 
@@ -281,6 +283,7 @@ Use the agent's own name after `--agent` (the doctor keeps its old name for ever
 
 | You see | Try |
 |---|---|
+| Start without a browser window | Pass `--no-open`: `npx @wenyuchiou/agent-board --no-open` (or `agent-board --no-open`). |
 | An agent is not on the board | Start a new session of it; one that was already open is not connected. For Codex, preview `npx @wenyuchiou/agent-board --codex-trust --codex-bin "<path-to-codex>" --json` with Codex's full path; the plain doctor prints the command when it can reach Codex. Review the preview, then add `--apply` only if you approve. Codex CLI also offers `/hooks`. |
 | Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs`). Read the conflicts and Next steps; edited files are left alone and listed there. |
 | An old version is still running | A running session keeps the version it loaded: start a new one. To update, see [the guide](docs/GUIDE.md#update-and-uninstall). |
@@ -292,7 +295,7 @@ More answers are in the guide's [FAQ](docs/GUIDE.md#faq) and [Troubleshooting](d
 <details>
 <summary><b>Colours and marks</b></summary>
 
-The pane follows Claude Code's theme (`/config`, then **Theme**); the page follows your computer's light or dark mode until you pick Light or Dark. On the board's page, the switch is next to **Close the board**: at the bottom of the expanded sidebar, or below the tasks on a narrow screen or when the sidebar is collapsed. Every mark has its own shape, so it reads without colour; the page draws a step still to do as a small dot rather than a ring, so it does not look like a button:
+The pane follows Claude Code's theme (`/config`, then **Theme**); the page follows your computer's light or dark mode until you pick Light or Dark. On the board's page, **Settings** is next to **Close the board** (the red power button): it opens Language, Look and Notifications. Changes apply at once. Language offers Automatic, English, 繁體中文 and 简体中文. Look offers Light, Dark and Automatic, then the progress bar's three styles, Ink (the default), Blue and Green. Notifications start off; turning them on asks the browser's permission and alerts you once for each waiting question or approval. The progress bar shows one cell per step beside the count, such as `━━━━╸── 5/7`; the style you pick shows on the page, the pane and the terminal board alike (`/progress style blue` in the pane, `s` on the terminal board). The button sits at the bottom of the expanded sidebar, or below the tasks on a narrow screen or when the sidebar is collapsed. Every mark has its own shape, so it reads without colour; the page draws a step still to do as a small dot rather than a ring, so it does not look like a button:
 
 | Mark | Means | | Mark | Means |
 |:-:|---|---|:-:|---|
@@ -317,4 +320,4 @@ The pane follows Claude Code's theme (`/config`, then **Theme**); the page follo
 
 [MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) and belong to their owners; an agent without a logo is shown by its initial.
 
-<p align="center"><sub>Latest stable version: 0.24.2 · <a href="CHANGELOG.md">Changelog</a></sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="Source version 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>Latest stable version: 0.24.2 · <a href="CHANGELOG.md">Changelog</a> · macOS was not tested for 0.24.3.</sub></p>

@@ -57,7 +57,7 @@ export const SAMPLES: Record<string, Sample> = {
 <!-- /auto session=a81d0c42 -->
 
 ## acme-web
-<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} resume=00000000-0000-0000-0000-000000000001 dir=%2FUsers%2Fana%2Facme-web -->
+<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} -->
 ### Upgrade to React 19
 > Session ended, open to take over
 > Context: the old version blocks the new router
@@ -156,7 +156,7 @@ export const SAMPLES: Record<string, Sample> = {
 <!-- /auto session=a81d0c42 -->
 
 ## acme-web
-<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} resume=00000000-0000-0000-0000-000000000001 dir=C%3A%5CUsers%5Cana%5Cacme-web -->
+<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} -->
 ### 升級到 React 19
 > 對話已結束，可接手
 > 背景：舊版擋住新的 router
@@ -255,7 +255,7 @@ export const SAMPLES: Record<string, Sample> = {
 <!-- /auto session=a81d0c42 -->
 
 ## acme-web
-<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} resume=00000000-0000-0000-0000-000000000001 dir=%2Fhome%2Fli%2Facme-web -->
+<!-- auto session=b72e4d19 agent=claude state=ended updated=${iso(NOW - 3 * 60 * MIN)} -->
 ### 升级到 React 19
 > 对话已结束，可接手
 > 背景：旧版本挡住了新的 router
@@ -320,21 +320,19 @@ export const SAMPLES: Record<string, Sample> = {
 // and an Antigravity CLI session each waiting on the person, beside Claude Code still at work.
 // No resume id or folder: a picture shows nothing a person would have to blank out.
 type CliTask = { title: string; done: string[]; ask: string; context?: string; next?: string }
-const cliFile = (w: { codex: CliTask; antigravity: CliTask; claude: { title: string; done: string[]; doing: string } }): string => `# Project progress
+type CliFocus = 'codex' | 'antigravity'
+const cliFile = (w: { codex: CliTask; antigravity: CliTask; claude: { title: string; done: string[]; doing: string } }) => (focus: CliFocus): string => {
+  const { title, context, done, ask, next } = w[focus]
+  const project = focus === 'codex' ? 'api-gateway' : 'data-pipeline'
+  const session = focus === 'codex' ? '3c9e5a71' : '8d21f0b4'
+  return `# Project progress
 
-## api-gateway
-<!-- auto session=3c9e5a71 agent=codex state=waiting updated=${iso(NOW - 4 * MIN)} -->
-### ${w.codex.title}
-${w.codex.context === undefined ? '' : `> Context: ${w.codex.context}\n`}${w.codex.done.map(step => `- [x] ${step}`).join('\n')}
-- [?] ${w.codex.ask}
-<!-- /auto session=3c9e5a71 -->
-
-## data-pipeline
-<!-- auto session=8d21f0b4 agent=antigravity state=waiting updated=${iso(NOW - 9 * MIN)} -->
-### ${w.antigravity.title}
-${w.antigravity.done.map(step => `- [x] ${step}`).join('\n')}
-- [?] ${w.antigravity.ask}
-${w.antigravity.next === undefined ? '' : `- [ ] ${w.antigravity.next}\n`}<!-- /auto session=8d21f0b4 -->
+## ${project}
+<!-- auto session=${session} agent=${focus} state=waiting updated=${iso(NOW - 4 * MIN)} -->
+### ${title}
+${context === undefined ? '' : `> Context: ${context}\n`}${done.map(step => `- [x] ${step}`).join('\n')}
+- [?] ${ask}
+${next === undefined ? '' : `- [ ] ${next}\n`}<!-- /auto session=${session} -->
 
 ## acme-web
 <!-- auto session=b72e4d19 agent=claude state=working updated=${iso(NOW - 2 * MIN)} -->
@@ -343,8 +341,9 @@ ${w.claude.done.map(step => `- [x] ${step}`).join('\n')}
 - [~] ${w.claude.doing}
 <!-- /auto session=b72e4d19 -->
 `
+}
 
-export const CLI_FILES: Record<string, string> = {
+export const CLI_FILES: Record<string, (focus: CliFocus) => string> = {
   en: cliFile({
     codex: { title: 'Fix the CSV export', context: 'exports over 10 MB time out', done: ['Reproduce the timeout', 'Stream the rows'], ask: 'Open the pull request, OK?' },
     antigravity: { title: 'Check the clean install', done: ['Install on a fresh machine'], ask: 'Keep the logs — 24 hours or 7 days?', next: 'Run the final checks' },
@@ -363,10 +362,9 @@ export const CLI_FILES: Record<string, string> = {
 }
 
 // The README's animated cover: half a minute of one morning on the terminal board
-// (`agent-board --watch`). Claude Code, Codex, Antigravity and OpenCode each report into one
+// (`agent-board`). Claude Code, Codex, Antigravity and OpenCode each report into one
 // file through their own hooks and tick their steps; Codex asks whether to open its pull
-// request and the person answers from the board; the person passes what Claude chose on to
-// Codex (a preview of Send to Codex, #318, preview target 0.24.2) and Codex ticks that step; last, Antigravity
+// request and receives a message from the web board. Last, Antigravity
 // asks something new. The moments are COVER_MARKS. No resume id or folder, as in the CLI sample.
 export const COVER_AGENTS = ['claude', 'codex', 'antigravity', 'opencode'] as const
 export type CoverAgent = (typeof COVER_AGENTS)[number]

@@ -1,4 +1,5 @@
 import type {
+  NativeAsk,
   ProgressAuto,
   ProgressCi,
   ProgressProject,
@@ -32,6 +33,25 @@ export const isCutMarker = (line: string): boolean => {
 export const AUTO_START = /^<!--\s*auto\s+(.*?)\s*-->\s*$/
 export const AUTO_END = /^<!--\s*\/auto\b.*?-->\s*$/
 export const QUESTION = /^<!--\s*question=([a-f0-9]{64}:[1-9]\d*)\s*-->\s*$/
+// `<!-- native=claude options=["a","b"] -->`: the question above is answered in that agent's own window.
+// Any line of this shape is read as the annotation, so a malformed one is dropped and never turns into text.
+export const NATIVE = /^<!--\s*native=(\S*)(?:\s+options=(.*?))?\s*-->\s*$/
+const NATIVE_AGENTS: readonly string[] = ['claude', 'codex']
+
+// Null for an unreadable line: an unknown agent, or options that are not a list of strings.
+export const nativeOf = (line: string): NativeAsk | null => {
+  const found = NATIVE.exec(line)
+  if (found === null || found[1] === undefined || !NATIVE_AGENTS.includes(found[1])) return null
+  if (found[2] === undefined) return { agent: found[1], options: [] }
+  try {
+    const list: unknown = JSON.parse(found[2])
+    if (!Array.isArray(list) || !list.every((one): one is string => typeof one === 'string')) return null
+
+    return { agent: found[1], options: list.slice(0, 8).map(one => one.slice(0, 120)) }
+  } catch {
+    return null
+  }
+}
 const DUE = /(?:截止|\bdue)[:：\s]*((?:\d{4}[-/])?\d{1,2}[-/]\d{1,2})/i
 
 const STATUS: Record<string, ProgressStepStatus> = {
@@ -89,6 +109,13 @@ export const autoOf = (raw: string): ProgressAuto | null => {
   const pr = Number(attrs.pr)
   // `origin=run` is the one value that means anything (#399); `parent` only matters beside it.
   const isRun = attrs.origin === 'run'
+  const replied = attrs.replied !== undefined
+    ? Number.isFinite(Date.parse(attrs.replied))
+      ? Date.parse(attrs.replied)
+      : Number.isFinite(Number(attrs.replied))
+      ? Number(attrs.replied)
+      : null
+    : null
 
   return {
     session,
@@ -101,6 +128,7 @@ export const autoOf = (raw: string): ProgressAuto | null => {
     ci: CI_STATES.find(one => one === attrs.ci) ?? null,
     ...(isRun ? { isRun: true as const } : {}),
     ...(isRun && attrs.parent !== undefined && RESUME.test(attrs.parent) ? { parent: attrs.parent } : {}),
+    ...(replied !== null && Number.isFinite(replied) ? { replied } : {}),
   }
 }
 
@@ -139,7 +167,7 @@ export const readable = (lines: readonly string[], isDiagnostic = false): Array<
       if (end < 0) return null
       isComment = false
       line = line.slice(end + 3)
-    } else if (AUTO_START.test(raw) || AUTO_END.test(raw) || QUESTION.test(raw)) {
+    } else if (AUTO_START.test(raw) || AUTO_END.test(raw) || QUESTION.test(raw) || NATIVE.test(raw)) {
       return raw
     }
     if (isCutMarker(raw)) {
@@ -255,6 +283,12 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
     if (question !== undefined) {
       const previous = task?.steps.at(-1)
       if (openSession !== null && task?.auto?.session === openSession && previous !== undefined) previous.questionToken = question
+      return
+    }
+    if (NATIVE.test(line)) {
+      const native = nativeOf(line)
+      const previous = task?.steps.at(-1)
+      if (native !== null && openSession !== null && task?.auto?.session === openSession && previous?.status === 'waiting') previous.native = native
       return
     }
 

@@ -5,7 +5,7 @@ import { emptyMirror } from '../hooks/mirror'
 import { upsertAutoBlock } from '../hooks/blocks'
 import { boardText, chatText } from '../hooks/board'
 import { parseProgress } from '../hooks/parse'
-import { emptyQuestions, observeQuestions, questionsJson } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, parseQuestions, questionsJson } from '../hooks/questions'
 import { serveModel } from '../hooks/serve'
 import { EN } from '../hooks/strings-en'
 import { answeredJson, answeredPath, buildView } from '../hooks/view'
@@ -206,7 +206,7 @@ describe('L2 a working day', () => {
 })
 
 describe('L3 across agents and sessions', () => {
-  test('L3 across agents: a Codex ask on a Claude pane says where to answer it, and once Codex has its answer it leaves every surface', async ($, on) => {
+  test('L3 across agents: a chat reply removes the Codex ask from Waiting on you and its next report closes it', async ($, on) => {
     const at = Date.parse('2026-10-16T12:00:00Z')
     const ownerId = blockId('codex', 'synthetic-codex-owner')
     const owner = {
@@ -237,6 +237,9 @@ describe('L3 across agents and sessions', () => {
     const task = project.tasks[0]!
     const key = `${project.name}::${task.title}::${task.steps.findIndex(step => step.status === 'waiting')}`
     expect(await ui.find({ type: 'Button', key: `${key}::hide` })).toBeDefined()
+    const records = () => parseQuestions(world.files.get(FILE.replace('.md', '-questions.json')) ?? '')?.records
+    const id = records()?.find(record => record.isUnresolved)?.id
+    expect(id).toBeDefined()
     await ui.press({ key: `${key}::hide` })
     await clock.advance(10)
     const afterHide = visiblePaneText(await ui.drawn())
@@ -250,8 +253,9 @@ describe('L3 across agents and sessions', () => {
     world.mtime += 1
     await clock.advance(5000)
     const answered = world.files.get(FILE) ?? ''
-    expect(answered).toContain('- [x] Retry limit — 3 or 5 attempts?')
-    expect(answered).not.toContain('- [?] Retry limit')
+    expect(answered).toContain('- [?] Retry limit — 3 or 5 attempts?')
+    expect(answered).toContain(`replied=${new Date(at + 1000).toISOString()}`)
+    expect(records()?.find(record => record.id === id)?.isUnresolved).toBe(true)
     expect(await ui.find({ type: 'Text', text: '● 0' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '✓ Nothing needs you right now' })).toBeDefined()
     await noPaneMachineIds(visiblePaneText(await ui.drawn()), world)
@@ -269,17 +273,34 @@ describe('L3 across agents and sessions', () => {
       expect(visible).toContain('0 waiting')
       expect(visible).toContain('Nothing needs you right now')
     }
-    expect(surfaces.terminal).toContain('✓ 1 Retry limit')
+    expect(surfaces.terminal).not.toContain('✓ 1 Retry limit')
     expect(surfaces.terminal).not.toContain('● 1 Retry limit')
+    expect(surfaces.terminal).toContain('○ 1 Retry limit')
+    expect(surfaces.chat).toContain(EN.reportNext('Apply the retry limit'))
+    expect(surfaces.chat).not.toContain(EN.reportNext('Retry limit'))
     // Answering the question leaves the agent's remaining work on the page.
     expect(page.counts.waiting).toBe(0)
     expect(page.counts.active).toBe(1)
     expect(page.groups).toHaveLength(1)
-    expect(page.groups[0]).toMatchObject({ project: 'api-gateway', rows: [{ title: 'Set the retry limit', done: 1, isAsking: false, steps: [{ text: 'Retry limit', status: 'done' }, { text: 'Apply the retry limit', status: 'todo', isCurrent: true }] }] })
+    expect(page.groups[0]).toMatchObject({ project: 'api-gateway', rows: [{ title: 'Set the retry limit', done: 0, isAsking: false, status: EN.answeredWaiting, steps: [{ text: 'Retry limit', status: 'todo' }, { text: 'Apply the retry limit', status: 'todo' }] }] })
     for (const visible of Object.values(surfaces)) {
       noMachineIds(visible, world)
       expect(visible).not.toContain('1 waiting')
     }
+
+    world.reply = () => 'TITLE: Set the retry limit\nCONTEXT: Synthetic journey data.\nDONE: Chose three attempts\nNEXT: Apply the retry limit\nASK: -'
+    world.files.set(`${INBOX}/codex-turn-${at + 2000}-2.json`, JSON.stringify({
+      session_id: 'synthetic-codex-owner', cwd: '/work/api-gateway', last_assistant_message: 'Chose three attempts; apply the limit next.',
+    }))
+    world.mtime += 1
+    await clock.advance(5000)
+    const reported = world.files.get(FILE) ?? ''
+    expect(reported).toContain('- [x] Retry limit — 3 or 5 attempts?')
+    expect(reported).not.toContain('replied=')
+    expect(records()?.find(record => record.id === id)?.isUnresolved).toBe(false)
+    const after = buildView(parseProgress(reported), [], null, at + 10000, 0, {}, EN)
+    expect(boardText(after, [], EN)).toContain('✓ 1 Retry limit')
+    expect(serveModel(after, [], EN).groups[0]).toMatchObject({ project: 'api-gateway', rows: [{ title: 'Set the retry limit', done: 2, isAsking: false, steps: [{ text: 'Retry limit', status: 'done' }, { text: 'Chose three attempts', status: 'done' }, { text: 'Apply the retry limit', status: 'todo', isCurrent: true }] }] })
     await ui.unmount()
   })
 

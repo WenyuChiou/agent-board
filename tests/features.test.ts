@@ -6,15 +6,15 @@ import { askOf } from '../hooks/ask'
 import { RULES } from '../hooks/rule'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor } from '../hooks/board'
 import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
-import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
+import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { connectDataRoots, connectRecordPath, recoveryUnreadableCode } from '../hooks/connect-pure'
-import { boardRun } from '../hooks/board-commands'
+import { boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
 import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, progressReport, unwrittenEntries } from '../hooks/journal'
-import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
+import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, nameReply, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
 import { autoOf, doneKey, parseProgress } from '../hooks/parse'
 import { LANGS, ZH_TW } from '../hooks/i18n'
@@ -22,8 +22,11 @@ import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
+import { boardLanguage, isLanguageOverridden, type SettingsLang } from '../hooks/board-settings'
+import { settingsPanel } from '../hooks/page-settings'
 import { qrModules, qrText } from '../hooks/qr'
 import { STALE_MS } from '../hooks/parse'
+import { DOING_QUIET_MS, WORKING_MS } from '../hooks/grouping'
 import { confirmMatches, confirmTask } from '../hooks/blocks'
 import { applyCompletionOverlay, completionKey, completionOfBlock, completionOverlay, isCompletionOverlay } from '../hooks/mirror'
 import { RELEASED } from '../hooks/released'
@@ -403,11 +406,13 @@ test('Confirm done preserves canceled and hidden steps and guards every agent at
   }
 })
 
-test('every agent keeps live blocks safe across terminal and page at the twelve-hour boundary in every language', () => {
+test('every agent keeps live blocks safe across terminal and page at the working limit and the twelve-hour boundary in every language', () => {
   const now = Date.parse('2026-10-19T12:00:00Z')
   for (const s of Object.values(STRINGS)) for (const agent of ARCHIVE_AGENTS) {
     for (const state of ['working', 'waiting', 'ended']) for (const age of [0, STALE_MS, STALE_MS + 1]) {
-      const live = state !== 'ended' && age <= STALE_MS
+      // A working row with no doing step stops being live after thirty minutes (#1000);
+      // a waiting row stays live until the twelve-hour stale time.
+      const live = state !== 'ended' && (state === 'working' ? age <= WORKING_MS : age <= STALE_MS)
       const file = `## Demo\n<!-- auto session=11223344 agent=${agent} state=${state} updated=${new Date(now - age).toISOString()} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
       const view = buildView(parseProgress(file), [], null, now, 0, {}, s)
       const items = boardItems(view, [])
@@ -432,6 +437,42 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
       expect(takeTask(file, ref, now, s) === null).toBe(live)
       expect(takeArchivable(file, now, undefined, s, true).text).toBe(file)
     }
+    // A working row with no readable `updated` has unknown age: ordinary age rules never
+    // archive it, whatever its state (#1000, Codex P1 on #1087).
+    for (const marker of ['', ' updated=not-a-date']) {
+      const unknown = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working${marker} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
+      const unknownView = buildView(parseProgress(unknown), [], null, now, 0, {}, s)
+      const unknownItems = boardItems(unknownView, [])
+      const unknownItem = unknownItems[0]
+      expect(unknownItem?.type).toBe('row')
+      if (unknownItem?.type !== 'row') throw new Error('Missing synthetic row')
+      expect(unknownItem.row.archive).toBe(null)
+      const unknownDrawn = pinned({ ...emptyBoardState, isIdleOpen: true }, unknownItems)
+      expect(boardKey(unknownDrawn, 'a', unknownItems, s).action?.type ?? null).toBe(null)
+      expect(boardScreen(unknownView, [], unknownDrawn, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(false)
+      const unknownModel = serveModel(unknownView, [], s)
+      const unknownPage = [...unknownModel.groups.flatMap(group => group.rows), ...unknownModel.stopped][0]
+      expect(unknownPage?.canArchive).toBe(false)
+      expect(unknownPage?.archiveNote === s.archiveLive).toBe(true)
+      expect(serveAction(unknownItems, { key: unknownItem.key, type: 'archive', text: '', session: '', fp: fingerprint(unknownItem, unknownItems) }, s)).toEqual({ type: 'refuse', note: s.archiveLive })
+      expect(takeTask(unknown, { project: 'Demo', title: 'Synthetic task', line: 2, session: '11223344' }, now, s)).toBe(null)
+    }
+    // The local observation a display falls back to proves nothing here either: the gate
+    // reads the writer time, like the write guard (#1000, lane review on #1087).
+    for (const marker of ['', ' updated=not-a-date']) {
+      const unknown = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working${marker} -->\n### Synthetic task\n- [ ] Next step\n<!-- /auto session=11223344 -->\n`
+      const parsed = parseProgress(unknown)
+      const task = parsed[0]?.tasks[0]
+      if (task === undefined) throw new Error('Missing synthetic task')
+      const seen = { [taskFingerprint('Demo', task)]: now - 10 * 60 * 60 * 1000 }
+      const seenView = buildView(parsed, [], null, now, 0, {}, s, [], seen)
+      const seenItems = boardItems(seenView, [])
+      const seenItem = seenItems[0]
+      expect(seenItem?.type).toBe('row')
+      if (seenItem?.type !== 'row') throw new Error('Missing synthetic row')
+      expect(seenItem.row.archive).toBe(null)
+      expect(takeTask(unknown, { project: 'Demo', title: 'Synthetic task', line: 2, session: '11223344' }, now, s, seen)).toBe(null)
+    }
     const asked = `## Demo\n<!-- auto session=11223344 agent=${agent} state=waiting updated=${new Date(now).toISOString()} -->\n### Question\n- [?] Choose a limit?\n<!-- /auto session=11223344 -->\n`
     const view = buildView(parseProgress(asked), [], null, now, 0, {}, s)
     expect(boardScreen(view, [], emptyBoardState, s, { width: 160, isColor: false })).not.toContain(s.archiveLive)
@@ -440,6 +481,39 @@ test('every agent keeps live blocks safe across terminal and page at the twelve-
     // A selected stopped block that resumes before the queued write stays owned.
     expect(takeTask(asked, { project: 'Demo', title: 'Question', line: 2, session: '11223344' }, now, s)).toBe(null)
     expect(takeTask(asked.replace(/ updated=[^ ]+/, ''), { project: 'Demo', title: 'Question', line: 2, session: '11223344' }, now, s)).toBe(null)
+  }
+})
+
+test('a working row quiet past the Working now limit can be archived on the terminal and the page (#1000)', () => {
+  const now = Date.parse('2026-10-19T12:00:00Z')
+  // A doing step counts for two quiet hours, any other activity for thirty minutes (#1054):
+  // past that the row is no longer at work, so a session killed mid-step can be archived
+  // instead of waiting out the twelve-hour stale time.
+  const cases: Array<[string, string, number, boolean]> = [
+    ['- [~] Write a test\n', DOING_QUIET_MS / 60_000 - 60, false],
+    ['- [~] Write a test\n', DOING_QUIET_MS / 60_000 + 60, true],
+    ['- [ ] Next step\n', WORKING_MS / 60_000 - 20, false],
+    ['- [ ] Next step\n', WORKING_MS / 60_000 + 10, true],
+  ]
+  for (const s of Object.values(STRINGS)) for (const agent of ['codex', 'claude']) for (const [steps, minutes, archivable] of cases) {
+    const file = `## Demo\n<!-- auto session=11223344 agent=${agent} state=working updated=${new Date(now - minutes * 60_000).toISOString()} -->\n### Synthetic task\n${steps}<!-- /auto session=11223344 -->\n`
+    const view = buildView(parseProgress(file), [], null, now, 0, {}, s)
+    const items = boardItems(view, [])
+    const item = items.find(one => one.type === 'row')
+    expect(item?.type).toBe('row')
+    if (item?.type !== 'row') throw new Error('Missing synthetic row')
+    expect(item.row.archive === null).toBe(!archivable)
+    const drawn = pinned({ ...emptyBoardState, isIdleOpen: true }, items)
+    const pressed = boardKey(drawn, 'a', items, s)
+    expect(pressed.action?.type ?? null).toBe(archivable ? 'archive' : null)
+    expect(boardScreen(view, [], pressed.state, s, { width: 160, isColor: false }).includes(s.archiveLive)).toBe(!archivable)
+    const model = serveModel(view, [], s)
+    const page = [...model.groups.flatMap(group => group.rows), ...model.stopped][0]
+    expect(page?.canArchive).toBe(archivable)
+    expect(page?.archiveNote === s.archiveLive).toBe(!archivable)
+    const action = serveAction(items, { key: item.key, type: 'archive', text: '', session: '', fp: fingerprint(item, items) }, s)
+    expect(action.type).toBe(archivable ? 'archive' : 'refuse')
+    if (!archivable) expect(action).toEqual({ type: 'refuse', note: s.archiveLive })
   }
 })
 
@@ -633,8 +707,13 @@ test('an ended session offers the command that reopens it where it ran', () => {
 test('the status line says where things stand, and nothing when nothing does', () => {
   const projects = parseProgress('## 求職\n### Google 暑期實習\n> 截止 10-18\n- [?] 推薦信\n')
   const line = statusLine(buildView(projects, [], { ...working(), pr: PR }, NOW))
-  expect(line).toBe('進度 · 重做進度面板 1/2 · Claude 正在做 · 1 件等你 · 1 件快到期 · PR #12 · CI 失敗 2 · 要求修改')
+  // Two steps or more: the bar takes the place of the status words, and the title stays (#1085).
+  expect(line).toBe('進度 · 重做進度面板 ━╸ 1/2 · 1 件等你 · 1 件快到期 · PR #12 · CI 失敗 2 · 要求修改')
   expect(statusLine(buildView([], [], null, NOW))).toBe(undefined)
+  // One step keeps its words: there is no bar to draw.
+  let one = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
+  one = applyTaskCreate(one, { subject: '讀 API' }, '1', NOW)
+  expect(statusLine(buildView([], [], { ...one, title: '只有一步', state: 'working' }, NOW))).toBe('進度 · 只有一步 0/1 · Claude 正在做')
 })
 
 test('two 和色 sets: the light one under a light theme, the dark one otherwise', () => {
@@ -1117,6 +1196,65 @@ test('a choice with a comma before 還是 / or still reads both options', () => 
   })
 })
 
+test('a list of options before or / 還是 offers every option, and a clause before it stays one option (#1111)', () => {
+  for (const [question, options] of [
+    ['Small, medium, large or huge?', ['Small', 'medium', 'large', 'huge']],
+    ['Small, medium, large, or huge?', ['Small', 'medium', 'large', 'huge']],
+    ['Should the size be small, medium, large or huge?', ['small', 'medium', 'large', 'huge']],
+    ['Which size, small, medium or large?', ['small', 'medium', 'large']],
+    ['A、B 還是 C？', ['A', 'B', 'C']],
+    ['用 A、B 还是 C？', ['A', 'B', 'C']],
+    // A clause before or / 還是 is still one option, as before.
+    ['A first, or B?', ['A first', 'B']],
+    ['先開旗標，還是全部開？', ['先開旗標', '全部開']],
+    ['Which metric, win rate or Elo?', ['win rate', 'Elo']],
+    ['I checked the logs, restart or wait?', ['restart', 'wait']],
+    ['If it fails, retry or stop?', ['retry', 'stop']],
+    ['我看了日誌，要重啟還是等？', ['重啟', '等']],
+    // A lead-in before the comma is not an option.
+    ['Tests pass, merge now or wait?', ['merge now', 'wait']],
+    ['Great, ship or hold?', ['ship', 'hold']],
+    ['Quick question, A or B?', ['A', 'B']],
+    ['Done, ready to merge or not?', ['ready to merge', 'not']],
+    ['Do you want X, Y or Z?', ['X', 'Y', 'Z']],
+  ] as const) {
+    expect(askOf(question, '')).toMatchObject({ kind: 'choose', options: [...options] })
+    expect(askOf('Pick', question)).toMatchObject({ kind: 'choose', options: [...options] })
+  }
+})
+
+test('an English "Should X be A or B?" question offers A and B as the answers, without the question words', () => {
+  expect(askOf('Should the retry limit be 3 or 5?', '')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
+  expect(askOf('Retry limit', 'Should the retry limit be 3 or 5?')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
+  // An imperative lead is not a question frame: it stays whole.
+  expect(askOf('Keep the old screenshots or redraw them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Keep the old screenshots', 'redraw them'],
+  })
+})
+
+test('an English question with a relative clause keeps its words and does not strip to the clause\'s verb', () => {
+  expect(askOf('Should I keep files that are backed up or delete them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep files that are backed up', 'delete them'],
+  })
+  expect(askOf('Should I keep files which are backed up or delete them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep files which are backed up', 'delete them'],
+  })
+  expect(askOf('Should I keep the person who is responsible or let them go?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep the person who is responsible', 'let them go'],
+  })
+  // A copula in an if-clause is not the main verb either.
+  expect(askOf('Should I keep files if they are backed up or delete them?', '')).toMatchObject({
+    kind: 'choose',
+    options: ['Should I keep files if they are backed up', 'delete them'],
+  })
+  // A leading `that` is the subject itself, not a clause: it still strips.
+  expect(askOf('Should that file be deleted or kept?', '')).toMatchObject({ kind: 'choose', options: ['deleted', 'kept'] })
+})
+
 test('archiving never ages out a block with no time, and keeps a section someone left empty', () => {
   const text = `# P
 
@@ -1233,6 +1371,49 @@ test('titles and background are cut by terminal width, at a word in English, nev
   expect(clip('Add a README.md to this repo describing index.js', 38)).toBe('Add a README.md to this repo…')
 })
 
+test('a naming reply accepts short titles and background in Chinese and English', () => {
+  expect(nameReply('「重做進度面板」\n背景：讓大家一眼看到工作進度')).toEqual({ title: '重做進度面板', context: '讓大家一眼看到工作進度' })
+  expect(nameReply('Build the progress board\nContext: Make the work visible to everyone.')).toEqual({ title: 'Build the progress board', context: 'Make the work visible to everyone.' })
+  expect(nameReply('Build the progress board')).toEqual({ title: 'Build the progress board', context: '' })
+  expect(nameReply('測試'.repeat(2))).not.toBeNull()
+  expect(nameReply('測試'.repeat(7))).not.toBeNull()
+  expect(nameReply('one two three')).not.toBeNull()
+  expect(nameReply('Fix README.md links')).toEqual({ title: 'Fix README.md links', context: '' })
+  expect(nameReply('Release 0.24.3 notes')).not.toBeNull()
+  expect(nameReply('v0.24.3 發版準備')).not.toBeNull()
+  expect(nameReply('Update the claude-one.txt notes')).not.toBeNull()
+  expect(nameReply('one two three four five six seven')).not.toBeNull()
+  expect(nameReply(`重做進度面板\n${'字'.repeat(40)}`)).not.toBeNull()
+  expect(nameReply(`Build the progress board\n${Array(19).fill('word').join(' ')}`)).not.toBeNull()
+})
+
+test('short first-person refusals are not task names, but read-error titles are', () => {
+  for (const reply of ['I cannot read the file', 'I can’t access the file', 'Sorry, we are unable to read it',
+    "I'm unable to read the file", 'We’re not able to open it', 'Title: "I cannot read the file"',
+    '我無法讀取檔案', '我无法读取文件', '抱歉，我暫時不能讀檔', '任務名稱：「我無法讀取檔案」']) expect(nameReply(reply)).toBeNull()
+  expect(nameReply('Fix cannot read error')?.title).toBe('Fix cannot read error')
+  expect(nameReply('修正無法讀檔')?.title).toBe('修正無法讀檔')
+})
+
+test('a naming reply rejects refusals, sentences, extra lines and answers outside the prompt limits', () => {
+  expect(nameReply('我無法讀取 claude-one.txt，對話中也沒有附上檔案\n請把檔案內容貼到對話中，我會依照你的格式要求回覆兩行')).toBeNull()
+  expect(nameReply('重做進度面板\n說明背景\n多出一行')).toBeNull()
+  expect(nameReply('重做進度面板。')).toBeNull()
+  expect(nameReply('Can you provide the file?')).toBeNull()
+  expect(nameReply('Fix the links. Then ship it')).toBeNull()
+  expect(nameReply('')).toBeNull()
+  expect(nameReply('短標題')).toBeNull()
+  expect(nameReply('長'.repeat(15))).toBeNull()
+  expect(nameReply(`修復命名保護 ${'a'.repeat(70)}`)).toBeNull()
+  expect(nameReply('two words')).toBeNull()
+  expect(nameReply('one two three four five six seven eight')).toBeNull()
+  expect(nameReply(`${'word'.repeat(10)} ${'word'.repeat(10)} end`)).toBeNull()
+  expect(nameReply(`重做進度面板\n${'字'.repeat(41)}`)).toBeNull()
+  expect(nameReply(`Build the progress board\n${Array(20).fill('word').join(' ')}`)).toBeNull()
+  expect(nameReply(`Build the progress board\n${Array(20).fill('lengthyword').join(' ')}`)).toBeNull()
+  expect(nameReply('重做進度面板\n背景：')).toBeNull()
+})
+
 test('封存 takes out one task now: an ended block by its session, a hand-kept task by its heading', () => {
   const text = `# 專案進度
 
@@ -1276,7 +1457,8 @@ test('封存 leaves the file alone when it cannot be sure which task it means', 
   const twins = '# 專案進度\n\n## a\n### 同名\n- [ ] 一\n\n## b\n### 同名\n- [ ] 二\n'
   expect(takeTask(twins, { project: 'a', title: '同名', line: 0, session: null }, NOW)).toBeNull()
   // A title inside some session's block is that session's, not the person's.
-  const inside = '## p\n<!-- auto session=aaaaaaaa state=working updated=2026-10-16T11:00:00.000Z -->\n### 修 CI\n- [ ] 修\n<!-- /auto session=aaaaaaaa -->\n'
+  // The session reported fifteen minutes ago, so its row is live and has no 封存 (#1000).
+  const inside = '## p\n<!-- auto session=aaaaaaaa state=working updated=2026-10-16T11:45:00.000Z -->\n### 修 CI\n- [ ] 修\n<!-- /auto session=aaaaaaaa -->\n'
   expect(takeTask(inside, { project: 'p', title: '修 CI', line: 0, session: null }, NOW)).toBeNull()
   // A block that lost its end marker.
   expect(takeTask('## p\n<!-- auto session=bbbbbbbb state=ended updated=2026-10-16T11:00:00.000Z -->\n### x\n', { project: 'p', title: 'x', line: 2, session: 'bbbbbbbb' }, NOW)).toBeNull()
@@ -1444,6 +1626,166 @@ test('the question a reply ends on: its last paragraph only, without code or mar
   // An underscore inside a word belongs to it (a name, a token); at the edge of one it is markdown.
   expect(lastQuestion('Should I rename `snake_case` to ghp_16C7e42F in CI?')).toBe('Should I rename snake_case to ghp_16C7e42F in CI?')
   expect(lastQuestion('Use _this_ or __that__, not my__name?')).toBe('Use this or that, not my__name?')
+})
+
+test('a question put to the person, followed only by its choices as a list, still asks it (#1243)', () => {
+  expect(lastQuestion('Which database should I use?\n1. Postgres\n2. SQLite\n3. MySQL')).toBe('Which database should I use?')
+  expect(lastQuestion('Done.\n\nShould I use Postgres or SQLite?\n- Postgres\n- SQLite')).toBe('Should I use Postgres or SQLite?')
+  expect(lastQuestion('The parser is fixed. Which one do you want first?\na) the docs\nb) the tests')).toBe('Which one do you want first?')
+  expect(lastQuestion('What would you like me to do next?\n• Ship it\n• Add tests\n• Stop here')).toBe('What would you like me to do next?')
+  // Bold does not hide a question only the agent could be asking.
+  expect(lastQuestion('Which one do you prefer?\n1. **Postgres** — replicas\n2. `SQLite` — one file')).toBe('Which one do you prefer?')
+  expect(lastQuestion('Which database do you prefer?\n1. PostgreSQL.\n2. SQLite.')).toBe('Which database do you prefer?')
+  expect(lastQuestion('Which component do you need?\na) parser\nb) renderer')).toBe('Which component do you need?')
+  expect(lastQuestion('我該用哪個資料庫？\n1、Postgres\n2、SQLite')).toBe('我該用哪個資料庫？')
+  expect(lastQuestion('要我先用哪個資料庫？\n- Postgres\n- SQLite')).toBe('要我先用哪個資料庫？')
+  expect(lastQuestion('你想先做哪一個？\n1. 文件\n2. 測試')).toBe('你想先做哪一個？')
+  expect(lastQuestion('我应该用哪个数据库？\n- Postgres\n- SQLite')).toBe('我应该用哪个数据库？')
+  expect(lastQuestion('您希望先做哪一个？\n1. 文档\n2. 测试')).toBe('您希望先做哪一个？')
+})
+
+test('blank lines between a question and its choices, and between the choices, do not hide it (#1243)', () => {
+  expect(lastQuestion('Done.\n\nWhich one do you want first?\n\n1. Postgres\n2. SQLite')).toBe('Which one do you want first?')
+  expect(lastQuestion('Which database should I use?\n\n1. Postgres\n\n2. SQLite')).toBe('Which database should I use?')
+  expect(lastQuestion('你要先用哪個資料庫？\n\n- Postgres\n\n- SQLite')).toBe('你要先用哪個資料庫？')
+  expect(lastQuestion('你要先用哪个数据库？\r\n\r\n- Postgres\r\n\r\n- SQLite')).toBe('你要先用哪个数据库？')
+})
+
+test('a heading or a recap worded as a question over a list that answers it asks nothing (#1243)', () => {
+  expect(lastQuestion('What changed?\n- Updated the parser.\n- Added tests.')).toBeNull()
+  expect(lastQuestion('What changed?\n- the parser\n- the tests')).toBeNull()
+  expect(lastQuestion('Which database did I pick?\n- SQLite was selected.\n- Migrations completed.')).toBeNull()
+  expect(lastQuestion('Which database did you want?\n- SQLite\n- Postgres')).toBeNull()
+  expect(lastQuestion('What did you ask for?\n- Add dark mode.\n- Preserve settings.')).toBeNull()
+  expect(lastQuestion('What did you ask for?\n- dark mode\n- saved settings')).toBeNull()
+  expect(lastQuestion('You asked for a summary. What changed?\n- Updated the parser.\n- Added tests.')).toBeNull()
+  expect(lastQuestion('你提出了哪些需求？\n- 新增深色模式。\n- 修正設定頁。')).toBeNull()
+  expect(lastQuestion('你提出了哪些需求？\n- 深色模式\n- 設定頁')).toBeNull()
+  expect(lastQuestion('你要了哪些功能？\n- 深色模式\n- 設定頁')).toBeNull()
+  expect(lastQuestion('你提出了哪些需求？\n- 新增深色模式。\n- 修正设置页。')).toBeNull()
+  expect(lastQuestion('改了哪些地方？\n- 解析器\n- 测试')).toBeNull()
+})
+
+test('an answered FAQ heading over its answers asks nothing (#1243)', () => {
+  expect(lastQuestion('**Should I make any changes?**\n- No changes are needed.\n- Your configuration is already correct.')).toBeNull()
+  // A survey's results: the heading asks the person in its words, and the list answers it.
+  expect(lastQuestion('**Which one do you prefer?**\n1. **Postgres** — replicas\n2. `SQLite` — one file')).toBeNull()
+  expect(lastQuestion('Survey results:\n\n**Which deployment option do you prefer?**\n- Docker — 70%\n- Binary — 30%')).toBeNull()
+  expect(lastQuestion('Survey results:\n\nWhich deployment option do you prefer?\n- Docker\n- Binary')).toBeNull()
+  expect(lastQuestion('Which deployment option do you prefer?\n- Docker — 70%\n- Binary — 30%')).toBeNull()
+  expect(lastQuestion('調查結果：\n\n你想要哪種部署方式？\n- Docker\n- 執行檔')).toBeNull()
+  expect(lastQuestion('Should I make any changes?\n- No changes are needed.\n- Your configuration is already correct.')).toBeNull()
+  expect(lastQuestion('Should I make any changes?\n- No\n- The configuration is already correct')).toBeNull()
+  expect(lastQuestion('**Which database should I use?**\n- Postgres for production\n- SQLite for tests')).toBeNull()
+  expect(lastQuestion('## Which database should I use?\n- Postgres for production\n- SQLite for tests')).toBeNull()
+  expect(lastQuestion('Q: Which database should I use?\n- Postgres for production\n- SQLite for tests')).toBeNull()
+  expect(lastQuestion('Which database should I use?\n- Use Postgres for production.\n- Use SQLite for tests.')).toBeNull()
+  expect(lastQuestion('**我需要修改什麼嗎？**\n- 不需要修改。\n- 你的設定已經正確。')).toBeNull()
+  expect(lastQuestion('**我該用哪個資料庫？**\n- 正式環境用 Postgres\n- 測試用 SQLite')).toBeNull()
+  expect(lastQuestion('**我应该用哪个数据库？**\n- 生产环境用 Postgres\n- 测试用 SQLite')).toBeNull()
+})
+
+test('a bare which-first question over its choices asks it, and a summary heading over a list does not (#1243)', () => {
+  expect(lastQuestion('Which database first?\n1. Postgres\n2. SQLite')).toBe('Which database first?')
+  expect(lastQuestion('Which one next?\n- docs\n- tests')).toBe('Which one next?')
+  expect(lastQuestion('先用哪個資料庫？\n1. Postgres\n2. SQLite')).toBe('先用哪個資料庫？')
+  expect(lastQuestion('先用哪个数据库？\n- Postgres\n- SQLite')).toBe('先用哪个数据库？')
+  expect(lastQuestion('Which files changed?\n- parse.ts\n- digest.ts')).toBeNull()
+  expect(lastQuestion('Which agents are supported?\n- Codex\n- Claude Code')).toBeNull()
+  expect(lastQuestion('Which step failed first?\n- build\n- lint')).toBeNull()
+  expect(lastQuestion('**Which database first?**\n- Postgres\n- SQLite')).toBeNull()
+  expect(lastQuestion('先前用了哪個資料庫？\n- Postgres\n- SQLite')).toBeNull()
+  // A timeline's heading names an order too, but with a verb or for several things.
+  expect(lastQuestion('The CI timeline:\n\nWhich jobs ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which jobs ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('已确定的执行顺序：\n\n先做哪些工作？\n- 更新解析器\n- 补充测试')).toBeNull()
+  expect(lastQuestion('先做哪些工作？\n- 更新解析器\n- 补充测试')).toBeNull()
+})
+
+test('a question under a caption, or about an order already finished, asks nothing (#1243)', () => {
+  expect(lastQuestion('CI jobs, in the order they finished\n\nWhich finished first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which finished first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion("Completed intake form with the customer's answers\n\nWhich services do you need?\n- Storage\n- Backups")).toBeNull()
+  expect(lastQuestion('The customer selected both services in the completed intake form\n\nWhich services should I provide?\n- Storage.\n- Backups.')).toBeNull()
+  expect(lastQuestion('客戶填好的需求表\n\n你需要哪些服務？\n- 儲存\n- 備份')).toBeNull()
+  // A sentence the agent ends before its question leaves the question its own.
+  expect(lastQuestion('I checked both.\n\nWhich services do you need?\n- Storage\n- Backups')).toBe('Which services do you need?')
+  expect(lastQuestion('兩個都查過了。\n\n你需要哪些服務？\n- 儲存\n- 備份')).toBe('你需要哪些服務？')
+})
+
+test('a list that explains, asks or follows a statement is not a list of choices (#1243)', () => {
+  // A list after a statement, or after a question the same line already answered.
+  expect(lastQuestion('What changed:\n1. the parser\n2. the tests')).toBeNull()
+  expect(lastQuestion('Why did it fail? The cache was stale.\n1. cleared it\n2. reran')).toBeNull()
+  expect(lastQuestion('Which one should I use?\n\nI went with A.\n\n1. A\n2. B')).toBeNull()
+  expect(lastQuestion('I answered these questions:\n1. Why did tests fail?\n2. The cache was stale.')).toBeNull()
+  // An item that asks: which of the questions waits cannot be told.
+  expect(lastQuestion('Which database should I use?\n1. Postgres for scale?\n2. SQLite for simplicity.')).toBeNull()
+  // The last item's own question is read as before, never the line over the list.
+  expect(lastQuestion('Which database should I use?\n1. Postgres for scale?\n2. SQLite for simplicity?')).toBe('SQLite for simplicity?')
+  // An item with a paragraph of its own explains; one choice alone is not a choice.
+  expect(lastQuestion('Which database do you prefer?\n\n1. Postgres.\n\n   It supports replicas.\n\n2. SQLite.')).toBeNull()
+  expect(lastQuestion('Which database should I use?\n- Postgres')).toBeNull()
+  expect(lastQuestion('Which one should I use?\n1. Postgres\n   - replicas\n2. SQLite')).toBeNull()
+  // A yes or no over a list is not a pick among its items.
+  expect(lastQuestion('Do you want the details?\n- parser\n- tests')).toBeNull()
+  expect(lastQuestion('你要看細節嗎？\n- 解析器\n- 測試')).toBeNull()
+  expect(lastQuestion('你要看细节吗？\n- 解析器\n- 测试')).toBeNull()
+  expect(lastQuestion('要用哪個資料庫？\n- Postgres 適合正式環境。\n- SQLite 適合測試。')).toBeNull()
+  expect(lastQuestion('该用哪个数据库？\n- Postgres 适合生产环境。\n- SQLite 适合测试。')).toBeNull()
+})
+
+test('a reply that quotes its earlier question asks nothing (#1273)', () => {
+  expect(lastQuestion('The test asked either "Your name" or "Are you ready?"')).toBeNull()
+  expect(lastQuestion('測試問了「你的名字」還是「準備好了嗎？」')).toBeNull()
+  expect(lastQuestion('That finishes the test: I said hello, then goodbye, and asked "Blue or green?"')).toBeNull()
+  expect(lastQuestion('Earlier you wrote “Blue or green?”')).toBeNull()
+  expect(lastQuestion("The prompt was 'Blue or green?'")).toBeNull()
+  expect(lastQuestion('The prompt said "Ready? Blue or green?"')).toBeNull()
+  expect(lastQuestion('I asked "Blue or green? Pick one" and stopped.')).toBeNull()
+  expect(lastQuestion('測試完成：我說了你好，然後問了「藍色還是綠色？」')).toBeNull()
+  expect(lastQuestion('测试完成：我说了你好，然后问了“蓝色还是绿色？”')).toBeNull()
+  expect(lastQuestion('我先問了『要不要繼續？』')).toBeNull()
+  expect(lastQuestion('I asked which one, as "Blue or green?"\n1. Blue\n2. Green')).toBeNull()
+  // A quote that wraps the whole question, or its last option, still asks.
+  expect(lastQuestion('Done. "Blue or green?"')).toBe('"Blue or green?"')
+  expect(lastQuestion('改好了。\n\n「藍色還是綠色？」')).toBe('「藍色還是綠色？」')
+  expect(lastQuestion('Should I call it "fast" or "safe?"')).toBe('Should I call it "fast" or "safe?"')
+  expect(lastQuestion('I asked "Blue or green?" and you said blue. Ship it?')).toBe('Ship it?')
+  expect(lastQuestion("Is it Alice's row or Bob's row?")).toBe("Is it Alice's row or Bob's row?")
+})
+
+test('a lone straight quote, such as an inch mark, is a literal character, and the question still asks (#1273)', () => {
+  expect(lastQuestion('Should I use a 12" shelf?')).toBe('Should I use a 12" shelf?')
+  expect(lastQuestion('Should I escape `"` in the output?')).toBe('Should I escape " in the output?')
+  expect(lastQuestion('The rack is 12" wide. Should I order it?')).toBe('Should I order it?')
+  expect(lastQuestion('要用 12" 的架子嗎？')).toBe('要用 12" 的架子嗎？')
+  expect(lastQuestion('Do you want "2"?')).toBe('Do you want "2"?')
+  expect(lastQuestion('Is "x" ok? "y" is next')).toBe('Is "x" ok?')
+  expect(lastQuestion('Should I use the "fast"-path? The "safe" path is slower.')).toBe('Should I use the "fast"-path?')
+  // A told-about quote still quotes after an inch mark or a closed pair, or with a space inside.
+  expect(lastQuestion('The 12" rack is in. I asked "Blue or green?"')).toBeNull()
+  expect(lastQuestion('The 12" rack is in, and I asked "Blue or green?"')).toBeNull()
+  expect(lastQuestion('I wrote "Version 2" in the title and asked "Ready?"')).toBeNull()
+  expect(lastQuestion('他問"要藍色還是綠色?"')).toBeNull()
+  expect(lastQuestion('I asked " Ready?"')).toBeNull()
+  expect(lastQuestion('I asked "...Ready?"')).toBeNull()
+  // A straight quote in code is a character, so it neither opens nor closes a quotation.
+  expect(lastQuestion('The tokens are `name"` and `"`. Should I escape both? "No" leaves them unchanged.')).toBe('Should I escape both?')
+  expect(lastQuestion('I compared `name"` and `"` and then asked "Ready?"')).toBeNull()
+})
+
+test('a link\'s own question mark is not a question, and a question with a link keeps it whole (#1108)', () => {
+  expect(lastQuestion('http://127.0.0.1:58561/?t=abc123')).toBeNull()
+  expect(lastQuestion('The board is open at http://127.0.0.1:58561/?t=abc123')).toBeNull()
+  expect(lastQuestion('See https://example.com/?q=1.')).toBeNull()
+  expect(lastQuestion('Done.\n\nCan you open https://example.com/a?q=1&b=2.html?')).toBe('Can you open https://example.com/a?q=1&b=2.html?')
+  expect(lastQuestion('I opened http://127.0.0.1:5173/?t=x. Ship it?')).toBe('Ship it?')
+  expect(lastQuestion('預覽在 https://example.com/?p=1，可以合併嗎？')).toBe('預覽在 https://example.com/?p=1，可以合併嗎？')
+  // A link ends at Chinese punctuation, so text after the question no longer hides it (#1121).
+  expect(lastQuestion('預覽在 https://example.com，可以合併嗎？（測試已通過）')).toBe('預覽在 https://example.com，可以合併嗎？')
+  expect(lastQuestion('預覽在 https://example.com/?p=1，可以合併嗎？請回覆。')).toBe('預覽在 https://example.com/?p=1，可以合併嗎？')
 })
 
 test('a reply that is JSON is not cut at its question mark and shown as a question', () => {
@@ -2567,10 +2909,11 @@ test('a chat board puts the questions first, each with its project and agent, an
   expect(text).toContain('\n▸ acme-web › Dark mode for the settings page — next Settings page\n')
   for (const question of ['Per-key limit', 'Publish the fixed pages', 'Ship it to staging']) expect(at('▸ acme-web')).toBeGreaterThan(at(question))
   // One marked answered in a pane on this machine, and one hidden since, are not asked again.
+  // The waiting session leaves Needs you and stays waiting, out of Working now / in progress (#1206).
   const answered = chatText(chatView(CHAT_FILE, ['a1b2c3d4 2 Per-key limit — 100 or 300 a minute?']), [], [], STRINGS.en, '/home/jane')
   expect(answered).not.toContain('Per-key limit')
   expect(answered).toContain('[Confirm] Publish the fixed pages, OK?')
-  expect(answered.startsWith('Progress  ● 1 waiting  ▸ 2 in progress')).toBe(true)
+  expect(answered.startsWith('Progress  ● 1 waiting  ▸ 1 in progress')).toBe(true)
   // They are counted, as on the terminal board, after the questions that remain.
   expect(answered).toContain('    [Confirm] Publish the fixed pages, OK?\n  1 answered, hidden\n')
   // Its task goes on with the work that is not waiting, and its next step is the one after the question.
@@ -2856,11 +3199,11 @@ test('Hermes Agent’s skill from an earlier release is still the plugin’s own
 test('each agent gets a board command in the form it reads, and a missing reporter never makes a hook exit 2', () => {
   const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw', board: '/h/.claude/agent-board.mjs', s: STRINGS.en }
   const files = Object.fromEntries(boardCommands(ctx).map(hook => [hook.file, hook]))
-  const gemini = String(files['/h/.gemini/commands/board.toml']?.edit('', false))
+  const gemini = String(files['/h/.gemini/commands/agent-board.toml']?.edit('', false))
   // A TOML literal string, so a Windows path's backslashes stay as they are.
   // Both invoke the no-flag command, and their model sees that exact command path beside the output.
   expect(JSON.parse(/^prompt = (.*)$/m.exec(gemini)?.[1] ?? 'null')).toBe(`${STRINGS.en.boardCommandPrompt}\n\n\`node "/h/.claude/agent-board.mjs"\`\n\n!{node "/h/.claude/agent-board.mjs"}\n`)
-  expect(String(files['/h/.config/opencode/commands/board.md']?.edit('', false))).toContain('!`node "/h/.claude/agent-board.mjs"`')
+  expect(String(files['/h/.config/opencode/commands/agent-board.md']?.edit('', false))).toContain('!`node "/h/.claude/agent-board.mjs"`')
   const skill = String(files['/h/.agents/skills/agent-board/SKILL.md']?.edit('', false))
   // The description has a colon in it; quoted, it stays one YAML value.
   expect(skill.startsWith('---\nname: agent-board\ndescription: "Agent Board: what every agent is doing, and what waits on you"\n---\n')).toBe(true)
@@ -2878,6 +3221,46 @@ test('each agent gets a board command in the form it reads, and a missing report
   expect(reportCommand('/h/.claude/progress-report.sh', 'gemini', 'turn', false)).toBe("sh '/h/.claude/progress-report.sh' gemini turn || true")
 })
 
+test('the old /board command files are retired only when they are exactly what a release wrote', () => {
+  const ctx = { home: '/h', sep: '/', isWindows: false, script: '/h/.claude/progress-report.sh', inbox: '/h/.claude/progress-inbox', codexHome: '/h/.codex', grokHome: '/h/.grok', hermesHome: '/h/.hermes', openclawHome: '/h/.openclaw', board: '/h/.claude/agent-board.mjs', s: STRINGS.en }
+  const files = Object.fromEntries(boardCommands(ctx).map(hook => [hook.file, hook]))
+  for (const [now, old] of [['/h/.gemini/commands/agent-board.toml', '/h/.gemini/commands/board.toml'], ['/h/.config/opencode/commands/agent-board.md', '/h/.config/opencode/commands/board.md']] as const) {
+    const text = String(files[now]?.edit('', false))
+    const retired = files[old]
+    expect(retired?.label).toBe('')
+    for (const remove of [false, true]) {
+      expect(retired?.edit(text, remove)).toBe(DELETE)
+      // A file the person changed, even by a line, is theirs: left as it is, never a collision that stops the connect.
+      expect(retired?.edit(`${text}\nMy own line\n`, remove)).toBe(`${text}\nMy own line\n`)
+    }
+    expect(retired?.edit('', false)).toBeNull()
+  }
+})
+
+test('the skill description 0.24.2 installed is still known as ours on upgrade, in every language', () => {
+  // Written out, not read from STRINGS: a later change to the wording must not strand 0.24.2's installs.
+  const released = [
+    'Open the local interactive board and track real task progress for the currently connected session.',
+    '開啟本機互動看板，追蹤目前已接線 session 的實際任務進度。',
+    '打开本地交互看板，跟踪当前已接线 session 的实际任务进度。',
+  ]
+  for (const description of released) {
+    expect(isInstallerSkill(`---\nname: agent-board\ndescription: ${JSON.stringify(description)}\n---\n\nRun the board.\n`)).toBe(true)
+  }
+  expect(isInstallerSkill('---\nname: agent-board\ndescription: "My own board skill"\n---\n\nRun the board.\n')).toBe(false)
+})
+
+test('a typed /board is still taken for a board request on an old install, though no text offers it any more', () => {
+  const words = boardRequestWords(Object.values(STRINGS))
+  for (const prompt of ['/board', ' /board \n', '/agent-board', '$agent-board']) expect(isBoardRequest({ prompt }, words)).toBe(true)
+  expect(isBoardRequest({ prompt: '/boards' }, words)).toBe(false)
+  for (const s of Object.values(STRINGS)) {
+    for (const text of [s.boardCommandPrompt, s.boardSkillPrompt('node "/h/agent-board.mjs"'), s.boardChatSkillPrompt('node "/h/agent-board.mjs"'), s.localAgentSkill('node "/h/agent-board.mjs"')]) {
+      expect(/(^|[^-\w])\/board\b/.test(text)).toBe(false)
+    }
+  }
+})
+
 test('OpenCode generated paths use the exact Windows config root with spaces and non-ASCII', () => {
   const root = 'C:\\Agent Config\\設定\\OpenCode'
   const ctx = { home: 'C:\\Users\\me', sep: '\\', isWindows: true, script: 'C:\\board\\progress-report.ps1', inbox: 'C:\\board\\progress-inbox', codexHome: 'C:\\Users\\me\\.codex', grokHome: 'C:\\Users\\me\\.grok', hermesHome: 'C:\\Users\\me\\.hermes', openclawHome: 'C:\\Users\\me\\.openclaw', opencodeHome: root, board: 'C:\\board\\agent-board.mjs' }
@@ -2887,7 +3270,7 @@ test('OpenCode generated paths use the exact Windows config root with spaces and
   expect(plugin?.old).toBe(`${root}\\plugin\\progress-pane.js`)
   const command = boardCommands(ctx).find(hook => hook.agent === 'opencode')
   expect(command?.dir).toBe(root)
-  expect(command?.file).toBe(`${root}\\commands\\board.md`)
+  expect(command?.file).toBe(`${root}\\commands\\agent-board.md`)
   expect(boardCommands(ctx).find(hook => hook.agent === 'skills')?.dirs).toContain(root)
 })
 
@@ -2897,7 +3280,9 @@ test('every legacy board skill uses the literal-path command and adopts only exa
   const command = boardRun(board)
   const hooks = boardCommands(ctx)
   expect(command).not.toContain(board)
-  for (const hook of hooks) {
+  // The old /board files only come out: they write nothing.
+  const oldCommand = (file: string): boolean => /\/commands\/board\.(?:toml|md)$/.test(file)
+  for (const hook of hooks.filter(one => !oldCommand(one.file))) {
     const current = String(hook.edit('', false))
     const content = hook.agent === 'gemini' ? JSON.parse(/^prompt = (.*)$/m.exec(current)?.[1] ?? 'null') : current
     expect(content).toContain(command)
@@ -2908,6 +3293,12 @@ test('every legacy board skill uses the literal-path command and adopts only exa
       const old = template.split(RELEASE_PATHS.board).join(board)
       expect(hook?.edit(old, false)).toBe(hook?.edit('', false))
       expect(hook?.edit(old + '\n# Personal edit\n', false)).toBe(COLLISION)
+      // What 0.20.5 wrote as /board is still known by its bytes, so the retire rule takes it away.
+      const retired = kind === 'skill' ? undefined : hooks.find(one => one.agent === agent && oldCommand(one.file))
+      if (retired !== undefined) {
+        expect(retired.edit(old, false)).toBe(DELETE)
+        expect(retired.edit(old + '\n# Personal edit\n', false)).toBe(old + '\n# Personal edit\n')
+      }
     }
   }
 })
@@ -3156,6 +3547,11 @@ const fpIn = (items: ReturnType<typeof boardItems>, key: string): string => {
   const item = items.find(one => one.key === key)
   return item === undefined ? '' : fingerprint(item, items)
 }
+// What a question's Done button sends: the tick fingerprint and the step's line (#1204).
+const askTickIn = (items: ReturnType<typeof boardItems>, key: string): { fp: string; line?: number } => {
+  const item = items.find(one => one.key === key)
+  return item?.type === 'ask' ? { fp: fingerprint(item, items, true), line: item.ask.step?.line ?? undefined } : { fp: '' }
+}
 
 const MATRIX_HOSTS = ['claude', 'codex', 'antigravity', 'hermes', 'openclaw', 'grok', 'opencode', 'cursor'] as const
 const MATRIX_SOURCES = ['own', 'other'] as const
@@ -3218,7 +3614,8 @@ test('the serve action contract covers every card kind from every agent and sour
       expect(actionItem === undefined ? '' : fingerprint(actionItem, items)).toBe(ask.fp)
       if (ask.canTick) {
         offered += 1
-        expect(serveAction(items, { key: ask.key, type: 'tick', text: '', session: '', fp: ask.fp }, STRINGS.en).type).toBe('tick')
+        // A question's Done sends what the page's button sends: the tick fingerprint and the step's line (#1204).
+        expect(serveAction(items, { key: ask.key, type: 'tick', text: '', session: '', fp: ask.tickFp, line: ask.fileLine ?? undefined }, STRINGS.en).type).toBe('tick')
       }
       if (ask.canHide) {
         offered += 1
@@ -3363,7 +3760,7 @@ test('a press on the page is worked out from the file as it is now: a line that 
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
   expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('Codex') })
   const manual = keyOf(item => item.type === 'ask' && item.ask.project === 'docs-site')
-  expect(resumeAction(items, { key: manual, type: 'tick', text: '', session: '', fp: fpIn(items, manual) }, STRINGS.en).type).toBe('tick')
+  expect(resumeAction(items, { key: manual, type: 'tick', text: '', session: '', ...askTickIn(items, manual) }, STRINGS.en).type).toBe('tick')
   expect(resumeAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveManualReply })
   // An ended block can go to the archive; a working one cannot yet.
   expect(resumeAction(items, { key: grok, type: 'archive', text: '', session: '', fp: fpIn(items, grok) }, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
@@ -4252,7 +4649,7 @@ test('two hand-kept questions with the same title and words are told apart by ho
   const one = keys[0] ?? ''
   expect(keys.length).toBe(2)
   expect(gone.some(item => item.key === one)).toBe(true)
-  const press = { key: one, type: 'tick', text: '', session: '', fp: fpIn(before, one) }
+  const press = { key: one, type: 'tick', text: '', session: '', ...askTickIn(before, one) }
   expect(serveAction(before, press, STRINGS.en).type).toBe('tick')
   expect(serveAction(gone, press, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   const drawn = pinned({ ...emptyBoardState, selected: before.findIndex(item => item.key === one) }, before)
@@ -4368,6 +4765,53 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(page).toContain("button(w('pgAnswered'), function () { hideQuestion(key, ask.unhideKey); }, 'primary')")
   expect(page).toContain("act(one.key, 'unhide')")
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
+})
+
+test('hiding a question on a state=waiting session reflects answeredWaiting rather than plain working (#1143, #1206)', () => {
+  const key = 'a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'
+  for (const s of Object.values(STRINGS)) {
+    expect(s.answeredWaiting).toBeTruthy()
+    // 1. Before hide: question is in asks, waiting session is not in Working now
+    const beforeView = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, s)
+    const beforeItems = boardItems(beforeView, [])
+    const askItem = beforeItems.find(item => item.type === 'ask' && item.key.includes('a1b2c3d4'))
+    expect(askItem).toBeDefined()
+    const beforeModel = serveModel(beforeView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(beforeModel.view.working.some(ref => ref.project === 'api-gateway')).toBe(false)
+
+    // 2. Hide through the page hide action
+    const acted = serveAction(beforeItems, { key: askItem!.key, type: 'hide', text: '', session: '' }, s)
+    expect(acted).toMatchObject({ type: 'hide', key })
+
+    // 3. After hide: question left Needs you, still-waiting session stays out of Working now and its count
+    const hiddenView = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, s, [key])
+    const row = hiddenView.groups.find(group => group.project === 'api-gateway')?.rows.find(r => r.title === 'Rate-limit the public endpoints')
+    expect(row?.status).toBe(s.answeredWaiting)
+    expect(row?.tone).toBe('quiet')
+    const model = serveModel(hiddenView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(model.view.working.some(ref => ref.key === `row:${row?.key}`)).toBe(false)
+    expect(model.view.working.filter(ref => ref.project === 'api-gateway').length).toBe(0)
+    expect(model.view.all.open.some(ref => ref.key === `row:${row?.key}`)).toBe(true)
+    expect(model.hidden.some(item => item.task === 'Rate-limit the public endpoints')).toBe(true)
+    expect(pageWords(s).answeredWaiting).toBe(s.answeredWaiting)
+
+    // Unhide route remains available
+    const hiddenItems = boardItems(hiddenView, [])
+    expect(serveAction(hiddenItems, { key: `hidden:${key}`, type: 'unhide', text: '', session: '' }, s)).toEqual({ type: 'unhide', key })
+
+    // 4. Later real working report moves the session into Working now
+    const resumedFile = SERVE_FILE.replace(
+      '<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z',
+      '<!-- auto session=a1b2c3d4 agent=codex state=working updated=2026-10-17T08:44:00Z',
+    )
+    const resumedView = buildView(parseProgress(resumedFile), [], null, SERVE_NOW, 0, {}, s, [key])
+    const resumedRow = resumedView.groups.find(group => group.project === 'api-gateway')?.rows.find(r => r.title === 'Rate-limit the public endpoints')
+    expect(resumedRow?.status).toBe(s.agentWorking('Codex'))
+    expect(resumedRow?.tone).toBe('accent')
+    const resumedModel = serveModel(resumedView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(resumedModel.view.working.some(ref => ref.key === `row:${resumedRow?.key}`)).toBe(true)
+    expect(resumedModel.view.working.filter(ref => ref.project === 'api-gateway').length).toBe(1)
+  }
 })
 
 test('a quick answer pressed while the page showed one question is refused once the same step asks another', () => {
@@ -4651,12 +5095,12 @@ test("the redesigned pages speak the page's language in every new word", () => {
   const keys = ['pgNeeds', 'pgWorking', 'pgOthers', 'pgStopped', 'pgDone', 'pgAgents', 'pgOlder', 'pgOlderOne', 'pgSideFold', 'pgSideOpen', 'showAllQuestions'] as const
   for (const s of Object.values(STRINGS)) {
     const live = servePage(s, 'synthetic')
-    // One icon button switches between light and dark; it names the theme it switches to, in the page's language.
-    for (const label of [s.themeToDark, s.themeToLight]) expect(live).toContain(label)
-    expect(live).toContain('data-theme-toggle')
+    // Settings holds the look (#1163), in the page's language.
+    for (const label of [s.settingsTitle, s.themeMenu, s.themeLight, s.themeDark, s.settingsAutomatic, s.barStyleHead, s.barStyleInk, s.barStyleBlue, s.barStyleGreen]) expect(live).toContain(label)
+    expect(live).toContain('data-settings-toggle')
+    expect(live).not.toContain('data-theme-toggle')
     expect(live).not.toContain('data-theme-pick')
     for (const label of [s.pgViews, s.pgOverview, s.pgNeeds, s.pgWorking, s.pgOthers, s.pgDone, s.pgProjects, s.pgAgents, s.pgSideFold]) expect(live).toContain(label)
-    expect(live).toContain(s.serveLive)
     expect(live).toContain(s.serveLiveHint)
     expect(live).toContain(s.sideClose)
     const words = pageWords(s)
@@ -4742,4 +5186,59 @@ test('the rule in every language asks for one-line steps of at most 120 characte
   expect(RULES['zh-TW']).toContain('其他時候不要手改這個檔')
   expect(RULES['zh-CN']).toContain('其他时候不要手改这个文件')
   expect(RULES.en).not.toContain('goes into progress.md by hand')
+})
+
+test('a native ask reaches the page model with its options and where to answer, and offers no answer button or reply', () => {
+  const now = Date.parse('2026-10-16T12:00:00.000Z')
+  const base = applyTaskCreate(emptyMirror('2be48af2-6193-5040', 'synthetic_project', now), { subject: 'Blue or green?' }, '1', now)
+  const mirror = { ...base, state: 'waiting' as const, source: 'tasks' as const, tasks: base.tasks.map(task => ({ ...task, waiting: 'you' as const, ask: 'choose', options: ['Blue', 'Green'], native: { agent: 'claude', options: ['Blue', 'Green'] } })) }
+  const projects = parseProgress(upsertAutoBlock('', mirror, STRINGS.en))
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], now, true, 'fixture:native').ledger
+  const view = buildView(projects, [], null, now, 0, {}, STRINGS.en, [], {}, ledger)
+  const ask = serveModel(view, [], STRINGS.en).asks[0]
+  expect(ask?.native).toEqual({ options: ['Blue', 'Green'], line: "Answer in Claude Code's window." })
+  expect(ask?.answers).toEqual([])
+  const text = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  expect(text).toContain("Answer in Claude Code's window.")
+  expect(text).toContain('· Blue')
+  const page = servePage(STRINGS.en, 'n')
+  expect(page).toContain('} else if (ask.native) {')
+  expect(page.slice(page.indexOf('} else if (ask.native) {'), page.indexOf('} else if (ask.isOwn) {'))).not.toContain('canWrite = true')
+})
+
+test('Settings language override detects CLI flag precedence and displays override warning', () => {
+  expect(isLanguageOverridden(null, 'zh-TW', 'en', 'en')).toBe(false)
+  expect(isLanguageOverridden('en', 'zh-TW', 'en', 'en')).toBe(true)
+  expect(isLanguageOverridden('en', 'en', 'en', 'en')).toBe(false)
+  expect(isLanguageOverridden('auto', 'en', null, 'zh-TW')).toBe(true)
+
+  const enOverridden = settingsPanel(STRINGS.en, 'zh-TW', false, true)
+  expect(enOverridden).toContain('id="settings-lang-override"')
+  expect(enOverridden).toContain(STRINGS.en.settingsLanguageOverridden)
+
+  const enNormal = settingsPanel(STRINGS.en, 'en', false, false)
+  expect(enNormal).not.toContain('id="settings-lang-override"')
+})
+
+test('Settings language request on a server started with --lang en preserves precedence, shows override and reloads English', () => {
+  const flag = 'en'
+  let saved: SettingsLang = 'en'
+  expect(boardLanguage(flag, saved, 'en', 'zh-TW')).toBe('en')
+  expect(isLanguageOverridden(flag, saved, 'en', 'zh-TW')).toBe(false)
+
+  saved = 'zh-TW'
+  expect(boardLanguage(flag, saved, 'en', 'zh-TW')).toBe('en')
+  const isOverridden = isLanguageOverridden(flag, saved, 'en', 'zh-TW')
+  expect(isOverridden).toBe(true)
+
+  const reloadedHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverridden)
+  expect(reloadedHtml).toContain(`<h2 id="settings-title">${STRINGS.en.settingsTitle}</h2>`)
+  expect(reloadedHtml).toContain('<option value="zh-TW" selected>')
+  expect(reloadedHtml).toContain(`<p class="settings-label" id="settings-lang-override">${STRINGS.en.settingsLanguageOverridden}</p>`)
+
+  saved = 'en'
+  const isOverriddenAfterReset = isLanguageOverridden(flag, saved, 'en', 'zh-TW')
+  expect(isOverriddenAfterReset).toBe(false)
+  const resetHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverriddenAfterReset)
+  expect(resetHtml).not.toContain('id="settings-lang-override"')
 })
