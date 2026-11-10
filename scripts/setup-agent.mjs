@@ -542,7 +542,7 @@ const main = () => {
   // The package launcher cannot discover a custom install from the account's default locations.
   const boardDirectory = boardFile ? dirname(resolve(boardFile)) : ''
   const boardCommand = boardFile ? command
-    ? [command.replace(/\s+setup\s*$/, ''), ...(boardDirectory !== resolve(homedir(), '.agent-board') ? ['--data-dir', quote(boardDirectory)] : [])].join(' ')
+    ? [command.replace(/\s+(?:setup|remove)\s*$/, ''), ...(boardDirectory !== resolve(homedir(), '.agent-board') ? ['--data-dir', quote(boardDirectory)] : [])].join(' ')
     : nodeCommand(boardFile) : ''
   if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
@@ -648,7 +648,7 @@ const main = () => {
       steps.push(words(sessionAgents.length === 1 ? 'restartRemoveOne' : 'restartRemove', { agents: sessionAgents.join(message(', ', '、', '、')) }))
       const removedBoard = results.flatMap(plan => plan.changes).some(change => change.action === 'remove' && change.file.endsWith('agent-board.mjs'))
       if (removedBoard) {
-        const launcherCommand = command ? command.replace(/\s+setup\s*$/, '') : 'npx @wenyuchiou/agent-board'
+        const launcherCommand = command ? command.replace(/\s+(?:setup|remove)\s*$/, '') : 'npx @wenyuchiou/agent-board'
         steps.push(words('directRemoved', { command: launcherCommand }))
       }
     }

@@ -223,10 +223,26 @@ test('after removal, the commands the README and remove output point to print pl
       const install = run('--agent', 'codex', '--lang', lang, '--apply')
       assert.equal(install.status, 0, install.stderr)
 
-      // Apply remove
-      const apply = run('--remove', '--lang', lang, '--apply')
-      assert.equal(apply.status, 0, apply.stderr)
-      assert.ok(apply.stdout.includes(expectedMessage), `${lang} remove output must include: ${expectedMessage}, got: ${apply.stdout}`)
+      // Apply remove with launcher environment simulating `npx @wenyuchiou/agent-board remove --apply`
+      const applyWithLauncher = run('--remove', '--lang', lang, '--apply')
+      assert.equal(applyWithLauncher.status, 0, applyWithLauncher.stderr)
+      assert.ok(applyWithLauncher.stdout.includes(expectedMessage), `${lang} remove output must include: ${expectedMessage}, got: ${applyWithLauncher.stdout}`)
+      assert.ok(!applyWithLauncher.stdout.includes('npx @wenyuchiou/agent-board remove'), `must not append remove to suggested launcher command: ${applyWithLauncher.stdout}`)
+
+      // Also verify when AGENT_BOARD_SETUP_COMMAND is explicitly passed with remove
+      const installAgain = run('--agent', 'codex', '--lang', lang, '--apply')
+      assert.equal(installAgain.status, 0, installAgain.stderr)
+      const launcherEnv = { ...env, AGENT_BOARD_SETUP_COMMAND: 'npx @wenyuchiou/agent-board remove' }
+      const applyEnv = spawnSync(process.execPath, [installer, '--home', home, '--remove', '--lang', lang, '--apply'], {
+        cwd: home,
+        env: launcherEnv,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 30000,
+      })
+      assert.equal(applyEnv.status, 0, applyEnv.stderr)
+      assert.ok(applyEnv.stdout.includes(expectedMessage), `${lang} remove with AGENT_BOARD_SETUP_COMMAND must include: ${expectedMessage}, got: ${applyEnv.stdout}`)
+      assert.ok(!applyEnv.stdout.includes('npx @wenyuchiou/agent-board remove'), `must not append remove to launcher command: ${applyEnv.stdout}`)
 
       // 3. Running the launcher (bin/agent-board.mjs) with commands from the README prints plain words, no stack trace
       const runLauncher = (...args) => spawnSync(process.execPath, [launcher, ...args], {
