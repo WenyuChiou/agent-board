@@ -38,7 +38,7 @@ npx @wenyuchiou/agent-board setup
 npx @wenyuchiou/agent-board
 ```
 
-第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，然后问一次 `要设置这些吗？[Y/n]`。答 yes 就写入文件、在 Codex 和 Hermes Agent 批准看板的 hooks，电脑上有 Claude Code 时也一并装好插件；答 no 就什么都不写。没有终端可以回答时（例如在 agent 的对话中），setup 只会预览：这时 `setup --apply` 会写入文件，并列出批准 hooks 和安装插件需要你自己运行的命令。第二行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若还没设置任何东西，单独运行第二行也会先问同一个问题。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要一次卸载所有设置过的 agent，运行 `npx @wenyuchiou/agent-board remove`（或 `setup --remove`）；见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
+第一行会找出这台电脑上装了哪些 agent，列出设置会改什么，然后问一次 `要设置这些吗？[Y/n]`。答 yes 就写入文件、在 Codex 和 Hermes Agent 批准看板的 hooks，电脑上有 Claude Code 时也一并装好插件；答 no 就什么都不写。没有终端可以回答时（例如在 agent 的对话中），setup 只会预览：这时 `setup --apply` 会写入文件，并列出批准 hooks 和安装插件需要你自己运行的命令。第二行在 SSH 或没有图形显示的交互式终端打开实时终端看板，其他情况打开网页。在 agent 对话中，输入 `/agent-board` 打开同一个网页。若还没设置任何东西，单独运行第二行也会先问同一个问题。若要停止看板服务，运行 `npx @wenyuchiou/agent-board stop`。若要启动服务器但不打开浏览器窗口，加上 `--no-open`（`npx @wenyuchiou/agent-board --no-open`）。想用更短的 `agent-board` 命令，先运行一次 `npm install -g @wenyuchiou/agent-board`。只设置一个 agent 的话，加上 `--agent` 和它的名字，例如 `--agent codex`。若要一次卸载所有设置过的 agent，运行 `npx @wenyuchiou/agent-board remove`（或 `setup --remove`）；见[更新和卸载](docs/GUIDE.zh-CN.md#更新和卸载)。详见[安装指南](docs/SETUP.md#install-with-npm)（英文）。Agent 要读看板状态时使用 `agent-board --json`；带版本且已隐藏私密数据的字段见 [Board JSON 说明](docs/BOARD-JSON.md)（英文）。
 
 看板语言跟随系统设置：系统是繁体或简体中文就用中文，其他用英文。要自己指定，在 setup 那行加上 `--lang zh-CN`（或 `zh-TW`、`en`），之后看板、网页和 `stop` 都会用这个语言。通过 Claude Code 插件接上的账号，改用 `/progress lang`。在网页的**设置**里选了语言，就以那个为准；选**自动**则跟随系统语言。
 
@@ -283,6 +283,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex
 
 | 你看到 | 试试 |
 |---|---|
+| 启动时不打开浏览器窗口 | 加上 `--no-open`：`npx @wenyuchiou/agent-board --no-open`（或 `agent-board --no-open`）。 |
 | 某个 agent 没出现在看板上 | 开一个它的新对话；原来就开着的不会接入。Codex 请以完整可执行文件路径运行 `npx @wenyuchiou/agent-board --codex-trust --codex-bin "<path-to-codex>" --json` 预览；doctor 能连接 Codex 时，纯文本输出会列出命令。先检查预览，确认同意后才加上 `--apply`。Codex CLI 也可使用 `/hooks`。 |
 | 装完之后什么都没变 | 不加 `--apply` 再运行一次 `npx @wenyuchiou/agent-board setup`（用 git clone 的话是 `node scripts/setup-agent.mjs`），查看列出的冲突和接下来的步骤；你改过的文件不会被覆盖，会列在那里。 |
 | 还在运行旧版 | 运行中的对话会一直用它加载时的版本：开一个新的。更新方式见[使用指南](docs/GUIDE.zh-CN.md#更新和卸载)。 |

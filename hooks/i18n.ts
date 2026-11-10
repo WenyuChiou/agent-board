@@ -141,6 +141,7 @@ export const ZH_TW = {
     "previewCreate": "將建立 {count} 個設定檔案",
     "preview": "將更新 {count} 個設定檔案",
     "previewRemove": "將移除 {count} 個設定檔案",
+    "appliedCreate": "已建立 {count} 個設定檔案",
     "applied": "已更新 {count} 個設定檔案",
     "current": "{count} 個已是最新",
     "shared": "共用",

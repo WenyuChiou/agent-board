@@ -1347,7 +1347,7 @@ test('a command on the PATH is listed once setup applies it, and again as alread
   f.fake('gemini')
   const applied = f.run('--apply')
   assert.equal(applied.status, 0, applied.stderr)
-  assert.match(applied.stdout, /^Gemini CLI: updated/m)
+  assert.match(applied.stdout, /^Gemini CLI: created/m)
   assert.equal(existsSync(join(f.root, 'install-gemini.json')), true)
   const second = f.run()
   assert.equal(second.status, 0, second.stderr)
