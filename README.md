@@ -251,7 +251,7 @@ Both pictures are drawn by the board's own code from synthetic data. Native hook
 The commands above open the board in your browser. If the agent cannot open a window, it gives you a link. Run the same command again to reopen the page. On the page you can:
 
 - **Answer** a question: **Send** it when messaging is on and the session is connected, or **Copy** the reply. The LAN page has no messaging.
-- **Settings** at the foot of the page changes the language, theme and other display preferences.
+- **Settings** at the foot of the page changes the language, look and notifications, and sets up or removes an agent without going back to a terminal.
 - **Tick** your next step, **archive** a task, or **Archive now** to clear everything finished.
 - **Already answered, hide** a question you answered in its own chat: hidden on this computer until that session asks something new; nothing is sent. This button is also visible directly on the card after Send. The Hidden notice offers **Show again** to restore that question.
 
