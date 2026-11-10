@@ -29,6 +29,8 @@ ${REPORT_TOOL_REPLY}`
 // receives the prompt or messages is registered. A report from the tool is bound to the session id the
 // host gives the tool, never to a folder.
 export const openclawLocalPlugin = (node: string, script: string, progress: string, home: string, description = STRINGS.en.openclawProgressTool, stepFormat = STRINGS.en.localAgentStepFormat): string => `${runner(node, script, progress, 'openclaw', home)}
+import { basename, dirname, isAbsolute, normalize } from 'node:path'
+
 export default {
   id: 'agent-board-local',
   register(api) {
@@ -44,6 +46,16 @@ export default {
       let dir = folders.get(id)
       if (dir === undefined) { try { dir = api.runtime?.agent?.resolveAgentWorkspaceDir?.(api.config) } catch {} }
       return typeof dir === 'string' && dir !== '' ? { cwd: dir } : {}
+    }
+    // Only the workspace name reaches the report. The default OpenClaw workspace uses
+    // the same heading as the lifecycle writer's folderProject.
+    const workspaceProject = dir => {
+      if (typeof dir !== 'string' || !isAbsolute(dir)) return ''
+      const path = normalize(dir)
+      const folder = basename(path)
+      const name = basename(dirname(path)) === '.openclaw' && /^workspace(?:-.*)?$/.test(folder)
+        ? 'OpenClaw' : folder.replace(/<!--|-->/g, ' ').replace(/\\s+/g, ' ').trim()
+      return name.length <= 500 ? name : ''
     }
     api.on('session_start', event => withHook((_current, deadline) => {
       report('--codex-event', { session_id: event.sessionId, hook_event_name: 'SessionStart', ...where(event.sessionId) }, deadline)
@@ -66,6 +78,7 @@ export default {
       const session = ctx?.sessionId
       if (typeof session !== 'string' || session === '') return null
       remember(session, ctx.workspaceDir)
+      const project = workspaceProject(ctx.workspaceDir)
       return {
         name: 'progress_card',
         label: 'Progress card',
@@ -81,9 +94,17 @@ export default {
         execute: async (_id, params) => {
           try {
             if (!Array.isArray(params?.steps) || params.steps.some(step => typeof step !== 'string')) throw new Error('AGENT_BOARD_REPORT_FAILED: INVALID_STEPS')
-            const payload = { steps: params.steps }
-            if (typeof params.title === 'string') payload.title = params.title
-            if (['working', 'waiting', 'done', 'ended'].includes(params.state)) payload.state = params.state
+            if (params.state !== undefined && !['working', 'waiting', 'done', 'ended'].includes(params.state)) throw new Error('AGENT_BOARD_REPORT_FAILED: INVALID_STATE')
+            // The tool permits a steps-only report. A question can make it wait, but
+            // only an explicit state marks the whole task done. The writer still validates the steps.
+            const items = params.steps.map(step => /^(?:[-*+]|\\d+[.)])\\s+(?:\\[([ xX~?>!\\-])\\]\\s+)?(.+)$/.exec(step.replace(/<!--|-->/g, ' ').replace(/\\s+/g, ' ').trim()))
+            const current = items.find(item => item?.[1] === '~') ?? items.find(item => item?.[1] === '?') ?? items.find(Boolean)
+            const payload = {
+              title: params.title === undefined ? current?.[2] : params.title,
+              state: params.state === undefined ? (items.some(item => item?.[1] === '?') ? 'waiting' : 'working') : params.state,
+              steps: params.steps,
+              ...(project === '' ? {} : { project }),
+            }
             const result = report('--codex-report', payload, Date.now() + ${hookTimeout('openclaw') - 1000}, session)
             return { content: [{ type: 'text', text: toolReply(result) }], details: {} }
           } catch (error) {
