@@ -1629,15 +1629,22 @@ test('the question a reply ends on: its last paragraph only, without code or mar
 })
 
 test('a question followed only by its choices as a list still asks it (#1243)', () => {
-  expect(lastQuestion('Which database first?\n1. Postgres\n2. SQLite')).toBe('Which database first?')
-  expect(lastQuestion('Done.\n\nWhich database first?\n\n1. Postgres\n2. SQLite')).toBe('Which database first?')
-  expect(lastQuestion('先用哪個資料庫？\n- Postgres\n- SQLite')).toBe('先用哪個資料庫？')
-  expect(lastQuestion('**Which one?**\n1. Postgres, the faster one\n   with replicas\n2. SQLite')).toBe('Which one?')
-  expect(lastQuestion('Two things:\n1. Which database first?\n   - Postgres\n   - SQLite')).toBe('Which database first?')
+  expect(lastQuestion('Which database should I set up first?\n1. Postgres\n2. SQLite')).toBe('Which database should I set up first?')
+  expect(lastQuestion('Done.\n\nWhich one do you want first?\n\n1. Postgres\n2. SQLite')).toBe('Which one do you want first?')
+  // A loose list: a blank line between choices.
+  expect(lastQuestion('Which one do you want first?\n\n1. Postgres\n\n2. SQLite')).toBe('Which one do you want first?')
+  expect(lastQuestion('要我先用哪個資料庫？\n- Postgres\n- SQLite')).toBe('要我先用哪個資料庫？')
+  expect(lastQuestion('**Which one do you prefer?**\n1. Postgres, the faster one\n   with replicas\n2. SQLite')).toBe('Which one do you prefer?')
   // A list after a statement, or after a question the same line already answered, asks nothing.
   expect(lastQuestion('What changed:\n1. the parser\n2. the tests')).toBeNull()
   expect(lastQuestion('Why did it fail? The cache was stale.\n1. cleared it\n2. reran')).toBeNull()
   expect(lastQuestion('Which one?\n\nI went with A.\n\n1. A\n2. B')).toBeNull()
+  // A summary under a question heading is not a choice put to the person.
+  expect(lastQuestion('What changed?\n- Updated the parser.\n- Added tests.')).toBeNull()
+  expect(lastQuestion('Which database did I pick?\n- SQLite was selected.\n- Migrations completed.')).toBeNull()
+  // A list whose items ask cannot tell which question waits.
+  expect(lastQuestion('Which database should I use?\n1. Postgres for scale?\n2. SQLite for simplicity.')).toBeNull()
+  expect(lastQuestion('I answered these questions:\n1. Why did tests fail?\n2. The cache was stale.')).toBeNull()
 })
 
 test('a link\'s own question mark is not a question, and a question with a link keeps it whole (#1108)', () => {

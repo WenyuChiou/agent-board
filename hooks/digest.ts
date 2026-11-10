@@ -119,10 +119,15 @@ export const lastQuestion = (answer: string, isFull = false): string | null => {
 // (`… at https://x.dev/a?`, `“Review https://x.dev/a?”`).
 const LINK = /https?:\/\/[^\s<>"'`“”‘’「」『』，。！？、；：（）]*[^\s<>"'`“”‘’「」『』.,;:!?？。！，、；：（)\]）]/g
 
-// A list item's mark: a bullet, a number or a letter (`-`, `1.`, `2)`, `1、`, `a)`).
+// Bullets, numbers and letters all mark choices, since agents write options every way (`1.`,
+// `2)`, `1、`, `a)`, `-`).
 const LIST_ITEM = /^\s*(?:[-*+•]|\d+[.)、]|[A-Za-z][.)])\s+/
-// A line that ends on its question mark; closing quotes and brackets may follow it.
+// Closing quotes and brackets may follow the mark, so `「選哪個？」` still ends on it.
 const ENDS_ASKING = /[?？]["'”」』)）]*$/
+// Over a list, a question counts only when it is put to the person. A heading such as `What
+// changed?` or `Which files did I touch?` over a summary asks nothing, and a false question
+// under Needs you costs the trust the board needs (#1243).
+const ASKS_PERSON = /\b(?:you|your|should I|shall I|should we|shall we|want me|can I|may I|ok to|okay to|prefer)\b|你|您|要我|要不要|要選|要选|請選|请选|我該|我应该|我應該/i
 
 // For callers that already normalized the reply: do not parse it a second time.
 export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
@@ -140,15 +145,26 @@ export const lastQuestionInProse = (answer: string, isFull = false): string | nu
   let tail = hidden(words(last).at(-1) ?? '')
   if (!/[?？]/.test(tail)) {
     // A question followed only by its choices as a list still asks it (#1243). The list is set
-    // aside, in the question's paragraph or as a paragraph of its own. The line before it must
-    // end on its question mark, so a list after a statement still asks nothing.
-    // An item that asks (`1. Which one?` over its own sub-list) is the question, not a choice.
-    const isChoice = (line: string): boolean => !ENDS_ASKING.test(line.trim()) && (LIST_ITEM.test(line) || /^\s/.test(line))
-    let at = last.length
-    while (at > 0 && isChoice(last[at - 1] ?? '')) at -= 1
-    if (at === last.length || !LIST_ITEM.test(last[at] ?? '')) return null
-    tail = hidden(words(at > 0 ? last.slice(0, at) : paragraphs.at(-2) ?? []).at(-1) ?? '')
-    if (!ENDS_ASKING.test(tail)) return null
+    // aside, in the question's paragraph or over paragraphs of its own (a loose list has blank
+    // lines between items). The line before it must end on its question mark and be put to the
+    // person, so a list after a statement or under a summary heading still asks nothing. A list
+    // whose item asks is not a list of choices: which of its questions waits cannot be told.
+    const isChoice = (line: string): boolean => LIST_ITEM.test(line) || /^\s/.test(line)
+    let index = paragraphs.length - 1
+    let lines = last
+    let at = lines.length
+    const choices: string[] = []
+    for (;;) {
+      while (at > 0 && isChoice(lines[at - 1] ?? '')) at -= 1
+      choices.unshift(...lines.slice(at))
+      if (at > 0 || index === 0) break
+      index -= 1
+      lines = paragraphs[index] ?? []
+      at = lines.length
+    }
+    if (at === 0 || !LIST_ITEM.test(choices[0] ?? '') || choices.some(line => ENDS_ASKING.test(line.trim()))) return null
+    tail = hidden(words(lines.slice(0, at)).at(-1) ?? '')
+    if (!ENDS_ASKING.test(tail) || !ASKS_PERSON.test(tail)) return null
   }
   // Keep closing wrappers after the question mark so choice parsing can distinguish
   // a wrapped question from a word's own leading apostrophe, such as '90s.
