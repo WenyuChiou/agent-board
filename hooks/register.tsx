@@ -27,7 +27,9 @@ import {
   countManualDone,
   isHandKeptMoveOn,
   removeAutoBlock,
+  holdsTick,
   setManualStep,
+  tickMark,
   shortId,
   scanBlocks,
   takeArchivable,
@@ -37,7 +39,7 @@ import {
   upsertAutoBlock,
   cutEntries,
 } from './blocks'
-import type { ConfirmedTask, ConfirmRef } from './blocks'
+import type { ConfirmedTask, ConfirmRef, TickMark } from './blocks'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from './history'
 import { barStyleFrom, barStyleName, barStyleOf, DEFAULT_BAR_STYLE, withBarStyle } from './progress-bar'
 import type { BarStyle } from './progress-bar'
@@ -3919,37 +3921,37 @@ const handOverPrompt = (row: TaskRow, s: Strings): string =>
 
 // A press on 完成: the step is ticked in the file, by the person's own hand, and journaled
 // like a step Claude finished.
-// The tick is kept when its own line reads back as written, whatever else another writer added.
-// A try that runs after a write means that write was undone; if it then finds nothing to tick
-// (the step moved, or its twin took its line), the undone write is not reported as made.
+// The tick is kept when the task that took it reads back with it, wherever another writer moved
+// its lines (tickMark). Only a read-back that finds it counts: a write every read-back finds
+// undone, or a try that then finds nothing to tick (the step moved, or its twin took its line),
+// is not reported as made. The pane's words name an unnamed project, as its draw did.
 const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
-  let ticked: { at: number; line: string } | null = null
-  let hasWritten = false
-  let isUndone = false
+  const s = await wordsOf($)
+  let ticked: { mark: TickMark | null; at: number; line: string } | null = null
+  let isKept = false
+  const holds = (text: string): boolean =>
+    ticked !== null && (ticked.mark === null ? text.split(/\r?\n/)[ticked.at] === ticked.line : holdsTick(text, ticked.mark, s))
   const wrote = await rewrite(
     $,
     await progressPath($),
     async before => {
-      const after = setManualStep(before, ref, 'x', await $.clock.now())
+      const after = setManualStep(before, ref, 'x', await $.clock.now(), s)
       if (after === before) {
-        isUndone = hasWritten
+        isKept = holds(before)
         return after
       }
       const was = before.split(/\r?\n/)
       const lines = after.split(/\r?\n/)
       const at = lines.findIndex((line, index) => line !== was[index])
-      ticked = { at, line: lines[at] ?? '' }
+      ticked = { mark: tickMark(after, ref.project, ref.title, at, s), at, line: lines[at] ?? '' }
+      isKept = false
       return after
     },
-    check => ticked !== null && check.split(/\r?\n/)[ticked.at] === ticked.line,
-    async (path, text) => {
-      await $.fs.write(path, text)
-      hasWritten = true
-    },
+    check => (isKept = holds(check)),
   )
   await poll($)
 
-  return wrote !== null && !isUndone
+  return wrote !== null && isKept
 }
 
 // A side question: answered over this session's transcript, without a turn of its own.

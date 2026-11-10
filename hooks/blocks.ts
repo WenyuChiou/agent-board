@@ -786,6 +786,28 @@ export const manualStepRef = (text: string, ref: StepRef, s: Strings = ZH_TW): S
     : null
 }
 
+// What a pane tick wrote, so its read-back can tell the same task still holds the tick: which
+// of the tasks with its project and title it is (by order), how many there are, and the whole
+// task's words and marks. Lines may move under another writer's change and the tick still
+// counts; a twin step or task that took its line, or a task that lost the tick, does not.
+export type TickMark = { project: string; title: string; index: number; count: number; key: string }
+
+const namedTasks = (text: string, project: string, title: string, s: Strings): ProgressTask[] =>
+  parseProgress(text).filter(one => (one.name || s.uncategorized) === project).flatMap(one => one.tasks).filter(task => task.title === title)
+
+export const tickMark = (after: string, project: string, title: string, at: number, s: Strings = ZH_TW): TickMark | null => {
+  const twins = namedTasks(after, project, title, s)
+  const index = twins.findIndex(task => task.steps.some(step => step.line === at))
+  const task = twins[index]
+  return task === undefined ? null : { project, title, index, count: twins.length, key: confirmKey(project, task, twins.length) }
+}
+
+export const holdsTick = (text: string, mark: TickMark, s: Strings = ZH_TW): boolean => {
+  const twins = namedTasks(text, mark.project, mark.title, s)
+  const task = twins[mark.index]
+  return twins.length === mark.count && task !== undefined && confirmKey(mark.project, task, twins.length) === mark.key
+}
+
 export const setManualStep = (text: string, ref: StepRef, mark: string, now?: number, s: Strings = ZH_TW): string => {
   const selected = manualStepRef(text, ref, s)
   if (selected === null) return text
