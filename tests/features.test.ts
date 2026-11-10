@@ -1702,6 +1702,18 @@ test('a bare which-first question over its choices asks it, and a summary headin
   expect(lastQuestion('先做哪些工作？\n- 更新解析器\n- 补充测试')).toBeNull()
 })
 
+test('a question under a caption, or about an order already finished, asks nothing (#1243)', () => {
+  expect(lastQuestion('CI jobs, in the order they finished\n\nWhich finished first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which finished first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion("Completed intake form with the customer's answers\n\nWhich services do you need?\n- Storage\n- Backups")).toBeNull()
+  expect(lastQuestion('The customer selected both services in the completed intake form\n\nWhich services should I provide?\n- Storage.\n- Backups.')).toBeNull()
+  expect(lastQuestion('客戶填好的需求表\n\n你需要哪些服務？\n- 儲存\n- 備份')).toBeNull()
+  // A sentence the agent ends before its question leaves the question its own.
+  expect(lastQuestion('I checked both.\n\nWhich services do you need?\n- Storage\n- Backups')).toBe('Which services do you need?')
+  expect(lastQuestion('兩個都查過了。\n\n你需要哪些服務？\n- 儲存\n- 備份')).toBe('你需要哪些服務？')
+})
+
 test('a list that explains, asks or follows a statement is not a list of choices (#1243)', () => {
   // A list after a statement, or after a question the same line already answered.
   expect(lastQuestion('What changed:\n1. the parser\n2. the tests')).toBeNull()

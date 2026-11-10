@@ -144,7 +144,8 @@ const IS_PAST = /\b(?:did|was|were|had|have|has)\b|了|過|过|剛|刚|之前|�
 // A bare `Which database first?` (`先用哪個資料庫？`, the #1243 report's own shape) asks for one
 // thing to do next. Only that exact shape counts: with a verb (`Which jobs ran first?`) or for
 // several (`先做哪些工作？`) it is a timeline's heading, answered by its list.
-const ASKS_ORDER = /^which (?:one|[\p{L}-]+) (?:first|next)[?？]$|^(?:先|下一步|接下來|接下来)[^，,。.]{0,4}哪(?:個|个|一)[^，,。.？?]{0,8}[？?]$/iu
+// The one word must not be a verb in the past (`Which finished first?`, `Which ran first?`).
+const ASKS_ORDER = /^which (?:one|(?!(?:ran|went|came|began|broke|built|won|got|made|took|wrote|did|was|were|had|left|lost|fell|sent|spent|ate|saw|ended)\b)(?![\p{L}-]*ed\b)[\p{L}-]+) (?:first|next)[?？]$|^(?:先|下一步|接下來|接下来)[^，,。.]{0,4}哪(?:個|个|一)[^，,。.？?]{0,8}[？?]$/iu
 const asksToPick = (question: string, isHeading: boolean): boolean => {
   // A heading, bold line or `Q:` over a list is a section the list answers (an FAQ, a survey's
   // results), whoever its words name.
@@ -157,8 +158,9 @@ const IS_HEADING = /^\s*(?:#|>|(?:Q|問|问)\s*[:：.])|^\s*([*_]{1,3})\S.*\1\s*
 
 // The question line over a list of choices that ends the reply, or null. Blank lines may sit
 // between the question and the list and between the choices; any other line ends the list.
-// A question introduced by a label (`Survey results:`, `The CI timeline:`) heads a section of a
-// report, so it is null too.
+// A question introduced by a label (`Survey results:`, `The CI timeline:`) or a caption with no
+// end mark (`Completed intake form with the customer's answers`) heads a section of a report,
+// so it is null too. A sentence the agent ends before it (`Done.`) leaves the question its own.
 const lineOverChoices = (prose: string): string | null => {
   const lines = prose.split(/\r?\n/)
   let at = lines.length
@@ -175,7 +177,9 @@ const lineOverChoices = (prose: string): string | null => {
   const line = lines[at - 1] ?? ''
   const lead = lines.slice(0, Math.max(at - 1, 0)).filter(one => one.trim() !== '').at(-1) ?? ''
 
-  return count < 2 || LIST_ITEM.test(line) || /[:：]\s*$/.test(withoutEmphasis(lead)) ? null : line
+  const isCaption = lead.trim() !== '' && !/[.。!！?？)）」』"”'…]\s*$/.test(withoutEmphasis(lead).trim())
+
+  return count < 2 || LIST_ITEM.test(line) || isCaption ? null : line
 }
 
 const OPENERS: Record<string, string> = { '“': '”', '‘': '’', '「': '」', '『': '』' }
