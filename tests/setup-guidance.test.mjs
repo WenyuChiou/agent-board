@@ -182,3 +182,22 @@ test('setup prints 1 setup file in the singular for a count of one in all six me
     assert.doesNotMatch(applied, /1 setup files\b/)
   })
 })
+
+test('a removal that changes one file says removed 1 setup file in the singular (#1270)', () => {
+  fixture((setup, { env }) => {
+    // The person's own Cursor hook, kept before setup and put back by hand after it, so the
+    // removal has only the install record left to take away.
+    const own = '{"version":1,"hooks":{"stop":[{"command":"echo synthetic"}]}}\n'
+    mkdirSync(join(env.HOME, '.cursor'))
+    writeFileSync(join(env.HOME, '.cursor', 'hooks.json'), own)
+    setup('--agent', 'cursor', '--lang', 'en', '--apply')
+    setup('--agent', 'gemini', '--lang', 'en', '--apply')
+    writeFileSync(join(env.HOME, '.cursor', 'hooks.json'), own)
+    const preview = setup('--agent', 'cursor', '--lang', 'en', '--remove')
+    assert.match(preview, /would remove 1 setup file\b/)
+    assert.doesNotMatch(preview, /1 setup files\b/)
+    const applied = setup('--agent', 'cursor', '--lang', 'en', '--remove', '--apply')
+    assert.match(applied, /removed 1 setup file\b/)
+    assert.doesNotMatch(applied, /1 setup files\b/)
+  })
+})
