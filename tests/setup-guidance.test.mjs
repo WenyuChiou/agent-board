@@ -1,42 +1,11 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { delimiter, dirname, join } from 'node:path'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
-import { setupPrograms } from './helpers/setup-programs.mjs'
+import { bootstrap, locales, fixture, terminal, succeeded } from './helpers/setup-fixture.mjs'
 
-const installer = fileURLToPath(new URL('../scripts/setup-agent.mjs', import.meta.url))
-const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
-const source = readFileSync(installer, 'utf8')
-const start = source.indexOf('const summaries = ') + 'const summaries = '.length
-const bootstrap = JSON.parse(source.slice(start, source.indexOf('\nconst summary = ', start)))
-const locales = ['en', 'zh-TW', 'zh-CN']
-
-const fixture = run => {
-  const root = mkdtempSync(join(tmpdir(), 'agent-board-setup-guidance-'))
-  const env = { ...process.env }
-  for (const name of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'OPENCODE_CONFIG_DIR', 'HERMES_HOME', 'GROK_HOME', 'OPENCLAW_STATE_DIR', 'DSH_HOME', 'TMP', 'TEMP', 'TMPDIR']) {
-    env[name] = join(root, name)
-    mkdirSync(env[name], { recursive: true, mode: 0o700 })
-  }
-  env.CLAUDE_PROGRESS_FILE = join(root, 'progress.md')
-  env.AGENT_BOARD_SETUP_COMMAND = ''
-  for (const name of ['CODEX_THREAD_ID', 'CODEX_SESSION_ID', 'AGENT_BOARD_AGENT', 'AGENT_BOARD_SESSION_ID', 'AGENT_BOARD_SETUP_TTY', 'AGENT_BOARD_TEST_CODEX_FAIL', 'AGENT_BOARD_TEST_CLAUDE_FAIL']) delete env[name]
-  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
-  env.PATH = [dirname(process.execPath), ...(process.platform === 'win32' ? [join(process.env.SystemRoot || 'C:\\Windows', 'System32'), process.env.SystemRoot || 'C:\\Windows'] : ['/usr/bin', '/bin'])].join(delimiter)
-  const invoke = (file, prefix, args, input) => spawnSync(process.execPath, [file, ...prefix, '--home', env.HOME, '--data-dir', join(root, 'data'), '--progress-file', env.CLAUDE_PROGRESS_FILE, ...args], { env, input, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
-  const runCommand = (file, prefix, args) => {
-    const child = invoke(file, prefix, args)
-    assert.equal(child.status, 0, 'synthetic setup failed: ' + JSON.stringify({ status: child.status, signal: child.signal, code: child.error?.code }))
-    return child.stdout
-  }
-  const setup = (...args) => runCommand(installer, [], args)
-  const launch = (...args) => runCommand(launcher, ['setup'], args)
-  try { return run(setup, { launch, env, root, invoke: (args, input = '\n') => invoke(installer, [], args, input) }) } finally { rmSync(root, { recursive: true, force: true }) }
-}
-
+// Keep output/count contracts separate from terminal consent and failure flows (#1231).
+// Every fixture still gets its own scratch home; no assertions or setup runs are shared.
 test('setup bootstrap guidance stays identical to all three canonical string tables', () => {
   const tables = ['hooks/strings-en.ts', 'hooks/i18n.ts', 'hooks/strings-zh-cn.ts'].map(file => {
     const text = readFileSync(new URL('../' + file, import.meta.url), 'utf8')
@@ -89,10 +58,10 @@ test('npm setup groups shared files, accurate counts, commands and sessions in e
     const start = bootstrap[index].start.replace('{agents}', ['Codex', 'Hermes Agent'].join(lang === 'en' ? ', ' : '、'))
     const applied = launch(...args, '--apply')
     for (const [i, name] of ['Codex', 'Hermes Agent'].entries()) {
-      const status = bootstrap[index].applied.replace('{count}', ownCounts[i])
+      const status = bootstrap[index].appliedCreate.replace('{count}', ownCounts[i])
       assert.ok(applied.split(/\r?\n/).includes(`${name}: ${status}`), applied)
     }
-    assert.ok(applied.includes(`${bootstrap[index].shared}: ${bootstrap[index].applied.replace('{count}', common.size)}`), applied)
+    assert.ok(applied.includes(`${bootstrap[index].shared}: ${bootstrap[index].appliedCreate.replace('{count}', common.size)}`), applied)
     for (const output of [text, applied]) {
       assert.equal(output.split(start).length - 1, 1, output)
       const data = join(root, 'data')
@@ -118,18 +87,43 @@ test('setup with one agent asks for one new session, without "each of"', () => {
   })
 })
 
-test('setup separates newly created and updated files in its preview', () => {
-  for (const [index, lang] of locales.entries()) fixture((setup, { env }) => {
-    writeFileSync(join(env.CODEX_HOME, 'hooks.json'), '{"hooks":{},"synthetic":true}\n')
-    const args = ['--agent', 'codex', '--lang', lang]
-    const plan = JSON.parse(setup(...args, '--json')).plans[0]
-    const created = plan.changes.filter(change => change.action === 'create').length
-    const updated = plan.changes.filter(change => change.action === 'update').length
-    assert.ok(created > 0 && updated > 0)
-    const line = setup(...args).split(/\r?\n/)[0]
-    assert.ok(line.includes(bootstrap[index].previewCreate.replace('{count}', created)), line)
-    assert.ok(line.includes(bootstrap[index].preview.replace('{count}', updated)), line)
-  })
+test('setup separates newly created and updated files in its preview and apply (#1246)', () => fixture((setup, { env }) => {
+  writeFileSync(join(env.CODEX_HOME, 'hooks.json'), '{"hooks":{},"synthetic":true}\n')
+  const args = ['--agent', 'codex', '--lang', 'en']
+  const plan = JSON.parse(setup(...args, '--json')).plans[0]
+  const created = plan.changes.filter(change => change.action === 'create').length
+  const updated = plan.changes.filter(change => change.action === 'update').length
+  assert.ok(created > 0 && updated > 0)
+  const line = setup(...args).split(/\r?\n/)[0]
+  assert.ok(line.includes(bootstrap[0].previewCreate.replace('{count}', created)), line)
+  assert.ok(line.includes(bootstrap[0].preview.replace('{count}', updated)), line)
+  const appliedLine = setup(...args, '--apply').split(/\r?\n/)[0]
+  assert.ok(appliedLine.includes(bootstrap[0].appliedCreate.replace('{count}', created)), appliedLine)
+  assert.ok(appliedLine.includes(bootstrap[0].applied.replace('{count}', updated)), appliedLine)
+}))
+
+test('a repeat preview when every agent is already set up omits first-time steps and lists only open ones (#1246)', () => fixture(setup => {
+  const applied = setup('--agent', 'opencode', '--lang', 'en', '--apply')
+  assert.match(applied, /created \d+ setup files/)
+  assert.match(applied, /restart OpenCode/i)
+  assert.match(applied, /Then start a new session/i)
+  assert.match(applied, /Open the board:/i)
+
+  const repeat = setup('--agent', 'opencode', '--lang', 'en')
+  assert.match(repeat, /OpenCode: already set up/)
+  assert.doesNotMatch(repeat, /restart OpenCode/i)
+  assert.doesNotMatch(repeat, /Then start a new session/i)
+  assert.doesNotMatch(repeat, /Open the board:/i)
+  assert.match(repeat, /Claude Code: run claude plugin/i)
+}))
+
+test('README quick start and troubleshooting document --no-open (#1246)', () => {
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  assert.match(readme, /--no-open/)
+  const zhTw = readFileSync(new URL('../README.zh-TW.md', import.meta.url), 'utf8')
+  assert.match(zhTw, /--no-open/)
+  const zhCn = readFileSync(new URL('../README.zh-CN.md', import.meta.url), 'utf8')
+  assert.match(zhCn, /--no-open/)
 })
 
 test('the Antigravity apply summary accounts for every file counted by its preview', () => {
@@ -148,321 +142,7 @@ test('the Antigravity apply summary accounts for every file counted by its previ
   })
 })
 
-const terminal = (run, programs) => fixture((setup, f) => {
-  f.env.USERPROFILE = f.env.HOME
-  f.env.AGENT_BOARD_SETUP_TTY = '1'
-  f.env.AGENT_BOARD_TEST_PID = String(process.pid)
-  const commands = setupPrograms(f.root, f.env, programs)
-  return run({ ...f, commands })
-})
-const succeeded = result => {
-  assert.ifError(result.error)
-  assert.equal(result.status, 0, result.stderr)
-  assert.equal(result.stderr, '')
-}
-const claudeCalls = f => f.commands.calls().filter(call => call.program === 'claude').map(call => call.args)
-const pluginCommands = [['plugin', 'marketplace', 'add', 'WenyuChiou/agent-board'], ['plugin', 'install', 'agent-board@agent-board']]
-const assertTrusted = f => {
-  const calls = f.commands.calls().filter(call => call.method === 'config/batchWrite')
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].params.edits[0].keyPath, 'hooks.state')
-  assert.equal(Object.keys(calls[0].params.edits[0].value).length, 7)
-  assert.equal((readFileSync(join(f.env.CODEX_HOME, 'config.toml'), 'utf8').match(/trusted_hash/g) ?? []).length, 7)
-  const approvals = JSON.parse(readFileSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json'), 'utf8')).approvals
-  const owned = JSON.parse(readFileSync(join(f.root, 'data', 'install-hermes.json'), 'utf8')).groups.hooks
-  assert.deepEqual(approvals.map(({ event, command }) => [event, command]), Object.entries(owned))
-}
-
-test('terminal setup accepts one yes for files, Codex and Hermes trust, and both Claude plugin commands', () => terminal(f => {
-  const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'], 'yes\n')
-  succeeded(result)
-  assert.equal(result.stdout.split('Set these up? [Y/n]').length - 1, 1)
-  assert.match(result.stdout, /This will:[\s\S]*Approve the board's hooks in Codex[\s\S]*Approve the board's hooks in Hermes Agent[\s\S]*Install the Claude Code plugin/)
-  assert.match(result.stdout, /Codex files: done\./)
-  assert.match(result.stdout, /Hermes Agent files: done\./)
-  assertTrusted(f)
-  assert.deepEqual(claudeCalls(f), pluginCommands)
-  const next = result.stdout.split('Next steps:')[1]
-  assert.match(next, /1\. Open a new session in each of: Codex, Hermes Agent, Claude Code\./)
-  assert.match(next, /2\. Then type \/agent-board in any of them\./)
-  assert.doesNotMatch(next, /--trust|--codex-trust|--hermes-trust|claude plugin/)
-}))
-
-test('terminal Enter means yes and the question is translated in all three languages', () => {
-  for (const [i, lang] of locales.entries()) terminal(f => {
-    const result = f.invoke(['--agent', 'cursor', '--lang', lang])
-    succeeded(result)
-    assert.ok(result.stdout.includes(bootstrap[i].question))
-    assert.equal(existsSync(join(f.root, 'data', 'install-cursor.json')), true)
-    assert.deepEqual(claudeCalls(f), pluginCommands)
-  })
-})
-
-test('terminal setup --apply writes files only and leaves hook approval and the plugin to a typed yes', () => terminal(f => {
-  const result = f.invoke(['--agent', 'codex,hermes,opencode,openclaw', '--lang', 'en', '--apply'], 'y\n')
-  succeeded(result)
-  assert.doesNotMatch(result.stdout, /Set these up\?|This will:/)
-  assert.equal(existsSync(join(f.root, 'data', 'install-codex.json')), true)
-  assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), false)
-  assert.equal(f.commands.calls().some(call => call.method === 'config/batchWrite'), false)
-  assert.deepEqual(claudeCalls(f), [])
-  const next = result.stdout.split('Next steps:')[1]
-  assert.match(next, /--codex-trust --codex-bin/)
-  assert.match(next, /--hermes-trust/)
-  assert.match(next, /claude plugin install agent-board@agent-board/)
-  for (const host of ['opencode', 'openclaw']) assert.ok(next.includes(bootstrap[0][host]))
-}))
-
-test('terminal setup skips "marketplace add" when Claude Code already knows the marketplace', () => terminal(f => {
-  mkdirSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins'), { recursive: true })
-  writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'known_marketplaces.json'), JSON.stringify({ 'agent-board': { source: { source: 'github', repo: 'WenyuChiou/agent-board' } } }))
-  const result = f.invoke(['--agent', 'cursor', '--lang', 'en'], 'y\n')
-  succeeded(result)
-  assert.deepEqual(claudeCalls(f), [pluginCommands[1]])
-  assert.doesNotMatch(result.stdout, /Claude Code marketplace:/)
-  assert.match(result.stdout, /Claude Code plugin: done\./)
-}))
-
-test('a Claude plugin install that exits 0 without installing the plugin is reported as failed', () => terminal(f => {
-  f.env.AGENT_BOARD_TEST_CLAUDE_FAIL = 'silent'
-  const result = f.invoke(['--agent', 'cursor', '--lang', 'en'], 'y\n')
-  succeeded(result)
-  assert.match(result.stdout, /Claude Code plugin: failed\. Run: claude plugin install agent-board@agent-board/)
-  assert.doesNotMatch(result.stdout.split('Next steps:')[1] ?? '', /Claude Code/)
-}))
-
-test('an agent whose files fail reports its hook approval as not done, with the command to run', () => terminal(f => {
-  // The preload makes only the Codex file write fail; the preview and Hermes Agent are untouched.
-  const preload = join(f.root, 'fail-codex-apply.cjs')
-  writeFileSync(preload, "const a = process.argv; if ((a[1] || '').endsWith('setup-codex.mjs') && a.includes('--apply') && a[a.indexOf('--agent') + 1] === 'codex') { process.stderr.write(JSON.stringify({ error: { code: 'SYNTHETIC', message: 'synthetic write failure' } }) + '\\n'); process.exit(2) }\n")
-  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
-  const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'], 'y\n')
-  assert.ifError(result.error)
-  assert.equal(result.status, 1, result.stdout)
-  assert.match(result.stdout, /Codex files: failed\./)
-  assert.match(result.stdout, /Approve the board's hooks in Codex: failed\. Run: .*--codex-trust/)
-  assert.match(result.stdout, /Approve the board's hooks in Hermes Agent: done\./)
-  assert.equal(f.commands.calls().some(call => call.method === 'config/batchWrite'), false)
-}))
-
-test('a failed Claude plugin part keeps files and both trust applies and does not skip the other plugin command', () => {
-  for (const failure of ['marketplace', 'install', 'all']) terminal(f => {
-    f.env.AGENT_BOARD_TEST_CLAUDE_FAIL = failure
-    const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'])
-    succeeded(result)
-    assertTrusted(f)
-    assert.deepEqual(claudeCalls(f), pluginCommands)
-    if (failure !== 'install') assert.match(result.stdout, /Claude Code marketplace: failed\. Run: claude plugin marketplace add WenyuChiou\/agent-board/)
-    if (failure !== 'marketplace') assert.match(result.stdout, /Claude Code plugin: failed\. Run: claude plugin install agent-board@agent-board/)
-    assert.match(result.stdout, /Codex files: done\./)
-    assert.match(result.stdout, /Hermes Agent files: done\./)
-  })
-})
-
-test('a failed Codex trust part keeps Hermes trust and the Claude plugin installation', () => terminal(f => {
-  f.env.AGENT_BOARD_TEST_CODEX_FAIL = '1'
-  const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'])
-  succeeded(result)
-  assert.match(result.stdout, /Approve the board's hooks in Codex: failed\. Run: .*--codex-trust.*--codex-bin.*--apply/)
-  assert.match(result.stdout, /Approve the board's hooks in Hermes Agent: done\./)
-  assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), true)
-  assert.deepEqual(claudeCalls(f), pluginCommands)
-}))
-
-test('a conflicting agent is skipped once, with its retry command, while the other agent and plugin parts still finish', () => terminal(f => {
-  writeFileSync(join(f.env.CODEX_HOME, 'hooks.json'), 'synthetic conflicting file')
-  const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'])
-  assert.ifError(result.error)
-  // As without a terminal, setup exits nonzero only when every selected agent is skipped.
-  assert.equal(result.status, 0, result.stderr)
-  assert.match(result.stdout, /Codex: skipped: .*--agent codex --apply/)
-  assert.doesNotMatch(result.stdout, /Codex files:/)
-  assert.equal(readFileSync(join(f.env.CODEX_HOME, 'hooks.json'), 'utf8'), 'synthetic conflicting file')
-  assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), true)
-  assert.deepEqual(claudeCalls(f), pluginCommands)
-  assert.equal(f.commands.calls().some(call => call.program === 'codex'), false)
-}))
-
-test('terminal no and end of input write nothing and retain the manual apply step', () => {
-  for (const answer of ['n\n', '']) terminal(f => {
-    const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'], answer)
-    succeeded(result)
-    assert.match(result.stdout, /Apply these changes: .*--apply/)
-    assert.equal(existsSync(join(f.root, 'data')), false)
-    assert.equal(existsSync(join(f.env.CODEX_HOME, 'hooks.json')), false)
-    assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), false)
-    assert.equal(existsSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins')), false)
-    assert.deepEqual(f.commands.calls(), [])
-  })
-})
-
-test('piped setup previews and applies only files while retaining manual trust and plugin guidance', () => terminal(f => {
-  delete f.env.AGENT_BOARD_SETUP_TTY
-  const preview = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'])
-  succeeded(preview)
-  assert.doesNotMatch(preview.stdout, /Set these up\?|This will:/)
-  assert.equal(existsSync(join(f.root, 'data')), false)
-  const applied = f.invoke(['--agent', 'codex,hermes', '--lang', 'en', '--apply'])
-  succeeded(applied)
-  assert.match(applied.stdout, /--codex-trust --codex-bin/)
-  assert.match(applied.stdout, /--hermes-trust/)
-  assert.match(applied.stdout, /claude plugin install agent-board@agent-board/)
-  assert.equal(existsSync(join(f.root, 'data', 'install-codex.json')), true)
-  assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), false)
-  assert.deepEqual(f.commands.calls(), [])
-}))
-
-test('JSON setup ignores the terminal test seam and applies files without trust or plugin commands', () => terminal(f => {
-  for (const extra of [[], ['--apply']]) {
-    const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en', '--json', ...extra])
-    succeeded(result)
-    assert.equal(JSON.parse(result.stdout).applied, extra.length > 0)
-    assert.equal(existsSync(join(f.root, 'data', 'install-codex.json')), extra.length > 0)
-    assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), false)
-    assert.deepEqual(f.commands.calls(), [])
-  }
-}))
-
-test('an unchanged terminal setup asks nothing and repeats no approval or installation that already succeeded', () => terminal(f => {
-  const args = ['--agent', 'codex,hermes', '--lang', 'en']
-  succeeded(f.invoke(args, 'y\n'))
-  assertTrusted(f)
-  f.commands.clear()
-  const result = f.invoke(args, 'y\n')
-  succeeded(result)
-  assert.doesNotMatch(result.stdout, /Set these up\?|Approve the board's hooks|Install the Claude Code plugin|failed/)
-  assert.equal(f.commands.calls().some(call => call.method === 'config/batchWrite'), false)
-  assert.deepEqual(claudeCalls(f), [])
-}))
-
-test('terminal setup installs the plugin when only Claude Code is present', () => terminal(f => {
-  for (const name of ['CODEX_HOME', 'GROK_HOME', 'HERMES_HOME', 'OPENCODE_CONFIG_DIR', 'OPENCLAW_STATE_DIR', 'DSH_HOME']) rmSync(f.env[name], { recursive: true, force: true })
-  const result = f.invoke(['--lang', 'en'])
-  succeeded(result)
-  assert.match(result.stdout, /Install the Claude Code plugin/)
-  assert.match(result.stdout, /Open a new session in Claude Code\.\r?\n\d\. Then type \/agent-board there\./)
-  assert.deepEqual(claudeCalls(f), pluginCommands)
-  assert.equal(existsSync(join(f.root, 'data')), false)
-}, ['claude']))
-
-const copiedClaudeSettings = f => {
-  for (const name of ['CODEX_HOME', 'GROK_HOME', 'HERMES_HOME', 'OPENCODE_CONFIG_DIR', 'OPENCLAW_STATE_DIR', 'DSH_HOME']) rmSync(f.env[name], { recursive: true, force: true })
-  writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), JSON.stringify({ enabledPlugins: { 'agent-board@agent-board': true }, synthetic: 'keep' }))
-}
-
-test('a copied Claude enable setting still asks once and installs before reporting success', () => terminal(f => {
-  copiedClaudeSettings(f)
-  const result = f.invoke(['--lang', 'en'])
-  succeeded(result)
-  assert.equal(result.stdout.split('Set these up? [Y/n]').length - 1, 1)
-  assert.deepEqual(claudeCalls(f), pluginCommands)
-  assert.match(result.stdout, /Claude Code plugin: done\./)
-  assert.match(result.stdout, /Open a new session in Claude Code\./)
-  assert.equal(existsSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json')), true)
-  assert.equal(JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8')).synthetic, 'keep')
-  f.commands.clear()
-  const repeated = f.invoke(['--lang', 'en'])
-  succeeded(repeated)
-  assert.doesNotMatch(repeated.stdout, /Set these up\?|Install the Claude Code plugin/)
-  assert.deepEqual(claudeCalls(f), [])
-}, ['claude']))
-
-test('a copied Claude enable setting cannot make a silent plugin installation count as done', () => terminal(f => {
-  copiedClaudeSettings(f)
-  f.env.AGENT_BOARD_TEST_CLAUDE_FAIL = 'silent'
-  const result = f.invoke(['--lang', 'en'])
-  succeeded(result)
-  assert.deepEqual(claudeCalls(f), pluginCommands)
-  assert.match(result.stdout, /Claude Code plugin: failed\. Run: claude plugin install agent-board@agent-board/)
-  assert.doesNotMatch(result.stdout, /Claude Code plugin: done\.|Open a new session in Claude Code\./)
-  assert.equal(existsSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json')), false)
-}, ['claude']))
-
-const installedClaude = f => {
-  copiedClaudeSettings(f)
-  const directory = join(f.env.CLAUDE_CONFIG_DIR, 'plugins')
-  mkdirSync(directory, { recursive: true })
-  writeFileSync(join(directory, 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'agent-board@agent-board': [{ scope: 'user' }] } }))
-}
-
-const disabledClaude = (f, hasReceipt = true) => {
-  if (hasReceipt) installedClaude(f)
-  else copiedClaudeSettings(f)
-  writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), JSON.stringify({ enabledPlugins: { 'agent-board@agent-board': false }, synthetic: 'keep' }))
-}
-const enableCommand = 'claude plugin enable agent-board@agent-board --scope user'
-const assertDisabledGuidance = (f, result, index) => {
-  succeeded(result)
-  assert.ok(result.stdout.includes(enableCommand), 'a disabled plugin needs a manual enable instruction, not a ready-session claim')
-  assert.ok(result.stdout.includes(bootstrap[index].enablePlugin.replace('{command}', enableCommand)))
-  const settings = JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8'))
-  assert.equal(settings.enabledPlugins['agent-board@agent-board'], false, 'setup must preserve the disabled preference')
-  assert.equal(settings.synthetic, 'keep')
-}
-
-for (const [index, lang] of locales.entries()) {
-  test('an installed Claude-only repeat gives session guidance instead of reinstall instructions in ' + lang, () => terminal(f => {
-    installedClaude(f)
-    const result = f.invoke(['--lang', lang])
-    succeeded(result)
-    assert.ok(!result.stdout.includes(bootstrap[index].plugin), 'the installed plugin must not be offered for installation again')
-    assert.ok(result.stdout.includes(bootstrap[index].openOne.replace('{agents}', 'Claude Code')))
-    assert.ok(result.stdout.includes(bootstrap[index].thenBoardOne))
-    assert.deepEqual(claudeCalls(f), [])
-    assert.equal(JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8')).synthetic, 'keep')
-    assert.equal(existsSync(join(f.root, 'data')), false)
-  }, ['claude']))
-
-  test('a files-only setup keeps installed Claude out of plugin instructions in ' + lang, () => terminal(f => {
-    installedClaude(f)
-    const result = f.invoke(['--agent', 'grok', '--lang', lang, '--apply'])
-    succeeded(result)
-    assert.ok(!result.stdout.includes(bootstrap[index].plugin), 'another selected agent must not reintroduce Claude install guidance')
-    const agents = ['Grok Build', 'Claude Code'].join(lang === 'en' ? ', ' : '、')
-    assert.ok(result.stdout.includes(bootstrap[index].start.replace('{agents}', agents)))
-    assert.deepEqual(claudeCalls(f), [], 'files-only setup must not run plugin commands')
-    assert.equal(JSON.parse(readFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8')).synthetic, 'keep')
-  }, ['claude']))
-
-  test('a disabled installed Claude-only repeat gives manual enable guidance in ' + lang, () => terminal(f => {
-    disabledClaude(f)
-    const result = f.invoke(['--lang', lang])
-    assertDisabledGuidance(f, result, index)
-    assert.ok(!result.stdout.includes(bootstrap[index].openOne.replace('{agents}', 'Claude Code')))
-    assert.doesNotMatch(result.stdout, /claude plugin install agent-board@agent-board/)
-    assert.deepEqual(claudeCalls(f), [])
-  }, ['claude']))
-
-  test('a files-only setup preserves a disabled Claude preference in ' + lang, () => terminal(f => {
-    disabledClaude(f)
-    const result = f.invoke(['--agent', 'grok', '--lang', lang, '--apply'])
-    assertDisabledGuidance(f, result, index)
-    assert.ok(result.stdout.includes(bootstrap[index].startOne.replace('{agents}', 'Grok Build')))
-    assert.doesNotMatch(result.stdout, /claude plugin install agent-board@agent-board/)
-    assert.deepEqual(claudeCalls(f), [])
-  }, ['claude']))
-}
-
-test('consenting to another agent does not report a disabled installed Claude plugin ready', () => terminal(f => {
-  disabledClaude(f)
-  const result = f.invoke(['--agent', 'grok', '--lang', 'en'])
-  assertDisabledGuidance(f, result, 0)
-  assert.match(result.stdout, /Open a new session in Grok Build\./)
-  assert.doesNotMatch(result.stdout, /Open a new session in each of:.*Claude Code/)
-  assert.deepEqual(claudeCalls(f), [])
-}, ['claude']))
-
-test('a successful installation with a disabled preference still requires manual enabling', () => terminal(f => {
-  disabledClaude(f, false)
-  const result = f.invoke(['--lang', 'en'])
-  assertDisabledGuidance(f, result, 0)
-  assert.deepEqual(claudeCalls(f), pluginCommands)
-  assert.match(result.stdout, /Claude Code plugin: done\./)
-  assert.doesNotMatch(result.stdout, /Open a new session in Claude Code\./)
-}, ['claude']))
-
-// Two setup runs only: the three tables are kept identical by the bootstrap test above, and each
-// run takes seconds on a Windows runner, where this file is near its time budget.
+// Two setup runs only: the bootstrap contract above checks all three canonical tables.
 test('on Windows setup says to start cursor-agent from PowerShell, in its preview and after a yes (#1159)', () => {
   const isWindows = process.platform === 'win32'
   fixture(setup => {

@@ -412,6 +412,8 @@ try {
   try {
     $scratchCutoff = (Get-Date).AddMinutes(-1)
     $cleanupFailed = $false
+    # A backlog of locked files must not spend the hook's whole timeout on retries.
+    $sweepSleepMs = 0
     foreach ($scratch in @(Get-ChildItem -LiteralPath $dir -File | Where-Object {
       $_.Extension -in @('.tmp', '.receipt', '.fallback', '.timeout', '.complete') -and $_.LastWriteTime -lt $scratchCutoff
     })) {
@@ -423,7 +425,9 @@ try {
           break
         } catch {
           if ($_.CategoryInfo.Category -eq 'ObjectNotFound' -or $_.Exception -is [System.Management.Automation.ItemNotFoundException]) { $removed = $true; break }
+          if ($try -eq 4 -or $sweepSleepMs -ge 1000) { break }
           Start-Sleep -Milliseconds 25
+          $sweepSleepMs += 25
         }
       }
       if (-not $removed) { $cleanupFailed = $true }

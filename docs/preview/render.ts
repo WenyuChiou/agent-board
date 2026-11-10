@@ -12,7 +12,7 @@ import { boardItems, boardScreen, emptyBoardState } from '../../hooks/board'
 import type { BoardState } from '../../hooks/board'
 import { countDay, journalLine } from '../../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../../hooks/mirror'
-import { MARK_PATH } from '../../hooks/page-look'
+import { BOARD_PATH, CORNER_LIGHT, GITHUB_PATH, POWER_PATH } from '../../hooks/page-look'
 import { settingsToggle } from '../../hooks/page-settings'
 import { DARK, LIGHT, PAGE_DARK, PAGE_LIGHT } from '../../hooks/palette'
 import type { Palette } from '../../hooks/palette'
@@ -218,17 +218,18 @@ const brandDefs = (w: number, h: number, glow: [number, number] = [0.78, 0.35]):
 const brandGround = (w: number, h: number): string =>
   `<rect width="${w}" height="${h}" fill="url(#sky)"/><rect width="${w}" height="${h}" fill="url(#glow)"/><rect width="${w}" height="${h}" fill="url(#dots)"/>`
 
-// The board mark, `size` square at x, y, and beside it the wordmark, both on the dark ground.
+// The Corner Light, `size` square at x, y, in the dark ground's ink with its light amber; or, with a name,
+// the name "Agent Board" with the light between its words, `size` tall from its top to the foot of its g.
 const brandMark = (x: number, y: number, size = 34, hasName = true): string => {
-  const k = size / LOCKUP.grid.size
-  if (!hasName) return `<path transform="translate(${x} ${y}) scale(${num(size / 64)})" fill="${PAGE_DARK.brand}" d="${MARK_PATH}"/>`
-  return `<g transform="translate(${num(x - LOCKUP.grid.x * k)} ${num(y - LOCKUP.grid.y * k)}) scale(${num(k)})">${lockupBody(BRAND.ink, PAGE_DARK.brand)}</g>`
+  if (!hasName) return `<g transform="translate(${x} ${y}) scale(${num(size / 64)})"><path fill="${BRAND.ink}" d="${BOARD_PATH}"/><circle fill="${PAGE_DARK.brand}" cx="${CORNER_LIGHT.cx}" cy="${CORNER_LIGHT.cy}" r="${CORNER_LIGHT.r}"/></g>`
+  const k = size / LOCKUP.height
+  return `<g transform="translate(${num(x - LOCKUP.left * k)} ${num(y - LOCKUP.top * k)}) scale(${num(k)})">${lockupBody(BRAND.ink, PAGE_DARK.brand)}</g>`
 }
 
 // docs/images/brand/: the lockup for a light and for a dark ground; the lockup and the mark alone that
 // follow the reader's theme through their own style (the README's title is that lockup: GitHub gives
-// an SVG picture its page's theme). Paths only, on a transparent ground.
-const lockupOpen = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(LOCKUP.width)}" height="${Math.ceil(LOCKUP.height)}" viewBox="${LOCKUP.left} ${LOCKUP.top} ${LOCKUP.width} ${LOCKUP.height}" role="img" aria-label="agent-board"><title>agent-board</title>`
+// an SVG picture its page's theme). Paths and circles only, on a transparent ground.
+const lockupOpen = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(LOCKUP.width)}" height="${Math.ceil(LOCKUP.height)}" viewBox="${LOCKUP.left} ${LOCKUP.top} ${LOCKUP.width} ${LOCKUP.height}" role="img" aria-label="Agent Board"><title>Agent Board</title>`
 const brandLockup = (mode: 'light' | 'dark'): string => {
   const page = mode === 'light' ? PAGE_LIGHT : PAGE_DARK
   return `${lockupOpen}${lockupBody(page.ink, page.brand)}</svg>\n`
@@ -236,7 +237,7 @@ const brandLockup = (mode: 'light' | 'dark'): string => {
 const brandLogo = (): string =>
   `${lockupOpen}<style>.ink{fill:${PAGE_LIGHT.ink}}.brand{fill:${PAGE_LIGHT.brand}}@media (prefers-color-scheme:dark){.ink{fill:${PAGE_DARK.ink}}.brand{fill:${PAGE_DARK.brand}}}</style>${lockupBody('.ink', '.brand')}</svg>\n`
 const brandMarkFile = (): string =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="agent-board"><title>agent-board</title><style>path{fill:${PAGE_LIGHT.brand}}@media (prefers-color-scheme:dark){path{fill:${PAGE_DARK.brand}}}</style><path d="${MARK_PATH}"/></svg>\n`
+  `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Agent Board"><title>Agent Board</title><style>.ink{fill:${PAGE_LIGHT.ink}}.brand{fill:${PAGE_LIGHT.brand}}@media (prefers-color-scheme:dark){.ink{fill:${PAGE_DARK.ink}}.brand{fill:${PAGE_DARK.brand}}}</style><path class="ink" d="${BOARD_PATH}"/><circle class="brand" cx="${CORNER_LIGHT.cx}" cy="${CORNER_LIGHT.cy}" r="${CORNER_LIGHT.r}"/></svg>\n`
 
 // The logo takes seven tenths of its tile: smaller, a logo with thin lines (OpenAI's) or fine
 // detail (Nous Research's) blurs at the table's 24 px.
@@ -1257,25 +1258,26 @@ ${iconTile('Codex', COVER_LEFT + 16, y + 16, 30)}
 <text x="${COVER_LEFT + 16}" y="${y + 76}" font-size="17" font-weight="600" fill="${look.ink}">${esc(question)}</text></g>`
   })()
 
-  // Scene 4: an excerpt of the web board's footer, using its own gear, label and palette.
+  // Scene 4: an excerpt of the web board's footer, using its own pictures, gear, label and palette.
   const settings = (() => {
     const y = propY(3) + 10
     const page = mode === 'dark' ? PAGE_DARK : PAGE_LIGHT
     const gear = settingsToggle(s).match(/<svg[^>]*>([\s\S]*?)<\/svg>/)?.[1]
     if (gear === undefined) throw new Error('The page Settings button has no SVG icon')
     const size = 15
-    const closeW = Math.ceil(textW(s.serveClose, size) + 30)
+    const closeW = 40
+    const red = mode === 'dark' ? PAGE_DARK.alert : pal.alert
     const settingsW = Math.ceil(textW(s.settingsTitle, size) + 46)
     const closeX = COVER_LEFT + COVER_COL - closeW - 12
     const settingsX = closeX - settingsW - 8
     return `<g class="a ${span((COVER_SCENES[3] ?? 0) + 0.2, ends[3] ?? 0)}" data-preview="page-footer">
 <rect x="${COVER_LEFT}" y="${y}" width="${COVER_COL - 2}" height="70" rx="12" fill="${page.surface}" stroke="${page.line}"/>
-<text x="${COVER_LEFT + 16}" y="${y + 41}" font-size="${size}" fill="${page.ink}">GitHub</text>
+<g transform="translate(${COVER_LEFT + 16},${y + 25}) scale(1.25)" fill="${page.ink}"><path d="${GITHUB_PATH}"/></g>
 <rect x="${settingsX}" y="${y + 15}" width="${settingsW}" height="40" rx="8" fill="${page.inset}" stroke="${page.brand}"/>
 <g transform="translate(${settingsX + 11},${y + 27})" fill="none" stroke="${page.ink}" stroke-width="1.3" stroke-linejoin="round">${gear}</g>
 <text x="${settingsX + 34}" y="${y + 41}" font-size="${size}" fill="${page.ink}">${esc(s.settingsTitle)}</text>
 <rect x="${closeX}" y="${y + 15}" width="${closeW}" height="40" rx="8" fill="${page.surface}" stroke="${page['line-strong']}"/>
-<text x="${closeX + closeW / 2}" y="${y + 41}" text-anchor="middle" font-size="${size}" fill="${page.ink}">${esc(s.serveClose)}</text></g>`
+<g transform="translate(${closeX + 9},${y + 24}) scale(1.375)" fill="none" stroke="${red}" stroke-width="1.5" stroke-linecap="round"><path d="${POWER_PATH}"/></g></g>`
   })()
 
   // Scene 5: Codex's card on the board's page, with its reply box and Send button. The person's

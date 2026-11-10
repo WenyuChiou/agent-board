@@ -80,8 +80,8 @@ node "$HOME/.agent-board/agent-board.mjs"
 ```
 
 On Windows use the exact Node and script paths printed by setup. Closing a browser tab
-leaves the local service running. Close the board stops it; `--idle-minutes 30` opts into
-idle shutdown. No startup service is installed.
+leaves the local service running. Close the board (the red power button) stops it;
+`--idle-minutes 30` opts into idle shutdown. No startup service is installed.
 
 To run the normal archive sweep without a Claude session:
 

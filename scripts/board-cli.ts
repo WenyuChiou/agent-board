@@ -22,7 +22,7 @@ import { boardLanguage, isLanguageOverridden, settingsLangOf, withBoardSettings 
 import type { SettingsLang } from '../hooks/board-settings'
 import { barStyleName, barStyleOf, nextBarStyle, withBarStyle } from '../hooks/progress-bar'
 import type { BarStyle } from '../hooks/progress-bar'
-import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
+import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, manualStepRef, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
@@ -67,7 +67,7 @@ import { createSettingsAgents } from './settings-agents'
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
 
 const args = process.argv.slice(2)
-const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust'].includes(arg))
+const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'].includes(arg))
 const flag = (name: string): string | undefined => {
   const at = args.indexOf(name)
   return at === -1 ? undefined : args[at + 1]
@@ -727,6 +727,7 @@ let routes: Record<string, AnswerRoute> = {}
 // 10 s, so the page's idle poll does not read the file each time; a pick made here is kept at once.
 const SETTINGS_MS = 10_000
 let settingsKept: { text: string | null; at: number } | null = null
+
 const settingsNow = (): string | null => {
   const now = Date.now()
   if (settingsKept !== null && now - settingsKept.at < SETTINGS_MS) return settingsKept.text
@@ -737,18 +738,21 @@ const settingsNow = (): string | null => {
 }
 const barStyleNow = (): BarStyle => barStyleOf(settingsNow())
 // The pick from the page or the `s` key: the settings file's other keys are kept. False when the
-// file exists but does not read as a JSON object: it is left as it is. A read or write error throws.
+// file exists but does not read as a JSON object, or is a symlinked or non-regular file: it is left
+// as it is. A read or write error throws.
 const saveBarStyle = (style: BarStyle): boolean => {
   const file = settingsPath(path)
+  if (isSymlinkOrNonRegular(file)) return false
   const next = withBarStyle(read(file), style)
   if (next === null) return false
-  writeFileSync(file, next)
+  try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
   settingsKept = { text: next, at: Date.now() }
   return true
 }
 
 const saveLanguage = (lang: SettingsLang): boolean => {
   const file = settingsPath(path)
+  if (isSymlinkOrNonRegular(file)) return false
   const next = withBoardSettings(read(file), { lang })
   if (next === null) return false
   // A failed write names the file on the page, as a failed read does.
@@ -1248,13 +1252,22 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     // ticked by this press.
     let isFound = false
     let isReplaced = false
+    let isChanged = false
     const writesBefore = writes
     const added = new Map<string, number>()
     const line = journalLine({ project: action.ref.project, task: action.ref.title, step: action.ref.step }, now, s)
     let wrote: string | null
     try {
       wrote = rewrite(path, text => {
-        const after = setManualStep(text, action.ref, 'x', now)
+        const selected = manualStepRef(text, action.ref, s)
+        if (selected === null) {
+          if (isReplaced) return text
+          isChanged = true
+          // Keep the progress lock while undoing a tentative tick's journal entry.
+          undoJournal(added, journal, writesBefore)
+          return null
+        }
+        const after = setManualStep(text, selected, 'x', now, s)
         if (after !== text) {
           // Save history before ticking: a journal failure must leave the step available
           // to retry. A failed board replacement removes only this press's journal line.
@@ -1273,6 +1286,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       error.isUnchanged = true
       throw error
     }
+    if (isChanged) return s.boardLineChanged
     if (wrote === null) return s.boardWriteFailed
     if (!isFound) return s.boardTickGone
     return done(s.boardTicked(action.ref.step))
@@ -2853,7 +2867,7 @@ try {
     if (reason === 'INVALID_STEP' && typeof step === 'string' && args.some(arg => ['--codex-report', '--report'].includes(arg))) {
       process.stderr.write(`AGENT_BOARD_DETAIL ${JSON.stringify(s.reporterInvalidStep(step))}\n`)
     }
-  } else if (args.some(arg => ['--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust'].includes(arg))) {
+  } else if (args.some(arg => ['--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'].includes(arg))) {
     process.exitCode = 1
     const failure = setupFailure(error, flag('--agent') ?? 'codex', s)
     process.stderr.write(`${args.includes('--json') ? JSON.stringify({ error: failure }) : failure.message}\n`)

@@ -486,13 +486,19 @@ export type ConfirmRef = TaskRef & { expected: string }
 
 // All words and marks are part of this action, including steps below the next one. The
 // twin count prevents a same-word manual task from taking another task's selected row.
+// The hidden done date the board writes after a draw (done-stamp.ts) is not part of a task's
+// identity, unless another task shares its title: then a date may be all that tells the two apart.
 export const confirmKey = (project: string, task: ProgressTask, twins: number): string =>
-  sha256(JSON.stringify([project, task.title, task.auto, task.notes, task.steps.map(step => step.raw), task.auto === null ? twins : 0]))
+  sha256(JSON.stringify([project, task.title, task.auto, task.notes, task.steps.map(step => twins > 1 ? step.raw : withoutStamp(step.raw)), task.auto === null ? twins : 0]))
 
-export const confirmedTarget = (text: string, ref: ConfirmRef, s: Strings): ProgressTask | null => {
+const confirmedTasks = (text: string, ref: ConfirmRef, s: Strings): ProgressTask[] => {
   const tasks = parseProgress(text).filter(project => (project.name || s.uncategorized) === ref.project).flatMap(project => project.tasks)
   const twins = tasks.filter(task => task.title === ref.title).length
-  const matches = tasks.filter(task => task.title === ref.title && (task.auto?.session ?? null) === ref.session && confirmKey(ref.project, task, twins) === ref.expected)
+  return tasks.filter(task => task.title === ref.title && (task.auto?.session ?? null) === ref.session && confirmKey(ref.project, task, twins) === ref.expected)
+}
+
+export const confirmedTarget = (text: string, ref: ConfirmRef, s: Strings): ProgressTask | null => {
+  const matches = confirmedTasks(text, ref, s)
   return matches.find(task => task.line === ref.line) ?? (matches.length === 1 ? matches[0] ?? null : null)
 }
 
@@ -765,13 +771,31 @@ export const manualTaskCount = (text: string, entry: QuickEntry): number => {
 // without its hidden done date (done-stamp.ts), so a press on a line drawn before the board
 // stamped it still finds it. With `now`, a step the press makes done or cancelled is stamped
 // that day (one that was already done keeps its date); any other mark carries no stamp.
-export const setManualStep = (text: string, ref: StepRef, mark: string, now?: number): string => {
+// A guarded page/terminal press must retain its task, candidate set and source positions
+// inside every write snapshot. Ambiguous movement refuses; content alone cannot identify twins.
+export const manualStepRef = (text: string, ref: StepRef, s: Strings = ZH_TW): StepRef | null => {
+  const guard = ref.guard
+  if (guard === undefined) return ref
+  const matches = confirmedTasks(text, guard.task, s)
+  const lines = matches.map(task => task.line >= 0 ? task.line : task.steps[0]?.line ?? -1).sort((a, b) => a - b)
+  if (lines.length !== guard.lines.length || lines.some((line, index) => line !== guard.lines[index])) return null
+  const task = matches.find(task => task.line === guard.task.line && task.steps.length === guard.steps.length && task.steps.every((step, index) => step.line === guard.steps[index]))
+  if (task === undefined) return null
+  const step = task.steps.find(step => step.line === ref.line)
+  return step !== undefined && withoutStamp(step.raw) === withoutStamp(ref.raw)
+    ? { ...ref, line: step.line, raw: step.raw, guard: undefined }
+    : null
+}
+
+export const setManualStep = (text: string, ref: StepRef, mark: string, now?: number, s: Strings = ZH_TW): string => {
+  const selected = manualStepRef(text, ref, s)
+  if (selected === null) return text
   const eol = eolOf(text)
   const lines = linesOf(text)
   const seen = seenOf(lines)
-  const wanted = withoutStamp(ref.raw)
+  const wanted = withoutStamp(selected.raw)
   const isStep = (index: number): boolean => withoutStamp(lines[index] ?? '') === wanted && seen[index] !== HIDDEN
-  let at = isStep(ref.line) ? ref.line : -1
+  let at = isStep(selected.line) ? selected.line : -1
   if (at < 0) {
     const same = lines.flatMap((_line, index) => (isStep(index) ? [index] : []))
     if (same.length === 1) at = same[0] ?? -1

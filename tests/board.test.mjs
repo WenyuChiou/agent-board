@@ -2882,19 +2882,198 @@ test('ticking twin steps from the page ticks each line it showed', { timeout: 30
     assert.equal(lines.length, 2)
     assert.ok(lines.every(line => typeof line === 'number'), 'the board names each step by its file line')
     // The second twin first: its press must not tick the first line.
-    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.fp } })
+    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.tickFp } })
     assert.equal(second.status, 200, second.body)
     let left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[lines[1]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
     assert.equal(left[lines[0]], '- [ ] Draft the notes')
     // Then the first twin, with the board drawn again.
     const again = await rowOf('Draft the notes')
-    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.fp } })
+    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.tickFp } })
     assert.equal(first.status, 200, first.body)
     left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[lines[0]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
   } finally {
     await board.close()
+  }
+})
+
+test('fresh untitled checkbox presses from the page tick the second twin and then the first', { timeout: 30_000 }, async () => {
+  const board = await page('## Untitled project\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
+  try {
+    for (const index of [1, 0]) {
+      const row = (await board.rows()).find(one => one.project === 'Untitled project' && one.title === EN.unnamed)
+      assert.ok(row)
+      const step = row.steps[index]
+      const response = await board.call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: step.text, line: step.fileLine, fp: row.tickFp } })
+      assert.equal(response.status, 200, response.body)
+      const lines = readFileSync(board.path, 'utf8').split('\n')
+      assert.match(lines[step.fileLine], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      if (index === 1) assert.equal(lines[row.steps[0].fileLine], '- [ ] Inspect the map')
+    }
+  } finally {
+    await board.close()
+  }
+})
+
+test('a saved checkbox press refuses after another card moves its twin lines (#1204)', { timeout: 30_000 }, async () => {
+  const board = await page('## home\n### Earlier card\n- [ ] Check the sample\n### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
+  try {
+    const { path, call, rowOf } = board
+    const row = await rowOf('Twin steps')
+    const request = { key: row.key, type: 'tick', text: 'Inspect the map', line: row.steps[1].fileLine, fp: row.tickFp }
+    const shifted = readFileSync(path, 'utf8').replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    writeFileSync(path, shifted)
+    const stale = await call('POST', '/api/act', { body: request })
+    assert.equal(stale.status, 409)
+    assert.equal(readFileSync(path, 'utf8'), shifted, 'refusing the stale checkbox must not write either twin')
+    const fresh = await rowOf('Twin steps')
+    const ticked = await call('POST', '/api/act', { body: { ...request, fp: fresh.tickFp, line: fresh.steps[1].fileLine } })
+    assert.equal(ticked.status, 200, ticked.body)
+    const left = readFileSync(path, 'utf8').split('\n')
+    assert.equal(left[fresh.steps[0].fileLine], '- [ ] Inspect the map')
+    assert.match(left[fresh.steps[1].fileLine], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+  } finally {
+    await board.close()
+  }
+})
+
+for (const ordering of ['lock', 'retry', 'readback', 'replacement', 'folded-visible', 'folded-lock', 'card-lock', 'card-readback', 'untitled-lock']) test('a checkbox keeps its original twin through the actual write boundary: ' + ordering, { timeout: 30_000 }, async () => {
+  const isLocked = ordering.endsWith('lock')
+  const isCards = ordering.startsWith('card-')
+  const isHiddenNext = ordering === 'folded-lock'
+  const isFoldedVisible = ordering === 'folded-visible'
+  const isUntitled = ordering === 'untitled-lock'
+  const faults = mkdtempSync(join(tmpdir(), 'board-checkbox-write-'))
+  const preload = join(faults, 'boundary.cjs')
+  const armed = join(faults, 'armed')
+  const blocked = join(faults, 'blocked')
+  const release = join(faults, 'release')
+  const injected = join(faults, 'injected')
+  const env = { NODE_OPTIONS: '--require ' + JSON.stringify(preload), AGENT_BOARD_TEST_CHECKBOX_PROGRESS: '' }
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const progress = process.env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS
+const arm = ${JSON.stringify(armed)}, blocked = ${JSON.stringify(blocked)}, injected = ${JSON.stringify(injected)}
+const ordering = ${JSON.stringify(ordering)}
+const open = fs.openSync, rename = fs.renameSync
+const change = () => {
+  const before = fs.readFileSync(progress, 'utf8')
+  const after = ordering === 'replacement'
+    ? before.replace('### Twin steps', '### Replacement task')
+    : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  fs.writeFileSync(progress, after)
+  fs.writeFileSync(injected, '')
+}
+fs.openSync = (file, ...args) => {
+  try { return open(file, ...args) } catch (error) {
+    if (ordering.endsWith('lock') && String(file) === progress + '.agent-board-lock' && error.code === 'EEXIST' && fs.existsSync(arm) && !fs.existsSync(blocked)) fs.writeFileSync(blocked, '')
+    throw error
+  }
+}
+fs.renameSync = (from, to, ...args) => {
+  const controlled = !ordering.endsWith('lock') && ordering !== 'folded-visible' && String(to) === progress && fs.existsSync(arm) && !fs.existsSync(injected)
+  if (controlled && !ordering.endsWith('readback')) {
+    change()
+    throw Object.assign(new Error('synthetic competing write before rename'), { code: 'EPERM' })
+  }
+  const result = rename(from, to, ...args)
+  if (controlled) change()
+  return result
+}
+syncBuiltinESMExports()
+`)
+  let board, holder, holderExit, watcher
+  try {
+    const twins = '### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+    const manual = isUntitled ? '## Untitled project\n' + twins.replace('### Twin steps\n', '') : isCards ? twins.repeat(2) : isHiddenNext ? '### Twin steps\n' + Array.from({ length: 5 }, (_, i) => '- [ ] Ordinary step ' + i + '\n').join('') + '- [~] Inspect the map\n- [~] Inspect the map\n' : isFoldedVisible ? '### Twin steps\n- [x] Completed one\n- [x] Completed two\n' + '- [ ] Inspect the map\n'.repeat(6) : twins
+    board = await page('## home\n### Earlier card\n- [ ] Check the sample\n' + manual, env, [], undefined, BOARD_SCRIPT, (_dir, path) => { env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS = path })
+    const row = isUntitled ? (await board.rows()).find(one => one.project === 'Untitled project' && one.title === EN.unnamed) : isCards ? (await board.rows()).filter(one => one.title === 'Twin steps').at(-1) : await board.rowOf('Twin steps')
+    const before = readFileSync(board.path, 'utf8')
+    const shifted = isUntitled ? before.replace('## Untitled project', '> Synthetic extra context\n## Untitled project') : isFoldedVisible ? before : isHiddenNext ? before.replace('- [ ] Check the sample\n', '') : before.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    const replaced = before.replace('### Twin steps', '### Replacement task')
+    const at = before.lastIndexOf('### Twin steps')
+    const changedCard = before.slice(0, at) + before.slice(at).replace('### Twin steps\n', '### Twin steps\n> Changed selected card\n')
+    const visible = row.steps.filter(step => step.text === 'Inspect the map' && typeof step.fileLine === 'number')
+    const body = { key: row.key, type: 'tick', text: 'Inspect the map', line: isHiddenNext ? row.nextFileLine : visible[1].fileLine, fp: row.tickFp }
+    if (isHiddenNext) assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the primary target is outside the folded display')
+    if (isLocked) {
+      const worker = join(faults, 'holder.mjs')
+      writeFileSync(worker, `import { withLocalLock } from ${JSON.stringify(new URL('../scripts/local-lock.ts', import.meta.url).href)}
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+const ordering = ${JSON.stringify(ordering)}
+withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
+  process.stdout.write('held\\n')
+  const deadline = Date.now() + 5000
+  while (!existsSync(${JSON.stringify(release)})) {
+    if (Date.now() >= deadline) throw new Error('CONTROL_NOT_RELEASED')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+  }
+  const file = ${JSON.stringify(board.path)}
+  const before = readFileSync(file, 'utf8')
+  const at = before.lastIndexOf('### Twin steps')
+  const after = ordering === 'untitled-lock' ? before.replace('## Untitled project', '> Synthetic extra context\\n## Untitled project') : ordering === 'folded-lock' ? before.replace('- [ ] Check the sample\\n', '') : ordering === 'card-lock' ? before.slice(0, at) + before.slice(at).replace('### Twin steps\\n', '### Twin steps\\n> Changed selected card\\n') : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  writeFileSync(file, after)
+})
+`)
+      holder = spawn(process.execPath, [worker], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      holderExit = new Promise((done, fail) => { holder.once('error', fail); holder.once('exit', done) })
+      const held = new Promise(done => holder.stdout.once('data', done))
+      await Promise.race([held, holderExit.then(code => { throw new Error('the lock holder exited before its barrier: ' + code) })])
+    }
+    const observed = !isLocked ? null : new Promise((done, fail) => {
+      watcher = fs.watch(faults, () => { if (existsSync(blocked)) done() })
+      watcher.on('error', fail)
+    })
+    writeFileSync(armed, '')
+    const sent = board.call('POST', '/api/act', { body })
+    if (isLocked) {
+      // The real server must already have failed to acquire the real shared lock.
+      await Promise.race([observed, sent.then(() => { throw new Error('the action ended before the blocked lock boundary') })])
+      writeFileSync(release, '')
+      assert.equal(await holderExit, 0)
+    }
+    const response = await sent
+    const after = readFileSync(board.path, 'utf8')
+    if (!isLocked && !isFoldedVisible) assert.ok(existsSync(injected), 'the competing write must reach the intended production boundary')
+    const journal = readdirSync(board.dir).filter(name => /^progress-journal-/.test(name)).map(name => readFileSync(join(board.dir, name), 'utf8')).join('\n')
+    if (ordering === 'replacement' || ordering === 'card-lock') {
+      assert.equal(response.status, 409, 'a replaced task must not receive the old checkbox press')
+      assert.equal(after, ordering === 'card-lock' ? changedCard : replaced)
+      assert.doesNotMatch(journal, /Inspect the map/, 'a refused tentative tick must not leave a false journal entry')
+    } else if (response.status === 409) {
+      assert.equal(ordering.endsWith('readback') || isFoldedVisible, false, 'a landed tick or a fresh visible checkbox must remain a single completed action')
+      assert.equal(after, shifted)
+      assert.doesNotMatch(journal, /Inspect the map/)
+    } else if (isCards || isHiddenNext || isFoldedVisible || isUntitled) {
+      assert.equal(response.status, 200, response.body)
+      const expected = shifted.split('\n')
+      const header = isUntitled ? expected.indexOf('## Untitled project') : isCards ? expected.lastIndexOf('### Twin steps') : expected.indexOf('### Twin steps')
+      const target = header + (isHiddenNext ? 6 : isFoldedVisible ? 4 : 2)
+      const raw = isHiddenNext ? '- [~] Inspect the map' : '- [ ] Inspect the map'
+      assert.equal(expected[target], raw)
+      const actual = after.split('\n')
+      assert.match(actual[target], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      actual[target] = raw
+      assert.equal(actual.join('\n'), shifted, 'only the original selected source checkbox may change')
+      assert.equal(journal.split('\n').filter(line => line.includes('Inspect the map')).length, 1)
+    } else {
+      assert.equal(response.status, 200, response.body)
+      const lines = after.split('\n')
+      const task = lines.indexOf('### Twin steps')
+      assert.equal(lines[task + 1], '- [ ] Inspect the map', 'the first twin must remain open after the original second-twin press')
+      assert.match(lines[task + 2], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      assert.equal(after.replace(/- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->/, '- [ ] Inspect the map'), shifted)
+    }
+  } finally {
+    watcher?.close()
+    if (holder !== undefined && holder.exitCode === null) {
+      writeFileSync(release, '')
+      const timer = setTimeout(() => holder.kill(), 5000)
+      try { await holderExit } finally { clearTimeout(timer) }
+    }
+    if (board !== undefined) await board.close()
+    rmSync(faults, { recursive: true, force: true })
   }
 })
 
@@ -2917,7 +3096,7 @@ test('ticking the next step from the page still works when the step list folded 
     assert.equal(row.next, 'Step six')
     assert.equal(typeof row.nextFileLine, 'number')
     assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the next step is folded out of the shown steps')
-    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.fp } })
+    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.tickFp } })
     assert.equal(ticked.status, 200, ticked.body)
     const left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[row.nextFileLine], /^- \[x\] Step six <!-- done \d{4}-\d\d-\d\d -->$/)
@@ -3390,8 +3569,9 @@ test('a tick on the page for a hand-kept question that was reworded since the pa
     assert.equal(drawn.text, 'Ask two referees')
     const reworded = text().replace('- [?] Ask two referees', '- [?] Submit the replacement application')
     writeFileSync(path, reworded)
-    const press = fp => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp } })
-    const refused = await press(drawn.fp)
+    // The press is what the page's Done button sends: the tick fingerprint and the step's line (#1204).
+    const press = one => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp: one.tickFp, line: one.fileLine } })
+    const refused = await press(drawn)
     assert.equal(refused.status, 409, refused.body)
     assert.equal(refused.json().note, LINE_CHANGED)
     assert.equal(text(), reworded)
@@ -3399,7 +3579,7 @@ test('a tick on the page for a hand-kept question that was reworded since the pa
     const now = await ask()
     assert.equal(now.key, drawn.key)
     assert.notEqual(now.fp, drawn.fp)
-    assert.equal((await press(now.fp)).status, 200)
+    assert.equal((await press(now)).status, 200)
     assert.ok(text().includes('- [x] Submit the replacement application'))
   } finally {
     await board.close()
@@ -3562,12 +3742,26 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     scrollIntoView() { this.scrolled = true }
     setSelectionRange() {}
     select() { this.isSelected = true }
+    cloneNode() {
+      const copy = new Element(this.tag)
+      for (const [name, value] of Object.entries(this.attributes)) copy.setAttribute(name, value)
+      return copy
+    }
   }
   const get = id => {
     if (!nodes.has(id)) nodes.set(id, new Element(id))
     return nodes.get(id)
   }
   get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
+  // The logo, the icons and the tab icon the server wrote (#1262): a node for each, with its attributes, so the page can paint the light.
+  // The first run's mark waits in a <template>, which the page does not search.
+  for (const [index, found] of [...html.replace(/<template\b[\s\S]*?<\/template>/g, '').matchAll(/<(svg|link)\b([^>]*)>/g)].entries()) {
+    const attrs = Object.fromEntries([...found[2].matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]]))
+    if (found[1] === 'svg' ? !/\bab-(?:logo|icon)\b/.test(attrs.class ?? '') : attrs.rel !== 'icon') continue
+    const node = get(found[1] + '-' + index)
+    node.tag = found[1]
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value)
+  }
   get('.pfoot').appendChild(get('close'))
   for (const id of ['close']) get(id).tag = 'button'
   const matches = (node, selector) => {
@@ -3575,6 +3769,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     if (selector === 'button') return node.tag === 'button'
     if (selector === 'button:not([data-local])') return node.tag === 'button' && node.getAttribute('data-local') === null
     if (selector === 'button[data-static]') return node.tag === 'button' && node.getAttribute('data-static') !== null
+    if (/^\.ab-(?:logo|icon)$/.test(selector)) return String(node.getAttribute('class') ?? '').split(' ').includes(selector.slice(1))
     const tag = selector.match(/^[a-z]+/)?.[0]
     const attrs = [...selector.matchAll(/\[([^=\]]+)(?:=["']?([^\]"']+)["']?)?\]/g)]
     if (tag && node.tag !== tag) return false
@@ -3700,6 +3895,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     allButtons: () => document.querySelectorAll('button'),
     query: selector => document.querySelectorAll(selector),
     node: get,
+    element: tag => new Element(tag),
     paste: (text, target = document.body) => {
       let prevented = false
       document.events.paste?.({ target, clipboardData: { getData: type => { assert.equal(type, 'text/plain'); return text } }, preventDefault: () => { prevented = true } })
@@ -3750,6 +3946,132 @@ const pageLostResults = (dom, label) => {
   assert.ok(card, `The removed card must leave a result labelled ${label}`)
   return pressWalk(card).filter(node => node.className?.includes('press-result'))
 }
+
+// The light in the logo is the board's status (#1262): the page sets one of four classes on the name and on each icon.
+const LIGHT_CLASSES = ['is-idle', 'is-working', 'is-waiting', 'is-offline']
+const lightsOf = dom => dom.query('.ab-logo,.ab-icon').map(node => String(node.getAttribute('class')).split(' ').filter(name => LIGHT_CLASSES.includes(name)).join(' '))
+const lightHtml = () => run('en', ['--chat'], {}, FILE, `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`)
+const quietBoard = { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }
+const askedBoard = { ...quietBoard, asks: [{ key: 'ask-demo', task: 'Question card', project: 'Demo', text: 'Ship it, OK?', kind: 'confirm', chip: 'Confirm', answers: ['Yes', 'No'], canTick: true, canHide: true, command: 'echo demo', reopen: 'claude --resume synthetic-session', send: 'copy', fp: 'first' }] }
+const busyBoard = (() => {
+  const model = viewed({ ...quietBoard, groups: [{ project: 'Demo', rows: [{ key: 'row-demo', title: 'Task card', next: 'Next step', canArchive: true, steps: [], send: 'copy', fp: 'first' }] }] })
+  return { ...model, view: { ...model.view, working: model.view.all.open } }
+})()
+const polling = (read, isDown = () => false) => async () => {
+  if (isDown()) throw new Error('Synthetic connection refused')
+  return { ok: true, json: async () => ({ model: read(), now: 1 }) }
+}
+
+test('the logo and the icons carry the board’s state as a class: idle, working, waiting, and offline when the page loses the board (#1262)', async () => {
+  const html = lightHtml()
+  let current = quietBoard
+  let isDown = false
+  const dom = await pageDom(html, quietBoard, { getBoard: polling(() => current, () => isDown) })
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-idle', 'is-idle', 'is-idle'], 'the name in the sidebar, the icon in the rail and the name in the narrow header: a quiet, connected board is idle')
+  for (const [name, model, expected] of [['an agent is busy', busyBoard, 'is-working'], ['something needs the person', askedBoard, 'is-waiting'], ['the board is quiet again', quietBoard, 'is-idle']]) {
+    current = model
+    await dom.redraw(model)
+    await dom.settle()
+    assert.deepEqual(lightsOf(dom), [expected, expected, expected], name)
+  }
+  // Something that needs the person outranks work in progress.
+  current = { ...busyBoard, view: { ...busyBoard.view, needs: { ...busyBoard.view.needs, n: 1 } } }
+  await dom.redraw(current)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-waiting', 'is-waiting', 'is-waiting'], 'a question outranks the work')
+  isDown = true
+  await dom.redraw(current)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-offline', 'is-offline', 'is-offline'], 'the page lost the board')
+  isDown = false
+  current = quietBoard
+  await dom.redraw(quietBoard)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-idle', 'is-idle', 'is-idle'], 'the board is back')
+  assert.ok(dom.query('.ab-icon').every(node => String(node.getAttribute('class')).split(' ').includes('ab-icon')), 'the picture keeps its own class while the state changes')
+})
+
+test('the tab icon turns to the needs-you icon while something needs the person, and back (#1262)', async () => {
+  const html = lightHtml()
+  const link = /<link rel="icon"[^>]*\bhref="([^"]+)" data-needs="([^"]+)"/.exec(html)
+  assert.ok(link, 'the page names a calm icon and a needs-you icon')
+  const [, calm, needs] = link
+  assert.notEqual(calm, needs)
+  let current = quietBoard
+  const dom = await pageDom(html, quietBoard, { getBoard: polling(() => current) })
+  await dom.settle()
+  const tab = () => dom.query('link[rel="icon"]')[0].getAttribute('href')
+  assert.equal(tab(), calm, 'calm to begin with')
+  for (const [model, expected, name] of [[askedBoard, needs, 'a question is waiting'], [busyBoard, calm, 'only work is going on'], [askedBoard, needs, 'a question is waiting again'], [quietBoard, calm, 'all is answered']]) {
+    current = model
+    await dom.redraw(model)
+    await dom.settle()
+    assert.equal(tab(), expected, name)
+  }
+})
+
+test('a page that stops, because a newer page took over or the board closed, greys its light and never keeps an amber tab (#1262)', async () => {
+  const html = lightHtml()
+  const calm = /<link rel="icon"[^>]*\bhref="([^"]+)"/.exec(html)?.[1]
+  assert.ok(calm, 'the page names a calm tab icon')
+  const tab = dom => dom.query('link[rel="icon"]')[0].getAttribute('href')
+  const offline = ['is-offline', 'is-offline', 'is-offline']
+  // A newer page takes over while a question waits: this one stops asking.
+  let isMoved = false
+  const moved = await pageDom(html, askedBoard, { getBoard: async () => ({ ok: true, json: async () => (isMoved ? { moved: true } : { model: askedBoard, now: 1 }) }) })
+  await moved.settle()
+  assert.deepEqual(lightsOf(moved), ['is-waiting', 'is-waiting', 'is-waiting'], 'the question waits')
+  assert.notEqual(tab(moved), calm, 'the tab is amber while the question waits')
+  isMoved = true
+  await moved.redraw(askedBoard)
+  await moved.settle()
+  assert.deepEqual(lightsOf(moved), offline, 'the replaced page shows no live status')
+  assert.equal(tab(moved), calm, 'the replaced page’s tab is calm again')
+  // The person closes the board while a question waits.
+  const closed = await pageDom(html, askedBoard, { getBoard: polling(() => askedBoard), post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  await closed.settle()
+  assert.notEqual(tab(closed), calm, 'the tab is amber before the board closes')
+  closed.node('close').click()
+  await closed.flush(); await closed.flush()
+  assert.deepEqual(lightsOf(closed), offline, 'the closed board shows no live status')
+  assert.equal(tab(closed), calm, 'the closed board’s tab is calm')
+})
+
+test('the first run drops its mark’s light into the corner once: a later empty board shows the mark at rest (#1262)', async () => {
+  const html = lightHtml()
+  const tag = /<template id="fresh-mark">(<svg[^>]*>)/.exec(html)?.[1] ?? ''
+  assert.match(tag, /class="ab-icon is-idle is-arriving"/, 'the template holds the arriving icon')
+  assert.match(tag, /width="44" height="44"/)
+  let current = busyBoard
+  const dom = await pageDom(html, busyBoard, { getBoard: polling(() => current) })
+  await dom.settle()
+  // The page clones the mark from the template's content, as a browser gives it.
+  const mark = dom.element('svg')
+  for (const [, name, value] of tag.matchAll(/([\w-]+)="([^"]*)"/g)) mark.setAttribute(name, value)
+  dom.node('fresh-mark').content = { firstChild: mark }
+  const freshMarks = () => [...new Set(dom.query('.ab-icon'))].filter(node => node.getAttribute('width') === '44')
+  const isArriving = node => String(node.getAttribute('class')).split(' ').includes('is-arriving')
+  assert.equal(freshMarks().length, 0, 'a board with work shows no first-run mark')
+  for (const [round, expected] of [['the first empty board', true], ['a later empty board', false], ['another empty board', false]]) {
+    current = quietBoard
+    await dom.redraw(quietBoard)
+    await dom.settle()
+    const shown = freshMarks()
+    assert.equal(shown.length, 1, round + ' shows one mark')
+    assert.equal(isArriving(shown[0]), expected, round + (expected ? ' plays the drop' : ' shows the mark at rest'))
+    current = busyBoard
+    await dom.redraw(busyBoard)
+    await dom.settle()
+    assert.equal(freshMarks().length, 0, 'the mark goes with the empty board')
+  }
+  // Without the template the empty board still draws.
+  dom.node('fresh-mark').content = null
+  current = quietBoard
+  await dom.redraw(quietBoard)
+  await dom.settle()
+  assert.equal(freshMarks().length, 0, 'no template, no mark, and no error')
+})
 
 test('the serve page and the terminal board answer every action with a visible line', async () => {
   const board = await page()
@@ -11760,10 +12082,11 @@ test('the sidebar version line is quiet', () => {
   const ver = html.match(/\.ver-link\{([^}]*)\}/)[1]
   assert.match(ver, /font-size:var\(--text-xs\)/)
   assert.match(ver, /color:color-mix\(in srgb,var\(--muted\) \d+%,var\(--surface\)\)/)
-  assert.match(html, /\.ver-link svg\.i\{width:12px;height:12px\}/)
+  // The GitHub mark is a filled shape, drawn at the page's icon size so it reads at a glance.
+  assert.match(html, /\.ver-link svg\.i\{width:16px;height:16px;fill:currentColor;stroke:none\}/)
 })
 
-test('the page footer has no web-chat or clipboard button and Close the board shows its name in every language (#1145)', async () => {
+test('the page footer has no web-chat or clipboard button and Close the board is a red power sign named in every language (#1145)', async () => {
   const { servePage } = await sourceBoard()
   for (const words of [EN, ZH_TW, ZH_CN]) {
     for (const isLan of [false, true]) {
@@ -11776,13 +12099,14 @@ test('the page footer has no web-chat or clipboard button and Close the board sh
       assert.match(close[1], /\btype="button"/)
       assert.match(close[1], /\bclass="icon-btn"/)
       assert.match(close[1], /\bdata-static\b/)
-      // The name is visible text, so the button needs no aria-label or tooltip.
-      assert.ok(!close[1].includes('aria-label=') && !close[1].includes('title='))
-      const shown = close[2].match(/^<svg class="i"[^>]*aria-hidden="true"><path d="[^"]+"\/><\/svg><span>([^<]+)<\/span>$/)
-      assert.ok(shown)
-      assert.equal(shown[1], words.serveClose)
+      // The button shows only a power sign, so its name is what a screen reader says and the tooltip.
+      assert.ok(close[1].includes(`aria-label="${words.serveClose}"`) && close[1].includes(`title="${words.serveClose}"`))
+      assert.match(close[2], /^<svg class="i"[^>]*aria-hidden="true"><path d="M8 1\.5v6M[^"]+"\/><\/svg>$/)
     }
   }
+  const css = servePage(EN, 'synthetic', false)
+  assert.match(css, /\.pfoot #close\{[^}]*color:var\(--alert\)/)
+  assert.match(css, /\.pfoot #close:hover\{[^}]*color:var\(--alert\)/)
 })
 
 test('a row whose title is its current step shows the step once', async () => {
@@ -11847,9 +12171,10 @@ test('the footer links to the project', async () => {
   assert.match(link, /target="_blank"/)
   assert.match(link, /rel="noopener"/)
   assert.ok(link.includes(`title="${EN.pgGithub}"`))
-  // The footer reads "v<version> · GitHub": the version is filled in by the page, and Close the board stays once.
+  // The footer reads "<GitHub mark> v<version>": the mark stands for the word, the version is filled in by the page, and Close the board stays once.
   const footer = html.slice(html.indexOf('<footer class="pfoot"'), html.indexOf('</footer>'))
-  assert.ok(footer.includes('<span id="versions"></span><span aria-hidden="true">·</span>GitHub'))
+  assert.match(footer, /<svg class="i" viewBox="0 0 16 16" role="img" aria-label="GitHub"><path d="M8 0c[^"]+"\/><\/svg><span id="versions"><\/span><\/a>/)
+  assert.ok(!footer.includes('>GitHub<'))
   assert.equal(html.split('id="close"').length - 1, 1)
   const { board, model } = await groupedPage()
   try {
