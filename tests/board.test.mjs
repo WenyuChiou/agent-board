@@ -3,7 +3,7 @@
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -3669,6 +3669,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
           const answer = await getBoard(options)
           return { ...answer, json: async () => { const data = await answer.json(); return data.model ? { ...data, model: viewed(data.model) } : data } }
         }
+        if (target === '/api/agents') return { ok: true, json: async () => ({ rows: [] }) }
         requests.push({ path: target, body: JSON.parse(options.body) })
         sent.push({ path: target, headers: options.headers, keepalive: options.keepalive })
         if (post) return post(requests.at(-1))
@@ -5300,56 +5301,32 @@ test('--serve starts the page in the background once, and the next --serve bring
   } finally { await board.end([url]) }
 })
 
-test('--serve prefers the last port when it is free and falls back to a random port when it is taken (#1164)', { timeout: 60_000 }, async () => {
+test('--serve takes a new port on every start: it saves no port and ignores one in the settings file (#1177)', { timeout: 60_000 }, async () => {
+  // A page that came back on the same port would keep its origin, and with it whatever a script on that origin
+  // left in the browser, such as a service worker, from one start to the next.
   const board = serveIn()
-  let url1 = null
-  let url2 = null
-  let url3 = null
-  let dummy = null
-  const closeServer = async url => {
-    if (!url) return
-    const { port, searchParams } = new URL(url)
+  const settings = board.path.replace(/\.md$/, '-settings.json')
+  const portOf = url => Number(new URL(url).port)
+  let first = null
+  let second = null
+  try {
+    first = board.urlOf(await board.serve())
+    assert.ok(first)
+    const saved = existsSync(settings) ? JSON.parse(readFileSync(settings, 'utf8')) : {}
+    assert.equal(saved.port, undefined, 'a start saves no port')
+    // Stop the first page but keep the fixture folder: end() would delete it.
+    const { port, searchParams } = new URL(first)
     await new Promise(done => {
       const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
       req.on('error', done)
       req.end('{}')
     })
     for (let tries = 0; existsSync(board.served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
-  }
-  try {
-    const first = await board.serve()
-    url1 = board.urlOf(first)
-    assert.ok(url1, first)
-    const port1 = Number(new URL(url1).port)
-    assert.ok(port1 > 0)
-    await closeServer(url1)
-
-    // Restart: since port1 is free, it should be reused
-    const second = await board.serve()
-    url2 = board.urlOf(second)
-    assert.ok(url2, second)
-    const port2 = Number(new URL(url2).port)
-    assert.equal(port2, port1, 'free last port is reused on restart')
-    await closeServer(url2)
-
-    // Occupy port1 with another listener
-    dummy = createNetServer()
-    await new Promise((done, fail) => {
-      dummy.once('error', fail)
-      dummy.listen(port1, '127.0.0.1', done)
-    })
-
-    // Third start: port1 is busy, server must fall back to a random free port without failing
-    const third = await board.serve()
-    url3 = board.urlOf(third)
-    assert.ok(url3, third)
-    const port3 = Number(new URL(url3).port)
-    assert.ok(port3 > 0)
-    assert.notEqual(port3, port1, 'occupied last port falls back to a free port')
-  } finally {
-    if (dummy !== null) dummy.close()
-    await board.end([url1, url2, url3])
-  }
+    writeFileSync(settings, JSON.stringify({ ...saved, port: portOf(first) }))
+    second = board.urlOf(await board.serve())
+    assert.ok(second)
+    assert.notEqual(portOf(second), portOf(first), 'a port in the settings file is not used again')
+  } finally { await board.end([first, second].filter(Boolean)) }
 })
 
 test('/progress looks for the board script beside a Windows or a POSIX progress path', () => {
@@ -5399,6 +5376,8 @@ const serveIn = () => {
       await new Promise(done => {
         const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
         req.on('error', done)
+        // A page that accepted the connection but never answers must not hold every test's cleanup.
+        req.setTimeout(5000, () => req.destroy(new Error('the close request timed out')))
         req.end('{}')
       })
     }
@@ -5415,6 +5394,353 @@ const serveIn = () => {
   return { dir, path, script, env, serve, urlOf, served, end }
 }
 
+// A test that may run out of time writes what it saw so far to stderr just before the test runner
+// would cut it off, so a CI log of a timeout still says which phase took the time (#1158).
+const phaseLog = (budgetMs, more = () => []) => {
+  const began = Date.now()
+  const lines = []
+  const line = (text, at) => `${String(at - began).padStart(6)} ms  ${text}`
+  const mark = text => { lines.push(line(text, Date.now())) }
+  // `more` gives lines other processes wrote, each starting with its Date.now(), read when the log is printed.
+  const text = () => `phase log:\n${[...lines, ...more().map(entry => line(entry.slice(entry.indexOf(' ') + 1), Number(entry.slice(0, entry.indexOf(' ')))))].sort().join('\n')}`
+  const watchdog = setTimeout(() => process.stderr.write(`\n[${budgetMs} ms passed and the test is still running] ${text()}\n`), budgetMs)
+  watchdog.unref()
+  return { mark, text, end: () => clearTimeout(watchdog) }
+}
+
+// Cursor's shell has two extra inheritable pipes as well as stdout and stderr. `mark` takes one line
+// per event, so a failure says which pipe stayed open and when the others closed.
+const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = () => {}) => {
+  const found = spawnSync('where.exe', ['bash.exe'], { encoding: 'utf8', windowsHide: true })
+  const bash = found.stdout.split(/\r?\n/).find(file => /[\\/]Git[\\/].*[\\/]bash\.exe$/i.test(file))
+  assert.ok(bash, 'Git Bash is needed to reproduce Cursor on Windows')
+  const child = spawn(bash, ['-c', 'exec "$@"', 'cursor', process.execPath, board.script, ...args], {
+    env: { ...board.env, ...env }, stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'ignore'], windowsHide: true,
+  })
+  mark(`bash ${child.pid} started ${args.join(' ')} through ${bash}`)
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const open = new Set(['stdout', 'stderr', 'fd3', 'fd4', 'bash exit'])
+  const end = (stream, name) => new Promise((done, fail) => { stream.once('end', () => { open.delete(name); mark(`${name} EOF`); done() }); stream.once('error', fail) })
+  const exited = new Promise((done, fail) => {
+    child.once('exit', (code, signal) => { open.delete('bash exit'); mark(`bash exit code=${code} signal=${signal}`); done({ code, signal }) })
+    child.once('error', fail)
+  })
+  let timer
+  try {
+    const [result] = await Promise.race([
+      Promise.all([exited, end(child.stdout, 'stdout'), end(child.stderr, 'stderr'), end(child.stdio[3], 'fd3'), end(child.stdio[4], 'fd4')]),
+      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
+    ])
+    assert.equal(result.code, 0, stderr)
+    return { stdout, stderr }
+  } catch (error) {
+    mark(`cursor shell failed: ${error.message.split('\n')[0]}`)
+    await stop()
+    mark('stop done')
+    throw error
+  } finally {
+    clearTimeout(timer)
+    if (child.exitCode === null && child.signalCode === null) child.kill()
+    child.stdout.destroy()
+    child.stderr.destroy()
+    child.stdio[3].destroy()
+    child.stdio[4].destroy()
+    await exited
+  }
+}
+
+const closeFixturePage = async board => {
+  if (!existsSync(board.served)) return
+  const { url } = JSON.parse(readFileSync(board.served, 'utf8'))
+  const { port, searchParams } = new URL(url)
+  await new Promise(done => {
+    const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+    req.on('error', done)
+    // A page that accepted the connection but never answers must not hold the test's cleanup.
+    req.setTimeout(5000, () => req.destroy(new Error('the close request timed out')))
+    req.end('{}')
+  })
+}
+
+const processAlive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
+
+// A stand-in browser: a small Windows program built here, so no real browser opens on the tester's
+// screen. `body` is its Main. Synthetic data only.
+// Each body is built once per test run and copied into place. The .NET Framework compiler that
+// ships with Windows builds one in about a second; Add-Type starts PowerShell and the compiler in
+// one process and took more than 15 s on a cold CI runner (#1166), so it is only the fallback.
+const standInBuilds = new Map()
+const buildStandIn = (body, env) => {
+  const built = standInBuilds.get(body)
+  if (built !== undefined) return built
+  const dir = mkdtempSync(join(tmpdir(), 'board-standin-'))
+  process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
+  const source = join(dir, 'browser.cs')
+  const exe = join(dir, 'browser.exe')
+  writeFileSync(source, `using System; using System.IO; using System.Diagnostics; using System.Threading;\npublic static class Browser { public static void Main() { ${body} } }`)
+  const windows = process.env.SystemRoot ?? 'C:\\Windows'
+  const csc = join(windows, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
+  if (existsSync(csc)) {
+    execFileSync(csc, ['/nologo', '/target:winexe', `/out:${exe}`, source], { windowsHide: true, stdio: 'pipe', timeout: 15_000 })
+  } else {
+    const powershell = join(windows, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
+      env: { ...env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: exe }, windowsHide: true, stdio: 'pipe', timeout: 15_000,
+    })
+  }
+  standInBuilds.set(body, exe)
+  return exe
+}
+const compileStandIn = (board, exe, body) => {
+  mkdirSync(resolve(exe, '..'), { recursive: true })
+  copyFileSync(buildStandIn(body, board.env), exe)
+}
+// Writes its PID for the test and stays up, as a browser window does.
+const SLEEPING_BROWSER = 'File.WriteAllText(Environment.GetEnvironmentVariable("BOARD_TEST_BROWSER_PID"), Process.GetCurrentProcess().Id.ToString()); Thread.Sleep(20000);'
+// Notes that it was started, then exits with an error at once, as a browser with no display does.
+const FAILING_BROWSER = 'File.AppendAllText(Environment.GetEnvironmentVariable("BOARD_TEST_FAILED_BROWSERS"), Process.GetCurrentProcess().Id.ToString() + "\\n"); Environment.Exit(1);'
+
+// Loaded into the `--html` process: notes every PowerShell it starts, with its exit code, time and
+// stderr (read here instead of dropped), so a run that lost Cursor's pipes says what its launcher did.
+const launchLogPreload = log => `const cp = require('node:child_process')
+const fs = require('node:fs')
+const note = line => { try { fs.appendFileSync(${JSON.stringify(log)}, Date.now() + ' ' + line + '\\n') } catch {} }
+const isPowerShell = file => /(?:^|[\\\\/])powershell(?:\\.exe)?$/i.test(String(file))
+const spawn = cp.spawn
+cp.spawn = function (file, args, options) {
+  if (!isPowerShell(file)) return spawn.apply(this, arguments)
+  const stdio = options?.stdio === 'ignore' ? ['ignore', 'ignore', 'pipe'] : options?.stdio
+  const child = spawn.call(this, file, args, { ...options, stdio })
+  const began = Date.now()
+  let err = ''
+  child.stderr?.on('data', chunk => { err += chunk })
+  note('powershell ' + child.pid + ' started, stdio ' + JSON.stringify(options?.stdio))
+  child.once('exit', (code, signal) => note('powershell ' + child.pid + ' exit code=' + code + ' signal=' + signal + ' after ' + (Date.now() - began) + ' ms, stderr ' + JSON.stringify(err.trim().slice(0, 600))))
+  return child
+}
+const execFileSync = cp.execFileSync
+cp.execFileSync = function (file) {
+  if (!isPowerShell(file)) return execFileSync.apply(this, arguments)
+  const began = Date.now()
+  try { return execFileSync.apply(this, arguments) } finally { note('powershell execFileSync took ' + (Date.now() - began) + ' ms') }
+}
+process.on('exit', code => note('--html process ' + process.pid + ' exit ' + code))
+require('node:module').syncBuiltinESMExports()
+`
+
+// The paths a browser-startup test uses: a Program Files of its own with Edge and Chrome slots, the
+// files the stand-ins and the `--html` process write, and the launcher log.
+const browserFixture = board => {
+  const programs = join(board.dir, 'Programs & Friends')
+  return {
+    programs,
+    edge: join(programs, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    chrome: join(programs, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    marker: join(board.dir, 'browser.pid'),
+    failed: join(board.dir, 'failed-browsers.txt'),
+    launcher: join(board.dir, 'launcher.pid'),
+    launchLog: join(board.dir, 'launch.log'),
+    preload: join(board.dir, 'launch-log.cjs'),
+  }
+}
+
+// Runs `--html` the way Cursor does against the fixture's browsers, with the launcher log loaded into
+// the `--html` process; `pid` is the stand-in that stays running, or undefined. Every step is marked.
+const htmlThroughCursor = async (board, fixture, log) => {
+  writeFileSync(fixture.preload, launchLogPreload(fixture.launchLog))
+  writeFileSync(board.script, `import { writeFileSync as recordLauncherPid } from 'node:fs'\nif (process.argv.includes('--html')) recordLauncherPid(${JSON.stringify(fixture.launcher)}, String(process.pid))\n${readFileSync(board.script, 'utf8')}`)
+  const served = await board.serve()
+  assert.ok(board.urlOf(served), served)
+  log.mark(`page served on port ${new URL(board.urlOf(served)).port}`)
+  const env = {
+    AGENT_BOARD_TEST_PID: '', ProgramFiles: fixture.programs, 'ProgramFiles(x86)': fixture.programs, BOARD_TEST_BROWSER_PID: fixture.marker,
+    BOARD_TEST_FAILED_BROWSERS: fixture.failed, NODE_OPTIONS: `--require ${JSON.stringify(fixture.preload)}`,
+  }
+  let pid
+  const stop = async () => {
+    if (existsSync(fixture.marker)) {
+      pid = Number(readFileSync(fixture.marker, 'utf8'))
+      if (processAlive(pid)) process.kill(pid)
+      for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    }
+    log.mark(`stand-in after the failed run: ${pid === undefined ? 'never started' : `${pid}, ${processAlive(pid) ? 'still alive' : 'stopped'}`}`)
+    await closeFixturePage(board)
+    await delay(200)
+  }
+  const result = await cursorShell(board, ['--html'], env, stop, log.mark)
+  for (let tries = 0; !existsSync(fixture.marker) && tries < 20; tries++) await delay(100)
+  if (existsSync(fixture.marker)) pid = Number(readFileSync(fixture.marker, 'utf8'))
+  log.mark(`stand-in ${pid === undefined ? 'never started' : `${pid} started, ${processAlive(pid) ? 'alive' : 'gone'}`}`)
+  return { ...result, pid: () => pid }
+}
+
+// What the `--html` process's launcher log holds so far, for the phase log.
+const launcherLines = fixture => existsSync(fixture.launchLog) ? readFileSync(fixture.launchLog, 'utf8').trim().split('\n').filter(Boolean).map(entry => entry.replace(' ', ' launcher: ')) : []
+
+// Stops the stand-in and the `--html` process the fixture may have left, then removes the fixture.
+const endBrowserFixture = async (board, fixture, log, pid) => {
+  if (pid === undefined && existsSync(fixture.marker)) pid = Number(readFileSync(fixture.marker, 'utf8'))
+  if (pid && processAlive(pid)) process.kill(pid)
+  if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+  if (pid) assert.ok(!processAlive(pid), 'the stand-in browser must stop before cleanup')
+  if (existsSync(fixture.launcher)) {
+    const launcherPid = Number(readFileSync(fixture.launcher, 'utf8'))
+    if (processAlive(launcherPid)) process.kill(launcherPid)
+    for (let tries = 0; processAlive(launcherPid) && tries < 50; tries++) await delay(100)
+    log.mark(`--html process ${launcherPid} ${processAlive(launcherPid) ? 'still alive' : 'gone'}`)
+    assert.ok(!processAlive(launcherPid), 'the board launcher must stop before cleanup')
+  }
+  await board.end([])
+  log.mark('fixture removed')
+}
+
+// Runs a browser-startup test body with the phase log; a failure, in the body or in the cleanup,
+// carries the whole log, and the cleanup never hides the body's error.
+const browserStartupTest = async body => {
+  const board = serveIn()
+  const fixture = browserFixture(board)
+  const log = phaseLog(23_000, () => launcherLines(fixture))
+  let pid
+  let failure
+  try {
+    pid = await body(board, fixture, log)
+  } catch (error) {
+    failure = error
+  } finally {
+    log.end()
+    try { await endBrowserFixture(board, fixture, log, pid) } catch (error) { log.mark(`cleanup failed: ${error.message.split('\n')[0]}`); failure ??= error }
+  }
+  if (failure !== undefined) {
+    failure.message = `${failure.message}\n${log.text()}`
+    throw failure
+  }
+}
+
+test('Windows server startup releases Cursor pipes while its page stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  try {
+    const result = await cursorShell(board, ['--serve', '--no-open'], {}, () => closeFixturePage(board))
+    assert.ok(board.urlOf(result.stdout), result.stdout)
+    const server = JSON.parse(readFileSync(board.served, 'utf8'))
+    assert.ok(processAlive(server.pid), 'the page must outlive the caller pipes')
+  } finally { await board.end([]) }
+})
+
+test('on Windows the page address reaches the shell exactly as served, with no wildcard escaping', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  const opened = join(board.dir, 'opened.txt')
+  const preload = join(board.dir, 'record-open.cjs')
+  // The launcher's own PowerShell runs, so its escaping is the real one, but Start-Process is swapped
+  // for a function that only notes -FilePath: no window opens on the tester's screen.
+  const needle = 'Microsoft.PowerShell.Management\\Start-Process'
+  const recorder = `function Record-Start { param($FilePath, $ArgumentList, $WorkingDirectory, [switch]$PassThru, $WindowStyle) [IO.File]::AppendAllText('${opened}', $FilePath + [Environment]::NewLine) }; `
+  writeFileSync(preload, `const cp = require('node:child_process')
+const spawn = cp.spawn
+cp.spawn = function (file, args, options) {
+  const at = Array.isArray(args) ? args.indexOf('-EncodedCommand') : -1
+  const command = at >= 0 ? Buffer.from(args[at + 1], 'base64').toString('utf16le') : ''
+  if (!command.includes(${JSON.stringify(needle)}) || command.includes('--serve-child')) return spawn.apply(this, arguments)
+  const copy = [...args]
+  copy[at + 1] = Buffer.from(${JSON.stringify(recorder)} + command.split(${JSON.stringify(needle)}).join('Record-Start'), 'utf16le').toString('base64')
+  return spawn.call(this, file, copy, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  let url = null
+  try {
+    const env = { ...board.env, AGENT_BOARD_TEST_PID: '', NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve'], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stdout}\n${stderr}`)) : done(stdout))))
+    url = board.urlOf(out)
+    assert.ok(url, out)
+    for (let tries = 0; !existsSync(opened) && tries < 50; tries++) await delay(100)
+    assert.deepEqual(readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean), [url], 'the address must not gain backticks')
+  } finally {
+    await board.end(url ? [url] : [])
+  }
+})
+
+test('a Windows page starts from a folder whose name holds a curly apostrophe, brackets and PowerShell text, and runs none of it', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  // ’ ends a PowerShell single-quoted string as ' does, and Start-Process reads -WorkingDirectory as a wildcard.
+  const folder = join(board.dir, '[x] x’;New-Item -ItemType File -Name injected -Force;#')
+  const path = join(folder, 'progress.md')
+  const script = join(folder, 'agent-board.mjs')
+  const mine = servedAt(join(board.dir, 'run'), path)
+  try {
+    mkdirSync(folder)
+    writeFileSync(path, FILE)
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const out = await new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open'], { env: board.env, cwd: board.dir, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stdout}\n${stderr}`)) : done(stdout))))
+    assert.ok(board.urlOf(out), out)
+    for (const where of [board.dir, folder]) assert.equal(existsSync(join(where, 'injected')), false, 'a folder name never runs as PowerShell code')
+  } finally {
+    const record = existsSync(mine) ? JSON.parse(readFileSync(mine, 'utf8')) : null
+    if (record !== null) {
+      spawnSync(process.execPath, [script, '--stop'], { env: board.env, cwd: board.dir, windowsHide: true })
+      for (let tries = 0; processAlive(record.pid) && tries < 50; tries++) await delay(100)
+    }
+    await board.end([])
+  }
+})
+
+test('Windows browser startup releases Cursor pipes while the browser stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+  // The Edge slot holds a file that is not a program, so the launcher has to move on to Chrome.
+  mkdirSync(resolve(fixture.edge, '..'), { recursive: true })
+  writeFileSync(fixture.edge, 'synthetic invalid executable')
+  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browser compiled')
+  const result = await htmlThroughCursor(board, fixture, log)
+  assert.ok(board.urlOf(result.stdout), result.stdout)
+  assert.match(result.stdout, /Opened Agent Board/, result.stdout)
+  assert.ok(result.pid() !== undefined, `the stand-in browser must start: ${result.stdout} ${result.stderr}`)
+  assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
+  return result.pid()
+}))
+
+test('a Windows browser that exits with an error at once gives way to the next browser, and Cursor pipes are still released', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+  // Start-Process returns once the program exists, so a browser that exits with an error right
+  // away (no display, no sandbox) would otherwise count as opened and the person would see nothing.
+  compileStandIn(board, fixture.edge, FAILING_BROWSER)
+  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browsers compiled')
+  const result = await htmlThroughCursor(board, fixture, log)
+  assert.ok(board.urlOf(result.stdout), result.stdout)
+  assert.match(result.stdout, /Opened Agent Board/, result.stdout)
+  assert.ok(existsSync(fixture.failed), 'the failing Edge stand-in must have been tried first')
+  assert.equal(readFileSync(fixture.failed, 'utf8').trim().split('\n').length, 1, 'the failing Edge stand-in is tried once')
+  assert.ok(result.pid() !== undefined, `the Chrome stand-in must start after Edge failed: ${result.stdout} ${result.stderr}`)
+  assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
+  return result.pid()
+}))
+
+test('Windows page startup times out without leaving its child or ready files', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'stall-child.cjs')
+  const marker = join(board.dir, 'stalled.pid')
+  writeFileSync(preload, `if (process.argv.includes('--serve-child')) { require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15000) }\n`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let pid
+  try {
+    const began = performance.now()
+    const out = await board.serve()
+    const elapsed = performance.now() - began
+    assert.ok(elapsed >= 9000 && elapsed < 18000, `startup ended after ${elapsed} ms`)
+    assert.equal(out.trim(), EN.serveFailed(EN.serveNotStarted))
+    assert.ok(existsSync(marker), 'the child must start before the timeout')
+    pid = Number(readFileSync(marker, 'utf8'))
+    for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    assert.ok(!processAlive(pid), 'the timed-out child must stop')
+    assert.ok(!readdirSync(resolve(board.served, '..')).some(name => name.startsWith('.agent-board-ready-')), 'startup files must be removed')
+  } finally {
+    if (pid === undefined && existsSync(marker)) pid = Number(readFileSync(marker, 'utf8'))
+    if (pid && processAlive(pid)) process.kill(pid)
+    if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    await board.end([])
+  }
+})
 test('a page a test started stops by itself once that test process is gone, and opens no window (#959)', async () => {
   const board = serveIn()
   // Stands in for a test run that is killed before it can close its page.
@@ -5949,6 +6275,26 @@ test('Windows page ACL checks use the system module instead of an inherited modu
   } finally { await board.end([url]) }
 })
 
+test('Windows page launcher uses the system module while preserving the caller module path', { skip: process.platform !== 'win32', timeout: 30_000 }, async () => {
+  const board = serveIn()
+  const modules = join(board.dir, 'untrusted-modules')
+  const module = join(modules, 'Microsoft.PowerShell.Management')
+  const touched = join(board.dir, 'untrusted-launcher-loaded')
+  const received = join(board.dir, 'child-module-path')
+  const preload = join(board.dir, 'record-module-path.cjs')
+  mkdirSync(module, { recursive: true })
+  writeFileSync(join(module, 'Microsoft.PowerShell.Management.psd1'), "@{ RootModule = 'fake.psm1'; ModuleVersion = '99.0.0'; GUID = '34000000-0000-4000-8000-000000000002'; FunctionsToExport = @('Start-Process') }")
+  writeFileSync(join(module, 'fake.psm1'), `function Start-Process { Set-Content -LiteralPath '${touched.replaceAll("'", "''")}' -Value 'unexpected'; throw 'synthetic untrusted launcher' }; Export-ModuleMember -Function Start-Process`)
+  writeFileSync(preload, `if (process.argv.includes('--serve-child')) require('node:fs').writeFileSync(${JSON.stringify(received)}, process.env.PSModulePath ?? '')\n`)
+  Object.assign(board.env, { PSModulePath: modules, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  let url = null
+  try {
+    url = board.urlOf(await board.serve())
+    assert.ok(url)
+    assert.ok(!existsSync(touched), 'the inherited module must not start the server')
+    assert.equal(readFileSync(received, 'utf8'), modules, 'the server keeps the caller module path')
+  } finally { await board.end([url]) }
+})
 test('Windows page ACL checks work without PowerShell command discovery', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 40_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'no-module-discovery.cjs')
@@ -5988,7 +6334,7 @@ const countPowerShell = (board, firstMs = 0) => {
   return starts
 }
 
-test('a cold Windows page start runs one PowerShell for the command and the server it starts together, and one more only to read again a folder it took another account\'s grant from', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 60_000 }, async () => {
+test('a cold Windows page start checks access once and uses a separate detached launcher', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 60_000 }, async () => {
   const board = serveIn()
   const starts = countPowerShell(board)
   let url = null
@@ -5996,9 +6342,9 @@ test('a cold Windows page start runs one PowerShell for the command and the serv
     url = board.urlOf(await board.serve(['--quiet-board']))
     assert.ok(url)
     const cold = starts.cold()
-    assert.deepEqual(starts(), cold, `the command reads the folder once; the server reuses that check and reads its new address file through icacls${starts.detail()}`)
+    assert.deepEqual(starts(), [...cold, 'launcher'], `the command reads the folder once; the server reuses that check and reads its new address file through icacls${starts.detail()}`)
     assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
-    assert.deepEqual(starts(), [...cold, 'parent'], `a second start reads the folder and the running page's address file in one start${starts.detail()}`)
+    assert.deepEqual(starts(), [...cold, 'launcher', 'parent'], `a second start reads the folder and the running page's address file in one start${starts.detail()}`)
   } finally { await board.end([url]) }
 })
 
@@ -6010,7 +6356,7 @@ test('a Windows page start whose first PowerShell start takes over 10 s still op
     const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
     url = board.urlOf(out)
     assert.ok(url, out)
-    assert.deepEqual(starts(), starts.cold(), starts.detail())
+    assert.deepEqual(starts(), [...starts.cold(), 'launcher'], starts.detail())
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
   } finally { await board.end([url]) }
 })
@@ -6784,9 +7130,11 @@ const publicationSpawn340 = publicationCp340.spawn
 const publicationFds340 = new Map()
 let publicationReads340 = 0
 publicationCp340.spawn = (command, args, options) => {
-  if (process.argv.includes('--serve') && args.includes('--serve-child')) {
+  const encoded = args.indexOf('-EncodedCommand')
+  const startsChild = args.includes('--serve-child') || (encoded >= 0 && Buffer.from(args[encoded + 1], 'base64').toString('utf16le').includes('--serve-child'))
+  if (process.argv.includes('--serve') && startsChild) {
     publicationWrite340(${JSON.stringify(lost)}, 'lost')
-    return publicationSpawn340(command, ['--input-type=module', '-e', 'process.exit(0)'], options)
+    return publicationSpawn340(process.execPath, ['--input-type=module', '-e', 'process.exit(0)'], options)
   }
   return publicationSpawn340(command, args, options)
 }
@@ -12543,7 +12891,7 @@ test('#1085: a style picked on the page is written to the settings file with its
   } finally { await board.close() }
 })
 
-test('Settings has one labelled button and three accessible sections in every language and keeps focus inside until closed', async () => {
+test('Settings has one labelled button and four accessible sections in every language and keeps focus inside until closed', async () => {
   for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
     const html = await sourcePage(lang)
     assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
@@ -12551,7 +12899,7 @@ test('Settings has one labelled button and three accessible sections in every la
     assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
     const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
     for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
-    assert.equal((panel.match(/<section\b/g) ?? []).length, 3)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 4)
     const dom = await pageDom(html, redesignModel(), { width: 375 })
     assert.equal(dom.node('settings').hidden, true)
     dom.node('settings-toggle').click()

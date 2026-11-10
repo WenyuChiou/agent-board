@@ -13,6 +13,8 @@ export const settingsPanel = (s: Strings, language: SettingsLang, isLan = false,
   (['auto', 'en', 'zh-TW', 'zh-CN'] as const).map(lang => `<option value="${lang}"${language === lang ? ' selected' : ''}>${esc(lang === 'auto' ? s.settingsAutomatic : lang === 'en' ? s.settingsEnglish : lang === 'zh-TW' ? s.settingsTraditional : s.settingsSimplified)}</option>`).join('') +
   `</select>${isLangOverridden ? `<p class="settings-label" id="settings-lang-override">${esc(s.settingsLanguageOverridden)}</p>` : ''}</section><section><h3>${esc(s.themeMenu)}</h3>${themeControls(s)}</section>` +
   `<section id="settings-notifications"><h3>${esc(s.settingsNotifications)}</h3><button type="button" id="settings-notify" data-local role="switch" aria-checked="false" aria-label="${esc(s.settingsNotifications)}">${esc(s.settingsOff)}</button></section>` +
+  `<section id="settings-agents"><h3 id="settings-agents-title">${esc(s.settingsAgents)}</h3><ul id="settings-agent-list" aria-labelledby="settings-agents-title"></ul>` +
+  (isLan ? '' : `<div id="settings-agent-confirm" hidden><p id="settings-agent-question"></p><div class="settings-choices"><button type="button" id="settings-agent-yes">${esc(s.settingsAgentConfirm)}</button><button type="button" id="settings-agent-cancel">${esc(s.settingsAgentCancel)}</button></div></div>`) + `</section>` +
   `<p id="settings-result" role="status" aria-live="polite" aria-atomic="true"></p></div></div>`
 
 export const settingsCss = `
@@ -30,6 +32,13 @@ export const settingsCss = `
 .settings-label{margin:var(--s3) 0 var(--s2);color:var(--muted)}
 #settings-result{margin:var(--s3) 0 0;min-height:1.5em}
 #settings-result.alert{color:var(--alert)}
+#settings-agent-list{list-style:none;padding:0;margin:0}
+.settings-agent{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--s1) var(--s2);align-items:center;padding-block:var(--s2)}
+.settings-agent-name,.settings-agent-state{display:block;overflow-wrap:anywhere}
+.settings-agent-state{font-size:var(--text-xs);color:var(--muted)}
+.settings-agent button{padding:var(--s1) var(--s2);background:var(--surface);color:var(--ink);border:1px solid var(--btn-line);border-radius:var(--radius-s);cursor:pointer}
+.settings-agent-note{grid-column:1/-1;margin:0;font-size:var(--text-xs);overflow-wrap:anywhere;color:var(--muted)}
+#settings-agent-question{overflow-wrap:anywhere}
 `
 
 // Runs inside the page's existing closure, sharing its authenticated calls and card model.
@@ -61,8 +70,10 @@ export const settingsScript = String.raw`
     settingsButton.setAttribute('aria-expanded', 'true');
     document.getElementById('shell').inert = true;
     document.getElementById('settings-close').focus();
+    refreshSettingsAgents();
   }
   function closeSettings() {
+    if (settingsAgentConfirm) settingsAgentConfirm.hidden = true;
     settings.hidden = true;
     settingsButton.setAttribute('aria-expanded', 'false');
     document.getElementById('shell').inert = false;
@@ -94,6 +105,71 @@ export const settingsScript = String.raw`
   document.querySelectorAll('[data-theme-set]').forEach(function (node) {
     node.addEventListener('click', function () { settingsSay(node.getAttribute('data-changed')); });
   });
+  var settingsAgentList = document.getElementById('settings-agent-list');
+  var settingsAgentConfirm = document.getElementById('settings-agent-confirm');
+  var settingsAgentChoice = null;
+  var settingsAgentButtons = {};
+  var settingsAgentPending = false;
+  var settingsAgentRead = 0;
+  function refreshSettingsAgents() {
+    var read = ++settingsAgentRead;
+    return call('/api/agents').then(function (data) {
+      if (read !== settingsAgentRead) return;
+      if (!data.ok || !Array.isArray(data.rows)) { settingsSay(data.note || w('settingsAgentsReadFailed'), true); return; }
+      var active = document.activeElement;
+      var focusedAgent = active && active.getAttribute('data-settings-agent');
+      settingsAgentList.textContent = '';
+      settingsAgentButtons = {};
+      data.rows.forEach(function (row) {
+        var item = document.createElement('li'); item.className = 'settings-agent';
+        var summary = document.createElement('div');
+        var name = document.createElement('strong'); name.className = 'settings-agent-name'; name.textContent = row.name;
+        var state = document.createElement('span'); state.className = 'settings-agent-state'; state.textContent = row.state;
+        summary.appendChild(name); summary.appendChild(state); item.appendChild(summary);
+        if (!isLan && (row.button === 'setup' || row.button === 'remove')) {
+          var button = document.createElement('button'); button.type = 'button';
+          var label = w(row.button === 'setup' ? 'settingsAgentSetup' : 'settingsAgentRemove');
+          button.textContent = label; button.setAttribute('aria-label', label + ' ' + row.name);
+          button.setAttribute('data-settings-agent', row.agent);
+          button.addEventListener('click', function () { previewSettingsAgent(row); });
+          settingsAgentButtons[row.agent] = button; item.appendChild(button);
+        }
+        if (!isLan && row.note) { var note = document.createElement('p'); note.className = 'settings-agent-note'; note.textContent = row.note; item.appendChild(note); }
+        settingsAgentList.appendChild(item);
+      });
+      if (focusedAgent && !settings.hidden) (settingsAgentButtons[focusedAgent] || document.getElementById('settings-close')).focus();
+    }, function () { settingsSay(w('settingsAgentsReadFailed'), true); });
+  }
+  function previewSettingsAgent(row) {
+    if (settingsAgentPending) { settingsSay(w('settingsAgentsBusy'), true); return; }
+    settingsAgentPending = true;
+    call('/api/agents?agent=' + encodeURIComponent(row.agent) + '&action=' + row.button).then(function (data) {
+      if (!data.ok) { settingsSay(data.note || w('pressFailed'), true); return; }
+      if (settings.hidden) return;
+      settingsAgentChoice = { agent: row.agent, action: row.button };
+      document.getElementById('settings-agent-question').textContent = data.note;
+      settingsAgentConfirm.hidden = false;
+      document.getElementById('settings-agent-yes').focus();
+    }, function () { settingsSay(w('pressFailed'), true); }).finally(function () { settingsAgentPending = false; });
+  }
+  if (!isLan) {
+    document.getElementById('settings-agent-cancel').addEventListener('click', function () {
+      settingsAgentConfirm.hidden = true;
+      if (settingsAgentChoice && settingsAgentButtons[settingsAgentChoice.agent]) settingsAgentButtons[settingsAgentChoice.agent].focus();
+      settingsAgentChoice = null;
+    });
+    document.getElementById('settings-agent-yes').addEventListener('click', function () {
+      if (!settingsAgentChoice || settingsAgentPending) return;
+      var choice = settingsAgentChoice; settingsAgentChoice = null; settingsAgentPending = true;
+      settingsAgentConfirm.hidden = true; document.getElementById('settings-close').focus();
+      call('/api/agents/' + choice.action, { agent: choice.agent }).then(function (data) {
+        settingsSay(data.note || w('pressFailed'), !data.ok);
+      }, function () { settingsSay(w('pressFailed'), true); }).finally(function () {
+        settingsAgentPending = false;
+        refreshSettingsAgents().then(function () { if (!settings.hidden) (settingsAgentButtons[choice.agent] || document.getElementById('settings-close')).focus(); });
+      });
+    });
+  }
   settingsLanguage.addEventListener('change', function () {
     var lang = settingsLanguage.value;
     settingsLanguage.disabled = true;
