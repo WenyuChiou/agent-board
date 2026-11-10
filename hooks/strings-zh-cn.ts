@@ -801,7 +801,6 @@ export const ZH_CN: Strings = {
   barStyleUnreadable: '看板的设置文件不是有效的 JSON，设置没有改，也没有覆盖它。请修好或删掉 progress-settings.json 再选一次。',
   barStyleKey: (name: string): string => `s 换进度条样式（现在：${name}）`,
   pgBarLabel: (count: string, step: string): string => `${count} · ${step}`,
-  serveLive: '实时',
   serveLiveHint: '每 3 秒读一次看板',
   sideTitle: '分类与筛选',
   sideViews: '视图',

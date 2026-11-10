@@ -807,7 +807,6 @@ export const EN: Strings = {
   barStyleUnreadable: 'The board’s settings file is not valid JSON, so settings were not changed and the file was not overwritten. Fix or delete progress-settings.json, then pick again.',
   barStyleKey: (name: string): string => `s changes the progress bar style (now: ${name})`,
   pgBarLabel: (count: string, step: string): string => `${count} · ${step}`,
-  serveLive: 'Live',
   serveLiveHint: 'Reads the board every 3 seconds',
   sideTitle: 'Sort and filter',
   sideViews: 'Views',

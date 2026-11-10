@@ -12,7 +12,7 @@ import { boardItems, boardScreen, emptyBoardState } from '../../hooks/board'
 import type { BoardState } from '../../hooks/board'
 import { countDay, journalLine } from '../../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../../hooks/mirror'
-import { GITHUB_PATH, MARK_PATH, POWER_PATH } from '../../hooks/page-look'
+import { BOARD_PATH, CORNER_LIGHT, GITHUB_PATH, POWER_PATH } from '../../hooks/page-look'
 import { settingsToggle } from '../../hooks/page-settings'
 import { DARK, LIGHT, PAGE_DARK, PAGE_LIGHT } from '../../hooks/palette'
 import type { Palette } from '../../hooks/palette'
@@ -218,17 +218,18 @@ const brandDefs = (w: number, h: number, glow: [number, number] = [0.78, 0.35]):
 const brandGround = (w: number, h: number): string =>
   `<rect width="${w}" height="${h}" fill="url(#sky)"/><rect width="${w}" height="${h}" fill="url(#glow)"/><rect width="${w}" height="${h}" fill="url(#dots)"/>`
 
-// The board mark, `size` square at x, y, and beside it the wordmark, both on the dark ground.
+// The Corner Light, `size` square at x, y, in the dark ground's ink with its light amber; or, with a name,
+// the name "Agent Board" with the light between its words, `size` tall from its top to the foot of its g.
 const brandMark = (x: number, y: number, size = 34, hasName = true): string => {
-  const k = size / LOCKUP.grid.size
-  if (!hasName) return `<path transform="translate(${x} ${y}) scale(${num(size / 64)})" fill="${PAGE_DARK.brand}" d="${MARK_PATH}"/>`
-  return `<g transform="translate(${num(x - LOCKUP.grid.x * k)} ${num(y - LOCKUP.grid.y * k)}) scale(${num(k)})">${lockupBody(BRAND.ink, PAGE_DARK.brand)}</g>`
+  if (!hasName) return `<g transform="translate(${x} ${y}) scale(${num(size / 64)})"><path fill="${BRAND.ink}" d="${BOARD_PATH}"/><circle fill="${PAGE_DARK.brand}" cx="${CORNER_LIGHT.cx}" cy="${CORNER_LIGHT.cy}" r="${CORNER_LIGHT.r}"/></g>`
+  const k = size / LOCKUP.height
+  return `<g transform="translate(${num(x - LOCKUP.left * k)} ${num(y - LOCKUP.top * k)}) scale(${num(k)})">${lockupBody(BRAND.ink, PAGE_DARK.brand)}</g>`
 }
 
 // docs/images/brand/: the lockup for a light and for a dark ground; the lockup and the mark alone that
 // follow the reader's theme through their own style (the README's title is that lockup: GitHub gives
-// an SVG picture its page's theme). Paths only, on a transparent ground.
-const lockupOpen = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(LOCKUP.width)}" height="${Math.ceil(LOCKUP.height)}" viewBox="${LOCKUP.left} ${LOCKUP.top} ${LOCKUP.width} ${LOCKUP.height}" role="img" aria-label="agent-board"><title>agent-board</title>`
+// an SVG picture its page's theme). Paths and circles only, on a transparent ground.
+const lockupOpen = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(LOCKUP.width)}" height="${Math.ceil(LOCKUP.height)}" viewBox="${LOCKUP.left} ${LOCKUP.top} ${LOCKUP.width} ${LOCKUP.height}" role="img" aria-label="Agent Board"><title>Agent Board</title>`
 const brandLockup = (mode: 'light' | 'dark'): string => {
   const page = mode === 'light' ? PAGE_LIGHT : PAGE_DARK
   return `${lockupOpen}${lockupBody(page.ink, page.brand)}</svg>\n`
@@ -236,7 +237,7 @@ const brandLockup = (mode: 'light' | 'dark'): string => {
 const brandLogo = (): string =>
   `${lockupOpen}<style>.ink{fill:${PAGE_LIGHT.ink}}.brand{fill:${PAGE_LIGHT.brand}}@media (prefers-color-scheme:dark){.ink{fill:${PAGE_DARK.ink}}.brand{fill:${PAGE_DARK.brand}}}</style>${lockupBody('.ink', '.brand')}</svg>\n`
 const brandMarkFile = (): string =>
-  `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="agent-board"><title>agent-board</title><style>path{fill:${PAGE_LIGHT.brand}}@media (prefers-color-scheme:dark){path{fill:${PAGE_DARK.brand}}}</style><path d="${MARK_PATH}"/></svg>\n`
+  `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Agent Board"><title>Agent Board</title><style>.ink{fill:${PAGE_LIGHT.ink}}.brand{fill:${PAGE_LIGHT.brand}}@media (prefers-color-scheme:dark){.ink{fill:${PAGE_DARK.ink}}.brand{fill:${PAGE_DARK.brand}}}</style><path class="ink" d="${BOARD_PATH}"/><circle class="brand" cx="${CORNER_LIGHT.cx}" cy="${CORNER_LIGHT.cy}" r="${CORNER_LIGHT.r}"/></svg>\n`
 
 // The logo takes seven tenths of its tile: smaller, a logo with thin lines (OpenAI's) or fine
 // detail (Nous Research's) blurs at the table's 24 px.

@@ -3748,6 +3748,15 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     return nodes.get(id)
   }
   get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
+  // The logo, the icons and the tab icon the server wrote (#1262): a node for each, with its attributes, so the page can paint the light.
+  // The first run's mark waits in a <template>, which the page does not search.
+  for (const [index, found] of [...html.replace(/<template\b[\s\S]*?<\/template>/g, '').matchAll(/<(svg|link)\b([^>]*)>/g)].entries()) {
+    const attrs = Object.fromEntries([...found[2].matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]]))
+    if (found[1] === 'svg' ? !/\bab-(?:logo|icon)\b/.test(attrs.class ?? '') : attrs.rel !== 'icon') continue
+    const node = get(found[1] + '-' + index)
+    node.tag = found[1]
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value)
+  }
   get('.pfoot').appendChild(get('close'))
   for (const id of ['close']) get(id).tag = 'button'
   const matches = (node, selector) => {
@@ -3755,6 +3764,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     if (selector === 'button') return node.tag === 'button'
     if (selector === 'button:not([data-local])') return node.tag === 'button' && node.getAttribute('data-local') === null
     if (selector === 'button[data-static]') return node.tag === 'button' && node.getAttribute('data-static') !== null
+    if (/^\.ab-(?:logo|icon)$/.test(selector)) return String(node.getAttribute('class') ?? '').split(' ').includes(selector.slice(1))
     const tag = selector.match(/^[a-z]+/)?.[0]
     const attrs = [...selector.matchAll(/\[([^=\]]+)(?:=["']?([^\]"']+)["']?)?\]/g)]
     if (tag && node.tag !== tag) return false
@@ -3930,6 +3940,76 @@ const pageLostResults = (dom, label) => {
   assert.ok(card, `The removed card must leave a result labelled ${label}`)
   return pressWalk(card).filter(node => node.className?.includes('press-result'))
 }
+
+// The light in the logo is the board's status (#1262): the page sets one of four classes on the name and on each icon.
+const LIGHT_CLASSES = ['is-idle', 'is-working', 'is-waiting', 'is-offline']
+const lightsOf = dom => dom.query('.ab-logo,.ab-icon').map(node => String(node.getAttribute('class')).split(' ').filter(name => LIGHT_CLASSES.includes(name)).join(' '))
+const lightHtml = () => run('en', ['--chat'], {}, FILE, `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`)
+const quietBoard = { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }
+const askedBoard = { ...quietBoard, asks: [{ key: 'ask-demo', task: 'Question card', project: 'Demo', text: 'Ship it, OK?', kind: 'confirm', chip: 'Confirm', answers: ['Yes', 'No'], canTick: true, canHide: true, command: 'echo demo', reopen: 'claude --resume synthetic-session', send: 'copy', fp: 'first' }] }
+const busyBoard = (() => {
+  const model = viewed({ ...quietBoard, groups: [{ project: 'Demo', rows: [{ key: 'row-demo', title: 'Task card', next: 'Next step', canArchive: true, steps: [], send: 'copy', fp: 'first' }] }] })
+  return { ...model, view: { ...model.view, working: model.view.all.open } }
+})()
+const polling = (read, isDown = () => false) => async () => {
+  if (isDown()) throw new Error('Synthetic connection refused')
+  return { ok: true, json: async () => ({ model: read(), now: 1 }) }
+}
+
+test('the logo and the icons carry the board’s state as a class: idle, working, waiting, and offline when the page loses the board (#1262)', async () => {
+  const html = lightHtml()
+  let current = quietBoard
+  let isDown = false
+  const dom = await pageDom(html, quietBoard, { getBoard: polling(() => current, () => isDown) })
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-idle', 'is-idle', 'is-idle'], 'the name in the sidebar, the icon in the rail and the icon in the narrow header: a quiet, connected board is idle')
+  for (const [name, model, expected] of [['an agent is busy', busyBoard, 'is-working'], ['something needs the person', askedBoard, 'is-waiting'], ['the board is quiet again', quietBoard, 'is-idle']]) {
+    current = model
+    await dom.redraw(model)
+    await dom.settle()
+    assert.deepEqual(lightsOf(dom), [expected, expected, expected], name)
+  }
+  // Something that needs the person outranks work in progress.
+  current = { ...busyBoard, view: { ...busyBoard.view, needs: { ...busyBoard.view.needs, n: 1 } } }
+  await dom.redraw(current)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-waiting', 'is-waiting', 'is-waiting'], 'a question outranks the work')
+  isDown = true
+  await dom.redraw(current)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-offline', 'is-offline', 'is-offline'], 'the page lost the board')
+  isDown = false
+  current = quietBoard
+  await dom.redraw(quietBoard)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-idle', 'is-idle', 'is-idle'], 'the board is back')
+  assert.ok(dom.query('.ab-icon').every(node => String(node.getAttribute('class')).split(' ').includes('ab-icon')), 'the picture keeps its own class while the state changes')
+})
+
+test('the tab icon turns to the needs-you icon while something needs the person, and back (#1262)', async () => {
+  const html = lightHtml()
+  const link = /<link rel="icon"[^>]*\bhref="([^"]+)" data-needs="([^"]+)"/.exec(html)
+  assert.ok(link, 'the page names a calm icon and a needs-you icon')
+  const [, calm, needs] = link
+  assert.notEqual(calm, needs)
+  let current = quietBoard
+  const dom = await pageDom(html, quietBoard, { getBoard: polling(() => current) })
+  await dom.settle()
+  const tab = () => dom.query('link[rel="icon"]')[0].getAttribute('href')
+  assert.equal(tab(), calm, 'calm to begin with')
+  for (const [model, expected, name] of [[askedBoard, needs, 'a question is waiting'], [busyBoard, calm, 'only work is going on'], [askedBoard, needs, 'a question is waiting again'], [quietBoard, calm, 'all is answered']]) {
+    current = model
+    await dom.redraw(model)
+    await dom.settle()
+    assert.equal(tab(), expected, name)
+  }
+})
+
+test('the first run keeps its mark in a template, ready to drop its light into the corner once (#1262)', () => {
+  const mark = /<template id="fresh-mark">(<svg[^>]*>)/.exec(lightHtml())?.[1] ?? ''
+  assert.match(mark, /class="ab-icon is-idle is-arriving"/, 'the template holds the arriving icon')
+  assert.match(mark, /width="44" height="44"/)
+})
 
 test('the serve page and the terminal board answer every action with a visible line', async () => {
   const board = await page()
