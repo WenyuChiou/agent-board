@@ -223,7 +223,7 @@ export type ProgressMirror = {
   // separately so adding prompt events never reinterprets saved turn/end ranks.
   promptOrder?: number
   // Existing question steps provisionally answered by the latest prompt, never prompt text.
-  promptQuestion?: { order: number; state: ProgressSessionState; autoAsk: string | null; tasks: ProgressMirrorTask[] } | null
+  promptQuestion?: { order: number; turnKey?: string; state: ProgressSessionState; autoAsk: string | null; tasks: ProgressMirrorTask[] } | null
   // Timestamp when a prompt replied to a waiting question in chat before the next report (#401).
   replied?: number
   // A person's completion rejects older (or undated) inbox turns without stopping new work.

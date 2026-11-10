@@ -22,6 +22,8 @@ import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
+import { boardLanguage, isLanguageOverridden, type SettingsLang } from '../hooks/board-settings'
+import { settingsPanel } from '../hooks/page-settings'
 import { qrModules, qrText } from '../hooks/qr'
 import { STALE_MS } from '../hooks/parse'
 import { DOING_QUIET_MS, WORKING_MS } from '../hooks/grouping'
@@ -1383,6 +1385,14 @@ test('a naming reply accepts short titles and background in Chinese and English'
   expect(nameReply('one two three four five six seven')).not.toBeNull()
   expect(nameReply(`重做進度面板\n${'字'.repeat(40)}`)).not.toBeNull()
   expect(nameReply(`Build the progress board\n${Array(19).fill('word').join(' ')}`)).not.toBeNull()
+})
+
+test('short first-person refusals are not task names, but read-error titles are', () => {
+  for (const reply of ['I cannot read the file', 'I can’t access the file', 'Sorry, we are unable to read it',
+    "I'm unable to read the file", 'We’re not able to open it', 'Title: "I cannot read the file"',
+    '我無法讀取檔案', '我无法读取文件', '抱歉，我暫時不能讀檔', '任務名稱：「我無法讀取檔案」']) expect(nameReply(reply)).toBeNull()
+  expect(nameReply('Fix cannot read error')?.title).toBe('Fix cannot read error')
+  expect(nameReply('修正無法讀檔')?.title).toBe('修正無法讀檔')
 })
 
 test('a naming reply rejects refusals, sentences, extra lines and answers outside the prompt limits', () => {
@@ -5041,4 +5051,41 @@ test('a native ask reaches the page model with its options and where to answer, 
   const page = servePage(STRINGS.en, 'n')
   expect(page).toContain('} else if (ask.native) {')
   expect(page.slice(page.indexOf('} else if (ask.native) {'), page.indexOf('} else if (ask.isOwn) {'))).not.toContain('canWrite = true')
+})
+
+test('Settings language override detects CLI flag precedence and displays override warning', () => {
+  expect(isLanguageOverridden(null, 'zh-TW', 'en', 'en')).toBe(false)
+  expect(isLanguageOverridden('en', 'zh-TW', 'en', 'en')).toBe(true)
+  expect(isLanguageOverridden('en', 'en', 'en', 'en')).toBe(false)
+  expect(isLanguageOverridden('auto', 'en', null, 'zh-TW')).toBe(true)
+
+  const enOverridden = settingsPanel(STRINGS.en, 'zh-TW', false, true)
+  expect(enOverridden).toContain('id="settings-lang-override"')
+  expect(enOverridden).toContain(STRINGS.en.settingsLanguageOverridden)
+
+  const enNormal = settingsPanel(STRINGS.en, 'en', false, false)
+  expect(enNormal).not.toContain('id="settings-lang-override"')
+})
+
+test('Settings language request on a server started with --lang en preserves precedence, shows override and reloads English', () => {
+  const flag = 'en'
+  let saved: SettingsLang = 'en'
+  expect(boardLanguage(flag, saved, 'en', 'zh-TW')).toBe('en')
+  expect(isLanguageOverridden(flag, saved, 'en', 'zh-TW')).toBe(false)
+
+  saved = 'zh-TW'
+  expect(boardLanguage(flag, saved, 'en', 'zh-TW')).toBe('en')
+  const isOverridden = isLanguageOverridden(flag, saved, 'en', 'zh-TW')
+  expect(isOverridden).toBe(true)
+
+  const reloadedHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverridden)
+  expect(reloadedHtml).toContain(`<h2 id="settings-title">${STRINGS.en.settingsTitle}</h2>`)
+  expect(reloadedHtml).toContain('<option value="zh-TW" selected>')
+  expect(reloadedHtml).toContain(`<p class="settings-label" id="settings-lang-override">${STRINGS.en.settingsLanguageOverridden}</p>`)
+
+  saved = 'en'
+  const isOverriddenAfterReset = isLanguageOverridden(flag, saved, 'en', 'zh-TW')
+  expect(isOverriddenAfterReset).toBe(false)
+  const resetHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverriddenAfterReset)
+  expect(resetHtml).not.toContain('id="settings-lang-override"')
 })

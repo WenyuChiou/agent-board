@@ -411,10 +411,24 @@ try {
   # The receipt is saved: a file that cannot be removed is only a cleanup failure, and one another reporter removed first is none.
   try {
     $scratchCutoff = (Get-Date).AddMinutes(-1)
-    Get-ChildItem -LiteralPath $dir -File | Where-Object {
+    $cleanupFailed = $false
+    foreach ($scratch in @(Get-ChildItem -LiteralPath $dir -File | Where-Object {
       $_.Extension -in @('.tmp', '.receipt', '.fallback', '.timeout', '.complete') -and $_.LastWriteTime -lt $scratchCutoff
-    } | Remove-Item -Force -ErrorAction SilentlyContinue -ErrorVariable cleanupErrors
-    if (@($cleanupErrors | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }).Count -gt 0) { Write-HookError 'CLEANUP_FAILED' }
+    })) {
+      $removed = $false
+      for ($try = 0; $try -lt 5; $try++) {
+        try {
+          Remove-Item -LiteralPath $scratch.FullName -Force -ErrorAction Stop
+          $removed = $true
+          break
+        } catch {
+          if ($_.CategoryInfo.Category -eq 'ObjectNotFound' -or $_.Exception -is [System.Management.Automation.ItemNotFoundException]) { $removed = $true; break }
+          Start-Sleep -Milliseconds 25
+        }
+      }
+      if (-not $removed) { $cleanupFailed = $true }
+    }
+    if ($cleanupFailed) { Write-HookError 'CLEANUP_FAILED' }
     # A turn file over 2 days old goes, and so do the oldest past ${INBOX_MAX_FILES} files or ${INBOX_MAX_BYTES} bytes.
     # Only *.json turn files, each removal counted in ${INBOX_DROPPED_FILE}: a taken or failed file stays.
     $droppedLog = Join-Path $dir '${INBOX_DROPPED_FILE}'

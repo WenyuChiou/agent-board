@@ -13,7 +13,7 @@ import { neverShown } from './fixtures/never-shown.mjs'
 import { hookOrDeferred, turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
-import { HOOK_INPUT_TIMEOUT, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
+import { HOOK_INPUT_TIMEOUT, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
@@ -4947,6 +4947,157 @@ test('Hermes setup keeps a rewritten todo matcher and repairs one changed away f
   assert.equal(hermesHooksOf(readFileSync(path, 'utf8')).post_tool_call.matcher, 'todo')
 }))
 
+test('Hermes install, refresh and removal keep foreign hooks with the board worker name in their commands', () => fixture(f => {
+  const config = hermesConfig(f)
+  const foreign = [
+    '    - {command: "node ./tools/example-agent-board-hook.mjs", timeout: 5}',
+    '    - command: "node ./custom/agent-board-hook.mjs"',
+    '      matcher: terminal',
+    '      timeout: 6',
+    '    - command: node ./tools/plain-agent-board-hook.mjs # personal hook',
+    '      timeout: 7',
+    '    - command: node ./tools/folded-agent-board-hook.mjs',
+    '        --personal',
+    '      timeout: 9',
+    '    - {command: node ./tools/flow-agent-board-hook.mjs, timeout: 8}',
+  ]
+  const original = ['model: synthetic/model', 'hooks:', '  pre_tool_call:', foreign[0],
+    '  post_tool_call:', ...foreign.slice(1), 'display:', '  skin: plain', ''].join('\n')
+  f.save(config, original)
+  const install = () => {
+    const result = f.install('--agent', 'hermes', '--apply')
+    assert.equal(result.status, 0, result.stderr)
+    const text = readFileSync(config, 'utf8')
+    for (const line of foreign) assert.ok(text.split('\n').includes(line), line)
+    return text
+  }
+  const installed = install()
+  const hook = hermesHooksOf(installed).post_tool_call
+  assert.equal(hook.matcher, 'todo')
+  const flow = `    - {command: ${JSON.stringify(hook.command)}, timeout: ${hook.timeout}, matcher: todo}`
+  assert.ok(installed.includes(flow))
+  const copied = `    - {command: ${JSON.stringify(hook.command)}, timeout: 5}`
+  const addCopy = text => text.replace('  pre_tool_call:\n', `  pre_tool_call:\n${copied}\n`)
+  // A dumper may write the recorded command as a folded, single-quoted block entry.
+  const folded = hook.command.replaceAll("'", "''").replace(' "--progress-file"', '\n        "--progress-file"')
+  assert.notEqual(folded, hook.command)
+  const stale = `    - command: '${folded}'\n      timeout: 3\n      matcher: shell`
+  f.save(config, addCopy(installed).replace(flow, stale))
+  assert.equal(install(), addCopy(installed))
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(config, 'utf8'), addCopy(original))
+}))
+
+test('Hermes removal preserves a foreign bare-dash list item after a recorded hook', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  const event = hermesHooksOf(text).post_tool_call
+  const line = `    - {command: ${JSON.stringify(event.command)}, timeout: ${event.timeout}, matcher: todo}`
+  assert.ok(text.includes(line))
+  const sibling = '    -\n      command: "node ./tools/personal-agent-board-hook.mjs"\n      timeout: 5'
+  f.save(config, text.replace(line, `${line}\n${sibling}`))
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(config, 'utf8'), `hooks:\n  post_tool_call:\n${sibling}\n`)
+}))
+
+test('Hermes refresh and removal recognize a recorded Unicode path after YAML escaping', () => fixture(f => {
+  const data = join(f.home, 'caf\u00e9-\u{1f600}')
+  const install = () => f.install('--agent', 'hermes', '--data-dir', data, '--apply')
+  const remove = () => remove774({ ...f, script: join(data, 'agent-board.mjs') }, 'hermes', true, ['--data-dir', data])
+  const installed = install()
+  assert.equal(installed.status, 0, installed.stderr)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  const event = hermesHooksOf(text).post_tool_call
+  const command = JSON.stringify(event.command)
+  const escaped = command.replaceAll('\u00e9', '\\xE9').replaceAll('\u{1f600}', '\\U0001F600')
+  assert.ok(escaped.includes('caf\\xE9-\\U0001F600'), 'the installed command uses the Unicode data path')
+  const line = `    - {command: ${command}, timeout: ${event.timeout}, matcher: todo}`
+  assert.ok(text.includes(line))
+  const foreign = '    - {command: "node ./tools/caf\\xE9-\\U0001F600-agent-board-hook.mjs", timeout: 5}'
+  const formatted = `    - command: ${escaped}\n      timeout: ${event.timeout}\n      matcher: todo\n${foreign}`
+  const rewritten = text.replace(line, formatted)
+  f.save(config, rewritten)
+  const same = install()
+  assert.equal(same.status, 0, same.stderr)
+  assert.deepEqual(JSON.parse(same.stdout).changes, [])
+  assert.equal(readFileSync(config, 'utf8'), rewritten)
+
+  const record = join(data, 'install-hermes.json')
+  const before = readFileSync(record, 'utf8')
+  for (const bad of ['\\caf', '\\U00110000caf']) {
+    const broken = rewritten.replace(escaped, escaped.replaceAll('caf', bad))
+    assert.notEqual(broken, rewritten)
+    f.save(config, broken)
+    assert.notEqual(remove().status, 0, 'an invalid escape must not match the recorded command')
+    assert.equal(readFileSync(config, 'utf8'), broken)
+    assert.equal(readFileSync(record, 'utf8'), before)
+  }
+
+  f.save(config, rewritten)
+  const removed = remove()
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(config, 'utf8'), `hooks:\n  post_tool_call:\n${foreign}\n`)
+  assert.equal(existsSync(record), false)
+}))
+
+test('Hermes removal refuses ambiguous recorded commands and duplicate YAML command keys', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  const event = hermesHooksOf(text).post_tool_call
+  const line = `    - {command: ${JSON.stringify(event.command)}, timeout: ${event.timeout}, matcher: todo}`
+  assert.ok(text.includes(line))
+  const duplicate = `${line}\n${line}`
+  const quoted = `    - command: ${JSON.stringify(event.command)}\n      "command": "node ./tools/foreign.mjs"\n      timeout: 5`
+  for (const replacement of [duplicate, quoted]) {
+    const ambiguous = text.replace(line, replacement)
+    f.save(config, ambiguous)
+    const removed = remove774(f, 'hermes')
+    assert.notEqual(removed.status, 0)
+    assert.equal(readFileSync(config, 'utf8'), ambiguous)
+    assert.ok(existsSync(join(f.root, 'install-hermes.json')))
+  }
+}))
+
+test('Hermes leaves the file intact when a foreign hook uses a recorded hook YAML anchor', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  const event = hermesHooksOf(text).post_tool_call
+  const line = `    - {command: ${JSON.stringify(event.command)}, timeout: ${event.timeout}, matcher: todo}`
+  assert.ok(text.includes(line))
+  const shared = text.replace(line, [
+    '    -',
+    `      command: ${JSON.stringify(event.command)}`,
+    '      timeout: &shared_timeout 10',
+    '      matcher: todo',
+    '    - command: "node ./tools/foreign.mjs"',
+    '      timeout: *shared_timeout',
+  ].join('\n'))
+  const command = JSON.stringify(event.command)
+  const escapedCommand = command.replace('agent-board-hook.mjs', '\\u0061gent-board-hook.mjs')
+  assert.notEqual(escapedCommand, command)
+  assert.equal(JSON.parse(escapedCommand), event.command)
+  const escaped = shared.replace(`      command: ${command}`, `      command: ${escapedCommand}`)
+  assert.notEqual(escaped, shared)
+  // YAML also accepts hexadecimal escapes that the JSON scalar reader cannot decode.
+  const opaque = escaped.replace('\\u0061gent-board-hook.mjs', '\\x61gent-board-hook.mjs')
+  assert.notEqual(opaque, escaped)
+  const duplicate = opaque.replace('  post_tool_call:\n', `  post_tool_call:\n${line}\n`)
+  assert.notEqual(duplicate, opaque)
+  for (const variant of [shared, escaped, opaque, duplicate]) {
+    f.save(config, variant)
+    const removed = remove774(f, 'hermes')
+    assert.notEqual(removed.status, 0, 'leave a recorded YAML command with a shared anchor intact')
+    assert.equal(readFileSync(config, 'utf8'), variant)
+    assert.ok(existsSync(join(f.root, 'install-hermes.json')))
+  }
+}))
+
 test('Hermes setup leaves a config.yaml it cannot merge into byte for byte and reports a conflict (#1115)', () => fixture(f => {
   for (const original of ['hooks: {pre_tool_call: [{command: "mine.sh"}]}\nmodel: x\n', '- not\n- a mapping\n', 'hooks:\n  on_session_start: [{command: "mine.sh"}]\n']) {
     f.save(hermesConfig(f), original)
@@ -5282,21 +5433,75 @@ test('a Codex report after an approval keeps the approval closed, not waiting', 
   assert.ok(!reported.includes('native=codex'))
 }))
 
-test('a Codex Stop whose last message ends on a question adds a waiting step with that question, and the next prompt closes it', () => fixture(f => {
+test('a native Codex chat reply keeps the durable question open until the next work report', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
   assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'The change is ready.\n\nShall I open the pull request now?' }).status, 0)
   const asked = readFileSync(f.progress, 'utf8')
   assert.match(asked, /- \[\?\] Shall I open the pull request now\?\n/)
   assert.ok(!asked.includes('native=codex'))
-  assert.equal(f.event('UserPromptSubmit', 'turn-2').status, 0)
-  const answered = readFileSync(f.progress, 'utf8')
-  assert.ok(answered.includes('- [x] Shall I open the pull request now?'))
-  assert.ok(!/- \[\?\]/.test(answered))
-  assert.ok(!answered.includes('native=codex'))
+  const observe = () => {
+    assert.equal(f.command(['--keys', 'j']).status, 0)
+    return JSON.parse(readFileSync(f.progress.replace(/\.md$/, '-questions.json'), 'utf8')).records
+  }
+  const first = observe().find(record => record.isUnresolved)
+  assert.ok(first)
+  assert.equal(f.event('UserPromptSubmit', 'turn-2', { prompt: 'SYNTHETIC-PRIVATE-CHAT' }).status, 0)
+  const replied = readFileSync(f.progress, 'utf8')
+  assert.match(replied, / replied=\S+Z/)
+  assert.match(replied, /- \[\?\] Shall I open the pull request now\?/)
+  assert.doesNotMatch(replied, /SYNTHETIC-PRIVATE-CHAT|native=codex/)
+  assert.deepEqual(observe().filter(record => record.isUnresolved).map(record => record.id), [first.id])
+
+  assert.equal(f.event('UserPromptSubmit', 'board-turn', { prompt: '/agent-board' }).status, 0)
+  assert.equal(f.event('Stop', 'board-turn', { last_assistant_message: 'Here is the board.' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), / replied=\S+Z/)
+  assert.deepEqual(observe().filter(record => record.isUnresolved).map(record => record.id), [first.id])
+
+  assert.equal(f.report('working', ['- [~] Prepare the pull request']).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Shall I open the pull request now\?/)
+  assert.doesNotMatch(readFileSync(f.progress, 'utf8'), / replied=/)
+  assert.equal(observe().find(record => record.id === first.id)?.isUnresolved, false)
 }))
 
-test('a Codex question stays owned through a board prompt, and the next prompt closes it', () => fixture(f => {
+test('a future queued Codex prompt cannot move the clock past a real chat reply', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'asking-turn').status, 0)
+  assert.equal(f.event('Stop', 'asking-turn', { last_assistant_message: 'Which folder should I use?' }).status, 0)
+  const original = sessionRecord(f, session)
+  const board = readFileSync(f.progress)
+  const future = Date.now() + 30_000
+  f.save(join(f.root, 'pending', '001.raw.json'), JSON.stringify({
+    version: 1, kind: 'raw', at: future, env: {},
+    argv: ['--codex-event', '--agent', 'codex', '--progress-file', f.progress],
+    payload: { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'future-turn', prompt: 'SYNTHETIC-FUTURE-CHAT' },
+  }))
+  f.save(join(f.root, 'pending', '002.json'), JSON.stringify({
+    version: 1, mode: '--codex-event', progress: f.progress, agent: 'codex', session,
+    at: original.appliedAt, now: new Date(future).toISOString(), isPrompt: false, isBoardPrompt: false,
+    payload: { session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'future-display-turn' },
+  }))
+  const recovered = f.command(['--recover-hooks'])
+  assert.equal(recovered.status, 0, recovered.stderr)
+  assert.deepEqual(JSON.parse(recovered.stdout), { recoveryVersion: 1, processed: 2, pending: 0 })
+  assert.deepEqual(sessionRecord(f, session), original)
+  assert.deepEqual(readFileSync(f.progress), board)
+  assert.equal((hookLog(f).match(/INVALID_EVENT_TIME/g) ?? []).length, 2)
+  assert.doesNotMatch(hookLog(f), /SYNTHETIC-FUTURE-CHAT/)
+
+  const replied = f.event('UserPromptSubmit', 'real-turn')
+  assert.equal(replied.status, 0, replied.stderr)
+  const active = sessionRecord(f, session)
+  assert.equal(active.turn, 'real-turn')
+  assert.ok(active.appliedAt > original.appliedAt && active.appliedAt < future)
+  assert.match(readFileSync(f.progress, 'utf8'), /replied=\S+Z/)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Which folder should I use\?/)
+  assert.equal(f.event('Stop', 'real-turn', { last_assistant_message: 'I used the synthetic folder.' }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Which folder should I use\?/)
+  assert.doesNotMatch(readFileSync(f.progress, 'utf8'), /replied=/)
+}))
+
+test('a Codex question stays owned through a board prompt, a chat reply and the next Stop', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
   assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which folder should I use?' }).status, 0)
@@ -5305,6 +5510,8 @@ test('a Codex question stays owned through a board prompt, and the next prompt c
   assert.equal(sessionRecord(f, session).askedRevision, original.askedRevision)
   assert.ok(readFileSync(f.progress, 'utf8').includes('- [?] Which folder should I use?'))
   assert.equal(f.event('UserPromptSubmit', 'turn-3').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Which folder should I use\?/)
+  assert.equal(f.event('Stop', 'turn-3', { last_assistant_message: 'I used the synthetic folder.' }).status, 0)
   const answered = readFileSync(f.progress, 'utf8')
   assert.ok(answered.includes('- [x] Which folder should I use?'))
   assert.ok(!/- \[\?\]/.test(answered))
@@ -5332,7 +5539,7 @@ test('a Codex Stop keeps nothing of the last message but its closing question', 
   assert.ok(!existsSync(join(f.root, 'pending')) || readdirSync(join(f.root, 'pending')).every(name => !readFileSync(join(f.root, 'pending', name), 'utf8').includes(secret)))
 }))
 
-test('a Codex question stays waiting through an approval and a stop without a question, until the next prompt', () => fixture(f => {
+test('a Codex question stays waiting through an approval and a board lookup, then settles after chat and a report', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
   assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which folder should I use?' }).status, 0)
@@ -5349,6 +5556,8 @@ test('a Codex question stays waiting through an approval and a stop without a qu
   assert.equal(held.match(/- \[[?x]\] Which folder should I use\?/g)?.length, 1)
   assert.ok(held.includes('- [?] Which folder should I use?'))
   assert.equal(f.event('UserPromptSubmit', 'turn-3').status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Which folder should I use\?/)
+  assert.equal(f.event('Stop', 'turn-3', { last_assistant_message: 'I used the synthetic folder.' }).status, 0)
   const answered = readFileSync(f.progress, 'utf8')
   assert.ok(answered.includes('- [x] Which folder should I use?'))
   assert.ok(!/- \[\?\]/.test(answered))
@@ -5385,11 +5594,16 @@ test('a closing question the model already reported as a [?] step stays one line
   const board = readFileSync(f.progress, 'utf8')
   assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
   assert.match(board, /- \[\?\] Blue or green\?\n<!-- question=[a-f0-9]{64}:\d+ -->/)
-  // The next prompt answers that one line.
+  // The next prompt answers that one line without settling it.
   assert.equal(f.event('UserPromptSubmit', 'turn-2').status, 0)
   const answered = readFileSync(f.progress, 'utf8')
   assert.equal(answered.match(/- \[[?x]\] Blue or green\?/g)?.length, 1)
-  assert.ok(!/- \[\?\]/.test(answered))
+  assert.match(answered, / replied=\S+Z/)
+  assert.match(answered, /- \[\?\] Blue or green\?/)
+  assert.equal(f.event('Stop', 'turn-2', { last_assistant_message: 'I picked blue.' }).status, 0)
+  const settled = readFileSync(f.progress, 'utf8')
+  assert.match(settled, /- \[x\] Blue or green\?/)
+  assert.doesNotMatch(settled, / replied=|- \[\?\]/)
 }))
 
 test('a replayed closing-question stop changes nothing', () => fixture(f => {
@@ -5457,8 +5671,13 @@ test('the approval step and the question step close and reuse their own lines in
   assert.ok(second.includes('- [?] Which folder should I use?'))
   assert.equal(f.event('UserPromptSubmit', 'turn-3').status, 0)
   const answered = readFileSync(f.progress, 'utf8')
-  assert.ok(answered.includes('- [x] Which folder should I use?'))
-  assert.ok(!/- \[\?\]/.test(answered))
+  assert.match(answered, / replied=\S+Z/)
+  assert.match(answered, /- \[\?\] Which folder should I use\?/)
+  assert.doesNotMatch(answered, /native=codex/)
+  assert.equal(f.event('Stop', 'turn-3', { last_assistant_message: 'I used the folder.' }).status, 0)
+  const settled = readFileSync(f.progress, 'utf8')
+  assert.match(settled, /- \[x\] Which folder should I use\?/)
+  assert.doesNotMatch(settled, / replied=|- \[\?\]/)
 }))
 
 test('Grok keeps only its closing question through board and end events, then closes and reuses it', () => fixture(f => {
@@ -5495,7 +5714,7 @@ test('Grok keeps only its closing question through board and end events, then cl
   assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Choose blue or green\?/)
 }))
 
-test('Cursor records a closing question on either side of stop and the next prompt closes it once', () => fixture(f => {
+test('Cursor records a closing question on either side of stop and settles it after chat and a report', () => fixture(f => {
   assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
   for (const [index, order] of [['response-first', ['afterAgentResponse', 'stop']], ['stop-first', ['stop', 'afterAgentResponse']]]) {
     const id = `synthetic-cursor-${index}`
@@ -5508,6 +5727,12 @@ test('Cursor records a closing question on either side of stop and the next prom
     assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Proceed now\?/)
     assert.ok(!readFileSync(recordFile, 'utf8').includes('SYNTHETIC-PRIVATE-CURSOR'))
     assert.equal(send('beforeSubmitPrompt', 'generation-2').status, 0)
+    assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Proceed now\?/)
+    // An empty Stop can arrive before the actual response; only the latter settles the question.
+    assert.equal(send('stop', 'generation-2').status, 0)
+    assert.match(readFileSync(f.progress, 'utf8'), / replied=\S+Z/)
+    assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Proceed now\?/)
+    assert.equal(send('afterAgentResponse', 'generation-2', { text: 'Continuing the synthetic work.' }).status, 0)
     const answered = JSON.parse(readFileSync(recordFile, 'utf8'))
     assert.equal(answered.steps.filter(step => step === '- [x] Proceed now?').length, 1)
     assert.ok(!answered.steps.some(step => step.startsWith('- [?] ')))
@@ -6351,6 +6576,28 @@ test('opencode: a refused progress report tells the model why', async () => {
   }, { lang })
 })
 
+test('an OpenCode report tells the model only how many steps the board left out or shortened', async () => {
+  await opencodeSpawnFixture(opencodeRealSpawn, async f => {
+    const execute = steps => f.instance.tool.agent_board_progress.execute({ ...f.payload, steps }, f.context)
+    assert.equal(await execute(['- [~] Synthetic short step']), 'OK')
+    // The reply names neither the session nor the progress file.
+    const long = await execute(Array.from({ length: 41 }, (_, index) => `- [ ] Synthetic step ${index + 1}`))
+    assert.deepEqual(JSON.parse(long), { dropped: 1, cut: 0 })
+    const cut = await execute([`- [ ] ${'x'.repeat(130)}`])
+    assert.deepEqual(JSON.parse(cut), { dropped: 0, cut: 1 })
+    for (const reply of [long, cut]) assert.doesNotMatch(reply, /session|progress|[\\/]/)
+  })
+})
+
+test('a report tool reply is both counts or OK, even when a count is missing or not a whole number', () => {
+  const toolReply = new Function(`${REPORT_TOOL_REPLY}return toolReply`)()
+  assert.equal(toolReply('{"cut":1}'), '{"dropped":0,"cut":1}')
+  assert.equal(toolReply('{"dropped":2,"session":"s","progress":"p"}'), '{"dropped":2,"cut":0}')
+  assert.equal(toolReply('{"dropped":"3","cut":1.5}'), 'OK')
+  assert.equal(toolReply('{"dropped":0,"cut":0,"session":"s"}'), 'OK')
+  for (const text of ['', 'null', '[]', 'not json']) assert.equal(toolReply(text), 'OK', text)
+})
+
 test('an OpenCode report retries once when the runtime ends spawnSync early with ETIMEDOUT', async () => {
   await opencodeSpawnFixture((file, args, options, realSpawnSync, count) => count === 1 ? opencodeTimeoutResult() : realSpawnSync(file, args, options), async f => {
     f.payload.state = 'done'
@@ -6587,8 +6834,63 @@ test('OpenClaw session events carry the session folder and progress_card reports
   assert.match(readFileSync(f.progress, 'utf8'), /^- \[\?\] Pick one$/m)
   await assert.rejects(tool.execute('call-2', { steps: 'not a list' }), /INVALID_STEPS/)
   await assert.rejects(tool.execute('call-3', { title: 'Invalid', state: 'working', steps: ['not a task line'] }), /Cannot read the step "not a task line".*- \[ \] step/)
-  const long = await tool.execute('call-4', { title: 'Many steps', state: 'working', steps: Array.from({ length: 41 }, (_, index) => `- [ ] Step ${index + 1}`) })
-  assert.equal(JSON.parse(long.content[0].text).dropped, 1)
+  const full = await tool.execute('call-4', { title: 'Many steps', state: 'working', steps: Array.from({ length: 40 }, (_, index) => `- [ ] Step ${index + 1}`) })
+  assert.equal(full.content[0].text, 'OK')
+  const long = await tool.execute('call-5', { title: 'Many steps', state: 'working', steps: Array.from({ length: 41 }, (_, index) => `- [ ] Step ${index + 1}`) })
+  // The model is told how many steps were left out, and nothing about the session or the file.
+  const reply = JSON.parse(long.content[0].text)
+  assert.deepEqual(Object.keys(reply).sort(), ['cut', 'dropped'])
+  assert.equal(reply.dropped, 1)
+  assert.doesNotMatch(long.content[0].text, /session|progress|[\\/]/)
+  // A shortened step is counted too, even in a short list.
+  const cut = await tool.execute('call-6', { title: 'Many steps', state: 'working', steps: [`- [ ] ${'x'.repeat(130)}`] })
+  assert.deepEqual(JSON.parse(cut.content[0].text), { dropped: 0, cut: 1 })
+}))
+
+test('OpenClaw progress_card derives omitted fields from steps and uses the host workspace on the first report', () => fixture(async f => {
+  const installed = f.install('--agent', 'openclaw', '--apply')
+  assert.equal(installed.status, 0, installed.stderr)
+  const plugin = (await import(pathToFileURL(join(f.root, 'adapters', 'openclaw', 'agent-board-local.mjs')))).default
+  const work = join(f.home, 'work'), other = join(f.home, 'other')
+  mkdirSync(work)
+  mkdirSync(other)
+  const hooks = new Map()
+  let factory, subscription
+  plugin.register({
+    on: (name, fn) => hooks.set(name, fn), config: {}, runtime: { agent: { resolveAgentWorkspaceDir: () => work } },
+    registerTool: make => { factory = make },
+    agent: { events: { registerAgentEventSubscription: value => { subscription = value } } },
+  })
+  const id = 'openclaw-progress-defaults'
+  const recordOf = session => join(f.root, 'sessions', createHash('sha256').update('openclaw:' + session).digest('hex') + '.json')
+  const record = () => JSON.parse(readFileSync(recordOf(id), 'utf8'))
+  await hooks.get('session_start')({ sessionId: id })
+  assert.equal(record().project, 'work')
+  const tool = factory({ sessionId: id, workspaceDir: other })
+  const waiting = ['1. [~] Check the result', '+ [?] Continue the synthetic check?']
+  const first = await tool.execute('defaults', { steps: waiting })
+  assert.equal(first.content[0].text, 'OK')
+  assert.equal(record().project, 'other')
+  assert.equal(record().title, 'Check the result')
+  assert.equal(record().state, 'waiting')
+  assert.deepEqual(record().steps, ['- [~] Check the result', '- [?] Continue the synthetic check?'])
+  const board = readFileSync(f.progress, 'utf8')
+  assert.match(board, /^## other\r?\n[\s\S]*^### Check the result\r?$/m)
+  assert.equal(board.split('### Check the result').length, 2)
+  assert.ok(!board.includes(other))
+
+  await subscription.handle({ stream: 'lifecycle', sessionId: id, runId: 'openclaw-defaults-run', data: { phase: 'start' } })
+  await tool.execute('state-only', { state: 'waiting', steps: ['- [?] Keep it?'] })
+  assert.equal(record().title, 'Keep it?')
+  assert.equal(record().state, 'waiting')
+  const injected = 'synthetic-other-session'
+  await tool.execute('title-only', { title: 'Keep my title', steps: ['- Continue'], sessionId: injected, workspaceDir: work, project: 'wrong' })
+  assert.equal(record().title, 'Keep my title')
+  assert.equal(record().state, 'working')
+  assert.equal(record().project, 'other')
+  assert.equal(existsSync(recordOf(injected)), false)
+  await assert.rejects(tool.execute('bad-state', { state: 'missing', steps: ['- [ ] Continue'] }), /INVALID_STATE/)
+  await assert.rejects(tool.execute('bad-title', { title: null, steps: ['- [ ] Continue'] }), /INVALID_TEXT/)
 }))
 
 test('a report from a folder binds to an openclaw record that holds the folder and refuses one that does not', () => fixture(f => {
@@ -6696,8 +6998,17 @@ test('DeepSeek session events carry the session folder and the agent_board tool 
   assert.match(readFileSync(f.progress, 'utf8'), /^- \[\?\] Pick one$/m)
   await assert.rejects(tool.execute({ action: 'report', steps: 'not a list' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_STEPS/)
   await assert.rejects(tool.execute({ action: 'report', title: 'Invalid', state: 'working', steps: ['not a task line'] }, { agent }), /Cannot read the step "not a task line".*- \[ \] step/)
+  const full = await tool.execute({ action: 'report', title: 'Many steps', state: 'working', steps: Array.from({ length: 40 }, (_, index) => `- [ ] Step ${index + 1}`) }, { agent })
+  assert.equal(full.text, 'OK')
   const long = await tool.execute({ action: 'report', title: 'Many steps', state: 'working', steps: Array.from({ length: 41 }, (_, index) => `- [ ] Step ${index + 1}`) }, { agent })
-  assert.equal(JSON.parse(long.text).dropped, 1)
+  // The model is told how many steps were left out, and nothing about the session or the file.
+  const reply = JSON.parse(long.text)
+  assert.deepEqual(Object.keys(reply).sort(), ['cut', 'dropped'])
+  assert.equal(reply.dropped, 1)
+  assert.doesNotMatch(long.text, /session|progress|[\\/]/)
+  // A shortened step is counted too, even in a short list.
+  const cut = await tool.execute({ action: 'report', title: 'Many steps', state: 'working', steps: [`- [ ] ${'x'.repeat(130)}`] }, { agent })
+  assert.deepEqual(JSON.parse(cut.text), { dropped: 0, cut: 1 })
   await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] Done'] }, {}), /AGENT_BOARD_REPORT_FAILED: NO_SESSION/)
   await assert.rejects(tool.execute({ action: 'close' }, { agent }), /AGENT_BOARD_REPORT_FAILED: INVALID_ACTION/)
 }))
@@ -8265,7 +8576,7 @@ test('L5 locked file: the hook retries, exits 0, and the Stop event lands on the
   assert.ok(Number.isFinite(entry.at))
   assert.ok(files[0].startsWith(`${String(entry.at).padStart(15, '0')}-`))
   assert.equal(entry.progress, f.progress)
-  assert.deepEqual(entry.payload, { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1' })
+  assert.deepEqual(entry.payload, { session_id: session, hook_event_name: 'Stop', turn_id: 'turn-1', has_response: true })
   unlinkSync(locked.marker)
   const nextSession = 'test-codex-session-456'
   const next = f.event('UserPromptSubmit', 'turn-2', { session_id: nextSession })
@@ -11013,6 +11324,49 @@ test('OpenCode idle events send the last assistant text and preserve status on f
     assert.equal(sent.state, 'waiting')
     assert.equal(sent.last_assistant_message, undefined)
   }
+}))
+
+test('OpenCode drops an older idle result after a newer prompt, busy status or session deletion', () => fixture(async f => {
+  const got = await planPlugin(f, 'opencode', 'return AgentBoardLocal', async factory => {
+    const cases = ['prompt', 'busy', 'deleted']
+    let enterLookup
+    let releaseLookup
+    const freshQuestion = 'Should I use the current draft?'
+    const answer = text => ({ data: [{ info: { role: 'assistant' }, parts: [{ type: 'text', text }] }] })
+    const client = { session: {
+      get: async ({ path }) => ({ data: { id: path.id } }),
+      messages: async ({ path }) => path.id === 'synthetic-current-idle' ? answer(freshQuestion) : new Promise(resolve => {
+        releaseLookup = resolve
+        enterLookup()
+      }),
+    } }
+    const hooks = await factory({ client, directory: f.home })
+    const idle = sessionID => hooks.event({ event: { type: 'session.idle', properties: { sessionID } } })
+    for (const kind of cases) {
+      const id = `synthetic-old-idle-${kind}`
+      const entered = new Promise(resolve => { enterLookup = resolve })
+      const pending = idle(id)
+      await entered
+      if (kind === 'prompt') {
+        await hooks['chat.message']({ sessionID: id }, { parts: [{ type: 'text', text: 'Start the new draft.' }] })
+        // A different session can report its own current question while the first lookup is held.
+        await idle('synthetic-current-idle')
+      } else if (kind === 'busy') {
+        await hooks.event({ event: { type: 'session.status', properties: { sessionID: id, status: { type: 'busy' } } } })
+      } else {
+        await hooks.event({ event: { type: 'session.deleted', properties: { info: { id } } } })
+      }
+      releaseLookup(answer('Should I use the old draft?'))
+      await pending
+    }
+  })
+  const reports = got.saved.map(call => JSON.parse(call.input))
+  assert.deepEqual(reports.map(({ session_id, state, last_assistant_message }) => [session_id, state, last_assistant_message]), [
+    ['synthetic-old-idle-prompt', 'working', undefined],
+    ['synthetic-current-idle', 'waiting', 'Should I use the current draft?'],
+    ['synthetic-old-idle-busy', 'working', undefined],
+    ['synthetic-old-idle-deleted', 'ended', undefined],
+  ])
 }))
 
 test('an OpenCode todo.updated event becomes the session steps; a child session, another event, no session, no todos or a failed session lookup write nothing', () => fixture(async f => {

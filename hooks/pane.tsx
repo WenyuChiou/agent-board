@@ -187,28 +187,39 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   const color = (tone: Tone): string => toneColor(palette, tone)
   const isOpen = (id: string): boolean => model.opened.includes(id)
   const resultTask = model.resolveResult?.key.replace(/::[^:]*$/, '') ?? ''
-  const hasDetachedResult = resultTask !== '' && !view.stopped.some(row => row.key === resultTask) && !view.recent.some(item => item.key === resultTask)
+  const hasInlineReplyResult = resultTask !== '' && (view.provisional ?? []).some(item => item.key === model.resolveResult?.key && item.questionId === model.resolveResult?.questionId)
+    && (resultTask === 'mine' ? view.current !== null : model.expanded === resultTask && (
+      isOpen('due') && view.due.some(row => row.key === resultTask)
+      || isOpen('idle') && view.idle.some(row => row.key === resultTask)
+      || isOpen('others') && view.groups.some(group => group.rows.some(row => row.key === resultTask))
+    ))
+  const hasDetachedResult = resultTask !== '' && !hasInlineReplyResult && !view.stopped.some(row => row.key === resultTask) && !view.recent.some(item => item.key === resultTask)
   const hasResult = (item: WaitingItem): boolean => {
     const result = model.resolveResult
     return result !== null && result !== undefined && (result.kind === 'changed' ? item.key === result.key : item.questionId !== undefined && result.questionId === item.questionId)
   }
 
-  const shelfQuestions = (items: readonly WaitingItem[], key: string) => (
+  const shelfQuestions = (items: readonly WaitingItem[], key: string, showResult = true) => (
     <Box flexDirection="column">
       {items.map(item => (
         <Box key={`${item.key}::question`} flexDirection="column">
           <Text color={palette.muted}>{[item.text, item.note].filter(Boolean).join(' — ')}</Text>
           {item.questionId !== undefined && <Button key={`${item.key}::resolve`} plain onPress={() => actions.resolve(item)}>{s.resolveQuestion}</Button>}
-          {hasResult(item) && <Text color={palette.muted}>{model.resolveResult?.text}</Text>}
+          {showResult && hasResult(item) && <Text color={palette.muted}>{model.resolveResult?.text}</Text>}
         </Box>
       ))}
-      {model.resolveResult?.key.startsWith(`${key}::`) && !items.some(item => item.key === model.resolveResult?.key || item.questionId === model.resolveResult?.questionId) && (
+      {showResult && model.resolveResult?.key.startsWith(`${key}::`) && !items.some(item => item.key === model.resolveResult?.key || item.questionId === model.resolveResult?.questionId) && (
         <Box key={`${model.resolveResult.key}::question`} flexDirection="column">
           <Text color={palette.muted}>{model.resolveResult.text}</Text>
         </Box>
       )}
     </Box>
   )
+
+  const repliedQuestions = (key: string) => {
+    const items = (view.provisional ?? []).filter(item => item.key.replace(/::[^:]*$/, '') === key)
+    return items.length === 0 ? null : shelfQuestions(items, key, hasInlineReplyResult && resultTask === key)
+  }
 
   const spacer = () => <Box flexGrow={1} />
   const muted = (text: string, wrap: 'wrap' | 'truncate-end' = 'wrap') => (
@@ -613,6 +624,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
             {row.context !== '' && muted(s.contextLine(row.context))}
             {row.handoff !== '' && muted(s.handoffLine(row.handoff))}
             {steps(row.steps)}
+            {repliedQuestions(row.key)}
             {rowActions(row)}
             {cardResult(row.key)}
           </Box>
@@ -716,6 +728,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         <Text color={current.tone === 'quiet' ? palette.muted : color(current.tone)} wrap="wrap">
           {current.status}
         </Text>
+        {repliedQuestions('mine')}
         {current.runs !== undefined && muted(current.runs, 'truncate-end')}
         {showAll ? (
           <Box flexDirection="column" marginTop={1}>

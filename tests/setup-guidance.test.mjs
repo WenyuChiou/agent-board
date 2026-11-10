@@ -95,8 +95,12 @@ test('npm setup groups shared files, accurate counts, commands and sessions in e
     assert.ok(applied.includes(`${bootstrap[index].shared}: ${bootstrap[index].applied.replace('{count}', common.size)}`), applied)
     for (const output of [text, applied]) {
       assert.equal(output.split(start).length - 1, 1, output)
-      assert.match(output, /npx @wenyuchiou\/agent-board --codex-trust --codex-bin /)
-      assert.match(output, /npx @wenyuchiou\/agent-board --hermes-trust/)
+      const data = join(root, 'data')
+      const quoted = process.platform === 'win32' ? `'${data.replaceAll("'", "''")}'` : `'${data.replaceAll("'", "'\\''")}'`
+      const location = /^[\w./:@=-]+$/.test(data) ? data : quoted
+      const board = `npx @wenyuchiou/agent-board --data-dir ${location}`
+      assert.ok(output.includes(`${board} --codex-trust --codex-bin `))
+      assert.ok(output.includes(`${board} --hermes-trust`))
       assert.ok(output.includes(bootstrap[index].board.replace('{command}', 'npx @wenyuchiou/agent-board')))
       assert.doesNotMatch(output, /& '/)
       assert.ok(!output.includes(process.execPath), output)
