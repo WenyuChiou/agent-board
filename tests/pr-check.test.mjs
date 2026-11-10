@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr,
   isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
-  hasFullApproval, privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
+  byTime, hasHeadApproval, privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -658,11 +658,26 @@ test('approval gate: an approval needs the full head sha, and a lane\'s own fres
   assert.ok(release.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(release))
   const outside = reviewProblems({ ...codexPr, association: 'CONTRIBUTOR', prComments: [laneApproval] })
   assert.ok(outside.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(outside))
+  // The form names the author's lane whatever the reviewer is called.
+  const namedOtherwise = { body: `Review: APPROVE ${head} by Claude Opus, codex's reviewer` }
+  assert.ok(reviewProblems({ ...codexPr, title: 'chore(release): Agent Board 9.9.9', prComments: [namedOtherwise] }).some(p => p.message.includes('RULES.md, R2')))
+  assert.equal(reviewProblems({ ...codexPr, prComments: [namedOtherwise] }).length, 0)
 
   // A short approval comment does not hide a GitHub approval of the full head.
   const shortComment = { body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark` }
-  assert.equal(hasFullApproval([shortComment]), false)
-  assert.equal(hasFullApproval([{ body: `Review: APPROVE ${head} by Muse Spark` }]), true)
+  assert.equal(hasHeadApproval([shortComment], head), false)
+  assert.equal(hasHeadApproval([{ body: `Review: APPROVE ${head} by Muse Spark` }], head), true)
+  // An approval of an older full head does not make the GitHub reviews unneeded either.
+  assert.equal(hasHeadApproval([{ body: `Review: APPROVE ${'1'.repeat(40)} by Muse Spark` }, shortComment], head), false)
+
+  // Comments and GitHub reviews are read in time order, so an older GitHub approval does not clear a later request for changes.
+  const merged = byTime([
+    { body: `Review: REQUEST CHANGES ${head} by Muse Spark`, created_at: '2026-11-10T09:00:00Z' },
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T08:00:00Z' },
+  ])
+  assert.ok(reviewProblems({ ...codexPr, prComments: merged }).some(p => p.message.includes('requested changes')))
+  const undated = [{ body: 'a' }, { body: 'b' }]
+  assert.deepEqual(byTime(undated), undated)
   assert.equal(reviewProblems({ ...codexPr, prComments: [shortComment, { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' } }] }).length, 0)
 
   // A request for changes still holds the merge whatever sha length it names.

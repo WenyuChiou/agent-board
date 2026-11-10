@@ -617,11 +617,16 @@ export const reviewOf = item => {
   return null
 }
 
-// A short-sha approval comment is not one R2 accepts, so it does not stop the GitHub reviews from being read.
-export const hasFullApproval = comments => comments.some(comment => {
+// Only an approval comment of the current full head makes the GitHub reviews unneeded; a short or older one does not.
+export const hasHeadApproval = (comments, head) => comments.some(comment => {
   const review = reviewOf(comment)
-  return review?.kind === 'APPROVE' && review.sha.length === 40
+  return review?.kind === 'APPROVE' && review.sha === String(head).toLowerCase()
 })
+
+// Comments and GitHub reviews come from two lists; the latest verdict is the latest by time, not by list.
+export const byTime = items => items.every(item => !Number.isNaN(Date.parse(item?.created_at ?? item?.submitted_at ?? '')))
+  ? [...items].sort((a, b) => Date.parse(a.created_at ?? a.submitted_at) - Date.parse(b.created_at ?? b.submitted_at))
+  : items
 
 export const verdict = (comments, head, options = {}) => {
   const output = result()
@@ -663,9 +668,10 @@ export const verdict = (comments, head, options = {}) => {
     return output
   }
 
-  // The lane-reviewer form counts only for the author's own lane, never on a release or an outside pull request (R2).
-  const isLaneReviewer = Boolean(authorAgent && last.lane && !isRelease && !isOutside && last.lane.split(/\s+/)[0].toLowerCase() === authorAgent.toLowerCase())
-  if (authorAgent && last.reviewer && !isLaneReviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())) {
+  // The lane-reviewer form names the author's own lane: it counts on that lane's pull requests only, never on a
+  // release or a pull request from outside the team (R2).
+  const isAuthorLane = Boolean(authorAgent && last.lane && last.lane.split(/\s+/)[0].toLowerCase() === authorAgent.toLowerCase())
+  if (authorAgent && last.reviewer && (isAuthorLane ? isRelease || isOutside : last.reviewer.toLowerCase().includes(authorAgent.toLowerCase()))) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
       output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer.'))
@@ -1016,10 +1022,10 @@ export const main = async (argv = process.argv.slice(2)) => {
       else {
         const comments = await api(`issues/${data.number}/comments`, { isList: true })
         let reviews = []
-        if (!hasFullApproval(Array.isArray(comments) ? comments : [])) {
+        if (!hasHeadApproval(Array.isArray(comments) ? comments : [], data.head)) {
           try { reviews = await api(`pulls/${data.number}/reviews`, { isList: true }) } catch {}
         }
-        data.prComments = [...(Array.isArray(comments) ? comments : []), ...(Array.isArray(reviews) ? reviews : [])]
+        data.prComments = byTime([...(Array.isArray(comments) ? comments : []), ...(Array.isArray(reviews) ? reviews : [])])
       }
     }
     const checked = checkPr(data)
