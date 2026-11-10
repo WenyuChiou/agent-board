@@ -44,10 +44,15 @@ const message = (en, tw, cn) => [en, tw, cn][['en', 'zh-TW', 'zh-CN'].indexOf(la
 const summaries = [
   {
     "previewCreate": "would create {count} setup files",
+    "previewCreateOne": "would create {count} setup file",
     "preview": "would update {count} setup files",
+    "previewOne": "would update {count} setup file",
     "previewRemove": "would remove {count} setup files",
+    "previewRemoveOne": "would remove {count} setup file",
     "appliedCreate": "created {count} setup files",
+    "appliedCreateOne": "created {count} setup file",
     "applied": "updated {count} setup files",
+    "appliedOne": "updated {count} setup file",
     "current": "{count} already current",
     "shared": "Shared",
     "retire": "{file} (the old /board command; setup removes it)",
@@ -87,6 +92,7 @@ const summaries = [
     "openOne": "Open a new session in {agents}.",
     "thenBoardOne": "Then type /agent-board there.",
     "appliedRemove": "removed {count} setup files",
+    "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",
     "keptData": "Keeps your data and history beside {progress} (answers, questions, journal, archive, sessions):",
     "applyRemove": "Apply this removal: {command}",
@@ -95,10 +101,15 @@ const summaries = [
   },
   {
     "previewCreate": "將建立 {count} 個設定檔案",
+    "previewCreateOne": "將建立 {count} 個設定檔案",
     "preview": "將更新 {count} 個設定檔案",
+    "previewOne": "將更新 {count} 個設定檔案",
     "previewRemove": "將移除 {count} 個設定檔案",
+    "previewRemoveOne": "將移除 {count} 個設定檔案",
     "appliedCreate": "已建立 {count} 個設定檔案",
+    "appliedCreateOne": "已建立 {count} 個設定檔案",
     "applied": "已更新 {count} 個設定檔案",
+    "appliedOne": "已更新 {count} 個設定檔案",
     "current": "{count} 個已是最新",
     "shared": "共用",
     "retire": "{file}（舊的 /board 命令；setup 會移除）",
@@ -138,6 +149,7 @@ const summaries = [
     "openOne": "在 {agents} 開一個新的工作階段。",
     "thenBoardOne": "接著在那裡輸入 /agent-board。",
     "appliedRemove": "已移除 {count} 個設定檔案",
+    "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
     "keptData": "保留 {progress} 旁邊的資料與歷史紀錄（回答、提問、日誌、歸檔、工作階段）：",
     "applyRemove": "套用此移除變更：{command}",
@@ -146,10 +158,15 @@ const summaries = [
   },
   {
     "previewCreate": "将创建 {count} 个设置文件",
+    "previewCreateOne": "将创建 {count} 个设置文件",
     "preview": "将更新 {count} 个设置文件",
+    "previewOne": "将更新 {count} 个设置文件",
     "previewRemove": "将移除 {count} 个设置文件",
+    "previewRemoveOne": "将移除 {count} 个设置文件",
     "appliedCreate": "已创建 {count} 个设置文件",
+    "appliedCreateOne": "已创建 {count} 个设置文件",
     "applied": "已更新 {count} 个设置文件",
+    "appliedOne": "已更新 {count} 个设置文件",
     "current": "{count} 个已是最新",
     "shared": "共用",
     "retire": "{file}（旧的 /board 命令；setup 会移除）",
@@ -189,6 +206,7 @@ const summaries = [
     "openOne": "在 {agents} 开一个新的会话。",
     "thenBoardOne": "接着在那里输入 /agent-board。",
     "appliedRemove": "已移除 {count} 个设置文件",
+    "appliedRemoveOne": "已移除 {count} 个设置文件",
     "noInstalled": "没有已安装的 Agent Board 设置可供移除",
     "keptData": "保留 {progress} 旁的数据与历史记录（回答、提问、日志、归档、会话）：",
     "applyRemove": "应用此移除更改：{command}",
@@ -436,17 +454,17 @@ const main = () => {
   const changesFor = (plan, isShared) => plan.changes.filter(change => shared.has(change.file) === isShared)
   const describe = changes => {
     if (isShowingApplied) {
-      if (isRemove) return changes.length ? words('appliedRemove', { count: changes.length }) : ''
+      if (isRemove) return changes.length ? words(changes.length === 1 ? 'appliedRemoveOne' : 'appliedRemove', { count: changes.length }) : ''
       return [['create', 'appliedCreate'], ['update', 'applied'], ['remove', 'appliedRemove']]
         .flatMap(([action, key]) => {
           const count = changes.filter(change => change.action === action).length
-          return count ? [words(key, { count })] : []
+          return count ? [words(count === 1 ? `${key}One` : key, { count })] : []
         }).join('; ')
     }
     return [['create', 'previewCreate'], ['update', 'preview'], ['remove', 'previewRemove']]
       .flatMap(([action, key]) => {
         const count = changes.filter(change => change.action === action).length
-        return count ? [words(key, { count })] : []
+        return count ? [words(count === 1 ? `${key}One` : key, { count })] : []
       }).join('; ')
   }
   const fileLine = (file, changes) => {
