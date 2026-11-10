@@ -11,7 +11,7 @@ import { discoverCodexBinary } from './codex-host'
 import { runCodexLocal, setupFailure } from './codex-local'
 import type { LocalPlan } from './codex-local'
 import { ConnectTransaction } from './connect-transaction'
-import { discoverSetupAgents, findOnPath, hasBoardPlugin, setupAgents, setupRecordChanges } from './setup-discovery.mjs'
+import { discoverSetupAgents, findOnPath, hasBoardPlugin, isBoardPluginDisabled, setupAgents, setupRecordChanges } from './setup-discovery.mjs'
 
 type AgentPlan = LocalPlan & { data: string; installed?: boolean; hooksTrusted?: boolean | 'unknown'; managedBy?: string }
 type AgentResult = { status: number; note: string; count?: number }
@@ -102,7 +102,8 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
         deepseek: flag('--deepseek-dir') || process.env.DSH_HOME,
       }, !o.args.includes('--home')))
       const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
-      const hasClaude = hasBoardPlugin(claudeDirectory) && connector?.disabled !== true
+      // Installed and not turned off, as setup reads it: copied settings alone are not an install (#1203).
+      const hasClaude = hasBoardPlugin(claudeDirectory) && !isBoardPluginDisabled(claudeDirectory) && connector?.disabled !== true
       let isUntrusted = false
       if (installed.has('codex') || connected.has('codex')) {
         // An unavailable Codex check must not hide the other agents.

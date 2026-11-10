@@ -133,6 +133,7 @@ export const ZH_CN: Strings = {
     "filesPart": "{host} 设置文件",
     "trustPart": "在 {host} 批准看板的 hooks",
     "installPlugin": "安装 Claude Code 插件",
+    "enablePlugin": "Claude Code：插件已安装，但在用户设置里被禁用了。请运行 {command} 重新启用。",
     "marketplacePart": "Claude Code 插件市场",
     "pluginPart": "Claude Code 插件",
     "partDone": "{part}：已完成。",
