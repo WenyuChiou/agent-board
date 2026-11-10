@@ -792,6 +792,30 @@ for (const kind of ['complete', 'plan-only', 'foreign']) test(`Hermes legacy doc
   assert.equal(readFileSync(config, 'utf8'), before, 'Doctor only observes the config')
 }))
 
+for (const kind of ['config', 'explicit', 'precedence', 'baked']) test(`Hermes legacy doctor respects ${kind} progress without a recorded path`, () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const progress = join(f.home, 'legacy chosen data', 'progress.md')
+  f.run(f.request('connect', { progress }))
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  delete state.connectedProgress
+  const beforeControl = `${JSON.stringify(state, null, 2)}\n`
+  writeFileSync(f.control, beforeControl)
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const before = readFileSync(config, 'utf8')
+  const env = { ...process.env, HERMES_HOME: join(f.home, '.hermes'), CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: '' }
+  if (kind === 'config') env.CLAUDE_CONFIG_DIR = dirname(progress)
+  if (kind === 'explicit' || kind === 'precedence') env.CLAUDE_PROGRESS_FILE = progress
+  if (kind === 'precedence') env.CLAUDE_CONFIG_DIR = join(f.home, 'other config')
+  const runner = kind === 'baked' ? join(dirname(progress), 'agent-board.mjs') : f.script
+  const checked = spawnSync(process.execPath, [runner, '--codex-doctor', '--agent', 'hermes', '--home', f.home, '--hermes-dir', join(f.home, '.hermes'), '--json'], {
+    env, encoding: 'utf8', windowsHide: true, timeout: 10000,
+  })
+  assert.equal(checked.status, 0, checked.stderr)
+  assert.equal(JSON.parse(checked.stdout).reportHook, 'connect')
+  assert.equal(readFileSync(config, 'utf8'), before)
+  assert.equal(readFileSync(f.control, 'utf8'), beforeControl, 'Doctor does not migrate the old record')
+}))
+
 test('Hermes legacy removal restores a config that originally had no hooks section', async () => {
   for (const original of ['model:\n  default: synthetic\n', 'model: synthetic\n# Synthetic setting stays\n', 'model:\r\n  default: synthetic\r\n']) await fixture(async f => {
     mkdirSync(join(f.home, '.hermes'))

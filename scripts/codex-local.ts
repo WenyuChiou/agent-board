@@ -1522,7 +1522,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     // /progress connect may have hooked the host instead, or left only its skill (#285).
     // Exact Hermes attribution needs the connection's actual data path even in this read-only check.
-    const connectorProgress = typeof connected === 'string' && isAbsolute(connected) ? connected : legacyProgress.find(isAbsolute)!
+    const connectorProgress = typeof connected === 'string' && isAbsolute(connected) ? connected : progress
     const connectorFolder = dirname(connectorProgress)
     const connectedHooks = agentHooks({
       home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32',

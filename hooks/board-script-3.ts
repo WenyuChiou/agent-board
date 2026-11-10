@@ -1689,7 +1689,7 @@ export const LINES = [
 "    } else if (installed && agent === \"codex\") {",
 "      hooksTrusted = inspectCodexConfigToml(configToml);",
 "    }",
-"    const connectorProgress = typeof connected === \"string\" && isAbsolute4(connected) ? connected : legacyProgress.find(isAbsolute4);",
+"    const connectorProgress = typeof connected === \"string\" && isAbsolute4(connected) ? connected : progress;",
 "    const connectorFolder = dirname6(connectorProgress);",
 "    const connectedHooks = agentHooks({",
 "      home,",
