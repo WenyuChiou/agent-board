@@ -306,6 +306,9 @@ test('Settings detects real synthetic installs once, trusts Codex and Hermes, re
   writeFileSync(codex, script.replace(output, `setTimeout(() => ${output}, Number(process.env.AGENT_BOARD_TEST_DELAY || 0))`), { mode: 0o755 })
   for (const agent of ['codex', 'opencode', 'gemini']) f.local('--codex-setup', '--agent', agent, '--apply')
   mkdirSync(join(f.home, '.cursor'))
+  const pluginDir = join(f.env.CLAUDE_CONFIG_DIR, 'plugins')
+  mkdirSync(pluginDir, { recursive: true })
+  writeFileSync(join(pluginDir, 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'agent-board@agent-board': [{ scope: 'user' }] } }))
   writeFileSync(join(f.env.CLAUDE_CONFIG_DIR, 'settings.json'), '{"enabledPlugins":{"agent-board@agent-board":true}}')
   writeFileSync(f.progress, '# Progress\n\n## Synthetic project\n' + block('opencode'))
   f.env.AGENT_BOARD_TEST_DELAY = '100'

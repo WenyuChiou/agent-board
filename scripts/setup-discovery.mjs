@@ -50,8 +50,7 @@ export const hasBoardPlugin = directory => {
     try { return JSON.parse(readFileSync(join(directory, file), 'utf8').replace(/^\uFEFF/, '')) } catch { return null }
   }
   const installed = read('plugins/installed_plugins.json')?.plugins?.[plugin]
-  return (Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === 'object')
-    || read('settings.json')?.enabledPlugins?.[plugin] === true
+  return Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === 'object'
 }
 
 export const setupRecordChanges = (plan, selected) => setupAgents.filter(other => !selected.includes(other)).map(other => join(plan.data, `install-${other}.json`)).filter(file => {

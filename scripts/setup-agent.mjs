@@ -341,7 +341,8 @@ const main = () => {
   const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
   const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude'], ['.exe', '.cmd']) : undefined
   const hasClaude = existsSync(claudeDirectory) || (homeAt < 0 && !!claude)
-  const isPluginNeeded = isAsking && !!claude && !hasPlugin(claudeDirectory)
+  const isPluginInstalled = hasClaude && hasPlugin(claudeDirectory)
+  const isPluginNeeded = isAsking && !!claude && !isPluginInstalled
   const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
   const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
     ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
@@ -357,7 +358,8 @@ const main = () => {
   if (!isRemove && selector === 'auto' && !selected.length && !isPluginNeeded) {
     const next = setupCommand(['--agent', 'codex'])
     const noAgent = noAgentText(homeAt < 0 ? 'anywhere' : 'home', { home, next })
-    process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n1. ${words('plugin')}` : noAgent}\n`)
+    const claudeNext = isPluginInstalled ? [words('openOne', { agents: 'Claude Code' }), words('thenBoardOne')] : [words('plugin')]
+    process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n${claudeNext.map((step, i) => `${i + 1}. ${step}`).join('\n')}` : noAgent}\n`)
     return
   }
   if ((!selected.length && selector !== 'auto') || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
@@ -623,9 +625,10 @@ const main = () => {
       if (agent === 'cursor' && process.platform === 'win32') steps.push(words('cursorWindows'))
       sessionAgents.push(names[agent])
     }
+    if (isPluginInstalled) sessionAgents.push('Claude Code')
     if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
     for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
-    if (hasClaude) steps.push(words('plugin'))
+    if (hasClaude && !isPluginInstalled) steps.push(words('plugin'))
     if (available.length) {
       steps.push(words('board', { command: boardCommand }))
     }

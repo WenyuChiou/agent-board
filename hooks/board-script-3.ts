@@ -9609,7 +9609,7 @@ export const LINES = [
 "    }",
 "  };",
 "  const installed = read(\"plugins/installed_plugins.json\")?.plugins?.[plugin];",
-"  return (Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === \"object\") || read(\"settings.json\")?.enabledPlugins?.[plugin] === true;",
+"  return Array.isArray(installed) ? installed.length > 0 : installed !== null && typeof installed === \"object\";",
 "};",
 "var setupRecordChanges = (plan, selected) => setupAgents2.filter((other) => !selected.includes(other)).map((other) => join18(plan.data, `install-${other}.json`)).filter((file) => {",
 "  try {",
