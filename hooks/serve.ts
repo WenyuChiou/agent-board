@@ -778,6 +778,7 @@ const PAGE_WORDS = [
   'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
   'settingsLanguageChanged', 'settingsLanguageOverridden', 'settingsNotifications', 'settingsOn', 'settingsOff', 'settingsDenied', 'settingsUnavailable', 'settingsChanged', 'settingsLanguage',
+  'settingsAgentSetup', 'settingsAgentRemove', 'settingsAgentConfirm', 'settingsAgentCancel', 'settingsAgentsBusy', 'settingsAgentsReadFailed',
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',

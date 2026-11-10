@@ -61,6 +61,7 @@ import { currentTidyCandidate, previewTidy, tidySelector, type TidyCandidate, ty
 import { codexSignal, isStrongRun, runLookupId } from '../hooks/runs'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { runMcp } from './board-mcp'
+import { createSettingsAgents } from './settings-agents'
 
 // The line `/progress connect` puts above the bundle sets it.
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
@@ -2004,6 +2005,7 @@ const serveChild = (): void => {
       language: () => settingsLangOf(settingsNow()) ?? langOf(BAKED.lang) ?? 'auto',
       setLanguage: saveLanguage,
       isLangOverridden: () => isLanguageOverridden(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG)),
+      agents: createSettingsAgents({ args, progress: path, script: process.argv[1]!, words: () => s, readProgress: () => read(path) }),
       sweep: () => { tidyCount(false, true); moveOldMonths() },
       // Tests can shorten the hourly interval without changing the sweep rules.
       sweepMs: Number.isInteger(Number(process.env.AGENT_BOARD_SWEEP_MS)) && Number(process.env.AGENT_BOARD_SWEEP_MS) >= 10 && Number(process.env.AGENT_BOARD_SWEEP_MS) <= 3_600_000 ? Number(process.env.AGENT_BOARD_SWEEP_MS) : 3_600_000,
@@ -2196,6 +2198,13 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   // would resolve differently in the child too.
   rest.push('--progress-file', path)
   if (flag('--messages-dir') !== undefined) rest.push('--messages-dir', messagesDirectory())
+  // Settings sets up and removes agents in the home, data folder and host folders this command was
+  // given, so the child gets them too, resolved here for the same reason. A bare program name for
+  // --codex-bin is passed on as it is, so setup refuses it as it does in a terminal.
+  for (const name of ['--home', '--data-dir', '--codex-dir', '--grok-dir', '--hermes-dir', '--opencode-dir', '--openclaw-dir', '--deepseek-dir', '--codex-bin']) {
+    const value = flag(name)
+    if (value !== undefined) rest.push(name, name === '--codex-bin' && !/[\\/]/.test(value) ? value : resolve(value))
+  }
   // On Windows the server child is told which folders were just checked, so it does not check them again.
   const handoff = runtimeFolderHandoff()
   // The default message folder is checked here, so its whoami and icacls starts are not among

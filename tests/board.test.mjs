@@ -3669,6 +3669,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
           const answer = await getBoard(options)
           return { ...answer, json: async () => { const data = await answer.json(); return data.model ? { ...data, model: viewed(data.model) } : data } }
         }
+        if (target === '/api/agents') return { ok: true, json: async () => ({ rows: [] }) }
         requests.push({ path: target, body: JSON.parse(options.body) })
         sent.push({ path: target, headers: options.headers, keepalive: options.keepalive })
         if (post) return post(requests.at(-1))
@@ -12890,7 +12891,7 @@ test('#1085: a style picked on the page is written to the settings file with its
   } finally { await board.close() }
 })
 
-test('Settings has one labelled button and three accessible sections in every language and keeps focus inside until closed', async () => {
+test('Settings has one labelled button and four accessible sections in every language and keeps focus inside until closed', async () => {
   for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
     const html = await sourcePage(lang)
     assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
@@ -12898,7 +12899,7 @@ test('Settings has one labelled button and three accessible sections in every la
     assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
     const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
     for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
-    assert.equal((panel.match(/<section\b/g) ?? []).length, 3)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 4)
     const dom = await pageDom(html, redesignModel(), { width: 375 })
     assert.equal(dom.node('settings').hidden, true)
     dom.node('settings-toggle').click()
