@@ -580,7 +580,10 @@ test('pr-check reports the last review verdict and distinguishes current and old
   assert.match(verdict(comments, head).info[0], /REQUEST CHANGES.*current head/)
   assert.match(verdict(comments.slice(0, 1), head).info[0], /without the full head sha/)
   assert.match(verdict([], head).info[0], /no review verdict/)
-  assert.deepEqual(reviewOf('Checks complete\nReview: APPROVE ABCDEF0\nReview: REQUEST CHANGES 1234567'), { kind: 'APPROVE', sha: 'abcdef0' })
+  // The first verdict line counts, but a short approval is no verdict (R2), so the next line of the comment does.
+  assert.deepEqual(reviewOf('Checks complete\nReview: APPROVE ABCDEF0\nReview: REQUEST CHANGES 1234567'), { kind: 'REQUEST CHANGES', sha: '1234567' })
+  assert.deepEqual(reviewOf('Checks complete\nReview: REQUEST CHANGES ABCDEF0\nReview: APPROVE 1234567'), { kind: 'REQUEST CHANGES', sha: 'abcdef0' })
+  assert.deepEqual(reviewOf('Review: APPROVE ABCDEF0'), { kind: 'APPROVE', sha: 'abcdef0' })
   assert.deepEqual(reviewOf('Review: REQUEST CHANGES `ABCDEF0`'), { kind: 'REQUEST CHANGES', sha: 'abcdef0' })
   assert.equal(reviewOf('Checks complete without a verdict'), null)
   assert.match(verdict([{ body: `Checks complete\nReview: REQUEST CHANGES \`${head}\`` }], head).info[0], /REQUEST CHANGES.*current head/)
@@ -698,6 +701,15 @@ Review: APPROVE ${head.slice(0, 7)} by Muse Spark`, submitted_at: '2026-11-10T09
 
   // A request for changes still holds the merge whatever sha length it names.
   assert.ok(reviewProblems({ ...codexPr, prComments: [{ body: `Review: REQUEST CHANGES ${head.slice(0, 7)} by Muse Spark` }] }).some(p => p.message.includes('requested changes')))
+  // A short approval quoted above a request for changes in one comment does not hide that request.
+  const quotedComment = byTime([
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T08:00:00Z' },
+    { body: `Review: APPROVE ${head.slice(0, 7)} by independent\nReview: REQUEST CHANGES ${head} by reviewer\nP1: synthetic finding`, created_at: '2026-11-10T09:00:00Z' },
+  ])
+  assert.ok(reviewProblems({ ...codexPr, prComments: quotedComment }).some(p => p.message.includes('requested changes')), JSON.stringify(quotedComment))
+  // The lane form does not let the author approve under its own bare name.
+  const bare = reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head} by codex, codex's reviewer` }] })
+  assert.ok(bare.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(bare))
 })
 
 test('pr-check combines issue state and draft information without mutating inputs', () => {

@@ -599,7 +599,10 @@ export const reviewOf = item => {
     return { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
   }
   const body = typeof item === 'string' ? item : item.body ?? ''
-  const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+)(?:,[ \t]*([^\r\n,']+)'s reviewer\b)?)?/mi)
+  // The first verdict line counts, as before, except that a short approval (no verdict under R2) does not hide a
+  // later line of the same comment, such as a request for changes.
+  const matches = [...body.matchAll(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+)(?:,[ \t]*([^\r\n,']+)'s reviewer\b)?)?/gmi)]
+  const match = matches.find(found => found[1].toUpperCase() !== 'APPROVE' || found[2].length === 40) ?? matches[0]
   if (match) {
     const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
     // R2's exception: a lane posts its own fresh reviewer's verdict as `by <reviewer and model>, <lane>'s reviewer`.
@@ -675,8 +678,10 @@ export const verdict = (comments, head, options = {}) => {
 
   // The lane-reviewer form names the author's own lane: it counts on that lane's pull requests only, never on a
   // release or a pull request from outside the team (R2).
+  // A reviewer named only as the author is the author, whatever lane it claims.
   const isAuthorLane = Boolean(authorAgent && last.lane && last.lane.split(/\s+/)[0].toLowerCase() === authorAgent.toLowerCase())
-  if (authorAgent && last.reviewer && (isAuthorLane ? isRelease || isOutside : last.reviewer.toLowerCase().includes(authorAgent.toLowerCase()))) {
+  const isAuthorOnly = Boolean(authorAgent && last.reviewer && last.reviewer.trim().toLowerCase() === authorAgent.toLowerCase())
+  if (authorAgent && last.reviewer && (isAuthorOnly || (isAuthorLane ? isRelease || isOutside : last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())))) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
       output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer.'))
