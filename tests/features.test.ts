@@ -1771,6 +1771,9 @@ test('a lone straight quote, such as an inch mark, is a literal character, and t
   expect(lastQuestion('他問"要藍色還是綠色?"')).toBeNull()
   expect(lastQuestion('I asked " Ready?"')).toBeNull()
   expect(lastQuestion('I asked "...Ready?"')).toBeNull()
+  // A straight quote in code is a character, so it neither opens nor closes a quotation.
+  expect(lastQuestion('The tokens are `name"` and `"`. Should I escape both? "No" leaves them unchanged.')).toBe('Should I escape both?')
+  expect(lastQuestion('I compared `name"` and `"` and then asked "Ready?"')).toBeNull()
 })
 
 test('a link\'s own question mark is not a question, and a question with a link keeps it whole (#1108)', () => {

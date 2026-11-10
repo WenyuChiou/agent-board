@@ -224,7 +224,9 @@ const isQuoted = (line: string, mark: number): boolean => {
 
 // For callers that already normalized the reply: do not parse it a second time.
 export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
-  const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, '$1')
+  // A straight quote in code (`name"`) is a character the reply shows, not a quotation: it stands
+  // in as another mark until the question is put back together.
+  const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, (_, code: string) => code.replace(/"/g, '\u0001'))
   const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '')
   const last = paragraphs.at(-1)
   if (last === undefined) return null
@@ -253,7 +255,7 @@ export const lastQuestionInProse = (answer: string, isFull = false): string | nu
   const sentence = [...tail.matchAll(/[^.。!！?？]*[?？]["'”」』)]*/g)].at(-1)
   if (sentence === undefined) return null
   if (isQuoted(tail, (sentence.index ?? 0) + sentence[0].search(/[?？]/))) return null
-  const question = sentence[0].replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '').trim()
+  const question = sentence[0].replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '').replace(/\u0001/g, '"').trim()
   // The question itself must be put to the person, not the line it ends: `You asked for a
   // summary. What changed?` over a list asks nothing.
   if (isOverList && !asksToPick(question, isHeading)) return null
