@@ -6139,6 +6139,30 @@ test('over SSH, in a terminal with no browser, plain agent-board runs the live t
   }
 })
 
+test('over SSH with a config folder variable set, plain agent-board opens the page and says how to forward its port (#1283)', { timeout: 40_000 }, async () => {
+  for (const name of ['HERMES_HOME', 'OPENCODE_CONFIG_DIR']) {
+    const board = serveIn()
+    let url = null
+    try {
+      const shim = join(board.dir, 'ssh-page-shim.cjs')
+      writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
+      // A person's own profile can set an agent's config folder; that still picks the page.
+      const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '', [name]: join(board.dir, 'own-config') }
+      for (const key of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[key]
+      const out = await new Promise((done, fail) => {
+        execFile(process.execPath, ['--require', shim, board.script], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
+      })
+      url = board.urlOf(out)
+      assert.ok(url, `${name}: the page's address is printed: ${JSON.stringify(out)}`)
+      const port = new URL(url).port
+      const lines = out.trim().split('\n')
+      assert.equal(lines.at(-1), url, `${name}: the address stays the last line`)
+      assert.equal(lines.at(-2), EN.serveSshHint(Number(port), '203.0.113.9', url), `${name}: the line before it says how to forward the port`)
+      assert.doesNotMatch(out, /\u001b\[\?1049h|Opened Agent Board|No browser found/, `${name}: no terminal board, no window, no browser note`)
+    } finally { await board.end([url]) }
+  }
+})
+
 test('a second agent-board reuses the running page and prints the same bare URL', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const urls = []
@@ -7132,6 +7156,7 @@ require('node:module').syncBuiltinESMExports()
     try {
       const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 30_000 })
       assert.equal(ran.stdout.trim(), EN.serveFailed(fault === 'timeout' ? EN.serveRuntimeCheckTimeout : EN.serveRuntimePrivate), fault)
+      assert.equal(ran.status, 1, `a --serve that started no page exits non-zero (#1292): ${fault}`)
       assert.ok(!existsSync(board.served), 'the empty file is discarded')
       assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [], fault)
       assert.ok(!ran.stdout.includes('http:'))

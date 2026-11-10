@@ -2413,6 +2413,8 @@ const serveBoard = async (): Promise<void> => {
   }
   const server = await serverPromise
   if (server === null) {
+    // No page started: a script that checks the exit status must not read success (#1292).
+    process.exitCode = 1
     process.stdout.write(`\n${serveFailureNote(failure)}\n`)
     return
   }
@@ -2432,13 +2434,17 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
   // The page is already in a window: point at it rather than opening another one that would poll too.
   if (isShape && await pageIsOpen(server)) return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
   const isOpen = isShape ? await new Promise<boolean>(done => openInBrowser(address, done, true)) : false
-  const isSuppressed = Boolean(process.env.AGENT_BOARD_TEST_PID || process.env.SSH_CONNECTION || process.env.SSH_TTY)
+  const isSsh = Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY)
+  const isSuppressed = Boolean(process.env.AGENT_BOARD_TEST_PID) || isSsh
   const note = isOpen
     ? s.boardPageWindowOpened(address)
     : isNoOpen || (isSuppressed && !isOpen)
       ? s.boardPageLink(address)
       : s.serveBrowserNone(address)
-  return { note, isOpen, url: address }
+  // Over SSH the address is on the remote computer: say how to forward its port, as the terminal
+  // board does, and keep the address the last line an agent shows (#1283).
+  const sshHint = isSsh && !isOpen ? `${s.serveSshHint(server.port, sshHost(), address)}\n` : ''
+  return { note: `${sshHint}${note}`, isOpen, url: address }
 }
 
 const openPageSurface = async (): Promise<void> => {
