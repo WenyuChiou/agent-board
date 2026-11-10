@@ -4081,7 +4081,7 @@ test('PowerShell reporter retries a scratch file released after its first failed
     clearTimeout(timer)
     if (lock !== undefined) closeSync(lock)
     if (child.exitCode === null && child.signalCode === null) child.kill()
-    await closed
+    await Promise.race([closed, new Promise(resolve => setTimeout(resolve, 10000))])
   }
 }))
 

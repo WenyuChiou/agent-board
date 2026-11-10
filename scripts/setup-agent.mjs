@@ -398,10 +398,13 @@ const main = () => {
     try { return JSON.parse(result.stdout) } catch { fallback() }
   }
   const plans = selected.map(agent => run(agent, false))
-  const available = selected.filter((agent, i) => !plans[i].conflicts.length)
-  if (isRemove && available.length < selected.length) {
+  let available = selected.filter((agent, i) => !plans[i].conflicts.length)
+  // Preview again with only the agents whose removal goes ahead, until none of them newly conflicts, so the list
+  // every removal is told matches what is applied.
+  while (isRemove && available.length < removing.length) {
     removing = available
-    for (const [i, agent] of selected.entries()) if (!plans[i].conflicts.length) plans[i] = run(agent, false)
+    for (const [i, agent] of selected.entries()) if (removing.includes(agent)) plans[i] = run(agent, false)
+    available = selected.filter((agent, i) => !plans[i].conflicts.length)
   }
   if (selected.length && !available.length) process.exitCode = 1
   const results = plans.map((plan, i) => {
