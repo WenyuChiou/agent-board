@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr,
   isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
-  byTime, hasHeadApproval, privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
+  byTime, privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -666,12 +666,14 @@ test('approval gate: an approval needs the full head sha, and a lane\'s own fres
   assert.ok(reviewProblems({ ...codexPr, title: 'chore(release): Agent Board 9.9.9', prComments: [namedOtherwise] }).some(p => p.message.includes('RULES.md, R2')))
   assert.equal(reviewProblems({ ...codexPr, prComments: [namedOtherwise] }).length, 0)
 
-  // A short approval comment does not hide a GitHub approval of the full head.
   const shortComment = { body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark` }
-  assert.equal(hasHeadApproval([shortComment], head), false)
-  assert.equal(hasHeadApproval([{ body: `Review: APPROVE ${head} by Muse Spark` }], head), true)
-  // An approval of an older full head does not make the GitHub reviews unneeded either.
-  assert.equal(hasHeadApproval([{ body: `Review: APPROVE ${'1'.repeat(40)} by Muse Spark` }, shortComment], head), false)
+  // At the same second, a request for changes goes after an approval, whichever list each came from.
+  const tied = byTime([
+    { body: `Review: APPROVE ${head} by independent\nReview: REQUEST CHANGES ${head} by reviewer`, created_at: '2026-11-10T08:00:00Z' },
+    { body: `Review: REQUEST CHANGES ${head} by reviewer\nP1: synthetic finding`, created_at: '2026-11-10T09:00:00Z' },
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T09:00:00Z' },
+  ])
+  assert.ok(reviewProblems({ ...codexPr, prComments: tied }).some(p => p.message.includes('requested changes')), JSON.stringify(tied))
 
   // Comments and GitHub reviews are read in time order, so an older GitHub approval does not clear a later request for changes.
   const merged = byTime([
@@ -963,7 +965,8 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   const args = ['--event', event, '--repo-dir', setup.directory]
   const passed = await runMain(args, env)
   assert.equal(passed.status, 0, passed.stdout + passed.stderr)
-  assert.equal(calls.length, 5)
+  // The GitHub reviews are read even after an approval comment (#1257).
+  assert.equal(calls.length, 6)
   assert.ok(calls.every(call => call.host === 'api.example.invalid' && call.authorization === 'Bearer synthetic-token-value'))
   globalThis.fetch = async url => (url.pathname.endsWith('/issues/42') ? { ok: false, status: 404, headers: new Headers() } : { ok: true, status: 200, json: async () => [], headers: new Headers() })
   const missing = await runMain(args, env)
@@ -1040,11 +1043,12 @@ const eventArgs = (setup, association, login = 'newcomer') => {
   return ['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory]
 }
 const apiEnv = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' }
-const githubAnswers = (calls, { labels = [], comments = [], pulls = [], reviews = [] }) => async url => {
+const githubAnswers = (calls, { labels = [], comments = [], pulls = [], reviews = [], prReviews = [] }) => async url => {
   calls.push(url.pathname)
   const isPrComments = url.pathname.endsWith('/issues/17/comments')
   const defaultReview = currentFixtureHead ? [{ body: `Review: APPROVE ${currentFixtureHead} by independent reviewer` }] : []
   const payload = isPrComments ? (reviews.length ? reviews : defaultReview) :
+    url.pathname.endsWith('/pulls/17/reviews') ? prReviews :
     url.pathname.endsWith('/issues/42') ? { state: 'open', labels } :
     url.pathname.endsWith('/issues/42/comments') ? comments :
     url.pathname.endsWith('/pulls') ? pulls : []
@@ -1309,6 +1313,24 @@ test('pr-check passes a team pull request with no claim on its issue', async t =
   // A team author's check reads neither the issue's comments nor the open pull requests, so a failed lookup it does
   // not need cannot stop it.
   assert.equal(calls.some(path => path.endsWith('/issues/42/comments') || path.endsWith('/pulls')), false, calls.join(' '))
+})
+
+test('pr-check reads the GitHub reviews after an approval comment, so a later request for changes holds the merge (#1257)', async t => {
+  const setup = fixture(t)
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const calls = []
+  const approval = { body: `Review: APPROVE ${setup.head} by independent reviewer`, created_at: '2030-01-01T08:00:00Z' }
+  const changes = { state: 'CHANGES_REQUESTED', commit_id: setup.head, user: { login: 'synthetic-reviewer' }, body: 'P1: synthetic finding', submitted_at: '2030-01-01T09:00:00Z' }
+  globalThis.fetch = githubAnswers(calls, { reviews: [approval], prReviews: [changes] })
+  const held = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
+  assert.equal(held.status, 1, held.stdout + held.stderr)
+  assert.match(held.stdout, /FAIL review: the latest review requested changes/)
+  assert.ok(calls.some(path => path.endsWith('/pulls/17/reviews')), calls.join(' '))
+  // With no later GitHub review the approval comment still passes.
+  globalThis.fetch = githubAnswers(calls, { reviews: [approval] })
+  const passed = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
 })
 
 test('pr-check passes a team pull request when more than eight pull requests are open', async t => {

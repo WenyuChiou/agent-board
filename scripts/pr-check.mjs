@@ -626,19 +626,15 @@ export const reviewOf = item => {
   return null
 }
 
-// Only an approval comment of the current full head makes the GitHub reviews unneeded; a short or older one does not.
-export const hasHeadApproval = (comments, head) => comments.some(comment => {
-  const review = reviewOf(comment)
-  return review?.kind === 'APPROVE' && review.sha === String(head).toLowerCase()
-})
-
 // Comments and GitHub reviews come from two lists; the latest verdict is the latest by time, not by list. From
 // GitHub every comment and submitted review has a time, so an item without one (a pending review) is no verdict yet.
+// At the same time a request for changes goes last, so a tie never lets an approval through.
 // Items with no times at all (a local run's synthetic list) keep their order.
 export const byTime = items => {
   const at = item => Date.parse(item?.created_at ?? item?.submitted_at ?? '')
+  const holds = item => reviewOf(item)?.kind === 'REQUEST CHANGES' ? 1 : 0
   if (!items.some(item => !Number.isNaN(at(item)))) return items
-  return items.filter(item => !Number.isNaN(at(item))).sort((a, b) => at(a) - at(b))
+  return items.filter(item => !Number.isNaN(at(item))).sort((a, b) => at(a) - at(b) || holds(a) - holds(b))
 }
 
 export const verdict = (comments, head, options = {}) => {
@@ -1034,10 +1030,9 @@ export const main = async (argv = process.argv.slice(2)) => {
       if (data.number === null) data.prComments = []
       else {
         const comments = await api(`issues/${data.number}/comments`, { isList: true })
+        // GitHub reviews are always read, so one that requests changes after an approval comment is not missed.
         let reviews = []
-        if (!hasHeadApproval(Array.isArray(comments) ? comments : [], data.head)) {
-          try { reviews = await api(`pulls/${data.number}/reviews`, { isList: true }) } catch {}
-        }
+        try { reviews = await api(`pulls/${data.number}/reviews`, { isList: true }) } catch {}
         data.prComments = byTime([...(Array.isArray(comments) ? comments : []), ...(Array.isArray(reviews) ? reviews : [])])
       }
     }
