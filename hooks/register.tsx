@@ -27,7 +27,9 @@ import {
   countManualDone,
   isHandKeptMoveOn,
   removeAutoBlock,
+  holdsTick,
   setManualStep,
+  tickMark,
   shortId,
   scanBlocks,
   takeArchivable,
@@ -37,7 +39,7 @@ import {
   upsertAutoBlock,
   cutEntries,
 } from './blocks'
-import type { ConfirmedTask, ConfirmRef } from './blocks'
+import type { ConfirmedTask, ConfirmRef, TickMark } from './blocks'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from './history'
 import { barStyleFrom, barStyleName, barStyleOf, DEFAULT_BAR_STYLE, withBarStyle } from './progress-bar'
 import type { BarStyle } from './progress-bar'
@@ -88,7 +90,7 @@ import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_M
 import { othersNote, sessionPushNote } from './others'
 import type { ProgressProject } from '../types'
 import { boardRun } from './board-commands'
-import { peekInbox, redact, turnsFor } from './board'
+import { guardedView, peekInbox, redact, turnsFor } from './board'
 import type { PendingTurn, TurnCache } from './board'
 import { paletteFor } from './palette'
 import { drawPane, pressTarget, reviseKey } from './pane'
@@ -3919,11 +3921,38 @@ const handOverPrompt = (row: TaskRow, s: Strings): string =>
 
 // A press on 完成: the step is ticked in the file, by the person's own hand, and journaled
 // like a step Claude finished.
+// The tick is kept when the step that took it reads back with it, wherever another writer moved
+// its lines or changed its other steps (tickMark). Only a read-back that finds it counts: a
+// write every read-back finds undone, or a try that then finds nothing to tick (the step moved,
+// or its twin took its line), is not reported as made. The pane's words name an unnamed
+// project, as its draw did.
 const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
-  const wrote = await rewrite($, await progressPath($), async before => setManualStep(before, ref, 'x', await $.clock.now()))
+  const s = await wordsOf($)
+  let ticked: { mark: TickMark | null; at: number; line: string } | null = null
+  let isKept = false
+  const holds = (text: string): boolean =>
+    ticked !== null && (ticked.mark === null ? text.split(/\r?\n/)[ticked.at] === ticked.line : holdsTick(text, ticked.mark, s))
+  const wrote = await rewrite(
+    $,
+    await progressPath($),
+    async before => {
+      const after = setManualStep(before, ref, 'x', await $.clock.now(), s)
+      if (after === before) {
+        isKept = holds(before)
+        return after
+      }
+      const was = before.split(/\r?\n/)
+      const lines = after.split(/\r?\n/)
+      const at = lines.findIndex((line, index) => line !== was[index])
+      ticked = { mark: tickMark(after, ref.project, at, s), at, line: lines[at] ?? '' }
+      isKept = false
+      return after
+    },
+    check => (isKept = holds(check)),
+  )
   await poll($)
 
-  return wrote !== null
+  return wrote !== null && isKept
 }
 
 // A side question: answered over this session's transcript, without a turn of its own.
@@ -4702,7 +4731,8 @@ export const register: Register = (on, options) => {
         ...warningOf(latest, s, seen, currentAt),
       }
     }
-    const view = await paneView()
+    // Drawn refs carry their source proof; presses re-read the view only for labels and counts.
+    const view = guardedView(await paneView())
     const ui: PaneUi = {
       Box: table.Box,
       Text: table.Text,

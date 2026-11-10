@@ -2099,6 +2099,188 @@ test('a successful pane step keeps its feedback until the task changes', async (
   await ui.unmount()
 })
 
+// #1228: a pane press keeps the step ref its button drew. Another writer removes an earlier line
+// while the queued write is reading, so the twin moves into the saved line; the write must refuse.
+const TWINS_1228 = (mark: string): string => `# Progress\n\n## Demo\n### Earlier card\n- [ ] Check the sample\n### Twin steps\n- [${mark}] Inspect the map\n- [${mark}] Inspect the map\n`
+const MOVED_1228 = (mark: string): string => TWINS_1228(mark).replace('- [ ] Check the sample\n', '')
+const twinWorld1228 = (text: string): World => ({ files: new Map([[FILE, text]]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: ['waiting', 'others'] }, written: [] })
+
+for (const [mark, keys, what] of [[' ', ['Demo::Twin steps', 'Demo::Twin steps::tick'], 'tick'], ['?', ['Demo::Twin steps::0::done'], 'question Done']] as const) {
+  test(`a pane ${what} refuses when an earlier line goes during its queued write and its twin takes the saved line (#1228)`, async ($, on) => {
+    const world = twinWorld1228(TWINS_1228(mark))
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    for (const key of keys.slice(0, -1)) await ui.press({ key })
+    world.written = []
+    let isMoved = false
+    world.afterRead = path => {
+      if (path !== FILE || isMoved) return
+      isMoved = true
+      world.files.set(FILE, MOVED_1228(mark))
+      world.mtime += 1
+    }
+    await ui.press({ key: keys[keys.length - 1]! })
+    world.afterRead = undefined
+    expect(isMoved).toBe(true)
+    expect(world.files.get(FILE)).toBe(MOVED_1228(mark))
+    expect(world.written.some(path => path.includes('-journal-'))).toBe(false)
+    expect(await ui.find({ type: 'Text', text: ZH_TW.boardTickGone })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`a pane ${what} is not kept when another writer moves the task and its twin step takes the done date (#1228)`, async ($, on) => {
+    const world = twinWorld1228(TWINS_1228(mark))
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    for (const key of keys.slice(0, -1)) await ui.press({ key })
+    world.written = []
+    let swapped = ''
+    world.afterWrite = () => {
+      world.afterWrite = undefined
+      // The earlier card's step goes, the first twin is open again, and the second twin now reads
+      // exactly as the tick wrote the first, on the line the tick wrote.
+      const done = (world.files.get(FILE) ?? '').split('\n')[6] ?? ''
+      swapped = MOVED_1228(mark).replace(`- [${mark}] Inspect the map\n- [${mark}] Inspect the map\n`, `- [${mark}] Inspect the map\n${done}\n`)
+      return swapped
+    }
+    await ui.press({ key: keys[keys.length - 1]! })
+    expect(swapped.split('\n')[6]).toMatch(/^- \[x\] Inspect the map/)
+    expect(world.files.get(FILE)).toBe(swapped)
+    expect(world.written.filter(path => path === FILE)).toHaveLength(1)
+    expect(world.written.some(path => path.includes('-journal-'))).toBe(false)
+    expect(await ui.find({ type: 'Text', text: ZH_TW.boardTickGone })).toBeDefined()
+    await ui.unmount()
+  })
+
+  for (const [lang, words] of [['en', EN], ['zh-CN', ZH_CN]] as const) {
+    test(`a pane ${what} on a task with no project heading ticks in ${lang} (#1228)`, async ($, on) => {
+      const text = `# Progress\n\n### Checklist\n- [${mark}] First step\n`
+      const world: World = { files: new Map([[FILE, text]]), mtime: 1, hasTasks: true, store: { lang, autoConnectOff: true, opened: ['waiting', 'others'] }, written: [] }
+      engineBeneath(on, world)
+      await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+      const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+      const task = `${words.uncategorized}::Checklist`
+      for (const key of what === 'tick' ? [task, `${task}::tick`] : [`${task}::0::done`]) await ui.press({ key })
+      expect(world.files.get(FILE) ?? '').toMatch(/^- \[x\] First step/m)
+      expect(world.written.some(path => path.includes('-journal-'))).toBe(true)
+      expect(await ui.find({ type: 'Text', text: words.boardTicked('First step') })).toBeDefined()
+      await ui.unmount()
+    })
+  }
+
+  test(`a fresh pane ${what} still ticks the first of two identical steps (#1228)`, async ($, on) => {
+    const world = twinWorld1228(TWINS_1228(mark))
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    for (const key of keys) await ui.press({ key })
+    const lines = (world.files.get(FILE) ?? '').split('\n')
+    expect(lines[6]).toMatch(/^- \[x\] Inspect the map/)
+    expect(lines[7]).toBe(`- [${mark}] Inspect the map`)
+    expect(world.written.some(path => path.includes('-journal-'))).toBe(true)
+    await ui.unmount()
+  })
+}
+
+// Round 2 of #1251: a task with no `###` heading carries the same read-back check, and another
+// writer finishing a different step of the same task does not undo a tick that is still there.
+const UNHEADED_1228 = (mark: string): string => `# Progress\n\n## Earlier\n### Earlier card\n- [ ] Check the sample\n\n## Demo\n- [${mark}] Inspect the map\n- [${mark}] Inspect the map\n`
+for (const [mark, what] of [[' ', 'tick'], ['?', 'question Done']] as const) {
+  test(`a pane ${what} on a task with no heading is not kept when its twin step takes the done date (#1228)`, async ($, on) => {
+    const world: World = { files: new Map([[FILE, UNHEADED_1228(mark)]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['waiting', 'others'] }, written: [] }
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    const task = `Demo::${EN.unnamed}`
+    const keys = what === 'tick' ? [task, `${task}::tick`] : [`${task}::0::done`]
+    for (const key of keys.slice(0, -1)) await ui.press({ key })
+    world.written = []
+    let swapped = ''
+    world.afterWrite = () => {
+      world.afterWrite = undefined
+      const done = (world.files.get(FILE) ?? '').split('\n')[7] ?? ''
+      swapped = UNHEADED_1228(mark).replace('- [ ] Check the sample\n', '').replace(`- [${mark}] Inspect the map\n- [${mark}] Inspect the map\n`, `- [${mark}] Inspect the map\n${done}\n`)
+      return swapped
+    }
+    await ui.press({ key: keys[keys.length - 1]! })
+    expect(swapped.split('\n')[7]).toMatch(/^- \[x\] Inspect the map/)
+    expect(world.files.get(FILE)).toBe(swapped)
+    expect(world.written.some(path => path.includes('-journal-'))).toBe(false)
+    expect(await ui.find({ type: 'Text', text: EN.boardTickGone })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`a pane ${what} is not kept when a stale copy puts a done card of the same title in its place (#1228)`, async ($, on) => {
+    const text = `# Progress\n\n## Demo\n### Checklist\n- [${mark}] Inspect the map\n- [ ] Finish North\n### Checklist\n- [x] Inspect the map <!-- done 2026-01-01 -->\n- [ ] Finish South\n`
+    const world: World = { files: new Map([[FILE, text]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['waiting', 'others'] }, written: [] }
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    const keys = what === 'tick' ? ['Demo::Checklist', 'Demo::Checklist::tick'] : ['Demo::Checklist::0::done']
+    for (const key of keys.slice(0, -1)) await ui.press({ key })
+    world.written = []
+    let stale = ''
+    world.afterWrite = () => {
+      world.afterWrite = undefined
+      // South, done today on the line the tick wrote, now comes first; North is open again.
+      const done = (world.files.get(FILE) ?? '').split('\n')[4] ?? ''
+      stale = `# Progress\n\n## Demo\n### Checklist\n${done}\n- [ ] Finish South\n### Checklist\n- [${mark}] Inspect the map\n- [ ] Finish North\n`
+      return stale
+    }
+    await ui.press({ key: keys[keys.length - 1]! })
+    expect(stale.split('\n')[4]).toMatch(/^- \[x\] Inspect the map <!-- done /)
+    expect(world.files.get(FILE)).toBe(stale)
+    expect(world.written.some(path => path.includes('-journal-'))).toBe(false)
+    expect(await ui.find({ type: 'Text', text: EN.boardTickGone })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`a pane ${what} is still reported when another writer finishes a different step of its task (#1228)`, async ($, on) => {
+    const text = `# Progress\n\n## Demo\n### Checklist\n- [${mark}] First step\n- [ ] Last step\n`
+    const world: World = { files: new Map([[FILE, text]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['waiting', 'others'] }, written: [] }
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    const keys = what === 'tick' ? ['Demo::Checklist', 'Demo::Checklist::tick'] : ['Demo::Checklist::0::done']
+    for (const key of keys.slice(0, -1)) await ui.press({ key })
+    world.written = []
+    world.afterWrite = () => {
+      world.afterWrite = undefined
+      return (world.files.get(FILE) ?? '').replace('- [ ] Last step', '- [x] Last step')
+    }
+    await ui.press({ key: keys[keys.length - 1]! })
+    const after = world.files.get(FILE) ?? ''
+    expect(after).toMatch(/^- \[x\] First step/m)
+    expect(after).toContain('- [x] Last step')
+    expect(world.written.filter(path => path === FILE)).toHaveLength(1)
+    const journal = [...world.files].filter(([path]) => path.includes('-journal-')).map(([, lines]) => lines).join('\n')
+    expect(journal.split('\n').filter(line => line.includes('First step'))).toHaveLength(1)
+    expect(await ui.find({ type: 'Text', text: EN.boardTicked('First step') })).toBeDefined()
+    await ui.unmount()
+  })
+}
+
+test('a pane tick whose write is undone and whose twin then takes its line is reported as not kept (#1228)', async ($, on) => {
+  const world = twinWorld1228(TWINS_1228(' '))
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'Demo::Twin steps' })
+  world.written = []
+  world.afterWrite = () => {
+    world.afterWrite = undefined
+    return MOVED_1228(' ')
+  }
+  await ui.press({ key: 'Demo::Twin steps::tick' })
+  expect(world.written.filter(path => path === FILE)).toHaveLength(1)
+  expect(world.files.get(FILE)).toBe(MOVED_1228(' '))
+  expect(world.written.some(path => path.includes('-journal-'))).toBe(false)
+  expect(await ui.find({ type: 'Text', text: ZH_TW.boardTickGone })).toBeDefined()
+  await ui.unmount()
+})
+
 test("a refusal caused by another agent's change stays next to the card after the redraw", async ($, on) => {
   const world: World = { files: new Map([[FILE, '# Progress\n\n## Demo\n### Checklist\n- [ ] First step\n- [ ] Last step\n']]), mtime: 1, hasTasks: true, store: { autoConnectOff: true, opened: ['others'] } }
   const clock = engineBeneath(on, world)

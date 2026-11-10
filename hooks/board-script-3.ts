@@ -7409,7 +7409,7 @@ export const LINES = [
 "  const session = item.type === \"ask\" ? item.ask.target?.session ?? item.ask.session : item.type === \"row\" ? item.row.archive?.session ?? item.row.target?.session ?? \"\" : \"\";",
 "  const parts = item.type === \"ask\" ? [session, item.ask.target?.resume ?? \"\", item.ask.project, item.ask.task, item.ask.text, item.ask.note] : item.type === \"row\" ? [session, item.row.target?.resume ?? \"\", item.row.project, item.row.title, item.row.next?.step ?? \"\", item.row.question ?? \"\", item.row.resume ?? \"\"] : [item.turn.agent, item.turn.project, item.turn.text];",
 "  if (item.type === \"row\")",
-"    parts.push(item.row.stepTask?.expected ?? item.row.confirm?.expected ?? \"\", JSON.stringify(item.row.steps.map(({ line, ...step }) => step)));",
+"    parts.push(item.row.stepTask?.expected ?? item.row.confirm?.expected ?? \"\", JSON.stringify(item.row.steps.map(({ line, ...step }) => ({ ...step, raw: withoutStamp(step.raw) }))));",
 "  if (item.type === \"row\" && isLineTick)",
 "    parts.push(JSON.stringify([item.row.next?.line ?? null, item.row.steps.map((step) => step.line), item.row.next?.guard?.lines ?? null]));",
 "  if (item.type === \"ask\" && isLineTick)",

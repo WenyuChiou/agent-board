@@ -2,6 +2,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { boardCounts } from './board-status'
 import { lastQuestionInProse, normalizeReply } from './digest'
+import { withoutStamp } from './done-stamp'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail, turnOrder } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
 import { DARK, LIGHT } from './palette'
@@ -718,7 +719,8 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLine
         : [item.turn.agent, item.turn.project, item.turn.text]
   // Card actions survive unrelated line moves; a tick's absolute line must still name the drawn step,
 // and the positions of every task it could be mistaken for must be the ones drawn.
-  if (item.type === 'row') parts.push(item.row.stepTask?.expected ?? item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => step)))
+  // The hidden done date the board writes after a draw is not a change the person made.
+  if (item.type === 'row') parts.push(item.row.stepTask?.expected ?? item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => ({ ...step, raw: withoutStamp(step.raw) }))))
   if (item.type === 'row' && isLineTick) parts.push(JSON.stringify([item.row.next?.line ?? null, item.row.steps.map(step => step.line), item.row.next?.guard?.lines ?? null]))
   if (item.type === 'ask' && isLineTick) parts.push(JSON.stringify([item.ask.step?.line ?? null, item.ask.step?.guard?.steps ?? null, item.ask.step?.guard?.task ?? null, item.ask.step?.guard?.lines ?? null]))
   if (item.type !== 'turn' && session === '') parts.push(String(twinsOf(item, items)))
@@ -735,6 +737,32 @@ export const guardStep = (ref: StepRef, items: readonly BoardItem[]): StepRef =>
   // An untitled task has no heading; its first source step anchors that candidate instead.
   const lines = [...new Set(items.flatMap(one => one.type === 'row' && one.row.project === ref.project && one.row.stepTask?.expected === expected ? [one.row.stepTask.line >= 0 ? one.row.stepTask.line : one.row.stepLines?.[0] ?? -1] : []))].sort((a, b) => a - b)
   return { ...ref, guard: { task: item.row.stepTask, steps: item.row.stepLines ?? [], lines } }
+}
+
+// The native pane draws the view itself and keeps each step ref in its button until the press.
+// Give those refs the same draw-time source proof the page and terminal carry, so a queued write
+// refuses, rather than retargets, a step whose task or twins moved since the draw (#1228).
+export const guardedView = (view: View): View => {
+  const rows = [...view.due, ...view.active, ...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped, ...(view.recentAsking ?? [])]
+  const items: BoardItem[] = rows.map(row => ({ type: 'row', key: `row:${row.key}`, row }))
+  const ask = (item: WaitingItem): WaitingItem => item.step == null ? item : { ...item, step: guardStep(item.step, items) }
+  const row = (one: TaskRow): TaskRow => one.next == null ? one : { ...one, next: guardStep(one.next, items) }
+  const focus = view.focus === null ? null : view.focus.type === 'ask' ? { ...view.focus, item: ask(view.focus.item) } : { ...view.focus, row: row(view.focus.row) }
+  return {
+    ...view,
+    focus,
+    waiting: view.waiting.map(ask),
+    hidden: view.hidden.map(ask),
+    ...(view.provisional === undefined ? {} : { provisional: view.provisional.map(ask) }),
+    ...(view.reminder === undefined ? {} : { reminder: view.reminder.map(ask) }),
+    ...(view.older === undefined ? {} : { older: view.older.map(ask) }),
+    idle: view.idle.map(row),
+    stopped: view.stopped.map(row),
+    due: view.due.map(row),
+    active: view.active.map(row),
+    groups: view.groups.map(group => ({ ...group, rows: group.rows.map(row) })),
+    ...(view.recentAsking === undefined ? {} : { recentAsking: view.recentAsking.map(row) }),
+  }
 }
 
 // What each key does on the selected line, so the footer lists only keys that do something.

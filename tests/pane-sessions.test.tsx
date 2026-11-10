@@ -4835,7 +4835,7 @@ test('a tick that is kept while another writer adds other text is reported as do
   await ui.unmount()
 })
 
-test('a final write is still reported when its read-back differs', async ($, on) => {
+test('a tick that every read-back finds undone is not reported or journaled (#1228)', async ($, on) => {
   const world: World = { files: new Map([[FILE, JOBS]]), mtime: 1, hasTasks: true, written: [] }
   engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'terminal', isInteractive: true })
@@ -4847,8 +4847,9 @@ test('a final write is still reported when its read-back differs', async ($, on)
   world.afterWrite = undefined
 
   expect(world.written.filter(path => path === FILE)).toHaveLength(3)
-  expect(world.files.get(FILE) ?? '').toContain('- [?] 推薦信 — 等教授回覆')
-  expect(world.written.some(path => path.includes('-journal-'))).toBe(true)
+  expect(world.files.get(FILE)).toBe(JOBS)
+  expect(world.written.some(path => path.includes('-journal-'))).toBe(false)
+  expect(await ui.find({ type: 'Text', text: ZH_TW.boardTickGone })).toBeDefined()
   await ui.unmount()
 })
 
