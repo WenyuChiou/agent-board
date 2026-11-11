@@ -154,7 +154,7 @@ export const startCodexReceiver = ({
     else if (value.method === 'turn/started' && p.turn?.id) state.turn = p.turn.id
     else if (value.method === 'turn/completed' && p.turn?.id) {
       if (state.turn === p.turn.id) state.turn = null
-      if (state.pending) { state.pending.ended.set(p.turn.id, p.turn.status ?? 'completed'); one.settle() }
+      if (state.pending) { state.pending.ended.set(p.turn.id, typeof p.turn.status === 'string' ? p.turn.status : ''); one.settle() }
     } else if (value.method === 'item/completed' && p.item?.type === 'agentMessage' && state.pending) {
       const line = ackLine(String(p.item.text ?? ''), state.pending.nonce)
       if (line !== null) { state.pending.acked.set(p.turnId, line); one.settle() }
@@ -186,13 +186,28 @@ export const startCodexReceiver = ({
       if (!pending?.turn || !pending.ended.has(pending.turn)) return
       const line = pending.acked.get(pending.turn)
       if (line === undefined) pending.reject(new Error('ACK_MISSING'))
-      else if (pending.ended.get(pending.turn) === 'completed') pending.done(line)
-      else pending.reject(new Error('TURN_NOT_COMPLETED'))
+      else {
+        // Only an explicit `completed` is a success; a status that is missing or unknown proves nothing.
+        const status = pending.ended.get(pending.turn)
+        if (status === 'completed') pending.done(line)
+        else if (status === 'failed' || status === 'interrupted') pending.reject(new Error('TURN_NOT_COMPLETED'))
+        else pending.reject(new Error('TURN_STATUS_UNKNOWN'))
+      }
+    }
+    // The running turn, when the daemon did not replay its start to this connection (a turn that began before the
+    // connection joined): the newest turn of the thread, if it is still in progress.
+    const activeTurn = async () => {
+      try {
+        const listed = await daemon.request('thread/turns/list', { threadId: thread, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' })
+        const newest = Array.isArray(listed?.data) ? listed.data[0] : undefined
+        return newest?.status === 'inProgress' && typeof newest.id === 'string' && newest.id ? newest.id : null
+      } catch { return null }
     }
     try {
       // Resuming a loaded thread subscribes this connection to its events without starting a turn.
       const resumed = await daemon.request('thread/resume', { threadId: thread, excludeTurns: true })
       state.status = typeof resumed?.thread?.status?.type === 'string' ? resumed.thread.status.type : 'unknown'
+      if (isSteerOn && state.status === 'active' && state.turn === null) state.turn = await activeTurn()
       const verify = async () => {
         let isLoaded = false
         try { isLoaded = daemon !== null && daemon.isOpen() && (await loadedThreads(daemon)).has(thread) } catch { isLoaded = false }
@@ -200,9 +215,12 @@ export const startCodexReceiver = ({
         return isLoaded
       }
       one.receiver = await client.attach({
-        agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: 'Codex CLI', verify, onError,
+        agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: 'Codex CLI', unclaimed: true, verify, onError,
         // Busy is not a refusal: the lease stays alive and the message waits in the board until the turn ends.
-        canReceive: () => !state.pending && (state.turn === null && state.status === 'idle' || isSteerOn && state.turn !== null && state.status === 'active'),
+        canReceive: async () => {
+          if (isSteerOn && !state.pending && state.status === 'active' && state.turn === null) state.turn = await activeTurn()
+          return !state.pending && (state.turn === null && state.status === 'idle' || isSteerOn && state.turn !== null && state.status === 'active')
+        },
         deliver: async (message, accepted, begin) => {
           if (state.pending) throw new Error('SESSION_BUSY')
           const isSteer = state.turn !== null || state.status !== 'idle'
@@ -273,12 +291,13 @@ export const startCodexReceiver = ({
       }
       let loaded
       try { loaded = await loadedThreads(daemon) } catch (error) { onError(error); return }
-      for (const [thread, one] of [...attached]) if (one.isLost || one.receiver?.isClosed() || !loaded.has(thread) || !wanted.includes(thread)) await drop(thread)
+      for (const [thread, one] of [...attached]) if (one.isLost || one.receiver?.isClosed() || one.receiver?.isContested() || !loaded.has(thread) || !wanted.includes(thread)) await drop(thread)
       for (const thread of wanted) {
         if (isClosed || attached.has(thread) || !loaded.has(thread)) continue
         // A thread with no turn yet has no saved history, and the daemon refuses to resume it (live check, 0.164.0): it is joined
         // on a later tick, after its first turn, and until then the message waits for the session's next step.
-        try { await attach(thread) } catch (error) { if (error.message !== 'OWNER_REJECTED') onError(error) }
+        // A session someone else holds (TARGET_CLAIMED) is tried again on a later tick: this receiver never contests it.
+        try { await attach(thread) } catch (error) { if (error.message !== 'OWNER_REJECTED' && error.message !== 'TARGET_CLAIMED') onError(error) }
       }
     } finally { isTicking = false }
   }

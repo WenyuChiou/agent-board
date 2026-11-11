@@ -2009,7 +2009,8 @@ const serveChild = (): void => {
       messagesDirectory: messagesDirectory(),
       isDefaultMessagesDirectory: flag('--messages-dir') === undefined,
       codex: {
-        threads: () => (progressProjectCache?.projects ?? parseProgress(read(path))).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
+        // Read now, not the page's cache: a tick has no page poll behind it, so a cache would keep an ended session attached and miss a new one.
+        threads: () => parseProgress(read(path)).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
         executable: codexReceiverExecutable(),
         isSteerOn: args.includes('--codex-steer'),
       },

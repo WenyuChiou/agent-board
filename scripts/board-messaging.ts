@@ -344,7 +344,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         return { id, deadline: now + timeoutMs }
       }
       if (action === 'register') {
-        messageFields(body, ['agent', 'session', 'surface', 'turn', 'scope', 'origin', 'connection', 'secret'])
+        messageFields(body, ['agent', 'session', 'surface', 'turn', 'scope', 'origin', 'connection', 'secret', 'unclaimed'])
         const agent = messageId(body.agent), session = messageId(body.session), turn = messageId(body.turn), surface = messageText(body.surface, 100)
         const scope = body.scope ?? 'turn'
         if (scope !== 'turn' && scope !== 'session' || scope === 'session' && turn !== 'session') throw new Error('INVALID_CONNECTION_SCOPE')
@@ -362,6 +362,9 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         }
         if (connections.size >= 100) throw new Error('CONNECTION_LIMIT')
         const matches = [...connections.values()].filter(one => address(one.agent, one.session) === address(agent, session))
+        // An automatic receiver asks to join only a session nobody holds, so it never marks a person's own connection contested.
+        if (body.unclaimed !== undefined && typeof body.unclaimed !== 'boolean') throw new Error('INVALID_CONNECTION_REQUEST')
+        if (body.unclaimed === true && matches.length > 0) throw new Error('TARGET_CLAIMED')
         for (const live of matches) connections.set(live.id, { ...live, contested: true })
         const one: Live = { id: randomBytes(16).toString('hex'), secret: randomBytes(24).toString('base64url'), agent, session, surface, turn, scope, origin, expires: now + LEASE_MS, contested: matches.length > 0 }
         connections.set(one.id, one)

@@ -55,11 +55,11 @@ export const boardClient = address => {
     expect: body => call('expect', body),
     // replaces: the { connection, secret } of this receiver's own earlier connection, from
     // credentials() before a restart, so the board ends it instead of marking both contested.
-    attach: async ({ agent, session, surface, turn, scope = 'turn', replaces, verify, canReceive, deliver, onError = () => undefined }) => {
+    attach: async ({ agent, session, surface, turn, scope = 'turn', replaces, unclaimed = false, verify, canReceive, deliver, onError = () => undefined }) => {
       if (typeof verify !== 'function' || typeof deliver !== 'function' || canReceive !== undefined && typeof canReceive !== 'function' || !await verify()) throw new Error('HOST_NOT_CONNECTED')
-      const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }) })
+      const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }), ...(unclaimed ? { unclaimed: true } : {}) })
       const credentials = { connection: registered.id, secret: registered.secret }
-      let isClosed = false, isPolling = false, isPollDue = false, isRetried = false, leaseUntil = registered.expires
+      let isContested = false, isClosed = false, isPolling = false, isPollDue = false, isRetried = false, leaseUntil = registered.expires
       const close = async () => {
         if (isClosed) return
         isClosed = true
@@ -111,6 +111,8 @@ export const boardClient = address => {
             leaseUntil = started + result.leaseMs
             if (Date.now() >= leaseUntil) throw new Error('CONNECTION_EXPIRED')
             isRetried = false
+            // Another connection for this session registered after this one: the board holds both back until one of them leaves.
+            isContested = result.contested === true
             if (!isClosed) for (const message of result.messages) void processMessage(message)
           } catch (error) {
             if (!error.isRetryable || Date.now() >= leaseUntil) await close()
@@ -133,6 +135,7 @@ export const boardClient = address => {
         id: registered.id, agent, session, surface, turn, close,
         // True once this connection has ended for good (closed, lost ownership or lease expired), so a caller can attach again.
         isClosed: () => isClosed,
+        isContested: () => isContested,
         // A function, so the secret never lands in a log of this object.
         credentials: () => ({ ...credentials }),
         send: async body => {
