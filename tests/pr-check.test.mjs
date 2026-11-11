@@ -1360,6 +1360,16 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
     body: 'Found during a review of the resize layout.',
     association: 'COLLABORATOR',
   }).problems.length, 1)
+  // Unrelated issue references ("Related roadmap: #209") and hex colors (#000000) do not count as a source PR link.
+  assert.equal(findingLink({
+    title: 'fix(board): resize glitch',
+    body: 'Found during a review of the resize layout.\nAuthor: codex\nRelated roadmap: #209\nColor: #000000\n',
+  }).problems.length, 1)
+  assert.deepEqual(findingLink({
+    title: 'fix(board): resize glitch',
+    body: '### Pull request it came from\n\n#1299\n\n### What happened, and what you expected\n\nFound during a review of the resize layout.\n',
+    association: 'COLLABORATOR',
+  }).problems, [])
 
   // 5. CLI --event for both issues (duplicate + missing finding link, plus form-shaped event) and PR (duplicate Fixes #42 for team author).
   const setup = fixture(t)

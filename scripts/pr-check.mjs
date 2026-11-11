@@ -227,9 +227,14 @@ export const findingLink = ({ title = '', body = '', number = null, association 
   // Strip standalone Fixes/Part of lines so a roadmap or issue link such as "Part of #209" does not mask a missing source PR link.
   const withoutLeadingIssues = linesOf(clean).filter(line => !/^\s*(?:Fixes|Part of|Closes|Resolves)\s+#\d+\b/i.test(line)).join('\n')
 
-  const hasNumberRef = [...withoutLeadingIssues.matchAll(/#(\d+)\b/g)].some(match => Number(match[1]) !== number)
-  const hasPullUrl = [...withoutLeadingIssues.matchAll(/github\.com\/[^/\s]+\/[^/\s]+\/pull\/(\d+)\b/gi)].some(match => Number(match[1]) !== number)
-  if (hasNumberRef || hasPullUrl) return output
+  // Require an explicit PR URL, the Pull request it came from section, "PR #N" / "pull request #N", or source wording before #N,
+  // so hex colors (#000000) or unrelated issue mentions ("Related roadmap: #209") do not satisfy the source-PR check.
+  const validRef = pattern => [...withoutLeadingIssues.matchAll(pattern)].some(match => Number(match[1]) !== number)
+  const hasPullUrl = validRef(/github\.com\/[^/\s]+\/[^/\s]+\/pull\/([1-9]\d*)\b/gi)
+  const hasSectionNumber = [...fromPrSection.matchAll(/#([1-9]\d*)\b/g)].some(match => Number(match[1]) !== number)
+  const hasExplicitPr = validRef(/\b(?:pull\s*request|pr)\s*#([1-9]\d*)\b/gi)
+  const hasSourceWording = validRef(/\b(?:from|source(?:\s+pr)?|found\s+(?:in|on|during\s+(?:review\s+of)?|by\s+(?:the\s+)?(?:outside\s+review\s+of|review\s+of|\S+\s+on))|(?:outside\s+)?review(?:ing)?(?:\s+of)?)\s*:?\s*(?:(?:the\s+)?(?:pr|pull\s*request)\s*)?#([1-9]\d*)\b/gi)
+  if (hasPullUrl || hasSectionNumber || hasExplicitPr || hasSourceWording) return output
 
   output.problems.push(problem(
     'finding-link',
