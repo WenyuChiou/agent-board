@@ -82,6 +82,7 @@ const runDockScript = ({ search, place, avail }) => {
     clearTimeout: id => { if (timers[id - 1]) timers[id - 1].fn = () => {} },
     setInterval: (fn, ms) => { timers.push({ fn, ms, every: true }); return timers.length },
     call: (path, body) => { calls.push([path, JSON.parse(JSON.stringify(body))]); return Promise.resolve({ ok: true }) },
+    isClosed: false,
   }
   vm.runInNewContext(dockScript, context)
   const tick = () => {
@@ -90,7 +91,7 @@ const runDockScript = ({ search, place, avail }) => {
       else if (!one.done) { one.done = true; one.fn() }
     }
   }
-  return { win, calls, moves, tick, timers }
+  return { win, calls, moves, tick, timers, context }
 }
 
 test('#1084: the docked page docks itself when the browser put it off its screen, and reports only the person\'s moves, once they settle', () => {
@@ -115,6 +116,17 @@ test('#1084: the docked page docks itself when the browser put it off its screen
   across.tick()
   across.tick()
   assert.deepEqual(across.calls, [['/api/window', { x: 1700, y: 100, width: 600, height: 800 }]])
+
+  // A page a newer one replaced, or the person closed, reports nothing more, even a move already
+  // waiting to settle.
+  across.win.screenX = 1800
+  across.tick()
+  across.context.isClosed = true
+  across.tick()
+  across.win.screenX = 1900
+  across.tick()
+  across.tick()
+  assert.equal(across.calls.length, 1, 'a closed page reports no move')
 
   const inside = runDockScript({ search: '?t=abc&dock=1', place: { x: 2000, y: 0, width: 560, height: 1392 }, avail: screen(2560, 1392) })
   assert.deepEqual(inside.moves, [])
@@ -151,6 +163,16 @@ test('#1084: the computer\'s page keeps the window place in the settings file; a
     assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')), { barStyle: 'blue', window: { x: -1500, y: 20, width: 700, height: 900 } })
     assert.equal((await post({ x: 'left', y: 0, width: 700, height: 900 })).status, 400)
     assert.equal((await post({ x: 0, y: 0, width: 10, height: 900 })).status, 400)
+    // A page a newer page replaced (#265) cannot overwrite the place; the newer page can.
+    const token = page.searchParams.get('t')
+    const poll = id => fetch(new URL('/api/board', page), { headers: { 'x-board-token': token, 'x-board-page': id } })
+    const postFrom = (id, body) => fetch(new URL('/api/window', page), { method: 'POST', headers: { 'x-board-token': token, 'x-board-page': id, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    assert.equal((await poll('pold')).status, 200)
+    assert.equal((await poll('pnew')).status, 200)
+    assert.equal((await postFrom('pold', { x: 10, y: 10, width: 700, height: 900 })).status, 409)
+    assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')).window, { x: -1500, y: 20, width: 700, height: 900 })
+    assert.equal((await postFrom('pnew', { x: 20, y: 20, width: 700, height: 900 })).status, 200)
+    assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')).window, { x: 20, y: 20, width: 700, height: 900 })
     // A settings file that is a folder, or a link to another file, is left as it is (#1261).
     const settings = join(root, 'progress-settings.json')
     rmSync(settings)

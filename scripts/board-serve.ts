@@ -574,6 +574,12 @@ export const startServer = (o: ServeOptions): void => {
         // Only the computer's own page has a window to place; the phone's page never sends one.
         const place = placeOf(body)
         if (isLan || place === null || o.setWindow === undefined) return json(res, 400, {})
+        // A page a newer one replaced (#265) keeps its window until the person closes it; a move
+        // there must not overwrite where the current window was put.
+        const id = pageIdOf(req.headers)
+        const mine = pages.get(id)?.seq
+        const now = Date.now()
+        if (retired.has(id) || mine !== undefined && [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)) return json(res, 409, {})
         return o.setWindow(place) ? json(res, 200, {}) : json(res, 409, {})
       }
       if (url.pathname === '/api/clean') {

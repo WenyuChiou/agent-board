@@ -144,8 +144,11 @@ export const dockScript = String.raw`
     }
     var sent = null, seen = null, timer = null;
     function same(a, b) { return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height; }
+    // A page a newer one replaced, or one the person closed, (isClosed, the page's own flag) is no
+    // longer the board's window: its moves are not the place to open at.
     function report() {
       timer = null;
+      if (isClosed) return;
       var one = place();
       if (same(one, sent) || one.width < 100 || one.height < 100) return;
       sent = one;
@@ -157,6 +160,7 @@ export const dockScript = String.raw`
     setTimeout(function () {
       sent = seen = place();
       setInterval(function () {
+        if (isClosed) return;
         var one = place();
         if (same(one, seen)) return;
         seen = one;
