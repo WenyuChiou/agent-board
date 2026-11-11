@@ -204,6 +204,22 @@ updating the plugin, then `/progress connect`. Installing runs nothing: the pack
 dependencies and no install scripts. Pre-releases are on the `next` tag
 (`npx @wenyuchiou/agent-board@next setup`); what makes a release stable is in [RELEASING.md](RELEASING.md).
 
+## Install from a clone
+
+Without npm, from a clone of this repository, with Node.js 22 or later:
+
+```sh
+git clone https://github.com/WenyuChiou/agent-board.git
+cd agent-board
+node scripts/setup-agent.mjs
+node scripts/setup-agent.mjs --apply
+```
+
+The first `setup-agent.mjs` only previews; `--apply` writes. It takes the same options as
+`npx @wenyuchiou/agent-board@next setup`, such as `--agent codex`. On Windows, use the exact
+paths it prints. Then open the board with `node bin/agent-board.mjs` from this folder, or with
+`/agent-board` inside an agent.
+
 ## Let an agent install it
 
 Paste this into the agent you already use:

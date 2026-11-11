@@ -25,7 +25,7 @@ npx @wenyuchiou/agent-board@next
 
 Then finish the steps your agent needs (Claude Code's plugin, Codex's hook trust: [after setup](docs/SETUP.md#after-setup-per-agent)) and start a new session of it; one that was already open is not connected. Open the board in it with `/agent-board`, or `$agent-board` in Codex; Cursor has no such command, so use the second command.
 
-The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise; add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to the setup command to choose. Add `--no-open` to the board command to start the page without opening a browser window. More options: the [setup guide](docs/SETUP.md#install-with-npm). No npm, or you want an agent to install it: [the same guide](docs/SETUP.md#let-an-agent-install-it).
+The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise; add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to the setup command to choose. Add `--html --no-open` to the board command to start the page without opening a browser window. More options: the [setup guide](docs/SETUP.md#install-with-npm). Without npm, from the source: [install from a clone](docs/SETUP.md#install-from-a-clone); to let an agent install it: [this prompt](docs/SETUP.md#let-an-agent-install-it).
 
 ## What you get
 
@@ -38,7 +38,7 @@ The board follows your system language when it is Traditional or Simplified Chin
 
 ## Supported agents
 
-Seven agents have a 0.24.3 record on Windows 11 ([parity](docs/validation/2026-11-10-parity-0.24.3.md), [simulated user](docs/validation/2026-11-10-usersim-0.24.3.md)). The live rows ran on an earlier 0.24.3 head: the later fixes to question detection and settings were not re-run on them. Where a cell says "not run live", the step was not run live.
+Seven agents have a 0.24.3 record on Windows 11, each run as its command-line tool (Cursor as `cursor-agent`) ([parity](docs/validation/2026-11-10-parity-0.24.3.md), [simulated user](docs/validation/2026-11-10-usersim-0.24.3.md)). The live rows ran on an earlier 0.24.3 head: the later fixes to question detection and settings were not re-run on them. Where a cell says "not run live", the step was not run live.
 
 | | Agent | Open the board inside it | A question reaches the board | Your answer |
 |:-:|---|---|---|---|
@@ -65,7 +65,7 @@ Not tested for 0.24.3: the desktop apps and IDE extensions of these agents, Open
 | Where | How |
 |---|---|
 | In an agent | `/agent-board` (`$agent-board` in Codex) |
-| A terminal | `npx @wenyuchiou/agent-board`: the page on a desktop, the terminal board over SSH or without a display |
+| A terminal | `npx @wenyuchiou/agent-board`: the page on a desktop; over SSH or without a display, the terminal board, unless an agent's setting such as `HERMES_HOME` or `OPENCODE_CONFIG_DIR` is set in that shell. Add `--watch` for the terminal board every time |
 | A phone on the same Wi-Fi | `npx @wenyuchiou/agent-board --lan` and scan the QR code. The phone can look, tick, archive and close the board, but cannot send an answer (it shows the answer to copy). Use it on a network you trust: the link is not encrypted and anyone who has it can open the page |
 | An agent reading the board | `npx @wenyuchiou/agent-board --json` ([fields](docs/BOARD-JSON.md)) |
 
@@ -84,7 +84,7 @@ npx @wenyuchiou/agent-board@next remove
 npx @wenyuchiou/agent-board@next remove --apply
 ```
 
-Your history stays beside `progress.md`; [Update and uninstall](docs/GUIDE.md#update-and-uninstall) lists what is kept, and a few small cache files can be left behind. For the shorter `agent-board` command, run `npm install -g @wenyuchiou/agent-board` once.
+Your history stays beside `progress.md`; [Update and uninstall](docs/GUIDE.md#update-and-uninstall) lists what is kept, and a few small cache files can be left behind. For the shorter `agent-board` command, run `npm install -g @wenyuchiou/agent-board@next` once.
 
 ## Troubleshooting
 

@@ -25,7 +25,7 @@ npx @wenyuchiou/agent-board@next
 
 接著做完你的 agent 需要的步驟（Claude Code 的外掛、Codex 的 hooks 信任：[設定之後](docs/SETUP.md#after-setup-per-agent)，英文），再開一個它的新對話；原本就開著的不會接上。在裡面輸入 `/agent-board` 打開看板，Codex 是 `$agent-board`；Cursor 沒有這種指令，改用第二個指令。
 
-系統語言是繁體或簡體中文時，看板就用中文，否則用英文；要自己選，在 setup 指令後加 `--lang en`、`--lang zh-TW` 或 `--lang zh-CN`。看板指令加 `--no-open`，只啟動網頁、不打開瀏覽器視窗。更多選項見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。不用 npm，或想讓 agent 幫你裝：[同一份指南](docs/SETUP.md#let-an-agent-install-it)。
+系統語言是繁體或簡體中文時，看板就用中文，否則用英文；要自己選，在 setup 指令後加 `--lang en`、`--lang zh-TW` 或 `--lang zh-CN`。看板指令加 `--html --no-open`，只啟動網頁、不打開瀏覽器視窗。更多選項見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。不用 npm、直接從原始碼安裝：[從複本安裝](docs/SETUP.md#install-from-a-clone)；想讓 agent 幫你裝：[這段提示詞](docs/SETUP.md#let-an-agent-install-it)。
 
 ## 你會得到什麼
 
@@ -38,7 +38,7 @@ npx @wenyuchiou/agent-board@next
 
 ## 支援的 agent
 
-下面七個 agent 有 0.24.3 的實測紀錄，都在 Windows 11 上測過（[對照紀錄](docs/validation/2026-11-10-parity-0.24.3.md)、[模擬使用者](docs/validation/2026-11-10-usersim-0.24.3.md)，皆為英文）。實機的列是在較早的 0.24.3 版本上跑的：之後對問題偵測和設定的修正沒有在上面重跑。標「未實機執行」的步驟就是沒有實機跑過。
+下面七個 agent 有 0.24.3 的實測紀錄，都在 Windows 11 上用命令列版本測過（Cursor 測的是 `cursor-agent`）（[對照紀錄](docs/validation/2026-11-10-parity-0.24.3.md)、[模擬使用者](docs/validation/2026-11-10-usersim-0.24.3.md)，皆為英文）。實機的列是在較早的 0.24.3 版本上跑的：之後對問題偵測和設定的修正沒有在上面重跑。標「未實機執行」的步驟就是沒有實機跑過。
 
 | | Agent | 在 agent 裡開看板 | 問題會上看板 | 你的回答 |
 |:-:|---|---|---|---|
@@ -65,7 +65,7 @@ npx @wenyuchiou/agent-board@next
 | 在哪裡 | 怎麼開 |
 |---|---|
 | agent 裡 | `/agent-board`（Codex 是 `$agent-board`） |
-| 終端機 | `npx @wenyuchiou/agent-board`：桌面開網頁，SSH 或沒有顯示器時開終端機看板 |
+| 終端機 | `npx @wenyuchiou/agent-board`：桌面開網頁；SSH 或沒有顯示器時開終端機看板，但那個 shell 若設了 agent 的設定（例如 `HERMES_HOME`、`OPENCODE_CONFIG_DIR`）就會開網頁。加 `--watch` 一定開終端機看板 |
 | 同一個 Wi-Fi 的手機 | `npx @wenyuchiou/agent-board --lan`，掃它印出的 QR code。手機可以看、勾步驟、封存和關閉看板，但不能傳送回答（它只顯示回答讓你複製）。請在信得過的網路使用：連結沒有加密，拿到的人都能打開網頁 |
 | 讓 agent 讀看板 | `npx @wenyuchiou/agent-board --json`（[欄位說明](docs/BOARD-JSON.md)，英文） |
 
@@ -84,7 +84,7 @@ npx @wenyuchiou/agent-board@next remove
 npx @wenyuchiou/agent-board@next remove --apply
 ```
 
-你的紀錄會留在 `progress.md` 旁邊；[更新與移除](docs/GUIDE.zh-TW.md#更新與移除)列出哪些會保留，另外可能留下幾個小的快取檔。想用較短的 `agent-board` 指令，執行一次 `npm install -g @wenyuchiou/agent-board`。
+你的紀錄會留在 `progress.md` 旁邊；[更新與移除](docs/GUIDE.zh-TW.md#更新與移除)列出哪些會保留，另外可能留下幾個小的快取檔。想用較短的 `agent-board` 指令，執行一次 `npm install -g @wenyuchiou/agent-board@next`。
 
 ## 疑難排解
 

@@ -504,7 +504,7 @@ describe('L0 discover and install from the README', () => {
   })
 
   test('L0 README: Open it anywhere has a row for an agent, a terminal, a phone and an agent reading the board, each with its command', () => {
-    const wanted = [['/agent-board', '$agent-board'], ['npx @wenyuchiou/agent-board'], ['npx @wenyuchiou/agent-board --lan'], ['npx @wenyuchiou/agent-board --json']]
+    const wanted = [['/agent-board', '$agent-board'], ['npx @wenyuchiou/agent-board', 'HERMES_HOME', 'OPENCODE_CONFIG_DIR', '--watch'], ['npx @wenyuchiou/agent-board --lan'], ['npx @wenyuchiou/agent-board --json']]
     for (const [name, lang] of READMES) {
       const anywhere = section(read(name), SECTIONS[lang][4])
       assert.ok(anywhere, `${name}: Open it anywhere exists`)
@@ -512,6 +512,28 @@ describe('L0 discover and install from the README', () => {
       assert.equal(surfaces.length, wanted.length, `${name}: an agent, a terminal, a phone and an agent reading the board`)
       surfaces.forEach(([, how], i) => assert.deepEqual(codeSpans(how), wanted[i], `${name}: surface row ${i + 1} runs ${wanted[i].join(' or ')}`))
       assert.ok(anywhere.includes(`docs/images/places-${lang}.svg`), `${name}: the places picture is shown`)
+    }
+  })
+
+  // #1326's bot-route review (codex_089): the commands a README gives do what it says on every computer.
+  test('L0 README: the no-window page command, the clone route, the global install on @next and the tested command-line tools are right in all three languages', () => {
+    const clone = section(read('docs/SETUP.md'), 'Install from a clone')
+    assert.ok(clone, 'SETUP.md: Install from a clone exists')
+    for (const step of ['git clone https://github.com/WenyuChiou/agent-board.git', 'cd agent-board', 'node scripts/setup-agent.mjs\n', 'node scripts/setup-agent.mjs --apply']) {
+      assert.ok(`${clone}\n`.includes(step), `SETUP.md: the clone route runs ${step.trim()}`)
+    }
+    for (const [name, lang] of READMES) {
+      const text = read(name)
+      const first = section(text, SECTIONS[lang][0])
+      // `--no-open` alone gives the terminal board in an interactive terminal over SSH or without a display.
+      assert.ok(first.includes('`--html --no-open`'), `${name}: Quick start starts the page with no window by --html --no-open`)
+      assert.doesNotMatch(first, /`--no-open`/, `${name}: Quick start does not give --no-open alone`)
+      assert.ok(first.includes('docs/SETUP.md#install-from-a-clone'), `${name}: Quick start links the clone route`)
+      // The stable tag is still 0.24.2, whose launcher has no `remove`.
+      assert.ok(text.includes('`npm install -g @wenyuchiou/agent-board@next`'), `${name}: the global install uses @next`)
+      assert.doesNotMatch(text, /npm install -g @wenyuchiou\/agent-board`/, `${name}: no global install of the stable tag`)
+      // The 0.24.3 record ran each agent's command-line tool; Cursor's was cursor-agent.
+      assert.ok(section(text, SECTIONS[lang][2]).includes('`cursor-agent`'), `${name}: the support section says the record ran the command-line tools`)
     }
   })
 })
