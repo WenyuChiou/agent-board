@@ -30,11 +30,18 @@ describe('L4 start-up time (#768)', () => {
         times.board.push(Math.round(performance.now() - boardBegan))
         assert.equal(board.status, 0, board.stderr || board.stdout)
 
+      } finally { await world.close() }
+      // The page in a world of its own: the board command above can start the page server, so a
+      // page timed after it would measure that server being reused. The interval runs from the
+      // command to the first page loaded and drawn (a `serve.page()` call), as a person sees it.
+      const pageWorld = makeWorld()
+      try {
         const pageBegan = performance.now()
-        const server = await serve.start(world)
+        const server = await serve.start(pageWorld)
+        assert.ok((await server.page()).length > 0)
         times.page.push(Math.round(performance.now() - pageBegan))
         await server.stop()
-      } finally { await world.close() }
+      } finally { await pageWorld.close() }
     }
     console.log(`#768 start-up times in ms over ${STARTUP_RUNS} runs: ${JSON.stringify(times)}; medians ${JSON.stringify(Object.fromEntries(Object.entries(times).map(([key, values]) => [key, median(values)])))}`)
     assert.ok(Math.max(...times.preview) <= SETUP_PREVIEW_MS, `setup preview over ${SETUP_PREVIEW_MS} ms: ${times.preview}`)
