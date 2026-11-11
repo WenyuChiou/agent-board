@@ -131,6 +131,8 @@ export const boardClient = address => {
       void poll()
       return {
         id: registered.id, agent, session, surface, turn, close,
+        // True once this connection has ended for good (closed, lost ownership or lease expired), so a caller can attach again.
+        isClosed: () => isClosed,
         // A function, so the secret never lands in a log of this object.
         credentials: () => ({ ...credentials }),
         send: async body => {

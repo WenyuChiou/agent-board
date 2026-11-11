@@ -4028,6 +4028,18 @@ test('a Codex message is sent only to a thread the running daemon has loaded, wi
   assert.throws(() => startCodexReceiver({ boardUrl: board.address, threads: () => [], executable: 'codex' }), /EXPLICIT_EXECUTABLE_REQUIRED/)
 }))
 
+test('a Codex thread whose board lease expired is attached again, not left stale', async () => fixture(async (board, dir) => {
+  // Every poll fails, so each connection ends by lease expiry; a stale entry would keep the thread at one registration.
+  const proxy = await pollingProxy(board, 'always')
+  const daemon = codexDaemon(dir, {})
+  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexThread], executable: daemon.executable, env: daemon.env, tickMs: 100 })
+  try {
+    await waitFor(() => proxy.registrations() >= 2, 60000)
+    // Claimed messages are never replayed: the new attachment only registers, it sends nothing.
+    assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 0)
+  } finally { await receiver.close(); await proxy.close() }
+}))
+
 test('an idle Codex thread gets the message through turn/start, not the queue', async () => fixture(async (board, dir) => {
   const daemon = codexDaemon(dir, {})
   const receiver = codexReceiver(board, daemon)

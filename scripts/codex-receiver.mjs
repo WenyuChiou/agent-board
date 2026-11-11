@@ -256,7 +256,7 @@ export const startCodexReceiver = ({
       }
       let loaded
       try { loaded = await loadedThreads(daemon) } catch (error) { onError(error); return }
-      for (const [thread, one] of [...attached]) if (one.isLost || !loaded.has(thread) || !wanted.includes(thread)) await drop(thread)
+      for (const [thread, one] of [...attached]) if (one.isLost || one.receiver?.isClosed() || !loaded.has(thread) || !wanted.includes(thread)) await drop(thread)
       for (const thread of wanted) {
         if (isClosed || attached.has(thread) || !loaded.has(thread)) continue
         // A thread with no turn yet has no saved history, and the daemon refuses to resume it (live check, 0.164.0): it is joined
