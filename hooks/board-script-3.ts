@@ -1620,7 +1620,7 @@ export const LINES = [
 "    const known = new Set([\"hookVersion\", \"path\", \"codexRoot\", \"lang\"]);",
 "    if (Object.keys(data).some((key) => !known.has(key)))",
 "      return false;",
-"    if (typeof data.hookVersion !== \"number\" || typeof data.path !== \"string\" || typeof data.lang !== \"string\")",
+"    if (data.hookVersion !== undefined && typeof data.hookVersion !== \"number\" || typeof data.path !== \"string\" || typeof data.lang !== \"string\")",
 "      return false;",
 "    if (!Object.hasOwn(STRINGS, data.lang) || ![progress, ...legacyProgress].includes(data.path))",
 "      return false;",
