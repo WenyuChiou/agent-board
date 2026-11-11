@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const start = '<!-- messaging-matrix:start -->'
 const end = '<!-- messaging-matrix:end -->'
-export const matrixFiles = ['docs/MESSAGING.md', 'README.md', 'README.zh-CN.md', 'README.zh-TW.md']
+export const matrixFiles = ['docs/MESSAGING.md']
 
 // These are coverage targets, not receiver claims. A matching receiver record replaces
 // the fallback automatically; adding a receiver never changes another receiver's file.

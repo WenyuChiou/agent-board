@@ -154,6 +154,35 @@ The pane's saved records (the plugin's store file, in Claude's config folder und
 - A block that still asks is archived automatically only after 3 days (ended or done) or 7 days with no report (working or waiting). Its complete question is saved first and stays on the Older list; an explicit Archive saves it first too.
 - A hand-kept task with every step done or canceled counts toward the archive after 3 days. Archive now and Clean up move finished work at once. Other cleanup periods are as described above.
 
+### Keys on the terminal board
+
+**In a terminal,** `--watch` works like the pane:
+
+| Key | Does |
+|---|---|
+| ↑ ↓, Enter | Pick a line, open it |
+| `x` | Tick the next step of your own task; it goes into the work log |
+| `d` | Confirm one of your own tasks, or a stopped session's work, done |
+| `a` | Archive one of your own tasks, or a stopped session's block |
+| `1`–`9`, `y` / `n` | Copy the answer to another agent's question, to paste in that agent |
+| `c` | Copy a command, or the command that reopens the session that asked |
+| `h`, `u` | Mark another agent's question already answered: hidden on this computer, nothing sent; show the hidden ones again |
+| `i` | Show or fold the tasks idle more than 7 days |
+| `o`, `q` | Open the browser view; quit |
+
+Finished work leaves the board by itself. The board writes `progress.md` as carefully as the pane does, and leaves other sessions' blocks alone unless you archive one that has stopped or confirm it done.
+
+### Settings, look and marks
+
+The pane follows Claude Code's theme (`/config`, then **Theme**); the page follows your computer's light or dark mode until you pick Light or Dark. On the board's page, **Settings** is next to **Close the board** (the red power button): it opens Language, Look and Notifications. Changes apply at once. Language offers Automatic, English, 繁體中文 and 简体中文. Look offers Light, Dark and Automatic, then the progress bar's three styles, Ink (the default), Blue and Green. Notifications start off; turning them on asks the browser's permission and alerts you once for each waiting question or approval. The progress bar shows one cell per step beside the count, such as `━━━━╸── 5/7`; the style you pick shows on the page, the pane and the terminal board alike (`/progress style blue` in the pane, `s` on the terminal board). The button sits at the bottom of the expanded sidebar, or below the tasks on a narrow screen or when the sidebar is collapsed. Every mark has its own shape, so it reads without colour; the page draws a step still to do as a small dot rather than a ring, so it does not look like a button:
+
+| Mark | Means | | Mark | Means |
+|:-:|---|---|:-:|---|
+| ● | Waiting on you | | ◐ | Running, or waiting on someone else |
+| ▸ | Doing now | | ! | Stuck |
+| ○ • | To do (a ring in the pane, a small dot on the pages) | | ⚑ | Due within two weeks |
+| ✓ | Done | | – | Cancelled |
+
 ### Marks and tags
 
 Step marks: ✓ done · ▸ doing · • to do · ● waiting on you · ◐ running · ! stuck · – canceled · ⚑ due within two weeks.
@@ -278,6 +307,8 @@ Independent local sessions with the same short report id can both keep reporting
 - **Read/write failure:** resolve the named file/permission problem, inspect the board/history and retry. Do not delete locks without checking their owner.
 - **No native pane:** non-Claude hosts use the interactive web board or terminal board. A web panel is not a native host sidebar.
 - **A task cut off mid-write:** if a session stops while it writes its block (a crash or a forced shutdown), the block can lose its end marker. The board reads it as ending where its lines end, shows it as it was, and names it under Board health at the bottom of the pane. To close it by hand, add `<!-- /auto session=<id> -->` on the line after its last line; the id is in the block's start marker. If the session wrote its block again first, the lines left below the new block repeat its old steps: delete them by hand.
+- **An agent shows up twice:** it may be connected both ways, by the Claude plugin's `/progress connect` and by setup. `/progress connect status` lists what the plugin connected; remove one with `/progress connect remove`, or with `npx @wenyuchiou/agent-board@next remove --agent <name>`, which previews the removal, then the same command with `--apply`.
+- **A question will not go away:** answer it in its own chat, then press **Already answered, hide** (`h` on the terminal board). It is on the card itself for a question whose chat has stopped, for one the agent asks in its own window, and after you **Send** or **Queue** from the board; after **Copy**, the same button reads **Answered**; otherwise it is under **More**. After 3 days the question moves into **Earlier unanswered questions**, and after 7 days into **Older unanswered questions**.
 
 ### Reporting a problem safely
 
