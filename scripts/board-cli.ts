@@ -764,17 +764,58 @@ const saveLanguage = (lang: SettingsLang): boolean => {
   return true
 }
 
+// A settings file this writer may replace: missing, or a regular file with this one name. A
+// symlink, a folder or a file with another hard link (whose other names would change too) is not.
+const isOwnSettingsFile = (file: string): boolean => {
+  try {
+    const stat = lstatSync(file)
+    return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1
+  } catch (error) {
+    return (error as { code?: string } | null)?.code === 'ENOENT'
+  }
+}
+
 // The docked window's place (#1084): the other keys are kept. A file that cannot be read (locked,
-// no access), does not read as a JSON object, or is a symlinked or non-regular file is left as it
-// is: false, the page's report is dropped and the next move tries again.
+// no access), does not read as a JSON object, or is not this writer's own (above) is left as it
+// is: false, and the page sends the place again later. The new text goes to a temp file beside it,
+// flushed, then renamed over it, so a failed or cut-off write never leaves the other settings
+// empty or half written. Just before the rename the file is looked at again: one that changed
+// since it was read (another writer, or a swap for a link) is left as it is.
 const saveWindow = (place: Rect): boolean => {
   const file = settingsPath(path)
-  if (isSymlinkOrNonRegular(file)) return false
+  if (!isOwnSettingsFile(file)) return false
   let text: string
   try { text = read(file) } catch { return false }
   const next = withBoardSettings(text, { window: place })
   if (next === null) return false
-  try { writeFileSync(file, next) } catch { return false }
+  const temp = `${file}.window.tmp`
+  const open = (): number => {
+    try { return openSync(temp, 'wx') } catch (error) {
+      // One a crashed save left behind is cleared; one being written now is not touched.
+      const stat = (error as { code?: string }).code === 'EEXIST' ? lstatSync(temp) : null
+      if (stat === null || !stat.isFile() || stat.isSymbolicLink() || Date.now() - stat.mtimeMs < 10_000) throw error
+      unlinkSync(temp)
+      return openSync(temp, 'wx')
+    }
+  }
+  let isOwned = false
+  try {
+    const fd = open()
+    isOwned = true
+    try {
+      writeFileSync(fd, next)
+      fsyncSync(fd)
+    } finally { closeSync(fd) }
+    // The file keeps its permissions (a settings file the person made private stays private).
+    const mode = existsSync(file) ? statSync(file).mode & 0o777 : undefined
+    if (mode !== undefined) chmodSync(temp, mode)
+    if (!isOwnSettingsFile(file) || read(file) !== text) throw new Error('changed')
+    renameSync(temp, file)
+    isOwned = false
+  } catch {
+    if (isOwned) { try { unlinkSync(temp) } catch {} }
+    return false
+  }
   settingsKept = { text: next, at: Date.now() }
   return true
 }

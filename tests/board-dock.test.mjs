@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -46,6 +46,9 @@ test('#1084: a remembered place is used on the next open, and one on a monitor t
   assert.ok(isReachable({ x: -8, y: -8, width: 2576, height: 1408 }, [main]))
   // Only the top strip counts: a window whose title bar is above every screen cannot be dragged back.
   assert.equal(isReachable({ x: 100, y: -400, width: 600, height: 900 }, [main]), false)
+  // A wide window with only two rows of its title bar on screen is out of reach too.
+  assert.equal(isReachable({ x: 0, y: 1390, width: 1600, height: 900 }, [main]), false)
+  assert.equal(launchPlace({ x: 0, y: 1390, width: 1600, height: 900 }, main, [main]).x, 2000)
   // The remembered place opens even on a screen too narrow to dock.
   const small = screen(1200)
   const kept = { x: 10, y: 10, width: 500, height: 600 }
@@ -64,7 +67,7 @@ test('#1084: the probe line and the settings file are read strictly', () => {
 })
 
 // The page's script in a stand-in window: the screen, the window's place and the timers are fake.
-const runDockScript = ({ search, place, avail }) => {
+const runDockScript = ({ search, place, avail, answer = () => Promise.resolve({ ok: true }) }) => {
   const timers = []
   const calls = []
   const moves = []
@@ -81,7 +84,7 @@ const runDockScript = ({ search, place, avail }) => {
     setTimeout: (fn, ms) => { timers.push({ fn, ms, every: false }); return timers.length },
     clearTimeout: id => { if (timers[id - 1]) timers[id - 1].fn = () => {} },
     setInterval: (fn, ms) => { timers.push({ fn, ms, every: true }); return timers.length },
-    call: (path, body) => { calls.push([path, JSON.parse(JSON.stringify(body))]); return Promise.resolve({ ok: true }) },
+    call: (path, body) => { calls.push([path, JSON.parse(JSON.stringify(body))]); return answer() },
     isClosed: false,
   }
   vm.runInNewContext(dockScript, context)
@@ -135,6 +138,21 @@ test('#1084: the docked page docks itself when the browser put it off its screen
   const tab = runDockScript({ search: '?t=abc', place: { x: 2000, y: 0, width: 560, height: 1392 }, avail: screen(1000) })
   assert.deepEqual(tab.moves, [])
   assert.equal(tab.timers.length, 0)
+})
+
+test('#1084: a place the computer did not keep is sent again while the window stays there, each wait longer', async () => {
+  const answers = [{ ok: false }, null, { ok: true }]
+  const page = runDockScript({
+    search: '?t=abc&dock=1', place: { x: 2000, y: 0, width: 560, height: 1392 }, avail: screen(2560, 1392),
+    answer: () => { const one = answers.shift(); return one ? Promise.resolve(one) : Promise.reject(new Error('offline')) },
+  })
+  const settle = () => new Promise(r => setImmediate(r))
+  page.tick()
+  page.win.screenX = 300
+  for (let i = 0; i < 10; i++) { page.tick(); await settle() }
+  const moved = ['/api/window', { x: 300, y: 0, width: 560, height: 1392 }]
+  assert.deepEqual(page.calls, [moved, moved, moved], 'refused, then failed, then kept; nothing after it was kept')
+  assert.deepEqual(page.timers.filter(one => !one.every).map(one => one.ms), [1500, 1000, 2000, 4000])
 })
 
 test('#1084: the built page carries the dock script', () => {
@@ -192,6 +210,25 @@ test('#1084: the computer\'s page keeps the window place in the settings file; a
       assert.equal(readFileSync(victim, 'utf8'), '{"kept":true}')
       unlinkSync(settings)
     }
+    // A settings file with a second hard link is left as it is: its other name would change too.
+    writeFileSync(settings, '{"barStyle":"blue"}\n')
+    const twin = join(root, 'twin.json')
+    linkSync(settings, twin)
+    assert.equal((await post({ x: 0, y: 0, width: 700, height: 900 })).status, 409)
+    assert.equal(readFileSync(twin, 'utf8'), '{"barStyle":"blue"}\n')
+    unlinkSync(twin)
+    // A write that cannot finish leaves the file whole: here a folder holds the temp file's name.
+    const temp = `${settings}.window.tmp`
+    mkdirSync(temp)
+    assert.equal((await post({ x: 0, y: 0, width: 700, height: 900 })).status, 409)
+    assert.equal(readFileSync(settings, 'utf8'), '{"barStyle":"blue"}\n')
+    rmSync(temp, { recursive: true })
+    // A temp file a crashed save left behind is cleared, and none stays after a save.
+    writeFileSync(temp, '{"barSt')
+    utimesSync(temp, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+    assert.equal((await post({ x: 0, y: 0, width: 700, height: 900 })).status, 200)
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { barStyle: 'blue', window: { x: 0, y: 0, width: 700, height: 900 } })
+    assert.equal(existsSync(temp), false)
   } finally {
     if (url) {
       const page = new URL(url)

@@ -47,14 +47,15 @@ export const windowPlaceOf = (text: string | null): Rect | null => {
   } catch { return null }
 }
 
-const overlap = (a: Rect, b: Rect): number => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y))
+const span = (start: number, size: number, otherStart: number, otherSize: number): number => Math.max(0, Math.min(start + size, otherStart + otherSize) - Math.max(start, otherStart))
 
 // The window's title bar must be on a monitor that is still there, or the person could not reach
-// it to drag it back: at least a 100×30 piece of its top strip lies inside one work area.
-export const isReachable = (place: Rect, works: readonly Rect[]): boolean => {
-  const strip = { x: place.x, y: place.y, width: place.width, height: 30 }
-  return works.some(work => overlap(strip, work) >= 100 * 30)
-}
+// it to drag it back: of its 30 px top strip, at least 100 px of width and 20 px of height lie
+// inside one work area. Both are checked, not the area alone: a wide window with two rows of
+// pixels on screen is out of reach. 20, not 30, so a maximized window, whose border sits 8 px
+// outside the work area, still counts.
+export const isReachable = (place: Rect, works: readonly Rect[]): boolean =>
+  works.some(work => span(place.x, place.width, work.x, work.width) >= 100 && span(place.y, 30, work.y, work.height) >= 20)
 
 // Where the next window opens: the remembered place while its monitor is there, else the dock on
 // the monitor that holds the foreground window, else nothing (the browser picks, as before).
@@ -142,17 +143,24 @@ export const dockScript = String.raw`
       var target = dock(area);
       if (target) { try { window.resizeTo(target.width, target.height); window.moveTo(target.x, target.y); } catch (error) {} }
     }
-    var sent = null, seen = null, timer = null;
+    var sent = null, seen = null, timer = null, isSending = false, wait = 1000;
     function same(a, b) { return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height; }
     // A page a newer one replaced, or one the person closed, (isClosed, the page's own flag) is no
-    // longer the board's window: its moves are not the place to open at.
+    // longer the board's window: its moves are not the place to open at. A place counts as sent
+    // only once the computer kept it; one it did not keep (the settings file held for a moment) is
+    // sent again while the window stays there, each wait twice the last, up to a minute.
     function report() {
       timer = null;
       if (isClosed) return;
       var one = place();
       if (same(one, sent) || one.width < 100 || one.height < 100) return;
-      sent = one;
-      call('/api/window', one).catch(function () {});
+      // One report at a time, so an older place cannot land after a newer one.
+      if (isSending) { timer = setTimeout(report, 1000); return; }
+      isSending = true;
+      call('/api/window', one).then(function (data) { return data && data.ok; }, function () { return false; }).then(function (isKept) {
+        isSending = false;
+        if (isKept) { sent = one; wait = 1000; } else wait = Math.min(wait * 2, 60000);
+      });
     }
     // No event tells a page it moved, so the place is looked at every second; a change is sent
     // once it has held for a second, not on every step of a drag. The place the window opened at
@@ -162,10 +170,12 @@ export const dockScript = String.raw`
       setInterval(function () {
         if (isClosed) return;
         var one = place();
-        if (same(one, seen)) return;
-        seen = one;
-        if (timer !== null) clearTimeout(timer);
-        timer = setTimeout(report, 1000);
+        if (!same(one, seen)) {
+          seen = one;
+          wait = 1000;
+          if (timer !== null) clearTimeout(timer);
+          timer = setTimeout(report, 1000);
+        } else if (timer === null && !isSending && !same(one, sent)) timer = setTimeout(report, wait);
       }, 1000);
     }, 1500);
   })();
