@@ -284,7 +284,6 @@ and cloud bots still need a host-proven binding; accepting their names does not 
 | Codex | Lifecycle hooks, thread and turn metadata | Host trust and live CLI/desktop verification |
 | Cursor | Lifecycle hooks, conversation and generation ids | IDE/CLI parity needs live checks |
 | OpenCode | Session status plugin and bound task tool | Status events have no turn id |
-| Legacy Gemini CLI | SessionStart, BeforeAgent, AfterAgent, SessionEnd | Separate enterprise/API compatibility; not Antigravity |
 | Grok Build | SessionStart, Stop, SessionEnd | Coarse status; no working-turn event |
 | Muse Code | Stop, SessionEnd | Coarse status; no working-turn event |
 | Hermes Agent | Board, skill and four shell hooks installed | Hermes asks once to trust the hooks; native execution unverified |

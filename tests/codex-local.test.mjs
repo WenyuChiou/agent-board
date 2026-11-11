@@ -1206,17 +1206,20 @@ const detectedSetupFixture = fn => fixture(f => {
 })
 
 test('a setup preview in a new home lists the agents installed on the PATH', () => detectedSetupFixture(f => {
+  // Gemini CLI is retired (#1327): its command on the PATH is not listed or offered.
   f.fake('gemini')
+  f.fake('opencode')
   f.fake('agy')
   const preview = f.run()
   assert.equal(preview.status, 0, preview.stderr)
   assert.equal(preview.stderr, '')
-  assert.match(preview.stdout, /^Gemini CLI:/m)
+  assert.match(preview.stdout, /^OpenCode:/m)
   assert.match(preview.stdout, /^Antigravity:/m)
-  assert.doesNotMatch(preview.stdout, /^(Codex|Cursor|OpenCode|Grok Build|Muse Code|Hermes Agent|OpenClaw|DeepSeek):/m)
+  assert.doesNotMatch(preview.stdout, /Gemini/)
+  assert.doesNotMatch(preview.stdout, /^(Codex|Cursor|Grok Build|Muse Code|Hermes Agent|OpenClaw|DeepSeek):/m)
   const json = f.run('--json')
   assert.equal(json.status, 0, json.stderr)
-  assert.deepEqual(JSON.parse(json.stdout).targets, ['gemini', 'antigravity'])
+  assert.deepEqual(JSON.parse(json.stdout).targets, ['opencode', 'antigravity'])
   f.fake('claude')
   const claude = f.run()
   assert.equal(claude.status, 0, claude.stderr)
@@ -1257,7 +1260,7 @@ test('a setup preview that finds no agent exits 0 and names the next command', (
 }))
 
 test('setup with --home does not read the PATH or apps of the account running it', () => detectedSetupFixture(f => {
-  f.fake('gemini')
+  f.fake('opencode')
   f.fake('claude')
   if (process.platform === 'win32') mkdirSync(join(f.env.LOCALAPPDATA, 'Programs', 'cursor'), { recursive: true })
   if (process.platform === 'darwin') mkdirSync(join(f.home, 'Applications', 'Cursor.app'), { recursive: true })
@@ -1267,7 +1270,7 @@ test('setup with --home does not read the PATH or apps of the account running it
     const result = f.run('--home', home, '--lang', lang)
     assert.equal(result.status, 0, result.stderr)
     assert.equal(result.stderr, '')
-    assert.doesNotMatch(result.stdout, /Gemini CLI:|Cursor:|Claude Code:|PATH/)
+    assert.doesNotMatch(result.stdout, /OpenCode:|Cursor:|Claude Code:|PATH/)
     assert.ok(result.stdout.includes(home))
   }
   assert.deepEqual(readdirSync(home), [])
@@ -1328,8 +1331,8 @@ test('setup on Windows counts every command spelling and not a bare name', { ski
       return JSON.parse(result.stdout).targets
     } finally { rmSync(file) }
   }
-  for (const extension of ['.exe', '.cmd', '.bat', '.com', '.ps1']) assert.deepEqual(targetsWith(`gemini${extension}`), ['gemini'], extension)
-  assert.deepEqual(targetsWith('gemini'), [])
+  for (const extension of ['.exe', '.cmd', '.bat', '.com', '.ps1']) assert.deepEqual(targetsWith(`opencode${extension}`), ['opencode'], extension)
+  assert.deepEqual(targetsWith('opencode'), [])
 }))
 
 test('a removed Antigravity is not listed again once its emptied hooks file is gone', () => fixture(f => {
@@ -1344,15 +1347,15 @@ test('a removed Antigravity is not listed again once its emptied hooks file is g
 }))
 
 test('a command on the PATH is listed once setup applies it, and again as already set up', () => detectedSetupFixture(f => {
-  f.fake('gemini')
+  f.fake('opencode')
   const applied = f.run('--apply')
   assert.equal(applied.status, 0, applied.stderr)
-  assert.match(applied.stdout, /^Gemini CLI: created/m)
-  assert.equal(existsSync(join(f.root, 'install-gemini.json')), true)
+  assert.match(applied.stdout, /^OpenCode: created/m)
+  assert.equal(existsSync(join(f.root, 'install-opencode.json')), true)
   const second = f.run()
   assert.equal(second.status, 0, second.stderr)
   assert.equal(second.stderr, '')
-  assert.match(second.stdout, /^Gemini CLI: already set up/m)
+  assert.match(second.stdout, /^OpenCode: already set up/m)
 }))
 
 const systemLanguageEnv = () => ({ LANG: '', NODE_OPTIONS: `--require ${JSON.stringify(resolve('tests/fixtures/system-lang-zh-tw.cjs'))}` })
@@ -2113,7 +2116,8 @@ test('doctor explains Claude Code plugin support in every language', () => fixtu
   for (const lang of ['en', 'zh-TW', 'zh-CN']) {
     const plain = f.command(['--codex-doctor', '--agent', 'claude', '--lang', lang])
     assert.equal(plain.status, 1)
-    for (const name of ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek', 'Claude Code', 'claude plugin list']) assert.ok(plain.stderr.includes(name), plain.stderr)
+    for (const name of ['codex', 'cursor', 'opencode', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek', 'Claude Code', 'claude plugin list']) assert.ok(plain.stderr.includes(name), plain.stderr)
+    assert.ok(!plain.stderr.includes('gemini'), plain.stderr)
     const json = f.command(['--codex-doctor', '--agent', 'claude', '--lang', lang, '--json'])
     const { error } = JSON.parse(json.stderr)
     assert.equal(error.code, 'UNSUPPORTED_AGENT')
@@ -7546,7 +7550,7 @@ test('Grok prompt hooks return a waiting session to working through the native s
   assert.ok(!readFileSync(f.progress, 'utf8').includes('PRIVATE_PAYLOAD'))
 }))
 
-test('auto setup does not mistake an Antigravity profile or the shared gemini directory for Gemini CLI', () => fixture(f => {
+test('auto setup does not mistake an Antigravity profile for another agent, and never lists Gemini CLI (#1327)', () => fixture(f => {
   mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
   const args = [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--json']
   const run = () => spawnSync(process.execPath, args, { env: f.env, encoding: 'utf8', windowsHide: true })
@@ -7555,7 +7559,7 @@ test('auto setup does not mistake an Antigravity profile or the shared gemini di
   assert.deepEqual(JSON.parse(result.stdout).targets, ['antigravity'])
   assert.equal(existsSync(join(f.home, '.gemini', 'settings.json')), false)
   f.save(join(f.home, '.gemini', 'settings.json'), '{}')
-  assert.deepEqual(JSON.parse(run().stdout).targets, ['gemini', 'antigravity'])
+  assert.deepEqual(JSON.parse(run().stdout).targets, ['antigravity'])
 }))
 
 test('all targets initialize one shared board and name each adapter capability', () => fixture(f => {
@@ -7563,12 +7567,13 @@ test('all targets initialize one shared board and name each adapter capability',
   const result = spawnSync(process.execPath, [installer, '--agent', 'all', '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply', '--json'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
   assert.equal(result.status, 0, `${JSON.stringify({ error: result.error?.code, signal: result.signal })}\n${result.stderr}`)
   const plans = JSON.parse(result.stdout).plans
-  assert.equal(plans.length, 10)
+  assert.equal(plans.length, 9)
+  assert.ok(!plans.some(plan => plan.agent === 'gemini'))
   assert.equal(new Set(plans.map(plan => plan.progress)).size, 1)
   assert.equal(plans.find(plan => plan.agent === 'hermes').capabilities.lifecycle, 'adapter-installed-unverified')
   for (const agent of ['openclaw', 'deepseek']) assert.equal(plans.find(plan => plan.agent === agent).capabilities.lifecycle, 'adapter-installed-unverified')
   assert.equal(plans.find(plan => plan.agent === 'antigravity').capabilities.lifecycle, 'adapter-installed-unverified')
-  assert.ok(existsSync(join(f.home, '.gemini', 'commands', 'agent-board.toml')))
+  assert.ok(!existsSync(join(f.home, '.gemini', 'commands', 'agent-board.toml')))
   assert.ok(existsSync(join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')))
   assert.match(readFileSync(join(f.home, '.hermes', 'config.yaml'), 'utf8'), /^hooks:\n {2}on_session_start:\n/)
   for (const agent of ['gemini', 'grok', 'muse']) {
@@ -9551,7 +9556,8 @@ test('setup keeps each installer\'s board when the connector and independent ins
     const result = setupAgent(f, '--json', ...(apply ? ['--apply'] : []))
     assert.equal(result.status, 0, result.stderr + result.stdout)
     const plans = JSON.parse(result.stdout).plans
-    for (const agent of ['codex', 'gemini']) {
+    assert.ok(!plans.some(one => one.agent === 'gemini'))
+    for (const agent of ['codex']) {
       const plan = plans.find(one => one.agent === agent)
       assert.equal(plan.managedBy, 'connector', agent)
       assert.equal(plan.progress, progress, agent)
@@ -9613,7 +9619,7 @@ test('setup previews the connector board without duplicate hooks or conflicts fo
   for (const folder of ['.codex', '.cursor', '.gemini/antigravity', '.grok/sessions', '.config/muse', '.config/opencode', '.hermes']) mkdirSync(join(f.home, folder), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
   legacyConnect(f, progress)
-  const agents = ['codex', 'cursor', 'gemini', 'grok', 'muse', 'opencode', 'hermes', 'antigravity']
+  const agents = ['codex', 'cursor', 'grok', 'muse', 'opencode', 'hermes', 'antigravity']
   const files = [f.hooks, join(f.home, '.cursor', 'hooks.json'), join(f.home, '.gemini', 'settings.json'), join(f.home, '.grok', 'hooks', 'agent-board.json'), join(f.home, '.config', 'opencode', 'plugin', 'agent-board.js'), join(f.home, '.gemini', 'config', 'hooks.json')]
   const before = files.map(file => readFileSync(file, 'utf8'))
   const preview = setupAgent(f, '--agent', agents.join(','), '--json')
@@ -9639,14 +9645,13 @@ test('after setup apply each connected hook delivers one synthetic event to the 
   for (const folder of ['.codex', '.cursor', '.gemini/antigravity', '.grok/sessions', '.config/muse']) mkdirSync(join(f.home, folder), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
   legacyConnect(f, progress)
-  const agents = ['codex', 'cursor', 'gemini', 'grok', 'muse', 'antigravity']
+  const agents = ['codex', 'cursor', 'grok', 'muse', 'antigravity']
   const applied = setupAgent(f, '--agent', agents.join(','), '--apply', '--json')
   assert.equal(applied.status, 0, applied.stderr + applied.stdout)
   assert.equal(JSON.parse(applied.stdout).applied, true)
   const definitions = [
     ['codex', f.hooks, 'Stop'],
     ['cursor', join(f.home, '.cursor', 'hooks.json'), 'afterAgentResponse'],
-    ['gemini', join(f.home, '.gemini', 'settings.json'), 'AfterAgent'],
     ['grok', join(f.home, '.grok', 'hooks', 'agent-board.json'), 'Stop'],
     ['muse', join(f.home, '.config', 'muse', 'settings.json'), 'Stop'],
   ]

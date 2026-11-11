@@ -1,10 +1,11 @@
 import { spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
+import { createHash } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, tempFolder } from './e2e/lib/host-journey.mjs'
+import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, snapshot, tempFolder } from './e2e/lib/host-journey.mjs'
 
 // The upgrade journey of #466. It reads the 0.24.0 files from the release tag, so it stays in
 // the board group, whose CI job fetches the tags; the other host journeys are in tests/e2e/.
@@ -38,9 +39,11 @@ test('an upgrade from 0.24.0 in the same home keeps every listed agent\'s card a
 // agent's command and skill files, and the owner's rule is that an update never breaks the board.
 // The home is set up by the 0.24.2 tag's own setup, then upgraded by this tree's setup.
 const OLD = 'agent-board--v0.24.2'
-const upgradeIds = ['codex', 'opencode', 'gemini', 'antigravity']
+// 0.24.2 set Gemini CLI up too; this release no longer offers it, and an upgrade takes its files away (#1327).
+const oldIds = ['codex', 'opencode', 'gemini', 'antigravity']
+const upgradeIds = ['codex', 'opencode', 'antigravity']
 const oldCommands = { opencode: '.config/opencode/commands/board.md', gemini: '.gemini/commands/board.toml' }
-const newCommands = { opencode: '.config/opencode/commands/agent-board.md', gemini: '.gemini/commands/agent-board.toml' }
+const newCommands = { opencode: '.config/opencode/commands/agent-board.md' }
 // Codex and Antigravity have no /board file: their skill is what ran --serve.
 const skills = { codex: '.agents/skills/agent-board/SKILL.md', antigravity: '.gemini/config/skills/agent-board/SKILL.md' }
 const handKept = ['## Quarterly work', '### Prepare the quarterly report', '- [x] Collect the numbers', '- [ ] Write the summary', '- [?] Send it to Dana or to the whole team?']
@@ -67,7 +70,7 @@ const oldHome = async old => {
   const f = fixture(['.claude', '.codex', '.gemini/antigravity-cli', '.config/opencode'])
   mkdirSync(join(f.home, '.gemini'), { recursive: true })
   writeFileSync(join(f.home, '.gemini', 'settings.json'), '{}')
-  await apply(f, upgradeIds, old)
+  await apply(f, oldIds, old)
   for (const id of ['codex', 'antigravity']) await report(f, id, 'waiting')
   appendFileSync(f.progress, `\n${handKept.join('\n')}\n`)
   return f
@@ -130,7 +133,9 @@ test('0.24.2 to this release: the old /board files and skills still open the pag
   const plan = await apply(f, upgradeIds)
   assert.equal(readFileSync(f.progress, 'utf8'), before, 'setup leaves progress.md as it was')
   const removed = plan.plans.flatMap(target => target.changes.filter(change => change.action === 'remove')).map(change => resolve(change.file)).sort()
-  assert.deepEqual(removed, Object.values(oldCommands).map(file => resolve(join(f.home, file))).sort(), 'setup retires exactly the two old /board files')
+  assert.deepEqual(removed, [resolve(join(f.home, oldCommands.opencode))], 'setup retires the old OpenCode /board file')
+  // Gemini CLI is retired: its old /board file goes with the rest of what setup wrote for it.
+  assert.ok(plan.retiredPlans.some(target => target.changes.some(change => change.action === 'remove' && resolve(change.file) === resolve(join(f.home, oldCommands.gemini)))), 'the Gemini plan removes its old /board file')
   for (const file of Object.values(oldCommands)) assert.ok(!existsSync(join(f.home, file)), `${file} is gone`)
   assert.ok(plan.plans.every(target => !target.keptEdited?.length), 'nothing edited was kept, so nothing is named')
 
@@ -149,24 +154,24 @@ test('0.24.2 to this release: the old /board files and skills still open the pag
   assertRepeat(await repeatApply(f), upgradeIds)
 })
 
-test("an upgrade from 0.24.2 keeps a /board file the person changed and names it in setup's output (#877)", async t => {
+test("an upgrade from 0.24.2 keeps an OpenCode /board file the person changed and names it in setup's output (#877)", async t => {
   const old = oldRelease(t)
   if (!old) return
   const f = await oldHome(old)
-  const edited = join(f.home, oldCommands.gemini)
+  const edited = join(f.home, oldCommands.opencode)
   appendFileSync(edited, '\n# my own note\n')
   const plan = await apply(f, upgradeIds)
   assert.ok(existsSync(edited), 'the edited /board file stays')
   assert.ok(readFileSync(edited, 'utf8').endsWith('# my own note\n'), 'and keeps its edit')
-  assert.ok(!existsSync(join(f.home, oldCommands.opencode)), 'the unchanged one next to it is retired')
-  const gemini = plan.plans.find(target => target.agent === 'gemini')
-  assert.deepEqual(gemini.keptEdited.map(file => resolve(file)), [resolve(edited)], 'the plan names the kept file')
-  assert.deepEqual(gemini.conflicts, [])
+  assert.ok(!existsSync(join(f.home, oldCommands.gemini)), 'the unchanged Gemini one next to it is gone')
+  const opencode = plan.plans.find(target => target.agent === 'opencode')
+  assert.deepEqual(opencode.keptEdited.map(file => resolve(file)), [resolve(edited)], 'the plan names the kept file')
+  assert.deepEqual(opencode.conflicts, [])
   const output = await setup(f, ['--apply'])
   assert.ok(output.includes('your edited old /board command; setup leaves it; the command is now /agent-board'), `setup's output names it\n${output}`)
-  assert.ok(output.includes('board.toml'), output)
-  assert.ok(existsSync(join(f.home, newCommands.gemini)), 'the new /agent-board command is there beside it')
-  await openPage(f, f.script, flagsIn(f, newCommands.gemini), 'new gemini command')
+  assert.ok(output.includes('board.md'), output)
+  assert.ok(existsSync(join(f.home, newCommands.opencode)), 'the new /agent-board command is there beside it')
+  await openPage(f, f.script, flagsIn(f, newCommands.opencode), 'new opencode command')
 })
 
 // #1302: a generated file the person edited never stops an upgrade and is never overwritten.
@@ -226,4 +231,147 @@ test('an upgrade keeps an edited hook runner, says so, and still upgrades the re
   const output = await setup(f, ['--apply'])
   assert.ok(output.includes('agent-board-hook.mjs'), `the output names it\n${output}`)
   assert.ok(output.includes('kept your copy'), `and says it kept the old file\n${output}`)
+})
+
+// #1327: Gemini CLI is retired. Antigravity keeps its files under the same ~/.gemini folder, so a removal that
+// is not exact would touch them. The home below was set up by 0.24.2 for Codex, OpenCode, Gemini CLI and Antigravity.
+const geminiFiles = ['.gemini/commands/board.toml', '.gemini/settings.json', '.agent-board/install-gemini.json']
+const setupCodexScript = join(repoRoot, 'scripts', 'setup-codex.mjs')
+const hashes = (f, prefix) => Object.fromEntries(snapshot(f.home).filter(([name, digest]) => digest !== null && name.startsWith(prefix)))
+const files = f => Object.fromEntries(snapshot(f.home).filter(([, digest]) => digest !== null))
+
+// Moves only Antigravity to this release (the helper retires nothing), so what the retirement then does to the
+// home can be told apart from what the upgrade of Antigravity does.
+const upgradeAntigravityOnly = async f => {
+  const result = await run(f, [setupCodexScript, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--lang', 'en', '--json', '--agent', 'antigravity', '--apply'], { timeoutMs: 120000 })
+  checked(result, 'upgrade Antigravity alone')
+}
+
+test('an upgrade takes away the Gemini CLI files setup wrote and leaves Antigravity byte for byte as it was (#1327)', async t => {
+  const old = oldRelease(t)
+  if (!old) return
+  const f = await oldHome(old)
+  for (const file of geminiFiles) assert.ok(existsSync(join(f.home, file)), `${file}: 0.24.2 wrote it`)
+  assert.ok(JSON.stringify(JSON.parse(read(f, '.gemini/settings.json')).hooks).includes('agent-board'), '0.24.2 hooked Gemini CLI')
+  await upgradeAntigravityOnly(f)
+  const antigravity = { ...hashes(f, '.gemini/config/'), ...hashes(f, '.gemini/antigravity-cli/'), ...hashes(f, '.agents/'), ...hashes(f, '.agent-board/install-antigravity.json') }
+  assert.ok(Object.keys(antigravity).some(name => name.startsWith('.gemini/config/')), 'Antigravity has files of its own to compare')
+  const everything = files(f)
+
+  const preview = await setup(f, ['--json'])
+  assert.ok(!preview.targets.includes('gemini'), 'Gemini CLI is not a target')
+  assert.deepEqual(preview.retired, ['gemini'], 'the preview says Gemini CLI is being retired')
+  assert.deepEqual(files(f), everything, 'a preview writes nothing')
+
+  const plan = await setup(f, ['--apply', '--json'])
+  assert.deepEqual(plan.retired, ['gemini'])
+  assert.deepEqual(plan.retiredPlans[0].conflicts, [])
+  // Gemini's own files are gone ...
+  assert.ok(!existsSync(join(f.home, '.gemini/commands/board.toml')))
+  assert.ok(!existsSync(join(f.home, '.agent-board/install-gemini.json')))
+  assert.ok(!JSON.stringify(JSON.parse(read(f, '.gemini/settings.json'))).includes('agent-board'), 'the Gemini CLI hooks are out of settings.json')
+  // ... and nothing else changed: every Antigravity file is the same bytes.
+  const after = files(f)
+  for (const [name, digest] of Object.entries(antigravity)) assert.equal(after[name], digest, `${name} is unchanged`)
+  const changed = Object.keys({ ...everything, ...after }).filter(name => everything[name] !== after[name])
+  // (The same run also upgrades Codex and OpenCode, which are not part of this check.)
+  assert.deepEqual(changed.filter(name => (name.startsWith('.gemini/') || name.includes('antigravity') || name.startsWith('.agents/')) && !geminiFiles.includes(name)), [], 'only Gemini files changed under .gemini, and nothing of Antigravity or the shared skill')
+  // A second run has nothing left to retire.
+  const again = await repeatApply(f)
+  assert.equal(again.plan.retired, undefined)
+  assert.deepEqual(again.after, again.before)
+})
+
+test('an upgrade keeps a Gemini CLI file the person edited, names it, and removes the rest (#1327)', async t => {
+  const old = oldRelease(t)
+  if (!old) return
+  const f = await oldHome(old)
+  const edited = join(f.home, '.gemini/commands/board.toml')
+  appendFileSync(edited, '\n# my own note\n')
+  const text = await setup(f, ['--apply'])
+  assert.ok(text.includes('Gemini CLI: no longer supported;'), text)
+  assert.ok(text.includes('you edited it, so setup leaves it'), text)
+  assert.ok(text.includes('board.toml'), text)
+  assert.ok(existsSync(edited), 'the edited Gemini file stays')
+  assert.ok(readFileSync(edited, 'utf8').endsWith('# my own note\n'), 'with its edit')
+  assert.ok(!existsSync(join(f.home, '.agent-board/install-gemini.json')), 'the rest of Gemini CLI is gone')
+  // The same home, as data: the plan names the kept file and skips nothing.
+  const g = await oldHome(old)
+  appendFileSync(join(g.home, '.gemini/commands/board.toml'), '\n# my own note\n')
+  const plan = await setup(g, ['--apply', '--json'])
+  assert.deepEqual(plan.retiredPlans[0].keptRetired.map(file => resolve(file)), [resolve(join(g.home, '.gemini/commands/board.toml'))])
+  assert.deepEqual(plan.retiredPlans[0].conflicts, [])
+  assertBlocks(f, ['codex', 'antigravity'])
+})
+
+test('remove --agent gemini takes away the Gemini CLI files and not those of Antigravity (#1327)', async t => {
+  const old = oldRelease(t)
+  if (!old) return
+  const f = await oldHome(old)
+  await upgradeAntigravityOnly(f)
+  const before = hashes(f, '.gemini/config/')
+  const plan = await setup(f, ['--remove', '--agent', 'gemini', '--apply', '--json'])
+  assert.deepEqual(plan.targets, ['gemini'])
+  assert.ok(!existsSync(join(f.home, '.gemini/commands/board.toml')))
+  assert.ok(!existsSync(join(f.home, '.agent-board/install-gemini.json')))
+  assert.deepEqual(hashes(f, '.gemini/config/'), before, 'Antigravity files are the same bytes')
+  assert.ok(existsSync(join(f.home, '.agent-board/install-antigravity.json')))
+})
+
+// #1327: a file the record lists that this release no longer writes. The record is edited by hand here, as an
+// older release would have left it, with one more file than this release writes.
+const recordOf = f => join(f.home, '.agent-board', 'install-codex.json')
+const sha = text => createHash('sha256').update(text).digest('hex')
+const withDropped = async (hasCreatedDirs, isEdited) => {
+  const f = fixture(['.codex'])
+  await apply(f, ['codex'])
+  const record = JSON.parse(readFileSync(recordOf(f), 'utf8'))
+  const folder = join(f.home, '.codex', 'retired-by-a-release')
+  const file = join(folder, 'old-hook.mjs')
+  mkdirSync(folder, { recursive: true })
+  writeFileSync(file, '// written by an earlier setup\n')
+  record.files[file] = sha('// written by an earlier setup\n')
+  if (hasCreatedDirs) record.createdDirs = [...(record.createdDirs ?? []), folder]
+  else delete record.createdDirs
+  writeFileSync(recordOf(f), `${JSON.stringify(record, null, 2)}\n`)
+  if (isEdited) appendFileSync(file, '// mine\n')
+  return { f, folder, file }
+}
+
+test('an upgrade removes a file this release no longer writes when its bytes are still the ones setup wrote, and the folder setup made for it (#1327)', async () => {
+  const { f, folder, file } = await withDropped(true, false)
+  const plan = await setup(f, ['--apply', '--json'])
+  const codex = plan.plans[0]
+  assert.deepEqual(codex.dropped, [file])
+  assert.ok(codex.changes.some(change => change.action === 'remove' && change.file === file))
+  assert.ok(!existsSync(file), 'the dropped file is gone')
+  assert.ok(!existsSync(folder), 'and the folder the record says setup made')
+  const record = JSON.parse(readFileSync(recordOf(f), 'utf8'))
+  assert.ok(!Object.hasOwn(record.files, file), 'the record stops naming it')
+  assert.ok(!(record.createdDirs ?? []).includes(folder), 'nor the folder')
+  assert.ok((record.createdDirs ?? []).length > 0, 'it keeps the folders it recorded for the files it still writes')
+  assertRepeat(await repeatApply(f), ['codex'])
+})
+
+test('an upgrade of a record with no createdDirs removes the dropped file and leaves the folder, which the record never named (#1327)', async () => {
+  const { f, folder, file } = await withDropped(false, false)
+  const plan = await setup(f, ['--apply', '--json'])
+  assert.deepEqual(plan.plans[0].dropped, [file])
+  assert.ok(!existsSync(file), 'the dropped file is gone')
+  assert.ok(existsSync(folder), 'its folder stays: an older record cannot say setup made it')
+  const record = JSON.parse(readFileSync(recordOf(f), 'utf8'))
+  assert.ok(!Object.hasOwn(record.files, file))
+  assert.ok(Object.keys(record.files).length > 0)
+  assertRepeat(await repeatApply(f), ['codex'])
+})
+
+test('an upgrade keeps a dropped file the person edited, names it, and forgets it (#1327)', async () => {
+  const { f, folder, file } = await withDropped(true, true)
+  const plan = await setup(f, ['--apply', '--json'])
+  assert.deepEqual(plan.plans[0].keptDropped, [file])
+  assert.deepEqual(plan.plans[0].conflicts, [])
+  assert.ok(readFileSync(file, 'utf8').endsWith('// mine\n'), 'the edited file stays as it is')
+  assert.ok(existsSync(folder))
+  assert.ok(!Object.hasOwn(JSON.parse(readFileSync(recordOf(f), 'utf8')).files, file), 'the record stops naming it')
+  assertRepeat(await repeatApply(f), ['codex'])
 })

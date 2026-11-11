@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { isatty } from 'node:tty'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, isBoardPluginDisabled as isPluginDisabled, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
+import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, isBoardPluginDisabled as isPluginDisabled, retiredAgents, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
 
 const args = process.argv.slice(2)
 const isRemove = args.includes('--remove')
@@ -61,6 +61,10 @@ const summaries = [
     "keptCode": "{file} (you edited it and the agent runs it, so setup kept your copy and did not install the new version; to get the new one, move your copy aside and run setup again)",
     "keptHeld": "{file} (not updated: it works with your edited board script, which setup kept; to update both, move your script aside and run setup again)",
     "heldMissing": "{file} (missing: setup cannot put back the old version while your edited board script stays; restore or move your agent-board.mjs, then run setup again)",
+    "dropped": "{file} (this release no longer writes it; setup removes it)",
+    "keptDropped": "{file} (this release no longer writes it, but you edited it, so setup leaves it)",
+    "retired": "no longer supported",
+    "keptRetired": "{file} (you edited it, so setup leaves it)",
     "ready": "already set up",
     "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry.",
     "retry": "Retry after fixing the conflicting files: {command}",
@@ -122,6 +126,10 @@ const summaries = [
     "keptCode": "{file}（你改過這個檔案，而且 agent 會直接執行它，所以 setup 保留你的版本，沒有裝新版；想換成新版，請先把你的版本移開，再執行一次 setup）",
     "keptHeld": "{file}（沒有更新：它要配合你改過的看板程式，而 setup 保留了你的版本；要一起更新，請先把你的看板程式移開，再執行一次 setup）",
     "heldMissing": "{file}（找不到：你改過的看板程式還在，setup 無法補回舊版；請還原或移開你的 agent-board.mjs，再執行一次 setup）",
+    "dropped": "{file}（這個版本不再寫入它；setup 會移除）",
+    "keptDropped": "{file}（這個版本不再寫入它，但你改過，所以 setup 不動它）",
+    "retired": "已不再支援",
+    "keptRetired": "{file}（你改過這個檔案，所以 setup 不動它）",
     "ready": "已設定完成",
     "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案後重試。",
     "retry": "修正衝突的檔案後重試：{command}",
@@ -183,6 +191,10 @@ const summaries = [
     "keptCode": "{file}（你改过这个文件，而且 agent 会直接运行它，所以 setup 保留了你的版本，没有装新版；想换成新版，请先把你的版本移走，再运行一次 setup）",
     "keptHeld": "{file}（没有更新：它要配合你改过的看板程序，而 setup 保留了你的版本；要一起更新，请先把你的看板程序移走，再运行一次 setup）",
     "heldMissing": "{file}（找不到：你改过的看板程序还在，setup 无法补回旧版；请还原或移走你的 agent-board.mjs，再运行一次 setup）",
+    "dropped": "{file}（这个版本不再写入它；setup 会移除）",
+    "keptDropped": "{file}（这个版本不再写入它，但你改过，所以 setup 不动它）",
+    "retired": "已不再支持",
+    "keptRetired": "{file}（你改过这个文件，所以 setup 不动它）",
     "ready": "已设置完成",
     "skipped": "已跳过：无法安全更新 {files}。请修复或移走冲突的文件后重试。",
     "retry": "修复冲突的文件后重试：{command}",
@@ -231,19 +243,19 @@ const words = (key, values = {}) => summary[key].replace(/\{(\w+)\}/g, (text, na
 // Keep this copy identical to setupNoAgent in all three tables.
 const noAgentWords = [
   {
-    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all)."
+    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all)."
   },
   {
-    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
+    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
   },
   {
-    "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "home": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "unknown": "agent-board：--agent 写了 setup 不认识的 agent 名称。指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
+    "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "home": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "unknown": "agent-board：--agent 写了 setup 不认识的 agent 名称。指定一个：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
   }
 ]
 const noAgentText = (key, values) => message(...noAgentWords.map(table => table[key].replace(/\{(\w+)\}/g, (text, name) => String(values[name] ?? text))))
@@ -369,11 +381,15 @@ const main = () => {
     deepseek: flag('--deepseek-dir') || process.env.DSH_HOME,
   }
   const data = flag('--data-dir') || join(home, '.agent-board')
-  const touched = targets.filter(agent => existsSync(join(data, `install-${agent}.json`)))
+  // A retired agent is offered nowhere, but a remove still takes away what an earlier setup wrote for it (#1327).
+  const removable = [...targets, ...retiredAgents]
+  const touched = removable.filter(agent => existsSync(join(data, `install-${agent}.json`)))
+  // An upgrade takes the same files away, keeping a file the person changed.
+  const retiring = isRemove ? [] : retiredAgents.filter(agent => existsSync(join(data, `install-${agent}.json`)))
   // --home can name another account's home; PATH and apps belong to the running account.
   const selected = isRemove
-    ? (selector === 'all' ? targets : selector === 'auto' ? touched : selector.split(','))
-    : (selector === 'all' ? targets : selector === 'auto' ? discoverSetupAgents(home, data, hostDirs, homeAt < 0) : selector.split(','))
+    ? (selector === 'all' ? [...removable] : selector === 'auto' ? touched : selector.split(','))
+    : (selector === 'all' ? [...targets] : selector === 'auto' ? discoverSetupAgents(home, data, hostDirs, homeAt < 0) : selector.split(','))
   const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
   const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude'], ['.exe', '.cmd']) : undefined
   const hasClaude = existsSync(claudeDirectory) || (homeAt < 0 && !!claude)
@@ -393,21 +409,22 @@ const main = () => {
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : words('noInstalled')}\n`)
     return
   }
-  if (!isRemove && selector === 'auto' && !selected.length && !isPluginNeeded) {
+  if (!isRemove && selector === 'auto' && !selected.length && !isPluginNeeded && !retiring.length) {
     const next = setupCommand(['--agent', 'codex'])
     const noAgent = noAgentText(homeAt < 0 ? 'anywhere' : 'home', { home, next })
     const claudeNext = !isPluginInstalled ? [words('plugin')] : hasDisabledPlugin ? [enablePluginStep()] : [words('openOne', { agents: 'Claude Code' }), words('thenBoardOne')]
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n${claudeNext.map((step, i) => `${i + 1}. ${step}`).join('\n')}` : noAgent}\n`)
     return
   }
-  if ((!selected.length && selector !== 'auto') || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
+  if ((!selected.length && selector !== 'auto') || selected.some(agent => !(isRemove ? removable : targets).includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
   const apply = args.includes('--apply')
   const isShowingApplied = apply
   // Only inside a test run (as AGENT_BOARD_SETUP_TTY), a stand-in helper can report what a real one cannot on cue.
   const script = process.env.AGENT_BOARD_TEST_PID && process.env.AGENT_BOARD_SETUP_HELPER ? process.env.AGENT_BOARD_SETUP_HELPER : fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
   let removing = selected
   const run = (agent, isApplying) => {
-    const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')] : common
+    const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')]
+      : retiring.includes(agent) ? ['--codex-remove', '--retire', '--removing', retiring.join(','), ...common] : common
     const result = spawnSync(process.execPath, [script, ...runArgs, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
     const fallback = () => {
       const cause = isCode(result.error?.code) ? result.error.code : 'UNKNOWN'
@@ -443,8 +460,12 @@ const main = () => {
     // An unchanged install still rewrites its manifest; keep a second run read-only.
     return plan.changes.length ? run(selected[i], true) : { ...plan, applied: true }
   })
+  // A retired agent is previewed with the rest and applied after them, so a file it shares with the others is
+  // already in its new bytes (#1327).
+  const retirePlans = retiring.map(agent => run(agent, false))
+  const retireResults = retirePlans.map((plan, i) => !isShowingApplied || plan.conflicts.length ? plan : plan.changes.length ? run(retiring[i], true) : { ...plan, applied: true })
   if (isJson) {
-    process.stdout.write(`${JSON.stringify({ targets: selected, plans: results, applied: apply && available.length > 0 }, null, 2)}\n`)
+    process.stdout.write(`${JSON.stringify({ targets: selected, plans: results, ...(retiring.length ? { retired: retiring, retiredPlans: retireResults } : {}), applied: apply && available.length > 0 }, null, 2)}\n`)
     return
   }
   const shortPath = file => {
@@ -479,9 +500,11 @@ const main = () => {
         return count ? [words(count === 1 ? `${key}One` : key, { count })] : []
       }).join('; ')
   }
+  // A file a release stopped writing goes when it is still ours; the other removals in an install are the old /board command.
+  const droppedFiles = new Set(results.flatMap(plan => plan.dropped ?? []))
   const fileLine = (file, changes) => {
     const change = changes.find(one => one.file === file)
-    return `  ${change?.action === 'remove' && !isRemove && !file.endsWith('.new') ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
+    return `  ${change?.action === 'remove' && !isRemove && !file.endsWith('.new') ? words(droppedFiles.has(file) ? 'dropped' : 'retire', { file: shortPath(file) }) : shortPath(file)}`
   }
   const sharedChanges = [...new Map(results.flatMap(plan => plan.conflicts.length ? [] : changesFor(plan, true)).map(change => [change.file, change])).values()]
   const sharedFiles = [...new Set(filesByAgent.flat().filter(file => shared.has(file)))]
@@ -507,7 +530,10 @@ const main = () => {
     const files = !isShowingApplied && !plan.conflicts.length ? filesByAgent[i].filter(file => !shared.has(file)).map(file => fileLine(file, ownChanges)) : []
     // An old /board file the person edited stays; say so in the preview and after applying.
     const missing = (plan.missingHeld ?? []).map(file => `  ${words('heldMissing', { file: shortPath(file) })}`)
-    const kept = plan.conflicts.length ? missing : (plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`)
+    const kept = plan.conflicts.length ? missing : [
+      ...(plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`),
+      ...(plan.keptDropped ?? []).map(file => `  ${words('keptDropped', { file: shortPath(file) })}`),
+    ]
     return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
   })
   lines.push(...agentLines)
@@ -522,6 +548,15 @@ const main = () => {
     }
     lines.push(...keptLines)
   }
+  // Gemini CLI and any other retired agent: named once, with what goes and what stays.
+  const retireLines = retiring.map((agent, i) => {
+    const plan = retireResults[i]
+    const status = plan.conflicts.length ? words('skipped', { files: plan.conflicts.map(shortPath).join(', ') }) : `${words('retired')}; ${describe(plan.changes)}`
+    const files = !isShowingApplied && !plan.conflicts.length ? plan.changes.map(change => `  ${shortPath(change.file)}`) : []
+    const kept = plan.conflicts.length ? [] : (plan.keptRetired ?? []).map(file => `  ${words('keptRetired', { file: shortPath(file) })}`)
+    return [`${names[agent]}: ${status}`, ...files, ...kept].join('\n')
+  })
+  lines.push(...retireLines)
   if (hasClaude && !isRemove) lines.push(`Claude Code: ${words('claude')}`)
   if (isRemove && results.length) {
     const progress = results[0]?.progress || join(data, 'progress.md')
@@ -575,6 +610,7 @@ const main = () => {
     const will = [
       ...(sharedChanges.length ? [sharedLine] : []),
       ...agentLines.filter((line, i) => !plans[i].conflicts.length && changesFor(plans[i], false).length).map(line => line.split('\n')[0]),
+      ...retireLines.filter((line, i) => !retirePlans[i].conflicts.length && retirePlans[i].changes.length).map(line => line.split('\n')[0]),
       ...approvals.map(agent => words('trustPart', { host: names[agent] })),
       ...(isPluginNeeded ? [words('installPlugin')] : []),
     ]
@@ -602,6 +638,17 @@ const main = () => {
         } catch { isDone = false }
         if (!isDone) process.exitCode = 1
         report(words('filesPart', { host: names[agent] }), isDone, setupCommand(['--agent', agent, '--apply']))
+      }
+      for (const [i, agent] of retiring.entries()) {
+        const plan = retirePlans[i]
+        if (plan.conflicts.length || !plan.changes.length) continue
+        let isDone = true
+        try {
+          const applied = run(agent, true)
+          isDone = applied.applied === true && !applied.conflicts.length
+        } catch { isDone = false }
+        if (!isDone) process.exitCode = 1
+        report(words('filesPart', { host: names[agent] }), isDone, setupCommand(['--apply']))
       }
       for (const agent of approvals) {
         const extra = [`--${agent}-trust`, ...(agent === 'codex' && codex ? ['--codex-bin', codex] : []), '--apply', '--json']
@@ -676,7 +723,8 @@ const main = () => {
     if (skipped.length) steps.push(words('retry', { command: setupCommand(['--remove', '--agent', skipped.join(','), '--apply']) }))
   } else {
     const hasChanges = available.some(agent => plans[selected.indexOf(agent)].changes.length > 0)
-    if (!apply && hasChanges) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
+    const hasRetireChanges = retirePlans.some(plan => !plan.conflicts.length && plan.changes.length > 0)
+    if (!apply && (hasChanges || hasRetireChanges)) steps.push(words('apply', { command: setupCommand([...(available.length ? ['--agent', available.join(',')] : []), '--apply']) }))
     const sessionAgents = []
     for (const agent of available) {
       const plan = results[selected.indexOf(agent)]

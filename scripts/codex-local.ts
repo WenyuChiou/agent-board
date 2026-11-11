@@ -1192,6 +1192,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(process.execPath, home, agent, worker, progress, event, state)
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'
+  // A retired agent (Gemini CLI, #1327) is taken away like a remove, except that a file the person edited is kept and named, not a conflict.
+  const retire = remove && args.includes('--retire')
+  const keptRetired: string[] = []
   const conflicts: string[] = []
   const changes: { file: string; action: string }[] = []
   // Beside the hooks.json it trusts, as the doctor reads it, so --codex-dir finds the same installation.
@@ -1243,7 +1246,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const foreign = manifest.foreignGroups[event]
       const hasUnknown = entries.some(entry => !Array.isArray(foreign) || !foreign.includes(hash(JSON.stringify(entry))))
       // With foreign history, an unknown entry is the user's edit of this hook; older records cannot tell.
-      if (remove && Array.isArray(foreign) && hasUnknown) conflicts.push(`${config}:${event}`)
+      if (remove && Array.isArray(foreign) && hasUnknown) (retire ? keptRetired : conflicts).push(`${config}:${event}`)
       else if (remove) alreadyGone.push(`${config}:${event}`)
       else if (entries.length && hasUnknown) conflicts.push(`${config}:${event}`)
       else hasMissingGroup = true
@@ -1421,7 +1424,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (existing !== null && !owned && existing !== desired) {
       // A generated file the person edited never stops an upgrade and is never overwritten (#1302). Text a
       // host only reads gets the new file beside it; code a host loads keeps the old file and is named.
-      if (remove || (file === script && !isHeld)) conflicts.push(file)
+      if (retire) keptRetired.push(file)
+      else if (remove || (file === script && !isHeld)) conflicts.push(file)
       else if (/\.(?:toml|md)$/.test(file)) {
         const copy = `${file}.new`
         const beside = initial(copy)
@@ -1452,11 +1456,21 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (existing === null) {
       if (remove && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
     } else if (hash(existing) === manifest.files[file] || [script, ...legacyBoards].some(board => isReleased(agent === 'gemini' ? 'gemini' : 'opencode', existing, { board }))) changes.push({ file, action: 'remove' })
-    else keptEdited.push(file)
+    else (retire ? keptRetired : keptEdited).push(file)
   }
-  // A host-directory override must not strand an old active plugin outside the
-  // new ownership record. Remove the old scoped install before changing roots.
-  for (const file of Object.keys(manifest.files)) if (!(file in files) && !retired.includes(file) && !staleBeside.has(file)) conflicts.push(file)
+  // A file the record lists that this release no longer writes (a host-directory override moved it, or a release
+  // dropped it) goes when its bytes are still the ones setup wrote, and is kept and named when the person changed
+  // it. A file another agent's record also lists stays; the record just stops naming it (#1327).
+  const dropped: string[] = []
+  const keptDropped: string[] = []
+  for (const file of Object.keys(manifest.files)) {
+    if (file in files || retired.includes(file) || staleBeside.has(file)) continue
+    if (remove) { conflicts.push(file); continue }
+    const existing = initial(file)
+    if (existing === null || otherManifests.some(one => Object.hasOwn(object(one.files ?? {}), file))) continue
+    if (hash(existing) === manifest.files[file]) { changes.push({ file, action: 'remove' }); dropped.push(file) }
+    else keptDropped.push(file)
+  }
   if (isHeld) {
     // The hooks stay as they are: the config is left byte for byte and the record keeps the old entries.
     const wouldChange = agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== (nextConfigText ?? '') : !isSame(hookConfig, nextConfig)
@@ -1488,10 +1502,24 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (!remove) for (const file of [...changes.filter(change => change.action === 'create').map(change => change.file), ...(initial(manifestFile) === null ? [manifestFile] : [])]) {
     for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
   }
+  // A folder the record says setup made goes with the last dropped file in it. A record without createdDirs
+  // (an older release) names none, so its folders stay.
+  const removedDirs = new Set<string>()
+  if (!remove && dropped.length) {
+    const gone = new Set(dropped)
+    for (const folder of [...createdDirs].sort((a, b) => b.split(/[\\/]/).length - a.split(/[\\/]/).length)) {
+      try {
+        if (readdirSync(folder).every(name => gone.has(join(folder, name)) || removedDirs.has(join(folder, name)))) {
+          removedDirs.add(folder)
+          changes.push({ file: folder, action: 'remove' })
+          createdDirs.delete(folder)
+        }
+      } catch {}
+    }
+  }
   const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
   const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).flatMap(([file, text]) => keptFiles.has(file) ? (manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]]) : [[file, hash(text)]])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
-  const removedDirs = new Set<string>()
   let handover: { file: string; text: string } | undefined
   if (remove) {
     // A folder named by --data-dir may be the person's own: it goes only when setup recorded making it.
@@ -1531,7 +1559,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(keptRetired.length ? { keptRetired } : {}), ...(dropped.length ? { dropped } : {}), ...(keptDropped.length ? { keptDropped } : {}), ...(missingHeld.length ? { missingHeld } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.

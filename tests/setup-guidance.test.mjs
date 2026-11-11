@@ -15,7 +15,7 @@ test('setup bootstrap guidance stays identical to all three canonical string tab
 })
 
 test('setup groups new sessions while retaining plugin restart instructions', () => {
-  const hosts = { antigravity: 'Antigravity', cursor: 'Cursor', grok: 'Grok Build', muse: 'Muse Code', gemini: 'Gemini CLI', opencode: 'OpenCode', openclaw: 'OpenClaw', deepseek: 'DeepSeek' }
+  const hosts = { antigravity: 'Antigravity', cursor: 'Cursor', grok: 'Grok Build', muse: 'Muse Code', opencode: 'OpenCode', openclaw: 'OpenClaw', deepseek: 'DeepSeek' }
   for (const [index, lang] of locales.entries()) fixture(setup => {
     const said = setup('--agent', Object.keys(hosts).join(','), '--lang', lang, '--apply')
     const start = bootstrap[index].start.replace('{agents}', Object.values(hosts).join(lang === 'en' ? ', ' : '、'))
@@ -191,7 +191,7 @@ test('a removal that changes one file says removed 1 setup file in the singular 
     mkdirSync(join(env.HOME, '.cursor'))
     writeFileSync(join(env.HOME, '.cursor', 'hooks.json'), own)
     setup('--agent', 'cursor', '--lang', 'en', '--apply')
-    setup('--agent', 'gemini', '--lang', 'en', '--apply')
+    setup('--agent', 'muse', '--lang', 'en', '--apply')
     writeFileSync(join(env.HOME, '.cursor', 'hooks.json'), own)
     const preview = setup('--agent', 'cursor', '--lang', 'en', '--remove')
     assert.match(preview, /would remove 1 setup file\b/)

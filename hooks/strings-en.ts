@@ -124,6 +124,10 @@ export const EN: Strings = {
     "keptCode": "{file} (you edited it and the agent runs it, so setup kept your copy and did not install the new version; to get the new one, move your copy aside and run setup again)",
     "keptHeld": "{file} (not updated: it works with your edited board script, which setup kept; to update both, move your script aside and run setup again)",
     "heldMissing": "{file} (missing: setup cannot put back the old version while your edited board script stays; restore or move your agent-board.mjs, then run setup again)",
+    "dropped": "{file} (this release no longer writes it; setup removes it)",
+    "keptDropped": "{file} (this release no longer writes it, but you edited it, so setup leaves it)",
+    "retired": "no longer supported",
+    "keptRetired": "{file} (you edited it, so setup leaves it)",
     "ready": "already set up",
     "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry.",
     "retry": "Retry after fixing the conflicting files: {command}",
@@ -167,9 +171,9 @@ export const EN: Strings = {
     "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks."
   },
   setupNoAgent: {
-    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all)."
+    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all)."
   },
   setupErrorMissingValue: 'agent-board: a setup option is missing its value. Options such as --agent, --home and --data-dir each take one; add it after the option and run setup again.',
   setupErrorConfig: (host: string): string => `agent-board: setup cannot read or safely update the settings for ${host}, so it left them as they were. Fix or move that agent's config file, then run setup again.`,
@@ -182,7 +186,7 @@ export const EN: Strings = {
   setupErrorCodexBinary: 'agent-board: the Codex trust check needs the Codex program. Add --codex-bin followed by the program\'s full path.',
   setupErrorCodexInstall: 'agent-board: the Codex trust check works only on an installed, unedited Codex setup. Run setup with --agent codex --apply first, then run the trust check again.',
   setupErrorDetails: {
-    UNSUPPORTED_AGENT: 'agent-board: doctor checks codex, cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity and deepseek; Claude Code connects through its plugin, so run claude plugin list to check it.',
+    UNSUPPORTED_AGENT: 'agent-board: doctor checks codex, cursor, opencode, grok, muse, hermes, openclaw, antigravity and deepseek; Claude Code connects through its plugin, so run claude plugin list to check it.',
     CODEX_SHIM_UNSUPPORTED: 'agent-board: this Codex shim cannot be resolved safely; find codex.exe with Get-ChildItem (npm root -g) -Filter codex.exe -Recurse and pass its full path with --codex-bin.',
     EINVAL: 'agent-board: the operating system rejected a setup argument; check the supplied paths and run the command again.',
     ENOENT: 'agent-board: a file or program needed by setup was not found; check the supplied paths and run the command again.',

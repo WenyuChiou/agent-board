@@ -281,7 +281,7 @@ if (!isChat && !args.includes('--status')) {
       if (old && typeof prelude.codexRoot === 'string') {
         let root = resolve(prelude.codexRoot)
         // The agents scripts/setup-agent.mjs knows; another install-*.json (a backup copy) is not one.
-        const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
+        const targets = ['codex', 'cursor', 'opencode', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
         const listed = folder => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
         let agents = listed(root)
         // A moved data folder: the board script's own folder is where the board is now.

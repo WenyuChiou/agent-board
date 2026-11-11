@@ -162,6 +162,10 @@ export const ZH_TW = {
     "keptCode": "{file}（你改過這個檔案，而且 agent 會直接執行它，所以 setup 保留你的版本，沒有裝新版；想換成新版，請先把你的版本移開，再執行一次 setup）",
     "keptHeld": "{file}（沒有更新：它要配合你改過的看板程式，而 setup 保留了你的版本；要一起更新，請先把你的看板程式移開，再執行一次 setup）",
     "heldMissing": "{file}（找不到：你改過的看板程式還在，setup 無法補回舊版；請還原或移開你的 agent-board.mjs，再執行一次 setup）",
+    "dropped": "{file}（這個版本不再寫入它；setup 會移除）",
+    "keptDropped": "{file}（這個版本不再寫入它，但你改過，所以 setup 不動它）",
+    "retired": "已不再支援",
+    "keptRetired": "{file}（你改過這個檔案，所以 setup 不動它）",
     "ready": "已設定完成",
     "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案後重試。",
     "retry": "修正衝突的檔案後重試：{command}",
@@ -205,9 +209,9 @@ export const ZH_TW = {
     "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。"
   },
   setupNoAgent: {
-    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
+    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
   },
   setupErrorMissingValue: 'agent-board：setup 有個選項後面沒有接值。--agent、--home、--data-dir 這類選項都要接一個值；請在選項後面補上，再執行一次 setup。',
   setupErrorConfig: (host: string): string => `agent-board：setup 讀不懂或無法安全更新 ${host} 的設定，所以保持原樣。請修正或移開該 agent 的設定檔，再執行一次 setup。`,
@@ -220,7 +224,7 @@ export const ZH_TW = {
   setupErrorCodexBinary: 'agent-board：Codex 信任檢查需要知道 Codex 程式在哪裡。請加上 --codex-bin，後面接該程式的完整路徑。',
   setupErrorCodexInstall: 'agent-board：Codex 信任檢查只能用在已安裝、且沒被改過的 Codex 設定上。請先執行 setup --agent codex --apply，再重跑信任檢查。',
   setupErrorDetails: {
-    UNSUPPORTED_AGENT: 'agent-board：doctor 檢查 codex、cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity 和 deepseek；Claude Code 透過外掛連接，請執行 claude plugin list 檢查外掛。',
+    UNSUPPORTED_AGENT: 'agent-board：doctor 檢查 codex、cursor、opencode、grok、muse、hermes、openclaw、antigravity 和 deepseek；Claude Code 透過外掛連接，請執行 claude plugin list 檢查外掛。',
     CODEX_SHIM_UNSUPPORTED: 'agent-board：無法安全解析這個 Codex 啟動檔；請用 Get-ChildItem (npm root -g) -Filter codex.exe -Recurse 找到 codex.exe，並用 --codex-bin 傳入完整路徑。',
     EINVAL: 'agent-board：作業系統拒絕了 setup 參數；請檢查輸入的路徑並重新執行命令。',
     ENOENT: 'agent-board：找不到 setup 需要的檔案或程式；請檢查輸入的路徑並重新執行命令。',
