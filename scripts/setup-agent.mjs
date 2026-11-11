@@ -640,6 +640,9 @@ const main = () => {
           sessions.push(names[agent])
         }
       }
+      // One retry command for every agent that was skipped, here as in the run without a terminal.
+      const skippedAgents = selected.filter((agent, i) => plans[i].conflicts.length)
+      if (skippedAgents.length) next.push(words('retry', { command: setupCommand(['--agent', skippedAgents.join(','), '--apply']) }))
       if (hasInstalledPlugin && isPluginDisabled(claudeDirectory)) next.push(enablePluginStep())
       if (isPluginReady) sessions.push('Claude Code')
       if (sessions.length) {

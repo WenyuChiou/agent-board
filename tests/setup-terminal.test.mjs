@@ -108,7 +108,9 @@ test('a conflicting agent is skipped once, with its retry command, while the oth
   assert.ifError(result.error)
   // As without a terminal, setup exits nonzero only when every selected agent is skipped.
   assert.equal(result.status, 0, result.stderr)
-  assert.match(result.stdout, /Codex: skipped: .*--agent codex --apply/)
+  assert.match(result.stdout, /Codex: skipped: setup cannot safely update .*hooks\.json/)
+  assert.equal(result.stdout.match(/--agent codex --apply/g)?.length, 1, result.stdout)
+  assert.match(result.stdout, /Retry after fixing the conflicting files: .*--agent codex --apply/)
   assert.doesNotMatch(result.stdout, /Codex files:/)
   assert.equal(readFileSync(join(f.env.CODEX_HOME, 'hooks.json'), 'utf8'), 'synthetic conflicting file')
   assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), true)

@@ -125,7 +125,7 @@ test('updating shared runtime files for one agent synchronizes sibling install m
   assert.equal(removeAg.status, 0, removeAg.stderr)
 }))
 
-test('recognized released boards upgrade while edited released boards conflict', () => fixture(f => {
+test('recognized released boards upgrade while an edited released board is kept and said so', () => fixture(f => {
   assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   recordOlderBoard(f)
@@ -138,8 +138,12 @@ test('recognized released boards upgrade while edited released boards conflict',
   assert.equal(JSON.parse(doctor.stdout).installed, true)
   writeFileSync(f.script, `${released}// mine\n`)
   const edited = f.install('--agent', 'codex', '--apply', '--json')
-  assert.notEqual(edited.status, 0)
-  assert.equal(JSON.parse(edited.stderr).error.code, 'INSTALL_CONFLICT')
+  assert.equal(edited.status, 0, edited.stderr)
+  const plan = JSON.parse(edited.stdout)
+  assert.deepEqual(plan.conflicts, [])
+  assert.deepEqual(plan.keptCode, [f.script])
+  assert.equal(readFileSync(f.script, 'utf8'), `${released}// mine
+`)
 }))
 
 test('updating a released board repairs stale sibling manifests without adding unlisted files', () => fixture(f => {

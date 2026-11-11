@@ -1622,7 +1622,10 @@ test('a conflict in one agent leaves the others set up and names the skipped age
       const result = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', ...args)
       assert.equal(result.status, 1)
       assert.equal(result.stderr, '')
-      for (const text of ['Codex', 'Cursor', 'skipped', '--agent codex', '--agent cursor']) assert.ok(result.stdout.includes(text), result.stdout)
+      for (const text of ['Codex', 'Cursor', 'skipped']) assert.ok(result.stdout.includes(text), result.stdout)
+      assert.match(result.stdout, /--agent '?codex,cursor'? --apply/)
+      // Both agents are skipped, so one retry command names both.
+      assert.equal(result.stdout.match(/--agent /g)?.length, 1, result.stdout)
       assert.equal(existsSync(f.root), false)
     }
     const json = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', '--apply', '--json')
@@ -2331,20 +2334,24 @@ test('Antigravity removal finishes when owned files and hook entries are already
   assert.ok(existsSync(f.progress))
 }))
 
-test('Antigravity setup still reports a user-edited owned file as a conflict', () => fixture(f => {
+test('Antigravity setup keeps a user-edited skill, writes the new one beside it, and reports no conflict', () => fixture(f => {
   const antigravitySkill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
   const installed = f.install('--agent', 'antigravity', '--apply')
   assert.equal(installed.status, 0, installed.stderr)
-  const edited = `${readFileSync(antigravitySkill, 'utf8')}Synthetic user edit\n`
+  const fresh = readFileSync(antigravitySkill, 'utf8')
+  const edited = `${fresh}Synthetic user edit
+`
   f.save(antigravitySkill, edited)
 
   const preview = f.install('--agent', 'antigravity')
   assert.equal(preview.status, 0, preview.stderr)
-  assert.ok(JSON.parse(preview.stdout).conflicts.includes(antigravitySkill), preview.stdout)
+  const plan = JSON.parse(preview.stdout)
+  assert.deepEqual(plan.conflicts, [])
+  assert.deepEqual(plan.keptText, [{ file: antigravitySkill, beside: `${antigravitySkill}.new` }])
   const applied = f.install('--agent', 'antigravity', '--apply')
-  assert.notEqual(applied.status, 0)
-  assert.ok(JSON.parse(applied.stdout).conflicts.includes(antigravitySkill), applied.stdout)
+  assert.equal(applied.status, 0, applied.stderr)
   assert.equal(readFileSync(antigravitySkill, 'utf8'), edited)
+  assert.equal(readFileSync(`${antigravitySkill}.new`, 'utf8'), fresh)
 }))
 
 test('setup hashes foreign hook entries and restores a missing owned hook beside them', () => fixture(f => {
@@ -4584,17 +4591,21 @@ test('--codex-doctor fails when explicit --codex-bin cannot be executed', () => 
   assert.notEqual(result.status, 0)
 }))
 
-test('Codex-only setup preserves unrelated hooks and refuses edited skill files', () => fixture(f => {
+test('Codex-only setup preserves unrelated hooks and keeps an edited skill file, writing the new one beside it', () => fixture(f => {
   const unrelated = { hooks: [{ type: 'command', command: 'echo other' }] }
   f.save(f.hooks, JSON.stringify({ other: true, hooks: { Stop: [unrelated] } }))
   assert.equal(f.install('--apply').status, 0)
   let config = JSON.parse(readFileSync(f.hooks))
   assert.equal(config.other, true)
   assert.deepEqual(config.hooks.Stop[0], unrelated)
+  const fresh = readFileSync(f.skill, 'utf8')
   writeFileSync(f.skill, 'user edited skill')
   const result = f.install('--apply')
-  assert.notEqual(result.status, 0)
+  assert.equal(result.status, 0, result.stderr)
   assert.equal(readFileSync(f.skill, 'utf8'), 'user edited skill')
+  assert.equal(readFileSync(`${f.skill}.new`, 'utf8'), fresh)
+  config = JSON.parse(readFileSync(f.hooks))
+  assert.deepEqual(config.hooks.Stop[0], unrelated)
 }))
 
 test('Codex-only setup respects an explicit progress path and preserves its bytes', () => fixture(f => {
