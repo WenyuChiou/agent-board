@@ -95,10 +95,11 @@ First install does not reach 90% in 0.24.4: every host loads its hooks when a se
 ### M8. Proof, then stable
 Records on the tagged head. The gate:
 1. `docs/RELEASING.md`'s release gate, checked on the exact tagged commit: CI green on Ubuntu and Windows; the vendor parity record `docs/validation/<date>-parity-0.24.4.md`, every FAIL in it naming an open issue outside the must-ship set; the L1 to L3 user-journey tests and the upgrade journeys in `tests/host-upgrade.test.mjs` passing on that commit.
-2. The delivery table: one row per agent, surface and scenario (a idle, b mid-turn, c stopped on a question), each marked `now`, `later` (turn end, next turn or reopen), `cannot` (named) or `not run`. Every agent in the README support table has a surface with a and c at `now` or `later`, or its card and the README say "cannot receive yet". No card wording disagrees with its record. The release notes print the counts. #557 is one row.
+2. The delivery table: one row per agent, surface and scenario (a idle, b mid-turn, c stopped on a question), each marked `now`, `later` (turn end, next turn or reopen) or `cannot` (named); `not run` only for a surface outside line 6's list. Every agent in the README support table has a surface with a and c at `now` or `later`, or its card and the README say "cannot receive yet". No card wording disagrees with its record. The release notes print the counts. #557 is one row.
 3. The usersim record with the ledger, at the ceilings above with each needed host restart counted as a step, each journey ending in a real session's row.
 4. One live row: the daily check from inside Codex CLI and the Codex app (F4).
-5. Must-ship closed, and every lane-reviewed pull request read from outside. The three IDE rows run if a person can type into them; otherwise they are named as not run.
+5. Must-ship closed, and every lane-reviewed pull request read from outside.
+6. Every AI named in this plan is tested live on the 0.24.4 head: Claude Code, Codex (CLI and app), OpenCode, Antigravity, Cursor, Grok Build, Hermes Agent, OpenClaw and DeepSeek Harness. Each has a dated record for the rows that apply to it: its row states (M7), its approval route or its "answer in its window" card (D3, other hosts), and delivery a and c (D2). A row a person must type into (the IDE rows) is run by the owner with the PM. `not run` is not accepted for these AIs. The owner, 2026-11-11: 「你剛剛提到的每個AI都要確實測試」.
 
 ## Delivery: an answer pressed on the board reaches the agent (lane E)
 
@@ -161,7 +162,7 @@ A route may need a one-time step inside that host: turning on a hook or a plugin
 
 ### D2. Receivers, one pull request per host
 In this order: OpenCode (a new receiver on the DeepSeek pattern; wakes an idle session, hands over at `session.idle`), Codex turn end (a `Stop` hand-over, and the wake if F6 passes), Cursor (enroll on any hook event, hand over at `stop`), Hermes, Grok (only if F8 passes). Before the first, a small pull request moves the turn-event block out of `scripts/codex-local.ts:1076-1124` into `scripts/hook-delivery.ts`. Hook changes must land in this version, not a patch.
-- **Done when:** per host, the stand-in test passes and the live record marks a, b and c each as `now`, `later`, `cannot` (named) or `not run`, as M8's delivery table does: a and c at `now` or `later` for each host the pull request ships, and b `cannot` only where the cut order has cut it. The card's line agrees with the record. Every record quotes the line the card showed under Send; a record where the card promised one thing and another happened is a FAIL.
+- **Done when:** per host, the stand-in test passes and the live record marks a, b and c each as `now`, `later` or `cannot` (named), as M8's delivery table does: a and c at `now` or `later` for each host the pull request ships, and b `cannot` only where the cut order has cut it. The card's line agrees with the record. Every record quotes the line the card showed under Send; a record where the card promised one thing and another happened is a FAIL.
 - **Test:** stand-in agents prove the wire shape and the store's state; only a live record proves the host obeys. Records are `docs/validation/<date>-<host>-live.md`.
 
 ## The checks
@@ -217,7 +218,7 @@ Half a day each, a dated note each, before the milestone they feed.
 - "No network use": one request a day, on by default.
 - "An agent cannot act as the person on the board": it can. An agent shown the page link, or that looks for it, can act as the person; `SECURITY.md` says so. The fix is 0.24.5.
 - "Works with Muse Code" or "Gemini CLI". "Works in <app or IDE>" for a row not run.
-- "Stable" before the five gate lines hold.
+- "Stable" before the six gate lines hold.
 
 ## Moved to 0.24.5
 
