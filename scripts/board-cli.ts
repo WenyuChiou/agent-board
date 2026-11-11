@@ -1960,10 +1960,12 @@ const pageIsOpen = async (server: RunningServer): Promise<boolean> => {
   return answer !== null && answer !== 'silent' && typeof answer.pageAgo === 'number' && answer.pageAgo >= 0 && answer.pageAgo < PAGE_OPEN_MS()
 }
 
-// The Codex program the receiver runs (#318): AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else,
-// it turns the receiver off), else the one on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names
-// its own, so it never reaches the real ~/.codex.
+// The Codex program the receiver runs (#318). The receiver is off unless the page was started with `--codex-send`: whether a
+// command that needs approval still reaches the person while the board is joined is not proven on a real Codex yet (#318).
+// Then AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else, it turns the receiver off), else the one
+// on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names its own, so it never reaches the real ~/.codex.
 const codexReceiverExecutable = (): string | null => {
+  if (!args.includes('--codex-send')) return null
   const given = process.env.AGENT_BOARD_CODEX_BIN
   if (given !== undefined) return explicitCodexExecutable(given)
   return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
@@ -2019,7 +2021,7 @@ const serveChild = (): void => {
       },
       get s() { return s },
       port: Number(flag('--port') ?? 0) || 0,
-      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSteer: args.includes('--codex-steer'), messagesDirectory: messagesDirectory() },
+      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSteer: args.includes('--codex-steer'), codexSend: args.includes('--codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       pending: (isFresh = true) => pending(undefined, isFresh),
@@ -2145,7 +2147,7 @@ const runningPage = async (isStarting = false): Promise<{ page: Running; isKept:
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
   const requestedStale = staleTimeoutMs()
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (answer.codexSteer ?? false) === args.includes('--codex-steer') && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (answer.codexSteer ?? false) === args.includes('--codex-steer') && (answer.codexSend ?? false) === args.includes('--codex-send') && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
@@ -2221,6 +2223,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
   if (args.includes('--codex-steer')) rest.push('--codex-steer')
+  if (args.includes('--codex-send')) rest.push('--codex-send')
   // The child runs with cwd set to the board's folder, so a relative path would resolve
   // against the board's folder instead of this command's folder. Pass the board and the
   // messages folder the parent resolved, as absolute paths, so the child serves the same

@@ -4286,7 +4286,14 @@ test('the board runs the Codex receiver for a Codex session it knows and ends it
   process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
   let board
   try {
-    board = await start(dir)
+    // Off unless asked for: without --codex-send the page starts no Codex program and joins no thread.
+    const quiet = await start(dir)
+    try {
+      await pause(1500)
+      assert.equal((await quiet.call('/api/board')).body.messaging.connections.length, 0)
+      assert.equal(existsSync(join(dir, 'proxy.pid')), false)
+    } finally { await quiet.close() }
+    board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send'])
     delete process.env.AGENT_BOARD_CODEX_BIN
     const connection = await codexConnection(board)
     assert.equal(connection.surface, 'Codex CLI')

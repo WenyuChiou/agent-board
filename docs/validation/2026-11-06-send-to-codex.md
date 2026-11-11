@@ -22,7 +22,7 @@ What it showed:
 
 - A real model turn: the ACK line, `turn/completed` `completed`, and the card showing "Codex replied".
 - The shared daemon started by `codex app-server daemon start` (os error 5 here), and a Codex TUI joined to it.
-- An approval-needing command while the receiver is joined: whether the daemon also waits on the board's connection, or only on the person's own client. The receiver never answers an approval request; whether that stalls the person's approval is not tested. **Do not treat this as safe until it is.**
+- **The reason the receiver is off by default (`--codex-send`):** an approval-needing command while the receiver is joined: whether the daemon also waits on the board's connection, or only on the person's own client. The receiver never answers an approval request; whether that stalls the person's approval is not tested. **Do not treat this as safe until it is.**
 - `thread/queue/delete`: the receiver uses no queue.
 - Windows hard kill on a real proxy (the mock ends with its stdin; the real proxy was not killed this way).
 - Linux and macOS; the Codex desktop app.
