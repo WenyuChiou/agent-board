@@ -46,18 +46,19 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 快速开始的第二个命令 | 你自己粘贴 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己粘贴 |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己粘贴 |
-| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | `/agent-board`（用提示让它执行 skill） | 你自己粘贴 |
+| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | 让它执行 `agent-board` skill | 你自己粘贴 |
 
 ### 在桌面 app 或 IDE
 
 | | Agent | 打开看板 | 你的回复怎么送到 |
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | 它对话旁的窗格 | 暂不支持 |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板网页：在任何终端运行快速开始的第二个命令（app 自带的终端也行） | 暂不支持 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页：在任何终端运行快速开始的第二个命令（app 自带的终端也行） | 尚未测试 |
-| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板网页：在任何终端运行快速开始的第二个命令（app 自带的终端也行） | 尚未测试 |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板网页：在任何终端运行快速开始的第二个命令（app 自带的终端也行） | 暂不支持 |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板网页（第二个命令） | 暂不支持 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页（第二个命令） | 尚未测试 |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板网页（第二个命令） | 尚未测试 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板网页（第二个命令） | 暂不支持 |
 
+- 看板网页：在任何终端运行快速开始的第二个命令，app 自带的终端也行。
 - dot 和其他网页版聊天要手动汇报：[怎么做](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)（英文）。
 
 ## 在看板上回复
@@ -67,7 +68,7 @@ npx @wenyuchiou/agent-board@next
 回复 agent 的提问，和主动给它发消息，走的是同一条路，看你点哪个按钮：
 
 - **发送**把它交给已连接的对话；对话回确认才代表收到。没有确认也可能已经送到，先看一下那个 agent 再用**复制回答**，免得它收到两次。发送需要[开启消息功能](docs/MESSAGING.md#local-storage)（英文）。
-- **排入 agent 的下一回合**会留到那个对话的下一回合才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收（Codex 在对照记录里就被拒收）。
+- **排入 agent 的下一回合**会留到那个对话的下一回合才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收。
 - **复制回答**把它放进剪贴板，由你粘贴到那个 agent。
 - 已经在 agent 自己的窗口里回复了？点**已回复，先隐藏**就能收掉这张卡。
 
@@ -123,4 +124,4 @@ npx @wenyuchiou/agent-board@next remove --apply
 
 [MIT](LICENSE)。agent 的图标来自 [Simple Icons](https://simpleicons.org)（CC0）和 [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT），这些图标属于各自的所有者；没有图标的 agent 用名字的第一个字母表示。
 
-<p align="center"><a href="CHANGELOG.md"><img alt="源代码版本 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>最新稳定版本 0.24.2 · 0.24.3 是预发布版（<code>npx @wenyuchiou/agent-board@next setup</code>）· <a href="CHANGELOG.md">更新日志</a> · 0.24.3 未测试 macOS。</sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="源代码版本 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>最新稳定版本 0.24.2 · 0.24.3 是预发布版（<code>npx @wenyuchiou/agent-board@next setup</code>）· <a href="CHANGELOG.md">更新日志</a></sub></p>

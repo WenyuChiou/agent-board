@@ -46,18 +46,19 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | The second Quick start command | You paste it |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | You paste it |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | You paste it |
-| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | `/agent-board` (opened by a prompt asking for the skill) | You paste it |
+| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | Ask it for the `agent-board` skill | You paste it |
 
 ### In a desktop app or IDE
 
 | | Agent | Open the board | Your reply reaches it |
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | The pane beside its chat | Not yet |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | The board page: the second Quick start command, in any terminal (the app's own too) | Not yet |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | The board page: the second Quick start command, in any terminal (the app's own too) | Not tested yet |
-| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | The board page: the second Quick start command, in any terminal (the app's own too) | Not tested yet |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | The board page: the second Quick start command, in any terminal (the app's own too) | Not yet |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page (second command) | Not yet |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page (second command) | Not tested yet |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page (second command) | Not tested yet |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page (second command) | Not yet |
 
+- Board page: run the second Quick start command in any terminal, the app's own included.
 - dot and other web chats report by hand: [how](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste).
 
 ## Answer from the board
@@ -67,7 +68,7 @@ npx @wenyuchiou/agent-board@next
 An answer to an agent's question and a message you send it travel the same way, by the button you press:
 
 - **Send** hands it to a connected session; a confirmation from that session means it was received. With no confirmation it may still have arrived, so look at the agent before you use **Copy answer**, or it may get it twice. Send needs [messaging on](docs/MESSAGING.md#local-storage).
-- **Queue for the agent's next turn** holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires (Codex's was rejected in the parity run).
+- **Queue for the agent's next turn** holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires.
 - **Copy answer** puts it on your clipboard to paste into that agent.
 - Answered in the agent's own window? Press **Already answered, hide** to clear the card.
 
@@ -123,4 +124,4 @@ To check Claude Code's setup, run `claude plugin list` and `/progress connect st
 
 [MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) and belong to their owners; an agent without a logo is shown by its initial.
 
-<p align="center"><a href="CHANGELOG.md"><img alt="Source version 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>Latest stable version: 0.24.2 · 0.24.3 is a pre-release (<code>npx @wenyuchiou/agent-board@next setup</code>) · <a href="CHANGELOG.md">Changelog</a> · macOS was not tested for 0.24.3.</sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="Source version 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>Latest stable version: 0.24.2 · 0.24.3 is a pre-release (<code>npx @wenyuchiou/agent-board@next setup</code>) · <a href="CHANGELOG.md">Changelog</a>.</sub></p>

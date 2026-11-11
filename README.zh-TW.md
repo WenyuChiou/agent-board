@@ -46,18 +46,19 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 快速開始的第二個指令 | 你自己貼上 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己貼上 |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己貼上 |
-| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | `/agent-board`（用提示請它執行 skill） | 你自己貼上 |
+| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | 請它執行 `agent-board` skill | 你自己貼上 |
 
 ### 在桌面 app 或 IDE
 
 | | Agent | 開看板 | 你的回答怎麼送到 |
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | 它對話旁的窗格 | 尚未支援 |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁：在任何終端機執行快速開始的第二個指令（app 自己的終端機也行） | 尚未支援 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁：在任何終端機執行快速開始的第二個指令（app 自己的終端機也行） | 尚未測試 |
-| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板網頁：在任何終端機執行快速開始的第二個指令（app 自己的終端機也行） | 尚未測試 |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁：在任何終端機執行快速開始的第二個指令（app 自己的終端機也行） | 尚未支援 |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁（第二個指令） | 尚未支援 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁（第二個指令） | 尚未測試 |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板網頁（第二個指令） | 尚未測試 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁（第二個指令） | 尚未支援 |
 
+- 看板網頁：在任何終端機執行快速開始的第二個指令，app 自己的終端機也行。
 - dot 和其他網頁版聊天要手動回報：[怎麼做](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)（英文）。
 
 ## 在看板上回答
@@ -67,7 +68,7 @@ npx @wenyuchiou/agent-board@next
 回答 agent 的問題，和主動傳訊息給它，走的是同一條路，看你按哪顆按鈕：
 
 - **傳送**把它交給已連線的對話；對話回確認才代表收到。沒有確認也可能已經送到，先看一下那個 agent 再用**複製回答**，免得它收到兩次。傳送需要[開啟訊息功能](docs/MESSAGING.md#local-storage)（英文）。
-- **排入 agent 的下一回合**會留到那個對話的下一回合才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收（Codex 在對照紀錄裡就被拒收）。
+- **排入 agent 的下一回合**會留到那個對話的下一回合才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收。
 - **複製回答**把它放進剪貼簿，由你貼到那個 agent。
 - 已經在 agent 自己的視窗裡回答了？按**已回覆，先隱藏**就能收掉這張卡。
 
@@ -123,4 +124,4 @@ npx @wenyuchiou/agent-board@next remove --apply
 
 [MIT](LICENSE)。agent 的圖示來自 [Simple Icons](https://simpleicons.org)（CC0）和 [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT），這些圖示屬於各自的擁有者；沒有圖示的 agent 以名字的第一個字母表示。
 
-<p align="center"><a href="CHANGELOG.md"><img alt="原始碼版本 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>最新穩定版本 0.24.2 · 0.24.3 是預先發行版（<code>npx @wenyuchiou/agent-board@next setup</code>）· <a href="CHANGELOG.md">更新紀錄</a> · 0.24.3 未測試 macOS。</sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="原始碼版本 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>最新穩定版本 0.24.2 · 0.24.3 是預先發行版（<code>npx @wenyuchiou/agent-board@next setup</code>）· <a href="CHANGELOG.md">更新紀錄</a></sub></p>
