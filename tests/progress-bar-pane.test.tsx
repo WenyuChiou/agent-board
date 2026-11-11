@@ -46,6 +46,22 @@ test('#1085: a pane row shows a cell per step with n/m beside it, in the style /
   } finally { await ui.unmount() }
 })
 
+// #1276: the plugin's own path reads and writes through the guarded scripts, so a link or a folder at the
+// settings path is refused with its own words and nothing is written. Before the fix `/progress style`
+// read and wrote the file with the host's calls and reported the style as set.
+test('#1276: /progress style refuses a settings file that is a link or a folder, and says so', async ($, on) => {
+  const world: World = { files: new Map([[FILE, board(SEVEN)], [SETTINGS, '{"style":"green"}']]), unsafeFiles: new Set([SETTINGS]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const refused = JSON.stringify(await $.command.run({ ...TIDY, args: 'style blue' }))
+  expect(refused).toContain(EN.barStyleUnsafe)
+  expect(refused).not.toContain(EN.barStyleSet(EN.barStyleBlue))
+  expect(world.files.get(SETTINGS)).toBe('{"style":"green"}')
+  world.unsafeFiles = new Set()
+  expect(JSON.stringify(await $.command.run({ ...TIDY, args: 'style blue' }))).toContain(EN.barStyleSet(EN.barStyleBlue))
+  expect(JSON.parse(world.files.get(SETTINGS) ?? '{}')).toEqual({ style: 'blue' })
+})
+
 test('#1085: a one-step task shows its count alone, with no bar', async ($, on) => {
   const world: World = { files: new Map([[FILE, board('- [~] Only step\n')]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
   engineBeneath(on, world)

@@ -27,6 +27,7 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
+import { SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script'
 import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED, PENDING_COMMIT, PENDING_STAGE } from '../hooks/ledger-move'
 import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
@@ -126,6 +127,8 @@ type World = {
   isMoveRefused?: (path: string) => boolean
   // A delete of this file fails, as with a file another program holds open.
   isRemoveRefused?: (path: string) => boolean
+  // Paths that are a link or a folder, as the settings scripts see them (#1276).
+  unsafeFiles?: Set<string>
   // What the model answers asynchronously; a promise that never settles is a hung call.
   hang?: (prompt: string) => boolean
   holdComplete?: { reached: () => void; release: Promise<void> }
@@ -313,6 +316,20 @@ const engineBeneath = (on: On, world: World): MockClock => {
       if (world.node === null) return { deny: 'ENOENT' }
       if (world.liveFailure === 'timeout') return { deny: 'ETIMEDOUT' }
       return { value: { exitCode: world.liveFailure === 'exit' ? 1 : 0, stdout: world.liveOutput ?? '', stderr: 'SYNTHETIC_STARTUP_DETAIL', isStdoutTruncated: world.liveFailure === 'truncated', isStderrTruncated: false } }
+    }
+    if (e.argv[0] === 'node' && e.argv[2] === SETTINGS_READ && e.argv[3] === '--') {
+      const file = posix(e.argv[4] ?? '')
+      world.ran?.push([...e.argv])
+      const text = world.files.get(file)
+      const body = world.unsafeFiles?.has(file) === true ? { kind: 'unsafe' } : text === undefined ? { kind: 'missing' } : { kind: 'ok', text }
+      return { value: { exitCode: 0, stdout: JSON.stringify(body), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (e.argv[0] === 'node' && e.argv[2] === SETTINGS_WRITE && e.argv[3] === '--') {
+      const file = posix(e.argv[4] ?? '')
+      world.ran?.push([...e.argv])
+      if (world.unsafeFiles?.has(file) === true) return { value: { exitCode: SETTINGS_UNSAFE, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      world.files.set(file, e.argv[5] ?? '')
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv[0] === 'node' && e.argv[2] === LEDGER_LINK && e.argv[3] === '--') {
       world.ran?.push([...e.argv])

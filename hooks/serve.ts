@@ -250,7 +250,9 @@ type PageView = {
   stuck: number
   versions: GroupOptions['versions']
   agents: Array<PageBucket & { agent: string; name: string; icon: string; last: number; isUnreadable: boolean }>
-  needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[] }
+  // handled: the cards whose answer is on its way (sent, or queued for the session's next turn). They stay on the
+  // sheet with their line and leave the count, on the page and on every other surface (#1296).
+  needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[]; handled: string[] }
   working: PageRef[]
   quiet: Quiet
   all: PageBucket & { isHidden: boolean }
@@ -362,6 +364,23 @@ const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): Ser
   when: item.when ?? '',
   ...(item.questionId === undefined ? {} : { questionId: item.questionId }),
 })
+
+// An answer that was sent, or queued for the session's next turn, no longer waits for the person (#1296). A message
+// that timed out or was refused waits again. The page, the terminal board, --status and --json all count from this.
+const isFailedReceipt = (receipt: Receipt | undefined): boolean =>
+  receipt !== undefined && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
+const handledKeys = (model: ServeModel, cards: readonly PageRef[]): string[] => {
+  const sources = new Map<string, { isSending?: boolean; receipt?: Receipt }>()
+  for (const one of [...model.asks, ...model.reminder, ...model.older, ...model.idle, ...model.stopped, ...model.groups.flatMap(group => group.rows)]) {
+    sources.set(one.key, { ...sources.get(one.key), ...('isSending' in one ? { isSending: one.isSending } : {}), ...(one.receipt === undefined ? {} : { receipt: one.receipt }) })
+  }
+  return cards
+    .filter(card => {
+      const one = sources.get(card.sourceKey ?? card.key) ?? sources.get(card.key.replace(/^stuck:/, ''))
+      return one?.isSending === true && !isFailedReceipt(one.receipt)
+    })
+    .map(card => card.key)
+}
 
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
@@ -580,7 +599,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     stuck: grouped.needs.stuck,
     versions: group.versions,
     agents: grouped.agents.map(one => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),
-    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref) },
+    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref)) },
     working: grouped.working.map(ref),
     quiet: grouped.quiet,
     all: { ...bucket(grouped.all), isHidden: grouped.all.isHidden },
@@ -1702,7 +1721,8 @@ const PAGE_SCRIPT = String.raw`
   }
   // An agent that waits on the person, or stopped a moment ago, is not "nothing" (#612).
   function quietLine(quiet, now) {
-    if (quiet && quiet.kind === 'asking') return w('pgQuietAsking', quiet.n);
+    // The questions whose answer is on its way are not asked of the person any more (#1296).
+    if (quiet && quiet.kind === 'asking') return Math.max(0, quiet.n - (pg.sentTotal - (pg.sentBy.own || 0))) > 0 ? w('pgQuietAsking', quiet.n - (pg.sentTotal - (pg.sentBy.own || 0))) : w('pgNoWorking');
     if (quiet && quiet.kind === 'stopped') return w('pgQuietStopped', agentName(quiet.agent), Math.max(1, Math.round((now - quiet.at) / 60000)));
     return w('pgNoWorking');
   }
@@ -1718,10 +1738,8 @@ const PAGE_SCRIPT = String.raw`
   // A sent answer is on its way: its card stays on the sheet with its line, but it no longer waits for the person.
   // A message that timed out or was refused waits for the person again.
   function isSent(ref) {
-    var one = source(ref);
-    var receipt = one.receipt;
-    var isFailed = receiptFailed(receipt);
-    return one.isSending === true && !isFailed;
+    var handled = pg.model && pg.model.view && pg.model.view.needs.handled;
+    return !!handled && handled.indexOf(ref.key) !== -1;
   }
   function byTime(a, b) { return (b.at || 0) - (a.at || 0); }
   function keepCopyFocus(redraw) {

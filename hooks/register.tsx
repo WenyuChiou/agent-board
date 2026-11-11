@@ -4,6 +4,7 @@ import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiv
 import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
+import { SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from './settings-script'
 import { LEDGER_LINK, LEDGER_RENAMES, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
 import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
@@ -4272,12 +4273,20 @@ export const register: Register = (on, options) => {
       const style = barStyleFrom(styleArg[1] ?? '')
       if (style === null) return { text: s.barStyleUnknown }
       const file = settingsPath(await progressPath($))
-      // A file that exists but cannot be read, or does not read as JSON, is left as it is.
-      let text: string
-      try { text = await readText($, file) } catch { return { text: s.barStyleUnreadable } }
-      const next = withBarStyle(text, style)
+      // A file that is a link or a folder, cannot be read, or does not read as JSON, is left as it is.
+      // The host's own file calls follow a link and wait on a FIFO, so Node reads and writes it (#1276).
+      const found = await $.process.run(['node', '-e', SETTINGS_READ, '--', file], { timeoutMs: 10000 }).catch(() => null)
+      let current: { kind?: unknown; text?: unknown } | null = null
+      if (found?.exitCode === 0 && !found.isStdoutTruncated) {
+        try { current = JSON.parse(found.stdout) as { kind?: unknown; text?: unknown } } catch {}
+      }
+      if (current === null || (current.kind !== 'missing' && current.kind !== 'unsafe' && current.kind !== 'ok')) return { text: s.pressFailed }
+      if (current.kind === 'unsafe') return { text: s.barStyleUnsafe }
+      const next = withBarStyle(current.kind === 'ok' && typeof current.text === 'string' ? current.text : null, style)
       if (next === null) return { text: s.barStyleUnreadable }
-      try { await $.fs.write(file, next) } catch { return { text: s.pressFailed } }
+      const wrote = await $.process.run(['node', '-e', SETTINGS_WRITE, '--', file, next], { timeoutMs: 10000 }).catch(() => null)
+      if (wrote?.exitCode === SETTINGS_UNSAFE) return { text: s.barStyleUnsafe }
+      if (wrote?.exitCode !== 0) return { text: s.pressFailed }
       await update($, barStyle, () => style)
       $.ui.invalidate('ui.render')
       return { text: s.barStyleSet(barStyleName(style, s)) }

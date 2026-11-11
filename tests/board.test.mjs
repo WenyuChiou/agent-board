@@ -3650,7 +3650,8 @@ const viewed = model => {
     recent,
     view: {
       now: 0, n: cards.length, questions: cards.length, stuck: 0, versions: { board: '0.0.0', package: null }, agents,
-      needs: { n: cards.length, questions: cards.length, stuck: 0, cards, older: older.map(one => one.ref) },
+      // The server lists the cards whose answer is on its way (sent, or queued) and not refused or timed out (#1296).
+      needs: { n: cards.length, questions: cards.length, stuck: 0, cards, older: older.map(one => one.ref), handled: asks.filter(one => one.item.isSending === true && !(one.item.receipt && (one.item.receipt.status === 'rejected' || one.item.receipt.status === 'uncertain' && one.item.receipt.hasAccepted !== true && /TIMEOUT/.test(one.item.receipt.error || '')))).map(one => one.ref.key) },
       working: [], all: { ...all, isHidden: agents.length < 2 }, own, projects: [],
     },
   }

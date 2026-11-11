@@ -53,9 +53,9 @@ export type ServeOptions = {
   // The progress bar's style (#1085): read from the board's settings file, and written there by
   // Settings so the pane and the terminal board show the same pick.
   barStyle?: () => BarStyle
-  setBarStyle?: (style: BarStyle) => boolean
+  setBarStyle?: (style: BarStyle) => 'ok' | 'invalid' | 'unsafe'
   language?: () => SettingsLang
-  setLanguage?: (lang: SettingsLang) => boolean
+  setLanguage?: (lang: SettingsLang) => 'ok' | 'invalid' | 'unsafe'
   isLangOverridden?: () => boolean
   agents?: SettingsAgentControl
   sweep: () => void
@@ -557,12 +557,14 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/style') {
         const style = body.style
         if (!isBarStyle(style) || o.setBarStyle === undefined) return json(res, 400, { note: o.s.pressFailed })
-        return o.setBarStyle(style) ? json(res, 200, { style }) : json(res, 409, { note: o.s.barStyleUnreadable })
+        const saved = o.setBarStyle(style)
+        return saved === 'ok' ? json(res, 200, { style }) : json(res, 409, { note: saved === 'unsafe' ? o.s.barStyleUnsafe : o.s.barStyleUnreadable })
       }
       if (url.pathname === '/api/language') {
         const lang = body.lang
         if (!isSettingsLang(lang) || o.setLanguage === undefined) return json(res, 400, { note: o.s.pressFailed })
-        if (!o.setLanguage(lang)) return json(res, 409, { note: o.s.barStyleUnreadable })
+        const saved = o.setLanguage(lang)
+        if (saved !== 'ok') return json(res, 409, { note: saved === 'unsafe' ? o.s.barStyleUnsafe : o.s.barStyleUnreadable })
         const isOverridden = o.isLangOverridden?.() ?? false
         return json(res, 200, { lang, isOverridden, note: isOverridden ? o.s.settingsLanguageOverridden : o.s.settingsLanguageChanged })
       }

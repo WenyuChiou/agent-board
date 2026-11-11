@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,6 +8,8 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { EN } from '../hooks/strings-en.ts'
+import { SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script.ts'
+import { readSettings, replaceSettings } from '../scripts/settings-file.ts'
 
 const post = (port, token, path, body) => new Promise((resolve, reject) => {
   const req = request({
@@ -69,66 +71,184 @@ const serve = async () => {
   }
 }
 
-test('saveBarStyle refuses a symlinked or non-regular settings file without overwriting target (#1261)', async () => {
+// A skipped test says why. A silent pass hid the link assertions on a computer that cannot make links (#1276).
+const canLink = (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-probe-'))
+  try {
+    symlinkSync(join(dir, 'target'), join(dir, 'link'))
+    return true
+  } catch {
+    return false
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})()
+const noLinks = canLink ? false : 'this computer cannot make symbolic links, so the link cases did not run'
+const canFifo = (() => {
+  if (process.platform === 'win32') return false
+  const dir = mkdtempSync(join(tmpdir(), 'settings-probe-'))
+  try {
+    execFileSync('mkfifo', [join(dir, 'f')])
+    return true
+  } catch {
+    return false
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})()
+const noFifo = canFifo ? false : 'this computer cannot make a FIFO, so the FIFO case did not run'
+
+// Each link target holds valid JSON, which the code before #1264 wrote through, or is missing, which it created.
+for (const [route, label, body, name] of [
+  ['/api/style', 'saveBarStyle', { style: 'blue' }, 'victim-style'],
+  ['/api/language', 'saveLanguage', { lang: 'zh-TW' }, 'victim-lang'],
+]) {
+  test(`${label} refuses a link to a valid JSON file and leaves the target alone (#1261, #1276)`, { skip: noLinks }, async () => {
+    const board = await serve()
+    try {
+      const settings = join(board.dir, 'progress-settings.json')
+      const victim = join(board.dir, `${name}.json`)
+      writeFileSync(victim, '{"keep":"sensitive target content"}\n')
+      symlinkSync(victim, settings)
+      const res = await board.call('POST', route, { body })
+      assert.equal(res.status, 409)
+      assert.equal(res.json().note, EN.barStyleUnsafe)
+      assert.equal(readFileSync(victim, 'utf8'), '{"keep":"sensitive target content"}\n')
+      assert.ok(lstatSync(settings).isSymbolicLink(), 'the link is still a link')
+    } finally {
+      await board.close()
+    }
+  })
+
+  test(`${label} refuses a link to a missing file and does not create the target (#1261, #1276)`, { skip: noLinks }, async () => {
+    const board = await serve()
+    try {
+      const settings = join(board.dir, 'progress-settings.json')
+      const victim = join(board.dir, `${name}-missing.json`)
+      symlinkSync(victim, settings)
+      const res = await board.call('POST', route, { body })
+      assert.equal(res.status, 409)
+      assert.equal(res.json().note, EN.barStyleUnsafe)
+      assert.equal(existsSync(victim), false)
+    } finally {
+      await board.close()
+    }
+  })
+
+  test(`${label} refuses a folder at the settings path and says it is not a plain file (#1261, #1276)`, async () => {
+    const board = await serve()
+    try {
+      const settings = join(board.dir, 'progress-settings.json')
+      mkdirSync(settings)
+      const res = await board.call('POST', route, { body })
+      assert.equal(res.status, 409)
+      assert.equal(res.json().note, EN.barStyleUnsafe)
+      assert.deepEqual(readdirSync(settings), [])
+      rmdirSync(settings)
+    } finally {
+      await board.close()
+    }
+  })
+}
+
+test('a settings file with invalid JSON still says it is not valid JSON (#1261)', async () => {
   const board = await serve()
   try {
     const settings = join(board.dir, 'progress-settings.json')
-    const victim = join(board.dir, 'victim-style.txt')
-    writeFileSync(victim, 'sensitive target content')
-
-    let hasSymlink = true
-    try {
-      symlinkSync(victim, settings)
-    } catch {
-      hasSymlink = false
-    }
-
-    if (hasSymlink) {
-      const res = await board.call('POST', '/api/style', { body: { style: 'blue' } })
-      assert.equal(res.status, 409)
-      assert.equal(res.json().note, EN.barStyleUnreadable)
-      assert.equal(readFileSync(victim, 'utf8'), 'sensitive target content')
-      unlinkSync(settings)
-    }
-
-    mkdirSync(settings)
-    const dirRes = await board.call('POST', '/api/style', { body: { style: 'blue' } })
-    assert.equal(dirRes.status, 409)
-    assert.equal(dirRes.json().note, EN.barStyleUnreadable)
-    rmdirSync(settings)
+    writeFileSync(settings, 'not json')
+    const res = await board.call('POST', '/api/style', { body: { style: 'blue' } })
+    assert.equal(res.status, 409)
+    assert.equal(res.json().note, EN.barStyleUnreadable)
+    assert.equal(readFileSync(settings, 'utf8'), 'not json')
   } finally {
     await board.close()
   }
 })
 
-test('saveLanguage refuses a symlinked or non-regular settings file without overwriting target (#1261)', async () => {
-  const board = await serve()
+test('a link swapped in after the check is replaced, never written through (#1276)', { skip: noLinks }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-swap-'))
   try {
-    const settings = join(board.dir, 'progress-settings.json')
-    const victim = join(board.dir, 'victim-lang.txt')
-    writeFileSync(victim, 'sensitive target content')
-
-    let hasSymlink = true
-    try {
-      symlinkSync(victim, settings)
-    } catch {
-      hasSymlink = false
-    }
-
-    if (hasSymlink) {
-      const res = await board.call('POST', '/api/language', { body: { lang: 'zh-TW' } })
-      assert.equal(res.status, 409)
-      assert.equal(res.json().note, EN.barStyleUnreadable)
-      assert.equal(readFileSync(victim, 'utf8'), 'sensitive target content')
-      unlinkSync(settings)
-    }
-
-    mkdirSync(settings)
-    const dirRes = await board.call('POST', '/api/language', { body: { lang: 'zh-TW' } })
-    assert.equal(dirRes.status, 409)
-    assert.equal(dirRes.json().note, EN.barStyleUnreadable)
-    rmdirSync(settings)
+    const settings = join(dir, 'progress-settings.json')
+    const victim = join(dir, 'victim.json')
+    writeFileSync(settings, '{"old":true}\n')
+    writeFileSync(victim, '{"keep":true}\n')
+    // The path is a regular file when checked; the swap happens before the new file is put in place.
+    const done = replaceSettings(settings, '{"style":"blue"}\n', () => { unlinkSync(settings); symlinkSync(victim, settings) })
+    assert.equal(done, true)
+    assert.equal(readFileSync(victim, 'utf8'), '{"keep":true}\n')
+    assert.equal(lstatSync(settings).isSymbolicLink(), false)
+    assert.equal(readFileSync(settings, 'utf8'), '{"style":"blue"}\n')
+    assert.deepEqual(readdirSync(dir).sort(), ['progress-settings.json', 'victim.json'])
   } finally {
-    await board.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a read of the settings file does not wait on a FIFO with no writer (#1276)', { skip: noFifo }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-fifo-'))
+  try {
+    const settings = join(dir, 'progress-settings.json')
+    execFileSync('mkfifo', [settings])
+    assert.deepEqual(readSettings(settings), { kind: 'unsafe' })
+    // The scripts the plugin runs must come back as well.
+    const ran = spawnSync(process.execPath, ['-e', SETTINGS_READ, '--', settings], { timeout: 5000, encoding: 'utf8' })
+    assert.equal(ran.error, undefined)
+    assert.equal(ran.status, 0)
+    assert.deepEqual(JSON.parse(ran.stdout), { kind: 'unsafe' })
+    const wrote = spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, '{}'], { timeout: 5000, encoding: 'utf8' })
+    assert.equal(wrote.error, undefined)
+    assert.equal(wrote.status, SETTINGS_UNSAFE)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// The startup language read and the terminal board's style read both come before any guarded save. A FIFO with no
+// writer blocked them for good on Linux and macOS (#1276); the board must still start and print.
+test('the board starts and prints with a FIFO at the settings path (#1276)', { skip: noFifo }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-fifo-board-'))
+  try {
+    const path = join(dir, 'progress.md')
+    writeFileSync(path, '# Progress\n\n## Demo\n- [ ] Task\n')
+    execFileSync('mkfifo', [join(dir, 'progress-settings.json')])
+    const script = join(dir, 'agent-board.mjs')
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, NO_COLOR: '1', LANG: 'en' }
+    for (const mode of ['--status', '--print']) {
+      const ran = spawnSync(process.execPath, [script, mode], { cwd: dir, env, timeout: 8000, encoding: 'utf8' })
+      assert.equal(ran.error, undefined, `${mode} came back`)
+      assert.equal(ran.status, 0, `${mode} exit`)
+      assert.ok(ran.stdout.length > 0, `${mode} printed`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the plugin scripts read a plain file, report a missing one, and refuse a link or a folder (#1276)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-script-'))
+  try {
+    const settings = join(dir, 'progress-settings.json')
+    const read = () => JSON.parse(spawnSync(process.execPath, ['-e', SETTINGS_READ, '--', settings], { timeout: 5000, encoding: 'utf8' }).stdout)
+    const write = text => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, text], { timeout: 5000, encoding: 'utf8' }).status
+    assert.deepEqual(read(), { kind: 'missing' })
+    assert.equal(write('{"style":"green"}\n'), 0)
+    assert.deepEqual(read(), { kind: 'ok', text: '{"style":"green"}\n' })
+    unlinkSync(settings)
+    mkdirSync(settings)
+    assert.deepEqual(read(), { kind: 'unsafe' })
+    assert.equal(write('{}'), SETTINGS_UNSAFE)
+    rmdirSync(settings)
+    if (canLink) {
+      const victim = join(dir, 'victim.json')
+      writeFileSync(victim, '{"keep":true}\n')
+      symlinkSync(victim, settings)
+      assert.deepEqual(read(), { kind: 'unsafe' })
+      assert.equal(write('{"style":"blue"}'), SETTINGS_UNSAFE)
+      assert.equal(readFileSync(victim, 'utf8'), '{"keep":true}\n')
+    }
+    assert.deepEqual(readdirSync(dir).filter(name => name.endsWith('.tmp')), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })
