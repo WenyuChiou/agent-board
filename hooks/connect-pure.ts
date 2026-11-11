@@ -500,7 +500,8 @@ const hermesSetupItemOf = (lines: readonly string[]): HermesSetupItem | undefine
   return { command, isSimple }
 }
 
-type HermesSetupEdit = { text: string; hasOwned: boolean }
+// isComplete: every hook the install record names is still in the file.
+type HermesSetupEdit = { text: string; hasOwned: boolean; isComplete: boolean }
 
 // Only the top-level hooks map and the recorded event/command pair can identify a setup entry.
 // Ambiguous copies are left alone rather than claiming both.
@@ -559,13 +560,14 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
         !lines.slice(top + 1, end).some((line, at) => isContent(line) && !drop.has(top + 1 + at))) drop.add(top)
   }
   const hasOwned = owned.size > 0
+  const isComplete = [...recorded.keys()].every(event => owned.has(event))
   if (!isRemoving && events.every(([event, command, matcher]) => {
     const entry = owned.get(event)
     return entry?.command === command && hermesHasTimeout(entry.item) && hermesHasMatcher(entry.item, matcher)
-  })) return { text, hasOwned }
+  })) return { text, hasOwned, isComplete }
   const kept = lines.filter((_, at) => !drop.has(at)).join('\n')
   const next = isRemoving ? kept : addHermesHooks(kept, events, text.includes('\r\n'))
-  return next === null ? null : { text: next, hasOwned }
+  return next === null ? null : { text: next, hasOwned, isComplete }
 }
 
 export const agentHooks = (ctx: ConnectContext): AgentHook[] => {

@@ -60,6 +60,7 @@ const summaries = [
     "keptText": "{file} (you edited it, so setup leaves your copy as it is; the new version goes in {beside})",
     "keptCode": "{file} (you edited it and the agent runs it, so setup kept your copy and did not install the new version; to get the new one, move your copy aside and run setup again)",
     "keptHeld": "{file} (not updated: it works with your edited board script, which setup kept; to update both, move your script aside and run setup again)",
+    "keptHeldWorker": "{file} (not updated: it works with your edited agent-board-hook.mjs, which setup kept; to update both, move that file aside and run setup again)",
     "heldMissing": "{file} (missing: setup cannot put back the old version while your edited board script stays; restore or move your agent-board.mjs, then run setup again)",
     "ready": "already set up",
     "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry.",
@@ -121,6 +122,7 @@ const summaries = [
     "keptText": "{file}（你改過這個檔案，所以 setup 不動它，新版放在 {beside}）",
     "keptCode": "{file}（你改過這個檔案，而且 agent 會直接執行它，所以 setup 保留你的版本，沒有裝新版；想換成新版，請先把你的版本移開，再執行一次 setup）",
     "keptHeld": "{file}（沒有更新：它要配合你改過的看板程式，而 setup 保留了你的版本；要一起更新，請先把你的看板程式移開，再執行一次 setup）",
+    "keptHeldWorker": "{file}（沒有更新：它要配合你改過的 agent-board-hook.mjs，而 setup 保留了你的版本；要一起更新，請先把該檔案移開，再執行一次 setup）",
     "heldMissing": "{file}（找不到：你改過的看板程式還在，setup 無法補回舊版；請還原或移開你的 agent-board.mjs，再執行一次 setup）",
     "ready": "已設定完成",
     "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案後重試。",
@@ -182,6 +184,7 @@ const summaries = [
     "keptText": "{file}（你改过这个文件，所以 setup 不动它，新版放在 {beside}）",
     "keptCode": "{file}（你改过这个文件，而且 agent 会直接运行它，所以 setup 保留了你的版本，没有装新版；想换成新版，请先把你的版本移走，再运行一次 setup）",
     "keptHeld": "{file}（没有更新：它要配合你改过的看板程序，而 setup 保留了你的版本；要一起更新，请先把你的看板程序移走，再运行一次 setup）",
+    "keptHeldWorker": "{file}（没有更新：它要配合你改过的 agent-board-hook.mjs，而 setup 保留了你的版本；要一起更新，请先把该文件移走，再运行一次 setup）",
     "heldMissing": "{file}（找不到：你改过的看板程序还在，setup 无法补回旧版；请还原或移走你的 agent-board.mjs，再运行一次 setup）",
     "ready": "已设置完成",
     "skipped": "已跳过：无法安全更新 {files}。请修复或移走冲突的文件后重试。",
@@ -519,6 +522,7 @@ const main = () => {
       for (const one of plan.keptText ?? []) keptLines.add(`  ${words('keptText', { file: shortPath(one.file), beside: shortPath(one.beside) })}`)
       for (const file of plan.keptCode ?? []) keptLines.add(`  ${words('keptCode', { file: shortPath(file) })}`)
       for (const file of plan.keptHeld ?? []) keptLines.add(`  ${words('keptHeld', { file: shortPath(file) })}`)
+      for (const file of plan.keptHeldWorker ?? []) keptLines.add(`  ${words('keptHeldWorker', { file: shortPath(file) })}`)
     }
     lines.push(...keptLines)
   }

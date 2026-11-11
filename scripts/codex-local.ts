@@ -335,6 +335,8 @@ export type LocalPlan = {
   keptCode?: string[]
   // Files left at the old version because the person's edited board script stays.
   keptHeld?: string[]
+  // Files left at the old version because the person's edited worker (agent-board-hook.mjs) stays.
+  keptHeldWorker?: string[]
   // Held files or hooks that are gone: setup cannot put the old version back while the edited board script stays.
   missingHeld?: string[]
   applied?: boolean
@@ -351,7 +353,7 @@ export const codexDoctorOutput = (result: LocalPlan & {
   const host = s.agentNames[result.agent] ?? result.agent
   const hasHook = result.installed || result.reportHook === 'connect'
   // Installed, but an edited board script or worker was kept, so it is not the current version (#1302).
-  const isOutdated = result.installed && ((result.keptCode?.length ?? 0) + (result.keptHeld?.length ?? 0) > 0)
+  const isOutdated = result.installed && ((result.keptCode?.length ?? 0) + (result.keptHeld?.length ?? 0) + (result.keptHeldWorker?.length ?? 0) > 0)
   const lines = [words.doctor(host, isOutdated ? words.outdated : result.installed ? words.installed : hasHook ? words.connector : words.missing)]
   if (result.problem) lines.push(result.problem)
   for (const file of result.conflicts) lines.push(words.conflict(file))
@@ -359,6 +361,7 @@ export const codexDoctorOutput = (result: LocalPlan & {
   if (isOutdated) {
     for (const file of result.keptCode ?? []) lines.push(words.keptCode(file))
     for (const file of result.keptHeld ?? []) lines.push(words.keptHeld(file))
+    for (const file of result.keptHeldWorker ?? []) lines.push(words.keptHeldWorker(file))
   }
   if (!hasHook) for (const change of result.changes) lines.push(words.needsUpdate(change.file))
   const isPending = result.capabilities.lifecycle === 'adapter-pending'
@@ -404,6 +407,7 @@ export const codexSetupOutput = (result: LocalPlan, s: Strings, command: string,
   for (const one of result.keptText ?? []) lines.push(words.keptText(one.file, one.beside))
   for (const file of result.keptCode ?? []) lines.push(words.keptCode(file))
   for (const file of result.keptHeld ?? []) lines.push(words.keptHeld(file))
+  for (const file of result.keptHeldWorker ?? []) lines.push(words.keptHeldWorker(file))
   lines.push(result.conflicts.length ? words.review(command)
     : isApplied || !result.changes.length ? words.setupCheck(check)
     : words.setupApply(`${command} --apply`))
@@ -1214,6 +1218,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const keptShared: { file: string; usedBy: string[] }[] = []
   const alreadyGone: string[] = []
   let hasMissingGroup = false
+  // Hermes keeps several hooks in one file: some of the recorded ones gone is a missing hook even while others remain.
+  let hasPartialHooks = false
   const nextHooks: Json = { ...hooks }
   const groups: Json = {}
   const foreignGroups: Json = {}
@@ -1332,6 +1338,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (remove) alreadyGone.push(`${nativeConfig}:hooks`)
       else hasMissingGroup = true
     }
+    if (!remove && patch !== null && manifest.groups.hooks !== undefined && !patch.isComplete) hasPartialHooks = true
     if (patch === null) conflicts.push(nativeConfig)
     nextConfigText = patch?.text ?? text
     if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
@@ -1386,6 +1393,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const keptText: { file: string; beside: string }[] = []
   const keptCode: string[] = []
   const keptHeld: string[] = []
+  const keptHeldWorker: string[] = []
   const missingHeld: string[] = []
   const keptFiles = new Set<string>()
   const staleBeside = new Set<string>()
@@ -1399,7 +1407,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // installed has no old hooks to keep, so it is skipped like any other conflict.
   const scriptNow = initial(script)
   const isScriptKept = !remove && scriptNow !== null && !isOwned(script, scriptNow) && scriptNow !== files[script]
-  const isHeld = isScriptKept && manifest.files[script] !== undefined
+  const isScriptHeld = isScriptKept && manifest.files[script] !== undefined
+  // An edited worker that setup wrote stays too, and so do the hooks that call it: new hooks (the plan hook's shorter
+  // deadline) must not run an older worker. The board script is then updated as usual.
+  const workerNow = initial(worker)
+  const isWorkerHeld = !remove && !isScriptHeld && workerNow !== null && !isOwned(worker, workerNow) && workerNow !== files[worker] && manifest.files[worker] !== undefined
+  const isHeld = isScriptHeld || isWorkerHeld
+  const heldList = isScriptHeld ? keptHeld : keptHeldWorker
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
@@ -1411,10 +1425,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     if (remove && existing === null && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
     const owned = isOwned(file, existing)
-    if (isHeld && file !== script && !/\.(?:toml|md)$/.test(file)) {
+    if (isHeld && file !== script && !(isWorkerHeld && file === worker) && !/\.(?:toml|md)$/.test(file)) {
       // A held file setup wrote and the person deleted cannot be put back as the old version: this agent stops.
-      if (existing === null && manifest.files[file] !== undefined) { missingHeld.push(file); conflicts.push(file) }
-      else if (existing !== desired) keptHeld.push(file)
+      if (existing === null && manifest.files[file] !== undefined) { if (isScriptHeld) missingHeld.push(file); conflicts.push(file) }
+      else if (existing !== desired) heldList.push(file)
       keptFiles.add(file)
       continue
     }
@@ -1425,14 +1439,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       else if (/\.(?:toml|md)$/.test(file)) {
         const copy = `${file}.new`
         const beside = initial(copy)
-        // The copy is replaced only while it is still bytes setup wrote; one the person edited, or made, is theirs.
-        const isOurs = beside === null || beside === desired || hash(beside) === manifest.files[copy] || otherManifests.some(one => object(one.files ?? {})[copy] === hash(beside))
+        // The copy is replaced only while it is still bytes setup wrote; one the person edited, or made (even with these bytes), is theirs.
+        const isOurs = beside === null || hash(beside) === manifest.files[copy] || otherManifests.some(one => object(one.files ?? {})[copy] === hash(beside))
         if (!isOurs) conflicts.push(copy)
         else {
           keptText.push({ file, beside: copy })
           if (beside !== desired) changes.push({ file: copy, action: beside === null ? 'create' : 'update' })
           files[copy] = desired
         }
+      } else if (manifest.files[file] === undefined && !otherManifests.some(one => Object.hasOwn(object(one.files ?? {}), file))) {
+        // Code the agent loads, with no record that setup wrote it, is not an edited copy of ours: it is someone else's file.
+        conflicts.push(file)
       } else keptCode.push(file)
       keptFiles.add(file)
     }
@@ -1460,8 +1477,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (isHeld) {
     // The hooks stay as they are: the config is left byte for byte and the record keeps the old entries.
     const wouldChange = agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== (nextConfigText ?? '') : !isSame(hookConfig, nextConfig)
-    if (hasMissingGroup) { missingHeld.push(nativeConfig); conflicts.push(nativeConfig) }
-    else if (wouldChange) keptHeld.push(nativeConfig)
+    if (hasMissingGroup || hasPartialHooks) { if (isScriptHeld) missingHeld.push(nativeConfig); conflicts.push(nativeConfig) }
+    else if (wouldChange) heldList.push(nativeConfig)
     nextConfig = { ...hookConfig }
     nextConfigText = initial(nativeConfig) ?? ''
     for (const key of Object.keys(groups)) delete groups[key]
@@ -1531,7 +1548,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(keptHeldWorker.length ? { keptHeldWorker } : {}), ...(missingHeld.length ? { missingHeld } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.
