@@ -4148,19 +4148,21 @@ test('turn/start success is accepted, never acknowledged', async () => fixture(a
   } finally { await receiver.close() }
 }))
 
-test('an unclear result is marked uncertain and nothing else is tried', async () => {
-  for (const start of ['error', 'empty']) await fixture(async (board, dir) => {
-    const daemon = codexDaemon(dir, { start })
-    const receiver = codexReceiver(board, daemon)
+test('a refusal from the daemon is rejected, an unclear result is uncertain, and nothing else is tried', async () => {
+  for (const [start, steer] of [['error'], ['empty'], ['ack', 'error']]) await fixture(async (board, dir) => {
+    // 'error' on turn/start, or an error answer to a steer of a turn that is no longer the running one.
+    const daemon = codexDaemon(dir, steer === undefined ? { start } : { status: 'active', steer })
+    const receiver = codexReceiver(board, daemon, steer === undefined ? {} : { isSteerOn: true })
     try {
       const connection = await codexConnection(board)
       await codexSend(board, connection)
-      const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
-      assert.equal(one.error, start === 'error' ? 'OWNER_REJECTED' : 'INVALID_TURN_RESPONSE')
+      const isRefusal = start === 'error' || steer === 'error'
+      const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === (isRefusal ? 'rejected' : 'uncertain') && found.error && found })
+      assert.equal(one.error, isRefusal ? 'OWNER_REJECTED' : 'INVALID_TURN_RESPONSE')
       await pause(3000)
       const methods = daemon.calls().filter(call => call.method).map(call => call.method)
-      assert.equal(methods.filter(method => method === 'turn/start').length, 1)
-      assert.ok(!methods.some(method => /^thread\/queue|^turn\/steer/.test(method)))
+      assert.equal(methods.filter(method => method === (steer === undefined ? 'turn/start' : 'turn/steer')).length, 1)
+      assert.ok(!methods.some(method => /^thread\/queue/.test(method) || method === (steer === undefined ? 'turn/steer' : 'turn/start')))
     } finally { await receiver.close() }
   })
 })
@@ -4175,6 +4177,30 @@ test('a Codex turn that ends without the ACK or fails after it never reads as ac
     writeFileSync(join(dir, 'end-turn'), '')
     const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
     assert.equal(one.error, 'ACK_MISSING')
+  } finally { await receiver.close() }
+  // The ACK line is there, but the turn failed or was interrupted: it never reads as a receipt.
+  for (const endStatus of ['failed', 'interrupted']) await fixture(async (board, dir) => {
+    const daemon = codexDaemon(dir, { endStatus })
+    const receiver = codexReceiver(board, daemon)
+    try {
+      const connection = await codexConnection(board)
+      await codexSend(board, connection)
+      const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
+      assert.equal(one.error, 'TURN_NOT_COMPLETED')
+    } finally { await receiver.close() }
+  })
+}))
+
+test('a turn longer than the ACK window ends as uncertain with ACK_TIMEOUT, and nothing is sent again', async () => fixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, { start: 'silent' })
+  const receiver = codexReceiver(board, daemon, { ackMs: 400 })
+  try {
+    const connection = await codexConnection(board)
+    await codexSend(board, connection)
+    const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
+    assert.equal(one.error, 'ACK_TIMEOUT')
+    await pause(1500)
+    assert.equal(daemon.calls().filter(call => call.method === 'turn/start').length, 1)
   } finally { await receiver.close() }
 }))
 

@@ -6163,7 +6163,7 @@ export const LINES = [
 "    return previous;",
 "  if (previous?.turn && turn && previous.turn !== turn && event !== \"UserPromptSubmit\")",
 "    throw new Error(\"STALE_TURN\");",
-"  const isHumanPrompt = working && !isBoardTurn && input.prompt_submitted !== false;",
+"  const isHumanPrompt = working && !isBoardTurn && input.delivery_request !== true && input.prompt_submitted !== false;",
 "  const hasOpenQuestion = previous?.asked !== undefined && previous.steps[previous.asked]?.startsWith(\"- [?] \") === true;",
 "  const sourceAt = typeof eventAt === \"number\" ? eventAt : Date.parse(eventAt);",
 "  const displayAt = Date.parse(now);",

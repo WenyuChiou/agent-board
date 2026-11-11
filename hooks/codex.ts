@@ -189,7 +189,7 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   // Cursor can send its reply after Stop with the same generation id.
   if (turn && previous?.events?.includes(key) && event !== 'PermissionRequest' && !isClosingQuestion) return previous
   if (previous?.turn && turn && previous.turn !== turn && event !== 'UserPromptSubmit') throw new Error('STALE_TURN')
-  const isHumanPrompt = working && !isBoardTurn && input.prompt_submitted !== false
+  const isHumanPrompt = working && !isBoardTurn && input.delivery_request !== true && input.prompt_submitted !== false
   const hasOpenQuestion = previous?.asked !== undefined && previous.steps[previous.asked]?.startsWith('- [?] ') === true
   const sourceAt = typeof eventAt === 'number' ? eventAt : Date.parse(eventAt)
   const displayAt = Date.parse(now)

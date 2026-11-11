@@ -5738,6 +5738,15 @@ test('Grok reopens a done block for a closing question and keeps it done for a p
   assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
 }))
 
+test('a Codex turn that starts from a board delivery still shows its closing question', () => fixture(f => {
+  f.install('--apply')
+  const prompt = deliveryText({ id: 'AB-1', from: 'board', to: 'codex:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-1', { prompt }).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which build should I use?' }).status, 0)
+  // The delivery is no board lookup: what Codex asks at the end of its turn reaches the board.
+  assert.ok(readFileSync(f.progress, 'utf8').includes('- [?] Which build should I use?'))
+}))
+
 test('the approval step and the question step close and reuse their own lines in either order', () => fixture(f => {
   f.install('--apply')
   const question = { last_assistant_message: 'Which folder should I use?' }

@@ -611,7 +611,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     checkDeadline()
     type Pending = {
       version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
-      status: unknown; event?: string; folder?: string; folderDigest?: string; folderCanonicalDigest?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
+      status: unknown; event?: string; folder?: string; folderDigest?: string; folderCanonicalDigest?: string; isBoardPrompt: boolean; isDelivery?: boolean; isPrompt: boolean; payload: Json
       // Who started the session, as far as the host's own words say (#399); absent when they say nothing.
       run?: RunSignal
     }
@@ -658,7 +658,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (event !== undefined && statusEvents.antigravity?.[event] !== status) throw new Error('INVALID_EVENT_STATE')
       // Classify before Cursor's adapter drops prompt text; retain lifecycle
       // ordering without treating a board lookup as an answer to the question.
-      const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, [...boardRequestWords(Object.values(STRINGS)), ...deliveryRequestWords(Object.values(STRINGS))]))
+      const isPromptLike = isPromptEvent(raw) || raw.prompt_submitted === true
+      const isBoardCommand = isPromptLike && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
+      // A delivered board message is not the person's reply, yet the turn it starts is real work: its closing question still counts.
+      const isDelivery = isPromptLike && !isBoardCommand && isBoardRequest(raw, deliveryRequestWords(Object.values(STRINGS)))
+      const isBoardPrompt = isBoardCommand || isDelivery
       // No longer changes any step (#243); kept so events queued by an older version still validate.
       const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
       // Only Codex says it, and only as a session opens or takes a prompt; the other local agents
@@ -678,7 +682,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           : mode === '--agent-status' && status === 'waiting' && (agent === 'grok' || agent === 'opencode' || agent === 'hermes') ? lastQuestion(message)
             : mode === '--agent-status' && status === 'waiting' && agent === 'antigravity' && (event === undefined || event === 'Stop') ? antigravityQuestion(raw.transcriptPath) : null
       return {
-        version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
+        version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, ...(isDelivery ? { isDelivery } : {}), isPrompt,
         ...(filesByFolder(mode, agent) ? { folder } : {}),
         ...(identity !== undefined && (agent !== 'codex' || folderProject(rawCwd) !== '') ? identity : {}),
         ...(run === undefined ? {} : { run }),
@@ -741,7 +745,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     let reportCut = 0
     let reportDropped = 0
     const apply = (entry: Pending, isRawReplay = false): CodexReport => {
-      const { mode, agent, session, now, at, status, event, folder = '', folderDigest, folderCanonicalDigest, isBoardPrompt, payload, run } = entry
+      const { mode, agent, session, now, at, status, event, folder = '', folderDigest, folderCanonicalDigest, isBoardPrompt, isDelivery = false, payload, run } = entry
       const displayAt = Date.parse(now)
       const sourceAt = at ?? displayAt
       const observedAt = Date.now()
@@ -797,7 +801,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
       // Keep the recovery format. Causality uses the host event's milliseconds,
       // which the display clock can round or carry forward.
-      const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, board_request: true } : payload, clock, s, sourceAt, { lastAppliedAt: original?.appliedAt, observedAt })
+      const base = mode === '--codex-event' ? codexEvent(previous, isDelivery ? { ...payload, delivery_request: true } : isBoardPrompt ? { ...payload, board_request: true } : payload, clock, s, sourceAt, { lastAppliedAt: original?.appliedAt, observedAt })
         : mode === '--agent-status' ? validateCodexReport({
           // These are already validated stored steps, including up to two owned lines beyond
           // the explicit report's forty user steps. A status is not a fresh task report.

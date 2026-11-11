@@ -8,7 +8,8 @@
 //   turn       the running turn's id when the thread is active
 //   start      what turn/start does: 'ack' (answers, ACKs, completes), 'silent' (answers, nothing else),
 //              'error' (an error answer), 'empty' (an answer with no turn)
-//   steer      what turn/steer does: 'ack' (answers with the turn id, ACKs, completes) or 'silent'
+//   steer      what turn/steer does: 'ack' (answers with the turn id, ACKs, completes), 'silent', or 'error' (an error answer)
+//   endStatus  the status the delivery turn ends with: 'completed' (default), 'failed' or 'interrupted'
 //   approval   when true, the daemon asks its client for an approval during the turn
 //   endFlag    a file whose appearance ends the running turn
 //   pidFile    file that gets this process's id
@@ -26,7 +27,7 @@ const ackOf = text => 'ACK ' + text.match(/ACK ([0-9a-f]{6})/)[1]
 const finish = (id, threadId, text) => {
   if (config.approval) emitNow({ id: 999, method: 'item/commandExecution/requestApproval', params: { threadId, turnId: id } })
   if (text) emitNow({ method: 'item/completed', params: { threadId, turnId: id, item: { type: 'agentMessage', text } } })
-  emitNow({ method: 'turn/completed', params: { threadId, turn: { id, status: 'completed' } } })
+  emitNow({ method: 'turn/completed', params: { threadId, turn: { id, status: config.endStatus ?? 'completed' } } })
   emitNow({ method: 'thread/status/changed', params: { threadId, status: { type: 'idle' } } })
   running = null
 }
@@ -52,6 +53,7 @@ serveWebSocketProxy({
       if (config.start === 'ack') setTimeout(() => finish('turn-delivery', threadId, ackOf(value.params.input[0].text)), 50)
     }
     if (value.method === 'turn/steer') {
+      if (config.steer === 'error') { emit({ id: value.id, error: { code: -32600, message: 'expected turn is not running' } }); return }
       emit({ id: value.id, result: { turnId: value.params.expectedTurnId } })
       if (config.steer === 'ack') setTimeout(() => finish(value.params.expectedTurnId, threadId, ackOf(value.params.input[0].text)), 50)
     }

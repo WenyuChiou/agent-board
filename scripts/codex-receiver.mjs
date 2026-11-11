@@ -216,16 +216,23 @@ export const startCodexReceiver = ({
           let silence
           try {
             const prompt = deliveryPrompt(message)
-            begin()
+            // The daemon's own error answer (a turn that is no longer the running one, a refused request) is a refusal
+            // before anything was done: the message is rejected, not uncertain. Anything else that goes wrong after the
+            // request left (no answer, a closed connection, an odd answer) may have been delivered.
+            const send = async (method, params, limit) => {
+              try { return await daemon.request(method, params, limit) } catch (error) { if (error?.message !== 'OWNER_REJECTED') begin(); throw error }
+            }
             if (isSteer) {
-              const result = await daemon.request('turn/steer', { threadId: thread, expectedTurnId: state.pending.turn, input: input(prompt) })
+              const result = await send('turn/steer', { threadId: thread, expectedTurnId: state.pending.turn, input: input(prompt) })
+              begin()
               if (result?.turnId !== state.pending.turn) throw new Error('TURN_MISMATCH')
               state.heard = Date.now()
               silence = setInterval(() => { if (Date.now() - state.heard > steerSilenceMs) state.pending?.reject(new Error('STEER_SILENT')) }, Math.max(10, Math.min(1000, steerSilenceMs)))
               silence.unref?.()
             } else {
               // The claim nonce is the message id Codex records, so a repeated request names the same message.
-              const result = await daemon.request('turn/start', { threadId: thread, input: input(prompt), clientUserMessageId: message.nonce }, 10_000)
+              const result = await send('turn/start', { threadId: thread, input: input(prompt), clientUserMessageId: message.nonce }, 10_000)
+              begin()
               if (!result?.turn?.id) throw new Error('INVALID_TURN_RESPONSE')
               state.pending.turn = result.turn.id
               if (!state.pending.ended.has(result.turn.id)) state.turn = result.turn.id
