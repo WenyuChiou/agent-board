@@ -121,13 +121,14 @@ test('a repeat preview when every agent is already set up omits first-time steps
   assert.match(repeat, /Claude Code: run claude plugin/i)
 }))
 
-test('README quick start and troubleshooting document --no-open (#1246)', () => {
-  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
-  assert.match(readme, /--no-open/)
-  const zhTw = readFileSync(new URL('../README.zh-TW.md', import.meta.url), 'utf8')
-  assert.match(zhTw, /--no-open/)
-  const zhCn = readFileSync(new URL('../README.zh-CN.md', import.meta.url), 'utf8')
-  assert.match(zhCn, /--no-open/)
+// The READMEs' Quick start is three bullets; the option itself is in the setup guide, and the
+// troubleshooting rows still avoid the bare flag.
+test('the setup guide documents --html --no-open, and the READMEs do not give --no-open alone (#1246)', () => {
+  const setup = readFileSync(new URL('../docs/SETUP.md', import.meta.url), 'utf8')
+  assert.match(setup, /`--html --no-open`/)
+  for (const file of ['README.md', 'README.zh-TW.md', 'README.zh-CN.md']) {
+    assert.doesNotMatch(readFileSync(new URL('../' + file, import.meta.url), 'utf8'), /`--no-open`/, file)
+  }
 })
 
 test('the Antigravity apply summary accounts for every file counted by its preview', () => {

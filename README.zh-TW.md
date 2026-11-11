@@ -2,7 +2,7 @@
 
 <p align="center"><b>一塊本機看板，告訴你哪個 AI agent 在等你回答</b></p>
 
-<p align="center"><a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a> <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a> <a href="https://www.npmjs.com/package/@wenyuchiou/agent-board"><img alt="npm" src="https://img.shields.io/npm/v/@wenyuchiou/agent-board"></a></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="Version" src="https://img.shields.io/github/package-json/v/WenyuChiou/agent-board?label=version"></a> <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a> <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a> <a href="https://www.npmjs.com/package/@wenyuchiou/agent-board"><img alt="npm" src="https://img.shields.io/npm/v/@wenyuchiou/agent-board"></a></p>
 
 <p align="center"><a href="README.md">English</a> · 繁體中文 · <a href="README.zh-CN.md">简体中文</a></p>
 
@@ -21,11 +21,9 @@ npx @wenyuchiou/agent-board@next setup
 npx @wenyuchiou/agent-board@next
 ```
 
-`setup` 會找出這台電腦上的 agent，列出它要改什麼；有東西要設定時才問一次（繁體中文系統上是 `要設定這些嗎？[Y/n]`，英文系統上是 `Set these up? [Y/n]`）；回答 n 就什麼都不寫。沒有終端機可以回答時（例如在 agent 的對話裡），它只預覽，要寫入就加 `--apply`。第二個指令打開看板。如果只有 Claude Code，看板跟著它的外掛來：回答 y 裝好外掛後，開一個新的 Claude Code 對話，在那裡輸入 `/agent-board`；沒有回答 y 的話，照下一段做。0.24.3 是預先發行版，所以兩個指令都用 `@next`。
-
-接著做完你的 agent 需要的步驟（Claude Code 的外掛、Codex 的 hooks 信任：[設定之後](docs/SETUP.md#after-setup-per-agent)，英文），再開一個它的新對話；原本就開著的不會接上。在裡面輸入 `/agent-board` 打開看板，Codex 是 `$agent-board`；Cursor 沒有這種指令，改用第二個指令。
-
-系統語言是繁體或簡體中文時，看板就用中文，否則用英文；要自己選，在 setup 指令後加 `--lang en`、`--lang zh-TW` 或 `--lang zh-CN`。看板指令加 `--html --no-open`，只啟動網頁、不打開瀏覽器視窗。更多選項見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。不用 npm、直接從原始碼安裝：[從複本安裝](docs/SETUP.md#install-from-a-clone)；想讓 agent 幫你裝：[這段提示詞](docs/SETUP.md#let-an-agent-install-it)。
+- `setup` 會先列出要改什麼，問你一次才寫入。
+- 接著開一個 agent 的新對話，輸入 `/agent-board`（Codex 是 `$agent-board`；Cursor 沒有這種指令，改用第二個指令）。
+- 各 agent 的步驟、語言、選項和其他安裝方式：[安裝指南](docs/SETUP.md#after-setup-per-agent)（英文）。
 
 ## 你會得到什麼
 
@@ -38,25 +36,28 @@ npx @wenyuchiou/agent-board@next
 
 ## 支援的 agent
 
-下面七個 agent 有 0.24.3 的實測紀錄，都在 Windows 11 上用命令列版本測過（Cursor 測的是 `cursor-agent`）（[對照紀錄](docs/validation/2026-11-10-parity-0.24.3.md)、[模擬使用者](docs/validation/2026-11-10-usersim-0.24.3.md)，皆為英文）。實機的列是在較早的 0.24.3 版本上跑的：之後對問題偵測和設定的修正沒有在上面重跑。標「未實機執行」的步驟就是沒有實機跑過。
-
-| | Agent | 在 agent 裡開看板 | 問題會上看板 | 你的回答 |
+| | Agent | 開看板 | 回答 · 命令列 | 回答 · 桌面 app / IDE |
 |:-:|---|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/agent-board` | 會 | **傳送**，對話會確認 |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | `$agent-board`（未實機執行） | 會 | **排到下一輪**；0.24.3 沒看到實際送達 |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board`（未實機執行） | 會 | **排到下一輪**；下一輪有收到 |
-| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | 沒有；用終端機指令 | 會 | **複製** |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` | 會 | **複製** |
-| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（未實機執行） | 會 | **複製** |
-| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` （用提示請它執行 skill） | 會 | **複製** |
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | 立即送到（會確認） | 尚未支援 |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 下一輪才收到 | 尚未支援 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 下一輪才收到 | 未測試 |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 終端機指令 | 你自己貼上 | 未測試 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己貼上 | 尚未支援 |
+| <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己貼上 | — |
+| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | `/agent-board`（用提示請它執行 skill） | 你自己貼上 | — |
 
-0.24.3 沒測：這些 agent 的桌面 app 和 IDE 擴充、OpenClaw、DeepSeek Harness（setup 還是會裝它們）和 macOS。dot 和其他網頁版聊天要手動回報：[怎麼做](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)（英文）。
+- dot 和其他網頁版聊天要手動回報：[怎麼做](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)（英文）。
 
 ## 在看板上回答
 
 <img alt="看板上的回答送到 agent 的三條路：傳送給 Claude Code、排到 Antigravity 或 Codex 的下一輪、或複製給 Cursor、OpenCode、Grok Build 和 Hermes。合成資料。" src="docs/images/answer-zh-TW.svg" width="100%">
 
-**傳送**把回答交給已連線的對話；對話回確認才代表收到。沒有確認也可能已經送到，先看一下那個 agent 再用**複製**，免得它收到兩次。**排到下一輪**會留到那個對話的下一輪才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收（Codex 在對照紀錄裡就被拒收）。**複製**把回答放進剪貼簿，由你貼到那個 agent。傳送需要[開啟訊息功能](docs/MESSAGING.md#local-storage)（英文）。如果你已經在 agent 自己的視窗裡回答了，按**已回覆，先隱藏**就能收掉這張卡。
+回答 agent 的問題，和主動傳訊息給它，走的是同一條路，看你按哪顆按鈕：
+
+- **傳送**把它交給已連線的對話；對話回確認才代表收到。沒有確認也可能已經送到，先看一下那個 agent 再用**複製回答**，免得它收到兩次。傳送需要[開啟訊息功能](docs/MESSAGING.md#local-storage)（英文）。
+- **排入 agent 的下一回合**會留到那個對話的下一回合才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收（Codex 在對照紀錄裡就被拒收）。
+- **複製回答**把它放進剪貼簿，由你貼到那個 agent。
+- 已經在 agent 自己的視窗裡回答了？按**已回覆，先隱藏**就能收掉這張卡。
 
 ## 在哪裡都能開
 
