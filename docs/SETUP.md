@@ -214,13 +214,14 @@ cd agent-board
 node scripts/setup-agent.mjs
 ```
 
-In a terminal, `setup-agent.mjs` shows what it would change and asks once
-(`Set these up? [Y/n]`); a no writes nothing. Without a terminal to answer in, such as an
-agent's chat, it only previews, and `node scripts/setup-agent.mjs --apply` writes. It takes the same options as
-`npx @wenyuchiou/agent-board@next setup`, such as `--agent codex` or `--data-dir`. On Windows,
-use the exact paths it prints. Then finish [the steps your agent needs](#after-setup-per-agent),
-and open the board with the board command in setup's Next steps: it names your data folder
-when you chose one with `--data-dir`.
+In a terminal, `setup-agent.mjs` shows what it would change and,
+when there is something to set up, asks once (`Set these up? [Y/n]`, or `要設定這些嗎？[Y/n]` and `要设置这些吗？[Y/n]` on a
+Chinese system); a no writes nothing. Without a terminal to answer in, such as an agent's chat,
+it only previews, and `node scripts/setup-agent.mjs --apply` writes. It takes the same options as
+`npx @wenyuchiou/agent-board@next setup`, such as `--agent codex` or `--data-dir <folder>`. On
+Windows, use the exact paths it prints. Then finish [the steps your agent needs](#after-setup-per-agent),
+and open the board from this folder with `node bin/agent-board.mjs`; add `--data-dir <folder>`
+when you set up with one.
 
 ## Let an agent install it
 

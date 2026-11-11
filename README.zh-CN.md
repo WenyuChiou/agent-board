@@ -21,7 +21,7 @@ npx @wenyuchiou/agent-board@next setup
 npx @wenyuchiou/agent-board@next
 ```
 
-`setup` 会找出这台电脑上的 agent，列出它要改什么，只问一次（`Set these up? [Y/n]`）；回答 n 就什么都不写。没有终端可以回答时（例如在 agent 的对话里），它只预览，要写入就加 `--apply`。第二个命令打开看板。如果只有 Claude Code，看板随它的插件一起来：回答 y 装好插件后，开一个新的 Claude Code 对话，在那里输入 `/agent-board`；没有回答 y 的话，照下一段做。0.24.3 是预发布版，所以两个命令都用 `@next`。
+`setup` 会找出这台电脑上的 agent，列出它要改什么；有东西要设置时才问一次（简体中文系统上是 `要设置这些吗？[Y/n]`，英文系统上是 `Set these up? [Y/n]`）；回答 n 就什么都不写。没有终端可以回答时（例如在 agent 的对话里），它只预览，要写入就加 `--apply`。第二个命令打开看板。如果只有 Claude Code，看板随它的插件一起来：回答 y 装好插件后，开一个新的 Claude Code 对话，在那里输入 `/agent-board`；没有回答 y 的话，照下一段做。0.24.3 是预发布版，所以两个命令都用 `@next`。
 
 接着做完你的 agent 需要的步骤（Claude Code 的插件、Codex 的 hooks 信任：[设置之后](docs/SETUP.md#after-setup-per-agent)，英文），再开一个它的新对话；原来就开着的不会接入。在里面输入 `/agent-board` 打开看板，Codex 是 `$agent-board`；Cursor 没有这种命令，改用第二个命令。
 
@@ -65,7 +65,7 @@ npx @wenyuchiou/agent-board@next
 | 在哪里 | 怎么开 |
 |---|---|
 | agent 里 | `/agent-board`（Codex 是 `$agent-board`） |
-| 终端 | `npx @wenyuchiou/agent-board`：交互式终端通过 SSH 连接，或 Linux 没有显示器时，开终端看板，但那个 shell 若设了 agent 的设置（例如 `HERMES_HOME`、`OPENCODE_CONFIG_DIR`）就开网页；CI 里打印纯文本；其他情况都开网页。在交互式终端加 `--watch` 一定开终端看板 |
+| 终端 | `npx @wenyuchiou/agent-board`：在交互式终端里，通过 SSH 连接或在没有显示器的 Linux 上，开终端看板，但那个 shell 若设了 agent 的设置（例如 `HERMES_HOME`、`OPENCODE_CONFIG_DIR`）就开网页；CI 里打印纯文本；其他情况都开网页。在交互式终端加 `--watch` 一定开终端看板 |
 | 同一个 Wi-Fi 的手机 | `npx @wenyuchiou/agent-board --lan`，扫它打印出的二维码。手机可以看、勾步骤、归档和关闭看板，但不能发送回复（它只显示回复让你复制）。请在信得过的网络使用：链接没有加密，拿到的人都能打开网页 |
 | 让 agent 读看板 | `npx @wenyuchiou/agent-board --json`（[字段说明](docs/BOARD-JSON.md)，英文） |
 

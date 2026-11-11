@@ -21,7 +21,7 @@ npx @wenyuchiou/agent-board@next setup
 npx @wenyuchiou/agent-board@next
 ```
 
-`setup` finds the agents on this computer, shows what it would change and asks once (`Set these up? [Y/n]`); a no writes nothing. Without a terminal to answer in, such as an agent's chat, it only previews, and `setup --apply` writes. The second command opens the board. With only Claude Code, the board comes with its plugin: after a yes installs it, open a new Claude Code session and type `/agent-board` there; without a yes, the next paragraph says how. 0.24.3 is a pre-release, so both commands use `@next`.
+`setup` finds the agents on this computer, shows what it would change and, when there is something to set up, asks once (`Set these up? [Y/n]`, or `要設定這些嗎？[Y/n]` and `要设置这些吗？[Y/n]` on a Chinese system); a no writes nothing. Without a terminal to answer in, such as an agent's chat, it only previews, and `setup --apply` writes. The second command opens the board. With only Claude Code, the board comes with its plugin: after a yes installs it, open a new Claude Code session and type `/agent-board` there; without a yes, the next paragraph says how. 0.24.3 is a pre-release, so both commands use `@next`.
 
 Then finish the steps your agent needs (Claude Code's plugin, Codex's hook trust: [after setup](docs/SETUP.md#after-setup-per-agent)) and start a new session of it; one that was already open is not connected. Open the board in it with `/agent-board`, or `$agent-board` in Codex; Cursor has no such command, so use the second command.
 

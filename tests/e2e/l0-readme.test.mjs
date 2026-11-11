@@ -516,10 +516,11 @@ describe('L0 discover and install from the README', () => {
   })
 
   // #1326's bot-route review (codex_089): the commands a README gives do what it says on every computer.
+  const ASK = { en: 'shows what it would change and, when there is something to set up, asks once (`Set these up? [Y/n]`, or `要設定這些嗎？[Y/n]` and `要设置这些吗？[Y/n]` on a Chinese system); a no writes nothing.', 'zh-TW': '列出它要改什麼；有東西要設定時才問一次（繁體中文系統上是 `要設定這些嗎？[Y/n]`，英文系統上是 `Set these up? [Y/n]`）；回答 n 就什麼都不寫。', 'zh-CN': '列出它要改什么；有东西要设置时才问一次（简体中文系统上是 `要设置这些吗？[Y/n]`，英文系统上是 `Set these up? [Y/n]`）；回答 n 就什么都不写。' }
   const SCOPE = {
     en: { cli: 'each run as its command-line tool', untested: 'the desktop apps and IDE extensions of these agents', terminal: ['in an interactive terminal over SSH or on Linux with no display', 'plain text in CI', 'the page everywhere else', 'in any interactive terminal'] },
-    'zh-TW': { cli: '用命令列版本測過', untested: '這些 agent 的桌面 app 和 IDE 擴充', terminal: ['互動式終端機透過 SSH 連線，或 Linux 沒有顯示器時', 'CI 裡印出純文字', '其他情況都開網頁', '在互動式終端機加 `--watch`'] },
-    'zh-CN': { cli: '用命令行版本测过', untested: '这些 agent 的桌面 app 和 IDE 扩展', terminal: ['交互式终端通过 SSH 连接，或 Linux 没有显示器时', 'CI 里打印纯文本', '其他情况都开网页', '在交互式终端加 `--watch`'] },
+    'zh-TW': { cli: '用命令列版本測過', untested: '這些 agent 的桌面 app 和 IDE 擴充', terminal: ['在互動式終端機裡，透過 SSH 連線或在沒有顯示器的 Linux 上', 'CI 裡印出純文字', '其他情況都開網頁', '在互動式終端機加 `--watch`'] },
+    'zh-CN': { cli: '用命令行版本测过', untested: '这些 agent 的桌面 app 和 IDE 扩展', terminal: ['在交互式终端里，通过 SSH 连接或在没有显示器的 Linux 上', 'CI 里打印纯文本', '其他情况都开网页', '在交互式终端加 `--watch`'] },
   }
   test('L0 README: the no-window page command, the clone route, the global install on @next and the tested command-line tools are right in all three languages', () => {
     const clone = section(read('docs/SETUP.md'), 'Install from a clone')
@@ -531,7 +532,14 @@ describe('L0 discover and install from the README', () => {
     // which names a custom data folder; the per-agent steps differ (Codex `$agent-board`, Cursor none).
     assert.ok(clone.includes('`Set these up? [Y/n]`') && clone.includes('a no writes nothing'), 'SETUP.md: the clone route says the first command asks once in a terminal')
     assert.doesNotMatch(clone, /first `setup-agent\.mjs` only previews/, 'SETUP.md: the clone route does not say the first command only previews')
-    assert.ok(clone.includes('(#after-setup-per-agent)') && clone.includes('Next steps') && clone.includes('`--data-dir`'), "SETUP.md: the clone route sends the reader to the per-agent steps and setup's printed board command")
+    assert.ok(clone.includes('(#after-setup-per-agent)'), 'SETUP.md: the clone route sends the reader to the per-agent steps')
+    // codex_093 + Greptile r4536141917: after a yes, setup prints no board command (only "type /agent-board",
+    // which Cursor lacks), so the clone route gives the launcher itself, which reads --data-dir.
+    assert.ok(clone.includes('`node bin/agent-board.mjs`') && clone.includes('`--data-dir <folder>`'), 'SETUP.md: the clone route opens the board with node bin/agent-board.mjs and --data-dir <folder>')
+    assert.doesNotMatch(clone, /board command in setup's Next steps/, "SETUP.md: the clone route does not promise a board command setup's yes path never prints")
+    assert.ok(read('bin/agent-board.mjs').includes("join(resolve(dataDir), 'agent-board.mjs')"), 'bin/agent-board.mjs: --data-dir opens the board installed in that folder')
+    // codex_093: setup asks only when there is something to set up, and in the system's language.
+    assert.ok(clone.includes('when there is something to set up') && clone.includes('`要設定這些嗎？[Y/n]`'), 'SETUP.md: the clone route says when setup asks and that the question is localized')
     assert.doesNotMatch(clone, /`\/agent-board` inside an agent/, 'SETUP.md: the clone route does not give /agent-board for every agent')
     for (const [name, lang] of READMES) {
       const text = read(name)
@@ -546,6 +554,8 @@ describe('L0 discover and install from the README', () => {
       // The 0.24.3 record ran each agent's command-line tool; Cursor's was cursor-agent; apps and IDEs were not run.
       const support = section(text, SECTIONS[lang][2])
       assert.ok(support.includes('`cursor-agent`') && support.includes(SCOPE[lang].cli) && support.includes(SCOPE[lang].untested), `${name}: the support section says the record ran the command-line tools and not the apps or IDEs`)
+      // codex_093: setup asks only when there is something to set up, in the system's language.
+      assert.ok(text.includes(ASK[lang]), `${name}: Quick start says when setup asks and how the question reads`)
       // Which surface the bare command picks (hooks/surface.ts): the terminal board only in an interactive terminal over SSH
       // or on Linux with no display, text in CI, the page otherwise; --watch in any interactive terminal.
       const terminalRow = text.split('\n').find(line => line.startsWith('|') && line.includes('`npx @wenyuchiou/agent-board`'))
