@@ -563,10 +563,12 @@ test('pr-check checks naming, the paths that need the bundle and comment strippi
   assert.equal(stripComments('a<!-- hidden\ntext -->b'), 'ab')
 })
 
-test('pr-check rejects embedded bitmaps and binary images except generated social previews', () => {
+test('pr-check rejects embedded bitmaps and binary images except generated social previews and the page screenshots', () => {
   assert.equal(privateData({ body: '', added: [{ path: 'docs/example.svg', line: 2, text: '<image href="data:image/png;base64,synthetic">' }] }).problems.length, 1)
   assert.equal(binaryImages(['docs/example.png', 'docs/images/social-preview-en.png', 'docs/example.svg']).problems.length, 1)
   assert.equal(binaryImages(['docs/with space.JPG']).problems.length, 1)
+  assert.equal(binaryImages(['docs/images/page-en-dark.png', 'docs/images/page-zh-TW-dark.png', 'docs/images/page-zh-CN-dark.png']).problems.length, 0)
+  assert.equal(binaryImages(['docs/images/page-fr-dark.png', 'docs/images/page-en-light.png', 'docs/images/page-en-dark.jpg', 'docs/images/sub/page-en-dark.png', 'docs/validation/page-en-dark.png', 'docs/images/PAGE-en-dark.png', 'docs/images\\page-en-dark.png', 'docs/images/../images/page-en-dark.png']).problems.length, 8)
   for (const text of ['Bearer synthetic01234567890123456789', 'ghp_synthetic01234567890123456789', 'github_pat_synthetic01234567890123456789', 'sk-ant-synthetic01234567890123456789', 'xoxb-synthetic0123456789', 'AKIA1234567890ABCDEF']) {
     const checked = privateData({ body: text, added: [] })
     assert.equal(checked.problems.length, 1)

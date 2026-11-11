@@ -486,6 +486,14 @@ describe('L0 discover and install from the README', () => {
     }
   })
 
+  // A picture drawn in both themes is shown in its dark one. The only bitmap is the screenshot of the board's page,
+  // which render.ts cannot draw (CONTRIBUTING.md, Images).
+  const pictureProblem = (file, has) => {
+    if (!file.endsWith('.svg')) return /^docs\/images\/page-(en|zh-TW|zh-CN)-dark\.png$/.test(file) ? null : `${file} is a bitmap other than the page screenshot`
+    if (!file.endsWith('-dark.svg') && has(file.replace(/\.svg$/, '-dark.svg'))) return `${file} has a dark version to show instead`
+    return null
+  }
+
   test('L0 README: every README picture shows its dark SVG and none keeps a light source', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
@@ -495,10 +503,19 @@ describe('L0 discover and install from the README', () => {
       for (const file of [`cover-${lang}`, `pane-${lang}`, `board/codex-${lang}`]) assert.ok(pictures.includes(`docs/images/${file}-dark.svg`), `${name}: shows docs/images/${file}-dark.svg`)
       for (const file of pictures) {
         assert.ok(exists(file), `${name}: ${file} exists`)
-        // A picture drawn in both themes is shown in its dark one.
-        if (!file.endsWith('-dark.svg')) assert.ok(!exists(file.replace(/\.svg$/, '-dark.svg')), `${name}: ${file} has a dark version to show instead`)
+        const problem = pictureProblem(file, exists)
+        assert.equal(problem, null, `${name}: ${problem}`)
       }
     }
+  })
+
+  test('L0 README: the page screenshot is the one bitmap a README may show, and an SVG drawn in both themes shows its dark one', () => {
+    const all = () => true
+    for (const lang of ['en', 'zh-TW', 'zh-CN']) assert.equal(pictureProblem(`docs/images/page-${lang}-dark.png`, all), null)
+    for (const file of ['docs/images/page-en-light.png', 'docs/images/page-fr-dark.png', 'docs/images/page-en-dark.jpg', 'docs/images/sub/page-en-dark.png', 'docs/images/interactive-board-en.jpg']) assert.notEqual(pictureProblem(file, all), null, file)
+    assert.notEqual(pictureProblem('docs/images/flow-en.svg', all), null)
+    assert.equal(pictureProblem('docs/images/flow-en.svg', () => false), null)
+    assert.equal(pictureProblem('docs/images/cover-en-dark.svg', all), null)
   })
 
   test('the README marks every agent that was not run live with the same phrase', () => {
