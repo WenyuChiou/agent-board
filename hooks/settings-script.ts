@@ -38,15 +38,25 @@ if (found === null) process.exitCode = 1
 else say(found)
 `
 
-// `node -e SCRIPT -- <file> <next> <kind> <base>`: replaces the file with <next>, which was worked out from <base> (the
-// text read earlier; <kind> is 'ok' for a file that held it, 'missing' for none). The file is read again just before
+// `node -e SCRIPT -- <file> <kind>` with `{"next":…,"base":…}` as JSON on stdin: replaces the file with `next`, which was
+// worked out from `base` (the text read earlier; <kind> is 'ok' for a file that held it, 'missing' for none). The
+// texts go on stdin, never in the process arguments, which any user on the computer can list. The file is read again just before
 // the swap and once after it: when it no longer holds <base>, nothing is written over it and the exit is
 // 72, so the caller reads and works the change out again and a save made meanwhile is not undone.
 // The new file gets the old one's permission bits (0600 when there was none).
 // Exit 0 when written, 71 when the path is a link or not a regular file (nothing written), 1 otherwise.
 export const SETTINGS_WRITE = `
 const fs = require('node:fs')
-const [file, next, kind, base] = process.argv.slice(1)
+const [file, kind] = process.argv.slice(1)
+let next, base
+try {
+  const given = JSON.parse(fs.readFileSync(0, 'utf8'))
+  next = given.next
+  base = given.base
+  if (typeof next !== 'string' || (kind === 'ok' && typeof base !== 'string')) throw new Error('bad input')
+} catch {
+  process.exit(1)
+}
 // Every read here, the one after the rename too, refuses a link or a non-regular file and never waits for a writer.
 const look = () => {
   try {
@@ -75,10 +85,14 @@ const finish = () => {
     if (!error || error.code !== 'ENOENT') return 1
   }
   const temp = file + '.' + process.pid + '.' + Date.now().toString(36) + '.tmp'
+  // Only a temp file this write created is ever deleted: a name that was already taken is somebody else's.
+  let created = false
   try {
     const early = held()
     if (early !== 'same') return early === 'unsafe' ? ${SETTINGS_UNSAFE} : ${SETTINGS_CHANGED}
-    fs.writeFileSync(temp, next, { flag: 'wx', mode })
+    const fd = fs.openSync(temp, 'wx', mode)
+    created = true
+    try { fs.writeFileSync(fd, next) } finally { fs.closeSync(fd) }
     fs.chmodSync(temp, mode)
     const late = held()
     if (late !== 'same') {
@@ -87,7 +101,7 @@ const finish = () => {
     }
     fs.renameSync(temp, file)
   } catch {
-    try { fs.unlinkSync(temp) } catch {}
+    if (created) try { fs.unlinkSync(temp) } catch {}
     return 1
   }
   try {

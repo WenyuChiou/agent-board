@@ -806,7 +806,7 @@ export const ZH_CN: Strings = {
   barStyleSet: (name: string): string => `进度条改用“${name}”样式，页面、面板和终端看板都会跟着换。`,
   barStyleUnknown: '进度条样式：ink（墨）、blue（蓝）、green（绿）。',
   barStyleUnreadable: '看板的设置文件不是有效的 JSON，设置没有改，也没有覆盖它。请修好或删掉 progress-settings.json 再选一次。',
-  barStyleUnsafe: '看板的设置文件是链接或文件夹，设置没有改，也没有覆盖它。请把 progress-settings.json 换成普通文件或删掉，再选一次。',
+  barStyleUnsafe: '看板的设置文件是链接或不是普通文件，设置没有改，也没有覆盖它。请把 progress-settings.json 换成普通文件或删掉，再选一次。',
   barStyleKey: (name: string): string => `s 换进度条样式（现在：${name}）`,
   pgBarLabel: (count: string, step: string): string => `${count} · ${step}`,
   serveLiveHint: '每 3 秒读一次看板',

@@ -1166,7 +1166,7 @@ const pollBarStyle = async ($: EngineInterface, path: string): Promise<void> => 
   const stat = await $.fs.stat(file).catch(() => undefined)
   const seen = stat === undefined ? '' : `${stat.mtimeMs}:${stat.size}`
   if (seen === barStyleSeen) return
-  const style = barStyleOf(stat === undefined ? null : await readText($, file).catch(() => null))
+  const style = barStyleOf(stat === undefined ? null : await readSettingsText($, file).catch(() => null))
   barStyleSeen = seen
   if ((await read($, barStyle)) === style) return
   await update($, barStyle, () => style)
@@ -1649,6 +1649,16 @@ const readText = async ($: EngineInterface, path: string): Promise<string> => {
     if (!(await $.fs.exists(path))) return ''
     throw error
   }
+}
+
+// The board's settings file as text, read by the guarded script: the host's own read follows a link and waits on a
+// FIFO (#1276). A missing file, a link or a file that is not a plain one read as empty, as nothing to read; a read
+// that fails throws. A process starts only when the caller reads, which the callers do on a change or a sweep.
+const readSettingsText = async ($: EngineInterface, file: string): Promise<string> => {
+  const found = await $.process.run(['node', '-e', SETTINGS_READ, '--', file], { timeoutMs: 10000 })
+  if (found.exitCode !== 0 || found.isStdoutTruncated) throw new Error('SETTINGS_UNREADABLE')
+  const body = JSON.parse(found.stdout) as { kind?: unknown; text?: unknown }
+  return body.kind === 'ok' && typeof body.text === 'string' ? body.text : ''
 }
 
 // Every write this session makes (its block, a tick, an archive) goes through one queue,
@@ -3205,7 +3215,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   // began moves no hand-kept task, rather than falling back to the times the pane kept in memory.
   const observed = isCleanUp ? (parseSeen(await readText($, seenPath(path))) ?? {}) : await read($, firstSeen)
   // Read on the sweep only, never on a poll; a missing or unreadable file means the default.
-  const historyDays = isNow || isCleanUp ? HISTORY_DAYS : historyDaysOf(await readText($, settingsPath(path)).catch(() => ''))
+  const historyDays = isNow || isCleanUp ? HISTORY_DAYS : historyDaysOf(await readSettingsText($, settingsPath(path)).catch(() => ''))
   // Counted with their number: two done blocks with the same title and steps make one entry text,
   // and both leave (#231).
   const archived = new Map<string, number>()
@@ -4289,7 +4299,8 @@ export const register: Register = (on, options) => {
         const base = current.kind === 'ok' && typeof current.text === 'string' ? current.text : null
         const next = withBarStyle(base, style)
         if (next === null) return { text: s.barStyleUnreadable }
-        const wrote = await $.process.run(['node', '-e', SETTINGS_WRITE, '--', file, next, base === null ? 'missing' : 'ok', base ?? ''], { timeoutMs: 10000 }).catch(() => null)
+        // The texts go on stdin: process arguments can be listed by other users, and the file is private.
+        const wrote = await $.process.run(['node', '-e', SETTINGS_WRITE, '--', file, base === null ? 'missing' : 'ok'], { timeoutMs: 10000, stdin: JSON.stringify({ next, base }) }).catch(() => null)
         if (wrote?.exitCode === SETTINGS_UNSAFE) return { text: s.barStyleUnsafe }
         if (wrote?.exitCode === SETTINGS_CHANGED) continue
         if (wrote?.exitCode !== 0) return { text: s.pressFailed }

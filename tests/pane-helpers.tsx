@@ -129,6 +129,8 @@ type World = {
   isRemoveRefused?: (path: string) => boolean
   // Paths that are a link or a folder, as the settings scripts see them (#1276).
   unsafeFiles?: Set<string>
+  // What each settings write was given: its arguments, and what it read on stdin.
+  settingsWrites?: Array<{ argv: string[]; stdin: string | undefined }>
   // What the model answers asynchronously; a promise that never settles is a hung call.
   hang?: (prompt: string) => boolean
   holdComplete?: { reached: () => void; release: Promise<void> }
@@ -329,9 +331,12 @@ const engineBeneath = (on: On, world: World): MockClock => {
       world.ran?.push([...e.argv])
       if (world.unsafeFiles?.has(file) === true) return { value: { exitCode: SETTINGS_UNSAFE, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
       // Written only when the file still holds the text the change was worked out from.
+      // The texts arrive on stdin, as the script reads them, never in the arguments.
+      const given = JSON.parse(String((e as typeof e & { init?: { stdin?: string } }).init?.stdin ?? '{}')) as { next?: string; base?: string | null }
+      world.settingsWrites?.push({ argv: [...e.argv], stdin: (e as typeof e & { init?: { stdin?: string } }).init?.stdin })
       const held = world.files.get(file)
-      if ((e.argv[6] === 'ok' ? held : undefined) !== (e.argv[6] === 'ok' ? e.argv[7] : undefined) || (e.argv[6] === 'missing' && held !== undefined)) return { value: { exitCode: SETTINGS_CHANGED, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-      world.files.set(file, e.argv[5] ?? '')
+      if ((e.argv[5] === 'ok' ? held : undefined) !== (e.argv[5] === 'ok' ? given.base ?? undefined : undefined) || (e.argv[5] === 'missing' && held !== undefined)) return { value: { exitCode: SETTINGS_CHANGED, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      world.files.set(file, given.next ?? '')
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv[0] === 'node' && e.argv[2] === LEDGER_LINK && e.argv[3] === '--') {

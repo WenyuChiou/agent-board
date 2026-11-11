@@ -62,6 +62,41 @@ test('#1276: /progress style refuses a settings file that is a link or a folder,
   expect(JSON.parse(world.files.get(SETTINGS) ?? '{}')).toEqual({ style: 'blue' })
 })
 
+// #1276, Codex on #1339: the style poll and the history-days read used the host's read, which waits on a FIFO.
+// They now read through the guarded script; the host never reads the settings file, and the pick still shows.
+test('#1276: the style poll reads the settings file through the guarded script, never the host read', async ($, on) => {
+  const world: World = { files: new Map([[FILE, board(SEVEN)], [SETTINGS, '{"style":"green"}']]), mtime: 1, hasTasks: true, reads: [], ran: [], store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    world.mtime += 1
+    await clock.advance(2100)
+    expect(world.reads).not.toContain(SETTINGS)
+    expect(world.ran?.some(argv => argv.includes(SETTINGS))).toBe(true)
+    // A path that is a link or a folder reads as no file: the pick falls back to the default and nothing waits.
+    world.unsafeFiles = new Set([SETTINGS])
+    world.mtime += 1
+    await clock.advance(2100)
+    expect(world.reads).not.toContain(SETTINGS)
+  } finally { await ui.unmount() }
+})
+
+// #1276, Codex on #1339: the settings JSON went in the process arguments, which other users can list.
+test('#1276: /progress style hands the settings text to the script on stdin, not in its arguments', async ($, on) => {
+  const world: World = { files: new Map([[FILE, board(SEVEN)], [SETTINGS, '{"historyDays":3,"lang":"en"}']]), mtime: 1, hasTasks: true, settingsWrites: [], store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  expect(JSON.stringify(await $.command.run({ ...TIDY, args: 'style blue' }))).toContain(EN.barStyleSet(EN.barStyleBlue))
+  expect(world.settingsWrites?.length).toBe(1)
+  const [write] = world.settingsWrites ?? []
+  expect(write?.argv.join('\n')).not.toContain('historyDays')
+  expect(write?.argv.join('\n')).not.toContain('"style"')
+  const given = JSON.parse(write?.stdin ?? '{}') as { next?: string; base?: string }
+  expect(given.base).toBe('{"historyDays":3,"lang":"en"}')
+  expect(JSON.parse(given.next ?? '{}')).toEqual({ historyDays: 3, lang: 'en', style: 'blue' })
+})
+
 test('#1085: a one-step task shows its count alone, with no bar', async ($, on) => {
   const world: World = { files: new Map([[FILE, board('- [~] Only step\n')]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
   engineBeneath(on, world)

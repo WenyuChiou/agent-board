@@ -369,10 +369,16 @@ const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): Ser
 // that timed out or was refused waits again. The page, the terminal board, --status and --json all count from this.
 const isFailedReceipt = (receipt: Receipt | undefined): boolean =>
   receipt !== undefined && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
-const handledKeys = (model: ServeModel, cards: readonly PageRef[]): string[] => {
+// A question counts as handled by the message bound to it, not by any message to its session (#1296): with two
+// questions in one session, one queued answer hands over one. `holder` is true when a message still held for
+// the session's next turn answers this question (or, unbound, was sent to the session it is asked in).
+const holdsAnswer = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, isConnected: boolean): boolean =>
+  to !== undefined && messages.some(one => one.to === to && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && (one.answers === undefined ? isConnected : one.answers === questionId))
+const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: ReadonlyMap<string, boolean>): string[] => {
   const sources = new Map<string, { isSending?: boolean; receipt?: Receipt }>()
   for (const one of [...model.asks, ...model.reminder, ...model.older, ...model.idle, ...model.stopped, ...model.groups.flatMap(group => group.rows)]) {
-    sources.set(one.key, { ...sources.get(one.key), ...('isSending' in one ? { isSending: one.isSending } : {}), ...(one.receipt === undefined ? {} : { receipt: one.receipt }) })
+    const isSending = held.get(one.key) ?? ('isSending' in one ? one.isSending : undefined)
+    sources.set(one.key, { ...sources.get(one.key), ...(isSending === undefined ? {} : { isSending }), ...(one.receipt === undefined ? {} : { receipt: one.receipt }) })
   }
   return cards
     .filter(card => {
@@ -390,6 +396,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
   const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId))
   const asks: ServeAsk[] = []
+  // Per ask card: whether an answer to this very question is held (the page's `isSending` is per session).
+  const held = new Map<string, boolean>()
   const groups = new Map<string, ServeRow[]>()
   const idle: ServeRow[] = []
   const idleKeys = new Set(view.idle.map(row => row.key))
@@ -412,6 +420,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan, true)
       const label = ask.step === null ? undefined : clipped(ask.text, LABEL_ROOM)
+      const heldBy = connection !== undefined ? address(connection.agent, connection.session) : ask.nativeSession === undefined ? undefined : address(ask.agent || 'claude', ask.nativeSession)
+      held.set(item.key, isSending(ask.target) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, connection !== undefined))
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
@@ -599,7 +609,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     stuck: grouped.needs.stuck,
     versions: group.versions,
     agents: grouped.agents.map(one => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),
-    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref)) },
+    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref), held) },
     working: grouped.working.map(ref),
     quiet: grouped.quiet,
     all: { ...bucket(grouped.all), isHidden: grouped.all.isHidden },

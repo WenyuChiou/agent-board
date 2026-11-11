@@ -1,4 +1,4 @@
-import { chmodSync, constants, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 
 // The board's settings file (progress-settings.json) is one the person may have replaced with a link
 // or a folder. Every reader and writer here refuses those, and none of them can block (#1276).
@@ -57,8 +57,12 @@ export const replaceSettings = (file: string, base: string | null, next: string,
   const before = holds()
   if (before !== 'same') return before
   const temp = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`
+  // Only a temp file this write created is ever deleted: a name that was already taken is somebody else's.
+  let isCreated = false
   try {
-    writeFileSync(temp, next, { flag: 'wx', mode })
+    const fd = openSync(temp, 'wx', mode)
+    isCreated = true
+    try { writeFileSync(fd, next) } finally { closeSync(fd) }
     chmodSync(temp, mode)
     between?.()
     const late = holds()
@@ -68,7 +72,7 @@ export const replaceSettings = (file: string, base: string | null, next: string,
     }
     renameSync(temp, file)
   } catch (error) {
-    try { unlinkSync(temp) } catch {}
+    if (isCreated) try { unlinkSync(temp) } catch {}
     throw error
   }
   const after = readSettings(file)

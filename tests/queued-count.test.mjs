@@ -131,3 +131,62 @@ test('one file fed to the CLI gives the same count on --status, --json and the t
     assert.equal(STRINGS['zh-CN'].boardQueuedCount(2), '2 项排队中')
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+// Codex P1 on #1339: one queued answer handed over every question of its session. An answer is bound to the question
+// it answers, and only that question counts as handled; the others still need the person.
+const twoInOne = `## Synthetic project aaaaaaa1
+<!-- auto session=aaaaaaa1 agent=codex resume=${first} state=waiting updated=${new Date(now).toISOString()} -->
+### Synthetic task aaaaaaa1
+- [?] Blue or green?
+- [?] Keep the draft?
+<!-- /auto session=aaaaaaa1 -->
+`
+const twoView = () => {
+  const one = buildView(parseProgress(twoInOne), [], null, now, 0, {}, EN)
+  // The page names each question by the ledger's id; the test names them by hand.
+  one.waiting.forEach((ask, index) => { ask.questionId = `Q-${index + 1}` })
+  return one
+}
+const storedFor = (questionId, box) => {
+  const queued = queueMessage({ messages: [], mailboxes: box.scope === 'mailbox' ? [box] : [] }, { id: 'SYNTHETIC-QUEUED-2', text: 'Blue', target: box.id, turn: box.turn, answers: questionId }, 'board', box, now)
+  return { version: 2, ...queued.state }
+}
+
+test('one queued answer hands over its own question only: 1 needs you, 1 queued, on the page and on every other surface', () => {
+  const messaging = shown(storedFor('Q-1', mailbox(first)))
+  const model = serveModel(twoView(), [], EN, new Set(), false, messaging, false, group)
+  assert.equal(model.view.needs.n, 2)
+  assert.equal(model.view.needs.handled.length, 1)
+  const handled = model.view.needs.cards.find(card => card.key === model.view.needs.handled[0])
+  assert.ok(model.asks.find(ask => ask.key === handled.key).text === 'Blue or green?')
+  const counts = boardCounts(twoView(), [], EN, now, messaging)
+  assert.deepEqual({ needs: counts.needs, queued: counts.queued }, { needs: 1, queued: 1 })
+  const terminal = boardText(twoView(), [], EN, { width: 100, isColor: false, messaging }).split('\n')[0]
+  assert.match(terminal, new RegExp(`● 1 ${EN.countWaiting}`))
+  assert.ok(terminal.includes(`◌ ${EN.boardQueuedCount(1)}`), terminal)
+  const document = boardDocument(twoView(), [], [], EN, '/synthetic-home', false, now, group, undefined, messaging)
+  assert.deepEqual([document.counts.needs, document.counts.queued, document.queued.length, document.needs.length], [1, 1, 1, 1])
+  assert.equal(document.queued[0].text, 'Blue or green?')
+  assert.equal(document.needs[0].text, 'Keep the draft?')
+})
+
+test('an answer bound to another question hands over neither of these', () => {
+  const messaging = shown(storedFor('Q-OTHER', mailbox(first)))
+  const counts = boardCounts(twoView(), [], EN, now, messaging)
+  assert.deepEqual({ needs: counts.needs, queued: counts.queued }, { needs: 2, queued: 0 })
+})
+
+test('a question-bound message to a live connection the store file holds is counted by the page and by the file readers alike', () => {
+  const live = { id: 'conn_live', agent: 'codex', session: first, surface: 'synthetic', turn: 'turn-1', scope: 'turn', expires: now + 3_600_000 }
+  // The message is held for a live connection (not a mailbox): the store file holds the message, not the connection.
+  const messages = storedFor('Q-2', live).messages.map(({ nonce: _nonce, hash: _hash, ...one }) => one)
+  const page = serveModel(twoView(), [], EN, new Set(), false, { connections: [live], mailboxes: [], messages }, false, group)
+  const file = serveModel(twoView(), [], EN, new Set(), false, { connections: [], mailboxes: [], messages }, false, group)
+  for (const model of [page, file]) {
+    assert.equal(model.view.needs.handled.length, 1)
+    const handled = model.view.needs.cards.find(card => card.key === model.view.needs.handled[0])
+    assert.equal(model.asks.find(ask => ask.key === handled.key).text, 'Keep the draft?')
+  }
+  const counts = boardCounts(twoView(), [], EN, now, { connections: [], mailboxes: [], messages })
+  assert.deepEqual({ needs: counts.needs, queued: counts.queued }, { needs: 1, queued: 1 })
+})

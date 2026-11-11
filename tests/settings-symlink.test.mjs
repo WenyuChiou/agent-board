@@ -11,6 +11,9 @@ import { EN } from '../hooks/strings-en.ts'
 import { SETTINGS_CHANGED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script.ts'
 import { readSettings, replaceSettings, updateSettings } from '../scripts/settings-file.ts'
 
+// The plugin's write script: the file and the kind on its command line, the two texts as JSON on stdin (never in the arguments).
+const writeScript = (file, next, kind, base, node = []) => spawnSync(process.execPath, [...node, '-e', SETTINGS_WRITE, '--', file, kind], { input: JSON.stringify({ next, base: kind === 'ok' ? base : null }), timeout: 5000, encoding: 'utf8' })
+
 const post = (port, token, path, body) => new Promise((resolve, reject) => {
   const req = request({
     host: '127.0.0.1',
@@ -210,7 +213,7 @@ test('the plugin write refuses when the file no longer holds the text it was wor
   const dir = mkdtempSync(join(tmpdir(), 'settings-script-two-'))
   try {
     const settings = join(dir, 'progress-settings.json')
-    const write = (next, kind, base) => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, next, kind, base], { timeout: 5000, encoding: 'utf8' }).status
+    const write = (next, kind, base) => writeScript(settings, next, kind, base).status
     // Another save landed after the plugin read '{"lang":"en"}'.
     writeFileSync(settings, '{"lang":"zh-TW"}\n')
     assert.equal(write('{"lang":"en","style":"blue"}\n', 'ok', '{"lang":"en"}\n'), SETTINGS_CHANGED)
@@ -235,7 +238,7 @@ test('both writers keep the settings file private: 0600 stays 0600 under a umask
   try {
     const settings = join(dir, 'progress-settings.json')
     const modeOf = () => (statSync(settings).mode & 0o777).toString(8)
-    const script = (next, kind, base) => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, next, kind, base], { timeout: 5000, encoding: 'utf8' }).status
+    const script = (next, kind, base) => writeScript(settings, next, kind, base).status
     writeFileSync(settings, '{"a":1}\n')
     chmodSync(settings, 0o600)
     assert.equal(replaceSettings(settings, '{"a":1}\n', '{"a":2}\n'), 'ok')
@@ -268,7 +271,7 @@ test('a read of the settings file does not wait on a FIFO with no writer (#1276)
     assert.equal(ran.error, undefined)
     assert.equal(ran.status, 0)
     assert.deepEqual(JSON.parse(ran.stdout), { kind: 'unsafe' })
-    const wrote = spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, '{}', 'missing', ''], { timeout: 5000, encoding: 'utf8' })
+    const wrote = writeScript(settings, '{}', 'missing', '')
     assert.equal(wrote.error, undefined)
     assert.equal(wrote.status, SETTINGS_UNSAFE)
   } finally {
@@ -288,7 +291,7 @@ const { execFileSync } = require('node:child_process')
 const rename = fs.renameSync
 fs.renameSync = (from, to) => { rename(from, to); fs.unlinkSync(to); execFileSync('mkfifo', [to]) }
 `)
-    const wrote = spawnSync(process.execPath, ['--require', swap, '-e', SETTINGS_WRITE, '--', settings, '{"style":"blue"}\n', 'missing', ''], { timeout: 5000, encoding: 'utf8' })
+    const wrote = writeScript(settings, '{"style":"blue"}\n', 'missing', '', ['--require', swap])
     assert.equal(wrote.error, undefined, 'the write came back')
     assert.equal(wrote.status, SETTINGS_UNSAFE)
     assert.ok(!lstatSync(settings).isFile(), 'the FIFO the preload put there is still there')
@@ -324,7 +327,7 @@ test('the plugin scripts read a plain file, report a missing one, and refuse a l
   try {
     const settings = join(dir, 'progress-settings.json')
     const read = () => JSON.parse(spawnSync(process.execPath, ['-e', SETTINGS_READ, '--', settings], { timeout: 5000, encoding: 'utf8' }).stdout)
-    const write = (text, kind = 'missing', base = '') => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, text, kind, base], { timeout: 5000, encoding: 'utf8' }).status
+    const write = (text, kind = 'missing', base = '') => writeScript(settings, text, kind, base).status
     assert.deepEqual(read(), { kind: 'missing' })
     assert.equal(write('{"style":"green"}\n'), 0)
     assert.deepEqual(read(), { kind: 'ok', text: '{"style":"green"}\n' })
@@ -342,6 +345,57 @@ test('the plugin scripts read a plain file, report a missing one, and refuse a l
       assert.equal(readFileSync(victim, 'utf8'), '{"keep":true}\n')
     }
     assert.deepEqual(readdirSync(dir).filter(name => name.endsWith('.tmp')), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Codex P1 on #1339: when the exclusive create of the temp name met a file already there (EEXIST), the cleanup
+// deleted that file. Only a temp this write created is deleted.
+test('a temp name that is already taken is left alone by both writers, and the write fails (#1276)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-taken-'))
+  try {
+    const settings = join(dir, 'progress-settings.json')
+    const name = pid => `${settings}.${pid}.${(1000).toString(36)}.tmp`
+    // The in-process writer: this process's id and a fixed clock make the temp name known.
+    const realNow = Date.now
+    Date.now = () => 1000
+    try {
+      writeFileSync(name(process.pid), 'SOMEBODY ELSE\n')
+      assert.throws(() => replaceSettings(settings, null, '{"style":"blue"}\n'), error => error.code === 'EEXIST')
+    } finally { Date.now = realNow }
+    assert.equal(readFileSync(name(process.pid), 'utf8'), 'SOMEBODY ELSE\n')
+    assert.equal(existsSync(settings), false)
+    unlinkSync(name(process.pid))
+    // The plugin's script, run with a fixed pid and clock for the same reason.
+    const preload = join(dir, 'fixed.cjs')
+    writeFileSync(preload, "Date.now = () => 1000; Object.defineProperty(process, 'pid', { value: 4242 })\n")
+    writeFileSync(name(4242), 'SOMEBODY ELSE\n')
+    const wrote = writeScript(settings, '{"style":"blue"}\n', 'missing', '', ['--require', preload])
+    assert.equal(wrote.status, 1)
+    assert.equal(readFileSync(name(4242), 'utf8'), 'SOMEBODY ELSE\n')
+    assert.equal(existsSync(settings), false)
+    // With the name free, the same script writes and leaves no temp file behind.
+    unlinkSync(name(4242))
+    assert.equal(writeScript(settings, '{"style":"blue"}\n', 'missing', '', ['--require', preload]).status, 0)
+    assert.equal(readFileSync(settings, 'utf8'), '{"style":"blue"}\n')
+    assert.deepEqual(readdirSync(dir).filter(file => file.endsWith('.tmp')), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the plugin write takes its two texts from stdin and refuses input it cannot read (#1276)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-stdin-'))
+  try {
+    const settings = join(dir, 'progress-settings.json')
+    const run = input => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, 'missing'], { input, timeout: 5000, encoding: 'utf8' })
+    assert.equal(run('').status, 1)
+    assert.equal(run('not json').status, 1)
+    assert.equal(run(JSON.stringify({ base: null })).status, 1)
+    assert.equal(existsSync(settings), false)
+    assert.equal(run(JSON.stringify({ next: '{"lang":"en"}\n', base: null })).status, 0)
+    assert.equal(readFileSync(settings, 'utf8'), '{"lang":"en"}\n')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
