@@ -204,6 +204,30 @@ updating the plugin, then `/progress connect`. Installing runs nothing: the pack
 dependencies and no install scripts. Pre-releases are on the `next` tag
 (`npx @wenyuchiou/agent-board@next setup`); what makes a release stable is in [RELEASING.md](RELEASING.md).
 
+## Let an agent install it
+
+Paste this into the agent you already use:
+
+```text
+Install Agent Board from https://github.com/WenyuChiou/agent-board on this computer.
+Read its AGENTS.md, README and setup guide. Identify my current host and the other installed coding agents, then preview the common installer: node scripts/setup-agent.mjs.
+Preserve existing settings and the shared progress path. Follow my approval requirements for persistent changes, then apply the applicable hooks, plugins and board command. Do not require or call another AI product to bootstrap this one.
+Complete any required scoped host trust, read the settings back, and have this session report its own real task progress. Open the interactive board.
+Verify actual hook events separately for CLI, desktop App and IDE. Installed files, transport acceptance and an ACK are different from a working progress connection.
+Tell me which existing sessions need reload and which adapters remain unsupported or unverified. Never scan private conversations or silently skip a blocker.
+```
+
+## After setup, per agent
+
+Start a new session of each agent: a session that was already open is not connected.
+
+- **Claude Code** connects through its plugin, which a yes to setup installs. If setup only previewed: `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
+- **Codex:** a yes to setup trusts its hooks. If setup only previewed, trust them in `/hooks` ([how](CODEX.md)).
+- **OpenCode, OpenClaw:** reload their plugins.
+- **dot and other web chats:** paste [the last section of AGENTS.md](../AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then save each block it writes and merge it into the progress file as [Remote reporters](REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) shows.
+
+To add a task of your own, write a `### title` with `- [ ] step` lines in `progress.md` ([the format](FORMAT.md)).
+
 ## Native status adapters
 
 | Host | Installed adapter | Separate acceptance / remaining limit |
