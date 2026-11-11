@@ -45,6 +45,16 @@ export const resolveCodexExecutable = ({ env = process.env, platform = process.p
   return null
 }
 
+// An explicit path (AGENT_BOARD_CODEX_BIN) is held to the same rule: a `.cmd` or `.bat` is a shell script, so on Windows it
+// is replaced by the Codex script beside it, or refused (null) when there is none.
+export const explicitCodexExecutable = (given, { platform = process.platform, exists = existsSync } = {}) => {
+  const flavor = platform === 'win32' ? win32 : posix
+  if (!flavor.isAbsolute(given)) return null
+  if (platform !== 'win32' || !/\.(?:cmd|bat)$/i.test(given)) return given
+  const script = flavor.join(flavor.dirname(given), 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
+  return exists(script) ? script : null
+}
+
 // The board's address and token live only in this process: the Codex program gets neither in its
 // arguments nor in its environment.
 const childEnvironment = env => Object.fromEntries(Object.entries(env).filter(([name, value]) => typeof value === 'string' && !/^AGENT_BOARD_/i.test(name)))

@@ -14,7 +14,7 @@ import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/messag
 import { observeSession } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
-import { resolveCodexExecutable, startCodexReceiver } from '../scripts/codex-receiver.mjs'
+import { explicitCodexExecutable, resolveCodexExecutable, startCodexReceiver } from '../scripts/codex-receiver.mjs'
 import { fileURLToPath } from 'node:url'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
 import { claimMessageStore } from '../scripts/message-store-claim.ts'
@@ -34,7 +34,7 @@ const { hookMailbox, parseMessageStore } = await import('../scripts/board-messag
 const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
 const { serveModel } = await import('../hooks/serve.ts')
 const { boardRequestWords, deliveryRequestWords, isBoardRequest } = await import('../hooks/board-commands.ts')
-const { readTurn } = await import('../hooks/inbox.ts')
+const { isBoardTurn, readTurn } = await import('../hooks/inbox.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
 const { EN } = await import('../hooks/strings-en.ts')
@@ -4026,6 +4026,13 @@ test('a Codex message is sent only to a thread the running daemon has loaded, wi
   assert.equal(resolveCodexExecutable({ env, platform: 'win32', exists: exists(['C:/bin/codex.cmd', 'C:/bin/node_modules/@openai/codex/bin/codex.js']) }).split('\\').join('/'), 'C:/bin/node_modules/@openai/codex/bin/codex.js')
   assert.equal(resolveCodexExecutable({ env, platform: 'win32', exists: exists(['C:/bin/codex.exe']) }).split('\\').join('/'), 'C:/bin/codex.exe')
   assert.throws(() => startCodexReceiver({ boardUrl: board.address, threads: () => [], executable: 'codex' }), /EXPLICIT_EXECUTABLE_REQUIRED/)
+  // An explicit path is held to the same rule: a .cmd is replaced by the script beside it, or refused.
+  const script = 'C:/bin/node_modules/@openai/codex/bin/codex.js'
+  assert.equal(explicitCodexExecutable('C:\\bin\\codex.cmd', { platform: 'win32', exists: exists([script]) }).split('\\').join('/'), script)
+  assert.equal(explicitCodexExecutable('C:\\bin\\codex.cmd', { platform: 'win32', exists: exists([]) }), null)
+  assert.equal(explicitCodexExecutable('C:\\bin\\codex.exe', { platform: 'win32', exists: exists([]) }), 'C:\\bin\\codex.exe')
+  assert.equal(explicitCodexExecutable('codex', { platform: 'win32', exists: exists([]) }), null)
+  assert.equal(explicitCodexExecutable('/usr/bin/codex', { platform: 'linux', exists: exists([]) }), '/usr/bin/codex')
 }))
 
 test('a Codex thread whose board lease expired is attached again, not left stale', async () => fixture(async (board, dir) => {
@@ -4034,7 +4041,10 @@ test('a Codex thread whose board lease expired is attached again, not left stale
   const daemon = codexDaemon(dir, {})
   const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexThread], executable: daemon.executable, env: daemon.env, tickMs: 100 })
   try {
-    await waitFor(() => proxy.registrations() >= 2, 60000)
+    // The lease takes about 15 s to run out, longer than waitFor allows.
+    const until = Date.now() + 60000
+    while (proxy.registrations() < 2 && Date.now() < until) await pause(100)
+    assert.ok(proxy.registrations() >= 2)
     // Claimed messages are never replayed: the new attachment only registers, it sends nothing.
     assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 0)
   } finally { await receiver.close(); await proxy.close() }
@@ -4231,6 +4241,11 @@ test('a delivery prompt does not answer the person\'s question', () => {
     // The inbox reader flags it, so a prompt turn for it never answers a question of the person's.
     for (const one of [message, fromAgent]) assert.equal(readTurn('codex-prompt-1-5.json', JSON.stringify({ session_id: 's1', cwd: '/w', hook_event_name: 'UserPromptSubmit', prompt: deliveryText(one, strings) }))?.isBoardRequest, true)
   }
+  // The agent's answer to a delivered message is still work: the turn is not a board lookup, so its reply is summed up.
+  const delivered = deliveryText({ id: 'AB-1', from: 'board', to: 'codex:' + codexThread, nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' }, EN)
+  const turn = readTurn('codex-turn-1-7.json', JSON.stringify({ session_id: 's1', cwd: '/w', hook_event_name: 'Stop', prompt: delivered, last_assistant_message: 'Which build should I use, the first or the second?' }))
+  assert.equal(turn?.event, 'turn')
+  assert.equal(isBoardTurn(turn), false)
   // What the person types as an answer is still theirs.
   assert.equal(isBoardRequest({ prompt: 'Use the second plan.' }, words), false)
   assert.equal(readTurn('codex-prompt-1-6.json', JSON.stringify({ session_id: 's1', cwd: '/w', hook_event_name: 'UserPromptSubmit', prompt: 'Use the second plan.' }))?.isBoardRequest, undefined)

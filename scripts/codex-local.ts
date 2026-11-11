@@ -23,7 +23,7 @@ import { discoverCodexBinary, inspectCodexConfigToml, trustCodex } from './codex
 import { withLocalLock } from './local-lock'
 import { installControlRoot, withInstallLock } from './install-control'
 import { ConnectTransaction } from './connect-transaction'
-import { boardPromptHelper, boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
+import { boardPromptHelper, boardRequestWords, boardRun, deliveryRequestWords, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
 import { windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
@@ -658,7 +658,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (event !== undefined && statusEvents.antigravity?.[event] !== status) throw new Error('INVALID_EVENT_STATE')
       // Classify before Cursor's adapter drops prompt text; retain lifecycle
       // ordering without treating a board lookup as an answer to the question.
-      const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
+      const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, [...boardRequestWords(Object.values(STRINGS)), ...deliveryRequestWords(Object.values(STRINGS))]))
       // No longer changes any step (#243); kept so events queued by an older version still validate.
       const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
       // Only Codex says it, and only as a session opens or takes a prompt; the other local agents

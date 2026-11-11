@@ -16,7 +16,7 @@ import { legacyConnect } from './connect-transaction'
 import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
 import { boardLanguage, isLanguageOverridden, settingsLangOf, withBoardSettings } from '../hooks/board-settings'
 import type { SettingsLang } from '../hooks/board-settings'
@@ -27,7 +27,7 @@ import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside } from './board-messaging'
-import { resolveCodexExecutable } from './codex-receiver.mjs'
+import { explicitCodexExecutable, resolveCodexExecutable } from './codex-receiver.mjs'
 import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
@@ -1965,7 +1965,7 @@ const pageIsOpen = async (server: RunningServer): Promise<boolean> => {
 // its own, so it never reaches the real ~/.codex.
 const codexReceiverExecutable = (): string | null => {
   const given = process.env.AGENT_BOARD_CODEX_BIN
-  if (given !== undefined) return isAbsolute(given) ? given : null
+  if (given !== undefined) return explicitCodexExecutable(given)
   return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
 }
 
