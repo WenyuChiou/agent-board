@@ -261,6 +261,8 @@ try { prelude = JSON.parse(readFileSync(installed, 'utf8').split('\n', 1)[0].rep
 language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? systemLang(process.env.LANG) ?? 'en'
 // The first line holds account settings, so it must not affect build comparisons.
 const hash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
+// The command that updates the install being run, for the page to show; empty when the notice names no command.
+let updateCommand = ''
 if (!isChat && !args.includes('--status')) {
   try {
     // The bundle is kept in hooks/board-script.ts and its parts; the shared reader joins them.
@@ -279,19 +281,22 @@ if (!isChat && !args.includes('--status')) {
       if (old && typeof prelude.codexRoot === 'string') {
         let root = resolve(prelude.codexRoot)
         // The agents scripts/setup-agent.mjs knows; another install-*.json (a backup copy) is not one.
-        const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
+        const targets = ['codex', 'cursor', 'opencode', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
         const listed = folder => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
         let agents = listed(root)
         // A moved data folder: the board script's own folder is where the board is now.
         if (!agents) { root = dirname(installed); agents = listed(root) ?? [] }
         const folder = shown(root)
         const opts = (agents.length ? ` --agent ${agents.join(',')}` : '') + (root !== join(home, '.agent-board') ? ` --data-dir ${/[^\w.:\\/~@+,=-]/.test(folder) ? `"${folder}"` : folder}` : '')
+        updateCommand = `npx ${name}@${v} setup${opts}`
         console.error(message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
       } else {
         console.error(old
           ? message(`agent-board ${v}: the board script at ${path} is from ${old}; the Claude Code plugin wrote it. To update it, update the agent-board plugin in Claude Code, then run /progress connect.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版，由 Claude Code 外掛寫入。更新：先在 Claude Code 更新 agent-board 外掛，再執行 /progress connect。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版，由 Claude Code 插件写入。更新：先在 Claude Code 更新 agent-board 插件，再运行 /progress connect。`)
           : message(`agent-board ${v}: the board script at ${path} is a different build (newer, or edited). It runs as it is.`, `agent-board ${v}：${path} 的看板程式是另一個版本（較新，或被改過），照原樣執行。`, `agent-board ${v}：${path} 的看板程序是另一个版本（较新，或被改过），照原样运行。`))
       }
+      // An older script cannot return the JSON this version promises, so the call fails with the notice instead of printing text and exiting 0 (#1304).
+      if (old && args.includes('--json')) process.exit(1)
     }
   } catch (error) {
     console.error(message(`agent-board ${v}: could not compare the board script at ${installed} with this package (${code(error)}). It runs as it is.`, `agent-board ${v}：無法比對 ${installed} 的看板程式與這個套件（${code(error)}），照原樣執行。`, `agent-board ${v}：无法比对 ${installed} 的看板程序与这个包（${code(error)}），照原样运行。`))
@@ -300,4 +305,4 @@ if (!isChat && !args.includes('--status')) {
 // A separate process preserves argv[1], which the installed page server identifies.
 const env = dataDir ? { ...process.env } : process.env
 if (dataDir) delete env.CLAUDE_PROGRESS_FILE
-run(installed, passArgs, { env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v } })
+run(installed, passArgs, { env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v, AGENT_BOARD_UPDATE_COMMAND: updateCommand } })

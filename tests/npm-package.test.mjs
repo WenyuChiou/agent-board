@@ -388,6 +388,47 @@ test('an installed board script from another build gets a one-line note naming i
   assert.equal(unreadable.stderr.trim().split('\n').length, 1)
 }))
 
+test('--json through an installed board script from an older release fails with the notice instead of printing text and exiting 0 (#1304)', () => fixture(f => {
+  const pkg = packed(f)
+  // What 0.24.2's script did with --json: print the text board and exit 0.
+  const text = `${prelude(f)}process.stdout.write('Agent Board (text, not JSON)\\n')\n// 0.24.2`
+  save(boardPath(f), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  for (const [lang, older] of [['en', 'is from 0.24.2.'], ['zh-TW', '是 0.24.2 版']]) {
+    const json = f.run(pkg, ['--json', '--lang', lang])
+    assert.notEqual(json.status, 0, 'the call fails')
+    assert.equal(json.stdout, '', 'nothing but JSON may ever reach stdout')
+    assert.ok(json.stderr.includes(older), json.stderr)
+    assert.ok(json.stderr.includes(`npx ${manifest.name}@${manifest.version} setup`), json.stderr)
+    assert.equal(json.stderr.trim().split('\n').length, 1)
+  }
+  // Without --json the older script still runs, with the same note.
+  const plain = f.run(pkg, ['--print'])
+  success(plain)
+  assert.ok(plain.stdout.includes('Agent Board (text, not JSON)'))
+  assert.ok(plain.stderr.includes('is from 0.24.2.'))
+}))
+
+test('the launcher hands an older script the update command for the install it runs, and none for a plugin copy (#1304)', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, 'data dir')
+  const echo = head => `${head}process.stdout.write('update=' + JSON.stringify(process.env.AGENT_BOARD_UPDATE_COMMAND ?? null))\n// 0.24.2`
+  const text = echo(`globalThis.AGENT_BOARD = ${JSON.stringify({ codexRoot: root, lang: 'en' })}\n`)
+  save(join(root, 'install-codex.json'), '{}')
+  save(join(root, 'agent-board.mjs'), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  const custom = f.run(pkg, ['--data-dir', root, '--print'])
+  success(custom)
+  assert.equal(custom.stdout, `update=${JSON.stringify(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir "${root}"`)}`)
+  const plugin = echo('globalThis.AGENT_BOARD = {}\n')
+  const script = join(f.env.CLAUDE_CONFIG_DIR, 'agent-board.mjs')
+  save(script, plugin)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(plugin)}'] }]\n`)
+  const fromPlugin = f.run(pkg, ['--print'])
+  success(fromPlugin)
+  assert.equal(fromPlugin.stdout, 'update=""')
+}))
+
 test('the board script beside CLAUDE_PROGRESS_FILE runs with the arguments unchanged and its own path as argv[1]', () => fixture(f => {
   const pkg = packed(f)
   const script = join(f.home, 'plugin data/agent-board.mjs')

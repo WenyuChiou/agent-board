@@ -8018,6 +8018,29 @@ test('with --lan the page also opens on the local network, with a token of its o
   }
 })
 
+test('the update command with a home path reaches the local page but never the page on the local network (#1304)', { timeout: 30_000 }, async t => {
+  const update = 'npx @wenyuchiou/agent-board@9.9.9 setup --data-dir /home/synthetic-person/board'
+  const board = await page('', { AGENT_BOARD_UPDATE_COMMAND: update })
+  try {
+    const { call, token } = board
+    assert.equal((await call('GET', '/api/board')).json().model.view.versions.update, update)
+    const opened = await call('POST', '/api/lan', { body: {} })
+    if (opened.status === 409) {
+      t.skip(`no local network address here: ${opened.json().note}`)
+      return
+    }
+    const lan = new URL(opened.json().url)
+    const phone = lan.searchParams.get('t')
+    assert.notEqual(phone, token)
+    const seen = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': phone })
+    assert.equal(seen.status, 200, seen.body)
+    assert.equal(seen.json().model.view.versions.update, null)
+    assert.ok(!seen.body.includes('synthetic-person'))
+  } finally {
+    await board.close()
+  }
+})
+
 test("--serve --lan prints the page's network address, a QR code of it and that the link is unencrypted, and a second run gives the same address", { timeout: 60_000 }, async t => {
   const board = serveIn()
   const urls = []
@@ -12261,8 +12284,18 @@ test('the footer links to the project', async () => {
     assert.match(dom.node('versions').textContent, /^v\d/)
     const apart = structuredClone(model)
     apart.view.versions.package = '99.0.0'
+    // Without a command from the launcher (a plugin board, or an unknown install) the page names no update command.
     await dom.redraw(apart)
-    assert.equal(dom.node('versions').textContent, EN.pgVersions(model.view.versions.board, '99.0.0'))
+    assert.equal(dom.node('versions').textContent, EN.pgVersionsOlder(model.view.versions.board, '99.0.0'))
+    // The launcher's own command, which names a custom data folder, is what the page shows (#1304).
+    apart.view.versions.update = 'npx @wenyuchiou/agent-board@99.0.0 setup --agent codex --data-dir /synthetic/board'
+    await dom.redraw(apart)
+    assert.equal(dom.node('versions').textContent, `${EN.pgVersionsOlder(model.view.versions.board, '99.0.0')} ${EN.pgVersionsUpdate(apart.view.versions.update)}`)
+    assert.match(dom.node('versions').textContent, /setup --agent codex --data-dir \/synthetic\/board, then add --apply/)
+    const behind = structuredClone(model)
+    behind.view.versions.package = '0.0.1'
+    await dom.redraw(behind)
+    assert.equal(dom.node('versions').textContent, EN.pgVersions(model.view.versions.board, '0.0.1'))
   } finally { await board.close() }
   for (const words of [ZH_TW, ZH_CN]) {
     assert.notEqual(words.pgGithub, EN.pgGithub)
@@ -12667,8 +12700,9 @@ test('the page of a grouped board draws each question once, copies an answer and
       assert.ok(fresh.node('board').textContent.includes(words.pgReady))
       // With nothing connected the empty board names no agent and tells how to start.
       assert.ok(fresh.node('board').textContent.includes(words.pgStartAny))
-      // (The version label and the project's name on GitHub are the same in every language.)
-      const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ')
+      // (The version label and the project's name on GitHub are the same in every language; the update
+      // command is filled in by the launcher, so only the flag it ends with is taken out.)
+      const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ').replaceAll('--apply', '')
       if (words === EN) assert.doesNotMatch(labels, /\p{Script=Han}/u)
       else assert.doesNotMatch(labels.replaceAll('Agent Board', '').replaceAll('GitHub', '').replaceAll('Claude Code', '').replaceAll('Codex', ''), /[A-Za-z]/)
     }

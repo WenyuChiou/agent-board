@@ -17,8 +17,8 @@ since commands and apps belong to the account running setup. It does not read
 conversations or credentials. A found command or app is a candidate, not an active
 session or account access. Run setup without `--apply` first: its preview lists each file;
 a bare `--apply` writes to the same agents and prints only how many files changed.
-A `.gemini` directory alone does not identify Gemini CLI: Antigravity uses that parent
-too. Finding nothing exits 0 without writing anything and names the next command to
+Gemini CLI is retired and setup never lists it; a `.gemini` directory belongs to
+Antigravity. Finding nothing exits 0 without writing anything and names the next command to
 run. You can also select a known target with `--agent <name>`.
 `--agent all` previews all supported targets; it does not install the AI applications.
 
@@ -335,13 +335,16 @@ The App, CLI and IDE share the global path but load it independently. Already-op
 sessions may need reload. These hooks report activity; semantic task steps remain explicit
 agent reports. No permission handler, transcript reader or remote-control tunnel is installed.
 
-## Legacy Gemini CLI compatibility
+## Gemini CLI is retired
 
 Google's [consumer transition announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)
-ended free individual and Google AI Pro/Ultra Gemini CLI service on June 18, 2026. Supported
-enterprise and paid API-key use remains separate. The explicit `--agent gemini` target is
-retained for those hosts. It does not stand for Antigravity, and a binary starting does
-not prove its account can run a model.
+ended free individual and Google AI Pro/Ultra Gemini CLI service on June 18, 2026, and
+setup no longer lists or installs it; `--agent gemini` is not a target. A home that an
+earlier release set up for it is cleaned by the next setup, or by
+`setup --remove --agent gemini`: the board command, the hooks in `~/.gemini/settings.json`
+and the install record go where their bytes are still the ones setup wrote. A file you
+changed stays, and setup names it. Antigravity's files, in `~/.gemini/config`, are never
+touched.
 
 ## Verify the result
 

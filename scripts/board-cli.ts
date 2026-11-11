@@ -2541,7 +2541,7 @@ const boardJson = (days?: number, projectFilter?: string) => {
   const packageVersion = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
   const group = {
     now, repoOf: repoLookup(worktreeRepoName),
-    versions: { board, package: /^\d+\.\d+\.\d+$/.test(packageVersion) ? packageVersion : null },
+    versions: { board, package: /^\d+\.\d+\.\d+$/.test(packageVersion) ? packageVersion : null, update: (process.env.AGENT_BOARD_UPDATE_COMMAND ?? '').slice(0, 500) || null },
     unreadable: current.unreadable ?? [],
   }
   let finished: FinishedTask[] | undefined
