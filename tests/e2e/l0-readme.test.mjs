@@ -71,15 +71,12 @@ const BOARD_COMMANDS = { 'Claude Code': '/agent-board', Codex: '$agent-board', A
 // described, and the words of the phone row. The cells follow docs/MESSAGING.md "Agent and surface support"
 // (Proposed or None is "Not yet", Implemented and not tested is "Not tested", no such surface is a dash).
 const WORDS = {
-  en: { terminal: 'Terminal command', now: 'At once (confirmed)', next: 'At its next turn', paste: 'You paste it', notYet: 'Not yet', untested: 'Not tested', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: '(opened by a prompt asking for the skill)' },
-  'zh-TW': { terminal: '終端機指令', now: '立即送到（會確認）', next: '下一輪才收到', paste: '你自己貼上', notYet: '尚未支援', untested: '未測試', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留到那個對話的下一回合才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '（用提示請它執行 skill）' },
-  'zh-CN': { terminal: '终端命令', now: '立即送达（会确认）', next: '下一轮才收到', paste: '你自己粘贴', notYet: '暂不支持', untested: '未测试', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留到那个对话的下一回合才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '（用提示让它执行 skill）' },
+  en: { now: 'At once (confirmed)', next: 'At its next turn', paste: 'You paste it', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: '(opened by a prompt asking for the skill)' },
+  'zh-TW': { now: '立即送到（會確認）', next: '下一輪才收到', paste: '你自己貼上', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留到那個對話的下一回合才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '（用提示請它執行 skill）' },
+  'zh-CN': { now: '立即送达（会确认）', next: '下一轮才收到', paste: '你自己粘贴', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留到那个对话的下一回合才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '（用提示让它执行 skill）' },
 }
-// Each agent's reply cells in the support table: [command line, desktop app / IDE], as keys of WORDS.
-const REPLY = {
-  'Claude Code': ['now', 'notYet'], Codex: ['next', 'notYet'], Antigravity: ['next', 'untested'], Cursor: ['paste', 'untested'],
-  OpenCode: ['paste', 'notYet'], 'Grok Build': ['paste', null], 'Hermes Agent': ['paste', null],
-}
+// Each agent's command-line reply in the terminal table, a key of WORDS.
+const REPLY = { 'Claude Code': 'now', Codex: 'next', Antigravity: 'next', Cursor: 'paste', OpenCode: 'paste', 'Grok Build': 'paste', 'Hermes Agent': 'paste' }
 // A piece of text as a pattern that matches it and nothing else.
 const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 // What a heading holds: the lines after it, up to the next heading of its level or above.
@@ -425,37 +422,65 @@ describe('L0 discover and install from the README', () => {
     assert.equal(new Set(Object.values(SECTIONS).map(list => list.length)).size, 1, 'every language has the same number of sections')
   })
 
-  test('L0 README: the support table lists the seven agents, each with its icon at 28 px, board command and one reply cell for the command line and one for the desktop app or IDE, and leaves Muse Code out', () => {
+  test('L0 README: Supported agents has one table for the terminal and one for desktop apps and IDEs, each row with its icon at 28 px, board command and reply, and leaves Muse Code out', () => {
+    const headings = {
+      en: ['In a terminal (command line)', 'In a desktop app or IDE'],
+      'zh-TW': ['在終端機（命令列）', '在桌面 app 或 IDE'],
+      'zh-CN': ['在终端（命令行）', '在桌面 app 或 IDE'],
+    }
     const headers = {
-      en: ['Agent', 'Open the board', 'Reply · command line', 'Reply · desktop app / IDE'],
-      'zh-TW': ['Agent', '開看板', '回答 · 命令列', '回答 · 桌面 app / IDE'],
-      'zh-CN': ['Agent', '打开看板', '回复 · 命令行', '回复 · 桌面 app / IDE'],
+      en: ['Agent', 'Open the board', 'Your reply reaches it'],
+      'zh-TW': ['Agent', '開看板', '你的回答怎麼送到'],
+      'zh-CN': ['Agent', '打开看板', '你的回复怎么送到'],
+    }
+    // Words of the page and pane cells; "Not tested yet" is MESSAGING.md's Implemented with no live run.
+    const DESKTOP = {
+      en: { pane: 'The pane beside its chat', page: "The board page: the second Quick start command, in any terminal (the app's own too)", notYet: 'Not yet', untested: 'Not tested yet', second: 'The second Quick start command' },
+      'zh-TW': { pane: '它對話旁的窗格', page: '看板網頁：在任何終端機執行快速開始的第二個指令（app 自己的終端機也行）', notYet: '尚未支援', untested: '尚未測試', second: '快速開始的第二個指令' },
+      'zh-CN': { pane: '它对话旁的窗格', page: '看板网页：在任何终端运行快速开始的第二个命令（app 自带的终端也行）', notYet: '暂不支持', untested: '尚未测试', second: '快速开始的第二个命令' },
+    }
+    // Agents with a desktop app or IDE in docs/MESSAGING.md "Agent and surface support", and what that table says of each.
+    const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'untested'], Cursor: ['page', 'untested'], OpenCode: ['page', 'notYet'] }
+    const messaging = read('docs/MESSAGING.md')
+    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Proposed', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Implemented', 'Not tested'], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Proposed', 'Not tested']]) {
+      assert.ok(messaging.split('\n').some(line => line.startsWith(`| ${host} | ${surface} | `) && line.includes(`| ${status} | ${live} |`)), `docs/MESSAGING.md: ${host} ${surface} is ${status}, ${live}`)
     }
     for (const [name, lang] of READMES) {
       const text = read(name)
       const words = WORDS[lang]
-      const table = firstTable(section(text, SECTIONS[lang][2]) ?? '')
-      assert.ok(table, `${name}: the support table exists`)
-      assert.deepEqual(rows(table, '| |')[0].slice(1), headers[lang], `${name}: the support table's columns`)
-      const agents = rows(table, '| <img')
-      assert.deepEqual(agents.map(cells => /alt="([^"]+)"/.exec(cells[0])?.[1]), LISTED, `${name}: one row per agent, in order`)
-      for (const [icon, agent, command, commandLine, desktop] of agents) {
+      const desk = DESKTOP[lang]
+      const support = section(text, SECTIONS[lang][2]) ?? ''
+      const [terminalPart, desktopPart] = headings[lang].map(heading => section(support, heading, 3))
+      assert.ok(terminalPart && desktopPart, `${name}: the terminal and the desktop app subsections exist`)
+      assert.ok(support.indexOf(headings[lang][0]) < support.indexOf(headings[lang][1]), `${name}: the terminal comes first`)
+      // Nothing between a subsection heading and its table.
+      for (const part of [terminalPart, desktopPart]) assert.ok(part.trim().startsWith('| | Agent'), `${name}: a table follows its heading at once`)
+      const terminal = firstTable(terminalPart)
+      const desktop = firstTable(desktopPart)
+      for (const table of [terminal, desktop]) assert.deepEqual(rows(table, '| |')[0].slice(1), headers[lang], `${name}: the table's columns`)
+      const agents = rows(terminal, '| <img')
+      assert.deepEqual(agents.map(cells => /alt="([^"]+)"/.exec(cells[0])?.[1]), LISTED, `${name}: one terminal row per agent, in order`)
+      for (const [icon, agent, command, reply] of agents) {
         const file = /src="([^"]+)"/.exec(icon)[1]
         assert.ok(exists(file), `${name}: ${file} exists`)
         assert.match(icon, /\swidth="28"/, `${name}: ${agent}'s mark is drawn at 28 px, where the brand mark reads`)
         assert.equal(agent, /alt="([^"]+)"/.exec(icon)[1], `${name}: the row names ${agent}`)
         assert.deepEqual(codeSpans(command), BOARD_COMMANDS[agent] ? [BOARD_COMMANDS[agent]] : [], `${name}: ${agent}'s board command`)
-        assert.equal(command.startsWith(words.terminal), agent === 'Cursor', `${name}: only Cursor opens the board from the terminal`)
+        assert.equal(command === desk.second, agent === 'Cursor', `${name}: only Cursor opens the board with the second Quick start command`)
         assert.equal(command.includes(words.askNote), agent === 'Hermes Agent', `${name}: only Hermes's command carries the note that a prompt asked for the skill`)
-        const [line, app] = REPLY[agent]
-        assert.equal(commandLine, words[line], `${name}: ${agent}'s command-line reply`)
-        assert.equal(desktop, app ? words[app] : '—', `${name}: ${agent}'s desktop app / IDE reply`)
+        assert.equal(reply, words[REPLY[agent]], `${name}: ${agent}'s command-line reply`)
+      }
+      const apps = rows(desktop, '| <img')
+      assert.deepEqual(apps.map(cells => /alt="([^"]+)"/.exec(cells[0])?.[1]), Object.keys(DESK), `${name}: the desktop table lists the agents with an app or IDE, and no others`)
+      for (const [icon, agent, open, reply] of apps) {
+        assert.match(icon, /\swidth="28"/, `${name}: ${agent}'s mark is drawn at 28 px`)
+        assert.equal(open, desk[DESK[agent][0]], `${name}: how ${agent}'s app opens the board`)
+        assert.equal(reply, desk[DESK[agent][1]], `${name}: ${agent}'s app reply`)
       }
       assert.doesNotMatch(text, /Muse/i, `${name}: Muse Code is not in the README`)
-      const support = section(text, SECTIONS[lang][2])
       // The notes about which version was tested live in the validation records, not in the README.
       assert.doesNotMatch(support, /0\.24\.3|not run live|未實機執行|未实机运行/, `${name}: the support section carries no test-record notes`)
-      assert.doesNotMatch(support, /\bQueue\b/, `${name}: the support table never says Queue`)
+      assert.doesNotMatch(support, /\bQueue\b/, `${name}: the support tables never say Queue`)
       assert.ok(support.includes('docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste'), `${name}: web chats link to the hand-report steps`)
     }
   })

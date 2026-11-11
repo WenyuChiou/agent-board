@@ -36,15 +36,27 @@ npx @wenyuchiou/agent-board@next
 
 ## Supported agents
 
-| | Agent | Open the board | Reply · command line | Reply · desktop app / IDE |
-|:-:|---|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | At once (confirmed) | Not yet |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | At its next turn | Not yet |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | At its next turn | Not tested |
-| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Terminal command | You paste it | Not tested |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | You paste it | Not yet |
-| <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | You paste it | — |
-| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | `/agent-board` (opened by a prompt asking for the skill) | You paste it | — |
+### In a terminal (command line)
+
+| | Agent | Open the board | Your reply reaches it |
+|:-:|---|---|---|
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | At once (confirmed) |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | At its next turn |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | At its next turn |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | The second Quick start command | You paste it |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | You paste it |
+| <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | You paste it |
+| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | `/agent-board` (opened by a prompt asking for the skill) | You paste it |
+
+### In a desktop app or IDE
+
+| | Agent | Open the board | Your reply reaches it |
+|:-:|---|---|---|
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | The pane beside its chat | Not yet |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | The board page: the second Quick start command, in any terminal (the app's own too) | Not yet |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | The board page: the second Quick start command, in any terminal (the app's own too) | Not tested yet |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | The board page: the second Quick start command, in any terminal (the app's own too) | Not tested yet |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | The board page: the second Quick start command, in any terminal (the app's own too) | Not yet |
 
 - dot and other web chats report by hand: [how](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste).
 

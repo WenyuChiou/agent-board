@@ -36,15 +36,27 @@ npx @wenyuchiou/agent-board@next
 
 ## 支援的 agent
 
-| | Agent | 開看板 | 回答 · 命令列 | 回答 · 桌面 app / IDE |
-|:-:|---|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | 立即送到（會確認） | 尚未支援 |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 下一輪才收到 | 尚未支援 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 下一輪才收到 | 未測試 |
-| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 終端機指令 | 你自己貼上 | 未測試 |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己貼上 | 尚未支援 |
-| <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己貼上 | — |
-| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | `/agent-board`（用提示請它執行 skill） | 你自己貼上 | — |
+### 在終端機（命令列）
+
+| | Agent | 開看板 | 你的回答怎麼送到 |
+|:-:|---|---|---|
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | 立即送到（會確認） |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 下一輪才收到 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 下一輪才收到 |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 快速開始的第二個指令 | 你自己貼上 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己貼上 |
+| <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己貼上 |
+| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | `/agent-board`（用提示請它執行 skill） | 你自己貼上 |
+
+### 在桌面 app 或 IDE
+
+| | Agent | 開看板 | 你的回答怎麼送到 |
+|:-:|---|---|---|
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | 它對話旁的窗格 | 尚未支援 |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁：在任何終端機執行快速開始的第二個指令（app 自己的終端機也行） | 尚未支援 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁：在任何終端機執行快速開始的第二個指令（app 自己的終端機也行） | 尚未測試 |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板網頁：在任何終端機執行快速開始的第二個指令（app 自己的終端機也行） | 尚未測試 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁：在任何終端機執行快速開始的第二個指令（app 自己的終端機也行） | 尚未支援 |
 
 - dot 和其他網頁版聊天要手動回報：[怎麼做](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)（英文）。
 
