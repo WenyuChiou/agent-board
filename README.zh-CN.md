@@ -18,7 +18,11 @@ Claude Code、Codex、Antigravity 等 AI agent 都向你电脑上的同一块看
 
 ```sh
 npx @wenyuchiou/agent-board@next setup
-# 开一个 agent 的新对话后：
+```
+
+然后开一个 agent 的新对话，运行：
+
+```sh
 npx @wenyuchiou/agent-board@next
 ```
 
@@ -70,7 +74,7 @@ npx @wenyuchiou/agent-board@next
 回复 agent 的提问，和主动给它发消息，走的是同一条路，看你点哪个按钮：
 
 - **发送**把它交给已连接的对话；对话回确认才代表收到。没有确认也可能已经送到，先看一下那个 agent 再用**复制回答**，免得它收到两次。发送需要[开启消息功能](docs/MESSAGING.md#local-storage)（英文）。
-- **排入 agent 的下一回合**会留到那个对话的下一回合才送，一回合交一条，先排的先送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收。
+- **排入 agent 的下一回合**会留给那个对话的各个回合，一回合交一条，先排的先送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收。
 - **复制回答**把它放进剪贴板，由你粘贴到那个 agent。
 - 已经在 agent 自己的窗口里回复了？点**已回复，先隐藏**就能收掉这张卡。
 

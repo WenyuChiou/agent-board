@@ -64,6 +64,8 @@ const SCENES = {
 }
 // The first-run command stays on screen in every frame, reduced motion included.
 const COMMAND = 'npx @wenyuchiou/agent-board'
+// The plain line between the two Quick start blocks.
+const NEW_SESSION = { en: 'Then open a new session of your agent and run:', 'zh-TW': '然後開一個 agent 的新對話，執行：', 'zh-CN': '然后开一个 agent 的新对话，运行：' }
 // The seven agents with a 0.24.3 record, in the support table's order, and each one's board command (none for Cursor).
 const LISTED = ['Claude Code', 'Codex', 'Antigravity', 'Cursor', 'OpenCode', 'Grok Build', 'Hermes Agent']
 const BOARD_COMMANDS = { 'Claude Code': '/agent-board', Codex: '$agent-board', Antigravity: '/agent-board', OpenCode: '/agent-board', 'Grok Build': '/agent-board', 'Hermes Agent': '/agent-board' }
@@ -71,9 +73,9 @@ const BOARD_COMMANDS = { 'Claude Code': '/agent-board', Codex: '$agent-board', A
 // described, and the words of the phone row. The cells follow docs/MESSAGING.md "Agent and surface support"
 // (Proposed or None is "Not yet", Implemented and not tested is "Not tested", no such surface is a dash).
 const WORDS = {
-  en: { now: 'Sent when it is free', next: 'Handed over at its next turn, one per turn', paste: 'You paste it', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it until that session's next turn, one message a turn, oldest first, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: 'Ask it for the Agent Board skill' },
-  'zh-TW': { now: '它空下來就送出', next: '下一輪起交給它，一輪一則', paste: '你自己貼上', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留到那個對話的下一回合才送，一回合交一則，先排的先送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '請它執行 Agent Board skill' },
-  'zh-CN': { now: '它空下来就发出', next: '下一轮起交给它，一轮一条', paste: '你自己粘贴', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留到那个对话的下一回合才送，一回合交一条，先排的先送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '让它执行 Agent Board skill' },
+  en: { now: 'Sent when it is free', next: 'Handed over from its next turn, one per turn', paste: 'You paste it', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it for that session's turns, one message a turn, oldest first, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: 'Ask it for the Agent Board skill' },
+  'zh-TW': { now: '它空下來就送出', next: '下一輪起交給它，一輪一則', paste: '你自己貼上', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留給那個對話的各個回合，一回合交一則，先排的先送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '請它執行 Agent Board skill' },
+  'zh-CN': { now: '它空下来就发出', next: '下一轮起交给它，一轮一条', paste: '你自己粘贴', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留给那个对话的各个回合，一回合交一条，先排的先送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '让它执行 Agent Board skill' },
 }
 // Each agent's command-line reply in the terminal table, a key of WORDS.
 const REPLY = { 'Claude Code': 'now', Codex: 'next', Antigravity: 'next', Cursor: 'paste', OpenCode: 'paste', 'Grok Build': 'paste', 'Hermes Agent': 'paste' }
@@ -137,9 +139,13 @@ describe('L0 discover and install from the README', () => {
       const first = section(text, SECTIONS[lang][0])
       assert.ok(first, `${name}: Quick start exists`)
       const node = first.indexOf('Node.js 22')
-      // A comment line between the commands says to open a new session first.
-      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board@next setup\r?\n# [^\n]+\r?\nnpx @wenyuchiou\/agent-board@next)\r?\n```/.exec(first)
-      assert.ok(install && /setup\r?\n# [^\n]+\r?\nnpx @wenyuchiou\/agent-board@next$/.test(install[1]), `${name}: the new-session comment sits between setup and the bare npx line`)
+      // Two copyable blocks, so a Claude-only setup has its new session before the board command runs (bin/agent-board.mjs):
+      // setup, then one plain line saying to open a new session, then the bare npx command.
+      const sequence = new RegExp('```sh\n' + literal('npx @wenyuchiou/agent-board@next setup') + '\n```\n\n' + literal(NEW_SESSION[lang]) + '\n\n```sh\n' + literal('npx @wenyuchiou/agent-board@next') + '\n```\n')
+      const install = sequence.exec(first)
+      assert.ok(install, `${name}: Quick start is the setup block, the exact new-session line, then the board block`)
+      assert.equal([...first.matchAll(/```sh\n/g)].length, 2, `${name}: Quick start has two command blocks`)
+      assert.ok(!/^#/m.test(first.slice(first.indexOf('```sh'), first.lastIndexOf('```'))), `${name}: no shell comment stands in for the new-session step`)
       assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then setup and the board command in order`)
       // The language flag, --no-open, the clone route and the agent-install prompt moved to docs/SETUP.md (checked below).
       assert.ok(!first.includes('--no-open') && !first.includes('--lang'), `${name}: Quick start leaves the options to the setup guide`)
@@ -156,8 +162,8 @@ describe('L0 discover and install from the README', () => {
     for (const [name, lang] of READMES) {
       const quick = section(read(name), SECTIONS[lang][0])
       assert.ok(quick, `${name}: Quick start exists`)
-      const commands = /```(?:sh|bash)\n([\s\S]*?)\n```/.exec(quick)?.[1]
-      assert.ok(commands, `${name}: Quick start has a command block`)
+      const commands = [...quick.matchAll(/```(?:sh|bash)\n([\s\S]*?)\n```/g)].map(match => match[1]).join('\n')
+      assert.ok(commands, `${name}: Quick start has command blocks`)
       assert.ok(!commands.split('\n').some(line => /^\s*agent-board(?:\s|$)/.test(line)), `${name}: Quick start cannot require the global command`)
       assert.ok(commands.split('\n').includes('npx @wenyuchiou/agent-board@next'), `${name}: Quick start opens the board with npx, on the pre-release tag`)
     }

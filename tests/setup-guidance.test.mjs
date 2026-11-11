@@ -121,13 +121,30 @@ test('a repeat preview when every agent is already set up omits first-time steps
   assert.match(repeat, /Claude Code: run claude plugin/i)
 }))
 
-// The READMEs' Quick start is three bullets; the option itself is in the setup guide, and the
-// troubleshooting rows still avoid the bare flag.
-test('the setup guide documents --html --no-open, and the READMEs do not give --no-open alone (#1246)', () => {
+// The READMEs' Quick start is two command blocks and three bullets; the option itself is in the setup guide.
+// A README may give --no-open only inside the complete command that also has --html: with --no-open alone, an
+// interactive terminal over SSH or without a display gets the terminal board, not a page.
+test('the setup guide documents --html --no-open, and no README gives a command with --no-open but not --html (#1246)', () => {
   const setup = readFileSync(new URL('../docs/SETUP.md', import.meta.url), 'utf8')
   assert.match(setup, /`--html --no-open`/)
+  assert.match(setup, /`--no-open` alone does not/)
   for (const file of ['README.md', 'README.zh-TW.md', 'README.zh-CN.md']) {
-    assert.doesNotMatch(readFileSync(new URL('../' + file, import.meta.url), 'utf8'), /`--no-open`/, file)
+    const text = readFileSync(new URL('../' + file, import.meta.url), 'utf8')
+    // Every code span and every shell line is a complete command or flag list: look at each that holds the flag.
+    const pieces = [...text.matchAll(/`([^`\n]+)`/g)].map(match => match[1]).concat(text.split(/\r?\n/).filter(line => /^\s*(?:npx|agent-board|node)\b/.test(line)))
+    for (const piece of pieces.filter(one => one.includes('--no-open'))) assert.ok(piece.includes('--html'), `${file}: ${piece} gives --no-open without --html`)
+  }
+})
+
+// A pasted block cannot wait for a new session, so setup and the board command are separate blocks with the
+// session step as one plain line between them (a Claude-only setup has no board script until that session starts).
+test('every Quick start is the setup block, the new-session line, then the board block (no comment line)', () => {
+  const lines = { 'README.md': 'Then open a new session of your agent and run:', 'README.zh-TW.md': '然後開一個 agent 的新對話，執行：', 'README.zh-CN.md': '然后开一个 agent 的新对话，运行：' }
+  for (const [file, line] of Object.entries(lines)) {
+    const text = readFileSync(new URL('../' + file, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+    const expected = '```sh\nnpx @wenyuchiou/agent-board@next setup\n```\n\n' + line + '\n\n```sh\nnpx @wenyuchiou/agent-board@next\n```\n'
+    assert.ok(text.includes(expected), file)
+    assert.doesNotMatch(text, /^# .*(?:session|對話|对话)/m, file)
   }
 })
 
