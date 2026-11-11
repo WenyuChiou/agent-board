@@ -52,7 +52,7 @@ npx @wenyuchiou/agent-board@next
 
 | | Agent | 打开看板 | 你的回复怎么送到 |
 |:-:|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | 它对话旁的窗格 | 暂不支持 |
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | 聊天旁的面板 | 暂不支持 |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板网页（第二个命令） | 暂不支持 |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页（第二个命令） | 尚未测试 |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板网页（第二个命令） | 尚未测试 |

@@ -436,8 +436,8 @@ describe('L0 discover and install from the README', () => {
     // Words of the page and pane cells; "Not tested yet" is MESSAGING.md's Implemented with no live run.
     const DESKTOP = {
       en: { pane: 'The pane beside its chat', page: 'Board page (second command)', notYet: 'Not yet', untested: 'Not tested yet', second: 'The second Quick start command' },
-      'zh-TW': { pane: '它對話旁的窗格', page: '看板網頁（第二個指令）', notYet: '尚未支援', untested: '尚未測試', second: '快速開始的第二個指令' },
-      'zh-CN': { pane: '它对话旁的窗格', page: '看板网页（第二个命令）', notYet: '暂不支持', untested: '尚未测试', second: '快速开始的第二个命令' },
+      'zh-TW': { pane: '聊天旁的面板', page: '看板網頁（第二個指令）', notYet: '尚未支援', untested: '尚未測試', second: '快速開始的第二個指令' },
+      'zh-CN': { pane: '聊天旁的面板', page: '看板网页（第二个命令）', notYet: '暂不支持', untested: '尚未测试', second: '快速开始的第二个命令' },
     }
     // Agents with a desktop app or IDE in docs/MESSAGING.md "Agent and surface support", and what that table says of each.
     const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'untested'], Cursor: ['page', 'untested'], OpenCode: ['page', 'notYet'] }
