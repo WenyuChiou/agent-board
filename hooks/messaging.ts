@@ -115,9 +115,9 @@ export const deliveryText = (message: Message, s: Strings = ZH_TW): string => [
     ? s.messagesDeliveryBoard
     : s.messagesDeliveryAgent(message.framingNonce ? senderLabel(message.from) : agentOf(message.from)),
   s.messagesDeliveryWarning,
-  ...(message.redelivered ? [s.messagesDeliveryRepeat] : []),
-  // A Codex thread has run one message twice (L2), so it is told what to do when it has answered already.
-  ...(agentOf(message.to) === 'codex' ? [s.messagesDeliveryAnswered(message.nonce)] : []),
+  // A Codex thread has run one message twice (L2), so it is told what to do when it has answered already; a message
+  // sent again says that in its own line.
+  ...(message.redelivered ? [s.messagesDeliveryRepeat] : agentOf(message.to) === 'codex' ? [s.messagesDeliveryAnswered(message.nonce)] : []),
   s.messagesDeliveryAck(message.nonce),
   `<<<AB-${message.framingNonce ?? message.nonce}`,
   message.text,
