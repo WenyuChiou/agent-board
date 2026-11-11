@@ -4,3 +4,5 @@ node_modules/
 docs/preview/out/
 # Bytecode from running scripts/remote-reporter without -B
 scripts/remote-reporter/__pycache__/
+# Agents' coordination notes and project-review runs (owner reports, security findings); never committed
+.coord/
