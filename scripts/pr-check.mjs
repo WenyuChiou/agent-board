@@ -217,11 +217,11 @@ export const findingLink = ({ title = '', body = '', number = null, association 
   const agentSection = clean.match(/^#{2,3}[ \t]*Agent name[ \t]*\r?\n+([^\r\n#][^\r\n]*)/im)?.[1]?.trim() ?? ''
   const hasFormAgent = Boolean(agentSection && !/^(?:none|n\/a|manual|_no response_)$/i.test(agentSection))
   const hasFindingTitle = /\bfinding\b/i.test(String(title ?? ''))
-  const hasFindingCue = /\b(?:finding|found\s+(?:by|in|on|during|while|from)|from\s+(?:the\s+)?(?:review|outside\s+review|audit|user-sim)|review\s+finding|audit\s+finding|split\s+from|source\s+pr)\b/i.test(clean)
-  const hasReviewFormCue = /\b(?:finding|review(?:ing)?|outside\s+review|audit|user-sim|split\s+from|source\s+pr|follow-?up)\b|\bfound\s+(?:by|while\s+reviewing|during\s+review|in\s+(?:pr|pull\s+request))\b/i.test(clean)
+  // Require a PR, review, audit, or finding cue so ordinary bug reports from team members ("found while using the app") pass.
+  const hasPrOrReviewCue = /\b(?:finding|review(?:ing)?|outside\s+review|audit|user-sim|split\s+from|source\s+pr|follow-?up)\b|\bfound\s+(?:by\s+(?:the\s+)?(?:review|outside\s+review|audit|\S+\s+on)|(?:while|when|during)\s+(?:reviewing|a\s+review|pr\b)|in\s+(?:a\s+)?(?:pr|pull\s+request))\b|\bfrom\s+(?:the\s+)?(?:review|outside\s+review|audit|user-sim|pr|pull\s+request)\b/i.test(clean)
   const fromPrSection = clean.match(/^#{2,3}[ \t]*Pull request it came from[ \t]*\r?\n+([^\r\n#][^\r\n]*)/im)?.[1]?.trim() ?? ''
   const hasSectionAnswer = Boolean(fromPrSection && !/^(?:none|n\/a|_no response_)$/i.test(fromPrSection))
-  const isLaneFinding = isFinding || hasFindingTitle || hasSectionAnswer || ((hasAuthor || isTeamAuthor) && hasFindingCue) || (hasFormAgent && hasReviewFormCue)
+  const isLaneFinding = isFinding || hasFindingTitle || hasSectionAnswer || ((hasAuthor || isTeamAuthor || hasFormAgent) && hasPrOrReviewCue)
   if (!isLaneFinding) return output
 
   // Strip standalone Fixes/Part of lines so a roadmap or issue link such as "Part of #209" does not mask a missing source PR link.

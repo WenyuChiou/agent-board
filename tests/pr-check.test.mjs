@@ -1343,6 +1343,12 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
     title: 'bug: window opens off screen',
     body: 'I found while using the app that the window opened off screen.\n\n### Pull request it came from\n\n_No response_\n',
   }).problems, [])
+  // Team members filing an ordinary bug report (not a review/PR finding) also pass without a source PR link.
+  assert.deepEqual(findingLink({
+    title: 'bug: window opens off screen',
+    body: 'I found while using the app that the window opened off screen.\n\n### Agent name\n\nantigravity\n\n### Pull request it came from\n\n_No response_\n',
+    association: 'OWNER',
+  }).problems, [])
   assert.equal(findingLink({ title: 'docs: small check', body: 'Broken link in README.', isFinding: true }).problems.length, 1)
   // Bug-form Agent name field and issue author_association identify lane findings even without an Author line.
   assert.equal(findingLink({
@@ -1351,7 +1357,7 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
   }).problems.length, 1)
   assert.equal(findingLink({
     title: 'fix(board): resize glitch',
-    body: 'Found during testing of the resize layout.',
+    body: 'Found during a review of the resize layout.',
     association: 'COLLABORATOR',
   }).problems.length, 1)
 
