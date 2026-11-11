@@ -207,10 +207,11 @@ const isQuoted = (line: string, mark: number): boolean => {
   }
   // A quote the reply talks about (`escape " here?`) has no partner after the mark. A partner right
   // after the mark closes (`他問"要不要?"好的`). Otherwise the partner opens a later quotation, and the
-  // question asks, only when a space comes before it, as a closing quote never has (`stray " here?
-  // "Yes"`, #1290), and that quotation closes. A quote opened right after a reporting word in the same
-  // sentence (`他問 "`, `I asked "`) is what was said, so its partner closes it. Any other partner
-  // closes, as on main (`他表示 " 要不要？我可以幫忙"然後說"好"`).
+  // question asks, only when the earlier quote stands alone between spaces, as an opening quote
+  // never does (`stray " here?`, #1290), a space comes before the partner, and that quotation
+  // closes (`"Yes"`). A quote opened right after a reporting word in the same sentence (`他問 "`,
+  // `I asked "`) is what was said, so its partner closes it. Any other partner closes, as on main
+  // (`他表示 " 要不要？我可以幫忙"然後說"好"`, `他表示 "要不要？ "然後說"👍"`).
   const partner = line.indexOf('"', mark + 1)
   const isRightAfter = /^[?？]["”」』)）]*$/.test(line.slice(mark, partner))
   const isReported = REPORTS.test(line.slice(0, Math.max(straight, 0)).split(/[.!?。！？]/).pop() ?? '')
@@ -227,15 +228,16 @@ const isQuoted = (line: string, mark: number): boolean => {
       const char = line[i] ?? ''
       if (char === '\\') i += 1
       else if (char !== '"') continue
-      else if (isClosed) after = after >= 0 || isLoneQuote(line, i) ? -1 : i
+      else if (isClosed) after = after >= 0 ? -1 : /\d/.test(line[i - 1] ?? '') ? -1 : i
       else if (/\d/.test(line[i - 1] ?? '') && !/^[\d.,]+$/.test(line.slice(partner + 1, i))) continue
       else if (/\s/.test(line[i - 1] ?? ' ')) return false
-      else if (/[\p{L}\p{N}]/u.test(line[i + 1] ?? '')) return false
+      else if (!/^(?:\s|$|\p{P})/u.test(line.slice(i + 1, i + 2))) return false
       else isClosed = true
     }
     return isClosed && after === -1
   }
-  const isOpener = !isReported && /\s/.test(line[partner - 1] ?? '') && isLaterQuotation()
+  const isAlone = /^\s?$/.test(line[straight - 1] ?? '') && /\s/.test(line[straight + 1] ?? '')
+  const isOpener = isAlone && !isReported && /\s/.test(line[partner - 1] ?? '') && isLaterQuotation()
   const isCloser = partner !== -1 && (isRightAfter || !isOpener)
   if (straight >= 0 && isCloser) open.push(straight)
   // An apostrophe also sits inside words, so a single quote counts only when it closes right
