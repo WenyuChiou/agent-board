@@ -4,9 +4,10 @@ The owner chose this plan on 2026-11-11, after a Fable 5.2 review of the whole p
 
 **Theme:** one command to install. From 0.24.4 on, the board keeps itself up to date. The Codex sessions it can see are listed. An approval a session is waiting on can be answered from the board, and the board says plainly how each answer reaches each agent.
 
-**Size:** about 20 issues and 6 new ones, plus the delivery work. The owner's answer on size, 2026-11-11: 「全部保留，晚一週」. Nothing moves out, and 0.24.4 ships about a week later than first planned. If it still slips, cut in this order and no other:
+**Size:** about 20 issues and 8 new ones, plus the delivery work. The owner's answer on size, 2026-11-11: 「全部保留，晚一週」. Nothing moves out, and 0.24.4 ships about a week later than first planned. If it still slips, cut in this order and no other:
 1. The scenario-b receivers (a message to an agent that is busy): Grok first, then Hermes, then Cursor turn-end.
-2. Never cut: D1, D3 (when F10 passes), OpenCode, the Codex record, the gate.
+2. The approval routes on the other hosts, each one whose check has not passed: OpenClaw, then Hermes, then Grok, then DeepSeek Harness. A cut route leaves "answer in its window" on its card.
+3. Never cut: D1, D3 (when F10 passes), OpenCode, the Codex record, the gate.
 
 ## The bar, and the step ceilings
 
@@ -74,6 +75,18 @@ First install does not reach 90% in 0.24.4: every host loads its hooks when a se
   | Conversation ended | the host's session-end event, or no event for a set time and no live process | take over, or reopen where the host can resume |
 
   The first four after Working sit under Needs you in amber; Done, to check sits there too, in green, until Seen is pressed, and is counted apart from the waiting ones. The page, the terminal board, `--status` and `--json` use the same six states.
+- **Rules from the outside read of this table** (Fable 5.2, 2026-11-11: 4 critical, 8 high and 4 medium holes, its report kept with the project review notes). The press rules are D3's: each press carries the item's id, turn and state, and an agent cannot press. Here:
+  - A seventh row, **Turn ended (cannot tell if finished)**: grey, outside Needs you, no button. It is used when the agent keeps no step list, when the only open step is the hook's own placeholder, or when the plan was not updated in the turn that just ended. "Stopped, not finished" needs a plan update inside that turn.
+  - A turn the person stopped (Codex Interrupt, Esc or Ctrl+C in Claude Code) shows "You stopped it", outside Needs you.
+  - A `[!]` step shows as Blocked, with its note, among the answers. A row whose only open steps are `[>]` or wait for someone else shows "Waiting on something else", outside Needs you. Hand-kept tasks are outside the six.
+  - The order when two apply: approval, answer, stopped, done to check, ended.
+  - The closing words of a finished turn ("Want me to add tests too?") do not hold it amber: with every step done it is Done, to check, with the question as a line. A turn whose reply text the board never sees (Gemini, Muse, OpenClaw, DeepSeek) cannot show Waits for your answer from its text, and never offers Continue.
+  - Continue only where the host wakes an idle session (Claude Code CLI, DeepSeek, OpenCode; Codex if F6 passes). Elsewhere the card says "open its window to continue", with the take-over link. A queued Continue is dropped when the person's own prompt reaches the agent first.
+  - Counts: `waiting` stays approvals plus answers; `stopped` and `toCheck` are new numbers beside it. Reminders and notifications fire for approvals and answers only.
+  - Seen is kept by session and turn, so a late event for the same turn does not bring the row back. An unseen Done, to check is never archived on its own; it folds into Done recently after 3 days.
+  - "No event for a set time" is 30 minutes, the board's existing "not heard from". The process check records a process id and its start time at session start, for terminal hosts only; without both, a row can be "unsure", never "ended". App and IDE hosts stay "unsure".
+  - Before the table test is written, one live record per host for the event orders not proven from code: Hermes (an end after each model call), Antigravity (Stop ends a loop, not a turn), Codex (a plan event after Stop), Muse (whether it ever shows Working).
+  - Defaults the owner may still change: whether Stopped counts in the Needs-you number (not counted), Continue on hosts that cannot be woken (absent), how long an unseen Done, to check stays (3 days), a courtesy question after finished work (Done, to check).
 - **Known limits, said as they are.** Every host here sends a turn-end event, so "stopped, not finished" and "done, to check" work for all of them. Antigravity and Hermes send no session-end event (Hermes fires its end after every turn), and a window closed by force or a crash sends none from any host: for those, "conversation ended" rests on the process check, and until then the row says "unsure" with its age. An agent that keeps no step list gives the board no way to tell "stopped" from "done", and its row says so.
 - **Done when:** the four surfaces agree on every count in the user-simulation run; no row stays "working" after its turn ended; the rates and the choice are on the issue. On each host with a live record, a turn that asks, a turn that stops with steps left, a turn that finishes and a closed window each show their state; Seen moves a row to Done recently, and it stays there until a new turn starts.
 - **Test:** one file fed to the four surfaces; a stale-row case in `tests/e2e/l4-time`; the shape set as a table test; a table test from each host's events and steps to the six states.
@@ -102,14 +115,46 @@ The owner: 「0.24.4 就上，有條件」. The limits, exactly:
 - **Allow once** and **Deny** for Codex, OpenCode and Claude Code. Claude Code joins through its `PermissionRequest` hook (F13: its hook documentation says the hook can wait and answer allow or deny, and adds no standing rule unless the hook asks for one; one live run must still show what the terminal shows while the hook waits). Cursor and Grok can only be denied, so their card offers Deny only. Hermes has no button (its approval hooks only observe). Antigravity documents no way to answer its prompt, so its card shows the request and no button; a live test is 0.24.5. Many Antigravity users run it in turbo mode (it always goes ahead and never asks), where there is nothing to approve: the board only shows its progress and hands it messages, at its next turn. The owner, 2026-11-11: 「它其实可以开一个 turbo 模式，就是一直都过不会问…只要发讯息，它也只是一个传送而已」.
 - No button where no hook runs: Claude Code in `bypassPermissions` or `dontAsk` mode, or with every hook turned off. A Claude Code session run with `-p` denies a call that no hook decides, so the 30 s fallback to the host's own prompt holds for interactive sessions only.
 - Approvals take their own route, a hook asking the local page, never the message path. This changes a written rule: `docs/MESSAGING.md` (lines 8, 235, 280, 431, 602) says a message never approves a tool. `MESSAGING.md` and `docs/dev/product-principles.md` change in the same pull request, by the owner's hand approval.
-- The local 127.0.0.1 page only; the LAN page shows the request and no button.
-- Bound to session, turn and a hash of the exact command, which is shown in full.
-- The hook waits at most 30 s, then returns no decision and the host's own prompt appears as today.
-- Never "always". Every approval is journaled with the command.
-- Ships only if F10 shows a command inside a gated Codex session cannot read the address file and post to the page.
-- `SECURITY.md` states the hole that stays: any program running as the person can press it. This is the owner's own approval to give.
+- The local 127.0.0.1 page only. The LAN page says "an approval is waiting" and shows neither the command nor a button.
+- Each pending request is its own item, with the host's own request id; a session may have several, and a sub-agent's request shows on its parent's row. A press carries that id, the turn and the state the page drew; the server refuses it on any difference and redraws. Where the host gives no request id or turn (OpenCode's status events have no turn id), the board shows the request and no button.
+- The command is shown in full after the board's `redact`. The journal keeps its hash and first words only. `scripts/codex-local.ts:638-639` and `docs/SETUP.md:326-328` promise that tool inputs and permission decisions are not kept; they change in the same pull request.
+- Allow once and Deny only: never "always", never "for this session". Where the host takes a message with a denial (Claude Code, Codex), a "Deny and say why" box sends it. The owner, 2026-11-11: 「照建議」.
+- The hook waits only while a local page is open and has confirmed it drew the request, and at most 30 s. Otherwise it returns at once with no decision, and the host's own prompt appears as today. After that fallback the row says "asked in its window", with no button. The installed hook limit is 3 s today (`hooks/hook-safety.ts:17-24`), so this is a hook change: existing installs get it through the update entry (M3).
+- An agent cannot press it: the approve route needs a secret that exists only in the open page, not in the address file, and the board's agent tools never offer Allow, Continue or Seen. Ships only if F10 shows, on every host that gets a button (Codex, OpenCode, Claude Code), that a command inside the agent's session cannot approve.
+- `SECURITY.md` states the hole that stays: a program running as the person that can drive the browser can still press it. This is the owner's own approval to give.
 - This takes the approval part of #1119 into 0.24.4. The token redesign stays in 0.24.5.
-- **Test:** a stand-in hook that waits: allow-once reaches only the bound request, 30 s falls back, the LAN is refused. New issue.
+- **Test:** a stand-in hook that waits: allow-once reaches only the bound request; a press with an old id, turn or state is refused; a press without the page's secret is refused; no open page returns at once; 30 s falls back; the LAN is refused. New issue.
+
+### Answer or send: the controls for each kind of prompt
+The owner, 2026-11-11: 「因為要讓使用者在板子上直接點選項傳送 還是訊息 那個得想想 針對AI怎麼問 決定按鈕與傳送怎麼設計吧」, and on the proposal below, 「照建議」. Every host asks differently (the 2026-11-11 survey of host documentation, not yet live: the checks below). The board does one of two things, and the card says which:
+- **Answer:** the agent is stopped at its own prompt (an approval, or its question tool with choices), and the board answers that prompt. It takes effect at once. The buttons are the host's own options, in its words, limited to those the board may give.
+- **Send:** the agent asked in the text of its reply. The board sends a message, and the line under the buttons says when it arrives (D1): now, at its next turn, or "answer in its window".
+
+| How the agent asks | What the board shows | Answer or send, where |
+|---|---|---|
+| Approval | the command, then Allow once, Deny, and "Deny and say why" where the host takes it | answer: Claude Code, Codex, OpenCode (D3). Elsewhere the request and "answer in its window" |
+| One choice from options | one button per option (its label, its description small); one tap sends, and the card says "Sent: <option>" | answer: Claude Code's question tool (F14), OpenCode's question tool (F15). Codex's question tool only through its app server: 0.24.5 |
+| Several choices | a box per option and Send | as above, where the host allows several |
+| Options plus "Other" | the options and a text box | as above |
+| A question in the reply text | buttons when the board reads choices from it ("A or B?"), and a text box | send, with D1's line; on next-turn hosts it says "arrives at its next turn" |
+| A password or other secret | no box: "enter it in its window" | never through the board |
+| The agent never asks (Antigravity turbo, Codex never or yolo, Claude Code bypass, Hermes off, Grok always-approve, Cursor Run Everything) | no approval card; progress and messages only | send only |
+
+Until a host's route below has passed its check, its card shows the request and "answer in its window", with no button that would only pretend.
+
+### Approvals and questions on the other hosts
+The owner, 2026-11-11: 「我還是希望 Antigravity、Cursor、Grok、Hermes、OpenClaw 要有方式 另外 deepseek harness 也要可以」. None of these lets an outside program answer its own prompt the way Claude Code, Codex and OpenCode do, but each has a hook or service that can decide before the prompt or in its place. Each route ships only after its check passes on a live record; until then the card says "answer in its window". Questions with choices on these hosts arrive as reply text, so they use Send (D1, D2).
+
+| Host | Route for Allow and Deny | Its check |
+|---|---|---|
+| Antigravity | a `PreToolUse` hook waits for the press and returns `auto_approve` or `deny`; with no page open it returns `ask`, so its own prompt shows | F16 |
+| Cursor | `beforeShellExecution` and `beforeMCPExecution` wait and return `allow` or `deny`; with no page open, `ask` | F17 |
+| Grok Build | its `PreToolUse` hook can only deny. Deny works in any mode; Allow needs the board as the gate (below) | F18 |
+| Hermes Agent | `pre_tool_call` can block, which is Deny; Allow needs the board as the gate, or a reply through Hermes's own messaging gateway (`/approve`) | F19 |
+| OpenClaw | its gateway resolves an approval (allow once, deny) for an operator client, which needs a gateway credential the person sets up once | F20 |
+| DeepSeek Harness | not documented: its board plugin runs inside the host, and may see a tool call before it runs | F21 (after F2) |
+
+**The board as the gate** (Grok, Hermes, and any host whose hook cannot allow): the person chooses, per host, to turn that host's own asking off and let the board's hook decide every tool call that would have asked. Setup never makes this choice: the person turns it on with one command, which the card offers. A hook that times out lets the call through on Grok, so the hook's limit must be raised above its wait and checked. With no board page open, the hook denies and tells the agent "open the board to approve", so nothing runs unasked.
 
 ### D2. Receivers, one pull request per host
 In this order: OpenCode (a new receiver on the DeepSeek pattern; wakes an idle session, hands over at `session.idle`), Codex turn end (a `Stop` hand-over, and the wake if F6 passes), Cursor (enroll on any hook event, hand over at `stop`), Hermes, Grok (only if F8 passes). Before the first, a small pull request moves the turn-event block out of `scripts/codex-local.ts:1076-1115` into `scripts/hook-delivery.ts`. Hook changes must land in this version, not a patch.
@@ -131,10 +176,18 @@ Half a day each, a dated note each, before the milestone they feed.
 | F7 | Can OpenClaw's in-process plugin send into a session without a gateway credential? | M1, D2 |
 | F8 | Does Grok's `UserPromptSubmit` output reach the model, and does a blocked `Stop` continue? | D2 |
 | F9 | OpenCode: `promptAsync` or `prompt`, and does it wake an idle session? | D2 |
-| F10 | Can a command inside a gated Codex session read the address file and post to 127.0.0.1? | D3 |
+| F10 | On each host that gets an approval button (Codex, OpenCode, Claude Code): can a command inside the agent's session approve its own request, through the address file or otherwise? | D3 |
 | F11 | Copilot: its hooks and session id. Notes only. | 0.24.5 |
 | F12 | Windsurf: hooks or MCP only. Notes only. | 0.24.5 |
 | F13 | Does Claude Code's `PermissionRequest` hook let the board's hook wait for the press and return allow or deny (and Antigravity, if it has such a hook)? Read 2026-11-11 from the hook documentation: yes for Claude Code, one live run left; no documented answer route for Antigravity. | D3 |
+| F14 | Does a Claude Code `PreToolUse` hook that returns the answers for its question tool close the question in the terminal and the desktop app, and in what form are several choices and "Other" given? | Answer or send |
+| F15 | OpenCode: in the installed version, which routes answer a permission and a question, does a denial take a message, and do both reach the event stream? | D3, Answer or send |
+| F16 | Antigravity CLI and IDE: does a waiting `PreToolUse` hook's `auto_approve` or `deny` take the place of the prompt under its default and request-review settings, within its 30 s limit, and does `ask` bring the prompt back? | Other hosts |
+| F17 | Cursor IDE and `cursor-agent`: do `allow`, `deny` and `ask` from a waiting `beforeShellExecution` / `beforeMCPExecution` hook all hold? | Other hosts |
+| F18 | Grok Build: can the `PreToolUse` limit be raised above the wait; does deny hold in ask and always-approve modes; does a timeout let the call through? | Other hosts |
+| F19 | Hermes: does a waiting `pre_tool_call` hold the call; with approvals off, does block hold; can the board reply through a Hermes messaging gateway without the person's chat credential? | Other hosts |
+| F20 | OpenClaw: can the board resolve an approval through the gateway, and what credential does that take? | Other hosts |
+| F21 | DeepSeek Harness: does it ask before a tool runs, and can its plugin see and decide that call? | Other hosts |
 
 ## Lanes and merge order
 
@@ -154,7 +207,7 @@ Half a day each, a dated note each, before the milestone they feed.
 - "Upgrades itself" for the upgrade to 0.24.4, for an install with no `npx`, or for the Claude Code plugin (its own channel). "0 typed commands" without "from 0.24.4 on, when nothing needs asking".
 - "90% automatic" for first install, for an app or IDE person, or for macOS (no run).
 - "Your sessions are there" or "at once": the board lists Codex sessions found in Codex's records, marked not connected. No other host.
-- Send, Queue or "receives" for an agent or surface with no live record on the 0.24.4 head. "Goes in now" where the record shows turn end or next turn. "Every agent receives" or "no Copy": the release notes print the delivery table's counts instead. "Approve from the board" unless D3 shipped (F10 passed). "Wakes an idle session" for a hook-mailbox host.
+- Send, Queue or "receives" for an agent or surface with no live record on the 0.24.4 head. "Goes in now" where the record shows turn end or next turn. "Every agent receives" or "no Copy": the release notes print the delivery table's counts instead. "Approve from the board" unless D3 shipped (F10 passed), and never for a host whose route's check has not passed. "Wakes an idle session" for a hook-mailbox host.
 - "Opens a window" in any app not shown doing so on the 0.24.4 head (#865).
 - "Knows when a conversation ended" for Antigravity, Hermes or a window closed by force, unless a record on the 0.24.4 head shows the process check doing it.
 - "Nothing to install": Node 22 or newer and a terminal are needed once.
@@ -185,7 +238,7 @@ The owner: 「全部加進去」. Lane D carries the first three as issues; the 
 
 ## Scope kept from the first draft
 
-- **In:** #1305, #1302, #1303, #1304 (upgrade); #868, #865, #1272, #1278, #1289 (first install); #1296, #1092 with pull request #1288, #1287, #1290 (status and questions); #557 (the next-turn record); #851, #1297 (the ledger); #1276 (owed from the 0.24.3 outside read); #1249; OpenClaw and DeepSeek Harness; Gemini CLI retirement. New issues to open: the update entry and ask rule (M3), the daily check and its start (M4), Codex sessions from its records (M6), the ledger and J11 (M0), the six row states (M7), and approvals on the board (D3).
+- **In:** #1305, #1302, #1303, #1304 (upgrade); #868, #865, #1272, #1278, #1289 (first install); #1296, #1092 with pull request #1288, #1287, #1290 (status and questions); #557 (the next-turn record); #851, #1297 (the ledger); #1276 (owed from the 0.24.3 outside read); #1249; OpenClaw and DeepSeek Harness; Gemini CLI retirement. New issues to open: the update entry and ask rule (M3), the daily check and its start (M4), Codex sessions from its records (M6), the ledger and J11 (M0), the six row states (M7), approvals on the board (D3), the answer-or-send controls, and the approval routes on the other hosts.
 - **README (#1267)** is in flight outside this plan; its pictures show only the seven agents with live records, and Muse Code leaves the support table in all three languages.
 - **Process, no version:** #1285, #1257 with its pull request #1259, #1258.
 - **May close, each after its check:** #884 (every skill reads `--json`; the MCP part is #723), #810 (only if a real SSH terminal can be tried), #1161 (each open item has its own issue).
