@@ -142,8 +142,7 @@ test('recognized released boards upgrade while an edited released board is kept 
   const plan = JSON.parse(edited.stdout)
   assert.deepEqual(plan.conflicts, [])
   assert.deepEqual(plan.keptCode, [f.script])
-  assert.equal(readFileSync(f.script, 'utf8'), `${released}// mine
-`)
+  assert.equal(readFileSync(f.script, 'utf8'), `${released}// mine\n`)
 }))
 
 test('updating a released board repairs stale sibling manifests without adding unlisted files', () => fixture(f => {

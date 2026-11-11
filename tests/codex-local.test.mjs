@@ -2339,8 +2339,7 @@ test('Antigravity setup keeps a user-edited skill, writes the new one beside it,
   const installed = f.install('--agent', 'antigravity', '--apply')
   assert.equal(installed.status, 0, installed.stderr)
   const fresh = readFileSync(antigravitySkill, 'utf8')
-  const edited = `${fresh}Synthetic user edit
-`
+  const edited = `${fresh}Synthetic user edit\n`
   f.save(antigravitySkill, edited)
 
   const preview = f.install('--agent', 'antigravity')
