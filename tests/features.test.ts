@@ -1771,6 +1771,13 @@ test('a lone straight quote, such as an inch mark, is a literal character, and t
   expect(lastQuestion('他問"要藍色還是綠色?"')).toBeNull()
   expect(lastQuestion('I asked " Ready?"')).toBeNull()
   expect(lastQuestion('I asked "...Ready?"')).toBeNull()
+  // A stray quote that closes nothing does not pair with a later quotation, so the question still asks (#1290).
+  expect(lastQuestion('Should I fix the stray " here? "Yes" is fine.')).toBe('Should I fix the stray " here?')
+  expect(lastQuestion('Should I fix the stray here? "Yes" is fine.')).toBe('Should I fix the stray here?')
+  expect(lastQuestion('I asked "Blue or green?"')).toBeNull()
+  expect(lastQuestion('Should I fix the stray " here? Yes is fine, and "no" too.')).toBe('Should I fix the stray " here?')
+  expect(lastQuestion('要修這個 " 嗎？ "好" 可以。')).toBe('要修這個 " 嗎？')
+  expect(lastQuestion('这个 " 要修吗？ "好" 可以。')).toBe('这个 " 要修吗？')
   // A straight quote in code is a character, so it neither opens nor closes a quotation.
   expect(lastQuestion('The tokens are `name"` and `"`. Should I escape both? "No" leaves them unchanged.')).toBe('Should I escape both?')
   expect(lastQuestion('I compared `name"` and `"` and then asked "Ready?"')).toBeNull()

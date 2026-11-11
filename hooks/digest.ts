@@ -205,8 +205,11 @@ const isQuoted = (line: string, mark: number): boolean => {
     else if (char in OPENERS) open.push(i)
     else if (CLOSERS.has(char)) open.pop()
   }
-  // A quote the reply talks about (`escape " here?`) has no partner after the mark.
-  if (straight >= 0 && line.indexOf('"', mark + 1) !== -1) open.push(straight)
+  // A quote the reply talks about (`escape " here?`) has no partner after the mark. Its partner
+  // must close: the next quote after the mark follows a character and no word follows it. A quote
+  // after a space or before a word opens a later quotation (`stray " here? "Yes" is fine`, #1290).
+  const partner = line.indexOf('"', mark + 1)
+  if (straight >= 0 && partner !== -1 && /\S/.test(line[partner - 1] ?? '') && !/[\p{L}\p{N}]/u.test(line[partner + 1] ?? '')) open.push(straight)
   // An apostrophe also sits inside words, so a single quote counts only when it closes right
   // after the mark and opens at the start of a word.
   if (/^[?？]["”」』)）]*'/.test(line.slice(mark))) {
