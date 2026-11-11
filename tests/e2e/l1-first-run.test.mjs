@@ -99,11 +99,10 @@ describe('L1 first run', () => {
       block(world, { state: 'waiting', steps: ['- [?] Publish the gateway, OK?'] })
       const [frame, elapsed] = await Promise.all([
         watch.next(text => text.includes('Publish the gateway, OK?'), PANE_MS),
-        seenPageWithin(server, text => text.includes('Publish the gateway, OK?'), PAGE_MS),
+        seenPageWithin(server, text => text.includes('Publish the gateway, OK?'), PANE_MS),
       ])
       assert.ok(frame.elapsed <= PANE_MS)
-      assert.ok(elapsed <= PAGE_MS)
-      await knownFailure('hold:page-ask-three-seconds', () => seenPageWithin(server, text => text.includes('Publish the gateway, OK?'), PANE_MS))
+      assert.ok(elapsed <= PANE_MS)
       noMachineIds(frame.text, world)
       noMachineIds(await server.page(), world)
     } finally { await world.close() }

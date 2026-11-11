@@ -1847,7 +1847,7 @@ export const LINES = [
 "var isOpen = (one) => !isFinished(one);",
 "var settled = (one) => isFinished(one) && (one.text !== \"\" || one.reply.length > ACK_MAX) ? { ...one, text: \"\", reply: one.reply.slice(0, ACK_MAX) } : one;",
 "var pruneMessages = (state, now) => {",
-"  const kept = state.messages.filter((one) => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map((one) => settled((one.status === \"uncertain\" || one.status === \"accepted\" && (one.error !== \"\" || isMailboxTarget(one.target))) && !isFinished(one) && now - one.updated > OPEN_LIMIT_MS ? { ...one, status: \"uncertain\", error: \"EXPIRED\", updated: now } : one));",
+"  const kept = state.messages.filter((one) => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map((one) => settled((one.status === \"uncertain\" || one.status === \"accepted\" && (one.error !== \"\" || isMailboxTarget(one.target))) && !isFinished(one) && now - one.updated > OPEN_LIMIT_MS ? { ...one, status: \"uncertain\", error: \"EXPIRED\", updated: now, ...one.status === \"accepted\" ? { hasAccepted: true } : {} } : one));",
 "  const latest = new Map;",
 "  for (const one of kept)",
 "    if (one.claimed > 0 && one.claimed >= (latest.get(one.to)?.claimed ?? 0))",

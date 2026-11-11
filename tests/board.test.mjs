@@ -3,7 +3,7 @@
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -17,7 +17,7 @@ import childProcess from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
-import { pickSurface, AGENT_ENV_VARS } from '../hooks/surface.ts'
+import { pickSurface, AGENT_ENV_VARS, sshTargetOf, pagePortOf } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
@@ -624,7 +624,15 @@ test('a --serve whose server cannot start says so without mentioning a page', ()
     'zh-CN': '打不开看板网页：服务器没有启动。',
   }
   for (const [lang, line] of Object.entries(lines)) {
-    const text = run(lang, ['--serve', '--no-open', '--port', '65536'])
+    let text = ''
+    try {
+      run(lang, ['--serve', '--no-open', '--port', '65536'])
+      assert.fail('a --serve that started no page exits non-zero (#1292)')
+    } catch (error) {
+      if (error.code === 'ERR_ASSERTION') throw error
+      assert.equal(error.status, 1, 'a --serve that started no page exits 1 (#1292)')
+      text = error.stdout
+    }
     assert.equal(text.trim().split('\n').at(-1), line)
     assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
     assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
@@ -2882,19 +2890,198 @@ test('ticking twin steps from the page ticks each line it showed', { timeout: 30
     assert.equal(lines.length, 2)
     assert.ok(lines.every(line => typeof line === 'number'), 'the board names each step by its file line')
     // The second twin first: its press must not tick the first line.
-    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.fp } })
+    const second = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: 'Draft the notes', line: lines[1], fp: row.tickFp } })
     assert.equal(second.status, 200, second.body)
     let left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[lines[1]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
     assert.equal(left[lines[0]], '- [ ] Draft the notes')
     // Then the first twin, with the board drawn again.
     const again = await rowOf('Draft the notes')
-    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.fp } })
+    const first = await call('POST', '/api/act', { body: { key: again.key, type: 'tick', text: 'Draft the notes', line: lines[0], fp: again.tickFp } })
     assert.equal(first.status, 200, first.body)
     left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[lines[0]], /^- \[x\] Draft the notes <!-- done \d{4}-\d\d-\d\d -->$/)
   } finally {
     await board.close()
+  }
+})
+
+test('fresh untitled checkbox presses from the page tick the second twin and then the first', { timeout: 30_000 }, async () => {
+  const board = await page('## Untitled project\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
+  try {
+    for (const index of [1, 0]) {
+      const row = (await board.rows()).find(one => one.project === 'Untitled project' && one.title === EN.unnamed)
+      assert.ok(row)
+      const step = row.steps[index]
+      const response = await board.call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: step.text, line: step.fileLine, fp: row.tickFp } })
+      assert.equal(response.status, 200, response.body)
+      const lines = readFileSync(board.path, 'utf8').split('\n')
+      assert.match(lines[step.fileLine], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      if (index === 1) assert.equal(lines[row.steps[0].fileLine], '- [ ] Inspect the map')
+    }
+  } finally {
+    await board.close()
+  }
+})
+
+test('a saved checkbox press refuses after another card moves its twin lines (#1204)', { timeout: 30_000 }, async () => {
+  const board = await page('## home\n### Earlier card\n- [ ] Check the sample\n### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n')
+  try {
+    const { path, call, rowOf } = board
+    const row = await rowOf('Twin steps')
+    const request = { key: row.key, type: 'tick', text: 'Inspect the map', line: row.steps[1].fileLine, fp: row.tickFp }
+    const shifted = readFileSync(path, 'utf8').replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    writeFileSync(path, shifted)
+    const stale = await call('POST', '/api/act', { body: request })
+    assert.equal(stale.status, 409)
+    assert.equal(readFileSync(path, 'utf8'), shifted, 'refusing the stale checkbox must not write either twin')
+    const fresh = await rowOf('Twin steps')
+    const ticked = await call('POST', '/api/act', { body: { ...request, fp: fresh.tickFp, line: fresh.steps[1].fileLine } })
+    assert.equal(ticked.status, 200, ticked.body)
+    const left = readFileSync(path, 'utf8').split('\n')
+    assert.equal(left[fresh.steps[0].fileLine], '- [ ] Inspect the map')
+    assert.match(left[fresh.steps[1].fileLine], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+  } finally {
+    await board.close()
+  }
+})
+
+for (const ordering of ['lock', 'retry', 'readback', 'replacement', 'folded-visible', 'folded-lock', 'card-lock', 'card-readback', 'untitled-lock']) test('a checkbox keeps its original twin through the actual write boundary: ' + ordering, { timeout: 30_000 }, async () => {
+  const isLocked = ordering.endsWith('lock')
+  const isCards = ordering.startsWith('card-')
+  const isHiddenNext = ordering === 'folded-lock'
+  const isFoldedVisible = ordering === 'folded-visible'
+  const isUntitled = ordering === 'untitled-lock'
+  const faults = mkdtempSync(join(tmpdir(), 'board-checkbox-write-'))
+  const preload = join(faults, 'boundary.cjs')
+  const armed = join(faults, 'armed')
+  const blocked = join(faults, 'blocked')
+  const release = join(faults, 'release')
+  const injected = join(faults, 'injected')
+  const env = { NODE_OPTIONS: '--require ' + JSON.stringify(preload), AGENT_BOARD_TEST_CHECKBOX_PROGRESS: '' }
+  writeFileSync(preload, `const fs = require('node:fs')
+const { syncBuiltinESMExports } = require('node:module')
+const progress = process.env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS
+const arm = ${JSON.stringify(armed)}, blocked = ${JSON.stringify(blocked)}, injected = ${JSON.stringify(injected)}
+const ordering = ${JSON.stringify(ordering)}
+const open = fs.openSync, rename = fs.renameSync
+const change = () => {
+  const before = fs.readFileSync(progress, 'utf8')
+  const after = ordering === 'replacement'
+    ? before.replace('### Twin steps', '### Replacement task')
+    : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  fs.writeFileSync(progress, after)
+  fs.writeFileSync(injected, '')
+}
+fs.openSync = (file, ...args) => {
+  try { return open(file, ...args) } catch (error) {
+    if (ordering.endsWith('lock') && String(file) === progress + '.agent-board-lock' && error.code === 'EEXIST' && fs.existsSync(arm) && !fs.existsSync(blocked)) fs.writeFileSync(blocked, '')
+    throw error
+  }
+}
+fs.renameSync = (from, to, ...args) => {
+  const controlled = !ordering.endsWith('lock') && ordering !== 'folded-visible' && String(to) === progress && fs.existsSync(arm) && !fs.existsSync(injected)
+  if (controlled && !ordering.endsWith('readback')) {
+    change()
+    throw Object.assign(new Error('synthetic competing write before rename'), { code: 'EPERM' })
+  }
+  const result = rename(from, to, ...args)
+  if (controlled) change()
+  return result
+}
+syncBuiltinESMExports()
+`)
+  let board, holder, holderExit, watcher
+  try {
+    const twins = '### Twin steps\n- [ ] Inspect the map\n- [ ] Inspect the map\n'
+    const manual = isUntitled ? '## Untitled project\n' + twins.replace('### Twin steps\n', '') : isCards ? twins.repeat(2) : isHiddenNext ? '### Twin steps\n' + Array.from({ length: 5 }, (_, i) => '- [ ] Ordinary step ' + i + '\n').join('') + '- [~] Inspect the map\n- [~] Inspect the map\n' : isFoldedVisible ? '### Twin steps\n- [x] Completed one\n- [x] Completed two\n' + '- [ ] Inspect the map\n'.repeat(6) : twins
+    board = await page('## home\n### Earlier card\n- [ ] Check the sample\n' + manual, env, [], undefined, BOARD_SCRIPT, (_dir, path) => { env.AGENT_BOARD_TEST_CHECKBOX_PROGRESS = path })
+    const row = isUntitled ? (await board.rows()).find(one => one.project === 'Untitled project' && one.title === EN.unnamed) : isCards ? (await board.rows()).filter(one => one.title === 'Twin steps').at(-1) : await board.rowOf('Twin steps')
+    const before = readFileSync(board.path, 'utf8')
+    const shifted = isUntitled ? before.replace('## Untitled project', '> Synthetic extra context\n## Untitled project') : isFoldedVisible ? before : isHiddenNext ? before.replace('- [ ] Check the sample\n', '') : before.replace('### Twin steps', '> Synthetic extra context\n### Twin steps')
+    const replaced = before.replace('### Twin steps', '### Replacement task')
+    const at = before.lastIndexOf('### Twin steps')
+    const changedCard = before.slice(0, at) + before.slice(at).replace('### Twin steps\n', '### Twin steps\n> Changed selected card\n')
+    const visible = row.steps.filter(step => step.text === 'Inspect the map' && typeof step.fileLine === 'number')
+    const body = { key: row.key, type: 'tick', text: 'Inspect the map', line: isHiddenNext ? row.nextFileLine : visible[1].fileLine, fp: row.tickFp }
+    if (isHiddenNext) assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the primary target is outside the folded display')
+    if (isLocked) {
+      const worker = join(faults, 'holder.mjs')
+      writeFileSync(worker, `import { withLocalLock } from ${JSON.stringify(new URL('../scripts/local-lock.ts', import.meta.url).href)}
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+const ordering = ${JSON.stringify(ordering)}
+withLocalLock(${JSON.stringify(board.path + '.agent-board-lock')}, () => {
+  process.stdout.write('held\\n')
+  const deadline = Date.now() + 5000
+  while (!existsSync(${JSON.stringify(release)})) {
+    if (Date.now() >= deadline) throw new Error('CONTROL_NOT_RELEASED')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+  }
+  const file = ${JSON.stringify(board.path)}
+  const before = readFileSync(file, 'utf8')
+  const at = before.lastIndexOf('### Twin steps')
+  const after = ordering === 'untitled-lock' ? before.replace('## Untitled project', '> Synthetic extra context\\n## Untitled project') : ordering === 'folded-lock' ? before.replace('- [ ] Check the sample\\n', '') : ordering === 'card-lock' ? before.slice(0, at) + before.slice(at).replace('### Twin steps\\n', '### Twin steps\\n> Changed selected card\\n') : before.replace('### Twin steps', '> Synthetic extra context\\n### Twin steps')
+  writeFileSync(file, after)
+})
+`)
+      holder = spawn(process.execPath, [worker], { env: { ...process.env, CLAUDE_PROGRESS_FILE: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+      holderExit = new Promise((done, fail) => { holder.once('error', fail); holder.once('exit', done) })
+      const held = new Promise(done => holder.stdout.once('data', done))
+      await Promise.race([held, holderExit.then(code => { throw new Error('the lock holder exited before its barrier: ' + code) })])
+    }
+    const observed = !isLocked ? null : new Promise((done, fail) => {
+      watcher = fs.watch(faults, () => { if (existsSync(blocked)) done() })
+      watcher.on('error', fail)
+    })
+    writeFileSync(armed, '')
+    const sent = board.call('POST', '/api/act', { body })
+    if (isLocked) {
+      // The real server must already have failed to acquire the real shared lock.
+      await Promise.race([observed, sent.then(() => { throw new Error('the action ended before the blocked lock boundary') })])
+      writeFileSync(release, '')
+      assert.equal(await holderExit, 0)
+    }
+    const response = await sent
+    const after = readFileSync(board.path, 'utf8')
+    if (!isLocked && !isFoldedVisible) assert.ok(existsSync(injected), 'the competing write must reach the intended production boundary')
+    const journal = readdirSync(board.dir).filter(name => /^progress-journal-/.test(name)).map(name => readFileSync(join(board.dir, name), 'utf8')).join('\n')
+    if (ordering === 'replacement' || ordering === 'card-lock') {
+      assert.equal(response.status, 409, 'a replaced task must not receive the old checkbox press')
+      assert.equal(after, ordering === 'card-lock' ? changedCard : replaced)
+      assert.doesNotMatch(journal, /Inspect the map/, 'a refused tentative tick must not leave a false journal entry')
+    } else if (response.status === 409) {
+      assert.equal(ordering.endsWith('readback') || isFoldedVisible, false, 'a landed tick or a fresh visible checkbox must remain a single completed action')
+      assert.equal(after, shifted)
+      assert.doesNotMatch(journal, /Inspect the map/)
+    } else if (isCards || isHiddenNext || isFoldedVisible || isUntitled) {
+      assert.equal(response.status, 200, response.body)
+      const expected = shifted.split('\n')
+      const header = isUntitled ? expected.indexOf('## Untitled project') : isCards ? expected.lastIndexOf('### Twin steps') : expected.indexOf('### Twin steps')
+      const target = header + (isHiddenNext ? 6 : isFoldedVisible ? 4 : 2)
+      const raw = isHiddenNext ? '- [~] Inspect the map' : '- [ ] Inspect the map'
+      assert.equal(expected[target], raw)
+      const actual = after.split('\n')
+      assert.match(actual[target], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      actual[target] = raw
+      assert.equal(actual.join('\n'), shifted, 'only the original selected source checkbox may change')
+      assert.equal(journal.split('\n').filter(line => line.includes('Inspect the map')).length, 1)
+    } else {
+      assert.equal(response.status, 200, response.body)
+      const lines = after.split('\n')
+      const task = lines.indexOf('### Twin steps')
+      assert.equal(lines[task + 1], '- [ ] Inspect the map', 'the first twin must remain open after the original second-twin press')
+      assert.match(lines[task + 2], /^- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->$/)
+      assert.equal(after.replace(/- \[x\] Inspect the map <!-- done \d{4}-\d\d-\d\d -->/, '- [ ] Inspect the map'), shifted)
+    }
+  } finally {
+    watcher?.close()
+    if (holder !== undefined && holder.exitCode === null) {
+      writeFileSync(release, '')
+      const timer = setTimeout(() => holder.kill(), 5000)
+      try { await holderExit } finally { clearTimeout(timer) }
+    }
+    if (board !== undefined) await board.close()
+    rmSync(faults, { recursive: true, force: true })
   }
 })
 
@@ -2917,7 +3104,7 @@ test('ticking the next step from the page still works when the step list folded 
     assert.equal(row.next, 'Step six')
     assert.equal(typeof row.nextFileLine, 'number')
     assert.ok(row.steps.every(step => step.fileLine !== row.nextFileLine), 'the next step is folded out of the shown steps')
-    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.fp } })
+    const ticked = await call('POST', '/api/act', { body: { key: row.key, type: 'tick', text: row.next, line: row.nextFileLine, fp: row.tickFp } })
     assert.equal(ticked.status, 200, ticked.body)
     const left = readFileSync(path, 'utf8').split('\n')
     assert.match(left[row.nextFileLine], /^- \[x\] Step six <!-- done \d{4}-\d\d-\d\d -->$/)
@@ -3428,8 +3615,9 @@ test('a tick on the page for a hand-kept question that was reworded since the pa
     assert.equal(drawn.text, 'Ask two referees')
     const reworded = text().replace('- [?] Ask two referees', '- [?] Submit the replacement application')
     writeFileSync(path, reworded)
-    const press = fp => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp } })
-    const refused = await press(drawn.fp)
+    // The press is what the page's Done button sends: the tick fingerprint and the step's line (#1204).
+    const press = one => call('POST', '/api/act', { body: { key: drawn.key, type: 'tick', text: '', session: '', fp: one.tickFp, line: one.fileLine } })
+    const refused = await press(drawn)
     assert.equal(refused.status, 409, refused.body)
     assert.equal(refused.json().note, LINE_CHANGED)
     assert.equal(text(), reworded)
@@ -3437,7 +3625,7 @@ test('a tick on the page for a hand-kept question that was reworded since the pa
     const now = await ask()
     assert.equal(now.key, drawn.key)
     assert.notEqual(now.fp, drawn.fp)
-    assert.equal((await press(now.fp)).status, 200)
+    assert.equal((await press(now)).status, 200)
     assert.ok(text().includes('- [x] Submit the replacement application'))
   } finally {
     await board.close()
@@ -3600,12 +3788,26 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     scrollIntoView() { this.scrolled = true }
     setSelectionRange() {}
     select() { this.isSelected = true }
+    cloneNode() {
+      const copy = new Element(this.tag)
+      for (const [name, value] of Object.entries(this.attributes)) copy.setAttribute(name, value)
+      return copy
+    }
   }
   const get = id => {
     if (!nodes.has(id)) nodes.set(id, new Element(id))
     return nodes.get(id)
   }
   get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
+  // The logo, the icons and the tab icon the server wrote (#1262): a node for each, with its attributes, so the page can paint the light.
+  // The first run's mark waits in a <template>, which the page does not search.
+  for (const [index, found] of [...html.replace(/<template\b[\s\S]*?<\/template>/g, '').matchAll(/<(svg|link)\b([^>]*)>/g)].entries()) {
+    const attrs = Object.fromEntries([...found[2].matchAll(/([\w-]+)="([^"]*)"/g)].map(one => [one[1], one[2]]))
+    if (found[1] === 'svg' ? !/\bab-(?:logo|icon)\b/.test(attrs.class ?? '') : attrs.rel !== 'icon') continue
+    const node = get(found[1] + '-' + index)
+    node.tag = found[1]
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value)
+  }
   get('.pfoot').appendChild(get('close'))
   for (const id of ['close']) get(id).tag = 'button'
   const matches = (node, selector) => {
@@ -3613,6 +3815,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     if (selector === 'button') return node.tag === 'button'
     if (selector === 'button:not([data-local])') return node.tag === 'button' && node.getAttribute('data-local') === null
     if (selector === 'button[data-static]') return node.tag === 'button' && node.getAttribute('data-static') !== null
+    if (/^\.ab-(?:logo|icon)$/.test(selector)) return String(node.getAttribute('class') ?? '').split(' ').includes(selector.slice(1))
     const tag = selector.match(/^[a-z]+/)?.[0]
     const attrs = [...selector.matchAll(/\[([^=\]]+)(?:=["']?([^\]"']+)["']?)?\]/g)]
     if (tag && node.tag !== tag) return false
@@ -3666,7 +3869,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   }
   let model = viewed(first)
   let clockNow = now === undefined ? Date.now() : now
-  let scheduled
+  let scheduled, pollMs
   const delays = []
   const windowEvents = {}
   const win = {
@@ -3695,8 +3898,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     Date: { now: () => clockNow },
     setTimeout: (run, delay) => {
       delays.push(delay)
-      // Only the board's own poll (every 3 seconds) is the next redraw; the short waits of a moving page are not.
-      if (delay === 3000 || delay === undefined) scheduled = run
+      // Identify the shipped refresh callback, independently of its delay or motion timers.
+      if (run.name === 'refresh') { scheduled = run; pollMs = delay }
       return 1
     },
     clearTimeout: () => {},
@@ -3707,6 +3910,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
           const answer = await getBoard(options)
           return { ...answer, json: async () => { const data = await answer.json(); return data.model ? { ...data, model: viewed(data.model) } : data } }
         }
+        if (target === '/api/agents') return { ok: true, json: async () => ({ rows: [] }) }
         requests.push({ path: target, body: JSON.parse(options.body) })
         sent.push({ path: target, headers: options.headers, keepalive: options.keepalive })
         if (post) return post(requests.at(-1))
@@ -3737,6 +3941,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     allButtons: () => document.querySelectorAll('button'),
     query: selector => document.querySelectorAll(selector),
     node: get,
+    element: tag => new Element(tag),
     paste: (text, target = document.body) => {
       let prevented = false
       document.events.paste?.({ target, clipboardData: { getData: type => { assert.equal(type, 'text/plain'); return text } }, preventDefault: () => { prevented = true } })
@@ -3749,6 +3954,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     active: () => document.activeElement,
     title: () => document.title,
     delays,
+    get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: () => windowEvents.pagehide?.(),
     restore: persisted => windowEvents.pageshow?.({ persisted }),
@@ -3787,6 +3993,132 @@ const pageLostResults = (dom, label) => {
   assert.ok(card, `The removed card must leave a result labelled ${label}`)
   return pressWalk(card).filter(node => node.className?.includes('press-result'))
 }
+
+// The light in the logo is the board's status (#1262): the page sets one of four classes on the name and on each icon.
+const LIGHT_CLASSES = ['is-idle', 'is-working', 'is-waiting', 'is-offline']
+const lightsOf = dom => dom.query('.ab-logo,.ab-icon').map(node => String(node.getAttribute('class')).split(' ').filter(name => LIGHT_CLASSES.includes(name)).join(' '))
+const lightHtml = () => run('en', ['--chat'], {}, FILE, `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`)
+const quietBoard = { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }
+const askedBoard = { ...quietBoard, asks: [{ key: 'ask-demo', task: 'Question card', project: 'Demo', text: 'Ship it, OK?', kind: 'confirm', chip: 'Confirm', answers: ['Yes', 'No'], canTick: true, canHide: true, command: 'echo demo', reopen: 'claude --resume synthetic-session', send: 'copy', fp: 'first' }] }
+const busyBoard = (() => {
+  const model = viewed({ ...quietBoard, groups: [{ project: 'Demo', rows: [{ key: 'row-demo', title: 'Task card', next: 'Next step', canArchive: true, steps: [], send: 'copy', fp: 'first' }] }] })
+  return { ...model, view: { ...model.view, working: model.view.all.open } }
+})()
+const polling = (read, isDown = () => false) => async () => {
+  if (isDown()) throw new Error('Synthetic connection refused')
+  return { ok: true, json: async () => ({ model: read(), now: 1 }) }
+}
+
+test('the logo and the icons carry the board’s state as a class: idle, working, waiting, and offline when the page loses the board (#1262)', async () => {
+  const html = lightHtml()
+  let current = quietBoard
+  let isDown = false
+  const dom = await pageDom(html, quietBoard, { getBoard: polling(() => current, () => isDown) })
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-idle', 'is-idle', 'is-idle'], 'the name in the sidebar, the icon in the rail and the name in the narrow header: a quiet, connected board is idle')
+  for (const [name, model, expected] of [['an agent is busy', busyBoard, 'is-working'], ['something needs the person', askedBoard, 'is-waiting'], ['the board is quiet again', quietBoard, 'is-idle']]) {
+    current = model
+    await dom.redraw(model)
+    await dom.settle()
+    assert.deepEqual(lightsOf(dom), [expected, expected, expected], name)
+  }
+  // Something that needs the person outranks work in progress.
+  current = { ...busyBoard, view: { ...busyBoard.view, needs: { ...busyBoard.view.needs, n: 1 } } }
+  await dom.redraw(current)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-waiting', 'is-waiting', 'is-waiting'], 'a question outranks the work')
+  isDown = true
+  await dom.redraw(current)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-offline', 'is-offline', 'is-offline'], 'the page lost the board')
+  isDown = false
+  current = quietBoard
+  await dom.redraw(quietBoard)
+  await dom.settle()
+  assert.deepEqual(lightsOf(dom), ['is-idle', 'is-idle', 'is-idle'], 'the board is back')
+  assert.ok(dom.query('.ab-icon').every(node => String(node.getAttribute('class')).split(' ').includes('ab-icon')), 'the picture keeps its own class while the state changes')
+})
+
+test('the tab icon turns to the needs-you icon while something needs the person, and back (#1262)', async () => {
+  const html = lightHtml()
+  const link = /<link rel="icon"[^>]*\bhref="([^"]+)" data-needs="([^"]+)"/.exec(html)
+  assert.ok(link, 'the page names a calm icon and a needs-you icon')
+  const [, calm, needs] = link
+  assert.notEqual(calm, needs)
+  let current = quietBoard
+  const dom = await pageDom(html, quietBoard, { getBoard: polling(() => current) })
+  await dom.settle()
+  const tab = () => dom.query('link[rel="icon"]')[0].getAttribute('href')
+  assert.equal(tab(), calm, 'calm to begin with')
+  for (const [model, expected, name] of [[askedBoard, needs, 'a question is waiting'], [busyBoard, calm, 'only work is going on'], [askedBoard, needs, 'a question is waiting again'], [quietBoard, calm, 'all is answered']]) {
+    current = model
+    await dom.redraw(model)
+    await dom.settle()
+    assert.equal(tab(), expected, name)
+  }
+})
+
+test('a page that stops, because a newer page took over or the board closed, greys its light and never keeps an amber tab (#1262)', async () => {
+  const html = lightHtml()
+  const calm = /<link rel="icon"[^>]*\bhref="([^"]+)"/.exec(html)?.[1]
+  assert.ok(calm, 'the page names a calm tab icon')
+  const tab = dom => dom.query('link[rel="icon"]')[0].getAttribute('href')
+  const offline = ['is-offline', 'is-offline', 'is-offline']
+  // A newer page takes over while a question waits: this one stops asking.
+  let isMoved = false
+  const moved = await pageDom(html, askedBoard, { getBoard: async () => ({ ok: true, json: async () => (isMoved ? { moved: true } : { model: askedBoard, now: 1 }) }) })
+  await moved.settle()
+  assert.deepEqual(lightsOf(moved), ['is-waiting', 'is-waiting', 'is-waiting'], 'the question waits')
+  assert.notEqual(tab(moved), calm, 'the tab is amber while the question waits')
+  isMoved = true
+  await moved.redraw(askedBoard)
+  await moved.settle()
+  assert.deepEqual(lightsOf(moved), offline, 'the replaced page shows no live status')
+  assert.equal(tab(moved), calm, 'the replaced page’s tab is calm again')
+  // The person closes the board while a question waits.
+  const closed = await pageDom(html, askedBoard, { getBoard: polling(() => askedBoard), post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  await closed.settle()
+  assert.notEqual(tab(closed), calm, 'the tab is amber before the board closes')
+  closed.node('close').click()
+  await closed.flush(); await closed.flush()
+  assert.deepEqual(lightsOf(closed), offline, 'the closed board shows no live status')
+  assert.equal(tab(closed), calm, 'the closed board’s tab is calm')
+})
+
+test('the first run drops its mark’s light into the corner once: a later empty board shows the mark at rest (#1262)', async () => {
+  const html = lightHtml()
+  const tag = /<template id="fresh-mark">(<svg[^>]*>)/.exec(html)?.[1] ?? ''
+  assert.match(tag, /class="ab-icon is-idle is-arriving"/, 'the template holds the arriving icon')
+  assert.match(tag, /width="44" height="44"/)
+  let current = busyBoard
+  const dom = await pageDom(html, busyBoard, { getBoard: polling(() => current) })
+  await dom.settle()
+  // The page clones the mark from the template's content, as a browser gives it.
+  const mark = dom.element('svg')
+  for (const [, name, value] of tag.matchAll(/([\w-]+)="([^"]*)"/g)) mark.setAttribute(name, value)
+  dom.node('fresh-mark').content = { firstChild: mark }
+  const freshMarks = () => [...new Set(dom.query('.ab-icon'))].filter(node => node.getAttribute('width') === '44')
+  const isArriving = node => String(node.getAttribute('class')).split(' ').includes('is-arriving')
+  assert.equal(freshMarks().length, 0, 'a board with work shows no first-run mark')
+  for (const [round, expected] of [['the first empty board', true], ['a later empty board', false], ['another empty board', false]]) {
+    current = quietBoard
+    await dom.redraw(quietBoard)
+    await dom.settle()
+    const shown = freshMarks()
+    assert.equal(shown.length, 1, round + ' shows one mark')
+    assert.equal(isArriving(shown[0]), expected, round + (expected ? ' plays the drop' : ' shows the mark at rest'))
+    current = busyBoard
+    await dom.redraw(busyBoard)
+    await dom.settle()
+    assert.equal(freshMarks().length, 0, 'the mark goes with the empty board')
+  }
+  // Without the template the empty board still draws.
+  dom.node('fresh-mark').content = null
+  current = quietBoard
+  await dom.redraw(quietBoard)
+  await dom.settle()
+  assert.equal(freshMarks().length, 0, 'no template, no mark, and no error')
+})
 
 test('the serve page and the terminal board answer every action with a visible line', async () => {
   const board = await page()
@@ -5338,56 +5670,32 @@ test('--serve starts the page in the background once, and the next --serve bring
   } finally { await board.end([url]) }
 })
 
-test('--serve prefers the last port when it is free and falls back to a random port when it is taken (#1164)', { timeout: 60_000 }, async () => {
+test('--serve takes a new port on every start: it saves no port and ignores one in the settings file (#1177)', { timeout: 60_000 }, async () => {
+  // A page that came back on the same port would keep its origin, and with it whatever a script on that origin
+  // left in the browser, such as a service worker, from one start to the next.
   const board = serveIn()
-  let url1 = null
-  let url2 = null
-  let url3 = null
-  let dummy = null
-  const closeServer = async url => {
-    if (!url) return
-    const { port, searchParams } = new URL(url)
+  const settings = board.path.replace(/\.md$/, '-settings.json')
+  const portOf = url => Number(new URL(url).port)
+  let first = null
+  let second = null
+  try {
+    first = board.urlOf(await board.serve())
+    assert.ok(first)
+    const saved = existsSync(settings) ? JSON.parse(readFileSync(settings, 'utf8')) : {}
+    assert.equal(saved.port, undefined, 'a start saves no port')
+    // Stop the first page but keep the fixture folder: end() would delete it.
+    const { port, searchParams } = new URL(first)
     await new Promise(done => {
       const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
       req.on('error', done)
       req.end('{}')
     })
     for (let tries = 0; existsSync(board.served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
-  }
-  try {
-    const first = await board.serve()
-    url1 = board.urlOf(first)
-    assert.ok(url1, first)
-    const port1 = Number(new URL(url1).port)
-    assert.ok(port1 > 0)
-    await closeServer(url1)
-
-    // Restart: since port1 is free, it should be reused
-    const second = await board.serve()
-    url2 = board.urlOf(second)
-    assert.ok(url2, second)
-    const port2 = Number(new URL(url2).port)
-    assert.equal(port2, port1, 'free last port is reused on restart')
-    await closeServer(url2)
-
-    // Occupy port1 with another listener
-    dummy = createNetServer()
-    await new Promise((done, fail) => {
-      dummy.once('error', fail)
-      dummy.listen(port1, '127.0.0.1', done)
-    })
-
-    // Third start: port1 is busy, server must fall back to a random free port without failing
-    const third = await board.serve()
-    url3 = board.urlOf(third)
-    assert.ok(url3, third)
-    const port3 = Number(new URL(url3).port)
-    assert.ok(port3 > 0)
-    assert.notEqual(port3, port1, 'occupied last port falls back to a free port')
-  } finally {
-    if (dummy !== null) dummy.close()
-    await board.end([url1, url2, url3])
-  }
+    writeFileSync(settings, JSON.stringify({ ...saved, port: portOf(first) }))
+    second = board.urlOf(await board.serve())
+    assert.ok(second)
+    assert.notEqual(portOf(second), portOf(first), 'a port in the settings file is not used again')
+  } finally { await board.end([first, second].filter(Boolean)) }
 })
 
 test('/progress looks for the board script beside a Windows or a POSIX progress path', () => {
@@ -5425,6 +5733,9 @@ const serveIn = () => {
   }
   const serve = (extra = []) =>
     new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+  // A start that fails exits 1 (#1292): its output and status, for the tests of that failure.
+  const serveFailing = (extra = [], timeout = 20_000) =>
+    new Promise(done => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout }, (error, out) => done({ status: error ? error.code : 0, out })))
   const urlOf = out => out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0] ?? null
   const served = servedAt(run, path)
   // Closes every page it was given, and the one its address file names when a test could not read
@@ -5437,6 +5748,8 @@ const serveIn = () => {
       await new Promise(done => {
         const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
         req.on('error', done)
+        // A page that accepted the connection but never answers must not hold every test's cleanup.
+        req.setTimeout(5000, () => req.destroy(new Error('the close request timed out')))
         req.end('{}')
       })
     }
@@ -5450,9 +5763,357 @@ const serveIn = () => {
     }
     await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
-  return { dir, path, script, env, serve, urlOf, served, end }
+  return { dir, path, script, env, serve, serveFailing, urlOf, served, end }
 }
 
+// A test that may run out of time writes what it saw so far to stderr just before the test runner
+// would cut it off, so a CI log of a timeout still says which phase took the time (#1158).
+const phaseLog = (budgetMs, more = () => []) => {
+  const began = Date.now()
+  const lines = []
+  const line = (text, at) => `${String(at - began).padStart(6)} ms  ${text}`
+  const mark = text => { lines.push(line(text, Date.now())) }
+  // `more` gives lines other processes wrote, each starting with its Date.now(), read when the log is printed.
+  const text = () => `phase log:\n${[...lines, ...more().map(entry => line(entry.slice(entry.indexOf(' ') + 1), Number(entry.slice(0, entry.indexOf(' ')))))].sort().join('\n')}`
+  const watchdog = setTimeout(() => process.stderr.write(`\n[${budgetMs} ms passed and the test is still running] ${text()}\n`), budgetMs)
+  watchdog.unref()
+  return { mark, text, end: () => clearTimeout(watchdog) }
+}
+
+// Cursor's shell has two extra inheritable pipes as well as stdout and stderr. `mark` takes one line
+// per event, so a failure says which pipe stayed open and when the others closed.
+const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = () => {}) => {
+  const found = spawnSync('where.exe', ['bash.exe'], { encoding: 'utf8', windowsHide: true })
+  const bash = found.stdout.split(/\r?\n/).find(file => /[\\/]Git[\\/].*[\\/]bash\.exe$/i.test(file))
+  assert.ok(bash, 'Git Bash is needed to reproduce Cursor on Windows')
+  const child = spawn(bash, ['-c', 'exec "$@"', 'cursor', process.execPath, board.script, ...args], {
+    env: { ...board.env, ...env }, stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'ignore'], windowsHide: true,
+  })
+  mark(`bash ${child.pid} started ${args.join(' ')} through ${bash}`)
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const open = new Set(['stdout', 'stderr', 'fd3', 'fd4', 'bash exit'])
+  const end = (stream, name) => new Promise((done, fail) => { stream.once('end', () => { open.delete(name); mark(`${name} EOF`); done() }); stream.once('error', fail) })
+  const exited = new Promise((done, fail) => {
+    child.once('exit', (code, signal) => { open.delete('bash exit'); mark(`bash exit code=${code} signal=${signal}`); done({ code, signal }) })
+    child.once('error', fail)
+  })
+  let timer
+  try {
+    const [result] = await Promise.race([
+      Promise.all([exited, end(child.stdout, 'stdout'), end(child.stderr, 'stderr'), end(child.stdio[3], 'fd3'), end(child.stdio[4], 'fd4')]),
+      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
+    ])
+    assert.equal(result.code, 0, stderr)
+    return { stdout, stderr }
+  } catch (error) {
+    mark(`cursor shell failed: ${error.message.split('\n')[0]}`)
+    await stop()
+    mark('stop done')
+    throw error
+  } finally {
+    clearTimeout(timer)
+    if (child.exitCode === null && child.signalCode === null) child.kill()
+    child.stdout.destroy()
+    child.stderr.destroy()
+    child.stdio[3].destroy()
+    child.stdio[4].destroy()
+    await exited
+  }
+}
+
+const closeFixturePage = async board => {
+  if (!existsSync(board.served)) return
+  const { url } = JSON.parse(readFileSync(board.served, 'utf8'))
+  const { port, searchParams } = new URL(url)
+  await new Promise(done => {
+    const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/api/close', headers: { host: `127.0.0.1:${port}`, 'x-board-token': searchParams.get('t'), 'content-type': 'application/json' } }, res => res.resume().on('end', done))
+    req.on('error', done)
+    // A page that accepted the connection but never answers must not hold the test's cleanup.
+    req.setTimeout(5000, () => req.destroy(new Error('the close request timed out')))
+    req.end('{}')
+  })
+}
+
+const processAlive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
+
+// A stand-in browser: a small Windows program built here, so no real browser opens on the tester's
+// screen. `body` is its Main. Synthetic data only.
+// Each body is built once per test run and copied into place. The .NET Framework compiler that
+// ships with Windows builds one in about a second; Add-Type starts PowerShell and the compiler in
+// one process and took more than 15 s on a cold CI runner (#1166), so it is only the fallback.
+const standInBuilds = new Map()
+const buildStandIn = (body, env) => {
+  const built = standInBuilds.get(body)
+  if (built !== undefined) return built
+  const dir = mkdtempSync(join(tmpdir(), 'board-standin-'))
+  process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
+  const source = join(dir, 'browser.cs')
+  const exe = join(dir, 'browser.exe')
+  writeFileSync(source, `using System; using System.IO; using System.Diagnostics; using System.Threading;\npublic static class Browser { public static void Main() { ${body} } }`)
+  const windows = process.env.SystemRoot ?? 'C:\\Windows'
+  const csc = join(windows, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
+  if (existsSync(csc)) {
+    execFileSync(csc, ['/nologo', '/target:winexe', `/out:${exe}`, source], { windowsHide: true, stdio: 'pipe', timeout: 15_000 })
+  } else {
+    const powershell = join(windows, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
+      env: { ...env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: exe }, windowsHide: true, stdio: 'pipe', timeout: 15_000,
+    })
+  }
+  standInBuilds.set(body, exe)
+  return exe
+}
+const compileStandIn = (board, exe, body) => {
+  mkdirSync(resolve(exe, '..'), { recursive: true })
+  copyFileSync(buildStandIn(body, board.env), exe)
+}
+// Writes its PID for the test and stays up, as a browser window does.
+const SLEEPING_BROWSER = 'File.WriteAllText(Environment.GetEnvironmentVariable("BOARD_TEST_BROWSER_PID"), Process.GetCurrentProcess().Id.ToString()); Thread.Sleep(20000);'
+// Notes that it was started, then exits with an error at once, as a browser with no display does.
+const FAILING_BROWSER = 'File.AppendAllText(Environment.GetEnvironmentVariable("BOARD_TEST_FAILED_BROWSERS"), Process.GetCurrentProcess().Id.ToString() + "\\n"); Environment.Exit(1);'
+
+// Loaded into the `--html` process: notes every PowerShell it starts, with its exit code, time and
+// stderr (read here instead of dropped), so a run that lost Cursor's pipes says what its launcher did.
+const launchLogPreload = log => `const cp = require('node:child_process')
+const fs = require('node:fs')
+const note = line => { try { fs.appendFileSync(${JSON.stringify(log)}, Date.now() + ' ' + line + '\\n') } catch {} }
+const isPowerShell = file => /(?:^|[\\\\/])powershell(?:\\.exe)?$/i.test(String(file))
+const spawn = cp.spawn
+cp.spawn = function (file, args, options) {
+  if (!isPowerShell(file)) return spawn.apply(this, arguments)
+  const stdio = options?.stdio === 'ignore' ? ['ignore', 'ignore', 'pipe'] : options?.stdio
+  const child = spawn.call(this, file, args, { ...options, stdio })
+  const began = Date.now()
+  let err = ''
+  child.stderr?.on('data', chunk => { err += chunk })
+  note('powershell ' + child.pid + ' started, stdio ' + JSON.stringify(options?.stdio))
+  child.once('exit', (code, signal) => note('powershell ' + child.pid + ' exit code=' + code + ' signal=' + signal + ' after ' + (Date.now() - began) + ' ms, stderr ' + JSON.stringify(err.trim().slice(0, 600))))
+  return child
+}
+const execFileSync = cp.execFileSync
+cp.execFileSync = function (file) {
+  if (!isPowerShell(file)) return execFileSync.apply(this, arguments)
+  const began = Date.now()
+  try { return execFileSync.apply(this, arguments) } finally { note('powershell execFileSync took ' + (Date.now() - began) + ' ms') }
+}
+process.on('exit', code => note('--html process ' + process.pid + ' exit ' + code))
+require('node:module').syncBuiltinESMExports()
+`
+
+// The paths a browser-startup test uses: a Program Files of its own with Edge and Chrome slots, the
+// files the stand-ins and the `--html` process write, and the launcher log.
+const browserFixture = board => {
+  const programs = join(board.dir, 'Programs & Friends')
+  return {
+    programs,
+    edge: join(programs, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    chrome: join(programs, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    marker: join(board.dir, 'browser.pid'),
+    failed: join(board.dir, 'failed-browsers.txt'),
+    launcher: join(board.dir, 'launcher.pid'),
+    launchLog: join(board.dir, 'launch.log'),
+    preload: join(board.dir, 'launch-log.cjs'),
+  }
+}
+
+// Runs `--html` the way Cursor does against the fixture's browsers, with the launcher log loaded into
+// the `--html` process; `pid` is the stand-in that stays running, or undefined. Every step is marked.
+const htmlThroughCursor = async (board, fixture, log) => {
+  writeFileSync(fixture.preload, launchLogPreload(fixture.launchLog))
+  writeFileSync(board.script, `import { writeFileSync as recordLauncherPid } from 'node:fs'\nif (process.argv.includes('--html')) recordLauncherPid(${JSON.stringify(fixture.launcher)}, String(process.pid))\n${readFileSync(board.script, 'utf8')}`)
+  const served = await board.serve()
+  assert.ok(board.urlOf(served), served)
+  log.mark(`page served on port ${new URL(board.urlOf(served)).port}`)
+  const env = {
+    AGENT_BOARD_TEST_PID: '', ProgramFiles: fixture.programs, 'ProgramFiles(x86)': fixture.programs, BOARD_TEST_BROWSER_PID: fixture.marker,
+    BOARD_TEST_FAILED_BROWSERS: fixture.failed, NODE_OPTIONS: `--require ${JSON.stringify(fixture.preload)}`,
+  }
+  let pid
+  const stop = async () => {
+    if (existsSync(fixture.marker)) {
+      pid = Number(readFileSync(fixture.marker, 'utf8'))
+      if (processAlive(pid)) process.kill(pid)
+      for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    }
+    log.mark(`stand-in after the failed run: ${pid === undefined ? 'never started' : `${pid}, ${processAlive(pid) ? 'still alive' : 'stopped'}`}`)
+    await closeFixturePage(board)
+    await delay(200)
+  }
+  const result = await cursorShell(board, ['--html'], env, stop, log.mark)
+  for (let tries = 0; !existsSync(fixture.marker) && tries < 20; tries++) await delay(100)
+  if (existsSync(fixture.marker)) pid = Number(readFileSync(fixture.marker, 'utf8'))
+  log.mark(`stand-in ${pid === undefined ? 'never started' : `${pid} started, ${processAlive(pid) ? 'alive' : 'gone'}`}`)
+  return { ...result, pid: () => pid }
+}
+
+// What the `--html` process's launcher log holds so far, for the phase log.
+const launcherLines = fixture => existsSync(fixture.launchLog) ? readFileSync(fixture.launchLog, 'utf8').trim().split('\n').filter(Boolean).map(entry => entry.replace(' ', ' launcher: ')) : []
+
+// Stops the stand-in and the `--html` process the fixture may have left, then removes the fixture.
+const endBrowserFixture = async (board, fixture, log, pid) => {
+  if (pid === undefined && existsSync(fixture.marker)) pid = Number(readFileSync(fixture.marker, 'utf8'))
+  if (pid && processAlive(pid)) process.kill(pid)
+  if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+  if (pid) assert.ok(!processAlive(pid), 'the stand-in browser must stop before cleanup')
+  if (existsSync(fixture.launcher)) {
+    const launcherPid = Number(readFileSync(fixture.launcher, 'utf8'))
+    if (processAlive(launcherPid)) process.kill(launcherPid)
+    for (let tries = 0; processAlive(launcherPid) && tries < 50; tries++) await delay(100)
+    log.mark(`--html process ${launcherPid} ${processAlive(launcherPid) ? 'still alive' : 'gone'}`)
+    assert.ok(!processAlive(launcherPid), 'the board launcher must stop before cleanup')
+  }
+  await board.end([])
+  log.mark('fixture removed')
+}
+
+// Runs a browser-startup test body with the phase log; a failure, in the body or in the cleanup,
+// carries the whole log, and the cleanup never hides the body's error.
+const browserStartupTest = async body => {
+  const board = serveIn()
+  const fixture = browserFixture(board)
+  const log = phaseLog(23_000, () => launcherLines(fixture))
+  let pid
+  let failure
+  try {
+    pid = await body(board, fixture, log)
+  } catch (error) {
+    failure = error
+  } finally {
+    log.end()
+    try { await endBrowserFixture(board, fixture, log, pid) } catch (error) { log.mark(`cleanup failed: ${error.message.split('\n')[0]}`); failure ??= error }
+  }
+  if (failure !== undefined) {
+    failure.message = `${failure.message}\n${log.text()}`
+    throw failure
+  }
+}
+
+test('Windows server startup releases Cursor pipes while its page stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  try {
+    const result = await cursorShell(board, ['--serve', '--no-open'], {}, () => closeFixturePage(board))
+    assert.ok(board.urlOf(result.stdout), result.stdout)
+    const server = JSON.parse(readFileSync(board.served, 'utf8'))
+    assert.ok(processAlive(server.pid), 'the page must outlive the caller pipes')
+  } finally { await board.end([]) }
+})
+
+test('on Windows the page address reaches the shell exactly as served, with no wildcard escaping', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  const opened = join(board.dir, 'opened.txt')
+  const preload = join(board.dir, 'record-open.cjs')
+  // The launcher's own PowerShell runs, so its escaping is the real one, but Start-Process is swapped
+  // for a function that only notes -FilePath: no window opens on the tester's screen.
+  const needle = 'Microsoft.PowerShell.Management\\Start-Process'
+  const recorder = `function Record-Start { param($FilePath, $ArgumentList, $WorkingDirectory, [switch]$PassThru, $WindowStyle) [IO.File]::AppendAllText('${opened}', $FilePath + [Environment]::NewLine) }; `
+  writeFileSync(preload, `const cp = require('node:child_process')
+const spawn = cp.spawn
+cp.spawn = function (file, args, options) {
+  const at = Array.isArray(args) ? args.indexOf('-EncodedCommand') : -1
+  const command = at >= 0 ? Buffer.from(args[at + 1], 'base64').toString('utf16le') : ''
+  if (!command.includes(${JSON.stringify(needle)}) || command.includes('--serve-child')) return spawn.apply(this, arguments)
+  const copy = [...args]
+  copy[at + 1] = Buffer.from(${JSON.stringify(recorder)} + command.split(${JSON.stringify(needle)}).join('Record-Start'), 'utf16le').toString('base64')
+  return spawn.call(this, file, copy, options)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  let url = null
+  try {
+    const env = { ...board.env, AGENT_BOARD_TEST_PID: '', NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve'], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stdout}\n${stderr}`)) : done(stdout))))
+    url = board.urlOf(out)
+    assert.ok(url, out)
+    for (let tries = 0; !existsSync(opened) && tries < 50; tries++) await delay(100)
+    assert.deepEqual(readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean), [url], 'the address must not gain backticks')
+  } finally {
+    await board.end(url ? [url] : [])
+  }
+})
+
+test('a Windows page starts from a folder whose name holds a curly apostrophe, brackets and PowerShell text, and runs none of it', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  // ’ ends a PowerShell single-quoted string as ' does, and Start-Process reads -WorkingDirectory as a wildcard.
+  const folder = join(board.dir, '[x] x’;New-Item -ItemType File -Name injected -Force;#')
+  const path = join(folder, 'progress.md')
+  const script = join(folder, 'agent-board.mjs')
+  const mine = servedAt(join(board.dir, 'run'), path)
+  try {
+    mkdirSync(folder)
+    writeFileSync(path, FILE)
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    const out = await new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open'], { env: board.env, cwd: board.dir, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stdout}\n${stderr}`)) : done(stdout))))
+    assert.ok(board.urlOf(out), out)
+    for (const where of [board.dir, folder]) assert.equal(existsSync(join(where, 'injected')), false, 'a folder name never runs as PowerShell code')
+  } finally {
+    const record = existsSync(mine) ? JSON.parse(readFileSync(mine, 'utf8')) : null
+    if (record !== null) {
+      spawnSync(process.execPath, [script, '--stop'], { env: board.env, cwd: board.dir, windowsHide: true })
+      for (let tries = 0; processAlive(record.pid) && tries < 50; tries++) await delay(100)
+    }
+    await board.end([])
+  }
+})
+
+test('Windows browser startup releases Cursor pipes while the browser stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+  // The Edge slot holds a file that is not a program, so the launcher has to move on to Chrome.
+  mkdirSync(resolve(fixture.edge, '..'), { recursive: true })
+  writeFileSync(fixture.edge, 'synthetic invalid executable')
+  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browser compiled')
+  const result = await htmlThroughCursor(board, fixture, log)
+  assert.ok(board.urlOf(result.stdout), result.stdout)
+  assert.match(result.stdout, /Opened Agent Board/, result.stdout)
+  assert.ok(result.pid() !== undefined, `the stand-in browser must start: ${result.stdout} ${result.stderr}`)
+  assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
+  return result.pid()
+}))
+
+test('a Windows browser that exits with an error at once gives way to the next browser, and Cursor pipes are still released', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+  // Start-Process returns once the program exists, so a browser that exits with an error right
+  // away (no display, no sandbox) would otherwise count as opened and the person would see nothing.
+  compileStandIn(board, fixture.edge, FAILING_BROWSER)
+  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browsers compiled')
+  const result = await htmlThroughCursor(board, fixture, log)
+  assert.ok(board.urlOf(result.stdout), result.stdout)
+  assert.match(result.stdout, /Opened Agent Board/, result.stdout)
+  assert.ok(existsSync(fixture.failed), 'the failing Edge stand-in must have been tried first')
+  assert.equal(readFileSync(fixture.failed, 'utf8').trim().split('\n').length, 1, 'the failing Edge stand-in is tried once')
+  assert.ok(result.pid() !== undefined, `the Chrome stand-in must start after Edge failed: ${result.stdout} ${result.stderr}`)
+  assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
+  return result.pid()
+}))
+
+test('Windows page startup times out without leaving its child or ready files', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  const preload = join(board.dir, 'stall-child.cjs')
+  const marker = join(board.dir, 'stalled.pid')
+  writeFileSync(preload, `if (process.argv.includes('--serve-child')) { require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15000) }\n`)
+  board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let pid
+  try {
+    const began = performance.now()
+    const { status, out } = await board.serveFailing()
+    const elapsed = performance.now() - began
+    assert.ok(elapsed >= 9000 && elapsed < 18000, `startup ended after ${elapsed} ms`)
+    assert.equal(out.trim(), EN.serveFailed(EN.serveNotStarted))
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
+    assert.ok(existsSync(marker), 'the child must start before the timeout')
+    pid = Number(readFileSync(marker, 'utf8'))
+    for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    assert.ok(!processAlive(pid), 'the timed-out child must stop')
+    assert.ok(!readdirSync(resolve(board.served, '..')).some(name => name.startsWith('.agent-board-ready-')), 'startup files must be removed')
+  } finally {
+    if (pid === undefined && existsSync(marker)) pid = Number(readFileSync(marker, 'utf8'))
+    if (pid && processAlive(pid)) process.kill(pid)
+    if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    await board.end([])
+  }
+})
 test('a page a test started stops by itself once that test process is gone, and opens no window (#959)', async () => {
   const board = serveIn()
   // Stands in for a test run that is killed before it can close its page.
@@ -5526,6 +6187,46 @@ test('over SSH, in a terminal with no browser, plain agent-board runs the live t
   } finally {
     if (child && child.exitCode === null) child.kill()
     await board.end([])
+  }
+})
+
+test('over SSH with a config folder variable set, plain agent-board opens the page and says how to forward its port (#1283)', { timeout: 40_000 }, async () => {
+  for (const name of ['HERMES_HOME', 'OPENCODE_CONFIG_DIR']) {
+    const board = serveIn()
+    let url = null
+    try {
+      const shim = join(board.dir, 'ssh-page-shim.cjs')
+      writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
+      // A person's own profile can set an agent's config folder; that still picks the page.
+      const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '', [name]: join(board.dir, 'own-config') }
+      for (const key of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[key]
+      const out = await new Promise((done, fail) => {
+        execFile(process.execPath, ['--require', shim, board.script], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
+      })
+      url = board.urlOf(out)
+      assert.ok(url, `${name}: the page's address is printed: ${JSON.stringify(out)}`)
+      const port = Number(new URL(url).port)
+      const lines = out.trim().split('\n')
+      assert.equal(lines.at(-1), url, `${name}: the address stays the last line`)
+      assert.equal(lines.at(-2), EN.serveSshHint(port, '203.0.113.9', url), `${name}: the line before it says how to forward the port`)
+      assert.doesNotMatch(out, /\u001b\[\?1049h|Opened Agent Board|No browser found/, `${name}: no terminal board, no window, no browser note`)
+      const runAgain = extra => new Promise((done, fail) => {
+        execFile(process.execPath, ['--require', shim, board.script], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
+      })
+      // An SSH server on another port: the command must name it, or the forward reaches port 22.
+      const other = (await runAgain({ SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222' })).trim().split('\n')
+      assert.equal(other.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', url), `${name}: the SSH port is named`)
+      // A page already open somewhere on the remote computer: the person here still needs the forward.
+      await fetch(url)
+      const open = (await runAgain({})).trim().split('\n')
+      assert.equal(open.at(-1), EN.boardPageAlreadyOpen(url), `${name}: the page counts as open`)
+      assert.equal(open.at(-2), EN.serveSshHint(port, '203.0.113.9', url), `${name}: the forward is still offered`)
+      // The terminal board's `o` keeps its note to the address alone, so no two addresses run together.
+      const keys = spawnSync(process.execPath, [board.script, '--keys', 'o', '--no-open'], { env, encoding: 'utf8', timeout: 20_000, windowsHide: true })
+      assert.equal(keys.status, 0, keys.stderr)
+      assert.ok(keys.stdout.includes(url), keys.stdout)
+      assert.doesNotMatch(keys.stdout, /\?t=[\w-]+(?:http|Forward)/, `${name}: the address is not joined to another line`)
+    } finally { await board.end([url]) }
   }
 })
 
@@ -5627,7 +6328,22 @@ test('the SSH hint links to the page with its token', () => {
     assert.ok(hint.includes(`ssh -L ${port}:127.0.0.1:${port} ${host}`), hint)
     assert.ok(hint.includes(url), hint)
   }
-  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshHost(), server.url)'))
+  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshTargetOf(process.env), server.url)'))
+  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(pagePortOf(opened.url), sshTargetOf(process.env), opened.url)'))
+})
+
+test('the SSH forwarding command names a valid non-22 SSH port and the page port a URL leaves out (#1283)', () => {
+  const at = port => ({ SSH_CONNECTION: `203.0.113.5 50000 203.0.113.9 ${port}`, HOSTNAME: 'board.example' })
+  assert.equal(sshTargetOf(at(22)), '203.0.113.9')
+  assert.equal(sshTargetOf(at(2222)), '-p 2222 203.0.113.9')
+  assert.equal(sshTargetOf(at(1)), '-p 1 203.0.113.9')
+  assert.equal(sshTargetOf(at(65535)), '-p 65535 203.0.113.9')
+  for (const bad of ['0', '65536', '99999', '-1', 'x22', '']) assert.equal(sshTargetOf(at(bad)), '203.0.113.9', `port ${JSON.stringify(bad)} is not passed to ssh -p`)
+  assert.equal(sshTargetOf({ SSH_CONNECTION: '203.0.113.5 50000', HOSTNAME: 'board.example' }), 'board.example')
+  assert.equal(sshTargetOf({ SSH_TTY: '/dev/pts/0' }), 'host')
+  assert.equal(pagePortOf('http://127.0.0.1:43210/?t=synthetic'), 43210)
+  assert.equal(pagePortOf('http://127.0.0.1:80/?t=synthetic'), 80, 'a URL drops :80, the command must not say 0')
+  assert.equal(pagePortOf('http://127.0.0.1/?t=synthetic'), 80)
 })
 
 test('an agent or a pipe running agent-board with no surface flag opens one page and prints one bare URL', async () => {
@@ -5851,7 +6567,8 @@ test('Windows page startup refuses an existing address file granted to another a
     url = board.urlOf(await board.serve(['--quiet-board']))
     assert.ok(url)
     execFileSync(icacls, [board.served, '/grant', '*S-1-1-0:R', '/L'], { windowsHide: true, stdio: 'pipe' })
-    const again = await board.serve(['--quiet-board'])
+    const { status, out: again } = await board.serveFailing(['--quiet-board'])
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
     assert.ok(!again.includes(url), 'the widened address must not be used to contact or open the running page')
     assert.equal(again.trim(), EN.serveStoreFailed('MESSAGE_STORE_IN_USE', board.served.replace(/\.json$/, '-messages')))
   } finally {
@@ -5941,7 +6658,10 @@ require('node:module').syncBuiltinESMExports()
       renameSync(other.served, replay)
       const renamed = fs.lstatSync(replay)
       assert.deepEqual([renamed.dev, renamed.ino, renamed.size], [original.dev, original.ino, original.size])
-      victimUrl = victim.urlOf(await victim.serve(['--quiet-board']))
+      const started = await victim.serveFailing(['--quiet-board'])
+      victimUrl = victim.urlOf(started.out)
+      // Failing closed starts no page, so that start exits 1 (#1292).
+      assert.equal(started.status, location === 'legacy' ? 0 : 1, started.out)
       assert.deepEqual(readFileSync(requests, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)), [], 'a mismatched record authorizes no request to the other board')
       const pid = JSON.parse(otherBytes.toString('utf8')).pid
       assert.doesNotThrow(() => process.kill(pid, 0), 'the other owned board remains running')
@@ -5987,6 +6707,26 @@ test('Windows page ACL checks use the system module instead of an inherited modu
   } finally { await board.end([url]) }
 })
 
+test('Windows page launcher uses the system module while preserving the caller module path', { skip: process.platform !== 'win32', timeout: 30_000 }, async () => {
+  const board = serveIn()
+  const modules = join(board.dir, 'untrusted-modules')
+  const module = join(modules, 'Microsoft.PowerShell.Management')
+  const touched = join(board.dir, 'untrusted-launcher-loaded')
+  const received = join(board.dir, 'child-module-path')
+  const preload = join(board.dir, 'record-module-path.cjs')
+  mkdirSync(module, { recursive: true })
+  writeFileSync(join(module, 'Microsoft.PowerShell.Management.psd1'), "@{ RootModule = 'fake.psm1'; ModuleVersion = '99.0.0'; GUID = '34000000-0000-4000-8000-000000000002'; FunctionsToExport = @('Start-Process') }")
+  writeFileSync(join(module, 'fake.psm1'), `function Start-Process { Set-Content -LiteralPath '${touched.replaceAll("'", "''")}' -Value 'unexpected'; throw 'synthetic untrusted launcher' }; Export-ModuleMember -Function Start-Process`)
+  writeFileSync(preload, `if (process.argv.includes('--serve-child')) require('node:fs').writeFileSync(${JSON.stringify(received)}, process.env.PSModulePath ?? '')\n`)
+  Object.assign(board.env, { PSModulePath: modules, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  let url = null
+  try {
+    url = board.urlOf(await board.serve())
+    assert.ok(url)
+    assert.ok(!existsSync(touched), 'the inherited module must not start the server')
+    assert.equal(readFileSync(received, 'utf8'), modules, 'the server keeps the caller module path')
+  } finally { await board.end([url]) }
+})
 test('Windows page ACL checks work without PowerShell command discovery', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 40_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'no-module-discovery.cjs')
@@ -6026,7 +6766,7 @@ const countPowerShell = (board, firstMs = 0) => {
   return starts
 }
 
-test('a cold Windows page start runs one PowerShell for the command and the server it starts together, and one more only to read again a folder it took another account\'s grant from', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 60_000 }, async () => {
+test('a cold Windows page start checks access once and uses a separate detached launcher', { skip: process.platform !== 'win32' && 'Windows PowerShell only', timeout: 60_000 }, async () => {
   const board = serveIn()
   const starts = countPowerShell(board)
   let url = null
@@ -6034,9 +6774,9 @@ test('a cold Windows page start runs one PowerShell for the command and the serv
     url = board.urlOf(await board.serve(['--quiet-board']))
     assert.ok(url)
     const cold = starts.cold()
-    assert.deepEqual(starts(), cold, `the command reads the folder once; the server reuses that check and reads its new address file through icacls${starts.detail()}`)
+    assert.deepEqual(starts(), [...cold, 'launcher'], `the command reads the folder once; the server reuses that check and reads its new address file through icacls${starts.detail()}`)
     assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
-    assert.deepEqual(starts(), [...cold, 'parent'], `a second start reads the folder and the running page's address file in one start${starts.detail()}`)
+    assert.deepEqual(starts(), [...cold, 'launcher', 'parent'], `a second start reads the folder and the running page's address file in one start${starts.detail()}`)
   } finally { await board.end([url]) }
 })
 
@@ -6048,7 +6788,7 @@ test('a Windows page start whose first PowerShell start takes over 10 s still op
     const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
     url = board.urlOf(out)
     assert.ok(url, out)
-    assert.deepEqual(starts(), starts.cold(), starts.detail())
+    assert.deepEqual(starts(), [...starts.cold(), 'launcher'], starts.detail())
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
   } finally { await board.end([url]) }
 })
@@ -6398,7 +7138,8 @@ require('node:module').syncBuiltinESMExports()
 `)
   board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
   try {
-    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
+    const { status, out } = await board.serveFailing(['--quiet-board'], 50_000)
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
     assert.equal(board.urlOf(out), null, out)
     assert.equal(out.trim(), EN.serveStoreFailed('ACL_CHECK_TIMEOUT', messages), out)
   } finally { await board.end([]) }
@@ -6502,6 +7243,7 @@ require('node:module').syncBuiltinESMExports()
     try {
       const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 30_000 })
       assert.equal(ran.stdout.trim(), EN.serveFailed(fault === 'timeout' ? EN.serveRuntimeCheckTimeout : EN.serveRuntimePrivate), fault)
+      assert.equal(ran.status, 1, `a --serve that started no page exits non-zero (#1292): ${fault}`)
       assert.ok(!existsSync(board.served), 'the empty file is discarded')
       assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [], fault)
       assert.ok(!ran.stdout.includes('http:'))
@@ -6822,9 +7564,11 @@ const publicationSpawn340 = publicationCp340.spawn
 const publicationFds340 = new Map()
 let publicationReads340 = 0
 publicationCp340.spawn = (command, args, options) => {
-  if (process.argv.includes('--serve') && args.includes('--serve-child')) {
+  const encoded = args.indexOf('-EncodedCommand')
+  const startsChild = args.includes('--serve-child') || (encoded >= 0 && Buffer.from(args[encoded + 1], 'base64').toString('utf16le').includes('--serve-child'))
+  if (process.argv.includes('--serve') && startsChild) {
     publicationWrite340(${JSON.stringify(lost)}, 'lost')
-    return publicationSpawn340(command, ['--input-type=module', '-e', 'process.exit(0)'], options)
+    return publicationSpawn340(process.execPath, ['--input-type=module', '-e', 'process.exit(0)'], options)
   }
   return publicationSpawn340(command, args, options)
 }
@@ -10036,10 +10780,14 @@ test('official agent marks retain their source viewport on every board surface',
         assert.ok(image.includes('fill="#0082FB"'))
         assert.ok(image.includes(`<path d="${icon.paths[0]}"/>`))
       }
-      for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const theme of ['light', 'dark']) {
-        const cover = readFileSync(new URL(`../docs/images/cover-${lang}-${theme}.svg`, import.meta.url), 'utf8')
-        assert.ok(cover.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/${theme}`)
-        assert.ok(cover.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/${theme}`)
+      // The new dark covers show only agents with a live record, and Muse Code has none yet; the old
+      // light covers keep its mark until they retire.
+      for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+        const light = readFileSync(new URL(`../docs/images/cover-${lang}-light.svg`, import.meta.url), 'utf8')
+        assert.ok(light.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/light`)
+        assert.ok(light.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/light`)
+        const dark = readFileSync(new URL(`../docs/images/cover-${lang}-dark.svg`, import.meta.url), 'utf8')
+        assert.ok(!dark.includes(`<path d="${icon.paths[0]}"/>`), `Muse is off the dark cover until it has a live record: ${lang}`)
       }
     } else assert.equal(icon.ink, undefined, 'existing marks retain their white foreground')
     if (official[icon.file]) {
@@ -10340,7 +11088,7 @@ test("the page's motion stops under reduced motion and every change still lands"
     const needs = shownWords(dom.node('needs'))
     assert.ok(needs.includes('Gamma question') && needs.includes('Beta question') && !needs.includes('Alpha question'), `${motion}: ${needs}`)
     assert.equal(dom.node('count-needs').textContent, '2', motion)
-    if (motion === 'reduce') assert.deepEqual(dom.delays.filter(delay => delay !== 3000), [], 'nothing waits for a transition')
+    if (motion === 'reduce') assert.deepEqual(dom.delays.filter(delay => delay !== dom.pollMs), [], 'nothing waits for a transition')
   }
 })
 
@@ -11450,10 +12198,11 @@ test('the sidebar version line is quiet', () => {
   const ver = html.match(/\.ver-link\{([^}]*)\}/)[1]
   assert.match(ver, /font-size:var\(--text-xs\)/)
   assert.match(ver, /color:color-mix\(in srgb,var\(--muted\) \d+%,var\(--surface\)\)/)
-  assert.match(html, /\.ver-link svg\.i\{width:12px;height:12px\}/)
+  // The GitHub mark is a filled shape, drawn at the page's icon size so it reads at a glance.
+  assert.match(html, /\.ver-link svg\.i\{width:16px;height:16px;fill:currentColor;stroke:none\}/)
 })
 
-test('the page footer has no web-chat or clipboard button and Close the board shows its name in every language (#1145)', async () => {
+test('the page footer has no web-chat or clipboard button and Close the board is a red power sign named in every language (#1145)', async () => {
   const { servePage } = await sourceBoard()
   for (const words of [EN, ZH_TW, ZH_CN]) {
     for (const isLan of [false, true]) {
@@ -11466,13 +12215,14 @@ test('the page footer has no web-chat or clipboard button and Close the board sh
       assert.match(close[1], /\btype="button"/)
       assert.match(close[1], /\bclass="icon-btn"/)
       assert.match(close[1], /\bdata-static\b/)
-      // The name is visible text, so the button needs no aria-label or tooltip.
-      assert.ok(!close[1].includes('aria-label=') && !close[1].includes('title='))
-      const shown = close[2].match(/^<svg class="i"[^>]*aria-hidden="true"><path d="[^"]+"\/><\/svg><span>([^<]+)<\/span>$/)
-      assert.ok(shown)
-      assert.equal(shown[1], words.serveClose)
+      // The button shows only a power sign, so its name is what a screen reader says and the tooltip.
+      assert.ok(close[1].includes(`aria-label="${words.serveClose}"`) && close[1].includes(`title="${words.serveClose}"`))
+      assert.match(close[2], /^<svg class="i"[^>]*aria-hidden="true"><path d="M8 1\.5v6M[^"]+"\/><\/svg>$/)
     }
   }
+  const css = servePage(EN, 'synthetic', false)
+  assert.match(css, /\.pfoot #close\{[^}]*color:var\(--alert\)/)
+  assert.match(css, /\.pfoot #close:hover\{[^}]*color:var\(--alert\)/)
 })
 
 test('a row whose title is its current step shows the step once', async () => {
@@ -11537,9 +12287,10 @@ test('the footer links to the project', async () => {
   assert.match(link, /target="_blank"/)
   assert.match(link, /rel="noopener"/)
   assert.ok(link.includes(`title="${EN.pgGithub}"`))
-  // The footer reads "v<version> · GitHub": the version is filled in by the page, and Close the board stays once.
+  // The footer reads "<GitHub mark> v<version>": the mark stands for the word, the version is filled in by the page, and Close the board stays once.
   const footer = html.slice(html.indexOf('<footer class="pfoot"'), html.indexOf('</footer>'))
-  assert.ok(footer.includes('<span id="versions"></span><span aria-hidden="true">·</span>GitHub'))
+  assert.match(footer, /<svg class="i" viewBox="0 0 16 16" role="img" aria-label="GitHub"><path d="M8 0c[^"]+"\/><\/svg><span id="versions"><\/span><\/a>/)
+  assert.ok(!footer.includes('>GitHub<'))
   assert.equal(html.split('id="close"').length - 1, 1)
   const { board, model } = await groupedPage()
   try {
@@ -12502,12 +13253,12 @@ test('a Hidden notice restores that exact question directly, including after a r
   }
 })
 
-test('after Send the hide button named by each README is visible without More', async () => {
+test('after Send the hide button named by each README and guide is visible without More', async () => {
   const isVisible = node => {
     for (let one = node; one; one = one.parentNode) if (one.hidden || one.inert || String(one.className || '').split(' ').includes('gone')) return false
     return true
   }
-  for (const [lang, readme] of [['en', 'README.md'], ['zh-TW', 'README.zh-TW.md'], ['zh-CN', 'README.zh-CN.md']]) {
+  for (const [lang, readme, guide] of [['en', 'README.md', 'docs/GUIDE.md'], ['zh-TW', 'README.zh-TW.md', 'docs/GUIDE.zh-TW.md'], ['zh-CN', 'README.zh-CN.md', 'docs/GUIDE.zh-CN.md']]) {
     const html = await sourcePage(lang)
     const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
     const model = cardsModel()
@@ -12522,7 +13273,7 @@ test('after Send the hide button named by each README is visible without More', 
     await dom.flush()
     const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
     assert.ok(hide, 'the documented hide button is visible after sending')
-    assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), readme)
+    for (const file of [readme, guide]) assert.ok(readFileSync(new URL('../' + file, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), file)
     hide.click()
     await dom.flush()
     assert.equal(dom.requests.at(-1).body.type, 'hide')
@@ -12581,7 +13332,7 @@ test('#1085: a style picked on the page is written to the settings file with its
   } finally { await board.close() }
 })
 
-test('Settings has one labelled button and three accessible sections in every language and keeps focus inside until closed', async () => {
+test('Settings has one labelled button and four accessible sections in every language and keeps focus inside until closed', async () => {
   for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
     const html = await sourcePage(lang)
     assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
@@ -12589,7 +13340,7 @@ test('Settings has one labelled button and three accessible sections in every la
     assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
     const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
     for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
-    assert.equal((panel.match(/<section\b/g) ?? []).length, 3)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 4)
     const dom = await pageDom(html, redesignModel(), { width: 375 })
     assert.equal(dom.node('settings').hidden, true)
     dom.node('settings-toggle').click()

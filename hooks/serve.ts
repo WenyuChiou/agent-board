@@ -1,10 +1,10 @@
 import type { AskKind } from './ask'
-import { answersOf, boardItems, fingerprint, olderKey, remainingInbox } from './board'
+import { answersOf, boardItems, fingerprint, guardStep, olderKey, remainingInbox } from './board'
 import type { BoardItem, PendingTurn } from './board'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from './clip'
 import { groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, Quiet, RepoOf } from './grouping'
-import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardMark, faviconLink, filterStore, htmlLang, motionCss, pageBaseCss, pageTokens, sheetCss, themeHead } from './page-look'
+import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardIcon, boardLogo, faviconLink, ICON_CSS, LOGO_CSS, LOGO_STATES, filterStore, GITHUB_PATH, htmlLang, motionCss, pageBaseCss, pageTokens, POWER_PATH, sheetCss, themeHead } from './page-look'
 import { settingsCss, settingsPanel, settingsScript, settingsToggle } from './page-settings'
 import type { SettingsLang } from './board-settings'
 import { ZH_TW } from './i18n'
@@ -55,7 +55,7 @@ const rowReceipt = (agent: string, session: string | undefined, messages: readon
 }
 // The person's answer to this question reached its session: the session took it, or replied.
 const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
-  messages.some(message => message.answers === questionId && (message.status === 'acknowledged' || message.status === 'accepted' && message.error === '' || message.status === 'uncertain' && message.hasAccepted === true))
+  messages.some(message => message.answers === questionId && (message.status === 'acknowledged' || message.status === 'accepted' || message.status === 'uncertain' && message.hasAccepted === true))
 const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerCase() === 'claude'
 // What pressing Send does right now, for a Claude session that is receiving (#316).
 const claudeHint = (agent: string, isWorking: boolean, s: Strings): string => !isClaudeAgent(agent) ? '' : isWorking ? s.claudeSendWorking : s.claudeSendNow
@@ -147,6 +147,7 @@ export type ServeAsk = {
   // A hand-kept question, the person's own (its agent is '', as Claude Code's is); absent otherwise.
   isOwn?: true
   canTick: boolean
+  fileLine: number | null
   // Another session's question can be marked answered: kept off the board until it changes.
   canHide: boolean
   unhideKey?: string
@@ -157,6 +158,7 @@ export type ServeAsk = {
   session: string
   // The line's fingerprint (hooks/board.ts): the page sends it back with every press.
   fp: string
+  tickFp: string
   // The folder a reply runs in, shown beside the box before it is sent.
   where: string
   // Why a reply cannot be sent from here, when it cannot.
@@ -190,6 +192,7 @@ export type ServeRow = {
   tone: Tone
   when: string
   agent: string
+  auto?: 'working' | 'waiting' | 'ended' | null
   done: number
   total: number
   // One character per step for the progress bar (#1085, `hooks/progress-bar.ts` cellCode); '' with no steps.
@@ -219,6 +222,8 @@ export type ServeRow = {
   send: SendMode
   session: string
   fp: string
+  // A checkbox also binds the file lines drawn with the card, so a moved twin cannot replace it.
+  tickFp: string
   where: string
   info: string
   isSending: boolean
@@ -414,11 +419,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         link: ask.link,
         ...(ask.native === undefined ? {} : { native: { options: ask.native.options, line: s.nativeAnswerIn(agentLabel(ask.native.agent, s)) } }),
         canTick: ask.step !== null,
+        fileLine: ask.step?.line ?? null,
         canHide: ask.hideKey !== '' && ask.canHide !== false,
         ...(ask.hideKey !== '' && ask.canHide !== false ? { unhideKey: `hidden:${ask.hideKey}` } : {}),
         send,
         session: connection?.session ?? ask.target?.session ?? '',
         fp: fingerprint(item, items),
+        tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (ask.target?.dir ?? '') : send === 'connected' ? claudeHint(ask.agent, false, s) : '',
         archiveNote: isManual ? '' : s.archiveLive,
         info: connection || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? infoOf(send, ask.agent, ask.task, '', s)),
@@ -465,7 +472,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         tone: row.tone,
         when: row.when,
         agent: row.agent,
-        ...(row.auto === null ? { isOwn: true as const } : {}),
+        ...(row.auto === null ? { isOwn: true as const } : { auto: row.auto }),
         done: row.done,
         total: row.total,
         cells: cellCode(row.cells ?? []),
@@ -488,6 +495,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         send,
         session: connection?.session ?? row.target?.session ?? '',
         fp: fingerprint(item, items),
+        tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (row.target?.dir ?? '') : send === 'connected' ? claudeHint(row.agent, row.auto === 'working', s) : '',
         // A row says why only when a reply could otherwise be expected here.
         info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
@@ -626,7 +634,8 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   // can be reworded under it: the press goes through only on the block and words the page drew.
   const item = items.find(one => one.key === request.key)
 
-  return item !== undefined && request.fp === fingerprint(item, items) ? action : { type: 'refuse', note: s.boardLineChanged }
+  if (item === undefined || request.fp !== fingerprint(item, items, request.type === 'tick' && (item.type === 'ask' || request.line !== undefined))) return { type: 'refuse', note: s.boardLineChanged }
+  return action.type === 'tick' ? { ...action, ref: guardStep(action.ref, items) } : action
 }
 
 const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean): ServeAction => {
@@ -637,7 +646,9 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'tick') {
     if (item.type === 'ask') {
       const ref = item.ask.step
-      return ref === null ? { type: 'refuse', note: s.boardTickGone } : { type: 'tick', ref }
+      if (ref === null) return { type: 'refuse', note: s.boardTickGone }
+      if (request.line !== ref.line) return { type: 'refuse', note: s.boardLineChanged }
+      return { type: 'tick', ref }
     }
     if (item.type !== 'row') return { type: 'refuse', note: s.boardTickGone }
     // A press names the step it showed by its file line, so two open steps with the same
@@ -776,7 +787,8 @@ const PAGE_WORDS = [
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
-  'settingsLanguageChanged', 'settingsNotifications', 'settingsOn', 'settingsOff', 'settingsDenied', 'settingsUnavailable', 'settingsChanged', 'settingsLanguage',
+  'settingsLanguageChanged', 'settingsLanguageOverridden', 'settingsNotifications', 'settingsOn', 'settingsOff', 'settingsDenied', 'settingsUnavailable', 'settingsChanged', 'settingsLanguage',
+  'settingsAgentSetup', 'settingsAgentRemove', 'settingsAgentConfirm', 'settingsAgentCancel', 'settingsAgentsBusy', 'settingsAgentsReadFailed',
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
@@ -813,10 +825,7 @@ html{scrollbar-gutter:stable}
 body{overflow-wrap:anywhere}
 .col{width:100%;max-width:808px;margin:0 auto;padding-left:max(var(--s5),env(safe-area-inset-left,0px));padding-right:max(var(--s5),env(safe-area-inset-right,0px))}
 .head .topbar{flex-wrap:nowrap;min-height:56px;padding-block:0;gap:var(--s3)}
-.brand h1{white-space:nowrap}
-.live{display:inline-flex;align-items:center;gap:6px;flex:none;font-size:var(--text-xs);color:var(--muted);border:1px solid var(--line);border-radius:var(--radius-round);padding:1px 8px 1px 7px;white-space:nowrap}
-.live i{width:7px;height:7px;border-radius:var(--radius-round);background:var(--done)}
-body:has(#offline:not(:empty)) .live{display:none}
+.brand h1{white-space:nowrap}.brand h1 .ab-logo{display:block}
 #offline{position:sticky;top:0;color:var(--alert);overflow-wrap:anywhere;padding:var(--s2) 0;border-bottom:1px solid var(--line)}
 #offline:empty{display:none}
 #offline:not(:empty){top:var(--head-h,56px);z-index:5;padding:var(--s3) max(var(--s4),calc((100vw - 808px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--ground))}
@@ -861,7 +870,7 @@ button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)
 button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
 .btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
-button.quiet:hover,.side .pfoot #close:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
+button.quiet:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
 .answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);background:color-mix(in srgb,var(--act) 12%,var(--hover))}
 .answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-lg)}
 .answers button.answer-send:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
@@ -959,7 +968,7 @@ div.row-btn .r-chev{visibility:hidden}
 .hid p{margin:0}
 .fresh{display:grid;gap:var(--s4);padding:var(--s6) 0;max-width:560px}
 .fresh h2{margin:0;font-size:var(--text-lg);line-height:1.4}.fresh p{margin:0;color:var(--muted)}
-.fresh .mark{width:44px;height:44px}
+.fresh .ab-icon{display:block;justify-self:start}
 .fresh ul{list-style:none;margin:0;padding:0;display:grid;gap:var(--s3)}
 .fresh li{display:grid;grid-template-columns:24px minmax(0,1fr);gap:var(--s3);align-items:center}
 .fresh li b{font-weight:600}
@@ -977,7 +986,12 @@ ${CLIP_CSS}
 .side{display:none}
 .stage{min-width:0}
 .s-brand{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 var(--s2)}
-.s-brand .b-name{flex:1 1 auto;font-size:var(--text-md);font-weight:600;line-height:1.4;white-space:nowrap}
+.s-brand .b-logo{flex:1 1 auto;display:flex;align-items:center;min-width:0}.s-brand .b-logo svg,.s-brand .b-icon svg{display:block}
+.s-brand .b-icon{display:none}
+/* the logo and the icon: the light is the board's status (is-idle, is-working, is-waiting, is-offline) */
+${LOGO_CSS}
+${ICON_CSS}
+.ab-icon.is-arriving .ab-board{transform-box:view-box;transform-origin:32px 32px}
 .s-toggle{flex:none;width:32px;height:32px;display:inline-grid;place-items:center;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
 .s-toggle:hover{background:var(--hover);color:var(--ink)}
 .s-toggle:active{background:var(--press)}
@@ -1010,12 +1024,15 @@ ${CLIP_CSS}
 .side .pfoot .grow{display:none}
 /* Close the board shows its name beside the icon (#1145): an X alone did not say it stops the board */
 .pfoot #close,.pfoot #settings-toggle{display:inline-flex;gap:var(--s1);width:auto;height:var(--hit);min-width:var(--hit);min-height:var(--hit);padding:0 var(--s2);font:inherit;font-size:var(--text-xs)}
+/* Close the board is a red power sign with no words: its name is the tooltip and what a screen reader says. */
+.pfoot #close{justify-content:center;padding:0;color:var(--alert)}.pfoot #close svg.i{width:18px;height:18px;stroke-width:2}
+.pfoot #close:hover{color:var(--alert);background-color:color-mix(in srgb,var(--alert) 12%,transparent)}
 .side .pfoot .btn{min-height:24px;padding-inline:var(--s2);font-size:var(--text-xs);color:var(--muted)}
-.side .pfoot #close:hover,.side .pfoot .btn:hover{color:var(--ink)}
+.side .pfoot .btn:hover{color:var(--ink)}
 .side .pfoot p{order:3;flex-basis:100%}
 .ver-link{display:inline-flex;align-items:center;gap:var(--s1);color:color-mix(in srgb,var(--muted) 75%,var(--surface));font-size:var(--text-xs);line-height:1.2;text-decoration:none;border-radius:var(--radius-s);white-space:nowrap}
 .ver-link:hover{color:var(--ink);text-decoration:underline;text-underline-offset:3px}
-.ver-link svg.i{width:12px;height:12px}
+.ver-link svg.i{width:16px;height:16px;fill:currentColor;stroke:none}
 .set-row{display:inline-flex;align-items:center;gap:var(--s1)}
 .pfoot .grow{flex:1 1 auto}
 
@@ -1035,7 +1052,8 @@ ${CLIP_CSS}
   .shell[data-view="done"] #board>[data-sec]:not([data-sec="done"]){display:none}
   /* the rail: the views and the agents as 44px icons with their badges; names in the tooltip; the project link, the theme and Close the board in the footer */
   .shell[data-rail="1"] .side{padding:var(--s3) 10px;align-items:center}
-  .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-name){display:none}
+  .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-logo){display:none}
+  .shell[data-rail="1"] .s-brand .b-icon{display:block}
   .shell[data-rail="1"] .s-brand{flex-direction:column;gap:var(--s2);padding:0}
   .shell[data-rail="1"] .s-group{align-items:center;width:100%}
   .shell[data-rail="1"] :is(.s-views,.s-views+.s-group){border-top:1px solid var(--line);padding-top:var(--s3)}
@@ -1072,7 +1090,6 @@ ${CLIP_CSS}
   .head{position:static}
   .agents{top:0}
   #offline:not(:empty){top:0}
-  .live .lbl{display:none}.live{padding:var(--s1)}
   .page,#board{gap:var(--s5)}
   .page{padding-top:var(--s4)}
   .card{padding:var(--s3)}
@@ -1107,7 +1124,7 @@ const sideView = (id: keyof typeof VIEW_ICONS, label: string, hasCount: boolean)
   `<button type="button" class="s-item v-${id}" id="view-${id}" data-view="${id}" data-local data-nav title="${esc(label)}" aria-pressed="${id === 'all'}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${VIEW_ICONS[id]}</svg><span class="s-txt">${esc(label)}</span>${hasCount ? `<span class="s-n${id === 'needs' ? ' hot' : ''}" id="count-${id}"></span>` : ''}</button>`
 
 // `isLan`: the page a phone opens on the local network, which closes sooner.
-export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, language: SettingsLang = 'auto'): string => `<!doctype html>
+export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, language: SettingsLang = 'auto', isLangOverridden = false): string => `<!doctype html>
 <html lang="${htmlLang(s)}">
 <head>
 <meta charset="utf-8">
@@ -1127,24 +1144,25 @@ ${settingsCss}
 <body>
 <div class="shell" id="shell" data-view="all">
 <aside class="side" id="side" aria-label="Agent Board">
-<div class="s-brand">${boardMark}<span class="b-name">Agent Board</span><span class="live" title="${esc(s.serveLiveHint)}"><i></i></span><button type="button" class="s-toggle" id="side-toggle" data-local aria-expanded="true" aria-label="${esc(s.pgSideFold)}" title="${esc(s.pgSideFold)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6.5 2.5v11"/></svg></button></div>
+<div class="s-brand"><span class="b-logo">${boardLogo(esc(s.serveLiveHint))}</span><span class="b-icon">${boardIcon(28, esc(s.serveLiveHint))}</span><button type="button" class="s-toggle" id="side-toggle" data-local aria-expanded="true" aria-label="${esc(s.pgSideFold)}" title="${esc(s.pgSideFold)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6.5 2.5v11"/></svg></button></div>
 <nav class="s-group s-views" id="side-views" aria-label="${esc(s.pgViews)}">${sideView('all', s.pgOverview, false)}${sideView('needs', s.pgNeeds, true)}${sideView('working', s.pgWorking, true)}${sideView('others', s.pgOthers, true)}${sideView('done', s.pgDone, true)}</nav>
 <div class="s-group s-agents" id="side-agent-group" role="group" aria-labelledby="side-agents-label" hidden><p class="s-label" id="side-agents-label">${esc(s.pgAgents)}</p><div class="s-group" id="side-agents"></div></div>
 <div class="s-group s-projects" id="side-project-group" role="group" aria-labelledby="side-projects-label" hidden><p class="s-label" id="side-projects-label">${esc(s.pgProjects)}</p><div class="s-group" id="side-projects"></div></div>
 <div class="s-foot" id="side-foot"></div>
 </aside>
 <div class="stage">
-<header class="head" id="head"><div class="col topbar"><div class="brand">${boardMark}<h1>Agent Board</h1><span class="live" title="${esc(s.serveLiveHint)}"><i></i><span class="lbl">${esc(s.serveLive)}</span></span></div></div></header>
+<header class="head" id="head"><div class="col topbar"><div class="brand"><h1>${boardLogo(esc(s.serveLiveHint))}</h1></div></div></header>
+<template id="fresh-mark">${boardIcon(44, '', true, ' is-arriving')}</template>
 <div id="offline" role="status" aria-live="polite"></div>
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
 <div id="board"></div>
-<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><span id="versions"></span><span aria-hidden="true">·</span>GitHub<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 3.5H3.5v9h9v-3M9 3h4v4M13 3 7.5 8.5"/></svg></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${settingsToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg><span>${esc(s.serveClose)}</span></button></footer>
+<details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><svg class="i" viewBox="0 0 16 16" role="img" aria-label="GitHub"><path d="${GITHUB_PATH}"/></svg><span id="versions"></span></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${settingsToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static aria-label="${esc(s.serveClose)}" title="${esc(s.serveClose)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="${POWER_PATH}"/></svg></button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
 </div>
-${settingsPanel(s, language, isLan)}
+${settingsPanel(s, language, isLan, isLangOverridden)}
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 <script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
@@ -1304,12 +1322,14 @@ const PAGE_SCRIPT = String.raw`
     boardEtag = '';
     if (!isUnreachable) offlineButtons = Array.from(document.querySelectorAll('button:not([data-local])')).filter(function (node) { return !node.disabled; });
     isUnreachable = true;
+    paintLight();
     if (offline.textContent !== w('serveOffline')) offline.textContent = w('serveOffline');
     document.querySelectorAll('button:not([data-local])').forEach(function (node) { node.disabled = true; });
   }
   function reachable() {
     if (!isUnreachable) return;
     isUnreachable = false;
+    paintLight();
     offline.textContent = '';
     document.querySelectorAll('button[data-static]').forEach(function (node) { node.disabled = false; });
     offlineButtons.forEach(function (node) { node.disabled = false; });
@@ -1318,6 +1338,29 @@ const PAGE_SCRIPT = String.raw`
     Object.keys(results).forEach(function (key) { if (results[key].text === w('serveOffline')) { results[key].text = w('pressFailed'); paintResult(key); } });
     // Redraw even an unchanged model to restore each action's own sending state.
     last = '';
+  }
+  // The light in the logo is the board's status: offline when the page has lost the board, or stopped because the
+  // board closed or a newer page took over; waiting when something needs the person; working when an agent is busy;
+  // else idle. The tab icon turns amber only for waiting, so a page that stops never keeps an amber tab.
+  var LIGHT_STATES = ${JSON.stringify(LOGO_STATES)};
+  function lightState() {
+    if (isUnreachable || isClosed) return 'is-offline';
+    if (pg.waitingNow > 0) return 'is-waiting';
+    var view = pg.model && pg.model.view;
+    return view && view.working && view.working.length ? 'is-working' : 'is-idle';
+  }
+  function paintLight() {
+    var next = lightState();
+    document.querySelectorAll('.ab-logo,.ab-icon').forEach(function (node) {
+      var names = String(node.getAttribute('class') || '').split(' ').filter(function (one) { return one && LIGHT_STATES.indexOf(one) === -1; });
+      var value = names.concat(next).join(' ');
+      if (node.getAttribute('class') !== value) node.setAttribute('class', value);
+    });
+    var tab = document.querySelector('link[rel="icon"]');
+    if (!tab) return;
+    if (!tab.getAttribute('data-calm')) tab.setAttribute('data-calm', tab.getAttribute('href') || '');
+    var href = next === 'is-waiting' ? tab.getAttribute('data-needs') : tab.getAttribute('data-calm');
+    if (href && tab.getAttribute('href') !== href) tab.setAttribute('href', href);
   }
   // Names this page to the board, so it can tell one open page from another (#265).
   function newPageId() { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } }
@@ -1738,7 +1781,7 @@ const PAGE_SCRIPT = String.raw`
       var isNext = step.fileLine !== undefined ? step.fileLine === row.nextFileLine : step.text === row.next;
       if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && !isNext) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
-        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.fp, undefined, step.fileLine); }, 'btn');
+        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.tickFp, undefined, step.fileLine); }, 'btn');
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
         tick.title = step.text;
         add(line, tick);
@@ -1796,7 +1839,7 @@ const PAGE_SCRIPT = String.raw`
       add(body, el('p', 'note', ask.native.line));
       if (ask.canHide) add(answers, button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
     } else if (ask.isOwn) {
-      if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.fp); }, 'primary'));
+      if (ask.canTick) add(answers, button(w('pgDone'), function () { act(key, 'tick', '', '', '', '', ask.tickFp, undefined, ask.fileLine); }, 'primary'));
     } else {
       var options = ask.answers || [];
       canWrite = true;
@@ -1966,7 +2009,7 @@ const PAGE_SCRIPT = String.raw`
         // the step list names a step, so the server can tell it from a twin with the same text.
         var nextStep = null;
         for (var index = 0; index < row.steps.length; index += 1) if (row.nextFileLine !== undefined && row.steps[index].fileLine === row.nextFileLine) { nextStep = row.steps[index]; break; }
-        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.fp, undefined, row.nextFileLine); }, 'primary');
+        var tickNext = button(w('serveTickNext', clean(row.nextLabel || row.next)), function () { act(key, 'tick', nextStep ? nextStep.text : row.next, '', '', '', row.tickFp, undefined, row.nextFileLine); }, 'primary');
         // A long step is named by its first words; the whole step is its title (#463).
         if (row.nextLabel) tickNext.title = row.next;
         add(acts, tickNext);
@@ -2744,14 +2787,25 @@ const PAGE_SCRIPT = String.raw`
   }
   // The empty board: the agents that can report here, and how their work shows up.
   // With nothing connected it names no agent, so none is marked connected (#546).
+  // The first run's mark: its light drops into the corner once, the first time this page shows the empty board.
+  var isFreshPlayed = false;
+  function freshMark() {
+    var holder = document.getElementById('fresh-mark');
+    var mark = holder && holder.content && holder.content.firstChild;
+    if (!mark) return el('span');
+    var copy = mark.cloneNode(true);
+    if (isFreshPlayed) copy.setAttribute('class', String(copy.getAttribute('class')).split(' ').filter(function (one) { return one !== 'is-arriving'; }).join(' '));
+    isFreshPlayed = true;
+    return copy;
+  }
   function freshPage(view) {
     var ids = connectedIds(view);
-    if (!ids.length) return add(el('section', 'fresh'), el('h2', '', w('pgReady')), el('p', '', w('pgStartAny')));
+    if (!ids.length) return add(el('section', 'fresh'), freshMark(), el('h2', '', w('pgReady')), el('p', '', w('pgStartAny')));
     var list = el('ul');
     ids.forEach(function (id) {
       add(list, add(el('li'), agentMark(id), add(el('span'), el('b', '', agentName(id)), el('span', 'ok', ' ✓ ' + w('pgConnected')))));
     });
-    return add(el('section', 'fresh'), el('h2', '', w('pgReady')), list, el('p', '', w('pgStartIn', ids.map(agentName).join(' / '))));
+    return add(el('section', 'fresh'), freshMark(), el('h2', '', w('pgReady')), list, el('p', '', w('pgStartIn', ids.map(agentName).join(' / '))));
   }
   function sectionBlock(section, list) {
     var block = fx(section);
@@ -2867,6 +2921,7 @@ const PAGE_SCRIPT = String.raw`
         if (caret) box.setSelectionRange(caret[0], caret[1]);
       }
     });
+    paintLight();
     hasDrawn = true;
   }
   function render(model) {
@@ -2904,6 +2959,7 @@ const PAGE_SCRIPT = String.raw`
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) {
         isClosed = true;
+        paintLight();
         var movedMain = document.querySelector('main');
         movedMain.textContent = '';
         add(movedMain, el('p', '', w('serveMoved')));
@@ -2949,7 +3005,8 @@ const PAGE_SCRIPT = String.raw`
     }, function () {
       unreachable();
     }).then(function () {
-      if (!isClosed) timer = setTimeout(refresh, 3000);
+      // Leave room for the response and paint inside the three-second ask deadline.
+      if (!isClosed) timer = setTimeout(refresh, 2000);
     });
   }
   // Wider than the parser's start marker, so a block it would take is never dropped here.
@@ -3050,6 +3107,7 @@ const PAGE_SCRIPT = String.raw`
     say(w('pressPending'), '', 'close');
     var shut = function () {
       isClosed = true;
+      paintLight();
       clearTimeout(timer);
       var main = document.querySelector('main');
       main.textContent = '';

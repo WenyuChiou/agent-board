@@ -286,7 +286,7 @@ test('hiding or answering the one card closes every copy of it', () => {
   // Showing it again brings back one card, not three.
   expect(viewOf(text, ledger, pending, []).waiting).toHaveLength(1)
   // Answer: the session of the shown copy goes on after the reply, which resolves that copy.
-  const answered = observeQuestions(ledger, parseProgress(text), null, [], NOW, true, 'writer:answer', undefined, [], [{ agent: 'codex', id: 'cccc3333', event: 'prompt', at: START + 2 * HOUR + 1 }]).ledger
+  const answered = observeQuestions(ledger, parseProgress(text), null, [], NOW, true, 'writer:answer', undefined, [], [{ agent: 'codex', id: 'cccc3333', event: 'turn', at: START + 2 * HOUR + 1 }]).ledger
   expect(viewOf(text, answered).waiting).toHaveLength(0)
   expect(viewOf(text, resolveQuestion(ledger, card.questionId ?? '', NOW), pending).waiting).toHaveLength(0)
   // A copy asked after the card was hidden is a new ask and shows.

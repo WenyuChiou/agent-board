@@ -500,6 +500,12 @@ const homePattern = /(?:[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}|\/(?:Users|home)\/)([
 // A web address, such as https://github.com/users/<name>, is not a home folder; file:///home/…,
 // ssh://host/home/… and vscode-remote://wsl+Ubuntu/home/… still are.
 const webAddress = /\bhttps?:\/\/[^\s"'`/][^\s"'`]*/gi
+const attachmentPrefix = 'https://github.com/user-attachments/assets/'
+const attachmentIdPattern = new RegExp(`^(${uuidPattern.source})([)>]*)$`, 'i')
+const publicAttachmentId = address => {
+  if (!address.startsWith(attachmentPrefix)) return null
+  return attachmentIdPattern.exec(address.slice(attachmentPrefix.length))?.[1] ?? null
+}
 // ana and li are the made-up people of docs/preview/samples.ts.
 const placeholders = new Set(['you', 'me', 'user', 'username', 'name', 'example', 'jane', 'john', 'alice', 'bob', 'ana', 'li', 'someone', 'runner', '...', '…'])
 const safeText = text => {
@@ -517,7 +523,13 @@ export const privateData = ({ added, body }) => {
   for (const { path, line, text } of entries) {
     const location = path ? `${safeText(path)} line ${line}` : `body line ${line}`
     const add = (kind, fix) => output.problems.push(problem('private-data', `${kind} in ${location}.`, fix))
-    if ([...text.matchAll(uuidPattern)].some(match => new Set(match[0].replace(/-/g, '').toLowerCase()).size > 2)) {
+    // A public screenshot's asset UUID is not a session. Other UUIDs on the same
+    // line and every other privacy check still see their original text.
+    const sessionText = text.replace(webAddress, address => {
+      const id = publicAttachmentId(address)
+      return id === null ? address : address.replace(id, '<attachment-id>')
+    })
+    if ([...sessionText.matchAll(uuidPattern)].some(match => new Set(match[0].replace(/-/g, '').toLowerCase()).size > 2)) {
       add('session id', 'use a placeholder such as <session-id>; a made-up id of repeated digits, such as 00000000-0000-0000-0000-000000000001, also passes.')
     }
     if ([...text.replace(webAddress, ' ').matchAll(homePattern)].some(match => !placeholders.has(match[1].toLowerCase()) && !/^[<$%]/.test(match[1]))) {
@@ -568,27 +580,83 @@ export const rulesPage = ({ paths = [], body = '', headPaths }) => {
   return output
 }
 
+// The board's page is built by its own script in the browser, so render.ts cannot draw it: its README picture is a
+// screenshot of the real page, one per README language, dark only.
+const pageShot = /^docs\/images\/page-(en|zh-TW|zh-CN)-dark\.png$/
 // Judged by name, not by git's binary guess, which a .gitattributes line in the pull request could change.
 export const binaryImages = paths => {
   const output = result()
   for (const path of paths) {
-    if (/\.(png|jpe?g|gif|webp|bmp|ico)$/i.test(path) && !/^docs\/images\/social-preview[^/]*\.png$/.test(path)) {
-      output.problems.push(problem('images', `binary image added or changed: ${safeText(path)}.`, 'README pictures must be SVGs drawn by docs/preview/render.ts (CONTRIBUTING.md, Images).'))
+    if (/\.(png|jpe?g|gif|webp|bmp|ico)$/i.test(path) && !/^docs\/images\/social-preview[^/]*\.png$/.test(path) && !pageShot.test(path)) {
+      output.problems.push(problem('images', `binary image added or changed: ${safeText(path)}.`, 'README pictures must be SVGs drawn by docs/preview/render.ts; the one exception is the page screenshot docs/images/page-<en|zh-TW|zh-CN>-dark.png (CONTRIBUTING.md, Images).'))
     }
   }
   return output
 }
 
-export const reviewOf = body => {
-  const match = (body ?? '').match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})\b/m)
-  return match ? { kind: match[1], sha: match[2].toLowerCase() } : null
+export const reviewOf = item => {
+  if (!item) return null
+  const body = typeof item === 'string' ? item : item.body ?? ''
+  const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
+  if (match) {
+    const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
+    return {
+      kind: match[1].toUpperCase(),
+      sha: match[2].toLowerCase(),
+      ...(reviewer ? { reviewer } : {}),
+    }
+  }
+  if (typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
+    const reviewer = item.user?.login ?? null
+    return { kind: 'APPROVE', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
+  }
+  if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
+    const reviewer = item.user?.login ?? null
+    return { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
+  }
+  return null
 }
 
-export const verdict = (comments, head) => {
+export const verdict = (comments, head, options = {}) => {
   const output = result()
-  const last = comments.map(comment => reviewOf(comment.body)).filter(Boolean).at(-1)
-  if (!last) output.info.push('review: no review verdict yet.')
-  else output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, ${head.startsWith(last.sha) ? 'the current head.' : 'an older head; the current head has no verdict yet.'}`)
+  const { isDraft = false, authorAgent = null, number = null } = options
+  const reviews = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
+  const last = reviews.at(-1)
+
+  if (!last) {
+    output.info.push('review: no review verdict yet.')
+    if (!isDraft && number !== null) {
+      output.problems.push(problem('review', 'a ready pull request needs a qualifying review approval on the current head.', 'request a review and post "Review: APPROVE <head> by <reviewer>".'))
+    }
+    return output
+  }
+
+  const isExactHead = head.toLowerCase().startsWith(last.sha) || last.sha.startsWith(head.toLowerCase())
+  if (!isExactHead) {
+    output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, an older head; the current head has no verdict yet.`)
+    if (!isDraft && number !== null) {
+      output.problems.push(problem('review', `the review approval was for an older head (${last.sha.slice(0, 7)}); the current head (${head.slice(0, 7)}) needs a fresh review.`, 'request a new review on the current head.'))
+    }
+    return output
+  }
+
+  if (last.kind !== 'APPROVE') {
+    output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, the current head.`)
+    if (!isDraft && number !== null) {
+      output.problems.push(problem('review', `the latest review requested changes on ${last.sha.slice(0, 7)}.`, 'address the review findings and request a new review.'))
+    }
+    return output
+  }
+
+  if (authorAgent && last.reviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())) {
+    output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
+    if (!isDraft && number !== null) {
+      output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer.'))
+    }
+    return output
+  }
+
+  output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, the current head.`)
   return output
 }
 
@@ -655,7 +723,7 @@ export const checkPr = data => {
     add(outsideNotes({ paths: data.paths, numstat: data.numstat }))
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
-  else add(verdict(data.prComments, data.head))
+  else add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number }))
   if (data.isDraft) output.info.push(`draft: the reviewer starts when you run \`gh pr ready ${data.number}\` and comment \`Ready for review ${data.head}\`.`)
   return output
 }
@@ -927,7 +995,19 @@ export const main = async (argv = process.argv.slice(2)) => {
         data.moreIssues = {}
         for (const number of more) data.moreIssues[number] = await lookup(number)
       }
-      data.prComments = data.number === null ? [] : await api(`issues/${data.number}/comments`, { isList: true })
+      if (data.number === null) data.prComments = []
+      else {
+        const comments = await api(`issues/${data.number}/comments`, { isList: true })
+        const hasApproval = (Array.isArray(comments) ? comments : []).some(c => {
+          const r = reviewOf(c)
+          return r && r.kind === 'APPROVE'
+        })
+        let reviews = []
+        if (!hasApproval) {
+          try { reviews = await api(`pulls/${data.number}/reviews`, { isList: true }) } catch {}
+        }
+        data.prComments = [...(Array.isArray(comments) ? comments : []), ...(Array.isArray(reviews) ? reviews : [])]
+      }
     }
     const checked = checkPr(data)
     if (needsBundle(data.paths)) {

@@ -83,7 +83,7 @@ Claude 明确再次提问时，即使文字相同，也会更新该问题的标�
 
 卡片只有在确切 session 的 adapter 在线时提供发送，否则复制或自行打开 agent。[消息说明](MESSAGING.md)区分设置、真正回复、重复、冲突及超时。安装不会任意接管已打开的对话，普通回复也不能批准工具、信任或 PR 合并。
 
-`--no-open` 只打印网址，不打开浏览器。关标签页不会停止本地服务，再运行同一个命令即可重开。**关闭看板**才会停止；若正在发送，请等完成。默认不会闲置关闭，`--idle-minutes 30` 才启用。旧版 `--allow-resume` 会明确启用已结束 Codex／Grok 的重新启动，默认关闭，也不会用作实时消息的回退路径。
+`--no-open` 只打印网址，不打开浏览器。关标签页不会停止本地服务，再运行同一个命令即可重开。**关闭看板**（红色电源按钮）才会停止；若正在发送，请等完成。默认不会闲置关闭，`--idle-minutes 30` 才启用。旧版 `--allow-resume` 会明确启用已结束 Codex／Grok 的重新启动，默认关闭，也不会用作实时消息的回退路径。
 
 #### 在手机上
 
@@ -154,6 +154,35 @@ claude plugin install agent-board@agent-board
 - 仍有未答问题的区块，已结束或完成的满三天、工作中或等待中的满七天没有新汇报，才会自动归档；问题会先完整保存并留在更早的问题清单，明确归档同样先保存完整问题。
 - 手写工作的每个步骤都已完成或取消，满三天后才计入归档。“现在归档”和“清理”会立刻处理已完成的工作，其他清理期限如上所述。
 
+### 终端看板的按键
+
+**在终端里，** `--watch` 用起来跟面板一样：
+
+| 按键 | 作用 |
+|---|---|
+| ↑ ↓、Enter | 选一行、展开 |
+| `x` | 勾掉自己工作的下一步，并记进工作日志 |
+| `d` | 确认自己的一件工作，或一个已停对话的工作，已经完成 |
+| `a` | 归档自己的工作，或已停对话的区块 |
+| `1`–`9`、`y`／`n` | 复制另一个 agent 问题的答案，贴到那个 agent |
+| `c` | 复制命令，或接回提问那个对话的命令 |
+| `h`、`u` | 把另一个 agent 的问题标成已回复：只在这台电脑上隐藏，不会发出任何内容；把隐藏的全部重新显示 |
+| `i` | 展开或收起超过 7 天没动的工作 |
+| `o`、`q` | 打开网页版；退出 |
+
+做完的工作会自己离开看板。看板写 `progress.md` 跟面板一样小心；别的对话的区块不会动，除非你归档一个已经停掉的，或确认它已经完成。
+
+### 设置、外观和符号
+
+面板跟着 Claude Code 的主题走（`/config`，再选 **Theme**）；网页跟着你电脑的浅色或深色模式，直到你选了亮色或暗色。看板网页的**设置**按钮在**关闭看板**旁边，点开可调整语言、外观和通知，更改立即生效。语言可选自动、English、繁體中文或简体中文；外观可选浅色、深色、自动，以及进度条的三种样式：墨（默认）、蓝、绿。通知默认关闭，开启时会向浏览器请求权限，每个等待回答或批准的问题只通知一次。进度条每一步一格，旁边写数字，例如 `━━━━╸── 5/7`；选好的样式在网页、侧栏和终端看板都一样（侧栏用 `/progress style blue`，终端看板按 `s`）。按钮位于展开的侧栏底部；窄屏幕或侧栏收起时，则在任务列表下方。每个符号形状都不一样，不看颜色也分得出来；网页上还没做的步骤画成小圆点，不画圆圈，免得看起来像能点的按钮：
+
+| 符号 | 意思 | | 符号 | 意思 |
+|:-:|---|---|:-:|---|
+| ● | 等你 | | ◐ | 在跑，或在等别人 |
+| ▸ | 正在做 | | ! | 卡住 |
+| ○ • | 还没做（面板是圆圈，网页是小圆点） | | ⚑ | 两周内到期 |
+| ✓ | 完成 | | – | 取消 |
+
 ### 符号与标签
 
 步骤符号：✓ 完成 · ▸ 正在做 · • 还没做 · ● 等你 · ◐ 在跑 · ! 卡住 · – 取消 · ⚑ 两周内截止。
@@ -164,14 +193,28 @@ claude plugin install agent-board@agent-board
 
 独立安装：将干净 checkout 更新到指定版本，预览 `node scripts/setup-agent.mjs`，再应用已批准范围。修改过的文件列为冲突，不覆盖。host 可能要重新加载；不安装自动更新器或开机服务。
 
-用已安装程序预览／应用移除，每个设置过的 agent 各做一次。下面以 Codex 为例；其他 agent 换成它的名称（`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
+通过 `@wenyuchiou/agent-board remove` 一次预览／应用所有设置过之 agent 的移除，或指定 `--agent` 只移除特定 agent（`codex`、`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
 
 ```sh
-node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
-node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
+npx @wenyuchiou/agent-board remove
+npx @wenyuchiou/agent-board remove --apply
 ```
 
-`--codex-remove`、`--codex-doctor` 是沿用的维护名称，可搭配各目标。先关闭该看板。卸载会移除未修改的看板文件、自有 hook 定义、对应的 Codex 信任项、setup 创建且已空的 hooks 配置，以及 setup 创建的空目录。其他目标还需要的共享文件保留。用户修改保留。
+从代码库 checkout 目录：
+
+```sh
+node scripts/setup-agent.mjs --remove
+node scripts/setup-agent.mjs --remove --apply
+```
+
+或使用已安装的辅助程序移除个别 agent：
+
+```sh
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex --apply
+```
+
+`--remove`（及兼容保留之 `--codex-remove`）会以短路径预览所有碰过的 agent 移除内容，并清楚列出保留在 `progress.md` 旁边的个人数据文件。先关闭该看板。卸载会移除未修改的看板文件、自有 hook 定义、对应的 Codex 信任项、setup 创建且已空的 hooks 配置，以及 setup 创建的空目录。其他目标还需要的共享文件保留。用户修改保留。
 
 这些是你的历史，会保留：`progress.md`, `progress-archive-*.md`, `progress-journal-*.md`, `sessions/`, `pending/`, `hook-recovery-*.json`, `hook-errors.log`, `progress-answered.json`, `progress-questions*.json`, `progress-seen.json`, `progress-run-cursor.txt`, `progress-page-state.json`, `progress-page-state-done-*.json`, `progress-inbox/` (`dropped.log`)。可手动删除。运行目录中非空的 `*-messages/` 目录也保留。以 `progress.md` 为基础的文件名会随所选进度文件名变化。
 
@@ -230,7 +273,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 
 独立 reporter 在本地保留挑选过的 session 元数据，以及 Codex、Grok Build、Cursor CLI、OpenCode 和 Antigravity CLI 的结尾问题，不调用摘要模型。Antigravity 的 hook 不带回复文字，所以看板从该对话自己的记录文件读取最后回复；格式没有文档，已在 agy 1.5.2 检查，只保留结尾问题。发信给在线 agent 会使用目标 agent 的模型与额度。下列模型与对话访问适用于可选的 Claude 插件流程：看板文件保存在本机。通过你自己的 Claude Code 登录／模型访问，回合摘要会把提问和回复发送给 Claude Haiku；标题会发送该对话的第一个请求和步骤名称；交接行会发送最多 6,000 个字符的压缩摘要。面板的侧边提问框也会通过同一个登录，把你的问题发送给模型，根据这段对话的记录回答。这些调用使用该账号的额度或计费。面板会运行 `git branch --show-current`，装了 GitHub 的 `gh` 的话，也会用它查 pull request 和 CI 状态。默认只发给确切在线的对话；旧版 Codex／Grok 进程续接须明确加上 `--allow-resume`，使用该 agent 的权限和网络。独立 OpenClaw 插件禁用对话访问；可选 Claude 连接器则设置 `allowConversationAccess: true`。
 
-网页默认只监听本机（`127.0.0.1`）；这台电脑上的任何程序只要有链接就能使用。`--lan` 会通过带 token 的 HTTP 链接，在私有网络分享网页。token 是访问密钥，不会加密：同一网络上任何拿到 LAN 链接的人都能读看板、修改看板文件（包括导入区块），也能停止服务器。LAN 网页会拒绝启动 agent 的回复，也不显示恢复会话的命令。私有网络地址不代表咖啡馆或酒店的网络值得信任。不要分享链接或二维码。要停止服务，请按网页上的“关闭看板”按钮；若正在发送回复，请等完成后重试。只关标签页，后台服务会继续运行；空闲关闭须自行启用。看板服务器或 LAN 监听器每次重新启动都会生成新的 token，因此停止后旧链接就无法使用。文件变更、启动的程序、网络访问和 看板隐藏信息的限制，详见 [SECURITY.md](../SECURITY.md)（英文）。
+网页默认只监听本机（`127.0.0.1`）；这台电脑上的任何程序只要有链接就能使用。`--lan` 会通过带 token 的 HTTP 链接，在私有网络分享网页。token 是访问密钥，不会加密：同一网络上任何拿到 LAN 链接的人都能读看板、修改看板文件（包括导入区块），也能停止服务器。LAN 网页会拒绝启动 agent 的回复，也不显示恢复会话的命令。私有网络地址不代表咖啡馆或酒店的网络值得信任。不要分享链接或二维码。要停止服务，请按网页上的“关闭看板”按钮（红色电源按钮）；若正在发送回复，请等完成后重试。只关标签页，后台服务会继续运行；空闲关闭须自行启用。看板服务器或 LAN 监听器每次重新启动都会生成新的 token，因此停止后旧链接就无法使用。文件变更、启动的程序、网络访问和 看板隐藏信息的限制，详见 [SECURITY.md](../SECURITY.md)（英文）。
 
 ### Windows 能用吗？
 
@@ -242,7 +285,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 
 ### 怎么卸载？
 
-独立安装：先关闭看板，预览 `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`，确认后加上 `--apply`。对每个已安装的 agent 重复此步骤。保留的历史文件见[更新和卸载](#更新和卸载)。可选 Claude 插件的卸载方式：
+独立安装：先关闭看板，预览 `npx @wenyuchiou/agent-board remove`（或 `node scripts/setup-agent.mjs --remove`），确认后加上 `--apply`。这会一次检查并移除所有安装过的 agent 设置，同时列出并完整保留 `progress.md` 旁边的数据文件。若只想移除特定 agent，可指定 `--agent <name>` 或运行 `node "$HOME/.agent-board/agent-board.mjs" --remove --agent <name>`。详见[更新和卸载](#更新和卸载)。可选 Claude 插件的卸载方式：
 
 ```sh
 claude -p "/progress connect remove"
@@ -264,6 +307,8 @@ claude plugin marketplace remove agent-board
 - **读写失败：** 处理指出的文件／权限问题，检查进度与历史再重试；不先确认 owner 就删锁。
 - **没有原生侧栏：** 非 Claude host 使用交互网页或终端看板，网页面板不等于原生侧栏。
 - **写到一半被截断的工作：** session 写自己的区块时如果中途停掉（崩溃或被强制关闭），区块可能少了结束标记。看板会把它读成在它最后一行结束，按原样显示，并列在侧栏最下方的「看板状态」。要自己补上，就在它最后一行的下一行加上 `<!-- /auto session=<id> -->`；id 在区块的开始标记里。如果那个 session 先重写了自己的区块，新区块下方留下的几行会重复它旧的步骤：请自己删掉。
+- **同一个 agent 出现两次：** 可能两种方式都接入了：Claude 插件的 `/progress connect` 和安装程序（setup）。`/progress connect status` 会列出插件接了哪些；用 `/progress connect remove` 去掉其中一个，或用 `npx @wenyuchiou/agent-board@next remove --agent <name>` 先预览要移除什么，再加上 `--apply` 执行。
+- **有个问题一直不消失：** 在它自己的对话里回答，再点**已回复，先隐藏**（终端看板按 `h`）。对话已停止的问题、agent 在自己窗口里问的问题，以及在看板上点过**发送**或**排到下一轮**之后，这个按钮直接在卡片上；点过**复制**之后，同一个按钮写的是**已回答**；其他时候它在**更多**里。3 天后它会移到**较早的未答问题**，7 天后移到**更早、尚未回答的问题**。
 
 ### 安全地报告问题
 

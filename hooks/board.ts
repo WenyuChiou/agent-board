@@ -2,6 +2,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { boardCounts } from './board-status'
 import { lastQuestionInProse, normalizeReply } from './digest'
+import { withoutStamp } from './done-stamp'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail, turnOrder } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
 import { DARK, LIGHT } from './palette'
@@ -578,10 +579,11 @@ export const chatText = (
     }
   }
   // A question is told above, answered or not: it is never the "next step" of its task.
-  const isNext = (step: ViewStep): boolean => step.number !== null && !['done', 'cancelled', 'waiting'].includes(step.status)
+  const isNext = (step: ViewStep): boolean => step.number !== null && step.isReplyPending !== true && !['done', 'cancelled', 'waiting'].includes(step.status)
   rows.forEach(({ row, mark }, index) => {
     const next = (row.steps.find(step => step.isCurrent && isNext(step)) ?? row.steps.find(isNext))?.text
-    const words = `${mark} ${isSameName(row.project, row.title) ? named(row.project) : `${named(row.project)} › ${row.title}`}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${next === undefined ? '' : ` — ${s.reportNext(next)}`}${row.runs ? ` · ${row.runs}` : ''}`
+    const status = row.isChatReplied === true && row.status === s.answeredWaiting ? ` · ${row.status}` : ''
+    const words = `${mark} ${isSameName(row.project, row.title) ? named(row.project) : `${named(row.project)} › ${row.title}`}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${status}${next === undefined ? '' : ` — ${s.reportNext(next)}`}${row.runs ? ` · ${row.runs}` : ''}`
     items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
   })
   if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) items.push(s.empty)
@@ -618,7 +620,8 @@ export type BoardItem =
 
 // `key` is the chosen line's, so the choice stays on it when lines above it come or go. `seen`
 // holds each line's fingerprint as the last draw showed it (null before the first draw).
-export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean; bulkTidy?: { token: string; preview: TidyPreview } }
+// `seenTicks` also binds question ticks to the source steps that draw showed.
+export type BoardState = { selected: number; key: string | null; open: string | null; note: string; tone?: 'done' | 'alert' | 'quiet'; copyText?: string; result?: { key: string; revision: string | null; label: string }; seen: Record<string, string> | null; seenTicks?: Record<string, string> | null; isIdleOpen?: boolean; isOlderOpen?: boolean; bulkTidy?: { token: string; preview: TidyPreview } }
 
 export type BoardAction =
   | { type: 'tick'; ref: StepRef }
@@ -638,7 +641,7 @@ export type BoardAction =
   // The next progress-bar style, written to the board's settings file for every surface (#1085).
   | { type: 'style' }
 
-export const emptyBoardState: BoardState = { selected: 0, key: null, open: null, note: '', seen: null }
+export const emptyBoardState: BoardState = { selected: 0, key: null, open: null, note: '', seen: null, seenTicks: null }
 
 // The line on screen that the keys act on. A line whose key is gone was replaced under the
 // cursor since the screen was drawn; isGone stops a key from acting on a line not yet seen.
@@ -666,15 +669,21 @@ export const boardItems = (view: View, pending: readonly PendingTurn[], isIdleOp
   const isWorking = (row: TaskRow): boolean => row.auto === 'working' && !shelved.has(row.key) && needsOf(row) === null
   const rest = listed.filter(row => !isStuck(row) && !isWorking(row))
   const rows = [...listed.filter(isStuck), ...listed.filter(isWorking), ...[...new Set(rest.map(row => row.project))].flatMap(project => rest.filter(row => row.project === project))]
+  // A visible question can belong to a collapsed idle row. Keep the whole source
+  // catalog for its write proof without adding hidden rows to the drawn list.
+  const sourceRows = [...view.due, ...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped, ...(view.recentAsking ?? [])]
+  const sourceItems: BoardItem[] = sourceRows.map(row => ({ type: 'row', key: `row:${row.key}`, row }))
+  const guardedAsk = (ask: WaitingItem): WaitingItem => ask.step == null ? ask : { ...ask, step: guardStep(ask.step, sourceItems) }
+  const guardedRow = (row: TaskRow): TaskRow => row.next == null ? row : { ...row, next: guardStep(row.next, sourceItems) }
 
   return [
     // A question's key holds its words, so a press made while it showed one question is refused
     // once the same step asks another, rather than taken as the answer to the new one.
-    ...view.waiting.map(ask => ({ type: 'ask' as const, key: ask.hideKey === '' ? `ask:${ask.key}` : `ask:${ask.key}@${ask.hideKey}`, ask })),
-    ...(isOlderOpen ? [...(view.reminder ?? []), ...(view.older ?? [])].map(ask => ({ type: 'ask' as const, key: olderKey(ask), ask })) : []),
-    ...rows.map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
+    ...view.waiting.map(ask => ({ type: 'ask' as const, key: ask.hideKey === '' ? `ask:${ask.key}` : `ask:${ask.key}@${ask.hideKey}`, ask: guardedAsk(ask) })),
+    ...(isOlderOpen ? [...(view.reminder ?? []), ...(view.older ?? [])].map(ask => ({ type: 'ask' as const, key: olderKey(ask), ask: guardedAsk(ask) })) : []),
+    ...rows.map(row => ({ type: 'row' as const, key: `row:${row.key}`, row: guardedRow(row) })),
     ...remainingInbox(view, pending).map((turn, index) => ({ type: 'turn' as const, key: `turn:${turn.agent}:${turn.project}:${index}`, turn })),
-    ...(view.recentAsking ?? []).filter(row => !listed.some(one => one.key === row.key)).map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })),
+    ...(view.recentAsking ?? []).filter(row => !listed.some(one => one.key === row.key)).map(row => ({ type: 'row' as const, key: `row:${row.key}`, row: guardedRow(row) })),
   ]
 }
 
@@ -700,7 +709,7 @@ const twinsOf = (item: BoardItem, items: readonly BoardItem[]): number => {
 // fingerprint, and a tick, an archive, a reply or a copy acts only while the line still has it.
 // `items` are the lines drawn together with it: a hand-kept task has no block id, so its
 // fingerprint also holds how many tasks share its project and title.
-export const fingerprint = (item: BoardItem, items: readonly BoardItem[]): string => {
+export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLineTick = false): string => {
   const session = item.type === 'ask' ? (item.ask.target?.session ?? item.ask.session) : item.type === 'row' ? (item.row.archive?.session ?? item.row.target?.session ?? '') : ''
   const parts =
     item.type === 'ask'
@@ -708,12 +717,30 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[]): strin
       : item.type === 'row'
         ? [session, item.row.target?.resume ?? '', item.row.project, item.row.title, item.row.next?.step ?? '', item.row.question ?? '', item.row.resume ?? '']
         : [item.turn.agent, item.turn.project, item.turn.text]
-  // A step's line number moves whenever a block above it grows or shrinks, so it stays out: a press
-  // from the drawn card still acts (#1170). A tick by line is checked against the current line.
-  if (item.type === 'row') parts.push(item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => step)))
+  // Card actions survive unrelated line moves; a tick's absolute line must still name the drawn step,
+// and the positions of every task it could be mistaken for must be the ones drawn.
+  // The hidden done date the board writes after a draw is not a change the person made, unless
+  // another task shares this one's title: then a date may be all that tells the two apart.
+  if (item.type === 'row') {
+    const dated = twinsOf(item, items) > 1
+    parts.push(item.row.stepTask?.expected ?? item.row.confirm?.expected ?? '', JSON.stringify(item.row.steps.map(({ line, ...step }) => dated ? step : { ...step, raw: withoutStamp(step.raw) })))
+  }
+  if (item.type === 'row' && isLineTick) parts.push(JSON.stringify([item.row.next?.line ?? null, item.row.steps.map(step => step.line), item.row.next?.guard?.lines ?? null]))
+  if (item.type === 'ask' && isLineTick) parts.push(JSON.stringify([item.ask.step?.line ?? null, item.ask.step?.guard?.steps ?? null, item.ask.step?.guard?.task ?? null, item.ask.step?.guard?.lines ?? null]))
   if (item.type !== 'turn' && session === '') parts.push(String(twinsOf(item, items)))
 
   return sha256(parts.join('\u0000')).slice(0, 12)
+}
+
+// Preserve source positions, not folded display ordinals, through the writer's lock and retries.
+export const guardStep = (ref: StepRef, items: readonly BoardItem[]): StepRef => {
+  if (ref.guard !== undefined) return ref
+  const item = items.find(one => one.type === 'row' && one.row.project === ref.project && one.row.title === ref.title && one.row.stepLines?.includes(ref.line))
+  if (item?.type !== 'row' || item.row.stepTask == null) return ref
+  const expected = item.row.stepTask.expected
+  // An untitled task has no heading; its first source step anchors that candidate instead.
+  const lines = [...new Set(items.flatMap(one => one.type === 'row' && one.row.project === ref.project && one.row.stepTask?.expected === expected ? [one.row.stepTask.line >= 0 ? one.row.stepTask.line : one.row.stepLines?.[0] ?? -1] : []))].sort((a, b) => a - b)
+  return { ...ref, guard: { task: item.row.stepTask, steps: item.row.stepLines ?? [], lines } }
 }
 
 // What each key does on the selected line, so the footer lists only keys that do something.
@@ -733,7 +760,13 @@ export const pinned = (state: BoardState, items: readonly BoardItem[]): BoardSta
   const at = chosen(state, items)
   if (state.key !== null && items[at]?.key !== state.key) return state
 
-  return { ...state, selected: at, key: items[at]?.key ?? null, seen: Object.fromEntries(items.map(item => [item.key, fingerprint(item, items)])) }
+  return {
+    ...state,
+    selected: at,
+    key: items[at]?.key ?? null,
+    seen: Object.fromEntries(items.map(item => [item.key, fingerprint(item, items)])),
+    seenTicks: Object.fromEntries(items.map(item => [item.key, fingerprint(item, items, true)])),
+  }
 }
 
 export const boardKey = (state: BoardState, key: string, items: readonly BoardItem[], s: Strings = ZH_TW, routes: Readonly<Record<string, AnswerRoute>> = {}): { state: BoardState; action: BoardAction | null } => {
@@ -748,8 +781,8 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (key === 'down' || key === 'j') return moved(Math.min(last, at + 1))
   // The legacy action name now opens the same live page as the desktop command.
   if (key === 'o') return { state, action: { type: 'html' } }
-  if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: state.isIdleOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
-  if (key === 'l') return { state: { ...state, isOlderOpen: !state.isOlderOpen, selected: 0, key: null, open: null, note: state.isOlderOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {} }, action: null }
+  if (key === 'i') return { state: { ...state, isIdleOpen: !state.isIdleOpen, selected: 0, key: null, open: null, note: state.isIdleOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {}, seenTicks: {} }, action: null }
+  if (key === 'l') return { state: { ...state, isOlderOpen: !state.isOlderOpen, selected: 0, key: null, open: null, note: state.isOlderOpen ? s.pressClosed : s.pressOpened, tone: 'done', seen: {}, seenTicks: {} }, action: null }
   if (key === 'u') return { state, action: { type: 'unhide', key: null } }
   // Archive now, as the page's button under Done recently does: every finished task goes at once.
   if (key === 't') return { state, action: { type: 'tidy' } }
@@ -767,7 +800,10 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   if (key === 'enter' || key === ' ') return { state: { ...state, selected: at, key: item.key, open: state.open === item.key ? null : item.key, note: state.open === item.key ? s.pressClosed : s.pressOpened, tone: 'done' }, action: null }
   if (item.type === 'ask') {
     const { ask } = item
-    if (key === 'x' && ask.step !== null) return { state, action: { type: 'tick', ref: ask.step } }
+    if (key === 'x' && ask.step !== null) {
+      if (state.seen !== null && state.seenTicks?.[item.key] !== fingerprint(item, items, true)) return changed
+      return { state, action: { type: 'tick', ref: guardStep(ask.step, items) } }
+    }
     if (key === 'h' && ask.hideKey !== '' && ask.canHide !== false) return { state, action: { type: 'hide', key: ask.hideKey, text: ask.text } }
     if (key === 'c' && (ask.command ?? ask.link) !== null) return { state, action: { type: 'copy', text: plain((ask.command ?? ask.link) as string) } }
     // Copy an actionable command on demand; a raw session id is not a clipboard action.
@@ -786,7 +822,10 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
   }
   if (item.type === 'row') {
     const { row } = item
-    if (key === 'x' && row.next !== null) return { state, action: { type: 'tick', ref: row.next } }
+    if (key === 'x' && row.next !== null) {
+      if (state.seen !== null && state.seenTicks?.[item.key] !== fingerprint(item, items, true)) return changed
+      return { state, action: { type: 'tick', ref: guardStep(row.next, items) } }
+    }
     if (key === 'a' && row.archive !== null) return { state, action: { type: 'archive', ref: row.archive, title: row.title } }
     if (key === 'a' && (row.auto === 'working' || row.auto === 'waiting')) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
     if (key === 'd' && row.confirm != null) return { state, action: { type: 'done', ref: row.confirm, title: row.title } }
@@ -1005,7 +1044,8 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       // Under In progress a row also names its project, which has no heading there.
       const lead = [(isWorking || isStuck) && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
       // The step it is on, in the accent colour, where its status only says that it works.
-      const step = needs === null && (row.tone === 'quiet' || row.tone === 'accent') ? row.steps.find(one => one.isCurrent && (one.status === 'doing' || one.status === 'todo')) : undefined
+      const step = needs === null && row.isChatReplied !== true && (row.tone === 'quiet' || row.tone === 'accent')
+        ? row.steps.find(one => one.isCurrent && one.isReplyPending !== true && (one.status === 'doing' || one.status === 'todo')) : undefined
       const bar = rowBar(row, o, isWide)
       const barRoom = bar.width === 0 ? 0 : bar.width + 1
       const status = cut(`${lead}${needs !== null ? needsWords(needs, s) : step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve - barRoom)

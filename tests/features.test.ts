@@ -22,6 +22,8 @@ import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
+import { boardLanguage, isLanguageOverridden, type SettingsLang } from '../hooks/board-settings'
+import { settingsPanel } from '../hooks/page-settings'
 import { qrModules, qrText } from '../hooks/qr'
 import { STALE_MS } from '../hooks/parse'
 import { DOING_QUIET_MS, WORKING_MS } from '../hooks/grouping'
@@ -1308,7 +1310,7 @@ test('the board page shows the whole file: counts, questions, folded work, steps
   expect(html).toContain('textContent')
   expect(html).not.toContain('<script>alert(1)')
   expect(html).toContain("call('/api/board')")
-  expect(html).toContain('timer = setTimeout(refresh, 3000)')
+  expect(html).toContain('timer = setTimeout(refresh, 2000)')
   expect(servePage(STRINGS.en, 'synthetic')).toContain('<html lang="en">')
 })
 
@@ -1383,6 +1385,14 @@ test('a naming reply accepts short titles and background in Chinese and English'
   expect(nameReply('one two three four five six seven')).not.toBeNull()
   expect(nameReply(`重做進度面板\n${'字'.repeat(40)}`)).not.toBeNull()
   expect(nameReply(`Build the progress board\n${Array(19).fill('word').join(' ')}`)).not.toBeNull()
+})
+
+test('short first-person refusals are not task names, but read-error titles are', () => {
+  for (const reply of ['I cannot read the file', 'I can’t access the file', 'Sorry, we are unable to read it',
+    "I'm unable to read the file", 'We’re not able to open it', 'Title: "I cannot read the file"',
+    '我無法讀取檔案', '我无法读取文件', '抱歉，我暫時不能讀檔', '任務名稱：「我無法讀取檔案」']) expect(nameReply(reply)).toBeNull()
+  expect(nameReply('Fix cannot read error')?.title).toBe('Fix cannot read error')
+  expect(nameReply('修正無法讀檔')?.title).toBe('修正無法讀檔')
 })
 
 test('a naming reply rejects refusals, sentences, extra lines and answers outside the prompt limits', () => {
@@ -1616,6 +1626,154 @@ test('the question a reply ends on: its last paragraph only, without code or mar
   // An underscore inside a word belongs to it (a name, a token); at the edge of one it is markdown.
   expect(lastQuestion('Should I rename `snake_case` to ghp_16C7e42F in CI?')).toBe('Should I rename snake_case to ghp_16C7e42F in CI?')
   expect(lastQuestion('Use _this_ or __that__, not my__name?')).toBe('Use this or that, not my__name?')
+})
+
+test('a question put to the person, followed only by its choices as a list, still asks it (#1243)', () => {
+  expect(lastQuestion('Which database should I use?\n1. Postgres\n2. SQLite\n3. MySQL')).toBe('Which database should I use?')
+  expect(lastQuestion('Done.\n\nShould I use Postgres or SQLite?\n- Postgres\n- SQLite')).toBe('Should I use Postgres or SQLite?')
+  expect(lastQuestion('The parser is fixed. Which one do you want first?\na) the docs\nb) the tests')).toBe('Which one do you want first?')
+  expect(lastQuestion('What would you like me to do next?\n• Ship it\n• Add tests\n• Stop here')).toBe('What would you like me to do next?')
+  // Bold does not hide a question only the agent could be asking.
+  expect(lastQuestion('Which one do you prefer?\n1. **Postgres** — replicas\n2. `SQLite` — one file')).toBe('Which one do you prefer?')
+  expect(lastQuestion('Which database do you prefer?\n1. PostgreSQL.\n2. SQLite.')).toBe('Which database do you prefer?')
+  expect(lastQuestion('Which component do you need?\na) parser\nb) renderer')).toBe('Which component do you need?')
+  expect(lastQuestion('我該用哪個資料庫？\n1、Postgres\n2、SQLite')).toBe('我該用哪個資料庫？')
+  expect(lastQuestion('要我先用哪個資料庫？\n- Postgres\n- SQLite')).toBe('要我先用哪個資料庫？')
+  expect(lastQuestion('你想先做哪一個？\n1. 文件\n2. 測試')).toBe('你想先做哪一個？')
+  expect(lastQuestion('我应该用哪个数据库？\n- Postgres\n- SQLite')).toBe('我应该用哪个数据库？')
+  expect(lastQuestion('您希望先做哪一个？\n1. 文档\n2. 测试')).toBe('您希望先做哪一个？')
+})
+
+test('blank lines between a question and its choices, and between the choices, do not hide it (#1243)', () => {
+  expect(lastQuestion('Done.\n\nWhich one do you want first?\n\n1. Postgres\n2. SQLite')).toBe('Which one do you want first?')
+  expect(lastQuestion('Which database should I use?\n\n1. Postgres\n\n2. SQLite')).toBe('Which database should I use?')
+  expect(lastQuestion('你要先用哪個資料庫？\n\n- Postgres\n\n- SQLite')).toBe('你要先用哪個資料庫？')
+  expect(lastQuestion('你要先用哪个数据库？\r\n\r\n- Postgres\r\n\r\n- SQLite')).toBe('你要先用哪个数据库？')
+})
+
+test('a heading or a recap worded as a question over a list that answers it asks nothing (#1243)', () => {
+  expect(lastQuestion('What changed?\n- Updated the parser.\n- Added tests.')).toBeNull()
+  expect(lastQuestion('What changed?\n- the parser\n- the tests')).toBeNull()
+  expect(lastQuestion('Which database did I pick?\n- SQLite was selected.\n- Migrations completed.')).toBeNull()
+  expect(lastQuestion('Which database did you want?\n- SQLite\n- Postgres')).toBeNull()
+  expect(lastQuestion('What did you ask for?\n- Add dark mode.\n- Preserve settings.')).toBeNull()
+  expect(lastQuestion('What did you ask for?\n- dark mode\n- saved settings')).toBeNull()
+  expect(lastQuestion('You asked for a summary. What changed?\n- Updated the parser.\n- Added tests.')).toBeNull()
+  expect(lastQuestion('你提出了哪些需求？\n- 新增深色模式。\n- 修正設定頁。')).toBeNull()
+  expect(lastQuestion('你提出了哪些需求？\n- 深色模式\n- 設定頁')).toBeNull()
+  expect(lastQuestion('你要了哪些功能？\n- 深色模式\n- 設定頁')).toBeNull()
+  expect(lastQuestion('你提出了哪些需求？\n- 新增深色模式。\n- 修正设置页。')).toBeNull()
+  expect(lastQuestion('改了哪些地方？\n- 解析器\n- 测试')).toBeNull()
+})
+
+test('an answered FAQ heading over its answers asks nothing (#1243)', () => {
+  expect(lastQuestion('**Should I make any changes?**\n- No changes are needed.\n- Your configuration is already correct.')).toBeNull()
+  // A survey's results: the heading asks the person in its words, and the list answers it.
+  expect(lastQuestion('**Which one do you prefer?**\n1. **Postgres** — replicas\n2. `SQLite` — one file')).toBeNull()
+  expect(lastQuestion('Survey results:\n\n**Which deployment option do you prefer?**\n- Docker — 70%\n- Binary — 30%')).toBeNull()
+  expect(lastQuestion('Survey results:\n\nWhich deployment option do you prefer?\n- Docker\n- Binary')).toBeNull()
+  expect(lastQuestion('Which deployment option do you prefer?\n- Docker — 70%\n- Binary — 30%')).toBeNull()
+  expect(lastQuestion('調查結果：\n\n你想要哪種部署方式？\n- Docker\n- 執行檔')).toBeNull()
+  expect(lastQuestion('Should I make any changes?\n- No changes are needed.\n- Your configuration is already correct.')).toBeNull()
+  expect(lastQuestion('Should I make any changes?\n- No\n- The configuration is already correct')).toBeNull()
+  expect(lastQuestion('**Which database should I use?**\n- Postgres for production\n- SQLite for tests')).toBeNull()
+  expect(lastQuestion('## Which database should I use?\n- Postgres for production\n- SQLite for tests')).toBeNull()
+  expect(lastQuestion('Q: Which database should I use?\n- Postgres for production\n- SQLite for tests')).toBeNull()
+  expect(lastQuestion('Which database should I use?\n- Use Postgres for production.\n- Use SQLite for tests.')).toBeNull()
+  expect(lastQuestion('**我需要修改什麼嗎？**\n- 不需要修改。\n- 你的設定已經正確。')).toBeNull()
+  expect(lastQuestion('**我該用哪個資料庫？**\n- 正式環境用 Postgres\n- 測試用 SQLite')).toBeNull()
+  expect(lastQuestion('**我应该用哪个数据库？**\n- 生产环境用 Postgres\n- 测试用 SQLite')).toBeNull()
+})
+
+test('a bare which-first question over its choices asks it, and a summary heading over a list does not (#1243)', () => {
+  expect(lastQuestion('Which database first?\n1. Postgres\n2. SQLite')).toBe('Which database first?')
+  expect(lastQuestion('Which one next?\n- docs\n- tests')).toBe('Which one next?')
+  expect(lastQuestion('先用哪個資料庫？\n1. Postgres\n2. SQLite')).toBe('先用哪個資料庫？')
+  expect(lastQuestion('先用哪个数据库？\n- Postgres\n- SQLite')).toBe('先用哪个数据库？')
+  expect(lastQuestion('Which files changed?\n- parse.ts\n- digest.ts')).toBeNull()
+  expect(lastQuestion('Which agents are supported?\n- Codex\n- Claude Code')).toBeNull()
+  expect(lastQuestion('Which step failed first?\n- build\n- lint')).toBeNull()
+  expect(lastQuestion('**Which database first?**\n- Postgres\n- SQLite')).toBeNull()
+  expect(lastQuestion('先前用了哪個資料庫？\n- Postgres\n- SQLite')).toBeNull()
+  // A timeline's heading names an order too, but with a verb or for several things.
+  expect(lastQuestion('The CI timeline:\n\nWhich jobs ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which jobs ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('已确定的执行顺序：\n\n先做哪些工作？\n- 更新解析器\n- 补充测试')).toBeNull()
+  expect(lastQuestion('先做哪些工作？\n- 更新解析器\n- 补充测试')).toBeNull()
+})
+
+test('a question under a caption, or about an order already finished, asks nothing (#1243)', () => {
+  expect(lastQuestion('CI jobs, in the order they finished\n\nWhich finished first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which finished first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion('Which ran first?\n- lint\n- typecheck')).toBeNull()
+  expect(lastQuestion("Completed intake form with the customer's answers\n\nWhich services do you need?\n- Storage\n- Backups")).toBeNull()
+  expect(lastQuestion('The customer selected both services in the completed intake form\n\nWhich services should I provide?\n- Storage.\n- Backups.')).toBeNull()
+  expect(lastQuestion('客戶填好的需求表\n\n你需要哪些服務？\n- 儲存\n- 備份')).toBeNull()
+  // A sentence the agent ends before its question leaves the question its own.
+  expect(lastQuestion('I checked both.\n\nWhich services do you need?\n- Storage\n- Backups')).toBe('Which services do you need?')
+  expect(lastQuestion('兩個都查過了。\n\n你需要哪些服務？\n- 儲存\n- 備份')).toBe('你需要哪些服務？')
+})
+
+test('a list that explains, asks or follows a statement is not a list of choices (#1243)', () => {
+  // A list after a statement, or after a question the same line already answered.
+  expect(lastQuestion('What changed:\n1. the parser\n2. the tests')).toBeNull()
+  expect(lastQuestion('Why did it fail? The cache was stale.\n1. cleared it\n2. reran')).toBeNull()
+  expect(lastQuestion('Which one should I use?\n\nI went with A.\n\n1. A\n2. B')).toBeNull()
+  expect(lastQuestion('I answered these questions:\n1. Why did tests fail?\n2. The cache was stale.')).toBeNull()
+  // An item that asks: which of the questions waits cannot be told.
+  expect(lastQuestion('Which database should I use?\n1. Postgres for scale?\n2. SQLite for simplicity.')).toBeNull()
+  // The last item's own question is read as before, never the line over the list.
+  expect(lastQuestion('Which database should I use?\n1. Postgres for scale?\n2. SQLite for simplicity?')).toBe('SQLite for simplicity?')
+  // An item with a paragraph of its own explains; one choice alone is not a choice.
+  expect(lastQuestion('Which database do you prefer?\n\n1. Postgres.\n\n   It supports replicas.\n\n2. SQLite.')).toBeNull()
+  expect(lastQuestion('Which database should I use?\n- Postgres')).toBeNull()
+  expect(lastQuestion('Which one should I use?\n1. Postgres\n   - replicas\n2. SQLite')).toBeNull()
+  // A yes or no over a list is not a pick among its items.
+  expect(lastQuestion('Do you want the details?\n- parser\n- tests')).toBeNull()
+  expect(lastQuestion('你要看細節嗎？\n- 解析器\n- 測試')).toBeNull()
+  expect(lastQuestion('你要看细节吗？\n- 解析器\n- 测试')).toBeNull()
+  expect(lastQuestion('要用哪個資料庫？\n- Postgres 適合正式環境。\n- SQLite 適合測試。')).toBeNull()
+  expect(lastQuestion('该用哪个数据库？\n- Postgres 适合生产环境。\n- SQLite 适合测试。')).toBeNull()
+})
+
+test('a reply that quotes its earlier question asks nothing (#1273)', () => {
+  expect(lastQuestion('The test asked either "Your name" or "Are you ready?"')).toBeNull()
+  expect(lastQuestion('測試問了「你的名字」還是「準備好了嗎？」')).toBeNull()
+  expect(lastQuestion('That finishes the test: I said hello, then goodbye, and asked "Blue or green?"')).toBeNull()
+  expect(lastQuestion('Earlier you wrote “Blue or green?”')).toBeNull()
+  expect(lastQuestion("The prompt was 'Blue or green?'")).toBeNull()
+  expect(lastQuestion('The prompt said "Ready? Blue or green?"')).toBeNull()
+  expect(lastQuestion('I asked "Blue or green? Pick one" and stopped.')).toBeNull()
+  expect(lastQuestion('測試完成：我說了你好，然後問了「藍色還是綠色？」')).toBeNull()
+  expect(lastQuestion('测试完成：我说了你好，然后问了“蓝色还是绿色？”')).toBeNull()
+  expect(lastQuestion('我先問了『要不要繼續？』')).toBeNull()
+  expect(lastQuestion('I asked which one, as "Blue or green?"\n1. Blue\n2. Green')).toBeNull()
+  // A quote that wraps the whole question, or its last option, still asks.
+  expect(lastQuestion('Done. "Blue or green?"')).toBe('"Blue or green?"')
+  expect(lastQuestion('改好了。\n\n「藍色還是綠色？」')).toBe('「藍色還是綠色？」')
+  expect(lastQuestion('Should I call it "fast" or "safe?"')).toBe('Should I call it "fast" or "safe?"')
+  expect(lastQuestion('I asked "Blue or green?" and you said blue. Ship it?')).toBe('Ship it?')
+  expect(lastQuestion("Is it Alice's row or Bob's row?")).toBe("Is it Alice's row or Bob's row?")
+})
+
+test('a lone straight quote, such as an inch mark, is a literal character, and the question still asks (#1273)', () => {
+  expect(lastQuestion('Should I use a 12" shelf?')).toBe('Should I use a 12" shelf?')
+  expect(lastQuestion('Should I escape `"` in the output?')).toBe('Should I escape " in the output?')
+  expect(lastQuestion('The rack is 12" wide. Should I order it?')).toBe('Should I order it?')
+  expect(lastQuestion('要用 12" 的架子嗎？')).toBe('要用 12" 的架子嗎？')
+  expect(lastQuestion('Do you want "2"?')).toBe('Do you want "2"?')
+  expect(lastQuestion('Is "x" ok? "y" is next')).toBe('Is "x" ok?')
+  expect(lastQuestion('Should I use the "fast"-path? The "safe" path is slower.')).toBe('Should I use the "fast"-path?')
+  // A told-about quote still quotes after an inch mark or a closed pair, or with a space inside.
+  expect(lastQuestion('The 12" rack is in. I asked "Blue or green?"')).toBeNull()
+  expect(lastQuestion('The 12" rack is in, and I asked "Blue or green?"')).toBeNull()
+  expect(lastQuestion('I wrote "Version 2" in the title and asked "Ready?"')).toBeNull()
+  expect(lastQuestion('他問"要藍色還是綠色?"')).toBeNull()
+  expect(lastQuestion('I asked " Ready?"')).toBeNull()
+  expect(lastQuestion('I asked "...Ready?"')).toBeNull()
+  // A straight quote in code is a character, so it neither opens nor closes a quotation.
+  expect(lastQuestion('The tokens are `name"` and `"`. Should I escape both? "No" leaves them unchanged.')).toBe('Should I escape both?')
+  expect(lastQuestion('I compared `name"` and `"` and then asked "Ready?"')).toBeNull()
 })
 
 test('a link\'s own question mark is not a question, and a question with a link keeps it whole (#1108)', () => {
@@ -2751,10 +2909,11 @@ test('a chat board puts the questions first, each with its project and agent, an
   expect(text).toContain('\n▸ acme-web › Dark mode for the settings page — next Settings page\n')
   for (const question of ['Per-key limit', 'Publish the fixed pages', 'Ship it to staging']) expect(at('▸ acme-web')).toBeGreaterThan(at(question))
   // One marked answered in a pane on this machine, and one hidden since, are not asked again.
+  // The waiting session leaves Needs you and stays waiting, out of Working now / in progress (#1206).
   const answered = chatText(chatView(CHAT_FILE, ['a1b2c3d4 2 Per-key limit — 100 or 300 a minute?']), [], [], STRINGS.en, '/home/jane')
   expect(answered).not.toContain('Per-key limit')
   expect(answered).toContain('[Confirm] Publish the fixed pages, OK?')
-  expect(answered.startsWith('Progress  ● 1 waiting  ▸ 2 in progress')).toBe(true)
+  expect(answered.startsWith('Progress  ● 1 waiting  ▸ 1 in progress')).toBe(true)
   // They are counted, as on the terminal board, after the questions that remain.
   expect(answered).toContain('    [Confirm] Publish the fixed pages, OK?\n  1 answered, hidden\n')
   // Its task goes on with the work that is not waiting, and its next step is the one after the question.
@@ -3388,6 +3547,11 @@ const fpIn = (items: ReturnType<typeof boardItems>, key: string): string => {
   const item = items.find(one => one.key === key)
   return item === undefined ? '' : fingerprint(item, items)
 }
+// What a question's Done button sends: the tick fingerprint and the step's line (#1204).
+const askTickIn = (items: ReturnType<typeof boardItems>, key: string): { fp: string; line?: number } => {
+  const item = items.find(one => one.key === key)
+  return item?.type === 'ask' ? { fp: fingerprint(item, items, true), line: item.ask.step?.line ?? undefined } : { fp: '' }
+}
 
 const MATRIX_HOSTS = ['claude', 'codex', 'antigravity', 'hermes', 'openclaw', 'grok', 'opencode', 'cursor'] as const
 const MATRIX_SOURCES = ['own', 'other'] as const
@@ -3450,7 +3614,8 @@ test('the serve action contract covers every card kind from every agent and sour
       expect(actionItem === undefined ? '' : fingerprint(actionItem, items)).toBe(ask.fp)
       if (ask.canTick) {
         offered += 1
-        expect(serveAction(items, { key: ask.key, type: 'tick', text: '', session: '', fp: ask.fp }, STRINGS.en).type).toBe('tick')
+        // A question's Done sends what the page's button sends: the tick fingerprint and the step's line (#1204).
+        expect(serveAction(items, { key: ask.key, type: 'tick', text: '', session: '', fp: ask.tickFp, line: ask.fileLine ?? undefined }, STRINGS.en).type).toBe('tick')
       }
       if (ask.canHide) {
         offered += 1
@@ -3595,7 +3760,7 @@ test('a press on the page is worked out from the file as it is now: a line that 
   const codex = keyOf(item => item.type === 'ask' && item.ask.agent === 'codex')
   expect(resumeAction(items, { key: codex, type: 'send', text: '300', session: 'a1b2c3d4' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveSendOpen('Codex') })
   const manual = keyOf(item => item.type === 'ask' && item.ask.project === 'docs-site')
-  expect(resumeAction(items, { key: manual, type: 'tick', text: '', session: '', fp: fpIn(items, manual) }, STRINGS.en).type).toBe('tick')
+  expect(resumeAction(items, { key: manual, type: 'tick', text: '', session: '', ...askTickIn(items, manual) }, STRINGS.en).type).toBe('tick')
   expect(resumeAction(items, { key: manual, type: 'send', text: 'yes', session: '' }, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.serveManualReply })
   // An ended block can go to the archive; a working one cannot yet.
   expect(resumeAction(items, { key: grok, type: 'archive', text: '', session: '', fp: fpIn(items, grok) }, STRINGS.en)).toMatchObject({ type: 'archive', title: 'Pick the cache' })
@@ -4485,7 +4650,7 @@ test('two hand-kept questions with the same title and words are told apart by ho
   const one = keys[0] ?? ''
   expect(keys.length).toBe(2)
   expect(gone.some(item => item.key === one)).toBe(true)
-  const press = { key: one, type: 'tick', text: '', session: '', fp: fpIn(before, one) }
+  const press = { key: one, type: 'tick', text: '', session: '', ...askTickIn(before, one) }
   expect(serveAction(before, press, STRINGS.en).type).toBe('tick')
   expect(serveAction(gone, press, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   const drawn = pinned({ ...emptyBoardState, selected: before.findIndex(item => item.key === one) }, before)
@@ -4603,17 +4768,50 @@ test("the terminal board and the board page mark any agent's question answered w
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
 })
 
-test('hiding a question on a state=waiting session reflects answeredWaiting rather than plain working (#1143)', () => {
+test('hiding a question on a state=waiting session reflects answeredWaiting rather than plain working (#1143, #1206)', () => {
   const key = 'a1b2c3d4 2 Per-key limit — 100 or 300 a minute?'
   for (const s of Object.values(STRINGS)) {
     expect(s.answeredWaiting).toBeTruthy()
+    // 1. Before hide: question is in asks, waiting session is not in Working now
+    const beforeView = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, s)
+    const beforeItems = boardItems(beforeView, [])
+    const askItem = beforeItems.find(item => item.type === 'ask' && item.key.includes('a1b2c3d4'))
+    expect(askItem).toBeDefined()
+    const beforeModel = serveModel(beforeView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(beforeModel.view.working.some(ref => ref.project === 'api-gateway')).toBe(false)
+
+    // 2. Hide through the page hide action
+    const acted = serveAction(beforeItems, { key: askItem!.key, type: 'hide', text: '', session: '' }, s)
+    expect(acted).toMatchObject({ type: 'hide', key })
+
+    // 3. After hide: question left Needs you, still-waiting session stays out of Working now and its count
     const hiddenView = buildView(parseProgress(SERVE_FILE), [], null, SERVE_NOW, 0, {}, s, [key])
     const row = hiddenView.groups.find(group => group.project === 'api-gateway')?.rows.find(r => r.title === 'Rate-limit the public endpoints')
     expect(row?.status).toBe(s.answeredWaiting)
     expect(row?.tone).toBe('quiet')
     const model = serveModel(hiddenView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
-    expect(model.view.working.some(ref => ref.key === `row:${row?.key}`)).toBe(true)
+    expect(model.view.working.some(ref => ref.key === `row:${row?.key}`)).toBe(false)
+    expect(model.view.working.filter(ref => ref.project === 'api-gateway').length).toBe(0)
+    expect(model.view.all.open.some(ref => ref.key === `row:${row?.key}`)).toBe(true)
+    expect(model.hidden.some(item => item.task === 'Rate-limit the public endpoints')).toBe(true)
     expect(pageWords(s).answeredWaiting).toBe(s.answeredWaiting)
+
+    // Unhide route remains available
+    const hiddenItems = boardItems(hiddenView, [])
+    expect(serveAction(hiddenItems, { key: `hidden:${key}`, type: 'unhide', text: '', session: '' }, s)).toEqual({ type: 'unhide', key })
+
+    // 4. Later real working report moves the session into Working now
+    const resumedFile = SERVE_FILE.replace(
+      '<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=2026-10-17T08:30:00Z',
+      '<!-- auto session=a1b2c3d4 agent=codex state=working updated=2026-10-17T08:44:00Z',
+    )
+    const resumedView = buildView(parseProgress(resumedFile), [], null, SERVE_NOW, 0, {}, s, [key])
+    const resumedRow = resumedView.groups.find(group => group.project === 'api-gateway')?.rows.find(r => r.title === 'Rate-limit the public endpoints')
+    expect(resumedRow?.status).toBe(s.agentWorking('Codex'))
+    expect(resumedRow?.tone).toBe('accent')
+    const resumedModel = serveModel(resumedView, [], s, new Set(), false, undefined, false, { now: SERVE_NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] })
+    expect(resumedModel.view.working.some(ref => ref.key === `row:${resumedRow?.key}`)).toBe(true)
+    expect(resumedModel.view.working.filter(ref => ref.project === 'api-gateway').length).toBe(1)
   }
 })
 
@@ -4904,7 +5102,6 @@ test("the redesigned pages speak the page's language in every new word", () => {
     expect(live).not.toContain('data-theme-toggle')
     expect(live).not.toContain('data-theme-pick')
     for (const label of [s.pgViews, s.pgOverview, s.pgNeeds, s.pgWorking, s.pgOthers, s.pgDone, s.pgProjects, s.pgAgents, s.pgSideFold]) expect(live).toContain(label)
-    expect(live).toContain(s.serveLive)
     expect(live).toContain(s.serveLiveHint)
     expect(live).toContain(s.sideClose)
     const words = pageWords(s)
@@ -5008,4 +5205,41 @@ test('a native ask reaches the page model with its options and where to answer, 
   const page = servePage(STRINGS.en, 'n')
   expect(page).toContain('} else if (ask.native) {')
   expect(page.slice(page.indexOf('} else if (ask.native) {'), page.indexOf('} else if (ask.isOwn) {'))).not.toContain('canWrite = true')
+})
+
+test('Settings language override detects CLI flag precedence and displays override warning', () => {
+  expect(isLanguageOverridden(null, 'zh-TW', 'en', 'en')).toBe(false)
+  expect(isLanguageOverridden('en', 'zh-TW', 'en', 'en')).toBe(true)
+  expect(isLanguageOverridden('en', 'en', 'en', 'en')).toBe(false)
+  expect(isLanguageOverridden('auto', 'en', null, 'zh-TW')).toBe(true)
+
+  const enOverridden = settingsPanel(STRINGS.en, 'zh-TW', false, true)
+  expect(enOverridden).toContain('id="settings-lang-override"')
+  expect(enOverridden).toContain(STRINGS.en.settingsLanguageOverridden)
+
+  const enNormal = settingsPanel(STRINGS.en, 'en', false, false)
+  expect(enNormal).not.toContain('id="settings-lang-override"')
+})
+
+test('Settings language request on a server started with --lang en preserves precedence, shows override and reloads English', () => {
+  const flag = 'en'
+  let saved: SettingsLang = 'en'
+  expect(boardLanguage(flag, saved, 'en', 'zh-TW')).toBe('en')
+  expect(isLanguageOverridden(flag, saved, 'en', 'zh-TW')).toBe(false)
+
+  saved = 'zh-TW'
+  expect(boardLanguage(flag, saved, 'en', 'zh-TW')).toBe('en')
+  const isOverridden = isLanguageOverridden(flag, saved, 'en', 'zh-TW')
+  expect(isOverridden).toBe(true)
+
+  const reloadedHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverridden)
+  expect(reloadedHtml).toContain(`<h2 id="settings-title">${STRINGS.en.settingsTitle}</h2>`)
+  expect(reloadedHtml).toContain('<option value="zh-TW" selected>')
+  expect(reloadedHtml).toContain(`<p class="settings-label" id="settings-lang-override">${STRINGS.en.settingsLanguageOverridden}</p>`)
+
+  saved = 'en'
+  const isOverriddenAfterReset = isLanguageOverridden(flag, saved, 'en', 'zh-TW')
+  expect(isOverriddenAfterReset).toBe(false)
+  const resetHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverriddenAfterReset)
+  expect(resetHtml).not.toContain('id="settings-lang-override"')
 })

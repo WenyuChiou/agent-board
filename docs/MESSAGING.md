@@ -147,6 +147,9 @@ before acceptance keeps the earlier behavior.
 When a later receipt makes an accepted delivery uncertain, the store retains the acceptance
 so the page does not offer to send the answer again. Older uncertain records without that
 evidence cannot be distinguished from deliveries that were never accepted.
+An ordinary disconnect does not undo acceptance. When an accepted message expires, its
+stored receipt keeps that evidence, including after restart. Its retained question stays
+out of Needs you; the receipt still distinguishes delivery from a confirmed model reply.
 
 ### Message ids
 

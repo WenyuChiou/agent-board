@@ -5,14 +5,14 @@ import { test } from 'node:test'
 import { BoardPage } from './board-page.mjs'
 import { browserFixture, writeProgress } from './fixture.mjs'
 
-const readmeLocations = [
-  ['README.md', ['next to **Close the board**', 'bottom of the expanded sidebar', 'below the tasks on a narrow screen or when the sidebar is collapsed']],
-  ['README.zh-TW.md', ['**關閉看板**旁邊', '展開的側欄底部', '窄螢幕或側欄收起時，則在工作清單下方']],
-  ['README.zh-CN.md', ['**关闭看板**旁边', '展开的侧栏底部', '窄屏幕或侧栏收起时，则在任务列表下方']],
+const guideLocations = [
+  ['docs/GUIDE.md', ['next to **Close the board**', 'bottom of the expanded sidebar', 'below the tasks on a narrow screen or when the sidebar is collapsed']],
+  ['docs/GUIDE.zh-TW.md', ['**關閉看板**旁邊', '展開的側欄底部', '窄螢幕或側欄收起時，則在工作清單下方']],
+  ['docs/GUIDE.zh-CN.md', ['**关闭看板**旁边', '展开的侧栏底部', '窄屏幕或侧栏收起时，则在任务列表下方']],
 ]
 
 test('at 375 px Settings is beside Close the board, traps focus, and fits every language without sideways scrolling', { timeout: 60_000 }, async () => {
-  for (const [file, locations] of readmeLocations) {
+  for (const [file, locations] of guideLocations) {
     const text = readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8')
     for (const location of locations) assert.ok(text.includes(location), `${file}: missing theme location ${location}`)
   }
@@ -35,6 +35,9 @@ test('at 375 px Settings is beside Close the board, traps focus, and fits every 
     await toggle.click()
     const panel = page.getByRole('dialog', { name: 'Settings', exact: true })
     await panel.waitFor({ state: 'visible' })
+    // The agent rows arrive a moment after the panel opens. Check the trap once they are in it, so
+    // the last control is the last row's button and not one the list then grows past.
+    await page.waitForFunction(() => document.querySelector('#settings-agent-list li') !== null || document.getElementById('settings-result').textContent !== '')
     await page.getByRole('button', { name: 'Close settings', exact: true }).focus()
     await page.keyboard.press('Shift+Tab')
     assert.equal(await panel.evaluate(element => element.contains(document.activeElement)), true)
@@ -54,8 +57,10 @@ test('at 375 px Settings is beside Close the board, traps focus, and fits every 
       await page.getByRole('heading', { name, exact: true }).waitFor({ state: 'visible' })
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true)
       assert.equal(await page.locator('#settings').evaluate(element => element.scrollWidth <= element.clientWidth), true)
-      const shortTargets = await page.locator('#settings button, #settings select').evaluateAll(elements => elements.filter(element => element.getBoundingClientRect().height < 48).length)
-      assert.equal(shortTargets, 0)
+      // Only controls on screen count: the agent confirm's Yes and Cancel stay hidden until a row's
+      // button is pressed, and a hidden control has no box to measure.
+      const shortTargets = await page.locator('#settings button, #settings select').evaluateAll(elements => elements.filter(element => element.getClientRects().length > 0 && element.getBoundingClientRect().height < 48).map(element => element.id || element.getAttribute('aria-label') || element.textContent.trim()))
+      assert.deepEqual(shortTargets, [])
       await page.screenshot({ path: join(evidence, `settings-${lang}-375.png`), fullPage: true })
       await page.keyboard.press('Escape')
     }

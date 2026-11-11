@@ -302,3 +302,17 @@ const run = async () => {
 if (args.includes('--recover-pending')) recoverPending()
 else await run().catch(() => fail('REPORTER_FAILED'))
 `
+
+// What a report tool hands back to the model: 'OK', or, when the board left steps out (over 40) or shortened
+// the title or a step, only those two counts, so the model can trim its report. The writer's session id and
+// progress-file path stay out of the model's context. Shared by the OpenClaw, DeepSeek and OpenCode plugins.
+// A count that is missing or not a whole number counts as 0, so the reply is always both counts or 'OK'.
+export const REPORT_TOOL_REPLY = `const toolReply = text => {
+  try {
+    const count = n => Number.isSafeInteger(n) && n > 0 ? n : 0
+    const receipt = JSON.parse(text)
+    const dropped = count(receipt.dropped), cut = count(receipt.cut)
+    return dropped > 0 || cut > 0 ? JSON.stringify({ dropped, cut }) : 'OK'
+  } catch { return 'OK' }
+}
+`

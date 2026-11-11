@@ -83,7 +83,7 @@ Claude 明確再次提問時，即使文字相同，也會更新該問題的識�
 
 卡片只有在確切 session 的 adapter 在線時提供傳送，否則複製或自行開啟 agent。[傳訊說明](MESSAGING.md)區分設定、真正回覆、重複、衝突及逾時。安裝不會任意接管已開啟的對話，一般回覆也不能批准工具、信任或 PR 合併。
 
-`--no-open` 只印出網址，不開瀏覽器。關分頁不會停止本機服務，再執行同一個指令即可重開。**關閉看板**才會停止；若正在送訊，請等完成。預設不會閒置關閉，`--idle-minutes 30` 才啟用。舊版 `--allow-resume` 會明確啟用已結束 Codex／Grok 的重新啟動，預設關閉，也不會用作即時通訊的回退路徑。
+`--no-open` 只印出網址，不開瀏覽器。關分頁不會停止本機服務，再執行同一個指令即可重開。**關閉看板**（紅色電源按鈕）才會停止；若正在送訊，請等完成。預設不會閒置關閉，`--idle-minutes 30` 才啟用。舊版 `--allow-resume` 會明確啟用已結束 Codex／Grok 的重新啟動，預設關閉，也不會用作即時通訊的回退路徑。
 
 #### 在手機上
 
@@ -154,6 +154,35 @@ claude plugin install agent-board@agent-board
 - 仍有未答問題的區塊，已結束或完成的滿三天、工作中或等待中的滿七天沒有新報告，才會自動封存；問題會先完整保存並留在更早的問題清單，明確封存同樣先保存完整問題。
 - 手寫工作的每個步驟都已完成或取消，滿三天後才計入封存。「現在封存」和「清理」會立刻處理已完成的工作，其他清理期限如上所述。
 
+### 終端機看板的按鍵
+
+**在終端機裡，** `--watch` 用起來跟面板一樣：
+
+| 按鍵 | 作用 |
+|---|---|
+| ↑ ↓、Enter | 選一行、展開 |
+| `x` | 勾掉自己工作的下一步，並記進工作日誌 |
+| `d` | 確認自己的一件工作，或一個已停對話的工作，已經完成 |
+| `a` | 封存自己的工作，或已停對話的區塊 |
+| `1`–`9`、`y`／`n` | 複製另一個 agent 問題的答案，貼到那個 agent |
+| `c` | 複製指令，或接回提問那個對話的指令 |
+| `h`、`u` | 把另一個 agent 的問題標成已回覆：只在這台電腦上隱藏，不會送出任何內容；把隱藏的全部重新顯示 |
+| `i` | 展開或收起超過 7 天沒動的工作 |
+| `o`、`q` | 打開網頁版；離開 |
+
+做完的工作會自己離開看板。看板寫 `progress.md` 跟面板一樣小心；別的對話的區塊不會動，除非你封存一個已經停掉的，或確認它已經完成。
+
+### 設定、外觀與符號
+
+面板跟著 Claude Code 的主題走（`/config`，再選 **Theme**）；網頁跟著你電腦的淺色或深色模式，直到你選了亮色或暗色。看板網頁的**設定**按鈕在**關閉看板**旁邊，按下去可調整語言、外觀與通知，變更立即套用。語言可選自動、English、繁體中文或简体中文；外觀可選淺色、深色、自動，以及進度條的三種樣式：墨（預設）、藍、綠。通知預設關閉，開啟時會向瀏覽器詢問權限，每個等待回答或核准的問題只通知一次。進度條每一步一格，旁邊寫數字，例如 `━━━━╸── 5/7`；選好的樣式在網頁、側欄和終端看板都一樣（側欄用 `/progress style blue`，終端看板按 `s`）。按鈕位於展開的側欄底部；窄螢幕或側欄收起時，則在工作清單下方。每個符號形狀都不一樣，不看顏色也分得出來；網頁上還沒做的步驟畫成小圓點，不畫圓圈，免得看起來像能按的按鈕：
+
+| 符號 | 意思 | | 符號 | 意思 |
+|:-:|---|---|:-:|---|
+| ● | 等你 | | ◐ | 在跑，或在等別人 |
+| ▸ | 正在做 | | ! | 卡住 |
+| ○ • | 還沒做（面板是圓圈，網頁是小圓點） | | ⚑ | 兩週內到期 |
+| ✓ | 完成 | | – | 取消 |
+
 ### 符號與標籤
 
 步驟符號：✓ 完成 · ▸ 正在做 · • 還沒做 · ● 等你 · ◐ 在跑 · ! 卡住 · – 取消 · ⚑ 兩週內截止。
@@ -164,14 +193,28 @@ claude plugin install agent-board@agent-board
 
 獨立安裝：將乾淨 checkout 更新到指定版本，預覽 `node scripts/setup-agent.mjs`，再套用已核准範圍。修改過的檔案列為衝突，不覆寫。host 可能要重新載入；不安裝自動更新器或開機服務。
 
-用已安裝程式預覽／套用移除，每個設定過的 agent 各做一次。下面以 Codex 為例；其他 agent 換成它的名稱（`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
+透過 `@wenyuchiou/agent-board remove` 一次預覽／套用所有設定過之 agent 的移除，或指定 `--agent` 只移除特定 agent（`codex`、`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
 
 ```sh
-node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex
-node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
+npx @wenyuchiou/agent-board remove
+npx @wenyuchiou/agent-board remove --apply
 ```
 
-`--codex-remove`、`--codex-doctor` 是沿用的維護名稱，可搭配各目標。先關閉該看板。移除會刪除未修改的看板檔案、自有 hook 定義、對應的 Codex 信任項、setup 建立且已空的 hooks 設定，以及 setup 建立的空目錄。其他目標還需要的共用檔案保留。使用者修改保留。
+從程式庫 checkout 目錄：
+
+```sh
+node scripts/setup-agent.mjs --remove
+node scripts/setup-agent.mjs --remove --apply
+```
+
+或使用已安裝的輔助程式移除個別 agent：
+
+```sh
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex
+node "$HOME/.agent-board/agent-board.mjs" --remove --agent codex --apply
+```
+
+`--remove`（及相容保留之 `--codex-remove`）會以短路徑預覽所有碰過的 agent 移除內容，並清楚列出保留在 `progress.md` 旁邊的個人資料檔案。先關閉該看板。移除會刪除未修改的看板檔案、自有 hook 定義、對應的 Codex 信任項、setup 建立且已空的 hooks 設定，以及 setup 建立的空目錄。其他目標還需要的共用檔案保留。使用者修改保留。
 
 這些是你的歷史，會保留：`progress.md`, `progress-archive-*.md`, `progress-journal-*.md`, `sessions/`, `pending/`, `hook-recovery-*.json`, `hook-errors.log`, `progress-answered.json`, `progress-questions*.json`, `progress-seen.json`, `progress-run-cursor.txt`, `progress-page-state.json`, `progress-page-state-done-*.json`, `progress-inbox/` (`dropped.log`)。可手動刪除。執行目錄中非空的 `*-messages/` 目錄也保留。以 `progress.md` 為基礎的檔名會隨所選進度檔名變化。
 
@@ -230,7 +273,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 
 獨立 reporter 在本機保留挑選過的 session 中繼資料，以及 Codex、Grok Build、Cursor CLI、OpenCode 和 Antigravity CLI 的結尾問題，不呼叫摘要模型。Antigravity 的 hook 不帶回覆文字，所以看板從該對話自己的紀錄檔讀取最後回覆；格式沒有文件，已在 agy 1.5.2 檢查，只保留結尾問題。發訊給在線 agent 會使用目標 agent 的模型與額度。下列模型與對話存取適用於選用的 Claude 外掛流程：看板檔案儲存在本機。透過你自己的 Claude Code 登入／模型存取，回合摘要會把提問和回覆傳給 Claude Haiku；標題會傳送該對話的第一個請求和步驟名稱；交接行會傳送最多 6,000 個字元的壓縮摘要。面板的側邊提問框也會透過同一個登入，把你的問題傳給模型，依這段對話的紀錄回答。這些呼叫使用該帳號的額度或計費。面板會執行 `git branch --show-current`，裝了 GitHub 的 `gh` 的話，也會用它查 pull request 和 CI 狀態。預設只傳給確切在線的對話；舊版 Codex／Grok 程序續接須明確加上 `--allow-resume`，使用該 agent 的權限與網路。獨立 OpenClaw 外掛停用對話存取；選用 Claude 連接器則設定 `allowConversationAccess: true`。
 
-網頁預設只監聽本機（`127.0.0.1`）；這台電腦上的任何程式只要有連結就能使用。`--lan` 會透過帶 token 的 HTTP 連結，在私人網路分享網頁。token 是存取金鑰，不會加密：同一網路上任何拿到 LAN 連結的人都能讀看板、修改看板檔案（包括匯入區塊），也能停止伺服器。LAN 網頁會拒絕啟動 agent 的回覆，也不顯示恢復對話的指令。私人網路位址不代表咖啡廳或旅館的網路值得信任。不要分享連結或 QR code。要停止服務，請按網頁上的「關閉看板」按鈕；若正在傳送回覆，請等完成後重試。只關分頁，背景服務會繼續運作；閒置關閉須自行啟用。看板伺服器或 LAN 監聽器每次重新啟動都會產生新的 token，因此停止後舊連結就無法使用。檔案變更、啟動的程式、網路存取和 看板遮蔽資訊的限制，詳見 [SECURITY.md](../SECURITY.md)（英文）。
+網頁預設只監聽本機（`127.0.0.1`）；這台電腦上的任何程式只要有連結就能使用。`--lan` 會透過帶 token 的 HTTP 連結，在私人網路分享網頁。token 是存取金鑰，不會加密：同一網路上任何拿到 LAN 連結的人都能讀看板、修改看板檔案（包括匯入區塊），也能停止伺服器。LAN 網頁會拒絕啟動 agent 的回覆，也不顯示恢復對話的指令。私人網路位址不代表咖啡廳或旅館的網路值得信任。不要分享連結或 QR code。要停止服務，請按網頁上的「關閉看板」按鈕（紅色電源按鈕）；若正在傳送回覆，請等完成後重試。只關分頁，背景服務會繼續運作；閒置關閉須自行啟用。看板伺服器或 LAN 監聽器每次重新啟動都會產生新的 token，因此停止後舊連結就無法使用。檔案變更、啟動的程式、網路存取和 看板遮蔽資訊的限制，詳見 [SECURITY.md](../SECURITY.md)（英文）。
 
 ### Windows 能用嗎？
 
@@ -242,7 +285,7 @@ node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex --apply
 
 ### 怎麼移除？
 
-獨立安裝：先關閉看板，預覽 `node "$HOME/.agent-board/agent-board.mjs" --codex-remove --agent codex`，確認後加上 `--apply`。對每個已安裝的 agent 重複此步驟。保留的歷史檔案見[更新與移除](#更新與移除)。選用 Claude 外掛的移除方式：
+獨立安裝：先關閉看板，預覽 `npx @wenyuchiou/agent-board remove`（或 `node scripts/setup-agent.mjs --remove`），確認後加上 `--apply`。這會一次檢視並移除所有安裝過的 agent 設定，同時列出並完整保留 `progress.md` 旁邊的資料檔案。若只想移除特定 agent，可指定 `--agent <name>` 或執行 `node "$HOME/.agent-board/agent-board.mjs" --remove --agent <name>`。詳見[更新與移除](#更新與移除)。選用 Claude 外掛的移除方式：
 
 ```sh
 claude -p "/progress connect remove"
@@ -264,6 +307,8 @@ claude plugin marketplace remove agent-board
 - **讀寫失敗：** 處理指出的檔案／權限問題，檢查進度與歷史再重試；不先確認 owner 就刪鎖。
 - **沒有原生側欄：** 非 Claude host 使用互動網頁或終端看板，網頁面板不等於原生側欄。
 - **寫到一半被截斷的工作：** session 寫自己的區塊時如果中途停掉（當掉或被強制關閉），區塊可能少了結束標記。看板會把它讀成在它最後一行結束，照原樣顯示，並列在側欄最下方的「看板狀態」。要自己補上，就在它最後一行的下一行加上 `<!-- /auto session=<id> -->`；id 在區塊的開始標記裡。如果那個 session 先重寫了自己的區塊，新區塊下方留下的幾行會重複它舊的步驟：請自己刪掉。
+- **同一個 agent 出現兩次：** 可能兩種方式都接上了：Claude 外掛的 `/progress connect` 和安裝程式（setup）。`/progress connect status` 會列出外掛接了哪些；用 `/progress connect remove` 拿掉其中一個，或用 `npx @wenyuchiou/agent-board@next remove --agent <name>` 先預覽要移除什麼，再加上 `--apply` 執行。
+- **有個問題一直不消失：** 在它自己的對話裡回答，再按**已回覆，先隱藏**（終端機看板按 `h`）。對話已停止的問題、agent 在自己視窗裡問的問題，以及在看板上按過**傳送**或**排到下一輪**之後，這顆按鈕直接在卡片上；按過**複製**之後，同一顆按鈕寫的是**已回答**；其他時候它在**更多**裡。3 天後它會移到**較早的未答問題**，7 天後移到**更早、尚未回答的問題**。
 
 ### 安全地回報問題
 

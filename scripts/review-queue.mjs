@@ -239,7 +239,8 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by, item.author)) {
       // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
       // even when it arrives from the shared login. The lane is part of the identity, so "codex (e2e)" approving
-      // "codex (phase1)" counts, while a verdict with no name keeps its old reading.
+      // "codex (phase1)" counts, while a verdict with no name keeps its old reading. This checks only who the author is:
+      // whether the reviewer is one the pull request's tier allows (outside the lane, another model family) is not checked here.
       result.waitingForAuthor.push({ ...item, detail: 'approval is by the author', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
