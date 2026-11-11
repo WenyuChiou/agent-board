@@ -1,9 +1,9 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress, STALE_MS } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { emptyQuestions, observeQuestions, questionScope } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, questionScope, resolveQuestion } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
-import { renderAutoBlock } from '../hooks/blocks'
+import { confirmTask, renderAutoBlock, takeTask } from '../hooks/blocks'
 import { emptyMirror, withAgentIdentity } from '../hooks/mirror'
 import type { ProgressMirror } from '../types'
 import { agentClaimOf, hostHashOf, isDeadAgent } from '../hooks/session-liveness'
@@ -42,8 +42,8 @@ const observe = (ledger: QuestionLedger, text: string, deadSessions: ReadonlySet
 // closed: the record the first pass created is what the second pass retains.
 const observeTwice = (text: string, deadSessions: ReadonlySet<string>): QuestionLedger =>
   observe(observe(emptyQuestions(), text, new Set()).ledger, text, deadSessions).ledger
-const viewOf = (text: string, deadSessions: ReadonlySet<string>, ledger: QuestionLedger) =>
-  buildView(parseProgress(text), [], null, NOW, 0, {}, words, [], {}, ledger, undefined, [], new Set(), undefined, STALE_MS, undefined, deadSessions)
+const viewOf = (text: string, deadSessions: ReadonlySet<string>, ledger: QuestionLedger, answered: string[] = []) =>
+  buildView(parseProgress(text), [], null, NOW, 0, {}, words, answered, {}, ledger, undefined, [], new Set(), undefined, STALE_MS, undefined, deadSessions)
 // A row lives in its project's group while the session works, and under Stopped
 // once it is ended.
 const rowOf = (view: ReturnType<typeof buildView>, title: string) =>
@@ -194,4 +194,111 @@ test('a non-Claude agent records no pid, and its waiting card stays until the 12
   const text = file(block('b8c9d0e1', 'codex', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: deadPidValue, started: liveStarted, host }))
   const view = viewOf(text, new Set(), observe(emptyQuestions(), text, new Set()).ledger)
   expect(view.waiting.map(item => item.text)).toEqual(['Deploy the synthetic build, OK?'])
+})
+
+// Round 2: the two P1s the first review left. The guards accept what the stopped
+// row offers only when the caller hands them the dead-session evidence; the
+// observation keeps a dead question's identity, so the row can name it and a
+// never-recorded one still reaches Older unanswered.
+test('a dead-but-recent stopped row\'s confirm and archive go through with dead-session evidence and are refused without it', () => {
+  const text = file(block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: deadPidValue, started: liveStarted, host }))
+  const scopes = deadScope('a1b2c3d4')
+  const view = viewOf(text, scopes, observeTwice(text, scopes))
+  const row = rowOf(view, 'Ship a1b2c3d4')
+  expect(row).toBeDefined()
+  expect(row!.archive).not.toBe(null)
+  expect(row!.confirm).not.toBe(null)
+  if (row!.archive === null || row!.confirm === null) throw new Error('stopped row actions missing')
+  const isSessionDead = (project: string, agent: string, session: string): boolean => scopes.has(questionScope(project, agent, session))
+  const archived = takeTask(text, row.archive, NOW, words, {}, STALE_MS, isSessionDead)
+  expect(archived).not.toBe(null)
+  expect(archived?.text).not.toContain('Ship a1b2c3d4')
+  const confirmed = confirmTask(text, row.confirm, NOW, words, {}, STALE_MS, isSessionDead)
+  expect(confirmed?.text).toContain('state=done')
+  // Without the evidence the guards keep the old refusal, as the plugin's calls
+  // do: it never computes the dead set. Evidence for another session does not
+  // open this one either.
+  expect(takeTask(text, row.archive, NOW, words, {}, STALE_MS)).toBe(null)
+  expect(confirmTask(text, row.confirm, NOW, words, {}, STALE_MS)).toBe(null)
+  const otherDead = (project: string, agent: string, session: string): boolean => deadScope('b2c3d4e5').has(questionScope(project, agent, session))
+  expect(takeTask(text, row.archive, NOW, words, {}, STALE_MS, otherDead)).toBe(null)
+  expect(confirmTask(text, row.confirm, NOW, words, {}, STALE_MS, otherDead)).toBe(null)
+})
+
+test('a question answered before the window closed does not ask again on its stopped row', () => {
+  const text = file(block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: deadPidValue, started: liveStarted, host }))
+  const scopes = deadScope('a1b2c3d4')
+  const settled = observeTwice(text, scopes)
+  const record = settled.records.find(one => one.isUnresolved)
+  expect(record).toBeDefined()
+  const resolved = resolveQuestion(settled, record!.id, NOW + 1)
+  expect(resolved.records.find(one => one.id === record!.id)?.isUnresolved).toBe(false)
+  const view = viewOf(text, scopes, resolved)
+  const row = rowOf(view, 'Ship a1b2c3d4')
+  expect(row?.question).toBe(null)
+  expect(row?.questions ?? []).toEqual([])
+  expect(view.waiting).toEqual([])
+  expect(view.older).toEqual([])
+})
+
+test('a question hidden before the window closed keeps its record identity and does not ask again', () => {
+  const text = file(block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: deadPidValue, started: liveStarted, host }))
+  const scopes = deadScope('a1b2c3d4')
+  const settled = observeTwice(text, scopes)
+  const record = settled.records.find(one => one.isUnresolved)
+  expect(record).toBeDefined()
+  const view = viewOf(text, scopes, settled, [record!.id])
+  const row = rowOf(view, 'Ship a1b2c3d4')
+  expect(row?.question).toBe(null)
+  expect(row?.questions ?? []).toEqual([])
+  expect(view.hidden.map(item => item.hideKey)).toEqual([record!.id])
+  expect(view.hidden.map(item => item.text)).toEqual(['Deploy the synthetic build, OK?'])
+  expect(view.older).toEqual([])
+  expect(view.waiting).toEqual([])
+})
+
+test('a question never recorded before the window closed is recorded as retained and reaches Older unanswered', () => {
+  const text = file(block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: deadPidValue, started: liveStarted, host }))
+  const scopes = deadScope('a1b2c3d4')
+  const ledger = observe(emptyQuestions(), text, scopes).ledger
+  const record = ledger.records.find(one => one.isUnresolved)
+  expect(record).toBeDefined()
+  expect(record!.isPresent).toBe(false)
+  expect(record!.isWaiting).toBe(false)
+  expect(record!.isUnresolved).toBe(true)
+  const view = viewOf(text, scopes, ledger)
+  expect(view.waiting).toEqual([])
+  expect(view.older.map(item => item.text)).toEqual(['Deploy the synthetic build, OK?'])
+  const row = rowOf(view, 'Ship a1b2c3d4')
+  expect(row?.questions?.map(question => question.questionId)).toEqual([record!.id])
+  expect(row?.questions?.map(question => question.hideKey)).toEqual([record!.id])
+})
+
+test('a second read of the same dead question reuses its retained record instead of recording it twice', () => {
+  const text = file(block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: deadPidValue, started: liveStarted, host }))
+  const scopes = deadScope('a1b2c3d4')
+  const once = observeTwice(text, scopes)
+  expect(once.records).toHaveLength(1)
+  const again = observe(once, text, scopes).ledger
+  expect(again.records).toHaveLength(1)
+  expect(again.records[0]!.id).toBe(once.records[0]!.id)
+  expect(again.records[0]!.isPresent).toBe(false)
+  expect(again.records[0]!.isWaiting).toBe(false)
+  expect(again.records[0]!.isUnresolved).toBe(true)
+  const view = viewOf(text, scopes, again)
+  expect(view.older.map(item => item.text)).toEqual(['Deploy the synthetic build, OK?'])
+})
+
+test('a step ticked after the window closed resolves its retained record instead of asking again', () => {
+  const before = file(block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: deadPidValue, started: liveStarted, host }))
+  const scopes = deadScope('a1b2c3d4')
+  const settled = observeTwice(before, scopes)
+  expect(settled.records.find(one => one.isUnresolved)).toBeDefined()
+  const after = file(block('a1b2c3d4', 'claude', 'waiting', '- [x] Deploy the synthetic build, OK?', { pid: deadPidValue, started: liveStarted, host }))
+  const ledger = observe(settled, after, scopes).ledger
+  const record = ledger.records.find(one => one.id === settled.records[0]!.id)
+  expect(record?.isUnresolved).toBe(false)
+  const view = viewOf(after, scopes, ledger)
+  expect(view.older).toEqual([])
+  expect(view.waiting).toEqual([])
 })

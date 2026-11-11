@@ -865,6 +865,51 @@ export const observeQuestions = (
       if (row.isWaiting) keys[questionSlot(row.scope, row.index)] = record.id
     })
   }
+  // A dead session's steps never reach the groups loop, so its questions are
+  // recorded here, as retained records: the row can still name a recorded
+  // question, and a never-recorded one still reaches Older unanswered. It runs
+  // after the live rows, so a session that resumed already owns a record for the
+  // same question and a dead row never takes it back. Death itself never answers
+  // a question; a step that no longer waits resolves its record, exactly as a
+  // live read would.
+  for (const project of projects) for (const task of project.tasks) {
+    if (task.auto === null) continue
+    const deadScope = scopeOf(project.name, task.auto.agent, task.auto.session, task.auto.resume)
+    if (!(deadSessions.has(deadScope) || deadSessions.has(questionScope(project.name, task.auto.agent, task.auto.session)))) continue
+    const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? ''
+    const data = sourceData(task)
+    const steps = task.steps.map((step, index) => ({ step, index, words: questionWords(step.text) }))
+    for (const { step, index, words } of steps) {
+      const copies = steps.filter(one => one.words === words)
+      const occurrence = copies.findIndex(one => one.index === index) + 1
+      const producer = step.questionToken ?? ''
+      // The retained record is not among the present candidates, so it is found
+      // without that filter: a second read of the same dead question reuses it
+      // instead of recording it twice. Its copies must still match the block's
+      // shape, or it belongs to an older incarnation.
+      const kept = byScopeWords.get(partsKey2(deadScope, words)) ?? []
+      let record = producer === ''
+        ? kept.find(old => !old.producer && old.occurrence === occurrence && old.copies === copies.length)
+        : kept.find(old => old.producer === producer)
+      if (record !== undefined && assigned.has(record.id)) continue
+      if (record === undefined && step.status === 'waiting') {
+        const binding = sha256(JSON.stringify([deadScope, words, occurrence, copies.length, incarnation]))
+        record = { id: `question:${binding}:${next++}`, scope: deadScope, words, occurrence, copies: copies.length, isWaiting: false, isPresent: false, isUnresolved: true, firstObserved: Number.isFinite(now) && now > 0 ? now : 0, incarnation, producer }
+        records.push(record)
+        indexRecord(record)
+      }
+      if (record === undefined) continue
+      record.isPresent = false
+      record.isWaiting = false
+      if (step.status !== 'waiting') record.isUnresolved = false
+      record.source = { kind: 'block', project: project.name, task: task.title, context, text: step.text, agent: task.auto.agent, session: task.auto.session, data }
+      assigned.add(record.id)
+      // A live row already owns this slot when the session resumed; the dead row
+      // never takes the key back.
+      const slot = questionSlot(deadScope, index)
+      if (keys[slot] === undefined && step.status === 'waiting') keys[slot] = record.id
+    }
+  }
   const blockKey = (auto: ProgressAuto): string => JSON.stringify([auto.agent.toLowerCase(), auto.session, auto.resume])
   const locations = new Map<string, { project: string; scope: string; alias: string }[]>()
   const scopeCounts = new Map<string, number>()

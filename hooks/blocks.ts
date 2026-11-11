@@ -513,9 +513,13 @@ export type ConfirmedTask = { text: string; ref: ConfirmRef; entries: Array<Omit
 
 // A person's completion changes only the exact task drawn, and only after its agent
 // stopped. Recheck here, inside each caller's read/change/write retry.
-export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS): ConfirmedTask | null => {
+export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, isSessionDead?: (project: string, agent: string, session: string) => boolean): ConfirmedTask | null => {
   const task = confirmedTarget(text, ref, s)
-  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now, observedTime(task.auto, now, seen).updated, staleMs)) return null
+  // A session whose agent process is gone has certainly stopped, like one whose
+  // marker says ended or whose update is stale: the row offers the press, so the
+  // write guard accepts it (#1092).
+  const isDead = task !== null && task.auto !== null && isSessionDead?.(ref.project, task.auto.agent, task.auto.session) === true
+  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now, observedTime(task.auto, now, seen).updated, staleMs) && !isDead) return null
   const lines = linesOf(text)
   const spans = scanBlocks(lines)
   const span = ref.session === null ? undefined : spans.find(one => one.session === ref.session)
@@ -680,7 +684,7 @@ export const takeManualDone = (
 // null when it cannot be found for sure: a block without its end marker, a heading that is
 // gone or has a twin, a heading inside some session's block, or a session id two blocks
 // share when the row's project and each block's first heading cannot tell them apart.
-export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS): Archived | null => {
+export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, isSessionDead?: (project: string, agent: string, session: string) => boolean): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
@@ -722,7 +726,10 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       // as the row does (#1051, #1000).
       const isSilence = span.state === 'working' && task !== undefined && isSilenceTask(task.steps, updated, now)
       // The quiet-time path needs a readable time: unknown age never archives (#1000).
-      const stopped = isTwin || auto !== null && isStale(auto, now, updated, staleMs) || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
+      // A session whose agent process is gone has certainly stopped, so its archive
+      // goes through even when the silence check would keep the row for review (#1092).
+      const isDead = auto !== null && isSessionDead?.(ref.project, auto.agent, auto.session) === true
+      const stopped = isTwin || isDead || auto !== null && isStale(auto, now, updated, staleMs) || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
       if (auto === null || !stopped) return null
     }
 
