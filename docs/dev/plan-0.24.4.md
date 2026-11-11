@@ -4,7 +4,7 @@ The owner chose this plan on 2026-11-11, after a Fable 5.2 review of the whole p
 
 **Theme:** one command to install. From 0.24.4 on, the board keeps itself up to date. The Codex sessions it can see are listed. An approval a session is waiting on can be answered from the board, and the board says plainly how each answer reaches each agent.
 
-**Size:** about 20 issues and 5 new ones, plus the delivery work. The owner's answer on size, 2026-11-11: 「全部保留，晚一週」. Nothing moves out, and 0.24.4 ships about a week later than first planned. If it still slips, cut in this order and no other:
+**Size:** about 20 issues and 6 new ones, plus the delivery work. The owner's answer on size, 2026-11-11: 「全部保留，晚一週」. Nothing moves out, and 0.24.4 ships about a week later than first planned. If it still slips, cut in this order and no other:
 1. The scenario-b receivers (a message to an agent that is busy): Grok first, then Hermes, then Cursor turn-end.
 2. Never cut: D1, D3 (when F10 passes), OpenCode, the Codex record, the gate.
 
@@ -62,8 +62,21 @@ First install does not reach 90% in 0.24.4: every host loads its hooks when a se
 
 ### M7. What the board shows can be believed
 - **Work:** one count for the page, the terminal board, `--status` and `--json` (#1296). A row with no event for a set time and no live process says "unsure" with its age. A closed agent window takes its card with it (#1092, pull request #1288). The four gaps from the outside read of #1264 (#1276). The question-finding design is decided here, measured first: fixed shape set from synthetic replies in three languages (#1287, #1290), the miss and false-question rates of today's rules, then the owner picks.
-- **Done when:** the four surfaces agree on every count in the user-simulation run; no row stays "working" after its turn ended; the rates and the choice are on the issue.
-- **Test:** one file fed to the four surfaces; a stale-row case in `tests/e2e/l4-time`; the shape set as a table test.
+- **Six row states.** Today "waiting on your reply" covers both a question and a turn that simply stopped, so a person cannot tell which one needs a decision. Each row now takes one of six states, read from the host's events and the agent's own steps, and each state has the one action the board offers. New issue. The owner, 2026-11-11: 「我们要想一下这几个状态」, then 「寫進 0.24.4」.
+
+  | State | When | Action on the board |
+  |---|---|---|
+  | Working | a turn started and has not ended | none |
+  | Waits for your approval | the host is asking to run a tool | Allow once or Deny, where D3 allows it |
+  | Waits for your answer | the turn ended on a question, or a `[?]` step | the choices, or a reply, with D1's line |
+  | Stopped, not finished | the turn ended, steps are left, and nothing was asked | Continue, sent with D1's line |
+  | Done, to check | the turn ended and every step is done or cancelled | Seen, which moves it to Done recently |
+  | Conversation ended | the host's session-end event, or no event for a set time and no live process | take over, or reopen where the host can resume |
+
+  The first four after Working sit under Needs you in amber; Done, to check sits there too, in green, until Seen is pressed, and is counted apart from the waiting ones. The page, the terminal board, `--status` and `--json` use the same six states.
+- **Known limits, said as they are.** Every host here sends a turn-end event, so "stopped, not finished" and "done, to check" work for all of them. Antigravity and Hermes send no session-end event (Hermes fires its end after every turn), and a window closed by force or a crash sends none from any host: for those, "conversation ended" rests on the process check, and until then the row says "unsure" with its age. An agent that keeps no step list gives the board no way to tell "stopped" from "done", and its row says so.
+- **Done when:** the four surfaces agree on every count in the user-simulation run; no row stays "working" after its turn ended; the rates and the choice are on the issue. On each host with a live record, a turn that asks, a turn that stops with steps left, a turn that finishes and a closed window each show their state; Seen moves a row to Done recently, and it stays there until a new turn starts.
+- **Test:** one file fed to the four surfaces; a stale-row case in `tests/e2e/l4-time`; the shape set as a table test; a table test from each host's events and steps to the six states.
 
 ### M8. Proof, then stable
 Records on the tagged head. The gate:
@@ -143,6 +156,7 @@ Half a day each, a dated note each, before the milestone they feed.
 - "Your sessions are there" or "at once": the board lists Codex sessions found in Codex's records, marked not connected. No other host.
 - Send, Queue or "receives" for an agent or surface with no live record on the 0.24.4 head. "Goes in now" where the record shows turn end or next turn. "Every agent receives" or "no Copy": the release notes print the delivery table's counts instead. "Approve from the board" unless D3 shipped (F10 passed). "Wakes an idle session" for a hook-mailbox host.
 - "Opens a window" in any app not shown doing so on the 0.24.4 head (#865).
+- "Knows when a conversation ended" for Antigravity, Hermes or a window closed by force, unless a record on the 0.24.4 head shows the process check doing it.
 - "Nothing to install": Node 22 or newer and a terminal are needed once.
 - "No network use": one request a day, on by default.
 - "An agent cannot act as the person on the board": it can. An agent shown the page link, or that looks for it, can act as the person; `SECURITY.md` says so. The fix is 0.24.5.
@@ -171,7 +185,7 @@ The owner: 「全部加進去」. Lane D carries the first three as issues; the 
 
 ## Scope kept from the first draft
 
-- **In:** #1305, #1302, #1303, #1304 (upgrade); #868, #865, #1272, #1278, #1289 (first install); #1296, #1092 with pull request #1288, #1287, #1290 (status and questions); #557 (the next-turn record); #851, #1297 (the ledger); #1276 (owed from the 0.24.3 outside read); #1249; OpenClaw and DeepSeek Harness; Gemini CLI retirement. New issues to open: the update entry and ask rule (M3), the daily check and its start (M4), Codex sessions from its records (M6), the ledger and J11 (M0), and approvals on the board (D3).
+- **In:** #1305, #1302, #1303, #1304 (upgrade); #868, #865, #1272, #1278, #1289 (first install); #1296, #1092 with pull request #1288, #1287, #1290 (status and questions); #557 (the next-turn record); #851, #1297 (the ledger); #1276 (owed from the 0.24.3 outside read); #1249; OpenClaw and DeepSeek Harness; Gemini CLI retirement. New issues to open: the update entry and ask rule (M3), the daily check and its start (M4), Codex sessions from its records (M6), the ledger and J11 (M0), the six row states (M7), and approvals on the board (D3).
 - **README (#1267)** is in flight outside this plan; its pictures show only the seven agents with live records, and Muse Code leaves the support table in all three languages.
 - **Process, no version:** #1285, #1257 with its pull request #1259, #1258.
 - **May close, each after its check:** #884 (every skill reads `--json`; the MCP part is #723), #810 (only if a real SSH terminal can be tried), #1161 (each open item has its own issue).
