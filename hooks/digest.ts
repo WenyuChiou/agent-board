@@ -243,7 +243,11 @@ const isQuoted = (line: string, mark: number): boolean => {
     return isClosed && after === -1
   }
   const isAlone = /^\s?$/.test(line[straight - 1] ?? '') && /\s/.test(line[straight + 1] ?? '')
-  const isOpener = isAlone && !isReported && /\s/.test(line[partner - 1] ?? '') && isLaterQuotation()
+  // An opening quote is not followed by a comma or a full stop: a partner followed by a mark and then text
+  // (`"，後來查了`, `", then`) closes the earlier quotation, whatever word came before it. A quotation of a
+  // mark alone with words after it (`"," is valid`) still opens.
+  const isMarkLed = /^\p{P}/u.test(line.slice(partner + 1)) && !/^\p{P}+"\s/u.test(line.slice(partner + 1))
+  const isOpener = isAlone && !isReported && !isMarkLed && /\s/.test(line[partner - 1] ?? '') && isLaterQuotation()
   const isCloser = partner !== -1 && (isRightAfter || !isOpener)
   if (straight >= 0 && isCloser) open.push(straight)
   // An apostrophe also sits inside words, so a single quote counts only when it closes right
