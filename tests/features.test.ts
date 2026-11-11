@@ -1782,6 +1782,10 @@ test('a lone straight quote, such as an inch mark, is a literal character, and t
   expect(lastQuestion('他問"要藍色還是綠色?"然後走了。')).toBeNull()
   expect(lastQuestion('他问"要不要?"好的。')).toBeNull()
   expect(lastQuestion('He asked "ready?"and left.')).toBeNull()
+  // A closing quote after a word, as Chinese writes it, or before a space still closes the quotation.
+  expect(lastQuestion('他問"要不要？我可以幫忙"然後走了。')).toBeNull()
+  expect(lastQuestion('他问"要不要？我可以帮忙"然后走了。')).toBeNull()
+  expect(lastQuestion('I asked "Blue or green? " and you said blue.')).toBeNull()
   // A straight quote in code is a character, so it neither opens nor closes a quotation.
   expect(lastQuestion('The tokens are `name"` and `"`. Should I escape both? "No" leaves them unchanged.')).toBe('Should I escape both?')
   expect(lastQuestion('I compared `name"` and `"` and then asked "Ready?"')).toBeNull()
