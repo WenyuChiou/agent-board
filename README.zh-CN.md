@@ -95,7 +95,7 @@ npx @wenyuchiou/agent-board@next remove --apply
 | 看板看起来是旧版 | 原来就开着的对话可能还在跑它加载时的版本：开一个那个 agent 的新对话。更新方式见[使用指南](docs/GUIDE.zh-CN.md#更新和卸载)。 |
 | 同一个 agent 出现两次 | 可能同时被 Claude 插件和 setup 接入：[要去掉哪个](docs/GUIDE.zh-CN.md#问题排查)。 |
 
-检查某个 agent 的设置：`node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex`（也可用 `cursor`、`opencode`、`grok`、`hermes`、`antigravity`，其余见[使用指南](docs/GUIDE.zh-CN.md#问题排查)），它不会改任何东西。Claude Code 请运行 `claude plugin list` 和 `/progress connect status`。更多答案在使用指南的[常见问题](docs/GUIDE.zh-CN.md#常见问题)和[问题排查](docs/GUIDE.zh-CN.md#问题排查)。发现 bug？用 [bug 表单](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml)提一个 issue，并照[安全报告步骤](docs/GUIDE.zh-CN.md#安全地报告问题)做：不要带 session id、主目录路径或 token。
+检查某个 agent 的设置：`npx @wenyuchiou/agent-board@next --codex-doctor --agent codex`（设置时用了 `--data-dir` 的话，也加上 `--data-dir <文件夹>`；也可用 `cursor`、`opencode`、`grok`、`hermes`、`antigravity`，其余见[使用指南](docs/GUIDE.zh-CN.md#问题排查)），它不会改任何东西。Claude Code 请运行 `claude plugin list` 和 `/progress connect status`。更多答案在使用指南的[常见问题](docs/GUIDE.zh-CN.md#常见问题)和[问题排查](docs/GUIDE.zh-CN.md#问题排查)。发现 bug？用 [bug 表单](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml)提一个 issue，并照[安全报告步骤](docs/GUIDE.zh-CN.md#安全地报告问题)做：不要带 session id、主目录路径或 token。
 
 ## 文档
 

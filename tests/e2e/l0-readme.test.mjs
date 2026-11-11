@@ -1,4 +1,7 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
@@ -522,6 +525,43 @@ describe('L0 discover and install from the README', () => {
     'zh-TW': { cli: '用命令列版本測過', untested: '這些 agent 的桌面 app 和 IDE 擴充', terminal: ['在互動式終端機裡，透過 SSH 連線或在沒有顯示器的 Linux 上', 'CI 裡印出純文字', '其他情況都開網頁', '在互動式終端機加 `--watch`'] },
     'zh-CN': { cli: '用命令行版本测过', untested: '这些 agent 的桌面 app 和 IDE 扩展', terminal: ['在交互式终端里，通过 SSH 连接或在没有显示器的 Linux 上', 'CI 里打印纯文本', '其他情况都开网页', '在交互式终端加 `--watch`'] },
   }
+  // codex_095: the commands a README or the clone route gives reach the board the launcher finds, in any shell.
+  test('L0 README: the doctor command works in any shell, and the clone route opens the board setup wrote or the one the Claude Code plugin manages', () => {
+    const launcher = fileURLToPath(new URL('bin/agent-board.mjs', root))
+    const stub = name => `globalThis.AGENT_BOARD = {"lang":"en"}\nprocess.stdout.write(${JSON.stringify(`${name}:`)} + process.argv.slice(2).join(' '))\n`
+    const scratch = mkdtempSync(join(tmpdir(), 'l0-readme-'))
+    try {
+      const home = join(scratch, 'home')
+      const save = (path, text) => { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, text) }
+      const env = { ...process.env, HOME: home, USERPROFILE: home, LANG: 'en_US.UTF-8' }
+      for (const key of ['CLAUDE_PROGRESS_FILE', 'CLAUDE_CONFIG_DIR', 'CI']) delete env[key]
+      const board = args => {
+        const result = spawnSync(process.execPath, [launcher, ...args], { env, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+        return result.stdout
+      }
+      // The doctor command names no shell variable, and the package command hands its words to the installed board.
+      for (const [name] of READMES) {
+        const text = read(name)
+        assert.ok(text.includes('`npx @wenyuchiou/agent-board@next --codex-doctor --agent codex`'), `${name}: the doctor command is the package command`)
+        assert.doesNotMatch(text.split('\n').find(line => line.includes('--codex-doctor')) ?? '', /\$HOME/, `${name}: the doctor command names no $HOME`)
+      }
+      save(join(home, '.agent-board', 'agent-board.mjs'), stub('default'))
+      assert.equal(board(['--codex-doctor', '--agent', 'codex']), 'default:--codex-doctor --agent codex', 'the package command runs the installed doctor')
+      // --data-dir opens the board setup wrote in that folder.
+      const data = join(scratch, 'data')
+      save(join(data, 'agent-board.mjs'), stub('data'))
+      assert.equal(board(['--data-dir', data, '--print']), 'data:--print', '--data-dir opens the board in that folder')
+      // Without it, a board the Claude Code plugin manages, beside its progress file, is found.
+      renameSync(join(home, '.agent-board', 'agent-board.mjs'), join(home, '.agent-board', 'moved.txt'))
+      const connected = join(scratch, 'connected', 'progress.md')
+      save(join(home, '.agent-board', 'legacy-connect.json'), JSON.stringify({ version: 1, disabled: false, connectedProgress: connected }))
+      save(join(connected, '..', 'agent-board.mjs'), stub('plugin'))
+      assert.equal(board(['--print']), 'plugin:--print', 'the launcher finds the plugin-managed board beside its progress file')
+      const clone = section(read('docs/SETUP.md'), 'Install from a clone')
+      assert.ok(clone.includes('when setup wrote the board there') && clone.includes('beside its progress file'), 'SETUP.md: the clone route says when --data-dir applies and that a plugin-managed board is found without it')
+    } finally { rmSync(scratch, { recursive: true, force: true }) }
+  })
+
   test('L0 README: the no-window page command, the clone route, the global install on @next and the tested command-line tools are right in all three languages', () => {
     const clone = section(read('docs/SETUP.md'), 'Install from a clone')
     assert.ok(clone, 'SETUP.md: Install from a clone exists')
