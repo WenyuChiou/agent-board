@@ -94,7 +94,7 @@ export const LINES = [
 "      open.pop();",
 "  }",
 "  const partner = line.indexOf('\"', mark + 1);",
-"  const isCloser = partner !== -1 && (/^[?？][\"”」』)）]*$/.test(line.slice(mark, partner)) || /\\S/.test(line[partner - 1] ?? \"\") && !/[\\p{L}\\p{N}]/u.test(line[partner + 1] ?? \"\"));",
+"  const isCloser = partner !== -1 && !(/\\s/.test(line[partner - 1] ?? \"\") && /\\S/.test(line[partner + 1] ?? \"\"));",
 "  if (straight >= 0 && isCloser)",
 "    open.push(straight);",
 "  if (/^[?？][\"”」』)）]*'/.test(line.slice(mark))) {",
