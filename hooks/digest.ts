@@ -187,8 +187,12 @@ const CLOSERS = new Set(Object.values(OPENERS))
 // A question mark inside a quote that follows other words is a question told about, not one
 // put to the person: `… and asked "Blue or green?"` (#1273). Two shapes do ask: a quote that
 // wraps the whole question, and a quoted last option after `or` (`"red" row or "blue row?"`),
-// unless the sentence reports what was asked or said (`The test asked either "x" or "Ready?"`, `他表示 " 要不要？ "`).
-const REPORTS = /\b(?:ask(?:ed|s)?|sa(?:id|ys)|wr(?:ote|ites)|repl(?:ied|ies)|typed|prompt(?:ed|s)?)\b|問|问|說|说|寫|写|回覆|回复|表示/i
+// unless the sentence reports what was asked or said (`The test asked either "x" or "Ready?"`).
+const REPORTS = /\b(?:ask(?:ed|s)?|sa(?:id|ys)|wr(?:ote|ites)|repl(?:ied|ies)|typed|prompt(?:ed|s)?)\b|問|问|說|说|寫|写|回覆|回复/i
+// Before a quote that stands alone between spaces, these also introduce what was said or thought
+// (`他表示 " 要不要？ "`, `他心想 " 要不要？ "`), so that quote opens a quotation, not a stray one. They
+// stay out of REPORTS: there `表示` also means "stands for" (`這個圖示表示「成功」還是「失敗？」` asks).
+const SPEAKS = /\b(?:thought|told|answered)\b|表示|心想|想著|想着|認為|认为|覺得|觉得|提到|告訴|告诉|回答|喊/i
 const isLoneQuote = (line: string, at: number): boolean => {
   const before = line[at - 1] ?? ' '
   return /\d/.test(before) || /\S/.test(before) && /^(?:\s|$)/.test(line.slice(at + 1))
@@ -214,7 +218,8 @@ const isQuoted = (line: string, mark: number): boolean => {
   // (`他表示 " 要不要？我可以幫忙"然後說"好"`, `他表示 "要不要？ "然後說"👍"`).
   const partner = line.indexOf('"', mark + 1)
   const isRightAfter = /^[?？]["”」』)）]*$/.test(line.slice(mark, partner))
-  const isReported = REPORTS.test(line.slice(0, Math.max(straight, 0)).split(/[.!?。！？]/).pop() ?? '')
+  const said = line.slice(0, Math.max(straight, 0)).split(/[.!?。！？]/).pop() ?? ''
+  const isReported = REPORTS.test(said) || SPEAKS.test(said)
   // It closes at the next straight quote that touches the text before it, not a space (`" and you
   // said "blue"` opens another) nor a digit (`12"` is an inch mark, but `"42"` closes), and that has
   // a space, a mark or the end after it, not a letter: in `幫忙 "然後說"好"` and `幫忙 "然後寫"好` the
