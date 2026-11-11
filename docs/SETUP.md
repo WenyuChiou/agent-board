@@ -212,13 +212,15 @@ Without npm, from a clone of this repository, with Node.js 22 or later:
 git clone https://github.com/WenyuChiou/agent-board.git
 cd agent-board
 node scripts/setup-agent.mjs
-node scripts/setup-agent.mjs --apply
 ```
 
-The first `setup-agent.mjs` only previews; `--apply` writes. It takes the same options as
-`npx @wenyuchiou/agent-board@next setup`, such as `--agent codex`. On Windows, use the exact
-paths it prints. Then open the board with `node bin/agent-board.mjs` from this folder, or with
-`/agent-board` inside an agent.
+In a terminal, `setup-agent.mjs` shows what it would change and asks once
+(`Set these up? [Y/n]`); a no writes nothing. Without a terminal to answer in, such as an
+agent's chat, it only previews, and `node scripts/setup-agent.mjs --apply` writes. It takes the same options as
+`npx @wenyuchiou/agent-board@next setup`, such as `--agent codex` or `--data-dir`. On Windows,
+use the exact paths it prints. Then finish [the steps your agent needs](#after-setup-per-agent),
+and open the board with the board command in setup's Next steps: it names your data folder
+when you chose one with `--data-dir`.
 
 ## Let an agent install it
 

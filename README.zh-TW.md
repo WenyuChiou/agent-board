@@ -65,7 +65,7 @@ npx @wenyuchiou/agent-board@next
 | 在哪裡 | 怎麼開 |
 |---|---|
 | agent 裡 | `/agent-board`（Codex 是 `$agent-board`） |
-| 終端機 | `npx @wenyuchiou/agent-board`：桌面開網頁；SSH 或沒有顯示器時開終端機看板，但那個 shell 若設了 agent 的設定（例如 `HERMES_HOME`、`OPENCODE_CONFIG_DIR`）就會開網頁。加 `--watch` 一定開終端機看板 |
+| 終端機 | `npx @wenyuchiou/agent-board`：互動式終端機透過 SSH 連線，或 Linux 沒有顯示器時，開終端機看板，但那個 shell 若設了 agent 的設定（例如 `HERMES_HOME`、`OPENCODE_CONFIG_DIR`）就開網頁；CI 裡印出純文字；其他情況都開網頁。在互動式終端機加 `--watch` 一定開終端機看板 |
 | 同一個 Wi-Fi 的手機 | `npx @wenyuchiou/agent-board --lan`，掃它印出的 QR code。手機可以看、勾步驟、封存和關閉看板，但不能傳送回答（它只顯示回答讓你複製）。請在信得過的網路使用：連結沒有加密，拿到的人都能打開網頁 |
 | 讓 agent 讀看板 | `npx @wenyuchiou/agent-board --json`（[欄位說明](docs/BOARD-JSON.md)，英文） |
 

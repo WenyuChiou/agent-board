@@ -65,7 +65,7 @@ npx @wenyuchiou/agent-board@next
 | 在哪里 | 怎么开 |
 |---|---|
 | agent 里 | `/agent-board`（Codex 是 `$agent-board`） |
-| 终端 | `npx @wenyuchiou/agent-board`：桌面开网页；SSH 或没有显示器时开终端看板，但那个 shell 若设了 agent 的设置（例如 `HERMES_HOME`、`OPENCODE_CONFIG_DIR`）就会开网页。加 `--watch` 一定开终端看板 |
+| 终端 | `npx @wenyuchiou/agent-board`：交互式终端通过 SSH 连接，或 Linux 没有显示器时，开终端看板，但那个 shell 若设了 agent 的设置（例如 `HERMES_HOME`、`OPENCODE_CONFIG_DIR`）就开网页；CI 里打印纯文本；其他情况都开网页。在交互式终端加 `--watch` 一定开终端看板 |
 | 同一个 Wi-Fi 的手机 | `npx @wenyuchiou/agent-board --lan`，扫它打印出的二维码。手机可以看、勾步骤、归档和关闭看板，但不能发送回复（它只显示回复让你复制）。请在信得过的网络使用：链接没有加密，拿到的人都能打开网页 |
 | 让 agent 读看板 | `npx @wenyuchiou/agent-board --json`（[字段说明](docs/BOARD-JSON.md)，英文） |
 

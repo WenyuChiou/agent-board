@@ -516,12 +516,23 @@ describe('L0 discover and install from the README', () => {
   })
 
   // #1326's bot-route review (codex_089): the commands a README gives do what it says on every computer.
+  const SCOPE = {
+    en: { cli: 'each run as its command-line tool', untested: 'the desktop apps and IDE extensions of these agents', terminal: ['in an interactive terminal over SSH or on Linux with no display', 'plain text in CI', 'the page everywhere else', 'in any interactive terminal'] },
+    'zh-TW': { cli: '用命令列版本測過', untested: '這些 agent 的桌面 app 和 IDE 擴充', terminal: ['互動式終端機透過 SSH 連線，或 Linux 沒有顯示器時', 'CI 裡印出純文字', '其他情況都開網頁', '在互動式終端機加 `--watch`'] },
+    'zh-CN': { cli: '用命令行版本测过', untested: '这些 agent 的桌面 app 和 IDE 扩展', terminal: ['交互式终端通过 SSH 连接，或 Linux 没有显示器时', 'CI 里打印纯文本', '其他情况都开网页', '在交互式终端加 `--watch`'] },
+  }
   test('L0 README: the no-window page command, the clone route, the global install on @next and the tested command-line tools are right in all three languages', () => {
     const clone = section(read('docs/SETUP.md'), 'Install from a clone')
     assert.ok(clone, 'SETUP.md: Install from a clone exists')
     for (const step of ['git clone https://github.com/WenyuChiou/agent-board.git', 'cd agent-board', 'node scripts/setup-agent.mjs\n', 'node scripts/setup-agent.mjs --apply']) {
       assert.ok(`${clone}\n`.includes(step), `SETUP.md: the clone route runs ${step.trim()}`)
     }
+    // codex_090: in a terminal the first command asks once and a yes writes; the board command is setup's own,
+    // which names a custom data folder; the per-agent steps differ (Codex `$agent-board`, Cursor none).
+    assert.ok(clone.includes('`Set these up? [Y/n]`') && clone.includes('a no writes nothing'), 'SETUP.md: the clone route says the first command asks once in a terminal')
+    assert.doesNotMatch(clone, /first `setup-agent\.mjs` only previews/, 'SETUP.md: the clone route does not say the first command only previews')
+    assert.ok(clone.includes('(#after-setup-per-agent)') && clone.includes('Next steps') && clone.includes('`--data-dir`'), "SETUP.md: the clone route sends the reader to the per-agent steps and setup's printed board command")
+    assert.doesNotMatch(clone, /`\/agent-board` inside an agent/, 'SETUP.md: the clone route does not give /agent-board for every agent')
     for (const [name, lang] of READMES) {
       const text = read(name)
       const first = section(text, SECTIONS[lang][0])
@@ -532,8 +543,13 @@ describe('L0 discover and install from the README', () => {
       // The stable tag is still 0.24.2, whose launcher has no `remove`.
       assert.ok(text.includes('`npm install -g @wenyuchiou/agent-board@next`'), `${name}: the global install uses @next`)
       assert.doesNotMatch(text, /npm install -g @wenyuchiou\/agent-board`/, `${name}: no global install of the stable tag`)
-      // The 0.24.3 record ran each agent's command-line tool; Cursor's was cursor-agent.
-      assert.ok(section(text, SECTIONS[lang][2]).includes('`cursor-agent`'), `${name}: the support section says the record ran the command-line tools`)
+      // The 0.24.3 record ran each agent's command-line tool; Cursor's was cursor-agent; apps and IDEs were not run.
+      const support = section(text, SECTIONS[lang][2])
+      assert.ok(support.includes('`cursor-agent`') && support.includes(SCOPE[lang].cli) && support.includes(SCOPE[lang].untested), `${name}: the support section says the record ran the command-line tools and not the apps or IDEs`)
+      // Which surface the bare command picks (hooks/surface.ts): the terminal board only in an interactive terminal over SSH
+      // or on Linux with no display, text in CI, the page otherwise; --watch in any interactive terminal.
+      const terminalRow = text.split('\n').find(line => line.startsWith('|') && line.includes('`npx @wenyuchiou/agent-board`'))
+      for (const words of SCOPE[lang].terminal) assert.ok(terminalRow?.includes(words), `${name}: the terminal row says ${words}`)
     }
   })
 })
