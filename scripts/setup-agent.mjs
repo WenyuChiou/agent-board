@@ -646,7 +646,8 @@ const main = () => {
     } else if (apply && available.length) {
       const sessionAgents = available.map(agent => names[agent])
       steps.push(words(sessionAgents.length === 1 ? 'restartRemoveOne' : 'restartRemove', { agents: sessionAgents.join(message(', ', '、', '、')) }))
-      const removedBoard = results.flatMap(plan => plan.changes).some(change => change.action === 'remove' && change.file.endsWith('agent-board.mjs'))
+      // A plan skipped for a conflict removed nothing, so its listed removal of the board script does not count (#1291).
+      const removedBoard = results.filter(plan => !plan.conflicts.length).flatMap(plan => plan.changes).some(change => change.action === 'remove' && change.file.endsWith('agent-board.mjs'))
       if (removedBoard) {
         const launcherCommand = command ? command.replace(/\s+(?:setup|remove)\s*$/, '') : 'npx @wenyuchiou/agent-board'
         steps.push(words('directRemoved', { command: launcherCommand }))
