@@ -12262,7 +12262,13 @@ test('the footer links to the project', async () => {
     const apart = structuredClone(model)
     apart.view.versions.package = '99.0.0'
     await dom.redraw(apart)
-    assert.equal(dom.node('versions').textContent, EN.pgVersions(model.view.versions.board, '99.0.0'))
+    // A board script older than the package says so and gives the one update command (#1304).
+    assert.equal(dom.node('versions').textContent, EN.pgVersionsOlder(model.view.versions.board, '99.0.0'))
+    assert.match(dom.node('versions').textContent, /npx @wenyuchiou\/agent-board@99\.0\.0 setup, then add --apply/)
+    const behind = structuredClone(model)
+    behind.view.versions.package = '0.0.1'
+    await dom.redraw(behind)
+    assert.equal(dom.node('versions').textContent, EN.pgVersions(model.view.versions.board, '0.0.1'))
   } finally { await board.close() }
   for (const words of [ZH_TW, ZH_CN]) {
     assert.notEqual(words.pgGithub, EN.pgGithub)

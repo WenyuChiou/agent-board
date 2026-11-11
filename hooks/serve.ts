@@ -791,7 +791,7 @@ const PAGE_WORDS = [
   'settingsAgentSetup', 'settingsAgentRemove', 'settingsAgentConfirm', 'settingsAgentCancel', 'settingsAgentsBusy', 'settingsAgentsReadFailed',
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
-  'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
+  'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgVersionsOlder', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
@@ -2842,7 +2842,12 @@ const PAGE_SCRIPT = String.raw`
     pg.waitingNow = waitingNow;
     document.title = waitingNow ? w('pgTabTitle', waitingNow) : 'Agent Board';
     var version = view.versions;
-    document.getElementById('versions').textContent = !version.package || version.package === version.board ? w('pgVersion', version.board) : w('pgVersions', version.board, version.package);
+    var isOlder = function (held, next) {
+      var a = held.split('.'), b = next.split('.');
+      for (var i = 0; i < 3; i++) { var d = (+b[i] || 0) - (+a[i] || 0); if (d) return d > 0; }
+      return false;
+    };
+    document.getElementById('versions').textContent = !version.package || version.package === version.board ? w('pgVersion', version.board) : isOlder(version.board, version.package) ? w('pgVersionsOlder', version.board, version.package) : w('pgVersions', version.board, version.package);
     var priorCards = pg.cardNodes;
     var priorOrder = pg.order.cards || [];
     var priorRows = pg.rowKeys;

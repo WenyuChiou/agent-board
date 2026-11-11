@@ -1364,6 +1364,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // away when it is still the bytes setup or a release wrote, and leaves one the person edited (#868).
   const retired = agent === 'gemini' ? [join(home, '.gemini', 'commands', 'board.toml')] : agent === 'opencode' ? [join(opencodeDir, 'commands', 'board.md')] : []
   const keptEdited: string[] = []
+  const keptText: { file: string; beside: string }[] = []
+  const keptCode: string[] = []
+  const keptFiles = new Set<string>()
+  const staleBeside = new Set<string>()
   const isReleasedBoard = (text: string): boolean => {
     const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))
     return RELEASED.some(release => release.board.includes(bodyHash))
@@ -1379,8 +1383,28 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     if (remove && existing === null && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
     const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing))))
-    if (existing !== null && !owned && existing !== desired) conflicts.push(file)
+    if (existing !== null && !owned && existing !== desired) {
+      // A generated file the person edited never stops an upgrade and is never overwritten (#1302). Text a
+      // host only reads gets the new file beside it; code a host loads keeps the old file and is named.
+      if (remove) conflicts.push(file)
+      else if (/\.(?:toml|md)$/.test(file)) {
+        keptText.push({ file, beside: `${file}.new` })
+        const beside = initial(`${file}.new`)
+        if (beside !== desired) changes.push({ file: `${file}.new`, action: beside === null ? 'create' : 'update' })
+        files[`${file}.new`] = desired
+      } else keptCode.push(file)
+      keptFiles.add(file)
+    }
     else if (remove ? owned : existing !== desired) changes.push({ file, action: remove ? 'remove' : existing === null ? 'create' : 'update' })
+  }
+  // A copy beside a file that is no longer edited, or that is being removed, goes when it is still the bytes setup wrote.
+  for (const file of Object.keys(manifest.files)) {
+    if (!file.endsWith('.new') || !(file.slice(0, -4) in files) || file in files) continue
+    const existing = initial(file)
+    const usedElsewhere = otherAgents.some((one, index) => !removingAgents.includes(one) && Object.hasOwn(object(otherManifests[index]?.files ?? {}), file))
+    if (existing !== null && hash(existing) === manifest.files[file] && !usedElsewhere) changes.push({ file, action: 'remove' })
+    else if (existing === null && remove) alreadyGone.push(file)
+    staleBeside.add(file)
   }
   for (const file of retired) {
     const existing = initial(file)
@@ -1391,7 +1415,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   // A host-directory override must not strand an old active plugin outside the
   // new ownership record. Remove the old scoped install before changing roots.
-  for (const file of Object.keys(manifest.files)) if (!(file in files) && !retired.includes(file)) conflicts.push(file)
+  for (const file of Object.keys(manifest.files)) if (!(file in files) && !retired.includes(file) && !staleBeside.has(file)) conflicts.push(file)
   const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
   nextConfigText ??= `${JSON.stringify(nextConfig, null, 2)}\n`
   if (hasNativeConfig && (!remove || Object.keys(manifest.groups).length)) {
@@ -1413,7 +1437,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
   }
   const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
-  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
+  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).flatMap(([file, text]) => keptFiles.has(file) ? (manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]]) : [[file, hash(text)]])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   const removedDirs = new Set<string>()
   let handover: { file: string; text: string } | undefined
@@ -1455,7 +1479,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.

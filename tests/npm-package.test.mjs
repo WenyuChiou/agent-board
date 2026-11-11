@@ -388,6 +388,27 @@ test('an installed board script from another build gets a one-line note naming i
   assert.equal(unreadable.stderr.trim().split('\n').length, 1)
 }))
 
+test('--json through an installed board script from an older release fails with the notice instead of printing text and exiting 0 (#1304)', () => fixture(f => {
+  const pkg = packed(f)
+  // What 0.24.2's script did with --json: print the text board and exit 0.
+  const text = `${prelude(f)}process.stdout.write('Agent Board (text, not JSON)\\n')\n// 0.24.2`
+  save(boardPath(f), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  for (const [lang, older] of [['en', 'is from 0.24.2.'], ['zh-TW', '是 0.24.2 版']]) {
+    const json = f.run(pkg, ['--json', '--lang', lang])
+    assert.notEqual(json.status, 0, 'the call fails')
+    assert.equal(json.stdout, '', 'nothing but JSON may ever reach stdout')
+    assert.ok(json.stderr.includes(older), json.stderr)
+    assert.ok(json.stderr.includes(`npx ${manifest.name}@${manifest.version} setup`), json.stderr)
+    assert.equal(json.stderr.trim().split('\n').length, 1)
+  }
+  // Without --json the older script still runs, with the same note.
+  const plain = f.run(pkg, ['--print'])
+  success(plain)
+  assert.ok(plain.stdout.includes('Agent Board (text, not JSON)'))
+  assert.ok(plain.stderr.includes('is from 0.24.2.'))
+}))
+
 test('the board script beside CLAUDE_PROGRESS_FILE runs with the arguments unchanged and its own path as argv[1]', () => fixture(f => {
   const pkg = packed(f)
   const script = join(f.home, 'plugin data/agent-board.mjs')
