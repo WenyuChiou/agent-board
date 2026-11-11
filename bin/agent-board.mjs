@@ -206,7 +206,9 @@ function setupAdvice(path, prelude) {
   const dataOpt = style => {
     if (isDefault) return ''
     if (rest !== undefined) {
-      if (isWin) return ` --data-dir ${style === 'cmd' ? `"%USERPROFILE%${rest.replaceAll('%', '"^%"')}"` : `"$HOME${rest.replace(/[`$]/g, '`$&')}"`}`
+      // Both shells read a backslash; a folder given with forward slashes is shown the same way.
+      const winRest = rest.replaceAll('/', '\\')
+      if (isWin) return ` --data-dir ${style === 'cmd' ? `"%USERPROFILE%${winRest.replaceAll('%', '"^%"')}"` : `"$HOME${winRest.replace(/[`$]/g, '`$&')}"`}`
       const below = rest.slice(1)
       return ` --data-dir ~${below === '' ? '' : `/${/[^\w.:\/~@+,=-]/.test(below) ? quoted(below, style) : below}`}`
     }
