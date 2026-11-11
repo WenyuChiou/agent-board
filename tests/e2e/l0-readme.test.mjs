@@ -71,9 +71,9 @@ const BOARD_COMMANDS = { 'Claude Code': '/agent-board', Codex: '$agent-board', A
 // described, and the words of the phone row. The cells follow docs/MESSAGING.md "Agent and surface support"
 // (Proposed or None is "Not yet", Implemented and not tested is "Not tested", no such surface is a dash).
 const WORDS = {
-  en: { now: 'At once (confirmed)', next: 'At its next turn', paste: 'You paste it', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: 'Ask it for the `agent-board` skill' },
-  'zh-TW': { now: '立即送到（會確認）', next: '下一輪才收到', paste: '你自己貼上', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留到那個對話的下一回合才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '請它執行 `agent-board` skill' },
-  'zh-CN': { now: '立即送达（会确认）', next: '下一轮才收到', paste: '你自己粘贴', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留到那个对话的下一回合才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '让它执行 `agent-board` skill' },
+  en: { now: 'At once (confirmed)', next: 'At its next turn', paste: 'You paste it', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: 'Ask it for the Agent Board skill' },
+  'zh-TW': { now: '立即送到（會確認）', next: '下一輪才收到', paste: '你自己貼上', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留到那個對話的下一回合才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '請它執行 Agent Board skill' },
+  'zh-CN': { now: '立即送达（会确认）', next: '下一轮才收到', paste: '你自己粘贴', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留到那个对话的下一回合才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '让它执行 Agent Board skill' },
 }
 // Each agent's command-line reply in the terminal table, a key of WORDS.
 const REPLY = { 'Claude Code': 'now', Codex: 'next', Antigravity: 'next', Cursor: 'paste', OpenCode: 'paste', 'Grok Build': 'paste', 'Hermes Agent': 'paste' }
@@ -465,7 +465,7 @@ describe('L0 discover and install from the README', () => {
         assert.ok(exists(file), `${name}: ${file} exists`)
         assert.match(icon, /\swidth="28"/, `${name}: ${agent}'s mark is drawn at 28 px, where the brand mark reads`)
         assert.equal(agent, /alt="([^"]+)"/.exec(icon)[1], `${name}: the row names ${agent}`)
-        assert.deepEqual(codeSpans(command), agent === 'Hermes Agent' ? ['agent-board'] : BOARD_COMMANDS[agent] ? [BOARD_COMMANDS[agent]] : [], `${name}: ${agent}'s board command`)
+        assert.deepEqual(codeSpans(command), BOARD_COMMANDS[agent] && agent !== 'Hermes Agent' ? [BOARD_COMMANDS[agent]] : [], `${name}: ${agent}'s board command`)
         assert.equal(command === desk.second, agent === 'Cursor', `${name}: only Cursor opens the board with the second Quick start command`)
         assert.equal(command.includes(words.askNote), agent === 'Hermes Agent', `${name}: only Hermes's command carries the note that a prompt asked for the skill`)
         assert.equal(reply, words[REPLY[agent]], `${name}: ${agent}'s command-line reply`)
