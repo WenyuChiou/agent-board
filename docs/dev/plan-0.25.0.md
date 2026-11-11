@@ -1,10 +1,12 @@
-# Plan for 0.24.4
+# Plan for 0.25.0
+
+Called 0.24.4 until 2026-11-11, when the owner renamed it: 「改叫 0.25.0」. It adds hooks, and a patch release, one that changes only the last number, adds none (#1285). 0.24.5 is now 0.25.1.
 
 The owner chose this plan on 2026-11-11, after a Fable 5.2 review of the whole project and two outside reviews of the first draft. The issues live in milestone 13. The roadmap is #209.
 
-**Theme:** one command to install. From 0.24.4 on, the board keeps itself up to date. The Codex sessions it can see are listed. An approval a session is waiting on can be answered from the board, and the board says plainly how each answer reaches each agent.
+**Theme:** one command to install. From 0.25.0 on, the board keeps itself up to date. The Codex sessions it can see are listed. An approval a session is waiting on can be answered from the board, and the board says plainly how each answer reaches each agent.
 
-**Size:** about 20 issues and 8 new ones, plus the delivery work. The owner's answer on size, 2026-11-11: 「全部保留，晚一週」. Nothing moves out, and 0.24.4 ships about a week later than first planned. If it still slips, cut in this order and no other:
+**Size:** about 20 issues and 8 new ones, plus the delivery work. The owner's answer on size, 2026-11-11: 「全部保留，晚一週」. Nothing moves out, and 0.25.0 ships about a week later than first planned. If it still slips, cut in this order and no other:
 1. The scenario-b receivers (a message to an agent that is busy): Grok first, then Hermes, then Cursor turn-end.
 2. The approval routes on the other hosts, each one whose check has not passed: OpenClaw, then Hermes, then Grok, then DeepSeek Harness. A cut route leaves "answer in its window" on its card.
 3. Never cut: D1, D3 (when F10 passes), OpenCode, the Codex record, the gate.
@@ -13,15 +15,15 @@ The owner chose this plan on 2026-11-11, after a Fable 5.2 review of the whole p
 
 The owner: 「希望能達到百分之九十自動 跨版本升級也能無痛…讓使用者覺得簡單 且立即能看到他們的session 再版子上面」. The bar is counted in person steps, not in typed commands. A step is learning there is something to do, starting it, answering a question, running a trust command, restarting a host, or opening the board again to check. The totals are frozen at the 2026-11-10 walk, and a journey counts only when a real session's row shows on the board.
 
-| Journey | Today | 0.24.4 ceiling |
+| Journey | Today | 0.25.0 ceiling |
 |---|---|---|
-| Upgrade from 0.24.4 to a later version, nothing to ask | 5 of 11 | 0: the person opens the board as usual; one line says it updated |
+| Upgrade from 0.25.0 to a later version, nothing to ask | 5 of 11 | 0: the person opens the board as usual; one line says it updated |
 | The same, something needs asking | 5 to 7 | 1: one confirm on the page, plus a restart only for a host whose loaded code changed |
-| Upgrade to 0.24.4 from 0.24.3 | 5 of 11 (10 of 17 on Linux) | 3: learn of it, one command, one answer; plus one restart for each host whose loaded hooks changed (0.24.4 changes the approval hooks, D3), counted as steps |
+| Upgrade to 0.25.0 from 0.24.3 | 5 of 11 (10 of 17 on Linux) | 3: learn of it, one command, one answer; plus one restart for each host whose loaded hooks changed (0.25.0 changes the approval hooks, D3), counted as steps |
 | First install, Windows, Codex only | 7 | 3: one command, one answer, restart Codex |
 | First install, Linux, four agents | 8 | 6: one command, one answer, a new session in each agent |
 
-First install does not reach 90% in 0.24.4: every host loads its hooks when a session starts, and the tool cannot remove that step. The owner accepted this: 「接受，寫進計畫」. The 0.24.3 script has no update check, so that one upgrade costs one command; "0 steps" holds only from 0.24.4 on.
+First install does not reach 90% in 0.25.0: every host loads its hooks when a session starts, and the tool cannot remove that step. The owner accepted this: 「接受，寫進計畫」. The 0.24.3 script has no update check, so that one upgrade costs one command; "0 steps" holds only from 0.25.0 on.
 
 ## Milestones
 
@@ -63,7 +65,7 @@ First install does not reach 90% in 0.24.4: every host loads its hooks when a se
 
 ### M7. What the board shows can be believed
 - **Work:** one count for the page, the terminal board, `--status` and `--json` (#1296). A row with no event for a set time and no live process says "unsure" with its age. A closed agent window takes its card with it (#1092, pull request #1288). The four gaps from the outside read of #1264 (#1276). The question-finding design is decided here, measured first: fixed shape set from synthetic replies in three languages (#1287, #1290), the miss and false-question rates of today's rules, then the owner picks.
-- **Six row states.** Today "waiting on your reply" covers both a question and a turn that simply stopped, so a person cannot tell which one needs a decision. Each row now takes one of six states, read from the host's events and the agent's own steps, and each state has the one action the board offers. New issue. The owner, 2026-11-11: 「我们要想一下这几个状态」, then 「寫進 0.24.4」.
+- **Six row states.** Today "waiting on your reply" covers both a question and a turn that simply stopped, so a person cannot tell which one needs a decision. Each row now takes one of six states, read from the host's events and the agent's own steps, and each state has the one action the board offers. New issue. The owner, 2026-11-11: 「我们要想一下这几个状态」, then 「寫進 0.25.0」.
 
   | State | When | Action on the board |
   |---|---|---|
@@ -94,26 +96,26 @@ First install does not reach 90% in 0.24.4: every host loads its hooks when a se
 
 ### M8. Proof, then stable
 Records on the tagged head. The gate:
-1. `docs/RELEASING.md`'s release gate, checked on the exact tagged commit: CI green on Ubuntu and Windows; the vendor parity record `docs/validation/<date>-parity-0.24.4.md`, every FAIL in it naming an open issue outside the must-ship set; the L1 to L3 user-journey tests and the upgrade journeys in `tests/host-upgrade.test.mjs` passing on that commit.
+1. `docs/RELEASING.md`'s release gate, checked on the exact tagged commit: CI green on Ubuntu and Windows; the vendor parity record `docs/validation/<date>-parity-0.25.0.md`, every FAIL in it naming an open issue outside the must-ship set; the L1 to L3 user-journey tests and the upgrade journeys in `tests/host-upgrade.test.mjs` passing on that commit.
 2. The delivery table: one row per agent, surface and scenario (a idle, b mid-turn, c stopped on a question), each marked `now`, `later` (turn end, next turn or reopen) or `cannot` (named); `not run` only for a surface outside line 6's list. Every agent in the README support table has a surface with a and c at `now` or `later`, or its card and the README say "cannot receive yet". No card wording disagrees with its record. The release notes print the counts. #557 is one row.
 3. The usersim record with the ledger, at the ceilings above with each needed host restart counted as a step, each journey ending in a real session's row.
 4. One live row: the daily check from inside Codex CLI and the Codex app (F4).
 5. Must-ship closed, and every lane-reviewed pull request read from outside.
-6. These nine AIs are tested live on the 0.24.4 head (the retired or deferred ones, Gemini CLI, Muse Code, Copilot and Windsurf, are not in it): Claude Code, Codex (CLI and app), OpenCode, Antigravity, Cursor, Grok Build, Hermes Agent, OpenClaw and DeepSeek Harness. Each has a dated record for the rows that apply to it: its row states (M7), its approval route or its "answer in its window" card (D3, other hosts), and delivery a and c (D2). A row a person must type into (the IDE rows) is run by the owner with the PM. `not run` is not accepted for these AIs. The owner, 2026-11-11: 「你剛剛提到的每個AI都要確實測試」.
+6. These nine AIs are tested live on the 0.25.0 head (the retired or deferred ones, Gemini CLI, Muse Code, Copilot and Windsurf, are not in it): Claude Code, Codex (CLI and app), OpenCode, Antigravity, Cursor, Grok Build, Hermes Agent, OpenClaw and DeepSeek Harness. Each has a dated record for the rows that apply to it: its row states (M7), its approval route or its "answer in its window" card (D3, other hosts), and delivery a and c (D2). A row a person must type into (the IDE rows) is run by the owner with the PM. `not run` is not accepted for these AIs. The owner, 2026-11-11: 「你剛剛提到的每個AI都要確實測試」.
 
 ## Delivery: an answer pressed on the board reaches the agent (lane E)
 
-A next-turn mailbox cannot answer an agent that sits idle on a question. Only Claude Code CLI, DeepSeek and, new in this version, OpenCode wake an idle session; Codex does too if F6 passes. The rest receive at their next turn, and the card says so. The wake for those hosts (`board_wait`, #685) is 0.24.5. The owner: 「老實寫下一輪收到」.
+A next-turn mailbox cannot answer an agent that sits idle on a question. Only Claude Code CLI, DeepSeek and, new in this version, OpenCode wake an idle session; Codex does too if F6 passes. The rest receive at their next turn, and the card says so. The wake for those hosts (`board_wait`, #685) is 0.25.1. The owner: 「老實寫下一輪收到」.
 
 **Order in lane E.** D1, then **D3 approvals first**, then answers to a question with choices, then free messages to a busy agent last. The owner: 「主要是他在问你同不同意的那个部分，我们可以直接在板上面做送出吧」 and, asked which comes first, 「審批第一，訊息最後」.
 
 ### D1. One Send button that says what will happen
-- **Work:** every card shows one line chosen by the board from the receiver's record: goes in now, goes in when its current step ends, goes in at its next turn (it will not wake it), goes in when this chat is opened again, reopens the session and sends, or cannot receive yet. Send shows only with a line whose route a live record on the 0.24.4 head has shown; "cannot receive yet", and any route without such a record, shows Copy instead and no Send. Each receiver record gains `routes: { idle, working, ended }`; the page's two hard-coded agent names (`hooks/serve.ts:1607-1612`) go. The matrix script prints the same record. The LAN page shows no Send.
+- **Work:** every card shows one line chosen by the board from the receiver's record: goes in now, goes in when its current step ends, goes in at its next turn (it will not wake it), goes in when this chat is opened again, reopens the session and sends, or cannot receive yet. Send shows only with a line whose route a live record on the 0.25.0 head has shown; "cannot receive yet", and any route without such a record, shows Copy instead and no Send. Each receiver record gains `routes: { idle, working, ended }`; the page's two hard-coded agent names (`hooks/serve.ts:1607-1612`) go. The matrix script prints the same record. The LAN page shows no Send.
 - **Done when:** every card shows one of the lines, with Send only where the route is recorded and Copy otherwise; `isAtOnce` and `isOpenOnly` are gone.
 - **Test:** a table test of every receiver record against idle, working and ended, in three languages, including a route with no record showing Copy and no Send.
 
 ### D3. Approvals on the board
-The owner: 「0.24.4 就上，有條件」. The limits, exactly:
+The owner: 「0.25.0 就上，有條件」. The limits, exactly:
 - **Allow once** and **Deny** for Codex, OpenCode and Claude Code. Claude Code joins through its `PermissionRequest` hook (F13: its hook documentation says the hook can wait and answer allow or deny, and adds no standing rule unless the hook asks for one; one live run must still show what the terminal shows while the hook waits). Antigravity, Cursor, Grok, Hermes, OpenClaw and DeepSeek Harness get only what their route in "Approvals and questions on the other hosts" (below) allows, and only after that route's check has passed on a live record; until then their card shows the request and "answer in its window", with no button. Many Antigravity users run it in turbo mode (it always goes ahead and never asks), where there is nothing to approve: the board only shows its progress and hands it messages, at its next turn. The owner, 2026-11-11: 「它其实可以开一个 turbo 模式，就是一直都过不会问…只要发讯息，它也只是一个传送而已」.
 - No button where no hook runs: Claude Code in `bypassPermissions` or `dontAsk` mode, or with every hook turned off. A Claude Code session run with `-p` denies a call that no hook decides, so the 30 s fallback to the host's own prompt holds for interactive sessions only.
 - Approvals take their own route, a hook asking the local page, never the message path. This changes a written rule: `docs/MESSAGING.md` (lines 8, 235, 280, 431, 602) says a message never approves a tool. `MESSAGING.md` and `docs/dev/product-principles.md` change in the same pull request, by the owner's hand approval.
@@ -124,7 +126,7 @@ The owner: 「0.24.4 就上，有條件」. The limits, exactly:
 - The hook waits only while a local page is open and has confirmed it drew the request, and at most 30 s. Otherwise it returns at once with no decision, and the host's own prompt appears as today; the one exception is a host the person has put under the board as the gate (below), where it denies instead. After that fallback the row says "asked in its window", with no button. The installed hook limit is 3 s today (`hooks/hook-safety.ts:17-24`), so this is a hook change: existing installs get it through the update entry (M3).
 - An agent cannot press it: the approve route needs a secret that exists only in the open page, not in the address file, and the board's agent tools never offer Allow, Continue or Seen. The first press for a session asks the person to confirm once on the page before anything is sent. Ships on a host only if F10 shows, on that host, that a command inside the agent's session cannot approve: Codex, OpenCode and Claude Code first, and each other host's route before it gets a button.
 - `SECURITY.md` states the hole that stays: a program running as the person that can drive the browser can still press it. This is the owner's own approval to give.
-- This takes the approval part of #1119 into 0.24.4. The token redesign stays in 0.24.5.
+- This takes the approval part of #1119 into 0.25.0. The token redesign stays in 0.25.1.
 - **Test:** a stand-in hook that waits: allow-once reaches only the bound request; a press with an old id, turn or state is refused; a press without the page's secret is refused; the first press in a session waits for the confirm; no open page returns at once; 30 s falls back; the LAN is refused. New issue.
 
 ### Answer or send: the controls for each kind of prompt
@@ -135,7 +137,7 @@ The owner, 2026-11-11: 「因為要讓使用者在板子上直接點選項傳送
 | How the agent asks | What the board shows | Answer or send, where |
 |---|---|---|
 | Approval | the command, then Allow once, Deny, and "Deny and say why" where the host takes it | answer: Claude Code, Codex, OpenCode (D3); another host through its route below once that route's check passes. Until then the request and "answer in its window" |
-| One choice from options | one button per option (its label, its description small); one tap sends, and the card says "Sent: <option>" | answer: Claude Code's question tool (F14), OpenCode's question tool (F15). Codex's question tool only through its app server: 0.24.5. Cursor's `AskQuestion` and Hermes's `clarify` hold the agent at their own prompt, which a sent message does not answer: the card shows the question and "answer in its window", no buttons |
+| One choice from options | one button per option (its label, its description small); one tap sends, and the card says "Sent: <option>" | answer: Claude Code's question tool (F14), OpenCode's question tool (F15). Codex's question tool only through its app server: 0.25.1. Cursor's `AskQuestion` and Hermes's `clarify` hold the agent at their own prompt, which a sent message does not answer: the card shows the question and "answer in its window", no buttons |
 | Several choices | a box per option and Send | as above, where the host allows several |
 | Options plus "Other" | the options and a text box | as above |
 | A question in the reply text | buttons when the board reads choices from it ("A or B?"), and a text box | send, with D1's line; on next-turn hosts it says "arrives at its next turn" |
@@ -181,8 +183,8 @@ Half a day each, a dated note each, before the milestone they feed.
 | F8 | Does Grok's `UserPromptSubmit` output reach the model, and does a blocked `Stop` continue? | D2 |
 | F9 | OpenCode: `promptAsync` or `prompt`, and does it wake an idle session? | D2 |
 | F10 | On each host that gets an approval button (Codex, OpenCode and Claude Code, then each other host's route before it ships): can a command inside the agent's session approve its own request, through the address file or otherwise? | D3, other hosts |
-| F11 | Copilot: its hooks and session id. Notes only. | 0.24.5 |
-| F12 | Windsurf: hooks or MCP only. Notes only. | 0.24.5 |
+| F11 | Copilot: its hooks and session id. Notes only. | 0.25.1 |
+| F12 | Windsurf: hooks or MCP only. Notes only. | 0.25.1 |
 | F13 | Does Claude Code's `PermissionRequest` hook let the board's hook wait for the press and return allow or deny (and Antigravity, if it has such a hook)? Read 2026-11-11 from the hook documentation: yes for Claude Code, one live run left; no documented answer route for Antigravity. | D3 |
 | F14 | Does a Claude Code `PreToolUse` hook that returns the answers for its question tool close the question in the terminal and the desktop app, and in what form are several choices and "Other" given? | Answer or send |
 | F15 | OpenCode: in the installed version, which routes answer a permission and a question, does a denial take a message, and do both reach the event stream? | D3, Answer or send |
@@ -206,21 +208,21 @@ Half a day each, a dated note each, before the milestone they feed.
 - Lanes A, B, C and E all rebuild the board bundle: one bundle-touching pull request merges at a time, and the next merges main and rebuilds first.
 - Lane B's milestones run one after another. M3 merges before M4. The extraction merges on day one; D1 merges before M7, which also changes cards in `hooks/serve.ts`.
 
-## What 0.24.4 must not claim
+## What 0.25.0 must not claim
 
-- "Upgrades itself" for the upgrade to 0.24.4, for an install with no `npx`, or for the Claude Code plugin (its own channel). "0 typed commands" without "from 0.24.4 on, when nothing needs asking".
+- "Upgrades itself" for the upgrade to 0.25.0, for an install with no `npx`, or for the Claude Code plugin (its own channel). "0 typed commands" without "from 0.25.0 on, when nothing needs asking".
 - "90% automatic" for first install, for an app or IDE person, or for macOS (no run).
 - "Your sessions are there" or "at once": the board lists Codex sessions found in Codex's records, marked not connected. No other host.
-- Send, Queue or "receives" for an agent or surface with no live record on the 0.24.4 head. "Goes in now" where the record shows turn end or next turn. "Every agent receives" or "no Copy": the release notes print the delivery table's counts instead. "Approve from the board" unless D3 shipped (F10 passed), and never for a host whose route's check has not passed. "Wakes an idle session" for a hook-mailbox host.
-- "Opens a window" in any app not shown doing so on the 0.24.4 head (#865).
-- "Knows when a conversation ended" for Antigravity, Hermes or a window closed by force, unless a record on the 0.24.4 head shows the process check doing it.
+- Send, Queue or "receives" for an agent or surface with no live record on the 0.25.0 head. "Goes in now" where the record shows turn end or next turn. "Every agent receives" or "no Copy": the release notes print the delivery table's counts instead. "Approve from the board" unless D3 shipped (F10 passed), and never for a host whose route's check has not passed. "Wakes an idle session" for a hook-mailbox host.
+- "Opens a window" in any app not shown doing so on the 0.25.0 head (#865).
+- "Knows when a conversation ended" for Antigravity, Hermes or a window closed by force, unless a record on the 0.25.0 head shows the process check doing it.
 - "Nothing to install": Node 22 or newer and a terminal are needed once.
 - "No network use": one request a day, on by default.
-- "An agent cannot act as the person on the board": it can. An agent shown the page link, or that looks for it, can act as the person; `SECURITY.md` says so. The fix is 0.24.5.
+- "An agent cannot act as the person on the board": it can. An agent shown the page link, or that looks for it, can act as the person; `SECURITY.md` says so. The fix is 0.25.1.
 - "Works with Muse Code" or "Gemini CLI". "Works in <app or IDE>" for a row not run.
 - "Stable" before the six gate lines hold.
 
-## Moved to 0.24.5
+## Moved to 0.25.1
 
 - **The token redesign:** a link that works once, a page session in no address, a separate credential for the board's own client. It must land before the rest of #1119.
 - **The wake for hook-only agents,** `board_wait` (#685), for Codex (if F6 fails), Antigravity, Cursor, Grok and Hermes.
