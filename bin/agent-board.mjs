@@ -175,8 +175,9 @@ const home = homedir()
 const isWin = process.platform === 'win32'
 // --chat output may be pasted into a chat app, so it shows the home folder as ~, as the board's own --chat does.
 const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(home.toLowerCase()) : path.startsWith(home)) ? `~${path.slice(home.length)}` : path
-// The path as one argument for the shell the command is shown for: single quotes on POSIX, double quotes on Windows (no quote can occur in a Windows path).
-const quoted = text => isWin ? `"${text}"` : `'${text.replaceAll("'", "'\\''")}'`
+// The path as one argument for the shell the command is shown for: single quotes on POSIX. On Windows, double quotes,
+// which cmd and PowerShell both read; PowerShell runs $(...) and backticks inside them, so such a path gets its single quotes.
+const quoted = text => !isWin ? `'${text.replaceAll("'", "'\\''")}'` : /[$`]/.test(text) ? `'${text.replaceAll("'", "''")}'` : `"${text}"`
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
 const run = (path, passed, { isSetup = false, isRemove = false, env = process.env, isJsonChecked = false } = {}) => {
   const setupCmd = isRemove ? `npx ${name} remove` : `npx ${name} setup`

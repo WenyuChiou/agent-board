@@ -448,6 +448,11 @@ test('the displayed update command quotes a custom path for the shell it is show
   const posix = f.run(pkg, ['--data-dir', root, '--print'], { NODE_OPTIONS: `--require ${JSON.stringify(join(repo, 'tests/fixtures/platform-posix.cjs'))}` })
   success(posix)
   assert.equal(posix.stdout, `update=${JSON.stringify(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir '${root.replaceAll("'", "'\\''")}'`)}`)
+  // Shown on Windows: PowerShell runs $(...) inside double quotes, so a path with $ or a backtick gets single quotes
+  // (a quote inside doubled); other paths keep the double quotes cmd also reads.
+  const windows = f.run(pkg, ['--data-dir', root, '--print'], { NODE_OPTIONS: `--require ${JSON.stringify(join(repo, 'tests/fixtures/platform-win32.cjs'))}` })
+  success(windows)
+  assert.equal(windows.stdout, `update=${JSON.stringify(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir '${root.replaceAll("'", "''")}'`)}`)
 }))
 
 test('the launcher hands an older script the update command for the install it runs, and none for a plugin copy (#1304)', () => fixture(f => {
