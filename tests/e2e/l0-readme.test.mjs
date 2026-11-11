@@ -421,28 +421,45 @@ describe('L0 discover and install from the README', () => {
       assert.match(svg, /@media[^{]*reduce[^{]*\{[\s\S]*\.calm\s*\{\s*opacity\s*:\s*0/, `${file}: reduced motion hides the calm board`)
       assert.match(svg, /\.still\s*\{\s*display\s*:\s*none/, `${file}: the still board is hidden unless motion is reduced`)
       assert.match(reduced[1], /\.still\s*\{\s*display\s*:\s*inline/, `${file}: reduced motion shows the still board`)
-      // Keyframe stops of class cN as [percent where the stop starts, opacity] pairs.
-      const stopsOf = name => {
+      // Keyframe stops of class cN as [percent, opacity] points, one per percent of a stop, and the
+      // opacity between two points, as the browser draws it (straight line; the easings used here
+      // do not overshoot).
+      const pointsOf = name => {
         const body = new RegExp(`@keyframes ${literal(name)} \\{((?:[^{}]|\\{[^{}]*\\})*)\\}`).exec(svg)?.[1] ?? ''
-        return [...body.matchAll(/([\d.%,\s]+)\{[^{}]*?opacity:\s*([\d.]+)/g)].map(stop => [Math.min(...stop[1].match(/[\d.]+/g).map(Number)), Number(stop[2])])
+        return [...body.matchAll(/([\d.%,\s]+)\{[^{}]*?opacity:\s*([\d.]+)/g)].flatMap(stop => stop[1].match(/[\d.]+/g).map(at => [Number(at), Number(stop[2])]))
       }
+      const opacityAt = (points, at) => {
+        const after = points.findIndex(([x]) => x >= at)
+        if (after === -1) return points.at(-1)?.[1] ?? 1
+        if (after === 0) return points[0][1]
+        const [x0, y0] = points[after - 1]
+        const [x1, y1] = points[after]
+        return x1 === x0 ? y1 : y0 + (y1 - y0) * (at - x0) / (x1 - x0)
+      }
+      const samples = (from, to) => Array.from({ length: Math.round((to - from) / 0.25) + 1 }, (_, i) => from + i * 0.25)
       // Amber means someone waits: the logo's light and its halo are off once the answer is sent,
-      // through the start scene and the calm close (the last 30% of the loop), and at the loop's end.
+      // through the start scene and the calm close (the last 30% of the loop), between stops too.
       const lights = [...svg.matchAll(/<circle class="a s (c\d+)" fill="#F8B500"/gi)].map(match => match[1])
       assert.equal(lights.length, 2, `${file}: the logo's light and its halo move`)
       for (const name of lights) {
-        const stops = stopsOf(name)
-        assert.ok(stops.length > 0 && stops.at(-1)[1] <= 0.1 && stops.filter(([at]) => at >= 70).every(([, value]) => value <= 0.1), `${file}: the logo's light (${name}) stays off after the answer is sent`)
+        const points = pointsOf(name)
+        assert.ok(points.length > 0 && samples(70, 100).every(at => opacityAt(points, at) <= 0.1), `${file}: the logo's light (${name}) stays off after the answer is sent`)
       }
-      // The setup command stays on screen, the end frame included.
-      const commands = [...svg.matchAll(new RegExp(`${literal(COMMAND)}</text>`, 'g'))]
-      assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND}"`)
+      // At the loop's end a row fades as a whole: the layers drawn over it (each step done, the
+      // receipt; class `cover`) stay fully on while it fades, so the text under them never shows through.
+      const end = 100 * (1 - 0.5 / Number(loop))
+      const layers = [...svg.matchAll(/<g class="a (c\d+) cover\b[^"]*">/g)].map(match => match[1])
+      assert.ok(layers.length >= 5, `${file}: the rows' done steps are layers drawn over them`)
+      for (const name of layers) {
+        const points = pointsOf(name)
+        assert.ok(samples(end, end + 25 / Number(loop) - 0.01).every(at => opacityAt(points, at) >= 0.99), `${file}: a layer drawn over a row (${name}) stays on until the row is gone`)
+      }
       // ...and every frame before it: the box's group may dim while the terminal of scene 6 types the
       // same command, never vanish. (The terminal's own copy comes and goes with its scene.)
       for (const command of commands.filter(command => isKept(groupsAround(svg, command.index)))) {
         for (const classes of groupsAround(svg, command.index)) {
           for (const name of classes.filter(word => /^c\d+$/.test(word))) {
-            assert.ok(stopsOf(name).every(([, value]) => value >= 0.25), `${file}: "${COMMAND}" stays on screen in every frame (${name})`)
+            assert.ok(pointsOf(name).every(([, value]) => value >= 0.25), `${file}: "${COMMAND}" stays on screen in every frame (${name})`)
           }
         }
       }

@@ -1055,7 +1055,10 @@ const cover = (lang: Lang): string => {
   // An animated group: `a`, its keyframes' class, and `last` when it stays to the loop's end.
   const g = (spans: Array<[number, number]>, body: string, rise = 0, fin = 0.4, fout = 0.3): string =>
     `<g class="a ${appear(spans, rise, fin, fout)}${endsLoop(spans) ? ' last' : ''}">${body}</g>`
-  const swap = (on: number, body: string): string => g([[on, LOOP]], body, 0, 0.18)
+  // A layer drawn over another inside a row (a step done, the receipt): it stays fully on until the
+  // row itself has faded out at the loop's end, so the layer under it never shows through.
+  const cover = (at: number, fin: number): string => track([[at, `opacity: 0; ${EASE}`], [at + fin, 'opacity: 1'], [LOOP - TAIL / 2, 'opacity: 1'], [LOOP - TAIL / 2 + 0.01, 'opacity: 0']])
+  const swap = (on: number, body: string): string => `<g class="a ${cover(on, 0.18)} cover last">${body}</g>`
   const glow = (at: number, peak: number, length = 1): string => track([[at, 'opacity: 0'], [at + 0.15, `opacity: ${peak}`], [at + length, 'opacity: 0']])
 
   // ---- The board's page, in its own units (0, 0 under the browser's bar) ----
@@ -1079,7 +1082,7 @@ const cover = (lang: Lang): string => {
     const overlays = row.ticks.map(([at, done], k) => {
       const isLast = k === row.ticks.length - 1 && !isAsking
       const body = rowState(row.task, done, PG.side, y, rowW)
-      return `<g class="a ${appear([[at, LOOP]], 0, 0.18)}${isLast ? ' last' : ''}">${body}</g>`
+      return `<g class="a ${cover(at, 0.18)} cover${isLast ? ' last' : ''}">${body}</g>`
     })
     const flashes = row.ticks.map(([at]) => `<rect class="a ${glow(at, 0.08)}" x="${PG.side}" y="${y}" width="${rowW}" height="${PG.row}" rx="10" fill="${LOOK.ink}"/>`).join('')
     const note = isAsking ? swap(T.fold + 0.3, rowState(row.task, sample.asks, PG.side, y, rowW, s.claudeDelivered)) : ''
