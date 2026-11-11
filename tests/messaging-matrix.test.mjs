@@ -196,3 +196,27 @@ test('a receiver record marks a surface Verified only when it names a live-run f
   assert.equal(run(directory, '--write', directory).status, 0)
   for (const file of matrixFiles) assert.doesNotMatch(read(join(directory, file)), /\| Verified(?:（已驗證）|（已验证）)? \|/)
 }))
+
+test('a receiver record prints its idle, working and ended routes, and one that names a line the board does not know is refused', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-board-matrix-routes-'))
+  try {
+  mkdirSync(join(directory, 'scripts'))
+  putRecord(directory, 'routed.mjs', {
+    host: 'Routed Host', surfaces: [{ name: 'CLI', evidence: null }], tier: 3, primitive: '[P4]', isImplemented: true,
+    agent: 'routed', kind: 'mailbox',
+    routes: { idle: { line: 'nextTurn', record: null }, working: { line: 'stepEnd', record: 'docs/validation/2026-01-02-synthetic.md' }, ended: { line: 'none', record: null } },
+  })
+  mkdirSync(join(directory, 'docs/validation'), { recursive: true })
+  writeFileSync(join(directory, 'docs/validation/2026-01-02-synthetic.md'), '# Synthetic\n')
+  const table = renderMatrix(await readReceiverRecords(directory), 'docs/MESSAGING.md', directory)
+  assert.match(table, /\| Idle \| Working \| Ended \|/)
+  assert.match(table, /Routed Host \| CLI \| 3 \| &#91;P4&#93; \| Implemented \| Not tested \| \[scripts\/routed\.mjs\]\(\.\.\/scripts\/routed\.mjs\) \| nextTurn · no live note \| stepEnd · \[docs\/validation\/2026-01-02-synthetic\.md\]\([^)]*\) \| none · no live note \|/)
+  // A module is imported once, so the refused record is another file.
+  putRecord(directory, 'refused.mjs', {
+    host: 'Routed Host', surfaces: [{ name: 'CLI', evidence: null }], tier: 3, primitive: '[P4]', isImplemented: true,
+    agent: 'routed', kind: 'mailbox',
+    routes: { idle: { line: 'sometime', record: null }, working: { line: 'stepEnd', record: null }, ended: { line: 'none', record: null } },
+  })
+  await assert.rejects(() => readReceiverRecords(directory), /Invalid messaging receiver record: scripts[\\/]refused\.mjs/)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})

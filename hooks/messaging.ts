@@ -35,6 +35,23 @@ export type Message = {
   answers?: string
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
+// When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
+// now (goes in at once), stepEnd (when its current step ends), nextTurn (at its next turn; it does not
+// wake it), chatOpen (when this chat is opened again), reopen (the board reopens the session and sends),
+// none (cannot receive yet). `record` is the docs/validation note that showed the route live, or null.
+export type RouteLine = 'now' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none'
+export type RowState = 'idle' | 'working' | 'ended'
+export type RouteKind = 'live' | 'mailbox' | 'turn'
+export type Route = { line: RouteLine; record: string | null }
+export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route> }
+// The line a row shows and whether it may offer Send: only on a route with a record. A receiver with no
+// record at all, and a line of none, give Copy.
+export const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteKind, state: RowState): { line: RouteLine; canSend: boolean } => {
+  const route = records.find(one => one.agent === (agent === '' ? 'claude' : agent) && one.kind === kind)?.routes[state]
+  return route === undefined ? { line: 'none', canSend: false } : { line: route.line, canSend: route.line !== 'none' && route.record !== null }
+}
+// A connection's scope names its kind of receiver: a session the host owns, a hook mailbox, or one turn.
+export const routeKind = (scope: Connection['scope']): RouteKind => scope === 'mailbox' ? 'mailbox' : scope === 'session' ? 'live' : 'turn'
 export const isMailboxTarget = (id: string): boolean => /^mailbox_[0-9a-f]{24}$/.test(id)
 const isHookDelivered = (one: Message): boolean => one.status === 'accepted' && isMailboxTarget(one.target) && !one.awaitsAck
 // A hook can stop waiting after the board has claimed a message for it, and then nobody accepts it. A

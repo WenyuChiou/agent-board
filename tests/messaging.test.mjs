@@ -30,7 +30,15 @@ registerHooks({ resolve(specifier, context, next) {
 const { createMessaging, moveLockAside } = await import('../scripts/board-messaging.ts')
 const { hookMailbox, parseMessageStore } = await import('../scripts/board-messaging.ts')
 const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
-const { serveModel } = await import('../hooks/serve.ts')
+const { serveModel: realServeModel, serveAction: realServeAction } = await import('../hooks/serve.ts')
+const { RECEIVER_ROUTES } = await import('../hooks/receiver-routes.ts')
+const { routeOf } = await import('../hooks/messaging.ts')
+// The page's Send paths are tested with every route the receivers name taken as shown live; the
+// tests of what the real records allow (the end of this file) pass RECEIVER_ROUTES themselves.
+// tests/helpers/recorded-routes.json holds them, so the e2e worlds can hand the same table to a board they start.
+const recorded = JSON.parse(readFileSync(new URL('./helpers/recorded-routes.json', import.meta.url), 'utf8'))
+const serveModel = (view, pending, s, sending, isLan, messaging, allowResume, group, routes = recorded) => realServeModel(view, pending, s, sending, isLan, messaging, allowResume, group, routes)
+const serveAction = (items, request, s, isLan, connections, isMessaging, allowResume, routes = recorded) => realServeAction(items, request, s, isLan, connections, isMessaging, allowResume, routes)
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
 const { EN } = await import('../hooks/strings-en.ts')
@@ -351,7 +359,6 @@ test('a hub that reads a mailbox claim after the hook gave up leaves the message
 })
 
 test('an ended session offers no mailbox, is not called contested, and can still resume with --allow-resume', async () => {
-  const { serveAction } = await import('../hooks/serve.ts')
   const { boardItems } = await import('../hooks/board.ts')
   const now = Date.now(), session = '11111111-2222-4333-8444-555555555555', mailbox = enrollMailbox({ messages: [] }, 'codex', session, 'CLI', now, 43_200_000).mailboxes[0]
   const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${session} dir=${encodeURIComponent(tmpdir())} state=ended updated=${new Date(now).toISOString()} -->\n### Mailbox ended\n- [~] Continue\n<!-- /auto session=abcdef01 -->\n`
@@ -535,7 +542,6 @@ test('only the board marks which question a message answers: an agent\'s send lo
 })
 
 test('a page cannot name the question its message answers: the board takes it from the card it drew', async () => {
-  const { serveAction } = await import('../hooks/serve.ts')
   const { fingerprint } = await import('../hooks/board.ts')
   const mailbox = mailboxSeed().mailboxes[0]
   const ask = keptQuestion('synthetic-q1', 'Continue?')
@@ -805,7 +811,7 @@ const startTrace = file => {
   const read = line => { try { return JSON.parse(line) } catch { return { phase: 'unreadable line' } } }
   return text.split('\n').map(read).map(one => one.ms === undefined ? `${one.phase}@${one.at}` : `${one.phase} ${one.ms}ms@${one.at}`).join(', ')
 }
-const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messages')]) => {
+const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messages')], routes = recorded) => {
   // The board uses XDG_RUNTIME_DIR only when no other account can open it.
   const runtime = join(dir, 'runtime'); mkdirSync(runtime, { recursive: true, mode: 0o700 })
   // `--serve` makes this folder private before it starts the page (runningPage reads its address
@@ -827,7 +833,9 @@ const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messa
   // A restart in the same folder starts a new trace, so a report names only its own child.
   writeFileSync(tracer, START_TRACE); writeFileSync(trace, '')
   const startedAt = performance.now()
-  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }) }, stdio: ['ignore', 'pipe', 'pipe'] })
+  // The boards these tests start take every route as shown live, like the page tests; the real records are tested apart.
+  const routesFile = join(dir, 'routes.json'); writeFileSync(routesFile, JSON.stringify(routes))
+  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_ROUTES: routesFile, HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }) }, stdio: ['ignore', 'pipe', 'pipe'] })
   const exited = new Promise(done => child.once('exit', done))
   let address
   try { address = await new Promise((done, fail) => {
@@ -878,9 +886,9 @@ const removeKilledPageFolder = async dir => {
     await pause(200)
   }
 }
-const fixture = async (fn, fault = '', args) => {
+const fixture = async (fn, fault = '', args, routes) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-messages-'))
-  const board = await start(dir, fault, args)
+  const board = await start(dir, fault, args, routes)
   try { await fn(board, dir) } finally { await board.close().catch(() => undefined); rmSync(dir, { recursive: true, force: true }) }
 }
 const waitFor = async fn => {
@@ -1791,11 +1799,11 @@ test('the card offers Send only while the receiver is live and falls back to Cop
   const connection = (await board.call('/api/messages/register', { agent: 'claude', session: CLAUDE_SESSION, turn: 'session', scope: 'session', surface: 'Claude Code' })).body
   const live = claudeCard((await board.call('/api/board')).body.model)
   assert.equal(live.send, 'connected')
-  assert.equal(live.where, EN.claudeSendWorking)
+  assert.equal(live.lineText, EN.claudeSendWorking)
   assert.equal(live.delivery.id, connection.id)
-  assert.doesNotMatch(JSON.stringify([live.where, live.info]), /[0-9a-f]{32}|11111111/)
+  assert.doesNotMatch(JSON.stringify([live.lineText, live.info]), /[0-9a-f]{32}|11111111/)
   writeFileSync(join(dir, 'progress.md'), claudeRow(dir, 'waiting'))
-  assert.equal(claudeCard((await board.call('/api/board')).body.model).where, EN.claudeSendNow)
+  assert.equal(claudeCard((await board.call('/api/board')).body.model).lineText, EN.claudeSendNow)
   writeFileSync(join(dir, 'message-clock-offset'), '15001')
   const gone = claudeCard((await board.call('/api/board')).body.model)
   assert.equal(gone.send, 'claude')
@@ -4226,3 +4234,96 @@ serveWebSocketProxy({ onMessage: (value, emit) => {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })
+
+// What the receivers' own records allow (#1351). Everything above takes every named route as shown live; here the
+// board runs on RECEIVER_ROUTES as shipped.
+const stateFile = (agent, state, session) => {
+  const auto = state === 'idle' ? 'waiting' : state === 'working' ? 'working' : 'ended'
+  const step = state === 'idle' ? '- [?] Continue?' : '- [~] Keep going'
+  return `## Synthetic\n<!-- auto session=abcdef01 agent=${agent} resume=${session} state=${auto} updated=${new Date().toISOString()} -->\n### Route table\n${step}\n<!-- /auto session=abcdef01 -->\n`
+}
+const sendLabels = (s, name) => [s.serveSend(name), s.serveQueueNextTurn(name), s.serveQueueNextOpen(name)]
+
+test('every receiver record against idle, working and ended shows its line, with Send only where a live note is named and Copy otherwise, in en, zh-TW and zh-CN', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const { agentLabel } = await import('../hooks/strings.ts')
+  const session = '11111111-2222-4333-8444-555555555555'
+  let sendable = 0, copyOnly = 0
+  for (const record of RECEIVER_ROUTES) for (const state of ['idle', 'working', 'ended']) for (const s of [EN, ZH_TW, ZH_CN]) {
+    const now = Date.now(), route = record.routes[state]
+    const view = buildView(parseProgress(stateFile(record.agent, state, session)), [], null, now, 0, {}, s)
+    const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+    const live = record.kind === 'mailbox' ? { connections: [], mailboxes: enrollMailbox({ messages: [] }, record.agent, session, 'Synthetic', now, 43_200_000).mailboxes, messages: [] }
+      : { connections: [{ id: 'table-receiver', agent: record.agent, session, surface: 'Synthetic', turn: record.kind === 'turn' ? 'turn1' : 'session', scope: record.kind === 'turn' ? 'turn' : 'session', expires: now + 60_000 }], messages: [] }
+    const model = realServeModel(view, [], s, new Set(), false, live, false, group, RECEIVER_ROUTES)
+    const card = state === 'idle' ? model.asks[0] : [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)].find(one => one.title === 'Route table')
+    const label = `${record.agent}/${record.kind}/${state}/${s.pgCopyAnswer}`
+    // A closed chat has no mailbox, so a mailbox card for an ended session has no route at all.
+    const isGone = record.kind === 'mailbox' && state === 'ended'
+    assert.equal(card.line, isGone ? 'none' : route.line, label)
+    const canSend = !isGone && route.line !== 'none' && route.record !== null
+    assert.equal(card.canSend, canSend, label)
+    const page = await pageDom(servePage(s, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    page.cards().flatMap(one => page.buttons(one)).find(one => one.textContent === s.pgWriteOwn)?.click()
+    const labels = page.cards().flatMap(one => page.buttons(one)).map(one => one.textContent)
+    const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
+    assert.equal(labels.some(one => sendLabels(s, name).includes(one)), canSend, label + ' ' + labels.join(' | '))
+    assert.equal(card.send === 'connected' || card.send === 'mailbox', canSend, label)
+    if (!canSend && state !== 'ended') assert.ok(labels.includes(s.pgCopyAnswer), label + ' ' + labels.join(' | '))
+    if (!isGone) {
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint, chatOpen: s.serveNextOpenHint, none: s.serveLineNone(name) }[route.line]
+      assert.ok(page.text().includes(words), label + ' ' + words)
+      assert.equal(page.text().includes(s.serveLineUnrecorded), !canSend && route.line !== 'none', label)
+    }
+    if (canSend) sendable += 1; else copyOnly += 1
+  }
+  // The table is not all one kind: some routes are shown live and some are not.
+  assert.ok(sendable > 0 && copyOnly > 0)
+})
+
+test('the line and Send of a route come from its record: no record gives none and Copy', () => {
+  const table = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'nextTurn', record: 'docs/validation/synthetic.md' }, working: { line: 'nextTurn', record: null }, ended: { line: 'none', record: null } } }]
+  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'idle'), { line: 'nextTurn', canSend: true })
+  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'working'), { line: 'nextTurn', canSend: false })
+  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'ended'), { line: 'none', canSend: false })
+  assert.deepEqual(routeOf(table, 'alpha', 'live', 'idle'), { line: 'none', canSend: false })
+  assert.deepEqual(routeOf(table, 'beta', 'mailbox', 'idle'), { line: 'none', canSend: false })
+})
+
+test('each receiver record names a validation note that exists, and the table the board reads matches every record', async () => {
+  const { readReceiverRecords } = await import('../scripts/messaging-matrix.mjs')
+  const root = join(import.meta.dirname, '..')
+  const records = (await readReceiverRecords(root)).filter(one => one.routes !== undefined)
+  assert.ok(records.length >= 10)
+  for (const record of records) {
+    for (const state of ['idle', 'working', 'ended']) {
+      const route = record.routes[state]
+      if (route.record !== null) assert.ok(existsSync(join(root, route.record)), `${record.source} ${state}: ${route.record}`)
+      assert.ok(!(route.line === 'none' && route.record !== null), `${record.source} ${state} names a note for a route that does not exist`)
+    }
+    const shipped = RECEIVER_ROUTES.find(one => one.agent === record.agent && one.kind === record.kind)
+    assert.deepEqual(shipped?.routes, record.routes, `${record.source} differs from hooks/receiver-routes.ts`)
+  }
+  // The stand-in the page tests and the e2e worlds use is the shipped table with a note named on every route that exists.
+  // Except that a running-turn adapter takes a message while idle too: tests register connections without a scope, which is a turn.
+  assert.deepEqual(recorded, RECEIVER_ROUTES.map(one => ({ ...one, routes: Object.fromEntries(Object.entries(one.routes).map(([state, route]) => [state, one.kind === 'turn' && state === 'idle' ? { line: 'now', record: 'docs/validation/synthetic.md' } : { ...route, record: route.line === 'none' ? null : 'docs/validation/synthetic.md' }])) })))
+})
+
+test('with the receivers\' own records, a Claude card sends and a Codex card that no live note covers is refused in its own words (#1351)', () => fixture(async (board, dir) => {
+  const codex = '22222222-3333-4444-8555-666666666666'
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${codex} state=waiting updated=${new Date().toISOString()} -->\n### Codex card\n- [?] Confirm the synthetic choice?\n<!-- /auto session=abcdef01 -->\n<!-- auto session=abcdef02 agent=claude resume=${CLAUDE_SESSION} state=waiting updated=${new Date().toISOString()} -->\n### Claude card\n- [?] Pick one?\n<!-- /auto session=abcdef02 -->\n`)
+  const codexConnection = (await board.call('/api/messages/register', { agent: 'codex', session: codex, turn: 'session', scope: 'session', surface: 'Synthetic Codex' })).body
+  const claudeConnection = (await board.call('/api/messages/register', { agent: 'claude', session: CLAUDE_SESSION, turn: 'session', scope: 'session', surface: 'Claude Code' })).body
+  const asks = (await board.call('/api/board')).body.model.asks
+  const cx = asks.find(one => one.agent === 'codex'), cl = asks.find(one => one !== cx)
+  assert.equal(cx.canSend, false); assert.equal(cx.send, 'none'); assert.equal(cx.delivery, undefined)
+  assert.equal(cx.lineText, `${EN.serveLineNow('Codex')} ${EN.serveLineUnrecorded}`)
+  assert.equal(cl.canSend, true); assert.equal(cl.send, 'connected'); assert.equal(cl.line, 'now')
+  const request = ask => ({ key: ask.key, type: 'message', id: 'AB-ROUTE-' + ask.agent, text: 'Yes', session: ask.session, asked: ask.text, fp: ask.fp })
+  const refused = await board.call('/api/act', { ...request(cx), session: codex, connection: codexConnection.id, turn: 'session' })
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.note, cx.lineText)
+  assert.equal((await board.call('/api/board')).body.messaging.messages.length, 0)
+  assert.equal((await board.call('/api/act', { ...request(cl), session: CLAUDE_SESSION, connection: claudeConnection.id, turn: 'session' })).status, 200)
+}, '', undefined, RECEIVER_ROUTES))

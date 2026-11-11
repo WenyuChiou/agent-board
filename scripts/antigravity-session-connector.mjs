@@ -7,6 +7,14 @@ export const messagingReceiver = {
   tier: 1,
   primitive: 'unknown',
   isImplemented: true,
+  agent: 'antigravity',
+  kind: 'live',
+  // canReceive is true only while the session is idle. No live note shows either route yet.
+  routes: {
+    idle: { line: 'now', record: null },
+    working: { line: 'stepEnd', record: null },
+    ended: { line: 'none', record: null },
+  },
 }
 
 // The host already owns one initialized CLI stream. No process, login, saved

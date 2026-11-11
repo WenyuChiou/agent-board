@@ -6,10 +6,19 @@
 // (header.origin 'subagent') never receives one. Nothing here reads the conversation.
 export const messagingReceiver = {
   host: 'DeepSeek Harness',
+  agent: 'deepseek',
+  kind: 'mailbox',
   surfaces: [{ name: 'Web', evidence: 'docs/validation/2026-11-08-deepseek-harness-live.md' }, { name: 'TUI', evidence: null }],
   tier: 1,
   primitive: '[P1]',
   isImplemented: true,
+  // Idle: the live run woke the session within seconds. Working: the plugin holds the message until the
+  // session is idle (tests only; the live note says a long busy session was not run). Ended: no mailbox.
+  routes: {
+    idle: { line: 'now', record: 'docs/validation/2026-11-08-deepseek-harness-live.md' },
+    working: { line: 'stepEnd', record: null },
+    ended: { line: 'none', record: null },
+  },
 }
 
 // The receiver's part of the generated plugin: module-level code that the plugin's apply wires to the

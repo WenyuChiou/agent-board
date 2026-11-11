@@ -35,6 +35,7 @@ import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server
 import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { isTimeout, privateFolderHandoff } from './private-folder'
 import { addressFileName } from '../hooks/receiver'
+import type { ReceiverRoutes } from '../hooks/messaging'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pagePortOf, pickSurface, sshTargetOf } from '../hooks/surface'
 import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
@@ -1994,6 +1995,7 @@ const serveChild = (): void => {
   try {
     startServer({
       allowResume: args.includes('--allow-resume'),
+      routes: routesStandIn(),
       messagesDirectory: messagesDirectory(),
       isDefaultMessagesDirectory: flag('--messages-dir') === undefined,
       reports: (isFresh = true) => {
@@ -2073,6 +2075,16 @@ const serveChild = (): void => {
     serveChildError(`MESSAGE_STORE_FAILED ${code}\n`)
     process.exitCode = 1
   }
+}
+
+// AGENT_BOARD_ROUTES names a JSON file of receiver routes used in place of the recorded ones (the tests'
+// stand-in, like AGENT_BOARD_GROK in board-serve.ts). A file that is missing or is no list stops the board.
+const routesStandIn = (): ReceiverRoutes[] | undefined => {
+  const file = process.env.AGENT_BOARD_ROUTES
+  if (file === undefined || file === '') return undefined
+  const list: unknown = JSON.parse(readFileSync(file, 'utf8'))
+  if (!Array.isArray(list)) throw new Error('INVALID_ROUTES')
+  return list as ReceiverRoutes[]
 }
 
 // The page at that address is asked to close, and whether it agreed is answered. It refuses while

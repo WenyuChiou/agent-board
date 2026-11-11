@@ -1,0 +1,182 @@
+[
+  {
+    "agent": "claude",
+    "kind": "live",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "deepseek",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "antigravity",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "codex",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "cursor",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "chatOpen",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "chatOpen",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "gemini",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "muse",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "codex",
+    "kind": "live",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "codex",
+    "kind": "turn",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "antigravity",
+    "kind": "live",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  }
+]

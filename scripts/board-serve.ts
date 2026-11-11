@@ -17,6 +17,7 @@ import { boardItems } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
 import { agentLabel } from '../hooks/strings'
+import type { ReceiverRoutes } from '../hooks/messaging'
 import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
@@ -32,6 +33,8 @@ import type { SettingsAgentControl } from './settings-agents'
 
 export type ServeOptions = {
   allowResume?: boolean
+  // The receivers' records in place of the built-in ones (the tests' stand-in, see board-cli.ts).
+  routes?: readonly ReceiverRoutes[]
   messagesDirectory: string
   isDefaultMessagesDirectory?: boolean
   reports?: (isFresh?: boolean) => ProgressBinding[]
@@ -457,7 +460,7 @@ export const startServer = (o: ServeOptions): void => {
           const view = o.view()
           const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
+          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.
           const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
@@ -523,7 +526,7 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/act') {
         const state = isLan ? undefined : messaging.snapshot(Date.now())
         // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
-        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, deliveryTargets(state?.connections ?? [], state?.mailboxes), true, o.allowResume)
+        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, deliveryTargets(state?.connections ?? [], state?.mailboxes), true, o.allowResume, o.routes)
         if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})

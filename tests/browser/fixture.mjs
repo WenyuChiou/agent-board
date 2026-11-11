@@ -52,6 +52,8 @@ const isolatedEnvironment = root => {
     ...process.env,
     // A board this fixture starts opens no window and stops once this test process is gone (#959).
     AGENT_BOARD_TEST_PID: String(process.pid),
+    // Every route the receivers name counts as shown live here: these journeys press Send on them.
+    AGENT_BOARD_ROUTES: fileURLToPath(new URL('../helpers/recorded-routes.json', import.meta.url)),
     HOME: home,
     USERPROFILE: home,
     CODEX_HOME: directories.codex,

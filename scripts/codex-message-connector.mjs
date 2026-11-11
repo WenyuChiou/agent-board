@@ -11,6 +11,14 @@ export const messagingReceiver = {
   tier: 2,
   primitive: 'unknown',
   isImplemented: true,
+  agent: 'codex',
+  kind: 'turn',
+  // It steers a running turn only: an idle session has no route (the run steered a 420 s command's turn).
+  routes: {
+    idle: { line: 'none', record: null },
+    working: { line: 'now', record: 'docs/validation/2026-11-04-codex-cli-proxy-live.md' },
+    ended: { line: 'none', record: null },
+  },
 }
 
 // Connects only to an already-running Codex control socket. `proxy` does not start,

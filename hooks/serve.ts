@@ -15,9 +15,10 @@ import { cellCode } from './progress-bar'
 import { RESUME } from './parse'
 import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
-import type { Connection, Message } from './messaging'
+import type { Connection, Message, ReceiverRoutes, RouteLine, RowState } from './messaging'
 import { deliveryTargets } from './hook-messages'
-import { address, isMailboxTarget, isOpen } from './messaging'
+import { address, isMailboxTarget, isOpen, routeKind, routeOf } from './messaging'
+import { RECEIVER_ROUTES } from './receiver-routes'
 
 // The board's page: what `agent-board` shows in a browser for agents other than
 // Claude Code, and what a press on it does. It does what the pane does: tick a hand-kept step,
@@ -57,8 +58,22 @@ const rowReceipt = (agent: string, session: string | undefined, messages: readon
 const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
   messages.some(message => message.answers === questionId && (message.status === 'acknowledged' || message.status === 'accepted' || message.status === 'uncertain' && message.hasAccepted === true))
 const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerCase() === 'claude'
-// What pressing Send does right now, for a Claude session that is receiving (#316).
-const claudeHint = (agent: string, isWorking: boolean, s: Strings): string => !isClaudeAgent(agent) ? '' : isWorking ? s.claudeSendWorking : s.claudeSendNow
+// The state a card's route is read for: a session whose progress record ended or whose target is closed is
+// ended, one at work is working, any other (waiting on a question, done) is idle.
+const stateOf = (auto: 'working' | 'waiting' | 'ended' | null | undefined, isClosed: boolean): RowState => isClosed || auto === 'ended' ? 'ended' : auto === 'working' ? 'working' : 'idle'
+const rowState = (row: { auto: 'working' | 'waiting' | 'ended' | null; target: AgentTarget | null; isRecordedEnded?: true }): RowState => stateOf(row.auto, row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true)
+// One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route
+// the record has not shown live also says only Copy is offered.
+const routeText = (line: RouteLine, canSend: boolean, agent: string, s: Strings): string => {
+  const name = isClaudeAgent(agent) ? 'Claude' : agentLabel(agent, s)
+  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : s.serveLineNow(name))
+    : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
+    : line === 'nextTurn' ? s.serveNextTurnHint
+    : line === 'chatOpen' ? s.serveNextOpenHint
+    : line === 'reopen' ? s.serveLineReopen(name)
+    : s.serveLineNone(name)
+  return canSend || line === 'none' ? text : `${text} ${s.serveLineUnrecorded}`
+}
 
 // One argument list per agent that takes a reply from outside. Every argument is a constant, a
 // session id the parser checked (RESUME) or, for Grok, the reply as one argument with no shell
@@ -163,6 +178,11 @@ export type ServeAsk = {
   where: string
   // Why a reply cannot be sent from here, when it cannot.
   info: string
+  // When a message from the board arrives, from the receiver's record (hooks/receiver-routes.ts): the line,
+  // whether the page may offer Send on it, and the words. A card with no receiver has line none, no Send, no text.
+  line: RouteLine
+  canSend: boolean
+  lineText: string
   // How to get back to the session that asked: its own id and, where known, the command that
   // reopens it; '' for a hand-kept question.
   back: string
@@ -226,6 +246,9 @@ export type ServeRow = {
   tickFp: string
   where: string
   info: string
+  line: RouteLine
+  canSend: boolean
+  lineText: string
   isSending: boolean
   // On the local network, where a reply that would be sent here is written and copied instead.
   hasCopyBox: boolean
@@ -363,7 +386,8 @@ const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): Ser
   ...(item.questionId === undefined ? {} : { questionId: item.questionId }),
 })
 
-export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions): ServeModel => {
+// `routes`: the receivers' records, which say on each card when a message arrives and whether Send is offered.
+export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
   const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
@@ -385,11 +409,17 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       // here, and its session took, needs nothing more from the person.
       if (!isLan && ask.key.startsWith('retained::') && ask.questionId !== undefined && isAnswerHanded(messaging?.messages ?? [], ask.questionId)) continue
       const isManual = ask.where === 'manual'
-      const connection = isManual || isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)
-      const isContested = !isManual && !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (ask.agent || 'claude') && one.session === ask.nativeSession) ?? false)
+      const found = isManual || isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)
+      const isContested = !isManual && !isLan && found === undefined && (messaging?.connections.some(one => one.agent === (ask.agent || 'claude') && one.session === ask.nativeSession) ?? false)
       const baseMode = isManual ? 'none' : sendMode(ask.agent, ask.target)
-      const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
+      // The receiver's record picks the line; a route it has not shown live keeps the card on Copy, and the
+      // delivery is left off it so the page has nothing to send to.
+      const route = found === undefined ? undefined : routeOf(routes, ask.agent, routeKind(found.scope), stateOf(undefined, ask.target?.isClosed === true))
+      const connection = route?.canSend === true ? found : undefined
+      const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : found ? 'none' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
+      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, ask.agent, s) }
+        : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, ask.agent, s) } : { line: 'none' as const, canSend: false, lineText: '' }
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan, true)
       const label = ask.step === null ? undefined : clipped(ask.text, LABEL_ROOM)
@@ -426,9 +456,10 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         session: connection?.session ?? ask.target?.session ?? '',
         fp: fingerprint(item, items),
         tickFp: fingerprint(item, items, true),
-        where: send === 'send' ? (ask.target?.dir ?? '') : send === 'connected' ? claudeHint(ask.agent, false, s) : '',
+        where: send === 'send' ? (ask.target?.dir ?? '') : '',
         archiveNote: isManual ? '' : s.archiveLive,
-        info: connection || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? infoOf(send, ask.agent, ask.task, '', s)),
+        info: found || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? infoOf(send, ask.agent, ask.task, '', s)),
+        ...lineOf,
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
@@ -441,11 +472,15 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const { row } = item
       if (view.recentAsking?.some(one => one.key === row.key)) continue
       const needs = rowNeedsYou(row, idleKeys.has(row.key) || stoppedKeys.has(row.key))
-      const connection = isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)
-      const isContested = !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (row.agent || 'claude') && one.session === row.nativeSession) ?? false)
+      const found = isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)
+      const isContested = !isLan && found === undefined && (messaging?.connections.some(one => one.agent === (row.agent || 'claude') && one.session === row.nativeSession) ?? false)
       const baseMode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
-      const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
+      const route = found === undefined ? undefined : routeOf(routes, row.agent, routeKind(found.scope), rowState(row))
+      const connection = route?.canSend === true ? found : undefined
+      const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : found ? 'none' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
+      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s) }
+        : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, row.agent, s) } : { line: 'none' as const, canSend: false, lineText: '' }
       // A Claude session still at work that this board cannot reach: its card says so and copies.
       const isOpenClaude = !isLan && send === 'claude' && row.auto !== 'ended'
       const nextLabel = row.next === null ? undefined : clipped(row.next.step, LABEL_ROOM)
@@ -496,12 +531,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         session: connection?.session ?? row.target?.session ?? '',
         fp: fingerprint(item, items),
         tickFp: fingerprint(item, items, true),
-        where: send === 'send' ? (row.target?.dir ?? '') : send === 'connected' ? claudeHint(row.agent, row.auto === 'working', s) : '',
+        where: send === 'send' ? (row.target?.dir ?? '') : '',
         // A row says why only when a reply could otherwise be expected here.
-        info: connection ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
+        info: found ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
+        ...lineOf,
         isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
         // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
-        hasCopyBox: !(row.auto === 'ended' && row.question === null && send === 'none') && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined),
+        hasCopyBox: !(row.auto === 'ended' && row.question === null && send === 'none') && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined || found !== undefined && connection === undefined),
         // A Claude row has no target, so its closed session is the block's own state=ended.
         ...(row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true ? { isClosed: true as const } : {}),
       })
@@ -626,8 +662,8 @@ export const replyText = (raw: string): string =>
 // gone or changed since the page drew it is refused, never taken for the one now in its place.
 // From the local network (`isLan`) a reply to an agent is refused: it would run a program on
 // the computer, and the network's page is plain HTTP that others on the network could read.
-export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false, connections: readonly Connection[] = [], isMessaging = false, allowResume = false): ServeAction => {
-  const action = actionOf(items, request, s, isLan, connections, isMessaging, allowResume)
+export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false, connections: readonly Connection[] = [], isMessaging = false, allowResume = false, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeAction => {
+  const action = actionOf(items, request, s, isLan, connections, isMessaging, allowResume, routes)
   if (action.type === 'refuse' && action.note === '') return { type: 'refuse', note: s.pressNothing }
   if (action.type !== 'tick' && action.type !== 'archive' && action.type !== 'done' && action.type !== 'send' && action.type !== 'message') return action
   // The key is a project and a title, which another session's block can take over, and a step
@@ -638,7 +674,7 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   return action.type === 'tick' ? { ...action, ref: guardStep(action.ref, items) } : action
 }
 
-const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean): ServeAction => {
+const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean, routes: readonly ReceiverRoutes[]): ServeAction => {
   // A hidden question is off the board: it is named by the key it was hidden under.
   if (request.type === 'unhide') return request.key.startsWith('hidden:') ? { type: 'unhide', key: request.key.slice('hidden:'.length) } : { type: 'refuse', note: '' }
   const item = items.find(one => one.key === request.key)
@@ -695,6 +731,10 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'message') {
     const question = item.type === 'ask' ? item.ask.text : item.row.question ?? ''
     if (isLan || !connected || connected.id !== request.connection || connected.turn !== request.turn || connected.session !== request.session || (request.asked ?? '') !== question || !text) return { type: 'refuse', note: s.messagesFailed }
+    // The page offers Send only on a route its receiver's record has shown live; a press on any other is
+    // refused with the card's own words, so a page that was altered cannot send there either.
+    const route = routeOf(routes, agent, routeKind(connected.scope), item.type === 'ask' ? stateOf(undefined, target?.isClosed === true) : rowState(item.row))
+    if (!route.canSend) return { type: 'refuse', note: routeText(route.line, false, agent, s) }
     return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
   }
   if (connected) return { type: 'refuse', note: s.boardLineChanged }
@@ -776,8 +816,8 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
-  'claudeSendNow', 'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveQueueNextTurn', 'serveNextTurnHint', 'serveQueueNextOpen', 'serveNextOpenHint', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
+  'serveQueueNextTurn', 'serveQueueNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1564,12 +1604,13 @@ const PAGE_SCRIPT = String.raw`
       : add(el('div', 'acts'), dismissButton(w(receipt.status === 'queued' ? 'messageTakeBack' : 'messageDismiss'), receipt, key));
     return acts ? add(el('div', 'receipt-box'), line, acts) : line;
   }
-  function receiptLine(receipt, key, agent, canSend) {
+  // line: the card route. A message handed over on a route that goes in now or at a step's end is not said to wait for a turn.
+  function receiptLine(receipt, key, agent, canSend, line) {
     if (!receipt) return null;
     clearEnqueueResult(key, receipt);
     if (!agent || String(agent).toLowerCase() === 'claude') return claudeReceipt(receipt, key, canSend);
-    // DeepSeek is handed the message the moment it is idle, not at a turn it starts later (#725).
-    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : String(agent).toLowerCase() === 'deepseek' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
+    // A session that takes its message the moment it is idle is not handed one at a turn it starts later (#725).
+    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : line === 'now' || line === 'stepEnd' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     // A mailbox message that was handed over gets no ACK, so its id is done with here: the next send is a new message.
     if (receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
     // The server already took a nonce ACK off; a receipt kept from a version 1 store was
@@ -1604,12 +1645,12 @@ const PAGE_SCRIPT = String.raw`
     // line under the same key starts an empty box, so the text is never sent to that session.
     input.setAttribute('data-key', [key, session || '', asked || '', delivery ? delivery.id + ':' + delivery.turn : ''].join('\u0001'));
     var draftKey = input.getAttribute('data-key');
-    // Cursor ignores what a hook gives it at a prompt, so its mailbox waits for the chat to open.
-    var isOpenOnly = String(agent).toLowerCase() === 'cursor';
-    // DeepSeek's plugin takes its mailbox's message at once and wakes the session (#725): a plain Send, no Copy.
-    var isAtOnce = String(agent).toLowerCase() === 'deepseek';
+    // The card's route, from its receiver's record, says what the button is called and whether Copy sits beside it:
+    // a route that waits for a turn or for the chat to open keeps Copy, one that goes in now or at a step's end does not.
+    var line = extras && extras.line;
+    var isWaiting = mode === 'mailbox' && line !== 'now' && line !== 'stepEnd';
     var go = mode === 'send' || mode === 'connected' || mode === 'mailbox'
-      ? button(w(mode === 'mailbox' && !isAtOnce ? (isOpenOnly ? 'serveQueueNextOpen' : 'serveQueueNextTurn') : 'serveSend', mode === 'connected' && (!agent || String(agent).toLowerCase() === 'claude') ? 'Claude' : agentName(agent)), function () {
+      ? button(w(isWaiting ? (line === 'chatOpen' ? 'serveQueueNextOpen' : 'serveQueueNextTurn') : 'serveSend', mode === 'connected' && (!agent || String(agent).toLowerCase() === 'claude') ? 'Claude' : agentName(agent)), function () {
         var text = input.value.trim();
         if (!text) { say(w('pressEmpty'), 'alert', key); return; }
         // The same text goes again through the same path; the box keeps it until it was sent.
@@ -1634,12 +1675,11 @@ const PAGE_SCRIPT = String.raw`
     if (where) add(footer, el('div', 'where', where));
     if (extras && extras.onCancel) add(footer, navButton(w('pgCancel'), extras.onCancel));
     add(box, input, add(footer, go));
-    if (mode === 'mailbox' && !isAtOnce) {
+    if (isWaiting) {
       add(footer, button(w('pgCopyAnswer'), function () {
         var text = input.value.trim();
         if (text) copy(text, key); else say(w('pressEmpty'), 'alert', key);
       }, '', true));
-      add(box, el('p', 'where', w(isOpenOnly ? 'serveNextOpenHint' : 'serveNextTurnHint')));
     }
     return box;
   }
@@ -1843,6 +1883,8 @@ const PAGE_SCRIPT = String.raw`
     } else {
       var options = ask.answers || [];
       canWrite = true;
+      // When a message from the board reaches this agent, from its receiver's record.
+      if (ask.lineText) add(body, el('p', 'note', ask.lineText));
       if (options.length) {
         var identity = JSON.stringify([ask.session || '', ask.text || '', ask.fp || '', ask.delivery ? [ask.delivery.id, ask.delivery.turn] : '', options]);
         var savedChoice = cardChoices[key];
@@ -1912,6 +1954,7 @@ const PAGE_SCRIPT = String.raw`
     parts.ask = fx(askBlock);
     if (canWrite) {
       parts.reply = fx(replyBox(key, w('serveReplyPlaceholder'), sends(mode) ? mode : 'copy', agent, sends(mode) ? ask.where : '', ask.isSending, ask.session, ask.text, ask.fp, ask.delivery, {
+        line: ask.line,
         onCancel: function () { setMode(key, 'ask'); },
         onDone: function (value) { setMode(key, mode === 'mailbox' ? 'queued' : sends(mode) ? 'sent' : 'copied', value); },
       }), false);
@@ -1928,7 +1971,7 @@ const PAGE_SCRIPT = String.raw`
     parts.after = fx(after, false);
     add(body, parts.ask, parts.reply, parts.after);
     paintMode(key);
-    if (ask.receipt) add(body, receiptLine(ask.receipt, key, ask.agent, !!ask.delivery));
+    if (ask.receipt) add(body, receiptLine(ask.receipt, key, ask.agent, !!ask.delivery, ask.line));
     resultSlot(body, key, ask.fp || ask.text, ask.task || ask.title || ref.repo);
     add(card, body);
     return card;
@@ -2002,7 +2045,8 @@ const PAGE_SCRIPT = String.raw`
       if (rest.length) add(inner, folded(plural('pgMoreSteps', rest.length), stepList(rest, row)));
       if (row.handoff) add(inner, el('p', 'context', row.handoff));
       if (row.runs) add(inner, el('p', 'context', row.runs));
-      if (sends(row.send)) add(inner, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery));
+      if (row.lineText) add(inner, el('p', 'context', row.lineText));
+      if (sends(row.send)) add(inner, replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery, { line: row.line }));
       else if (row.hasCopyBox) add(inner, replyBox(row.key, w('serveReplyPlaceholder'), 'copy', row.agent, '', false, row.session, row.question));
       if (row.isOwn && section !== 'done' && row.next) {
         // The press names the next step by its file line and its shown text, the same way
@@ -2019,7 +2063,7 @@ const PAGE_SCRIPT = String.raw`
       if (row.canArchive || row.archiveNote) add(acts, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', row.fp); }));
       if (row.canConfirm && section !== 'done') add(acts, button(w('confirmDone'), function () { act(key, 'done', '', '', '', '', row.fp); }));
       if (acts.firstChild) add(inner, acts);
-      if (row.receipt) add(inner, receiptLine(row.receipt, key, row.agent, !!row.delivery));
+      if (row.receipt) add(inner, receiptLine(row.receipt, key, row.agent, !!row.delivery, row.line));
       if (row.info) add(inner, el('p', 'context', row.info));
     } else {
       (row.questions || []).forEach(function (question) { add(inner, el('p', 'context', clean(question))); });

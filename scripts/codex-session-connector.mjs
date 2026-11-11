@@ -7,6 +7,15 @@ export const messagingReceiver = {
   tier: 1,
   primitive: '[P1]',
   isImplemented: true,
+  agent: 'codex',
+  kind: 'live',
+  // canReceive is true only while the session is idle, so a message sent during a turn waits for its end.
+  // No live note shows either route yet.
+  routes: {
+    idle: { line: 'now', record: null },
+    working: { line: 'stepEnd', record: null },
+    ended: { line: 'none', record: null },
+  },
 }
 
 // For an application that already owns a loaded Codex session and its notifications.
