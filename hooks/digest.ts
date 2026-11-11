@@ -205,12 +205,17 @@ const isQuoted = (line: string, mark: number): boolean => {
     else if (char in OPENERS) open.push(i)
     else if (CLOSERS.has(char)) open.pop()
   }
-  // A quote the reply talks about (`escape " here?`) has no partner after the mark. A partner with
-  // a space before it and a character right after it opens a later quotation instead (`stray " here?
-  // "Yes" is fine`, #1290). Any other partner closes: right after a character, as Chinese writes
-  // it (`他問"要不要？我可以幫忙"然後`), or before a space (`asked "Blue or green? " and`).
+  // A quote the reply talks about (`escape " here?`) has no partner after the mark. A partner right
+  // after the mark closes (`他問"要不要?"好的`). Otherwise a partner with a word or an opening mark
+  // right after it opens a later quotation when a space comes before it (`stray " here? "Yes" is
+  // fine`, #1290) or when the quote before the mark stands between spaces (`要修這個 " 嗎？回答"好"`).
+  // Any other partner closes: after a word, as Chinese writes it (`他問"要不要？我可以幫忙"然後`), or
+  // before a space or a comma (`asked "Blue or green? ", and`).
   const partner = line.indexOf('"', mark + 1)
-  const isCloser = partner !== -1 && !(/\s/.test(line[partner - 1] ?? '') && /\S/.test(line[partner + 1] ?? ''))
+  const isRightAfter = /^[?？]["”」』)）]*$/.test(line.slice(mark, partner))
+  const isSpaced = (at: number): boolean => /\s/.test(line[at - 1] ?? ' ') && /\s/.test(line[at + 1] ?? ' ')
+  const isOpener = /[\p{L}\p{N}\p{Ps}\p{Pi}]/u.test(line[partner + 1] ?? '') && (/\s/.test(line[partner - 1] ?? '') || isSpaced(straight))
+  const isCloser = partner !== -1 && (isRightAfter || !isOpener)
   if (straight >= 0 && isCloser) open.push(straight)
   // An apostrophe also sits inside words, so a single quote counts only when it closes right
   // after the mark and opens at the start of a word.
