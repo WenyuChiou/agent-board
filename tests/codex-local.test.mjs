@@ -1623,7 +1623,7 @@ test('a conflict in one agent leaves the others set up and names the skipped age
       assert.equal(result.status, 1)
       assert.equal(result.stderr, '')
       for (const text of ['Codex', 'Cursor', 'skipped']) assert.ok(result.stdout.includes(text), result.stdout)
-      assert.match(result.stdout, /--agent '?codex,cursor'? --apply/)
+      assert.match(result.stdout, /--agent codex,cursor --apply/)
       // Both agents are skipped, so one retry command names both.
       assert.equal(result.stdout.match(/--agent /g)?.length, 1, result.stdout)
       assert.equal(existsSync(f.root), false)
@@ -2356,12 +2356,10 @@ test('Antigravity setup keeps a user-edited skill, writes the new one beside it,
 test('#1302 setup never overwrites a .new copy the person edited, and names it instead of replacing it', () => fixture(f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const antigravitySkill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
-  f.save(antigravitySkill, `${readFileSync(antigravitySkill, 'utf8')}Synthetic user edit
-`)
+  f.save(antigravitySkill, `${readFileSync(antigravitySkill, 'utf8')}Synthetic user edit\n`)
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const copy = `${antigravitySkill}.new`
-  const mine = `${readFileSync(copy, 'utf8')}Synthetic edit to the copy
-`
+  const mine = `${readFileSync(copy, 'utf8')}Synthetic edit to the copy\n`
   f.save(copy, mine)
   const preview = f.install('--agent', 'antigravity')
   assert.deepEqual(JSON.parse(preview.stdout).conflicts, [copy])
@@ -2373,8 +2371,7 @@ test('#1302 setup never overwrites a .new copy the person edited, and names it i
 test('#1302 a .new copy setup wrote is removed, not emptied, once the person restores the generated file', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   const fresh = readFileSync(f.skill, 'utf8')
-  f.save(f.skill, `${fresh}Synthetic user edit
-`)
+  f.save(f.skill, `${fresh}Synthetic user edit\n`)
   assert.equal(f.install('--apply').status, 0)
   assert.equal(readFileSync(`${f.skill}.new`, 'utf8'), fresh)
   f.save(f.skill, fresh)

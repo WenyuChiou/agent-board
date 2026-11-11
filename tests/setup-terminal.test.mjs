@@ -131,8 +131,7 @@ test('#1302 one retry command names every skipped agent, with no shell quotes ar
 test('#1302 a blocked removal names one retry command that keeps --remove and lists the skipped agents', () => terminal(f => {
   for (const agent of ['codex', 'hermes']) assert.equal(f.invoke(['--agent', agent, '--lang', 'en', '--apply']).status, 0)
   const skill = join(f.env.HOME, '.agents', 'skills', 'agent-board', 'SKILL.md')
-  writeFileSync(skill, `${readFileSync(skill, 'utf8')}Synthetic user edit
-`)
+  writeFileSync(skill, `${readFileSync(skill, 'utf8')}Synthetic user edit\n`)
   const result = f.invoke(['--remove', '--agent', 'codex,hermes', '--lang', 'en', '--apply'])
   assert.ifError(result.error)
   assert.match(result.stdout, /Retry after fixing the conflicting files: .*--remove --agent codex,hermes --apply/)
