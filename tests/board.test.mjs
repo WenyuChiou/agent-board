@@ -10741,10 +10741,14 @@ test('official agent marks retain their source viewport on every board surface',
         assert.ok(image.includes('fill="#0082FB"'))
         assert.ok(image.includes(`<path d="${icon.paths[0]}"/>`))
       }
-      for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const theme of ['light', 'dark']) {
-        const cover = readFileSync(new URL(`../docs/images/cover-${lang}-${theme}.svg`, import.meta.url), 'utf8')
-        assert.ok(cover.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/${theme}`)
-        assert.ok(cover.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/${theme}`)
+      // The new dark covers show only agents with a live record, and Muse Code has none yet; the old
+      // light covers keep its mark until they retire.
+      for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+        const light = readFileSync(new URL(`../docs/images/cover-${lang}-light.svg`, import.meta.url), 'utf8')
+        assert.ok(light.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/light`)
+        assert.ok(light.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/light`)
+        const dark = readFileSync(new URL(`../docs/images/cover-${lang}-dark.svg`, import.meta.url), 'utf8')
+        assert.ok(!dark.includes(`<path d="${icon.paths[0]}"/>`), `Muse is off the dark cover until it has a live record: ${lang}`)
       }
     } else assert.equal(icon.ink, undefined, 'existing marks retain their white foreground')
     if (official[icon.file]) {

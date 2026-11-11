@@ -22,13 +22,14 @@ const SECTIONS = {
   'zh-CN': ['快速开始', '常用命令', '支持的 agent', '你会看到什么', '怎么运作', '问题排查', '文档', '许可证'],
 }
 
-// The six scenes, the page's Settings button, and the Send and receipt labels in each locale.
+// The four scenes' captions, Claude Code's question, and the page's receipt once the answer
+// reached Claude Code (claudeDelivered in the strings tables), in each locale.
 const SCENES = {
-  en: [[['Every agent,', 'one board.'], ['Watch steps', 'tick off live.'], ['Questions jump', 'to the top.'], ['Make the board', 'yours.'], ['Send from', 'the board.'], ['One command', 'to start.']], 'Settings', ['Send to Codex', 'Sending to Codex; waiting for its reply…', '✓ Replied']],
-  'zh-TW': [[['每個 agent', '同一塊看板'], ['每一步', '即時打勾'], ['等你回答的', '排在最上面'], ['用你習慣的', '看板設定'], ['直接從看板', '傳送訊息'], ['一行指令', '開始使用']], '設定', ['傳給 Codex', '正在傳給 Codex，等它回完…', '✓ 已回覆']],
-  'zh-CN': [[['每个 agent', '同一块看板'], ['每一步', '实时打勾'], ['等你回答的', '排在最上面'], ['用你习惯的', '看板设置'], ['直接从看板', '发送消息'], ['一行命令', '开始使用']], '设置', ['发给 Codex', '正在发给 Codex，等它回完…', '✓ 已回复']],
+  en: [[['One command', 'to start.'], ['Every agent,', 'one board.'], ['Questions jump', 'to the top.'], ['Answer from', 'the board.']], 'Blue or green?', "Delivered. Waiting for Claude's reply."],
+  'zh-TW': [[['一行指令', '就能開始'], ['每個 agent', '都在同一塊看板'], ['誰在等你', '誰就排最前面'], ['在看板上', '直接回覆']], '藍色還是綠色？', '已送達，正在等 Claude 回覆。'],
+  'zh-CN': [[['一行命令', '就能开始'], ['每个 agent', '都在同一块看板'], ['谁在等你', '谁就排最前面'], ['在看板上', '直接回复']], '蓝色还是绿色？', '已送达，正在等 Claude 回复。'],
 }
-// The first-run command stays on screen with reduced motion.
+// The first-run command stays on screen in every frame, reduced motion included.
 const COMMAND = 'npx @wenyuchiou/agent-board'
 // The ten integrations the header names, in the support matrix's order (#407).
 const INTEGRATIONS = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode', 'Cursor', 'Grok Build', 'Muse Code', 'Hermes Agent', 'OpenClaw', 'DeepSeek Harness']
@@ -265,7 +266,7 @@ describe('L0 discover and install from the README', () => {
     }
   })
 
-  test('L0 README: the cover loops through six captioned scenes in 20 to 30 seconds, moves with CSS alone and stands still on the setup scene for reduced motion', () => {
+  test('L0 README: the cover loops through four captioned scenes in 20 to 30 seconds, moves with CSS alone and stands still on the answered scene for reduced motion', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io|\/badge\.svg"|docs\/images\/brand\//.test(match[0]))
@@ -309,7 +310,7 @@ describe('L0 discover and install from the README', () => {
       assert.match(svg, /@keyframes\s+[\w-]+\s*\{/i, `${file}: CSS defines keyframes`)
       const rules = [...svg.matchAll(/\{([^{}]*)\}/g)]
       assert.ok(rules.some(rule => /\banimation-duration\s*:\s*[^;}\s][^;}]*(?:;|$)/i.test(rule[1]) && /\banimation-iteration-count\s*:\s*infinite\s*(?:;|$)/i.test(rule[1])), `${file}: one rule sets animation duration and infinite iteration`)
-      // The loop lasts 20 to 30 seconds: six scenes of a few seconds each, long enough to read a caption.
+      // The loop lasts 20 to 30 seconds: four scenes of a few seconds each, long enough to read a caption.
       const loop = rules.map(rule => /\banimation-duration\s*:\s*(\d+(?:\.\d+)?)s\s*(?:;|$)/i.exec(rule[1])?.[1]).find(seconds => seconds !== undefined)
       assert.ok(loop !== undefined && Number(loop) >= 20 && Number(loop) <= 30, `${file}: the loop lasts 20 to 30 seconds (it lasts ${loop}s)`)
       // Two stops at one point of a keyframe leave the later one in force: an element meant to stay
@@ -348,9 +349,9 @@ describe('L0 discover and install from the README', () => {
       }
       for (const name of bound) assert.ok(named.has(name), `${file}: .${name} has its @keyframes`)
 
-      // The six captions, in order. Each is one <text> of two <tspan> lines inside an animated group;
+      // The four captions, in order. Each is one <text> of two <tspan> lines inside an animated group;
       // reduced motion keeps only the last scene's group.
-      const [scenes, settings, words] = SCENES[lang]
+      const [scenes, question, delivered] = SCENES[lang]
       let at = -1
       scenes.forEach(([first, second], k) => {
         // String match: the journey safety check reads a call on a built RegExp as a process call.
@@ -361,18 +362,20 @@ describe('L0 discover and install from the README', () => {
         at = found.index
         assert.equal(found[1].split(/\s+/).includes('last'), k === scenes.length - 1, `${file}: only scene ${scenes.length}'s caption stays for reduced motion`)
       })
-      // The Settings excerpt uses the page's localized label.
-      const footer = /<g [^>]*data-preview="page-footer"[^>]*>([\s\S]*?)<\/g>\s*<g class="a /.exec(svg)
-      assert.ok(footer, `${file}: the page footer is shown in an animated scene`)
-      assert.match(footer[1], new RegExp(`>${literal(settings)}</text>`), `${file}: the footer shows its localized Settings control`)
       assert.doesNotMatch(svg, /Coming in 0\.24\.2|0\.24\.2 起提供|copied to the clipboard|已複製|已复制|progress\.html/i, `${file}: the cover does not teach the retired demo`)
-      // A receipt is text without textLength: the terminal board's own rows carry it, so a row
-      // that reads the same as a receipt cannot stand in for it.
-      const receipt = word => `<text(?![^>]*textLength)[^>]*>${literal(word)}</text>`
-      for (const word of words) assert.match(svg, new RegExp(receipt(word)), `${file}: scene 5 shows "${word}"`)
-      // The end frame shows the setup command: reduced motion keeps every animated group round it.
+      // A piece of text is in the end frame when every animated group round it stays for reduced
+      // motion; text in no animated group is on screen in every frame.
+      const isKept = groups => groups.every(classes => !classes.includes('a') || classes.includes('last'))
+      const shown = word => [...svg.matchAll(new RegExp(`>${literal(word)}</(?:text|tspan)>`, 'g'))]
+      // The end frame is the answered scene: the page's receipt in Claude Code's row, and no
+      // question card left over (#1273). The question is asked in an earlier scene only.
+      const receipts = shown(delivered)
+      assert.ok(receipts.some(at => isKept(groupsAround(svg, at.index)) && groupsAround(svg, at.index).some(classes => classes.includes('last'))), `${file}: the end frame shows "${delivered}"`)
+      const asked = shown(question)
+      assert.ok(asked.length > 0, `${file}: an earlier scene asks "${question}"`)
+      assert.ok(asked.every(at => !isKept(groupsAround(svg, at.index))), `${file}: the end frame holds no question card`)
+      // The setup command stays on screen, the end frame included.
       const commands = [...svg.matchAll(new RegExp(`${literal(COMMAND)}</text>`, 'g'))]
-      const isKept = groups => groups.some(classes => classes.includes('last')) && groups.every(classes => !classes.includes('a') || classes.includes('last'))
       assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND}"`)
     }
   })
