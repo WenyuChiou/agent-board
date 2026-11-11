@@ -206,15 +206,18 @@ const isQuoted = (line: string, mark: number): boolean => {
     else if (CLOSERS.has(char)) open.pop()
   }
   // A quote the reply talks about (`escape " here?`) has no partner after the mark. A partner right
-  // after the mark closes (`他問"要不要?"好的`). Otherwise a partner with a word or an opening mark
-  // right after it opens a later quotation when a space comes before it (`stray " here? "Yes" is
-  // fine`, #1290) or when the quote before the mark stands between spaces (`要修這個 " 嗎？回答"好"`).
-  // Any other partner closes: after a word, as Chinese writes it (`他問"要不要？我可以幫忙"然後`), or
-  // before a space or a comma (`asked "Blue or green? ", and`).
+  // after the mark closes (`他問"要不要?"好的`). Otherwise the partner opens a later quotation, and the
+  // question asks, when all of these hold: what follows it is not a space or closing punctuation
+  // (`"Yes"`, `"👍"`, but not `" and` or `", and`); a space comes before it (`stray " here? "Yes"`,
+  // #1290) or the quote before the mark stands between spaces (`要修這個 " 嗎？回答"好"即可`); and an odd
+  // number of straight quotes follows it, so the quotation it opens closes (`他問 " 要不要？我可以幫忙"
+  // 然後走了` has none, so its partner closes the quotation as Chinese writes it).
   const partner = line.indexOf('"', mark + 1)
   const isRightAfter = /^[?？]["”」』)）]*$/.test(line.slice(mark, partner))
   const isSpaced = (at: number): boolean => /\s/.test(line[at - 1] ?? ' ') && /\s/.test(line[at + 1] ?? ' ')
-  const isOpener = /[\p{L}\p{N}\p{Ps}\p{Pi}]/u.test(line[partner + 1] ?? '') && (/\s/.test(line[partner - 1] ?? '') || isSpaced(straight))
+  const isOpensWord = /^[^\s,.;:!?，。、；：！？)）\]】」』"”'’…]/u.test(line.slice(partner + 1))
+  const isClosedLater = (line.slice(partner + 1).match(/"/g) ?? []).length % 2 === 1
+  const isOpener = isOpensWord && (/\s/.test(line[partner - 1] ?? '') || isSpaced(straight)) && isClosedLater
   const isCloser = partner !== -1 && (isRightAfter || !isOpener)
   if (straight >= 0 && isCloser) open.push(straight)
   // An apostrophe also sits inside words, so a single quote counts only when it closes right
