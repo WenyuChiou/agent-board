@@ -21,7 +21,7 @@ npx @wenyuchiou/agent-board@next setup
 npx @wenyuchiou/agent-board@next
 ```
 
-`setup` 会找出这台电脑上的 agent，列出它要改什么，只问一次（`Set these up? [Y/n]`）；回答 n 就什么都不写。没有终端可以回答时（例如在 agent 的对话里），它只预览，要写入就加 `--apply`。第二个命令打开看板。0.24.3 是预发布版，所以两个命令都用 `@next`。
+`setup` 会找出这台电脑上的 agent，列出它要改什么，只问一次（`Set these up? [Y/n]`）；回答 n 就什么都不写。没有终端可以回答时（例如在 agent 的对话里），它只预览，要写入就加 `--apply`。第二个命令打开看板；如果只有 Claude Code，要先装好它的插件：回答 y 会装，否则照下一段做。0.24.3 是预发布版，所以两个命令都用 `@next`。
 
 接着做完你的 agent 需要的步骤（Claude Code 的插件、Codex 的 hooks 信任：[设置之后](docs/SETUP.md#after-setup-per-agent)，英文），再开一个它的新对话；原来就开着的不会接入。在里面输入 `/agent-board` 打开看板，Codex 是 `$agent-board`；Cursor 没有这种命令，改用第二个命令。
 
@@ -56,11 +56,11 @@ npx @wenyuchiou/agent-board@next
 
 <img alt="看板上的回复送到 agent 的三条路：发送给 Claude Code、排到 Antigravity 或 Codex 的下一轮、或复制给 Cursor、OpenCode、Grok Build 和 Hermes。合成数据。" src="docs/images/answer-zh-CN.svg" width="100%">
 
-**发送**把回复交给已连接的对话；对话回确认才代表收到，没有确认就改用**复制**。**排到下一轮**会留到那个对话的下一轮才送，不会唤醒空闲中的对话，对话先结束的话可能被拒收（Codex 在对照记录里就这样）。**复制**把回复放进剪贴板，由你粘贴到那个 agent。发送需要[开启消息功能](docs/MESSAGING.md#local-storage)（英文）。如果你已经在 agent 自己的窗口里回复了，点**已回复，先隐藏**就能收掉这张卡。
+**发送**把回复交给已连接的对话；对话回确认才代表收到。没有确认也可能已经送到，先看一下那个 agent 再用**复制**，免得它收到两次。**排到下一轮**会留到那个对话的下一轮才送，不会唤醒空闲中的对话，对话先结束的话可能被拒收，排队的消息过期也一样（Codex 在对照记录里就被拒收）。**复制**把回复放进剪贴板，由你粘贴到那个 agent。发送需要[开启消息功能](docs/MESSAGING.md#local-storage)（英文）。如果你已经在 agent 自己的窗口里回复了，点**已回复，先隐藏**就能收掉这张卡。
 
 ## 在哪里都能开
 
-<img alt="同一块看板，出现在浏览器、终端和 Claude Code 对话旁的面板；同一个 Wi-Fi 的手机只能看、不能发送。合成数据。" src="docs/images/places-zh-CN.svg" width="100%">
+<img alt="同一块看板，出现在浏览器、终端和 Claude Code 对话旁的面板；同一个 Wi-Fi 的手机也能用，只是不能发送。合成数据。" src="docs/images/places-zh-CN.svg" width="100%">
 
 | 在哪里 | 怎么开 |
 |---|---|

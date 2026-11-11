@@ -40,7 +40,8 @@ test('the README repair preview names the apply command when an owned hook file 
     for (const [file, label, next] of [['README.md', 'Nothing changed after installing', 'Next steps'], ['README.zh-TW.md', '裝完之後什麼都沒變', '接下來的步驟'], ['README.zh-CN.md', '装完之后什么都没变', '接下来的步骤']]) {
       const row = readFileSync(file, 'utf8').split(/\r?\n/).find(line => line.startsWith(`| ${label} |`))
       assert.ok(row, file)
-      assert.match(row, /npx @wenyuchiou\/agent-board(?:@next)? setup/, file)
+      // 0.24.3 is on next: the row must install it, not the stable 0.24.2.
+      assert.match(row, /npx @wenyuchiou\/agent-board@next setup/, file)
       assert.ok(row.includes('node scripts/setup-agent.mjs'), file)
       assert.ok(row.includes(next), file)
       assert.ok(!row.includes('--json'), file)

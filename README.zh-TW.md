@@ -21,7 +21,7 @@ npx @wenyuchiou/agent-board@next setup
 npx @wenyuchiou/agent-board@next
 ```
 
-`setup` 會找出這台電腦上的 agent，列出它要改什麼，只問一次（`Set these up? [Y/n]`）；回答 n 就什麼都不寫。沒有終端機可以回答時（例如在 agent 的對話裡），它只預覽，要寫入就加 `--apply`。第二個指令打開看板。0.24.3 是預先發行版，所以兩個指令都用 `@next`。
+`setup` 會找出這台電腦上的 agent，列出它要改什麼，只問一次（`Set these up? [Y/n]`）；回答 n 就什麼都不寫。沒有終端機可以回答時（例如在 agent 的對話裡），它只預覽，要寫入就加 `--apply`。第二個指令打開看板；如果只有 Claude Code，要先裝好它的外掛：回答 y 會裝，否則照下一段做。0.24.3 是預先發行版，所以兩個指令都用 `@next`。
 
 接著做完你的 agent 需要的步驟（Claude Code 的外掛、Codex 的 hooks 信任：[設定之後](docs/SETUP.md#after-setup-per-agent)，英文），再開一個它的新對話；原本就開著的不會接上。在裡面輸入 `/agent-board` 打開看板，Codex 是 `$agent-board`；Cursor 沒有這種指令，改用第二個指令。
 
@@ -56,11 +56,11 @@ npx @wenyuchiou/agent-board@next
 
 <img alt="看板上的回答送到 agent 的三條路：傳送給 Claude Code、排到 Antigravity 或 Codex 的下一輪、或複製給 Cursor、OpenCode、Grok Build 和 Hermes。合成資料。" src="docs/images/answer-zh-TW.svg" width="100%">
 
-**傳送**把回答交給已連線的對話；對話回確認才代表收到，沒有確認就改用**複製**。**排到下一輪**會留到那個對話的下一輪才送，不會叫醒閒置中的對話，對話先結束的話可能被拒收（Codex 在對照紀錄裡就這樣）。**複製**把回答放進剪貼簿，由你貼到那個 agent。傳送需要[開啟訊息功能](docs/MESSAGING.md#local-storage)（英文）。如果你已經在 agent 自己的視窗裡回答了，按**已回覆，先隱藏**就能收掉這張卡。
+**傳送**把回答交給已連線的對話；對話回確認才代表收到。沒有確認也可能已經送到，先看一下那個 agent 再用**複製**，免得它收到兩次。**排到下一輪**會留到那個對話的下一輪才送，不會叫醒閒置中的對話，對話先結束的話可能被拒收，排隊的訊息過期也一樣（Codex 在對照紀錄裡就被拒收）。**複製**把回答放進剪貼簿，由你貼到那個 agent。傳送需要[開啟訊息功能](docs/MESSAGING.md#local-storage)（英文）。如果你已經在 agent 自己的視窗裡回答了，按**已回覆，先隱藏**就能收掉這張卡。
 
 ## 在哪裡都能開
 
-<img alt="同一塊看板，出現在瀏覽器、終端機和 Claude Code 對話旁的面板；同一個 Wi-Fi 的手機只能看、不能傳送。合成資料。" src="docs/images/places-zh-TW.svg" width="100%">
+<img alt="同一塊看板，出現在瀏覽器、終端機和 Claude Code 對話旁的面板；同一個 Wi-Fi 的手機也能用，只是不能傳送。合成資料。" src="docs/images/places-zh-TW.svg" width="100%">
 
 | 在哪裡 | 怎麼開 |
 |---|---|

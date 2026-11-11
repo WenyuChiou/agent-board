@@ -21,7 +21,7 @@ npx @wenyuchiou/agent-board@next setup
 npx @wenyuchiou/agent-board@next
 ```
 
-`setup` finds the agents on this computer, shows what it would change and asks once (`Set these up? [Y/n]`); a no writes nothing. Without a terminal to answer in, such as an agent's chat, it only previews, and `setup --apply` writes. The second command opens the board. 0.24.3 is a pre-release, so both commands use `@next`.
+`setup` finds the agents on this computer, shows what it would change and asks once (`Set these up? [Y/n]`); a no writes nothing. Without a terminal to answer in, such as an agent's chat, it only previews, and `setup --apply` writes. The second command opens the board; with Claude Code alone, it needs the plugin first: a yes installs it, otherwise the next paragraph says how. 0.24.3 is a pre-release, so both commands use `@next`.
 
 Then finish the steps your agent needs (Claude Code's plugin, Codex's hook trust: [after setup](docs/SETUP.md#after-setup-per-agent)) and start a new session of it; one that was already open is not connected. Open the board in it with `/agent-board`, or `$agent-board` in Codex; Cursor has no such command, so use the second command.
 
@@ -56,11 +56,11 @@ Not tested for 0.24.3: the desktop apps and IDE extensions of these agents, Open
 
 <img alt="Three ways an answer from the board reaches its agent: Send to Claude Code, queue for the next turn of Antigravity or Codex, or copy for Cursor, OpenCode, Grok Build and Hermes. Synthetic data." src="docs/images/answer-en.svg" width="100%">
 
-**Send** hands the answer to a connected session; a confirmation from that session means it was received, and with none you should use **Copy**. **Queue** holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first (Codex's was, in the parity run). **Copy** puts it on your clipboard to paste into that agent. Send needs [messaging on](docs/MESSAGING.md#local-storage). If you answered in the agent's own window, press **Already answered, hide** to clear the card.
+**Send** hands the answer to a connected session; a confirmation from that session means it was received. With no confirmation it may still have arrived, so look at the agent before you use **Copy**, or it may get the answer twice. **Queue** holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or the queued message expires (Codex's was rejected in the parity run). **Copy** puts it on your clipboard to paste into that agent. Send needs [messaging on](docs/MESSAGING.md#local-storage). If you answered in the agent's own window, press **Already answered, hide** to clear the card.
 
 ## Open it anywhere
 
-<img alt="The same board in a browser, in a terminal and in the pane beside Claude Code's chat; a phone on the same Wi-Fi can view it but not send. Synthetic data." src="docs/images/places-en.svg" width="100%">
+<img alt="The same board in a browser, in a terminal and in the pane beside Claude Code's chat; a phone on the same Wi-Fi can use it but not send. Synthetic data." src="docs/images/places-en.svg" width="100%">
 
 | Where | How |
 |---|---|
