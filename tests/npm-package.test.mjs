@@ -409,6 +409,30 @@ test('--json through an installed board script from an older release fails with 
   assert.ok(plain.stderr.includes('is from 0.24.2.'))
 }))
 
+test('the launcher hands an older script the update command for the install it runs, and none for a plugin copy (#1304)', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, 'data dir')
+  const echo = head => `${head}process.stdout.write('update=' + JSON.stringify(process.env.AGENT_BOARD_UPDATE_COMMAND ?? null))
+// 0.24.2`
+  const text = echo(`globalThis.AGENT_BOARD = ${JSON.stringify({ codexRoot: root, lang: 'en' })}
+`)
+  save(join(root, 'install-codex.json'), '{}')
+  save(join(root, 'agent-board.mjs'), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]
+`)
+  const custom = f.run(pkg, ['--data-dir', root, '--print'])
+  success(custom)
+  assert.equal(custom.stdout, `update=${JSON.stringify(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir "${root}"`)}`)
+  const plugin = echo('globalThis.AGENT_BOARD = {}\n')
+  const script = join(f.env.CLAUDE_CONFIG_DIR, 'agent-board.mjs')
+  save(script, plugin)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(plugin)}'] }]
+`)
+  const fromPlugin = f.run(pkg, ['--print'])
+  success(fromPlugin)
+  assert.equal(fromPlugin.stdout, 'update=""')
+}))
+
 test('the board script beside CLAUDE_PROGRESS_FILE runs with the arguments unchanged and its own path as argv[1]', () => fixture(f => {
   const pkg = packed(f)
   const script = join(f.home, 'plugin data/agent-board.mjs')

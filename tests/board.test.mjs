@@ -12261,10 +12261,14 @@ test('the footer links to the project', async () => {
     assert.match(dom.node('versions').textContent, /^v\d/)
     const apart = structuredClone(model)
     apart.view.versions.package = '99.0.0'
+    // Without a command from the launcher (a plugin board, or an unknown install) the page names no update command.
     await dom.redraw(apart)
-    // A board script older than the package says so and gives the one update command (#1304).
     assert.equal(dom.node('versions').textContent, EN.pgVersionsOlder(model.view.versions.board, '99.0.0'))
-    assert.match(dom.node('versions').textContent, /npx @wenyuchiou\/agent-board@99\.0\.0 setup, then add --apply/)
+    // The launcher's own command, which names a custom data folder, is what the page shows (#1304).
+    apart.view.versions.update = 'npx @wenyuchiou/agent-board@99.0.0 setup --agent codex --data-dir /synthetic/board'
+    await dom.redraw(apart)
+    assert.equal(dom.node('versions').textContent, `${EN.pgVersionsOlder(model.view.versions.board, '99.0.0')} ${EN.pgVersionsUpdate(apart.view.versions.update)}`)
+    assert.match(dom.node('versions').textContent, /setup --agent codex --data-dir \/synthetic\/board, then add --apply/)
     const behind = structuredClone(model)
     behind.view.versions.package = '0.0.1'
     await dom.redraw(behind)
@@ -12673,9 +12677,9 @@ test('the page of a grouped board draws each question once, copies an answer and
       assert.ok(fresh.node('board').textContent.includes(words.pgReady))
       // With nothing connected the empty board names no agent and tells how to start.
       assert.ok(fresh.node('board').textContent.includes(words.pgStartAny))
-      // (The version label, the project's name on GitHub and the update command are the same in every language,
-      // so the command is taken out of the older-script notice and the rest of it is still checked.)
-      const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ').replace(/npx @wenyuchiou\/agent-board@\S* setup/g, '').replaceAll('--apply', '')
+      // (The version label and the project's name on GitHub are the same in every language; the update
+      // command is filled in by the launcher, so only the flag it ends with is taken out.)
+      const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ').replaceAll('--apply', '')
       if (words === EN) assert.doesNotMatch(labels, /\p{Script=Han}/u)
       else assert.doesNotMatch(labels.replaceAll('Agent Board', '').replaceAll('GitHub', '').replaceAll('Claude Code', '').replaceAll('Codex', ''), /[A-Za-z]/)
     }

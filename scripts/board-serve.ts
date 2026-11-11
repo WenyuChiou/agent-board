@@ -456,7 +456,7 @@ export const startServer = (o: ServeOptions): void => {
           const now = Date.now()
           const view = o.view()
           const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
-          const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
+          const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion, update: (process.env.AGENT_BOARD_UPDATE_COMMAND ?? '').slice(0, 500) || null }, unreadable: view.unreadable ?? [] }
           const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.
