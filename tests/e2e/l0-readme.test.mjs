@@ -69,9 +69,9 @@ const NOT_RUN_LIVE = ['Codex', 'Antigravity', 'Grok Build']
 // What each README says per language: the phrase for a step not run live, how each answer path is described
 // and the words of the phone row.
 const WORDS = {
-  en: { notLive: '(not run live)', send: /\*\*Send\*\* hands the answer to a connected session, which confirms it/, queue: /\*\*Queue\*\* holds it until that session's next turn and does not wake an idle one/, copy: /\*\*Copy\*\* puts it on your clipboard/, answers: { 'Claude Code': 'Send', Codex: 'Queue', Antigravity: 'Queue', Cursor: 'Copy', OpenCode: 'Copy', 'Grok Build': 'Copy', 'Hermes Agent': 'Copy' }, viewOnly: /View only/ },
-  'zh-TW': { notLive: '（未實機執行）', send: /\*\*傳送\*\*把回答交給已連線的對話，對話會確認/, queue: /\*\*排到下一輪\*\*會留到那個對話的下一輪才送，不會叫醒閒置中的對話/, copy: /\*\*複製\*\*把回答放進剪貼簿/, answers: { 'Claude Code': '傳送', Codex: '排到下一輪', Antigravity: '排到下一輪', Cursor: '複製', OpenCode: '複製', 'Grok Build': '複製', 'Hermes Agent': '複製' }, viewOnly: /只能看/ },
-  'zh-CN': { notLive: '（未实机运行）', send: /\*\*发送\*\*把回复交给已连接的对话，对话会确认/, queue: /\*\*排到下一轮\*\*会留到那个对话的下一轮才送，不会唤醒空闲中的对话/, copy: /\*\*复制\*\*把回复放进剪贴板/, answers: { 'Claude Code': '发送', Codex: '排到下一轮', Antigravity: '排到下一轮', Cursor: '复制', OpenCode: '复制', 'Grok Build': '复制', 'Hermes Agent': '复制' }, viewOnly: /只能看/ },
+  en: { notLive: '(not run live)', send: /\*\*Send\*\* hands the answer to a connected session; a confirmation from that session means it was received/, queue: /\*\*Queue\*\* holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first/, copy: /\*\*Copy\*\* puts it on your clipboard/, answers: { 'Claude Code': 'Send', Codex: 'Queue', Antigravity: 'Queue', Cursor: 'Copy', OpenCode: 'Copy', 'Grok Build': 'Copy', 'Hermes Agent': 'Copy' }, viewOnly: /cannot send an answer/, askNote: '(opened by a prompt asking for the skill)' },
+  'zh-TW': { notLive: '（未實機執行）', send: /\*\*傳送\*\*把回答交給已連線的對話；對話回確認才代表收到/, queue: /\*\*排到下一輪\*\*會留到那個對話的下一輪才送，不會叫醒閒置中的對話，對話先結束的話可能被拒收/, copy: /\*\*複製\*\*把回答放進剪貼簿/, answers: { 'Claude Code': '傳送', Codex: '排到下一輪', Antigravity: '排到下一輪', Cursor: '複製', OpenCode: '複製', 'Grok Build': '複製', 'Hermes Agent': '複製' }, viewOnly: /不能傳送回答/, askNote: '（用提示請它執行 skill）' },
+  'zh-CN': { notLive: '（未实机运行）', send: /\*\*发送\*\*把回复交给已连接的对话；对话回确认才代表收到/, queue: /\*\*排到下一轮\*\*会留到那个对话的下一轮才送，不会唤醒空闲中的对话，对话先结束的话可能被拒收/, copy: /\*\*复制\*\*把回复放进剪贴板/, answers: { 'Claude Code': '发送', Codex: '排到下一轮', Antigravity: '排到下一轮', Cursor: '复制', OpenCode: '复制', 'Grok Build': '复制', 'Hermes Agent': '复制' }, viewOnly: /不能发送回复/, askNote: '（用提示让它执行 skill）' },
 }
 // A piece of text as a pattern that matches it and nothing else.
 const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -126,11 +126,12 @@ describe('L0 discover and install from the README', () => {
       const first = section(text, SECTIONS[lang][0])
       assert.ok(first, `${name}: Quick start exists`)
       const node = first.indexOf('Node.js 22')
-      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board setup\r?\nnpx @wenyuchiou\/agent-board)\r?\n```/.exec(first)
+      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board@next setup\r?\nnpx @wenyuchiou\/agent-board@next)\r?\n```/.exec(first)
       assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then setup and the board command in order`)
       assert.ok(first.includes(`--lang ${lang}`), `${name}: Quick start says how to choose the language`)
       assert.ok(first.includes('--no-open'), `${name}: Quick start says how to start the page without a window`)
-      assert.ok(first.includes('/agent-board') && first.includes('$agent-board'), `${name}: Quick start names the board command inside an agent`)
+      assert.ok(first.includes('/agent-board') && first.includes('$agent-board') && first.includes('Cursor'), `${name}: Quick start names the board command inside an agent and says Cursor has none`)
+      assert.ok(first.includes('docs/SETUP.md#after-setup-per-agent'), `${name}: Quick start points to the per-agent steps after setup`)
       assert.ok(first.includes('docs/SETUP.md#let-an-agent-install-it'), `${name}: Quick start links to the agent-install prompt`)
       // The README stays short: one screen of reading for a newcomer, not the guide.
       assert.ok(text.split('\n').length <= 140, `${name}: the README has at most 140 lines`)
@@ -144,7 +145,7 @@ describe('L0 discover and install from the README', () => {
       const commands = /```(?:sh|bash)\n([\s\S]*?)\n```/.exec(quick)?.[1]
       assert.ok(commands, `${name}: Quick start has a command block`)
       assert.ok(!commands.split('\n').some(line => /^\s*agent-board(?:\s|$)/.test(line)), `${name}: Quick start cannot require the global command`)
-      assert.ok(commands.split('\n').includes('npx @wenyuchiou/agent-board'), `${name}: Quick start opens the board with npx`)
+      assert.ok(commands.split('\n').includes('npx @wenyuchiou/agent-board@next'), `${name}: Quick start opens the board with npx, on the pre-release tag`)
     }
 
     for (const name of [...READMES.map(([readme]) => readme), 'docs/GUIDE.md', 'docs/GUIDE.zh-TW.md', 'docs/GUIDE.zh-CN.md']) {
@@ -176,7 +177,7 @@ describe('L0 discover and install from the README', () => {
       assert.ok(update, `${name}: Update and remove exists`)
       const line = update.split('\n').find(l => words[lang].test(l) && l.includes(links[lang]))
       assert.ok(line, `${name}: Update and remove has a line on how to remove it linking to ${links[lang]}`)
-      assert.ok(update.includes('npx @wenyuchiou/agent-board remove --apply'), `${name}: Update and remove gives the remove command`)
+      assert.ok(update.includes('npx @wenyuchiou/agent-board@next remove --apply'), `${name}: Update and remove gives the remove command`)
     }
   })
 
@@ -426,10 +427,12 @@ describe('L0 discover and install from the README', () => {
         assert.equal(agent, /alt="([^"]+)"/.exec(icon)[1], `${name}: the row names ${agent}`)
         assert.deepEqual(codeSpans(command), BOARD_COMMANDS[agent] ? [BOARD_COMMANDS[agent]] : [], `${name}: ${agent}'s board command`)
         assert.equal(command.includes(words.notLive), NOT_RUN_LIVE.includes(agent), `${name}: ${agent} carries the not-run-live phrase only if its board command was not run live`)
+        assert.equal(command.includes(words.askNote), agent === 'Hermes Agent', `${name}: only Hermes's command carries the note that a prompt asked for the skill`)
         assert.ok(question.length > 0, `${name}: ${agent} has its question cell`)
         assert.ok(answer.startsWith(`**${words.answers[agent]}**`), `${name}: ${agent}'s answer path is ${words.answers[agent]}`)
       }
       assert.doesNotMatch(text, /Muse/i, `${name}: Muse Code is not in the README`)
+      assert.match(section(text, SECTIONS[lang][2]), lang === 'en' ? /earlier 0\.24\.3 head/ : /較早的 0\.24\.3|较早的 0\.24\.3/, `${name}: the live rows ran on an earlier 0.24.3 head, and the README says so`)
       assert.equal(text.split(words.notLive).length - 1, NOT_RUN_LIVE.length, `${name}: the phrase appears once per agent not run live`)
     }
   })
@@ -464,7 +467,7 @@ describe('L0 discover and install from the README', () => {
       assert.ok(quick, `${name}: Quick start exists`)
       // npm needs Node 22, said before its commands.
       const npm = quick.search(/Node\.js 22\b/)
-      assert.ok(npm >= 0 && npm < quick.indexOf('npx @wenyuchiou/agent-board setup'), `${name}: Node.js 22 comes before the npm commands`)
+      assert.ok(npm >= 0 && npm < quick.indexOf('npx @wenyuchiou/agent-board@next setup'), `${name}: Node.js 22 comes before the npm commands`)
     }
   })
 

@@ -156,6 +156,6 @@
 <rect x="1075.96" y="344" width="108" height="26" rx="7" fill="#1e2022" stroke="#2e3134"/><rect x="1083.96" y="352" width="58" height="4" rx="2" fill="#e6e4dc" fill-opacity="0.5"/><rect x="1083.96" y="360" width="36" height="3" rx="1.5" fill="#e6e4dc" fill-opacity="0.2"/><rect x="1075.96" y="378" width="108" height="26" rx="7" fill="#1e2022" stroke="#2e3134"/><rect x="1083.96" y="386" width="44" height="4" rx="2" fill="#e6e4dc" fill-opacity="0.5"/><rect x="1083.96" y="394" width="52" height="3" rx="1.5" fill="#e6e4dc" fill-opacity="0.2"/>
 <rect x="1107.96" y="414" width="44" height="3" rx="1.5" fill="#e6e4dc" fill-opacity="0.35"/>
 <text x="234.04" y="464" text-anchor="middle" font-size="16" font-weight="600" fill="#e6e4dc">瀏覽器</text><text x="572.58" y="464" text-anchor="middle" font-size="16" font-weight="600" fill="#e6e4dc">終端機</text><text x="890.54" y="464" text-anchor="middle" font-size="16" font-weight="600" fill="#e6e4dc">Claude Code 對話旁</text><text x="1129.96" y="464" text-anchor="middle" font-size="16" font-weight="600" fill="#e6e4dc">手機</text>
-<text x="1129.96" y="486" text-anchor="middle" font-size="13" fill="#AFAFB0">同一個 Wi-Fi 下只能看</text>
+<text x="1129.96" y="486" text-anchor="middle" font-size="13" fill="#AFAFB0">同一個 Wi-Fi 下不能傳送</text>
 </g>
 </svg>

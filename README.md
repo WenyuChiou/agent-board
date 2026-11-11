@@ -17,26 +17,28 @@ Claude Code, Codex, Antigravity and other AI agents report to one board on your 
 With Node.js 22+, in any terminal:
 
 ```sh
-npx @wenyuchiou/agent-board setup
-npx @wenyuchiou/agent-board
+npx @wenyuchiou/agent-board@next setup
+npx @wenyuchiou/agent-board@next
 ```
 
-`setup` finds the agents on this computer, shows what it would change and asks once (`Set these up? [Y/n]`); a no writes nothing. Without a terminal to answer in, such as an agent's chat, it only previews, and `setup --apply` writes. The second command opens the board. Then start a new session of your agent (one that was already open is not connected) and type `/agent-board` in it, or `$agent-board` in Codex.
+`setup` finds the agents on this computer, shows what it would change and asks once (`Set these up? [Y/n]`); a no writes nothing. Without a terminal to answer in, such as an agent's chat, it only previews, and `setup --apply` writes. The second command opens the board. 0.24.3 is a pre-release, so both commands use `@next`.
+
+Then finish the steps your agent needs (Claude Code's plugin, Codex's hook trust: [after setup](docs/SETUP.md#after-setup-per-agent)) and start a new session of it; one that was already open is not connected. Open the board in it with `/agent-board`, or `$agent-board` in Codex; Cursor has no such command, so use the second command.
 
 The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise; add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to the setup command to choose. Add `--no-open` to the board command to start the page without opening a browser window. More options: the [setup guide](docs/SETUP.md#install-with-npm). No npm, or you want an agent to install it: [the same guide](docs/SETUP.md#let-an-agent-install-it).
 
 ## What you get
 
-- **Questions first.** A question an agent is waiting on goes to the top, with a button for each answer.
+- **Questions first.** A question an agent is waiting on goes to the top, with a button for each option it can read, or you write your own answer.
 - **Every agent stays where it is.** Agents keep running in their own terminals; the board reads what their hooks report.
 - **Local and plain.** One Markdown file you can read and edit, a page on 127.0.0.1 only, and no model calls by the board.
 - **One command to install, one to remove.** `setup` shows what it will change before it writes; `remove` takes out what setup wrote and leaves your own settings alone.
 
-<img alt="The board's page: Needs you shows a question from Claude Code with a button for each answer; Working now lists tasks from Codex, Antigravity and OpenCode with their steps. Synthetic data." src="docs/images/page-en-dark.png" width="860">
+<img alt="The board's page: Needs you shows a question from Claude Code with answer buttons; Working now lists tasks from Codex, Antigravity and OpenCode with their steps. Synthetic data." src="docs/images/page-en-dark.png" width="860">
 
 ## Supported agents
 
-Seven agents have a 0.24.3 record on Windows 11 ([parity](docs/validation/2026-11-10-parity-0.24.3.md), [simulated user](docs/validation/2026-11-10-usersim-0.24.3.md)). Where a cell says "not run live", the step was checked only in a synthetic home.
+Seven agents have a 0.24.3 record on Windows 11 ([parity](docs/validation/2026-11-10-parity-0.24.3.md), [simulated user](docs/validation/2026-11-10-usersim-0.24.3.md)). The live rows ran on an earlier 0.24.3 head: the later fixes to question detection and settings were not re-run on them. Where a cell says "not run live", the step was not run live.
 
 | | Agent | Open the board inside it | A question reaches the board | Your answer |
 |:-:|---|---|---|---|
@@ -46,7 +48,7 @@ Seven agents have a 0.24.3 record on Windows 11 ([parity](docs/validation/2026-1
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | None; use the terminal command | Yes | **Copy** |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` | Yes | **Copy** |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board` (not run live) | Yes | **Copy** |
-| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` | Yes | **Copy** |
+| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` (opened by a prompt asking for the skill) | Yes | **Copy** |
 
 Not tested for 0.24.3: the desktop apps and IDE extensions of these agents, OpenClaw, DeepSeek Harness (setup still installs them) and macOS. dot and other web chats report by hand: [how](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste).
 
@@ -54,7 +56,7 @@ Not tested for 0.24.3: the desktop apps and IDE extensions of these agents, Open
 
 <img alt="Three ways an answer from the board reaches its agent: Send to Claude Code, queue for the next turn of Antigravity or Codex, or copy for Cursor, OpenCode, Grok Build and Hermes. Synthetic data." src="docs/images/answer-en.svg" width="100%">
 
-**Send** hands the answer to a connected session, which confirms it; it needs [messaging on](docs/MESSAGING.md#local-storage). **Queue** holds it until that session's next turn and does not wake an idle one. **Copy** puts it on your clipboard to paste into that agent. If you answered in the agent's own window, press **Already answered, hide** to clear the card.
+**Send** hands the answer to a connected session; a confirmation from that session means it was received, and with none you should use **Copy**. **Queue** holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first (Codex's was, in the parity run). **Copy** puts it on your clipboard to paste into that agent. Send needs [messaging on](docs/MESSAGING.md#local-storage). If you answered in the agent's own window, press **Already answered, hide** to clear the card.
 
 ## Open it anywhere
 
@@ -64,7 +66,7 @@ Not tested for 0.24.3: the desktop apps and IDE extensions of these agents, Open
 |---|---|
 | In an agent | `/agent-board` (`$agent-board` in Codex) |
 | A terminal | `npx @wenyuchiou/agent-board`: the page on a desktop, the terminal board over SSH or without a display |
-| A phone on the same Wi-Fi | `npx @wenyuchiou/agent-board --lan` and scan the QR code. View only; use it on a network you trust: the link is not encrypted and anyone who has it can open the page |
+| A phone on the same Wi-Fi | `npx @wenyuchiou/agent-board --lan` and scan the QR code. The phone can look, tick, archive and close the board, but cannot send an answer (it shows the answer to copy). Use it on a network you trust: the link is not encrypted and anyone who has it can open the page |
 | An agent reading the board | `npx @wenyuchiou/agent-board --json` ([fields](docs/BOARD-JSON.md)) |
 
 ## How it works
@@ -75,11 +77,11 @@ Each agent's hooks write what its session is doing into its own block of one loc
 
 ## Update and remove
 
-Run `npx @wenyuchiou/agent-board setup` again to see what an update would change, then `setup --apply`; files you edited are left alone. To remove what setup wrote:
+Run `npx @wenyuchiou/agent-board@next setup` again to see what an update would change, then `setup --apply`; files you edited are left alone. To remove what setup wrote:
 
 ```sh
-npx @wenyuchiou/agent-board remove
-npx @wenyuchiou/agent-board remove --apply
+npx @wenyuchiou/agent-board@next remove
+npx @wenyuchiou/agent-board@next remove --apply
 ```
 
 Your history stays beside `progress.md`; [Update and uninstall](docs/GUIDE.md#update-and-uninstall) lists what is kept, and a few small cache files can be left behind. For the shorter `agent-board` command, run `npm install -g @wenyuchiou/agent-board` once.
@@ -89,10 +91,11 @@ Your history stays beside `progress.md`; [Update and uninstall](docs/GUIDE.md#up
 | You see | Try |
 |---|---|
 | An agent is not on the board | Start a new session of it; one that was already open is not connected. For Codex, preview `npx @wenyuchiou/agent-board --codex-trust --codex-bin "<path-to-codex>" --json` with Codex's full path, review it, then add `--apply` only if you approve. Codex CLI also offers `/hooks`. |
-| Nothing changed after installing | Run `npx @wenyuchiou/agent-board setup` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs`). Read the conflicts and Next steps; edited files are left alone and listed there. |
-| An old version is still running | A running session keeps the version it loaded: start a new one. To update, see [the guide](docs/GUIDE.md#update-and-uninstall). |
+| Nothing changed after installing | Run `npx @wenyuchiou/agent-board@next setup` again without `--apply` (from a checkout: `node scripts/setup-agent.mjs`). Read the conflicts and Next steps; edited files are left alone and listed there. |
+| If the board looks old | A session that was already open may still run the version it loaded: start a new session of that agent. To update, see [the guide](docs/GUIDE.md#update-and-uninstall). |
+| An agent shows up twice | It may be connected both by the Claude plugin and by setup: [what to remove](docs/GUIDE.md#troubleshooting). |
 
-To check one agent's setup: `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` (use the agent's own name after `--agent`). It changes nothing. More answers: the guide's [FAQ](docs/GUIDE.md#faq) and [Troubleshooting](docs/GUIDE.md#troubleshooting). Found a bug? Open the [bug form](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml) and follow the [safe-report steps](docs/GUIDE.md#reporting-a-problem-safely): no session ids, home-folder paths or tokens.
+To check one agent's setup: `node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex` (also `cursor`, `opencode`, `grok`, `hermes`, `antigravity`; the [guide](docs/GUIDE.md#troubleshooting) has the rest). It changes nothing. For Claude Code, run `claude plugin list` and `/progress connect status`. More answers: the guide's [FAQ](docs/GUIDE.md#faq) and [Troubleshooting](docs/GUIDE.md#troubleshooting). Found a bug? Open the [bug form](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml) and follow the [safe-report steps](docs/GUIDE.md#reporting-a-problem-safely): no session ids, home-folder paths or tokens.
 
 ## Documentation
 

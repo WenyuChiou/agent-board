@@ -1444,19 +1444,19 @@ const PLACES_WORDS: Record<Lang, { title: string; names: [string, string, string
   en: {
     title: 'Same board, three places',
     names: ['Browser', 'Terminal', 'Beside Claude Code’s chat', 'Phone'],
-    phone: 'View only on Wi-Fi',
+    phone: 'No sending on Wi-Fi',
     label: 'The same board in a browser, in a terminal and in the pane beside Claude Code’s chat; a phone on the same Wi-Fi can view it but not send. Synthetic data.',
   },
   'zh-TW': {
     title: '同一塊看板，三個地方',
     names: ['瀏覽器', '終端機', 'Claude Code 對話旁', '手機'],
-    phone: '同一個 Wi-Fi 下只能看',
+    phone: '同一個 Wi-Fi 下不能傳送',
     label: '同一塊看板，可以在瀏覽器、終端機，或 Claude Code 對話旁的面板打開；同一個 Wi-Fi 的手機可以看，但不能傳送。合成資料。',
   },
   'zh-CN': {
     title: '同一块看板，三个地方',
     names: ['浏览器', '终端', 'Claude Code 对话旁', '手机'],
-    phone: '同一个 Wi-Fi 下只能看',
+    phone: '同一个 Wi-Fi 下不能发送',
     label: '同一块看板，可以在浏览器、终端，或 Claude Code 对话旁的面板打开；同一个 Wi-Fi 的手机可以看，但不能发送。合成数据。',
   },
 }

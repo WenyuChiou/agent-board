@@ -17,26 +17,28 @@ Claude Code、Codex、Antigravity 等 AI agent 都向你電腦上的同一塊看
 需要 Node.js 22 以上，在任何終端機執行：
 
 ```sh
-npx @wenyuchiou/agent-board setup
-npx @wenyuchiou/agent-board
+npx @wenyuchiou/agent-board@next setup
+npx @wenyuchiou/agent-board@next
 ```
 
-`setup` 會找出這台電腦上的 agent，列出它要改什麼，只問一次（`Set these up? [Y/n]`）；回答 n 就什麼都不寫。沒有終端機可以回答時（例如在 agent 的對話裡），它只預覽，要寫入就加 `--apply`。第二個指令打開看板。接著開一個 agent 的新對話（原本就開著的不會接上），在裡面輸入 `/agent-board`；Codex 是 `$agent-board`。
+`setup` 會找出這台電腦上的 agent，列出它要改什麼，只問一次（`Set these up? [Y/n]`）；回答 n 就什麼都不寫。沒有終端機可以回答時（例如在 agent 的對話裡），它只預覽，要寫入就加 `--apply`。第二個指令打開看板。0.24.3 是預先發行版，所以兩個指令都用 `@next`。
+
+接著做完你的 agent 需要的步驟（Claude Code 的外掛、Codex 的 hooks 信任：[設定之後](docs/SETUP.md#after-setup-per-agent)，英文），再開一個它的新對話；原本就開著的不會接上。在裡面輸入 `/agent-board` 打開看板，Codex 是 `$agent-board`；Cursor 沒有這種指令，改用第二個指令。
 
 系統語言是繁體或簡體中文時，看板就用中文，否則用英文；要自己選，在 setup 指令後加 `--lang en`、`--lang zh-TW` 或 `--lang zh-CN`。看板指令加 `--no-open`，只啟動網頁、不打開瀏覽器視窗。更多選項見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。不用 npm，或想讓 agent 幫你裝：[同一份指南](docs/SETUP.md#let-an-agent-install-it)。
 
 ## 你會得到什麼
 
-- **問題排最前面。** agent 在等你回答的問題會排到最上面，每個答案一顆按鈕。
+- **問題排最前面。** agent 在等你回答的問題會排到最上面；它給的選項讀得出來，就每個選項一顆按鈕，否則自己輸入回答。
 - **每個 agent 留在原本的地方。** agent 繼續在自己的終端機裡跑，看板讀的是它們 hooks 的回報。
 - **在本機、純文字。** 一個你可以自己看、自己改的 Markdown 檔，只在 127.0.0.1 的網頁，看板本身不呼叫模型。
 - **一個指令裝、一個指令移除。** `setup` 寫入前先列出要改什麼；`remove` 拿掉 setup 寫的東西，不動你自己的設定。
 
-<img alt="看板網頁：「需要你」放著 Claude Code 的問題，每個答案一顆按鈕；「進行中」列出 Codex、Antigravity 和 OpenCode 的工作和步驟。合成資料。" src="docs/images/page-zh-TW-dark.png" width="860">
+<img alt="看板網頁：「需要你」放著 Claude Code 的問題，附答案按鈕；「進行中」列出 Codex、Antigravity 和 OpenCode 的工作和步驟。合成資料。" src="docs/images/page-zh-TW-dark.png" width="860">
 
 ## 支援的 agent
 
-下面七個 agent 有 0.24.3 的實測紀錄，都在 Windows 11 上測過（[對照紀錄](docs/validation/2026-11-10-parity-0.24.3.md)、[模擬使用者](docs/validation/2026-11-10-usersim-0.24.3.md)，皆為英文）。標「未實機執行」的步驟，只在合成環境檢查過。
+下面七個 agent 有 0.24.3 的實測紀錄，都在 Windows 11 上測過（[對照紀錄](docs/validation/2026-11-10-parity-0.24.3.md)、[模擬使用者](docs/validation/2026-11-10-usersim-0.24.3.md)，皆為英文）。實機的列是在較早的 0.24.3 版本上跑的：之後對問題偵測和設定的修正沒有在上面重跑。標「未實機執行」的步驟就是沒有實機跑過。
 
 | | Agent | 在 agent 裡開看板 | 問題會上看板 | 你的回答 |
 |:-:|---|---|---|---|
@@ -46,7 +48,7 @@ npx @wenyuchiou/agent-board
 | <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | 沒有；用終端機指令 | 會 | **複製** |
 | <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` | 會 | **複製** |
 | <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board`（未實機執行） | 會 | **複製** |
-| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` | 會 | **複製** |
+| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` （用提示請它執行 skill） | 會 | **複製** |
 
 0.24.3 沒測：這些 agent 的桌面 app 和 IDE 擴充、OpenClaw、DeepSeek Harness（setup 還是會裝它們）和 macOS。dot 和其他網頁版聊天要手動回報：[怎麼做](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)（英文）。
 
@@ -54,7 +56,7 @@ npx @wenyuchiou/agent-board
 
 <img alt="看板上的回答送到 agent 的三條路：傳送給 Claude Code、排到 Antigravity 或 Codex 的下一輪、或複製給 Cursor、OpenCode、Grok Build 和 Hermes。合成資料。" src="docs/images/answer-zh-TW.svg" width="100%">
 
-**傳送**把回答交給已連線的對話，對話會確認；需要[開啟訊息功能](docs/MESSAGING.md#local-storage)（英文）。**排到下一輪**會留到那個對話的下一輪才送，不會叫醒閒置中的對話。**複製**把回答放進剪貼簿，由你貼到那個 agent。如果你已經在 agent 自己的視窗裡回答了，按**已回覆，先隱藏**就能收掉這張卡。
+**傳送**把回答交給已連線的對話；對話回確認才代表收到，沒有確認就改用**複製**。**排到下一輪**會留到那個對話的下一輪才送，不會叫醒閒置中的對話，對話先結束的話可能被拒收（Codex 在對照紀錄裡就這樣）。**複製**把回答放進剪貼簿，由你貼到那個 agent。傳送需要[開啟訊息功能](docs/MESSAGING.md#local-storage)（英文）。如果你已經在 agent 自己的視窗裡回答了，按**已回覆，先隱藏**就能收掉這張卡。
 
 ## 在哪裡都能開
 
@@ -64,7 +66,7 @@ npx @wenyuchiou/agent-board
 |---|---|
 | agent 裡 | `/agent-board`（Codex 是 `$agent-board`） |
 | 終端機 | `npx @wenyuchiou/agent-board`：桌面開網頁，SSH 或沒有顯示器時開終端機看板 |
-| 同一個 Wi-Fi 的手機 | `npx @wenyuchiou/agent-board --lan`，掃它印出的 QR code。只能看；請在信得過的網路使用：連結沒有加密，拿到的人都能打開網頁 |
+| 同一個 Wi-Fi 的手機 | `npx @wenyuchiou/agent-board --lan`，掃它印出的 QR code。手機可以看、勾步驟、封存和關閉看板，但不能傳送回答（它只顯示回答讓你複製）。請在信得過的網路使用：連結沒有加密，拿到的人都能打開網頁 |
 | 讓 agent 讀看板 | `npx @wenyuchiou/agent-board --json`（[欄位說明](docs/BOARD-JSON.md)，英文） |
 
 ## 怎麼運作
@@ -75,11 +77,11 @@ npx @wenyuchiou/agent-board
 
 ## 更新與移除
 
-再跑一次 `npx @wenyuchiou/agent-board setup` 看更新會改什麼，再加 `--apply` 套用；你改過的檔案不會被覆蓋。要移除 setup 寫的東西：
+再跑一次 `npx @wenyuchiou/agent-board@next setup` 看更新會改什麼，再加 `--apply` 套用；你改過的檔案不會被覆蓋。要移除 setup 寫的東西：
 
 ```sh
-npx @wenyuchiou/agent-board remove
-npx @wenyuchiou/agent-board remove --apply
+npx @wenyuchiou/agent-board@next remove
+npx @wenyuchiou/agent-board@next remove --apply
 ```
 
 你的紀錄會留在 `progress.md` 旁邊；[更新與移除](docs/GUIDE.zh-TW.md#更新與移除)列出哪些會保留，另外可能留下幾個小的快取檔。想用較短的 `agent-board` 指令，執行一次 `npm install -g @wenyuchiou/agent-board`。
@@ -89,10 +91,11 @@ npx @wenyuchiou/agent-board remove --apply
 | 你看到 | 試試 |
 |---|---|
 | 某個 agent 沒出現在看板上 | 開一個它的新對話；原本就開著的不會接上。Codex 請以完整執行檔路徑執行 `npx @wenyuchiou/agent-board --codex-trust --codex-bin "<path-to-codex>" --json` 預覽；先檢查預覽，確認同意後才加上 `--apply`。Codex CLI 也可使用 `/hooks`。 |
-| 裝完之後什麼都沒變 | 不加 `--apply` 再跑一次 `npx @wenyuchiou/agent-board setup`（用 git clone 的話是 `node scripts/setup-agent.mjs`），查看列出的衝突和接下來的步驟；你改過的檔案不會被覆蓋，會列在那裡。 |
-| 還在跑舊版 | 跑著的對話會一直用它載入時的版本：開一個新的。更新方式見[使用指南](docs/GUIDE.zh-TW.md#更新與移除)。 |
+| 裝完之後什麼都沒變 | 不加 `--apply` 再跑一次 `npx @wenyuchiou/agent-board@next setup`（用 git clone 的話是 `node scripts/setup-agent.mjs`），查看列出的衝突和接下來的步驟；你改過的檔案不會被覆蓋，會列在那裡。 |
+| 看板看起來是舊版 | 原本就開著的對話可能還在跑它載入時的版本：開一個那個 agent 的新對話。更新方式見[使用指南](docs/GUIDE.zh-TW.md#更新與移除)。 |
+| 同一個 agent 出現兩次 | 可能同時被 Claude 外掛和 setup 接上：[要拿掉哪個](docs/GUIDE.zh-TW.md#疑難排解)。 |
 
-檢查某個 agent 的設定：`node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex`（`--agent` 後面換成那個 agent 的名字），它不會改任何東西。更多答案在使用指南的[常見問題](docs/GUIDE.zh-TW.md#常見問題)和[疑難排解](docs/GUIDE.zh-TW.md#疑難排解)。發現 bug 的話，用 [bug 表單](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml)開一個 issue，並照[安全回報步驟](docs/GUIDE.zh-TW.md#安全地回報問題)做：不要放 session id、家目錄路徑或 token。
+檢查某個 agent 的設定：`node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex`（也可用 `cursor`、`opencode`、`grok`、`hermes`、`antigravity`，其餘見[使用指南](docs/GUIDE.zh-TW.md#疑難排解)），它不會改任何東西。Claude Code 請跑 `claude plugin list` 和 `/progress connect status`。更多答案在使用指南的[常見問題](docs/GUIDE.zh-TW.md#常見問題)和[疑難排解](docs/GUIDE.zh-TW.md#疑難排解)。發現 bug 的話，用 [bug 表單](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml)開一個 issue，並照[安全回報步驟](docs/GUIDE.zh-TW.md#安全地回報問題)做：不要放 session id、家目錄路徑或 token。
 
 ## 文件
 

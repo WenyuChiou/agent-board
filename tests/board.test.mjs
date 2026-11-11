@@ -13214,12 +13214,12 @@ test('a Hidden notice restores that exact question directly, including after a r
   }
 })
 
-test('after Send the hide button named by each guide is visible without More', async () => {
+test('after Send the hide button named by each README and guide is visible without More', async () => {
   const isVisible = node => {
     for (let one = node; one; one = one.parentNode) if (one.hidden || one.inert || String(one.className || '').split(' ').includes('gone')) return false
     return true
   }
-  for (const [lang, readme] of [['en', 'docs/GUIDE.md'], ['zh-TW', 'docs/GUIDE.zh-TW.md'], ['zh-CN', 'docs/GUIDE.zh-CN.md']]) {
+  for (const [lang, readme, guide] of [['en', 'README.md', 'docs/GUIDE.md'], ['zh-TW', 'README.zh-TW.md', 'docs/GUIDE.zh-TW.md'], ['zh-CN', 'README.zh-CN.md', 'docs/GUIDE.zh-CN.md']]) {
     const html = await sourcePage(lang)
     const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
     const model = cardsModel()
@@ -13234,7 +13234,7 @@ test('after Send the hide button named by each guide is visible without More', a
     await dom.flush()
     const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
     assert.ok(hide, 'the documented hide button is visible after sending')
-    assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes(words.answeredHide), readme)
+    for (const file of [readme, guide]) assert.ok(readFileSync(new URL('../' + file, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), file)
     hide.click()
     await dom.flush()
     assert.equal(dom.requests.at(-1).body.type, 'hide')
