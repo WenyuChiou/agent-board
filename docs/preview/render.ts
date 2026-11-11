@@ -20,7 +20,7 @@ import { STRINGS } from '../../hooks/strings'
 import type { Strings } from '../../hooks/i18n'
 import { buildView } from '../../hooks/view'
 import { CLI_FILES, NOW, PAGE, SAMPLES, SESSION, MIN } from './samples'
-import type { PageAgent, PageSample } from './samples'
+import type { PageAgent, PageSample, PageTask } from './samples'
 import { AGENT_ICONS, TESTED_ICONS } from './icons'
 import type { AgentIcon } from './icons'
 import { LOCKUP, WORDMARK, lockupBody } from './brand'
@@ -197,7 +197,20 @@ const isDark = (tile: string): boolean => parseInt(tile.slice(1, 3), 16) + parse
 
 // An agent's tile, `size` square, from its name. A name without a tile throws: a renamed agent
 // would otherwise drop out of a picture without a word.
+// A picture that shows the same tile many times (the cover) sets `tileSink`: each tile is then drawn
+// once in the picture's defs and used where it is wanted, which keeps the file small.
+let tileSink: Set<string> | null = null
+const tileId = (name: string): string => `tile-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
 const iconTile = (name: string, x: number, y: number, size: number): string => {
+  const icon = AGENT_ICONS.find(one => one.name === name)
+  if (icon === undefined) throw new Error(`No tile for the agent "${name}" in AGENT_ICONS`)
+  if (tileSink !== null) {
+    tileSink.add(name)
+    return `<use href="#${tileId(name)}" transform="translate(${num(Number(x))} ${num(Number(y))}) scale(${num(size / 48)})"/>`
+  }
+  return tileDrawn(name, x, y, size)
+}
+const tileDrawn = (name: string, x: number, y: number, size: number): string => {
   const icon = AGENT_ICONS.find(one => one.name === name)
   if (icon === undefined) throw new Error(`No tile for the agent "${name}" in AGENT_ICONS`)
   const rim = isDark(icon.tile) ? `<rect x="${x + 0.5}" y="${y + 0.5}" width="${size - 1}" height="${size - 1}" rx="${size * 0.23 - 0.5}" fill="none" stroke="#fff" stroke-opacity="0.22"/>` : ''
@@ -742,7 +755,7 @@ const tabFace = (title: string, isLit: boolean): string =>
 // The page drawn in SVG, in its own sizes (hooks/page-look.ts and the page's stylesheet): the head
 // with its logo, the row of agent icons, then Needs you and Working now. `PG` holds the heights.
 const PG = { head: 48, chips: 46, top: 22, heading: 30, row: 54, rowGap: 8, flag: 30, card: 132, sectionGap: 22, side: 24 }
-const PAGE_NAMES: Record<PageAgent, string> = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity', opencode: 'OpenCode' }
+const PAGE_NAMES: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', antigravity: 'Antigravity', opencode: 'OpenCode' }
 const pageHead = (pw: number, light = LOOK.ink, over = ''): string =>
   `${lockupAt(PG.side, 16, 17, light, over)}<line x1="0" y1="${PG.head - 0.5}" x2="${pw}" y2="${PG.head - 0.5}" stroke="${LOOK.line}"/>`
 // One agent's icon in the row, with the page's presence dot (green: connected) at its corner.
@@ -763,11 +776,11 @@ const sectionHead = (text: string, y: number): string => `<text x="${PG.side}" y
 
 // A task row: the agent's icon, the title, who and when at the right, then the step it is on (or
 // `note`, a line the page wrote) and a bar of its steps.
-const rowFrame = (s: Strings, agent: PageAgent, task: { title: string }, x: number, y: number, w: number): string =>
+const rowFrame = (s: Strings, agent: string, task: { title: string }, x: number, y: number, w: number): string =>
   `<rect x="${x}" y="${y}" width="${w}" height="${PG.row}" rx="10" fill="${LOOK.surface}" stroke="${LOOK.line}"/>
-${iconTile(PAGE_NAMES[agent], x + 14, y + 13, 28)}
+${iconTile(PAGE_NAMES[agent] ?? agent, x + 14, y + 13, 28)}
 <text x="${x + 54}" y="${y + 23}" font-size="15" font-weight="600" fill="${LOOK.ink}">${esc(task.title)}</text>
-<text x="${x + w - 16}" y="${y + 22}" text-anchor="end" font-size="12.5" fill="${LOOK.muted}">${esc(PAGE_NAMES[agent])} · ${esc(s.justNow)}</text>`
+<text x="${x + w - 16}" y="${y + 22}" text-anchor="end" font-size="12.5" fill="${LOOK.muted}">${esc(PAGE_NAMES[agent] ?? agent)} · ${esc(s.justNow)}</text>`
 const rowState = (task: { steps: string[] }, done: number, x: number, y: number, w: number, note?: string): string => {
   const total = task.steps.length
   const barW = total * 18 - 4
@@ -830,64 +843,129 @@ ${sectionHead(s.pgWorking, headYB)}
 ${rows}`
 }
 
-// The README's cover, a 20 s loop in four scenes, each named by a caption at the left: one command
-// to start, every agent on one board, a question jumping to the top, and answering it from the board.
-// The screen is the board's page, drawn from the page's look and words (pgNeeds, pgWorking,
-// pgTabTitle, claudeDelivered). The logo at the top left is ink while all is calm, turns amber when
-// Claude Code asks, as the page's logo does (is-waiting), and goes back to ink once the answer is
-// sent. CSS keyframes only, so GitHub plays it in an <img>; with reduced motion, or a viewer that
-// plays no animation, the last scene shows still. Its board asks nothing more (#1273).
-const COVER_LOOP = 20
-const COVER_SCENES = [0, 4, 9, 14]
-// The moments: the command typed, the agents arriving, the question, the pointer's way to an answer
-// and to Send, the answer delivered, Needs you folding away, and the veil at the loop's turn.
-const COVER_T = { type: 0.35, typed: 1.5, ask: 9.5, aim: 14.25, pick: 15.0, toSend: 15.3, send: 15.75, sent: 15.9, fold: 17.5, veil: 19.6 }
-const COVER_ARRIVE: Record<PageAgent, number> = { codex: 1.8, antigravity: 2.2, claude: 2.6, opencode: 3.0 }
-// How many steps each agent has done when it arrives, and each later tick: [agent, time, done].
-const COVER_START: Record<PageAgent, number> = { claude: 1, codex: 1, antigravity: 1, opencode: 0 }
-const COVER_TICKS: Array<[PageAgent, number, number]> = [['codex', 4.6, 2], ['opencode', 5.4, 1], ['antigravity', 6.2, 2], ['claude', 7.0, 2], ['codex', 7.8, 3]]
-type CoverScene = { caption: [string, string]; sub: string }
-const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; works: string; synthetic: string }> = {
+// The README's cover, a 40 s loop in seven captioned scenes (1280 x 720). The words sit at the left,
+// the picture at the right. 1 asks the question every person who runs several agents has: which
+// one is waiting on you? 2 shows one agent stopped on a question while you were in another window.
+// 3 names the product in one sentence, and the three windows become rows of the board's page. 4 a
+// question jumps to the top. 5 it is answered from the page. 6 one command starts it. 7 closes on
+// the sentence again, with the calm board. The screen is the board's page, drawn from the page's
+// look and words (pgNeeds, pgWorking, pgTabTitle, claudeDelivered). The logo at the top left is
+// ink while all is calm, turns amber while Claude Code asks, as the page's logo does (is-waiting),
+// and goes back to ink once the answer is sent. Amber means one thing in the whole picture:
+// something is waiting on you. CSS keyframes only, so GitHub plays it in an <img>; with reduced
+// motion, or a viewer that plays no animation, scene 7 shows still (`.last`). The loop turns by a
+// cross-fade from scene 7 back to scene 1, which is already fully drawn at 0 s.
+const COVER_LOOP = 40
+const COVER_SCENES = [0, 4, 9, 15, 22, 28, 33]
+// Seconds: the three windows turn into rows, the question arrives, the pointer's way to an answer
+// and to Send, the answer delivered, Needs you folding away, and the command typed in scene 6.
+const COVER_T = { morph: 9, ask: 15, aim: 22.4, pick: 23.2, send: 23.95, sent: 24.1, fold: 25.8, type: 28.7, typed: 29.9, close: 33 }
+// The sentence of scenes 3 and 7 and of the social card (the owner's pick, Set 1 of the tagline
+// proposal). {…} marks the words in amber. The Chinese headline is the product's name for what it
+// is, since a word-for-word translation of the English reads oddly (owner 2026-11-11, Fable's
+// Set 1 name with its round-2 sub line A).
+const SET1: Record<Lang, { caption: string[]; sub: string[]; size: number }> = {
+  en: { caption: ['A board that shows', 'which AI agent is', '{waiting on you}.'], sub: ['Claude Code, Codex, Cursor', 'and more, on your own computer.', 'Questions show up in seconds.'], size: 48 },
+  'zh-TW': { caption: ['AI agent 進度看板'], sub: ['agent 一停下來{等你回答}，', '幾秒內就排到看板最上面，', '不用再一個個視窗找。'], size: 60 },
+  'zh-CN': { caption: ['AI agent 进度看板'], sub: ['agent 一停下来{等你回复}，', '几秒内就排到看板最上面，', '不用再挨个窗口找。'], size: 60 },
+}
+type CoverScene = { caption: string[]; sub?: string[]; size?: number }
+type CoverTerm = { project: string; steps: [string, string, string] }
+const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; works: string; synthetic: string; terms: Record<'codex' | 'antigravity' | 'claude', CoverTerm> }> = {
   en: {
-    label: 'Synthetic demo: four agents report to one board page. Claude Code asks “Blue or green?”, its card moves up to Needs you and the logo’s light turns amber; an answer pressed on the page is delivered to Claude Code. Synthetic data.',
+    label: 'Synthetic demo: Which AI agent is waiting on you? Three coding agents work side by side and one has stopped to ask “Blue or green?”. Agent Board puts that question first on one local page; an answer pressed there is delivered to Claude Code. Synthetic data.',
     scenes: [
-      { caption: ['One command', 'to start.'], sub: 'Setup connects the agents it finds.' },
-      { caption: ['Every agent,', 'one board.'], sub: 'Each step ticks off the moment it is done.' },
-      { caption: ['Questions jump', 'to the top.'], sub: 'The agent that needs you lights up.' },
-      { caption: ['Answer from', 'the board.'], sub: 'Claude Code gets it without a window switch.' },
+      { caption: ['Which AI agent is', '{waiting on you}?'] },
+      { caption: ['One stopped to ask.', 'You were in', 'another window.'] },
+      SET1.en,
+      { caption: ['Its question goes', 'to the top.'], sub: ['On the board within seconds.'] },
+      { caption: ['Answer it', 'right there.'], sub: ['Claude Code gets it without', 'a window switch.'] },
+      { caption: ['One command', 'to start.'], sub: ['On your computer.', 'One Markdown file. No account.'] },
+      SET1.en,
     ],
     works: 'Works with',
     synthetic: 'Synthetic data',
+    terms: {
+      codex: { project: 'api-gateway', steps: ['Token bucket', 'Load test', 'API docs'] },
+      antigravity: { project: 'docs-site', steps: ['English text', 'Japanese page', 'Check links'] },
+      claude: { project: 'acme-web', steps: ['Colour tokens', 'Chart contrast', ''] },
+    },
   },
-  // Chinese headlines leave out the punctuation at the end of a line, as Chinese display type does.
   'zh-TW': {
-    label: '合成示範：四個 agent 回報到同一個看板網頁。Claude Code 問「藍色還是綠色？」，它的卡片移到「需要你」，標誌的燈變成琥珀色；在網頁上按下答案，就送到 Claude Code。合成資料。',
+    label: '合成示範：現在哪個 AI agent 在等你？三個 coding agent 並排工作，其中一個停下來問「藍色還是綠色？」。Agent Board 把這個問題排在本機網頁的最上面，在那裡按下答案，就送到 Claude Code。合成資料。',
     scenes: [
-      { caption: ['一行指令', '就能開始'], sub: '安裝時會自動接上找到的 agent。' },
-      { caption: ['每個 agent', '都在同一塊看板'], sub: '每做完一步，看板上馬上打勾。' },
-      { caption: ['誰在等你', '誰就排最前面'], sub: '需要你的那一個會亮起來。' },
-      { caption: ['在看板上', '直接回覆'], sub: '不用切視窗，答案直接送到 Claude Code。' },
+      { caption: ['現在哪個 AI agent', '{在等你}？'] },
+      { caption: ['有一個停下來問你', '你人在別的視窗'] },
+      SET1['zh-TW'],
+      { caption: ['它的問題直接', '排到最上面'], sub: ['幾秒內就上看板。'] },
+      { caption: ['在看板上', '直接回答'], sub: ['不用切視窗，', '答案直接送到 Claude Code。'] },
+      { caption: ['一行指令', '就能開始'], sub: ['在你的電腦上跑，', '一個 Markdown 檔，不用帳號。'] },
+      SET1['zh-TW'],
     ],
     works: '支援',
     synthetic: '合成資料',
+    terms: {
+      codex: { project: 'api-gateway', steps: ['token bucket', 'staging 壓測', 'API 文件'] },
+      antigravity: { project: 'docs-site', steps: ['寫英文內容', '做日文頁面', '檢查連結'] },
+      claude: { project: 'acme-web', steps: ['配色 token', '圖表對比度', ''] },
+    },
   },
   'zh-CN': {
-    label: '合成演示：四个 agent 汇报到同一个看板网页。Claude Code 问“蓝色还是绿色？”，它的卡片移到“需要你”，标志的灯变成琥珀色；在网页上按下答案，就送到 Claude Code。合成数据。',
+    label: '合成演示：现在哪个 AI agent 在等你？三个 coding agent 并排工作，其中一个停下来问“蓝色还是绿色？”。Agent Board 把这个问题排在本机网页的最上面，在那里按下答案，就发给 Claude Code。合成数据。',
     scenes: [
-      { caption: ['一行命令', '就能开始'], sub: '安装时会自动接上找到的 agent。' },
-      { caption: ['每个 agent', '都在同一块看板'], sub: '每做完一步，看板上马上打勾。' },
-      { caption: ['谁在等你', '谁就排最前面'], sub: '需要你的那一个会亮起来。' },
-      { caption: ['在看板上', '直接回复'], sub: '不用切窗口，答案直接送到 Claude Code。' },
+      { caption: ['现在哪个 AI agent', '{在等你}？'] },
+      { caption: ['有一个停下来问你', '你在别的窗口'] },
+      SET1['zh-CN'],
+      { caption: ['它的提问直接', '排到最上面'], sub: ['几秒内就出现在看板上。'] },
+      { caption: ['在看板上', '直接回复'], sub: ['不用切窗口，', '答案直接送到 Claude Code。'] },
+      { caption: ['一行命令', '就能开始'], sub: ['在你的电脑上运行，', '一个 Markdown 文件，不用账号。'] },
+      SET1['zh-CN'],
     ],
     works: '支持',
     synthetic: '合成数据',
+    terms: {
+      codex: { project: 'api-gateway', steps: ['token bucket', 'staging 压测', 'API 文档'] },
+      antigravity: { project: 'docs-site', steps: ['写英文内容', '做日文页面', '检查链接'] },
+      claude: { project: 'acme-web', steps: ['配色 token', '图表对比度', ''] },
+    },
   },
 }
-// The setup command scene 1 types.
+// The setup command scene 6 types, and the bottom of the left column shows in every scene.
 const COVER_COMMAND = 'npx @wenyuchiou/agent-board'
 // Every new picture's row of agents: the seven with a live record at 0.24.3, in the owner's
 // order, and no agent that was not run live.
 const LIVE_AGENTS = ['Claude Code', 'Codex', 'Antigravity', 'Cursor', 'OpenCode', 'Grok Build', 'Hermes Agent']
+// The fifth agent on the board, which the page sample does not hold (made up, like the others).
+const COVER_CURSOR: Record<Lang, PageTask> = {
+  en: { project: 'web-client', title: 'Refactor the settings page', steps: ['Split the form', 'Add field checks', 'Update snapshots', 'Open the pull request'] },
+  'zh-TW': { project: 'web-client', title: '重構設定頁', steps: ['拆開表單', '加上欄位檢查', '更新快照', '開 PR'] },
+  'zh-CN': { project: 'web-client', title: '重构设置页', steps: ['拆开表单', '加上字段检查', '更新快照', '提 PR'] },
+}
+// The board's rows while all is calm, top to bottom, with the steps each has done when it first
+// shows and each later tick: [time, done]. Claude Code's row is the one that asks, and it has done
+// the steps before the question when it does.
+type CoverRow = { name: string; task: PageTask; start: number; ticks: Array<[number, number]> }
+const coverRows = (lang: Lang): CoverRow[] => {
+  const sample = PAGE[lang] as PageSample
+  return [
+    { name: 'Codex', task: sample.tasks.codex, start: 2, ticks: [[17.0, 3]] },
+    { name: 'Antigravity', task: sample.tasks.antigravity, start: 2, ticks: [[19.8, 3]] },
+    { name: 'Claude Code', task: sample.tasks.claude, start: sample.asks, ticks: [] },
+    { name: 'Cursor', task: COVER_CURSOR[lang], start: 1, ticks: [[18.4, 2]] },
+    { name: 'OpenCode', task: sample.tasks.opencode, start: 0, ticks: [[21.0, 1], [27.0, 2]] },
+  ]
+}
+// A caption's line with {…} in amber.
+const marked = (line: string): string =>
+  line.split(/(\{[^}]*\})/).filter(part => part !== '').map(part => (part.startsWith('{') ? `<tspan fill="${LOOK.amber}">${esc(part.slice(1, -1))}</tspan>` : esc(part))).join('')
+const plain = (line: string): string => line.replace(/[{}]/g, '')
+
+// The board's chip for an agent in the page's head row, with the presence dot (green: connected).
+const chipTile = (name: string, i: number): string => {
+  const x = PG.side + i * 42
+  const y = PG.head + 9
+  return `${iconTile(name, x, y, 28)}<circle cx="${x + 26}" cy="${y + 26}" r="5.5" fill="${LOOK.alive}" stroke="${LOOK.ground}" stroke-width="2.5"/>`
+}
 
 const cover = (lang: Lang): string => {
   const s = STRINGS[lang]
@@ -898,12 +976,14 @@ const cover = (lang: Lang): string => {
   const LOOP = COVER_LOOP
   const isCjk = lang !== 'en'
   if (w.scenes.length !== COVER_SCENES.length) throw new Error(`The ${lang} cover has ${w.scenes.length} captions for ${COVER_SCENES.length} scenes`)
-  const claudeDone = COVER_TICKS.filter(([agent, at]) => agent === 'claude' && at < T.ask).reduce((_, [, , done]) => done, COVER_START.claude)
-  if (claudeDone !== sample.asks) throw new Error(`Claude Code has done ${claudeDone} steps when it asks, but its question is step ${sample.asks + 1}`)
+  tileSink = new Set()
+  const rowsData = coverRows(lang)
+  const askRow = rowsData.findIndex(row => row.name === 'Claude Code')
+  if ((rowsData[askRow]?.start ?? -1) !== sample.asks) throw new Error(`Claude Code has done ${rowsData[askRow]?.start} steps when it asks, but its question is step ${sample.asks + 1}`)
   const W = 1280
-  const H = 640
-  const L = 64
-  const win = { x: 500, y: 32, w: 740, h: 576 }
+  const H = 720
+  const L = 56
+  const win = { x: 582, y: 28, w: 658, h: 664 }
   const pw = win.w
   const rowW = pw - PG.side * 2
   const keyframes: string[] = []
@@ -921,90 +1001,131 @@ const cover = (lang: Lang): string => {
     const at = i === 0 ? (sec <= 0 ? '0%' : `0%, ${p(sec)}`) : i === stops.length - 1 ? (sec >= LOOP ? '100%' : `${p(sec)}, 100%`) : p(sec)
     return `${at} { ${css} }`
   }).join(' '))
-  const EASE = 'animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1)'
+  const EASE = 'animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1)'
   const MOVE = 'animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1)'
-  // On from `on` (rising `rise` px into place) until `off`; from 0 it is already on, to the loop's end it
-  // stays: the veil hides the turn.
-  const show = (on: number, off: number, rise = 0, fade = 0.4): string => {
+  const TAIL = 0.5
+  // On screen during each of `spans` (rising `rise` px into place), and gone between. A span that
+  // starts at 0 is already there at the loop's start, and one that ends at the loop's end leaves
+  // over the last TAIL seconds, so the loop turns by a cross-fade from scene 7 to scene 1.
+  const appear = (spans: Array<[number, number]>, rise = 0, fin = 0.4, fout = 0.3): string => {
     const y = (v: number): string => (rise === 0 ? '' : `; transform: translateY(${v}px)`)
-    const stops: Array<[number, string]> = on <= 0 ? [[0, `opacity: 1${y(0)}`]] : [[on, `opacity: 0${y(rise)}; ${EASE}`], [on + fade, `opacity: 1${y(0)}`]]
-    return track([...stops, ...(off >= LOOP ? [[LOOP, `opacity: 1${y(0)}`] as [number, string]] : [[off - 0.25, `opacity: 1${y(0)}`] as [number, string], [off, `opacity: 0${y(0)}`] as [number, string]])])
+    const on = `opacity: 1${y(0)}`
+    const gone = `opacity: 0${y(0)}`
+    const stops: Array<[number, string]> = []
+    for (const [start, end] of spans) {
+      if (start <= 0) stops.push([0, on])
+      else stops.push([start, `opacity: 0${y(rise)}; ${EASE}`], [start + fin, on])
+      if (end >= LOOP) stops.push([LOOP - TAIL, on], [LOOP, gone])
+      else stops.push([end - fout, on], [end, gone])
+    }
+    if ((spans[0]?.[0] ?? 1) <= 0) stops.push([LOOP - TAIL, gone], [LOOP, on])
+    return track(stops)
   }
-  // A quick change in place, as the page redraws a line.
-  const swap = (on: number, off: number): string => show(on, off, 0, 0.18)
+  const endsLoop = (spans: Array<[number, number]>): boolean => spans.some(([, end]) => end >= LOOP)
+  // An animated group: `a`, its keyframes' class, and `last` when it stays to the loop's end.
+  const g = (spans: Array<[number, number]>, body: string, rise = 0, fin = 0.4, fout = 0.3): string =>
+    `<g class="a ${appear(spans, rise, fin, fout)}${endsLoop(spans) ? ' last' : ''}">${body}</g>`
+  const swap = (on: number, body: string): string => g([[on, LOOP]], body, 0, 0.18)
   const glow = (at: number, peak: number, length = 1): string => track([[at, 'opacity: 0'], [at + 0.15, `opacity: ${peak}`], [at + length, 'opacity: 0']])
-  const last = (end: number): string => (end >= LOOP ? ' last' : '')
-  const g = (name: string, body: string, end = 0, extra = ''): string => `<g class="a ${name}${last(end)}"${extra}>${body}</g>`
 
-  // The page inside the window, in its own units (0, 0 under the browser's bar).
-  const order = ['claude', 'codex', 'antigravity', 'opencode'] as PageAgent[]
-  const states = (agent: PageAgent): Array<[number, number]> => [[COVER_ARRIVE[agent], COVER_START[agent]], ...COVER_TICKS.filter(([one]) => one === agent).map(([, at, done]) => [at, done] as [number, number])]
-  const rowBody = (agent: PageAgent, y: number, isClaude: boolean): string => {
-    const task = sample.tasks[agent]
-    const list = states(agent)
-    const parts = list.map(([at, done], k) => {
-      const end = list[k + 1]?.[0] ?? (isClaude ? T.fold : LOOP)
-      return g(k === 0 ? show(0, end) : swap(at, end), rowState(task, done, PG.side, y, rowW), end)
-    })
-    const flashes = list.slice(1).map(([at]) => `<rect class="a ${glow(at, 0.08)}" x="${PG.side}" y="${y}" width="${rowW}" height="${PG.row}" rx="10" fill="${LOOK.ink}"/>`).join('')
-    const note = isClaude ? g(swap(T.fold, LOOP), rowState(task, sample.asks, PG.side, y, rowW, s.claudeDelivered), LOOP) : ''
-    return `${rowFrame(s, agent, task, PG.side, y, rowW)}${parts.join('')}${note}${flashes}`
+  // ---- The board's page, in its own units (0, 0 under the browser's bar) ----
+  const CK = 1.2
+  const cardTop = contentTop + PG.flag
+  const cardH = Math.round(PG.card * CK)
+  const headYB = cardTop + cardH + PG.sectionGap
+  const rowYA = (i: number): number => contentTop + PG.heading + i * (PG.row + PG.rowGap)
+  const others = rowsData.map((_, i) => i).filter(i => i !== askRow)
+  const rowYB = (i: number): number => headYB + PG.heading + others.indexOf(i) * (PG.row + PG.rowGap)
+  const dyOf = (i: number): number => rowYB(i) - rowYA(i)
+  const headDy = headYB - contentTop
+  const rise = rowYA(askRow) - cardTop
+  const card = needsCard(s, sample, 0, -PG.flag, rowW / CK)
+  const toPage = ([x, y]: [number, number]): [number, number] => [PG.side + x * CK, cardTop + y * CK]
+  const toCanvas = (at: [number, number]): [number, number] => {
+    const [x, y] = toPage(at)
+    return [win.x + x, win.y + BAR_H + y]
   }
-  // The other three rows move down under Claude Code's card while it asks, and back once it folds.
-  const moved = (agent: PageAgent): string => {
-    const dy = rowYB(agent) - rowYA(agent)
-    const on = COVER_ARRIVE[agent]
+  const ARRIVE = T.morph + 0.5
+  const rowBody = (row: CoverRow, i: number): string => {
+    const y = rowYA(i)
+    const isAsking = i === askRow
+    const overlays = row.ticks.map(([at, done], k) => {
+      const isLast = k === row.ticks.length - 1 && !isAsking
+      const body = rowState(row.task, done, PG.side, y, rowW)
+      return `<g class="a ${appear([[at, LOOP]], 0, 0.18)}${isLast ? ' last' : ''}">${body}</g>`
+    })
+    const flashes = row.ticks.map(([at]) => `<rect class="a ${glow(at, 0.08)}" x="${PG.side}" y="${y}" width="${rowW}" height="${PG.row}" rx="10" fill="${LOOK.ink}"/>`).join('')
+    const note = isAsking ? swap(T.fold + 0.3, rowState(row.task, sample.asks, PG.side, y, rowW, s.claudeDelivered)) : ''
+    // A thin amber outline marks the row that waits, until its question takes over the top.
+    const outline = isAsking ? `<rect class="a ${appear([[T.morph + 1.3, T.ask + 0.3]], 0, 0.5, 0.3)}" x="${PG.side - 1}" y="${y - 1}" width="${rowW + 2}" height="${PG.row + 2}" rx="11" fill="none" stroke="${LOOK.amber}" stroke-width="2"/>` : ''
+    return `${rowFrame(s, row.name, row.task, PG.side, y, rowW)}${rowState(row.task, row.start, PG.side, y, rowW)}${overlays.join('')}${note}${flashes}${outline}`
+  }
+  const rowTrack = (i: number): string => {
+    const at = ARRIVE + i * 0.12
+    if (i === askRow) {
+      return track([
+        [0, 'opacity: 0; transform: translateY(0px)'],
+        [at, `opacity: 0; transform: translateY(12px); ${EASE}`],
+        [at + 0.45, 'opacity: 1; transform: translateY(0px)'],
+        [T.ask, `opacity: 1; transform: translateY(0px); ${MOVE}`],
+        [T.ask + 0.5, `opacity: 0; transform: translateY(${-rise}px)`],
+        [T.fold, `opacity: 0; transform: translateY(${-rise}px); ${MOVE}`],
+        [T.fold + 0.6, 'opacity: 1; transform: translateY(0px)'],
+        [LOOP - TAIL, 'opacity: 1; transform: translateY(0px)'],
+        [LOOP, 'opacity: 0; transform: translateY(0px)'],
+      ])
+    }
+    const dy = dyOf(i)
+    const isNew = i >= 3
+    const first: Array<[number, string]> = isNew
+      ? [[0, `opacity: 0; transform: translateY(${dy}px)`], [T.ask + 0.3 + (i - 3) * 0.3, `opacity: 0; transform: translateY(${dy}px); ${EASE}`], [T.ask + 0.75 + (i - 3) * 0.3, `opacity: 1; transform: translateY(${dy}px)`]]
+      : [[0, 'opacity: 0; transform: translateY(0px)'], [at, `opacity: 0; transform: translateY(12px); ${EASE}`], [at + 0.45, 'opacity: 1; transform: translateY(0px)'], [T.ask, `opacity: 1; transform: translateY(0px); ${MOVE}`], [T.ask + 0.6, `opacity: 1; transform: translateY(${dy}px)`]]
     return track([
-      [on, `opacity: 0; transform: translateY(12px); ${EASE}`],
-      [on + 0.45, 'opacity: 1; transform: translateY(0px)'],
-      [T.ask, `opacity: 1; transform: translateY(0px); ${MOVE}`],
-      [T.ask + 0.6, `opacity: 1; transform: translateY(${dy}px)`],
+      ...first,
       [T.fold, `opacity: 1; transform: translateY(${dy}px); ${MOVE}`],
       [T.fold + 0.6, 'opacity: 1; transform: translateY(0px)'],
-      [LOOP, 'opacity: 1; transform: translateY(0px)'],
+      [LOOP - TAIL, 'opacity: 1; transform: translateY(0px)'],
+      [LOOP, 'opacity: 0; transform: translateY(0px)'],
     ])
   }
-  const rise = rowYA('claude') - contentTop - PG.flag
-  const claudeRow = track([
-    [COVER_ARRIVE.claude, `opacity: 0; transform: translateY(12px); ${EASE}`],
-    [COVER_ARRIVE.claude + 0.45, 'opacity: 1; transform: translateY(0px)'],
+  const rows = rowsData.map((row, i) => `<g class="a ${rowTrack(i)} last">${rowBody(row, i)}</g>`).join('\n')
+  const heading = `<g class="a ${track([
+    [0, 'opacity: 0; transform: translateY(0px)'],
+    [ARRIVE - 0.1, `opacity: 0; transform: translateY(0px); ${EASE}`],
+    [ARRIVE + 0.3, 'opacity: 1; transform: translateY(0px)'],
     [T.ask, `opacity: 1; transform: translateY(0px); ${MOVE}`],
-    [T.ask + 0.5, `opacity: 0; transform: translateY(${-rise}px)`],
-    [T.fold, `opacity: 0; transform: translateY(${-rise}px); ${MOVE}`],
+    [T.ask + 0.6, `opacity: 1; transform: translateY(${headDy}px)`],
+    [T.fold, `opacity: 1; transform: translateY(${headDy}px); ${MOVE}`],
     [T.fold + 0.6, 'opacity: 1; transform: translateY(0px)'],
-    [LOOP, 'opacity: 1; transform: translateY(0px)'],
-  ])
-  const rows = order.map(agent => `<g class="a ${agent === 'claude' ? claudeRow : moved(agent)} last">${rowBody(agent, rowYA(agent), agent === 'claude')}</g>`).join('\n')
-  // Working now comes with the first agent, then moves down under the card and back.
-  const first = Math.min(...Object.values(COVER_ARRIVE))
-  const headDy = headYB - contentTop
-  const heading = `<g class="a ${track([[first - 0.1, `opacity: 0; transform: translateY(0px); ${EASE}`], [first + 0.35, 'opacity: 1; transform: translateY(0px)'], [T.ask, `opacity: 1; transform: translateY(0px); ${MOVE}`], [T.ask + 0.6, `opacity: 1; transform: translateY(${headDy}px)`], [T.fold, `opacity: 1; transform: translateY(${headDy}px); ${MOVE}`], [T.fold + 0.6, 'opacity: 1; transform: translateY(0px)']])} last">${sectionHead(s.pgWorking, contentTop)}</g>`
-  // Claude Code's card: up from its row into Needs you, the answer picked and sent, then back down.
-  const card = needsCard(s, sample, PG.side, contentTop, rowW)
+    [LOOP - TAIL, 'opacity: 1; transform: translateY(0px)'],
+    [LOOP, 'opacity: 0; transform: translateY(0px)'],
+  ])} last">${sectionHead(s.pgWorking, contentTop)}</g>`
+  // Claude Code's card: up from its row into Needs you, the answer picked and sent, then folded away.
   const cardMove = track([
     [T.ask, `opacity: 0; transform: translateY(${rise}px); ${MOVE}`],
     [T.ask + 0.6, 'opacity: 1; transform: translateY(0px)'],
     [T.fold, `opacity: 1; transform: translateY(0px); ${MOVE}`],
     [T.fold + 0.5, `opacity: 0; transform: translateY(${rise}px)`],
   ])
-  const cardSvg = `<g class="a ${cardMove}"><g filter="url(#soft)">${card.sheet}</g>${card.answers}${g(swap(T.pick + 0.05, LOOP), card.picked)}${g(swap(T.sent, LOOP), card.receipt)}</g>`
-  const flag = g(show(T.ask + 0.15, T.sent + 0.35, 6, 0.35), needsFlag(s, PG.side, contentTop, 1))
-  const chips = order.map((agent, i) => g(show(COVER_ARRIVE[agent], LOOP, 6, 0.35), chipAt(agent, i), LOOP)).join('')
-  const badge = g(show(T.ask + 0.2, T.sent, 0, 0.25), badgeAt(order.indexOf('claude'), 1))
+  const cardSvg = `<g class="a ${cardMove}"><g transform="translate(${PG.side} ${cardTop}) scale(${CK})"><g filter="url(#soft)">${card.sheet}</g>${card.answers}${g([[T.pick + 0.05, T.fold + 0.5]], card.picked, 0, 0.18, 0.2)}${g([[T.sent, T.fold + 0.5]], card.receipt, 0, 0.18, 0.2)}</g></g>`
+  const flag = g([[T.ask + 0.15, T.sent + 0.35]], needsFlag(s, PG.side, contentTop, 1), 6, 0.35)
+  // The head row's seven chips: the three agents of scene 1 first, the rest as the board fills.
+  const chips = LIVE_AGENTS.map((name, i) => (i < 3 ? chipTile(name, i) : g([[T.ask + 0.3 + (i - 3) * 0.12, LOOP]], chipTile(name, i), 6, 0.35))).join('')
+  const badge = g([[T.ask + 0.2, T.sent]], badgeAt(0, 1), 0, 0.25)
   // The page's own logo lights with the cover's.
-  const headLight = `<circle class="a ${show(T.ask + 0.1, T.sent, 0, 0.3)}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
+  const headLight = `<circle class="a ${appear([[T.ask + 0.1, T.sent]], 0, 0.3)}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
   const page = `${pageHead(pw, LOOK.ink, headLight)}${chips}${badge}${chipsLine(pw)}
 ${heading}
 ${rows}
 ${flag}
 ${cardSvg}`
-  const tab = `${tabFace('Agent Board', false)}<g class="a ${show(T.ask + 0.1, T.sent, 0, 0.2)}"><rect x="84" y="12" width="250" height="24" fill="${LOOK.ground}"/>${tabFace(s.pgTabTitle(1), true)}</g>`
-  const windowSvg = browser('page', win.x, win.y, win.w, win.h, tab, page)
+  const tab = `${tabFace('Agent Board', false)}${g([[T.ask + 0.1, T.sent]], `<rect x="84" y="12" width="250" height="24" fill="${LOOK.ground}"/>${tabFace(s.pgTabTitle(1), true)}`, 0, 0.2)}`
+  const board = `<g class="a ${appear([[T.morph, 28], [T.close, LOOP]], 0, 0.6, 0.4)} last">${browser('page', win.x, win.y, win.w, win.h, tab, page)}</g>`
 
   // The pointer: in from below to the first answer, a press, on to Send, a press, and away.
   const pointer = (() => {
-    const [ax, ay] = card.pick.map((v, i) => v + (i === 0 ? win.x : win.y + BAR_H)) as [number, number]
-    const [sx, sy] = card.send.map((v, i) => v + (i === 0 ? win.x : win.y + BAR_H)) as [number, number]
+    const [ax, ay] = toCanvas(card.pick)
+    const [sx, sy] = toCanvas(card.send)
     const at = (x: number, y: number, k = 1): string => `transform: translate(${num(x)}px, ${num(y)}px) scale(${k})`
     const move = 'animation-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1)'
     const name = track([
@@ -1021,53 +1142,157 @@ ${cardSvg}`
     ])
     return `<g class="a ${name}"><path d="M0 0V18.5L4.6 14.2L7.7 21.2L10.9 19.8L7.9 13H14Z" fill="#fff" stroke="#1b1b1b" stroke-width="1.3" stroke-linejoin="round"/></g>`
   })()
-  const presses = [[card.pick, T.pick], [card.send, T.send]].map(([[x, y], at]) => `<circle class="a ${glow(at as number, 0.35, 0.45)}" cx="${num((x as number) + win.x)}" cy="${num((y as number) + win.y + BAR_H)}" r="22" fill="${LOOK.ink}"/>`).join('')
+  const presses = [[card.pick, T.pick], [card.send, T.send]].map(([at, time]) => {
+    const [x, y] = toCanvas(at as [number, number])
+    return `<circle class="a ${glow(time as number, 0.35, 0.45)}" cx="${num(x)}" cy="${num(y)}" r="22" fill="${LOOK.ink}"/>`
+  }).join('')
 
-  // The left column: the logo, each scene's caption and the line under it, then the command and the
-  // agents setup supports, which stay.
-  const lit = `<circle class="a s ${track([[T.ask, 'opacity: 0; transform: scale(0.86)'], [T.ask + 0.45, 'opacity: 1; transform: scale(1.18)'], [T.ask + 1.1, 'opacity: 1; transform: scale(1)'], [T.sent - 0.05, 'opacity: 1; transform: scale(1)'], [T.sent + 0.4, 'opacity: 0; transform: scale(1)']])}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
-  const halo = `<circle class="a s ${track([[T.ask, 'opacity: 0; transform: scale(1)'], [T.ask + 0.05, 'opacity: 0.6; transform: scale(1)'], [T.ask + 1.6, 'opacity: 0; transform: scale(1.9)'], [T.ask + 2.6, 'opacity: 0.3; transform: scale(1.6)'], [T.ask + 3.8, 'opacity: 0.05; transform: scale(1.1)'], [T.ask + 5, 'opacity: 0.3; transform: scale(1.6)'], [T.sent, 'opacity: 0; transform: scale(1.05)']])}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
-  const logo = lockupAt(L, 40, 30, LOOK.ink, `${halo}${lit}`)
-  const capY = 196
-  const capSize = isCjk ? 50 : 54
-  const capGap = isCjk ? 64 : 64
+  // ---- Scenes 1 to 3: three terminal windows side by side, then the board's rows ----
+  const WIN_COLS = 20
+  const WIN_ROWS = 9
+  const winW = WIN_COLS * CELL + PAD * 2
+  const winH = BAR + PAD + WIN_ROWS * LINE + PAD
+  const winGap = 10
+  const winY = 224
+  const winX = (i: number): number => win.x + 2 + i * (winW + winGap)
+  const dark = TERMINAL.dark
+  const y0 = (row: number): number => BAR + PAD + row * LINE + 14
+  const plainLine = (row: number, text: string, fill: string, bold = false): string => `<text x="${PAD}" y="${y0(row)}" fill="${fill}"${bold ? ' font-weight="700"' : ''}>${esc(text)}</text>`
+  const doneLine = (row: number, text: string): string => `<text x="${PAD}" y="${y0(row)}" fill="${dark.palette.done}">✓ <tspan fill="${dark.ink}">${esc(text)}</tspan></text>`
+  const runLine = (row: number, text: string): string => `<text x="${PAD}" y="${y0(row)}" fill="${dark.palette.muted}">▸ ${esc(text)}</text>`
+  const cover1 = (row: number): string => `<rect x="1" y="${y0(row) - 14}" width="${winW - 2}" height="${LINE}" fill="${dark.ground}"/>`
+  // The window's tick: the step turns into a tick and the next one starts.
+  const ticking = (term: CoverTerm, at: number): string =>
+    g([[at, 9.9]], `${cover1(2)}${doneLine(2, term.steps[1])}`, 0, 0.2) + g([[at + 0.3, 9.9]], runLine(3, term.steps[2]), 0, 0.3)
+  const workingBody = (name: string, term: CoverTerm, at: number): string =>
+    `${iconTile(name, winW - 34, 6, 22)}${plainLine(0, term.project, dark.palette.project)}${doneLine(1, term.steps[0])}${runLine(2, term.steps[1])}${ticking(term, at)}`
+  const blinkStops: Array<[number, string]> = [[0, 'opacity: 1']]
+  for (let k = 1; k * 0.55 < 9.4; k++) blinkStops.push([Math.round((k * 0.55 - 0.02) * 100) / 100, `opacity: ${k % 2 === 1 ? 1 : 0}`], [Math.round(k * 0.55 * 100) / 100, `opacity: ${k % 2 === 1 ? 0 : 1}`])
+  blinkStops.push([9.9, 'opacity: 0'])
+  const stoppedBody = (name: string, term: CoverTerm): string =>
+    `${iconTile(name, winW - 34, 6, 22)}${plainLine(0, term.project, dark.palette.project)}${doneLine(1, term.steps[0])}${doneLine(2, term.steps[1])}${plainLine(4, sample.question, dark.ink, true)}${plainLine(6, '>', dark.palette.muted)}<rect class="a ${track(blinkStops)}" x="${num(PAD + 2 * CELL)}" y="${y0(6) - 13}" width="${num(CELL * 0.9)}" height="16" fill="${dark.ink}"/>`
+  const windows = [
+    { name: 'Codex', body: workingBody('Codex', w.terms.codex, 1.3), dim: 0.4 },
+    { name: 'Antigravity', body: workingBody('Antigravity', w.terms.antigravity, 2.5), dim: 0.4 },
+    { name: 'Claude Code', body: `${stoppedBody('Claude Code', w.terms.claude)}<rect class="a ${appear([[4, 10]], 0, 0.6, 0.3)}" x="-4" y="-4" width="${num(winW + 8)}" height="${num(winH + 8)}" rx="15" fill="none" stroke="${LOOK.amber}" stroke-width="2.5"/>`, dim: 1 },
+  ].map(({ name, body, dim }, i) => {
+    const at = (x: number, y: number, k = 1): string => `transform: translate(${num(x)}px, ${num(y)}px) scale(${k})`
+    const spot = at(winX(i), winY)
+    const k = PG.row / winH
+    const row = at(win.x + PG.side + 4, win.y + BAR_H + rowYA(i), k)
+    const name1 = track([
+      [0, `opacity: 1; ${spot}`],
+      [4, `opacity: 1; ${spot}`],
+      [4.6, `opacity: ${dim}; ${spot}`],
+      [T.morph, `opacity: ${dim}; ${spot}; ${MOVE}`],
+      [T.morph + 0.8, `opacity: 0; ${row}`],
+      [LOOP - TAIL - 0.01, `opacity: 0; ${row}`],
+      [LOOP - TAIL, `opacity: 0; ${spot}`],
+      [LOOP, `opacity: 1; ${spot}`],
+    ])
+    return `<g class="a ${name1}">${terminal('dark', mono, name, body, WIN_ROWS, 0, 0, WIN_COLS)}</g>`
+  }).join('\n')
+
+  // ---- Scene 6: the command typed in a terminal, then the seven agents it connects ----
+  const TERM_K = 1.3
+  const termCols = 48
+  const termW = (termCols * CELL + PAD * 2) * TERM_K
+  const termX = win.x + (win.w - termW) / 2
+  const termY = 176
+  const cmdX = PAD + textW('$ ', 14) + 3
+  const letters = COVER_COMMAND.length
+  const cmdLetterW = COVER_COMMAND.length * CELL
+  const mask = track([[T.type, `opacity: 1; transform: scaleX(1); animation-timing-function: steps(${letters}, end)`], [T.typed, 'opacity: 1; transform: scaleX(0)'], [T.typed + 0.05, 'opacity: 0; transform: scaleX(0)']])
+  const typed = `<text x="${PAD}" y="${y0(0)}" fill="${dark.ink}"><tspan fill="${dark.palette.muted}">$ </tspan>${esc(COVER_COMMAND)}</text><rect class="a m ${mask}" x="${num(cmdX - 1)}" y="${y0(0) - 14}" width="${num(cmdLetterW + 6)}" height="${LINE}" fill="${dark.ground}"/>`
+  const terminalSvg = `<g transform="translate(${num(termX)} ${termY}) scale(${TERM_K})">${terminal('dark', mono, 'agent-board', typed, 2, 0, 0, termCols)}</g>`
+  const pill = (name: string, x: number, y: number): { svg: string; w: number } => {
+    const width = Math.ceil(52 + textW(name, 20, 600) + 20)
+    return { w: width, svg: `<rect x="${num(x)}" y="${y}" width="${width}" height="46" rx="23" fill="${LOOK.surface}" stroke="${LOOK.strong}"/>${iconTile(name, x + 7, y + 7, 32)}<text x="${num(x + 52)}" y="${y + 30}" font-size="20" font-weight="600" fill="${LOOK.ink}">${esc(name)}</text>` }
+  }
+  const perRow = [3, 3, 1]
+  let pillIndex = 0
+  const pills: string[] = []
+  perRow.forEach((count, r) => {
+    let x = termX
+    for (let c = 0; c < count; c++) {
+      const name = LIVE_AGENTS[pillIndex] ?? ''
+      const one = pill(name, x, 410 + r * 62)
+      pills.push(g([[30.1 + pillIndex * 0.15, T.close - 0.1]], one.svg, 8, 0.35, 0.3))
+      x += one.w + 14
+      pillIndex++
+    }
+  })
+  const scene6 = `${g([[28, T.close - 0.1]], terminalSvg, 0, 0.4, 0.3)}\n${pills.join('\n')}`
+
+  // ---- The left column ----
+  const capY = 190
+  const sizeOf = (scene: CoverScene): number => scene.size ?? (isCjk ? 50 : 48)
+  const gapOf = (scene: CoverScene): number => Math.round(sizeOf(scene) * (isCjk ? 1.24 : 1.2))
   const ends = COVER_SCENES.map((_, k) => COVER_SCENES[k + 1] ?? LOOP)
   const captions = w.scenes.map((scene, k) => {
-    const start = COVER_SCENES[k] ?? 0
-    const end = ends[k] ?? LOOP
-    const lines = scene.caption.map((line, i) => `<tspan x="${L}" y="${capY + i * capGap}"${i === 1 ? ` fill="${LOOK.ink}" fill-opacity="0.55"` : ''}>${esc(line)}</tspan>`).join('')
-    return `<g class="a ${show(start, end, 16, 0.5)}${last(end)}"><text font-size="${capSize}" font-weight="800" ${HEADLINE} fill="${LOOK.ink}">${lines}</text></g>
-<g class="a ${show(start + 0.15, end, 10, 0.5)}${last(end)}"><text x="${L}" y="${capY + capGap + 50}" font-size="${isCjk ? 19 : 19}" fill="${LOOK.muted}">${esc(scene.sub)}</text></g>`
+    const span: Array<[number, number]> = [[COVER_SCENES[k] ?? 0, ends[k] ?? LOOP]]
+    const start = span[0]?.[0] ?? 0
+    const size = sizeOf(scene)
+    const gap = gapOf(scene)
+    const lines = scene.caption.map((line, i) => `<tspan x="${L}" y="${capY + i * gap}">${marked(line)}</tspan>`).join('')
+    const head = `<g class="a cap ${appear(span, 16, 0.5)}${endsLoop(span) ? ' last' : ''}"><text font-size="${size}" font-weight="800" ${HEADLINE} fill="${LOOK.ink}">${lines}</text></g>`
+    if (scene.sub === undefined) return head
+    const subTop = capY + (scene.caption.length - 1) * gap + (scene.caption.length === 1 ? 54 : 56)
+    const sub = scene.sub.map((line, i) => `<tspan x="${L}" y="${subTop + i * 38}">${marked(line)}</tspan>`).join('')
+    const subSpan: Array<[number, number]> = [[start + 0.15, ends[k] ?? LOOP]]
+    return `${head}\n<g class="a sub ${appear(subSpan, 10, 0.5)}${endsLoop(subSpan) ? ' last' : ''}"><text font-size="28" fill="${LOOK.muted}">${sub}</text></g>`
   }).join('\n')
-  // The command, typed a letter at a time by a box in the field's colour that shrinks to its right
-  // edge; reduced motion, or no animation, shows it whole.
-  const boxY = 400
-  const boxW = 388
+  // The closing scene also names where it works.
+  const worksY = 478
+  const tile = 36
+  const works = g([[T.close + 0.4, LOOP]], `<text x="${L}" y="${worksY}" font-size="12" font-weight="600" letter-spacing="${isCjk ? '0.1em' : '0.16em'}" fill="${LOOK.muted}">${esc(isCjk ? w.works : w.works.toUpperCase())}</text>${LIVE_AGENTS.map((name, i) => iconTile(name, L + i * 60, worksY + 14, tile)).join('')}<text font-size="14" fill="${LOOK.muted}"><tspan x="${L}" y="${worksY + 14 + tile + 26}">${esc(LIVE_AGENTS.slice(0, 4).join(' · '))}</tspan><tspan x="${L}" y="${worksY + 14 + tile + 48}">${esc(LIVE_AGENTS.slice(4).join(' · '))}</tspan></text>`, 8, 0.5)
+  // The command, whole and in every scene.
+  const boxY = 604
+  const boxW = 440
   const size = 17
-  const cmdX = L + 20 + textW('$ ', size) + 4
-  const cmdW = COVER_COMMAND.length * size * 0.6
-  const letters = COVER_COMMAND.length
-  const mask = track([[T.type, `opacity: 1; transform: scaleX(1); animation-timing-function: steps(${letters}, end)`], [T.typed, 'opacity: 1; transform: scaleX(0)'], [T.typed + 0.05, 'opacity: 0; transform: scaleX(0)']])
-  const command = `<rect x="${L}" y="${boxY}" width="${boxW}" height="56" rx="12" fill="${LOOK.surface}"/><rect x="${L + 0.5}" y="${boxY + 0.5}" width="${boxW - 1}" height="55" rx="11.5" fill="none" stroke="url(#rim)"/>
-<text x="${L + 20}" y="${boxY + 34}" font-family="${mono}" font-size="${size}" fill="${LOOK.ink}"><tspan fill="${LOOK.muted}">$ </tspan>${esc(COVER_COMMAND)}</text>
-<rect class="a m ${mask}" x="${num(cmdX - 1)}" y="${boxY + 14}" width="${num(cmdW + 4)}" height="26" fill="${LOOK.surface}"/>`
-  const tileSize = 32
-  const tileGap = (boxW - LIVE_AGENTS.length * tileSize) / (LIVE_AGENTS.length - 1)
-  const worksY = boxY + 56 + 34
-  const works = `<text x="${L}" y="${worksY}" font-size="12" font-weight="600" letter-spacing="${isCjk ? '0.1em' : '0.16em'}" fill="${LOOK.muted}">${esc(isCjk ? w.works : w.works.toUpperCase())}</text>${LIVE_AGENTS.map((name, i) => iconTile(name,Math.round((L + i * (tileSize + tileGap)) * 100) / 100, worksY + 14, tileSize)).join('')}`
+  const command = `<rect x="${L}" y="${boxY}" width="${boxW}" height="52" rx="12" fill="${LOOK.surface}"/><rect x="${L + 0.5}" y="${boxY + 0.5}" width="${boxW - 1}" height="51" rx="11.5" fill="none" stroke="url(#rim)"/>
+<text x="${L + 20}" y="${boxY + 32}" font-family="${mono}" font-size="${size}" fill="${LOOK.ink}"><tspan fill="${LOOK.muted}">$ </tspan>${esc(COVER_COMMAND)}</text>`
   // The scene markers under the left column, one lit for each scene; reduced motion hides them.
-  const pipY = H - 40
-  const pips = `<g class="pips">${COVER_SCENES.map((_, k) => `<rect x="${L + k * 36}" y="${pipY}" width="28" height="4" rx="2" fill="${LOOK.ink}" fill-opacity="0.16"/>`).join('')}${COVER_SCENES.map((start, k) => `<rect class="a ${show(start, ends[k] ?? LOOP, 0, 0.3)}" x="${L + k * 36}" y="${pipY}" width="28" height="4" rx="2" fill="${LOOK.ink}"/>`).join('')}</g>`
+  const pipY = H - 36
+  const pips = `<g class="pips">${COVER_SCENES.map((_, k) => `<rect x="${L + k * 36}" y="${pipY}" width="28" height="4" rx="2" fill="${LOOK.ink}" fill-opacity="0.16"/>`).join('')}${COVER_SCENES.map((start, k) => `<rect class="a ${appear([[start, ends[k] ?? LOOP]], 0, 0.3)}" x="${L + k * 36}" y="${pipY}" width="28" height="4" rx="2" fill="${LOOK.ink}"/>`).join('')}</g>`
   const synthetic = `<text x="${L + boxW}" y="${pipY + 5}" text-anchor="end" font-size="12" fill="${LOOK.muted}" fill-opacity="0.7">${esc(w.synthetic)}</text>`
-  const veil = `<rect class="a ${frames(`0% { opacity: 1 } ${p(0.4)}, ${p(T.veil)} { opacity: 0 } 100% { opacity: 1 }`)}" width="${W}" height="${H}" fill="${LOOK.ground}"/>`
+  // The logo's light: amber while Claude Code asks, and once more as the closing scene begins.
+  const lit = `<circle class="a s ${track([
+    [0, 'opacity: 0; transform: scale(0.86)'],
+    [T.ask, 'opacity: 0; transform: scale(0.86)'],
+    [T.ask + 0.45, 'opacity: 1; transform: scale(1.18)'],
+    [T.ask + 1.1, 'opacity: 1; transform: scale(1)'],
+    [T.sent - 0.05, 'opacity: 1; transform: scale(1)'],
+    [T.sent + 0.4, 'opacity: 0; transform: scale(1)'],
+    [T.close, 'opacity: 0; transform: scale(0.86)'],
+    [T.close + 0.35, 'opacity: 1; transform: scale(1.18)'],
+    [T.close + 1, 'opacity: 1; transform: scale(1)'],
+    [T.close + 1.6, 'opacity: 0; transform: scale(1)'],
+  ])}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
+  const halo = `<circle class="a s ${track([
+    [0, 'opacity: 0; transform: scale(1)'],
+    [T.ask, 'opacity: 0; transform: scale(1)'],
+    [T.ask + 0.05, 'opacity: 0.6; transform: scale(1)'],
+    [T.ask + 1.6, 'opacity: 0; transform: scale(1.9)'],
+    [T.ask + 2.6, 'opacity: 0.3; transform: scale(1.6)'],
+    [T.ask + 3.8, 'opacity: 0.05; transform: scale(1.1)'],
+    [T.ask + 5, 'opacity: 0.3; transform: scale(1.6)'],
+    [T.sent, 'opacity: 0; transform: scale(1.05)'],
+    [T.close, 'opacity: 0; transform: scale(1)'],
+    [T.close + 0.05, 'opacity: 0.6; transform: scale(1)'],
+    [T.close + 1.5, 'opacity: 0; transform: scale(1.9)'],
+  ])}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
+  const logo = lockupAt(L, 40, 30, LOOK.ink, `${halo}${lit}`)
 
+  const tiles = [...(tileSink as Set<string>)].map(name => `<g id="${tileId(name)}">${tileDrawn(name, 0, 0, 48)}</g>`).join('')
+  tileSink = null
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(w.label)}" font-family="${sansOf(lang)}">
 <title>Agent Board: ${esc(w.label)}</title>
-<defs>${lookDefs(W, H, [0.68, 0.2])}</defs>
+<defs>${lookDefs(W, H, [0.68, 0.2])}${tiles}</defs>
 <style>
 .a { animation-duration: ${LOOP}s; animation-iteration-count: infinite; animation-timing-function: linear; }
 .a { opacity: 0; }
-/* A viewer that does not play CSS animation shows the last scene still; a playing one follows its keyframes. */
+/* A viewer that does not play CSS animation shows the closing scene still; a playing one follows its keyframes. */
 .a.last { opacity: 1; }
 .m { transform-box: fill-box; transform-origin: 100% 50%; }
 .s { transform-box: fill-box; transform-origin: center; }
@@ -1083,14 +1308,15 @@ ${keyframes.map((_, i) => `.c${i} { animation-name: c${i} }`).join('\n')}
 ${lookGround(W, H)}
 ${logo}
 ${captions}
-${command}
 ${works}
+${command}
 ${pips}
 ${synthetic}
-${windowSvg}
+${board}
+${windows}
+${scene6}
 ${presses}
 ${pointer}
-${veil}
 </g>
 </svg>
 `
@@ -1362,44 +1588,63 @@ ${outs}
 `
 }
 
-// The promotional card, for GitHub's social preview and for sharing: the headline, the agents it
-// works with, and the board's page with a question that has just come in.
-const PROMO_WORDS: Record<Lang, { head: string[]; need: string[]; works: string }> = {
-  en: { head: ['Know which', 'coding agent is'], need: ['{waiting for you}.'], works: 'Works with' },
-  'zh-TW': { head: ['哪個 coding agent'], need: ['{在等你}，', '打開就知道。'], works: '支援' },
-  'zh-CN': { head: ['哪个 coding agent'], need: ['{在等你}，', '打开就知道。'], works: '支持' },
+// The promotional card, for GitHub's social preview and for sharing: the cover's closing scene held
+// still at 1280 x 640. The sentence of scenes 3 and 7 (SET1) with amber on the words that name what
+// the board is for, the agents it works with, the repository, and the calm board.
+const PROMO_WORDS: Record<Lang, { works: string }> = {
+  en: { works: 'Works with' },
+  'zh-TW': { works: '支援' },
+  'zh-CN': { works: '支持' },
+}
+
+// The board's page while nothing asks: the seven chips and every row at the step it has reached.
+const calmPage = (lang: Lang, pw: number): string => {
+  const s = STRINGS[lang]
+  const sample = PAGE[lang] as PageSample
+  const rowW = pw - PG.side * 2
+  const rows = coverRows(lang).map((row, i) => {
+    const y = contentTop + PG.heading + i * (PG.row + PG.rowGap)
+    const done = row.ticks.reduce((_, [, count]) => count, row.start)
+    const note = row.name === 'Claude Code' ? s.claudeDelivered : undefined
+    return `${rowFrame(s, row.name, row.task, PG.side, y, rowW)}${rowState(row.task, done, PG.side, y, rowW, note)}`
+  }).join('\n')
+  void sample
+  return `${pageHead(pw)}
+${LIVE_AGENTS.map((name, i) => chipTile(name, i)).join('')}${chipsLine(pw)}
+${sectionHead(s.pgWorking, contentTop)}
+${rows}`
 }
 
 const promo = (lang: Lang): string => {
   const mono = monoOf(lang)
-  const s = STRINGS[lang]
+  const set = SET1[lang]
   const w = PROMO_WORDS[lang]
   const W = 1280
   const H = 640
   const isCjk = lang !== 'en'
-  const size = isCjk ? 46 : 52
-  const gap = size + 12
-  const top = 196
-  const head = w.head.map((line, i) => `<text x="72" y="${top + i * gap}" font-size="${size}" font-weight="800" ${HEADLINE} fill="${LOOK.ink}">${esc(line)}</text>`).join('\n')
-  // The second sentence in grey, its words for "needs you" in amber, the board's one colour for that.
-  const needTop = top + w.head.length * gap + 14
-  const need = w.need.map((line, i) => `<text x="72" y="${needTop + i * gap}" font-size="${size}" font-weight="800" ${HEADLINE} fill="${LOOK.ink}" fill-opacity="0.5">${line.split(/(\{[^}]*\})/).map(part => (part.startsWith('{') ? `<tspan fill="${LOOK.amber}" fill-opacity="1">${esc(part.slice(1, -1))}</tspan>` : esc(part))).join('')}</text>`).join('\n')
-  const worksY = 480
+  const size = isCjk ? 64 : 52
+  const gap = Math.round(size * 1.16)
+  const top = 172
+  const head = set.caption.map((line, i) => `<tspan x="72" y="${top + i * gap}">${marked(line)}</tspan>`).join('')
+  const subTop = top + (set.caption.length - 1) * gap + (set.caption.length === 1 ? 54 : 56)
+  const sub = set.sub.map((line, i) => `<tspan x="72" y="${subTop + i * 38}">${marked(line)}</tspan>`).join('')
+  const worksY = 478
   const icons = LIVE_AGENTS.map((name, i) => iconTile(name, 72 + i * 52, worksY + 16, 38)).join('\n')
-  const k = 0.72
-  const pw = 740
-  const ph = 576
-  const wx = 708
+  const k = 0.8
+  const pw = 658
+  const ph = 520
+  const wx = 690
   const wy = (H - ph * k) / 2
-  const window = `<g transform="translate(${wx} ${num(wy)}) scale(${k})">${browser('promo', 0, 0, pw, ph, tabFace(s.pgTabTitle(1), true), pageAsking(lang, pw))}</g>`
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Agent Board: ${esc([...w.head, ...w.need].join(' ').replace(/[{}]/g, ''))}" font-family="${sansOf(lang)}">
+  const window = `<g transform="translate(${wx} ${num(wy)}) scale(${k})">${browser('promo', 0, 0, pw, ph, tabFace('Agent Board', false), calmPage(lang, pw))}</g>`
+  const label = `${set.caption.map(plain).join(' ')} ${set.sub.map(plain).join(' ')}`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Agent Board: ${esc(label)}" font-family="${sansOf(lang)}">
 <title>Agent Board</title>
 <defs>${lookDefs(W, H, [0.75, 0.3])}</defs>
 <g clip-path="url(#edge)">
 ${lookGround(W, H)}
-${lockupAt(72, 64, 34, LOOK.amber)}
-${head}
-${need}
+${lockupAt(72, 64, 34, LOOK.ink)}
+<text font-size="${size}" font-weight="800" ${HEADLINE} fill="${LOOK.ink}">${head}</text>
+<text font-size="28" fill="${LOOK.muted}">${sub}</text>
 <text x="72" y="${worksY}" font-size="13" font-weight="600" letter-spacing="${isCjk ? '0.1em' : '0.16em'}" fill="${LOOK.muted}">${esc(isCjk ? w.works : w.works.toUpperCase())}</text>
 ${icons}
 <text x="72" y="590" font-family="${mono}" font-size="18" fill="${LOOK.muted}">github.com/<tspan fill="${LOOK.ink}" font-weight="700">WenyuChiou/agent-board</tspan></text>

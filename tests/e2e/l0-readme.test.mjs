@@ -22,12 +22,42 @@ const SECTIONS = {
   'zh-CN': ['快速开始', '常用命令', '支持的 agent', '你会看到什么', '怎么运作', '问题排查', '文档', '许可证'],
 }
 
-// The four scenes' captions, Claude Code's question, and the page's receipt once the answer
-// reached Claude Code (claudeDelivered in the strings tables), in each locale.
+// The seven scenes' captions (the lines, the line under them and the words in amber), Claude Code's
+// question, and the page's receipt once the answer reached Claude Code (claudeDelivered in the
+// strings tables), in each locale. Scenes 3 and 7 say the same sentence.
+const SET1 = {
+  en: { caption: ['A board that shows', 'which AI agent is', 'waiting on you.'], sub: ['Claude Code, Codex, Cursor', 'and more, on your own computer.', 'Questions show up in seconds.'], amber: ['waiting on you'], subAmber: [] },
+  'zh-TW': { caption: ['AI agent 進度看板'], sub: ['agent 一停下來等你回答，', '幾秒內就排到看板最上面，', '不用再一個個視窗找。'], amber: [], subAmber: ['等你回答'] },
+  'zh-CN': { caption: ['AI agent 进度看板'], sub: ['agent 一停下来等你回复，', '几秒内就排到看板最上面，', '不用再挨个窗口找。'], amber: [], subAmber: ['等你回复'] },
+}
 const SCENES = {
-  en: [[['One command', 'to start.'], ['Every agent,', 'one board.'], ['Questions jump', 'to the top.'], ['Answer from', 'the board.']], 'Blue or green?', "Delivered. Waiting for Claude's reply."],
-  'zh-TW': [[['一行指令', '就能開始'], ['每個 agent', '都在同一塊看板'], ['誰在等你', '誰就排最前面'], ['在看板上', '直接回覆']], '藍色還是綠色？', '已送達，正在等 Claude 回覆。'],
-  'zh-CN': [[['一行命令', '就能开始'], ['每个 agent', '都在同一块看板'], ['谁在等你', '谁就排最前面'], ['在看板上', '直接回复']], '蓝色还是绿色？', '已送达，正在等 Claude 回复。'],
+  en: [[
+    { caption: ['Which AI agent is', 'waiting on you?'], amber: ['waiting on you'] },
+    { caption: ['One stopped to ask.', 'You were in', 'another window.'] },
+    SET1.en,
+    { caption: ['Its question goes', 'to the top.'], sub: ['On the board within seconds.'] },
+    { caption: ['Answer it', 'right there.'], sub: ['Claude Code gets it without', 'a window switch.'] },
+    { caption: ['One command', 'to start.'], sub: ['On your computer.', 'One Markdown file. No account.'] },
+    SET1.en,
+  ], 'Blue or green?', "Delivered. Waiting for Claude's reply."],
+  'zh-TW': [[
+    { caption: ['現在哪個 AI agent', '在等你？'], amber: ['在等你'] },
+    { caption: ['有一個停下來問你', '你人在別的視窗'] },
+    SET1['zh-TW'],
+    { caption: ['它的問題直接', '排到最上面'], sub: ['幾秒內就上看板。'] },
+    { caption: ['在看板上', '直接回答'], sub: ['不用切視窗，', '答案直接送到 Claude Code。'] },
+    { caption: ['一行指令', '就能開始'], sub: ['在你的電腦上跑，', '一個 Markdown 檔，不用帳號。'] },
+    SET1['zh-TW'],
+  ], '藍色還是綠色？', '已送達，正在等 Claude 回覆。'],
+  'zh-CN': [[
+    { caption: ['现在哪个 AI agent', '在等你？'], amber: ['在等你'] },
+    { caption: ['有一个停下来问你', '你在别的窗口'] },
+    SET1['zh-CN'],
+    { caption: ['它的提问直接', '排到最上面'], sub: ['几秒内就出现在看板上。'] },
+    { caption: ['在看板上', '直接回复'], sub: ['不用切窗口，', '答案直接送到 Claude Code。'] },
+    { caption: ['一行命令', '就能开始'], sub: ['在你的电脑上运行，', '一个 Markdown 文件，不用账号。'] },
+    SET1['zh-CN'],
+  ], '蓝色还是绿色？', '已送达，正在等 Claude 回复。'],
 }
 // The first-run command stays on screen in every frame, reduced motion included.
 const COMMAND = 'npx @wenyuchiou/agent-board'
@@ -266,7 +296,7 @@ describe('L0 discover and install from the README', () => {
     }
   })
 
-  test('L0 README: the cover loops through four captioned scenes in 20 to 30 seconds, moves with CSS alone and stands still on the answered scene for reduced motion', () => {
+  test('L0 README: the cover loops through seven captioned scenes in 30 to 45 seconds, moves with CSS alone and rests on its closing scene for reduced motion', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io|\/badge\.svg"|docs\/images\/brand\//.test(match[0]))
@@ -310,9 +340,9 @@ describe('L0 discover and install from the README', () => {
       assert.match(svg, /@keyframes\s+[\w-]+\s*\{/i, `${file}: CSS defines keyframes`)
       const rules = [...svg.matchAll(/\{([^{}]*)\}/g)]
       assert.ok(rules.some(rule => /\banimation-duration\s*:\s*[^;}\s][^;}]*(?:;|$)/i.test(rule[1]) && /\banimation-iteration-count\s*:\s*infinite\s*(?:;|$)/i.test(rule[1])), `${file}: one rule sets animation duration and infinite iteration`)
-      // The loop lasts 20 to 30 seconds: four scenes of a few seconds each, long enough to read a caption.
+      // The loop lasts 30 to 45 seconds: seven scenes of a few seconds each, long enough to read a caption.
       const loop = rules.map(rule => /\banimation-duration\s*:\s*(\d+(?:\.\d+)?)s\s*(?:;|$)/i.exec(rule[1])?.[1]).find(seconds => seconds !== undefined)
-      assert.ok(loop !== undefined && Number(loop) >= 20 && Number(loop) <= 30, `${file}: the loop lasts 20 to 30 seconds (it lasts ${loop}s)`)
+      assert.ok(loop !== undefined && Number(loop) >= 30 && Number(loop) <= 45, `${file}: the loop lasts 30 to 45 seconds (it lasts ${loop}s)`)
       // Two stops at one point of a keyframe leave the later one in force: an element meant to stay
       // on screen to the loop's end faded out that way once. Stops out of order go wrong the same way.
       const bodies = [...svg.matchAll(/@keyframes\s+[\w-]+\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g)]
@@ -349,26 +379,38 @@ describe('L0 discover and install from the README', () => {
       }
       for (const name of bound) assert.ok(named.has(name), `${file}: .${name} has its @keyframes`)
 
-      // The four captions, in order. Each is one <text> of two <tspan> lines inside an animated group;
-      // reduced motion keeps only the last scene's group.
+      // The seven captions, in order. Each is one <text> of one <tspan> per line inside an animated group
+      // marked `cap`, with the words in amber in a <tspan> of their own; the line under it sits in a
+      // group marked `sub`. Reduced motion keeps only the closing scene's groups.
       const [scenes, question, delivered] = SCENES[lang]
-      let at = -1
-      scenes.forEach(([first, second], k) => {
-        // String match: the journey safety check reads a call on a built RegExp as a process call.
-        const found = svg.match(new RegExp(`<g class="([^"]*)"><text\\b[^>]*>\\s*<tspan\\b[^>]*>${literal(first)}</tspan>\\s*<tspan\\b[^>]*>${literal(second)}</tspan>\\s*</text>`))
-        assert.ok(found, `${file}: scene ${k + 1} has its caption "${first} ${second}"`)
-        assert.ok(found[1].split(/\s+/).includes('a'), `${file}: scene ${k + 1}'s caption sits in an animated group`)
-        assert.ok(found.index > at, `${file}: scene ${k + 1}'s caption comes after scene ${k}'s`)
-        at = found.index
-        assert.equal(found[1].split(/\s+/).includes('last'), k === scenes.length - 1, `${file}: only scene ${scenes.length}'s caption stays for reduced motion`)
+      const lines = body => [...body.replace(/<tspan fill="[^"]*">([^<]*)<\/tspan>/g, '$1').matchAll(/<tspan\b[^>]*>([^<]*)<\/tspan>/g)].map(match => match[1])
+      const amber = body => [...body.matchAll(/<tspan fill="#F8B500">([^<]*)<\/tspan>/gi)].map(match => match[1])
+      // String matches: the journey safety check reads a call on a built RegExp as a process call.
+      const groupsOf = (svg, word) => svg.match(word === 'cap' ? /<g class="[^"]*\bcap\b[^"]*"><text\b[^>]*>[\s\S]*?<\/text><\/g>/g : /<g class="[^"]*\bsub\b[^"]*"><text\b[^>]*>[\s\S]*?<\/text><\/g>/g) ?? []
+      const groupOf = word => groupsOf(svg, word).map(group => /^<g class="([^"]*)"><text\b[^>]*>([\s\S]*)<\/text><\/g>$/.exec(group))
+      const captions = groupOf('cap')
+      assert.equal(captions.length, scenes.length, `${file}: one caption for each of the ${scenes.length} scenes`)
+      scenes.forEach((scene, k) => {
+        assert.deepEqual(lines(captions[k][2]), scene.caption, `${file}: scene ${k + 1} has its caption`)
+        assert.deepEqual(amber(captions[k][2]), scene.amber ?? [], `${file}: scene ${k + 1}'s caption has amber only on ${JSON.stringify(scene.amber ?? [])}`)
+        assert.ok(captions[k][1].split(/\s+/).includes('a'), `${file}: scene ${k + 1}'s caption sits in an animated group`)
+        assert.equal(captions[k][1].split(/\s+/).includes('last'), k === scenes.length - 1, `${file}: only scene ${scenes.length}'s caption stays for reduced motion`)
+      })
+      const subs = groupOf('sub')
+      const withSub = scenes.filter(scene => scene.sub !== undefined)
+      assert.equal(subs.length, withSub.length, `${file}: the scenes with a line under the caption have one`)
+      withSub.forEach((scene, k) => {
+        assert.deepEqual(lines(subs[k][2]), scene.sub, `${file}: sub line ${k + 1}`)
+        assert.deepEqual(amber(subs[k][2]), scene.subAmber ?? [], `${file}: sub line ${k + 1} has amber only on ${JSON.stringify(scene.subAmber ?? [])}`)
+        assert.equal(subs[k][1].split(/\s+/).includes('last'), k === withSub.length - 1, `${file}: only the closing scene's sub line stays for reduced motion`)
       })
       assert.doesNotMatch(svg, /Coming in 0\.24\.2|0\.24\.2 起提供|copied to the clipboard|已複製|已复制|progress\.html/i, `${file}: the cover does not teach the retired demo`)
       // A piece of text is in the end frame when every animated group round it stays for reduced
       // motion; text in no animated group is on screen in every frame.
       const isKept = groups => groups.every(classes => !classes.includes('a') || classes.includes('last'))
       const shown = word => [...svg.matchAll(new RegExp(`>${literal(word)}</(?:text|tspan)>`, 'g'))]
-      // The end frame is the answered scene: the page's receipt in Claude Code's row, and no
-      // question card left over (#1273). The question is asked in an earlier scene only.
+      // The end frame is the closing scene: the calm board with the page's receipt in Claude Code's row,
+      // and no question card left over (#1273). The question is asked in earlier scenes only.
       const receipts = shown(delivered)
       assert.ok(receipts.some(at => isKept(groupsAround(svg, at.index)) && groupsAround(svg, at.index).some(classes => classes.includes('last'))), `${file}: the end frame shows "${delivered}"`)
       const asked = shown(question)
