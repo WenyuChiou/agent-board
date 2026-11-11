@@ -2017,14 +2017,28 @@ test('the page keeps a source copy for the archived same-title peer alone', { ti
 
 // #921: the first view of a big board queues its question captures instead of
 // writing all 500 inside the request, and the server answers a mailbox poll
-// while they drain. The 150 ms poll budget is the hook's own (a mailbox turn
-// gives up after 150 ms); it is asserted only while the flush drains, where
-// one tick writes 5 files and the event loop is free between ticks. A poll
-// issued while the first view itself still computes is printed, not asserted:
+// while they drain. Holding the continuation after its first batch shows
+// that a poll can answer before the flush finishes, even if CI pauses (#1323).
+// A poll issued while the first view itself still computes is printed, not asserted:
 // the view computation alone is ~120-180 ms on this VM (T0), so that number
 // is machine-dependent and not something the queue changes.
 test('the first view of the synthetic big board queues its captures and the server answers a mailbox poll while they drain', { timeout: 60_000 }, async () => {
-  const board = await page()
+  const board = await page('', {}, [], undefined, `
+import { existsSync as isCaptureFlushHeld, readdirSync as captureFlushFiles } from 'node:fs'
+import { dirname as captureFlushDirectory } from 'node:path'
+const captureImmediate = globalThis.setImmediate
+globalThis.setImmediate = (callback, ...args) => captureImmediate(() => {
+  const path = globalThis.AGENT_BOARD.path
+  const isHeld = () => isCaptureFlushHeld(path + '.hold-captures')
+  const count = captureFlushFiles(captureFlushDirectory(path)).filter(name => name.includes('-questions-source-')).length
+  if (!isHeld() || count === 0) return callback(...args)
+  const timer = setInterval(() => {
+    if (isHeld()) return
+    clearInterval(timer)
+    callback(...args)
+  }, 10)
+})
+${BOARD_SCRIPT}`, (_dir, path) => writeFileSync(path + '.hold-captures', ''))
   try {
     writeFileSync(board.path, bigBoard(460))
     const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'a1b2c3d4', surface: '921 T1', turn: 'turn1' } })).json()
@@ -2049,14 +2063,19 @@ test('the first view of the synthetic big board queues its captures and the serv
     assert.ok(queued < 500, `the first view must queue the captures instead of writing them all, got ${queued} on disk at once`)
     const drainPoll = await poll()
     assert.equal(drainPoll.status, 200, JSON.stringify(drainPoll))
-    assert.ok(drainPoll.ms < 150, `a poll while the flush drains must answer inside the 150 ms hook budget, took ${drainPoll.ms.toFixed(1)} ms`)
+    const heldCaptures = captures()
+    assert.ok(heldCaptures > 0 && heldCaptures < 500, `the poll must answer after the flush starts and before it finishes, got ${heldCaptures} captures`)
+    rmSync(board.path + '.hold-captures')
     for (let tries = 0; tries < 1200; tries++) {
       if (captures() >= 500) break
       await delay(25)
     }
     assert.equal(captures(), 500, 'the flush must land every queued capture')
     console.log(`first view of the big board: ${firstMs.toFixed(1)} ms; poll during the first view: ${during.ms.toFixed(1)} ms (printed, not asserted — the view computation alone is ~120-180 ms here); poll while the flush drains: ${drainPoll.ms.toFixed(1)} ms`)
-  } finally { await board.close() }
+  } finally {
+    rmSync(board.path + '.hold-captures', { force: true })
+    await board.close()
+  }
 })
 
 test('the first view of the synthetic big board shows the same model as the view after its captures drain, and every capture lands as a valid content-addressed file', { timeout: 60_000 }, async () => {

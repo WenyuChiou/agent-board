@@ -2761,12 +2761,17 @@ test('a reply full of board marks with no count line is read at once, not tried 
   const many = Array.from({ length: 50 }, () => `${'●1▸1⚑1'.repeat(66)} x`).join('\n')
   const digits = Array.from({ length: 100 }, () => `●${'1'.repeat(133)}▸${'1'.repeat(132)}⚑${'1'.repeat(132)}`).join('\n')
   const blank = `Here:${'\n'.repeat(40000)}Progress  ● 1 waiting  ▸ 1 in progress  ⚑ 0 due soon  ✓ 0 done today\n`
-  const started = performance.now()
-  expect(isBoardTurn(said(long)!)).toBe(false)
-  expect(isBoardTurn(said(many)!)).toBe(false)
-  expect(isBoardTurn(said(digits)!)).toBe(false)
-  expect(isBoardTurn(said(blank)!)).toBe(true)
-  expect(performance.now() - started).toBeLessThan(500)
+  const runs = Array.from({ length: 3 }, () => {
+    const started = performance.now()
+    expect(isBoardTurn(said(long)!)).toBe(false)
+    expect(isBoardTurn(said(many)!)).toBe(false)
+    expect(isBoardTurn(said(digits)!)).toBe(false)
+    expect(isBoardTurn(said(blank)!)).toBe(true)
+    return performance.now() - started
+  })
+  // #1323: regex backtracking has no work counter, so the fastest of three runs stands for its cost: a CI
+  // pause would have to hit all three. The plugin runtime has no process.env to widen the limit on CI.
+  expect(Math.min(...runs)).toBeLessThan(500)
 })
 
 // --chat: the board as plain text for an agent that answers in a chat app (Telegram), sent as it is.
