@@ -1655,6 +1655,8 @@ const readText = async ($: EngineInterface, path: string): Promise<string> => {
 // FIFO (#1276). A missing file, a link or a file that is not a plain one read as empty, as nothing to read; a read
 // that fails throws. A process starts only when the caller reads, which the callers do on a change or a sweep.
 const readSettingsText = async ($: EngineInterface, file: string): Promise<string> => {
+  // No file, no process: a board with no settings file starts nothing to read it.
+  if (!(await $.fs.exists(file))) return ''
   const found = await $.process.run(['node', '-e', SETTINGS_READ, '--', file], { timeoutMs: 10000 })
   if (found.exitCode !== 0 || found.isStdoutTruncated) throw new Error('SETTINGS_UNREADABLE')
   const body = JSON.parse(found.stdout) as { kind?: unknown; text?: unknown }
