@@ -1,6 +1,6 @@
-# Checks new or edited issues with scripts/pr-check.mjs: flags a title that matches an open issue and
-# requires a lane filing a finding to link the pull request it came from (#1325).
-# The token is read-only; issue fields are read from the event file and never enter a shell command.
+# Checks new or edited issues with scripts/pr-check.mjs: posts or updates a notice comment when a
+# title matches an open issue or a lane finding lacks a pull request link (#1325).
+# Issue fields are read from the event file and never enter a shell command.
 name: issue-check
 
 on:
@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  issues: read
+  issues: write
 
 concurrency:
   group: issue-check-${{ github.event.issue.number }}
@@ -31,4 +31,4 @@ jobs:
       - name: Check the issue
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/pr-check.mjs --event "$GITHUB_EVENT_PATH"
+        run: node scripts/pr-check.mjs --event "$GITHUB_EVENT_PATH" --comment-issue

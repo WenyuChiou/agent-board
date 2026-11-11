@@ -143,16 +143,25 @@ const linkedIssues = body => {
 }
 
 // Two open pull requests must not both claim to fix the same issue (#1240 and #1213 on #1203).
+// Only the later pull request (later createdAt, or higher PR number) is flagged; the original stays unflagged.
 // "Part of #N" marks split steps that share a parent issue (#209), so those are left alone.
-export const duplicatePr = ({ body = '', title = '', number = null, branch = null, open = [] } = {}) => {
+export const duplicatePr = ({ body = '', title = '', number = null, branch = null, createdAt = null, open = [] } = {}) => {
   const output = result()
   if (isReleaseTitle(title) || open === null || open === undefined) return output
   const fixing = [...new Set(issueLine(body, title).items.filter(item => item.kind === 'fixes').map(item => item.number))]
   if (!fixing.length) return output
+  const selfTime = createdAt ? Date.parse(createdAt) : NaN
   const reported = new Set()
   for (const other of open) {
     if (!other || other.number === number) continue
     if (number === null && branch && other.headRef && other.headRef === branch) continue
+    if (number !== null) {
+      const otherTime = other.createdAt ? Date.parse(other.createdAt) : NaN
+      const isOtherEarlier = Number.isFinite(selfTime) && Number.isFinite(otherTime) && selfTime !== otherTime
+        ? otherTime < selfTime
+        : typeof other.number === 'number' && other.number < number
+      if (!isOtherEarlier) continue
+    }
     const otherFixing = new Set(linkedIssues(other.body ?? '').filter(item => item.kind === 'fixes').map(item => item.number))
     for (const issueNumber of fixing) {
       if (!otherFixing.has(issueNumber)) continue
@@ -196,6 +205,7 @@ export const duplicateIssue = ({ title = '', number = null, openIssues = [] } = 
   for (const existing of openIssues) {
     if (!existing || existing.pull_request) continue
     if (existing.number === number) continue
+    if (number !== null && typeof existing.number === 'number' && existing.number >= number) continue
     if (existing.state && existing.state !== 'open') continue
     if (issueTitleKeys(existing.title).some(key => keys.has(key))) {
       output.problems.push(problem(
@@ -216,24 +226,30 @@ export const findingLink = ({ title = '', body = '', number = null, association 
   const isTeamAuthor = isKnownAssociation(association) && !isOutsideAssociation(association)
   const agentSection = clean.match(/^#{2,3}[ \t]*Agent name[ \t]*\r?\n+([^\r\n#][^\r\n]*)/im)?.[1]?.trim() ?? ''
   const hasFormAgent = Boolean(agentSection && !/^(?:none|n\/a|manual|_no response_)$/i.test(agentSection))
-  const hasFindingTitle = /\bfinding\b/i.test(String(title ?? ''))
-  // Require a PR, review, audit, or finding cue so ordinary bug reports from team members ("found while using the app") pass.
-  const hasPrOrReviewCue = /\b(?:finding|review(?:ing)?|outside\s+review|audit|user-sim|split\s+from|source\s+pr|follow-?up)\b|\bfound\s+(?:by\s+(?:the\s+)?(?:review|outside\s+review|audit|\S+\s+on)|(?:while|when|during)\s+(?:reviewing|a\s+review|pr\b)|in\s+(?:a\s+)?(?:pr|pull\s+request))\b|\bfrom\s+(?:the\s+)?(?:review|outside\s+review|audit|user-sim|pr|pull\s+request)\b/i.test(clean)
+  const hasLaneMarker = hasAuthor || isTeamAuthor || hasFormAgent
+  const hasFindingTitle = /\b(?:review|audit|user-?sim|outside[- ]review|lane|pr)\s+findings?\b|^\s*(?:\[\s*finding\s*\]|finding\s*:)|:\s*finding\s*:/i.test(String(title ?? ''))
+  // Match explicit PR/review/finding cues so plain UI words ("The review button disappears", "Finding a file") pass for ordinary reports.
+  const hasPrOrReviewCue = [
+    /(?:^|\n)[ \t]*finding\s*:/i,
+    /\b(?:(?:outside|code|pr|security|greptile|codex)\s+review|(?:review|audit|user-?sim|outside[- ]review)\s+findings?|split\s+from|source\s+pr|follow-?up\s+(?:to|from)\s+(?:the\s+)?(?:pr\b|pull\s+request|review|outside\s+review))\b/i,
+    /\bfound\s+(?:by\s+(?:the\s+|an?\s+)?(?:(?:(?:outside|code|pr|security)\s+)?review(?:er)?|audit|codex|greptile|claude|antigravity)|(?:while|when|during)\s+(?:reviewing|a\s+review(?:\s+of)?|an?\s+outside\s+review|auditing|user-?sim|pr\s+review)|in\s+(?:a\s+|an?\s+)?(?:pr\b|pull\s+request|review\s+of))\b/i,
+    /\b(?:came|from)\s+(?:the\s+|an?\s+)?(?:(?:outside|code|pr)\s+review|audit|user-?sim|pull\s+request|pr\b)\b/i,
+  ].some(pattern => pattern.test(clean))
   const fromPrSection = clean.match(/^#{2,3}[ \t]*Pull request it came from[ \t]*\r?\n+([^\r\n#][^\r\n]*)/im)?.[1]?.trim() ?? ''
   const hasSectionAnswer = Boolean(fromPrSection && !/^(?:none|n\/a|_no response_)$/i.test(fromPrSection))
-  const isLaneFinding = isFinding || hasFindingTitle || hasSectionAnswer || ((hasAuthor || isTeamAuthor || hasFormAgent) && hasPrOrReviewCue)
+  const isLaneFinding = isFinding || (hasLaneMarker && (hasFindingTitle || hasPrOrReviewCue || hasSectionAnswer))
   if (!isLaneFinding) return output
 
   // Strip standalone Fixes/Part of lines so a roadmap or issue link such as "Part of #209" does not mask a missing source PR link.
   const withoutLeadingIssues = linesOf(clean).filter(line => !/^\s*(?:Fixes|Part of|Closes|Resolves)\s+#\d+\b/i.test(line)).join('\n')
 
-  // Require an explicit PR URL, the Pull request it came from section, "PR #N" / "pull request #N", or source wording before #N,
-  // so hex colors (#000000) or unrelated issue mentions ("Related roadmap: #209") do not satisfy the source-PR check.
+  // Require an explicit PR URL, the Pull request it came from section, "PR #N" / "pull request #N", or origin/review wording before #N,
+  // so hex colors ("from #123456 to #abcdef", #000000) or unrelated issue mentions ("Related roadmap: #209") do not satisfy the check.
   const validRef = pattern => [...withoutLeadingIssues.matchAll(pattern)].some(match => Number(match[1]) !== number)
   const hasPullUrl = validRef(/github\.com\/[^/\s]+\/[^/\s]+\/pull\/([1-9]\d*)\b/gi)
   const hasSectionNumber = [...fromPrSection.matchAll(/#([1-9]\d*)\b/g)].some(match => Number(match[1]) !== number)
   const hasExplicitPr = validRef(/\b(?:pull\s*request|pr)\s*#([1-9]\d*)\b/gi)
-  const hasSourceWording = validRef(/\b(?:from|source(?:\s+pr)?|found\s+(?:in|on|during\s+(?:review\s+of)?|by\s+(?:the\s+)?(?:outside\s+review\s+of|review\s+of|\S+\s+on))|(?:outside\s+)?review(?:ing)?(?:\s+of)?)\s*:?\s*(?:(?:the\s+)?(?:pr|pull\s*request)\s*)?#([1-9]\d*)\b/gi)
+  const hasSourceWording = validRef(/\b(?:(?:came|split|follow-?up|originated|filed)\s+from|from\s+(?:the\s+|an?\s+)?(?:(?:outside|code|pr)\s+)?review(?:\s+of)?|source\s+(?:pr|pull\s*request)|found\s+(?:in|on|during\s+(?:(?:a|the)\s+)?(?:review\s+of\s+)?|by\s+(?:the\s+)?(?:outside\s+review\s+of|review\s+of|\S+\s+on))|(?:outside\s+)?review(?:ing)?\s+(?:of\s+)?)\s*:?\s*(?:(?:the\s+)?(?:pr|pull\s*request)\s*)?#([1-9]\d*)\b/gi)
   if (hasPullUrl || hasSectionNumber || hasExplicitPr || hasSourceWording) return output
 
   output.problems.push(problem(
@@ -844,7 +860,7 @@ export const checkPr = data => {
   // The team has no limit on open pull requests (#607); only an outside author's are counted.
   if (issue.items.some(item => item.kind === 'fixes')) {
     if (data.open === null) output.info.push('duplicate-pr: skipped (offline).')
-    else add(duplicatePr({ body: data.body, title: data.title, number: data.number, branch: data.branch, open: data.open }))
+    else add(duplicatePr({ body: data.body, title: data.title, number: data.number, branch: data.branch, createdAt: data.createdAt, open: data.open }))
   }
   if (isOutside) {
     if (data.open === null) output.info.push('cap: skipped (offline).')
@@ -883,15 +899,16 @@ export const reportMarkdown = ({ problems, info }, header) => [
 const usage = `Usage:
   node scripts/pr-check.mjs --pr <N> [-R owner/repo] [--repo-dir <dir>]
   node scripts/pr-check.mjs --body-file <file> --title <title> [--base <ref>] [--repo-dir <dir>]
-  node scripts/pr-check.mjs --issue <N> [--finding] [-R owner/repo] [--repo-dir <dir>]
+  node scripts/pr-check.mjs --issue <N> [--finding] [--comment-issue] [-R owner/repo] [--repo-dir <dir>]
   node scripts/pr-check.mjs --issue-title <title> [--issue-body-file <file>] [--finding] [-R owner/repo] [--repo-dir <dir>]
-  node scripts/pr-check.mjs --event <file> [--repo-dir <dir>]
+  node scripts/pr-check.mjs --event <file> [--comment-issue] [--repo-dir <dir>]
 
 Options:
-  --offline       Skip issue, claim, open-PR cap and review network checks
-  --no-bundle     Skip the Bun board bundle check
-  --finding       Check the issue as a finding filed by a lane
-  --help          Print this usage
+  --offline        Skip issue, claim, open-PR cap and review network checks
+  --no-bundle      Skip the Bun board bundle check
+  --finding        Check the issue as a finding filed by a lane
+  --comment-issue  Post or update a notice comment when an issue check finds problems
+  --help           Print this usage
 
 Default repository: WenyuChiou/agent-board. Default base: origin/main.
 Exit codes: 0 passed, 1 check problems, 2 usage or environment error.
@@ -899,7 +916,7 @@ Exit codes: 0 passed, 1 check problems, 2 usage or environment error.
 
 const parseArgs = argv => {
   const options = {}
-  const flags = new Set(['--offline', '--no-bundle', '--finding', '--help'])
+  const flags = new Set(['--offline', '--no-bundle', '--finding', '--comment-issue', '--help'])
   const values = new Set(['--pr', '-R', '--repo-dir', '--body-file', '--title', '--base', '--issue', '--issue-title', '--issue-body-file', '--event'])
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i]
@@ -914,6 +931,7 @@ const parseArgs = argv => {
   }
   if (options['--body-file'] ? !options['--title'] : options['--title'] || options['--base']) throw new Error('--body-file needs --title; --title and --base belong only to --body-file mode.')
   if (options['--issue-body-file'] && !options['--issue-title']) throw new Error('--issue-body-file belongs only to --issue-title mode.')
+  if (options['--comment-issue'] && !options['--issue'] && !options['--event']) throw new Error('--comment-issue belongs only to --issue or --event mode.')
   if (options['--pr'] && !/^[1-9]\d*$/.test(options['--pr'])) throw new Error('--pr must be a positive integer.')
   if (options['--issue'] && !/^[1-9]\d*$/.test(options['--issue'])) throw new Error('--issue must be a positive integer.')
   return options
@@ -1022,6 +1040,55 @@ const printCheckResult = (checked, header, { isEvent = false } = {}) => {
   return checked.problems.length ? 1 : 0
 }
 
+const issueNoticeMarker = '<!-- issue-check:notice -->'
+const isActionsBot = user => user?.type === 'Bot' && /^github-actions(?:\[bot\])?$/i.test(user?.login ?? '')
+const quietNotice = text => safeText(oneLine(text)).replace(/(^|[^\w.%+-])@(?=[A-Za-z0-9])/g, '$1@\u200b')
+
+const apiWriter = (options, repo, cwd, run = spawnSync) => async (method, path, payload) => {
+  const endpoint = `repos/${repo}/${path}`
+  const failed = () => new Error(`network write failed for ${endpoint}.`)
+  if (!options['--event']) {
+    const executed = run('gh', ['api', '--method', method, endpoint, '--input', '-'], { cwd, encoding: 'utf8', maxBuffer, input: JSON.stringify(payload) })
+    if (executed.error || executed.status !== 0) throw failed()
+    return executed.stdout.trim() ? JSON.parse(executed.stdout) : null
+  }
+  try {
+    const base = process.env.GITHUB_API_URL ?? 'https://api.github.com'
+    const response = await fetch(new URL(`${base.replace(/\/$/, '')}/${endpoint}`), {
+      method,
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}),
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30000),
+      redirect: 'error',
+    })
+    if (!response.ok) throw new Error('unsuccessful API write')
+    return null
+  } catch {
+    throw failed()
+  }
+}
+
+const syncIssueNotice = async ({ checked, api, write, number }) => {
+  const comments = await api(`issues/${number}/comments`, { isList: true })
+  const existing = (Array.isArray(comments) ? comments : []).find(comment => isActionsBot(comment?.user) && (comment?.body ?? '').startsWith(issueNoticeMarker))
+  if (!checked.problems.length && !existing) return
+  const body = checked.problems.length
+    ? [
+        issueNoticeMarker,
+        '**issue-check** flagged the following problem(s) on this issue:',
+        '',
+        ...checked.problems.flatMap(item => [`- **${quietNotice(item.check)}:** ${quietNotice(item.message)}`, `  - Fix: ${quietNotice(item.fix)}`]),
+      ].join('\n')
+    : `${issueNoticeMarker}\n**issue-check:** all checks passed.`
+  if (existing && existing.body === body) return
+  if (existing) await write('PATCH', `issues/comments/${existing.id}`, { body })
+  else await write('POST', `issues/${number}/comments`, { body })
+}
+
 const runIssueCheck = async ({ options, cwd, repo, issue }) => {
   if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('repository must be owner/repo.')
   const api = options['--offline'] ? null : apiReader(options, repo, cwd)
@@ -1045,6 +1112,9 @@ const runIssueCheck = async ({ options, cwd, repo, issue }) => {
     openIssues,
     isFinding: Boolean(options['--finding']),
   })
+  if (options['--comment-issue'] && api && target.number) {
+    await syncIssueNotice({ checked, api, write: apiWriter(options, repo, cwd), number: target.number })
+  }
   const header = target.number ? `issue #${target.number}` : 'new issue'
   return printCheckResult(checked, header, { isEvent: Boolean(options['--event']) })
 }
@@ -1089,17 +1159,17 @@ export const main = async (argv = process.argv.slice(2)) => {
       }
       repo = event.repository.full_name
       // author_association and user.login are in the event's pull_request; both stay undefined when it has none.
-      data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.head?.ref, head: pr.head?.sha, isDraft: pr.draft, labels: pr.labels, association: pr.author_association, login: pr.user?.login }
+      data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.head?.ref, head: pr.head?.sha, isDraft: pr.draft, labels: pr.labels, association: pr.author_association, login: pr.user?.login, createdAt: pr.created_at ?? null }
       base = pr.base?.sha
     } else if (options['--pr']) {
       let pr
       try {
-        pr = readJson(command('gh', ['pr', 'view', options['--pr'], '-R', repo, '--json', 'number,title,body,headRefName,headRefOid,baseRefName,baseRefOid,isDraft,labels,author'], cwd))
+        pr = readJson(command('gh', ['pr', 'view', options['--pr'], '-R', repo, '--json', 'number,title,body,headRefName,headRefOid,baseRefName,baseRefOid,isDraft,labels,author,createdAt'], cwd))
       } catch {
         throw new Error('network check failed for gh pr view; use --body-file with --offline to check without GitHub.')
       }
       // gh pr view has no author_association field; it is read from the open pull request list below.
-      data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.headRefName, head: pr.headRefOid, isDraft: pr.isDraft, labels: pr.labels, login: pr.author?.login }
+      data = { number: pr.number, title: pr.title, body: pr.body ?? '', branch: pr.headRefName, head: pr.headRefOid, isDraft: pr.isDraft, labels: pr.labels, login: pr.author?.login, createdAt: pr.createdAt ?? null }
       base = pr.baseRefOid
       baseRef = pr.baseRefName
     } else {
@@ -1172,6 +1242,7 @@ export const main = async (argv = process.argv.slice(2)) => {
         if (own) {
           data.association ??= own.association
           data.login ??= own.login ?? undefined
+          data.createdAt ??= own.createdAt ?? null
         }
       }
       const [first, ...more] = [...new Set(parsedIssue.issues)]

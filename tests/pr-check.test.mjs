@@ -1271,22 +1271,42 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
   assert.match(dupPrefix.problems[0].message, /#88/)
   // Short generic remainder after prefix is not falsely equated across distinct prefixes.
   assert.deepEqual(issueTitleKeys('fix(board): add badge'), ['fix(board): add badge'])
-  // Closed issue and self-edit are not flagged.
+  // Closed issue, self-edit, and editing the original issue when a later duplicate exists are not flagged.
   assert.deepEqual(duplicateIssue({ title: 'fix(board): closed issue with same title', openIssues }).problems, [])
   assert.deepEqual(duplicateIssue({ number: 88, title: 'fix(board): stale card badge stays visible after exit', openIssues }).problems, [])
+  assert.deepEqual(duplicateIssue({
+    number: 88,
+    title: 'fix(board): stale card badge stays visible after exit',
+    openIssues: [...openIssues, { number: 200, state: 'open', title: 'fix(board): stale card badge stays visible after exit' }],
+  }).problems, [])
   // Offline issue check skips duplicate lookup cleanly.
   assert.ok(checkIssue({ title: 'fix(board): new title', body: '', openIssues: null }).info.includes('duplicate-issue: skipped (offline).'))
 
-  // 2. Duplicate open PR fixing the same issue is flagged with the existing PR number; Part of #N steps are allowed.
+  // 2. Duplicate open PR fixing the same issue flags only the later PR with the earlier PR's number; Part of #N steps are allowed.
+  const firstPr = duplicatePr({
+    number: 1213,
+    createdAt: '2026-11-01T00:00:00Z',
+    title: 'fix: first fix',
+    body: 'Fixes #1203\nAuthor: claude, fix/1203-first',
+    open: [{ number: 1240, createdAt: '2026-11-02T00:00:00Z', title: 'fix: duplicate fix', body: 'Fixes #1203\nAuthor: codex, fix/1203-second', headRef: 'fix/1203-second' }],
+  })
+  assert.deepEqual(firstPr.problems, [])
   const secondPr = duplicatePr({
     number: 1240,
+    createdAt: '2026-11-02T00:00:00Z',
     title: 'fix: duplicate fix',
     body: 'Fixes #1203\nAuthor: codex, fix/1203-second',
-    open: [{ number: 1213, title: 'fix: first fix', body: 'Fixes #1203\nAuthor: claude, fix/1203-first', headRef: 'fix/1203-first' }],
+    open: [{ number: 1213, createdAt: '2026-11-01T00:00:00Z', title: 'fix: first fix', body: 'Fixes #1203\nAuthor: claude, fix/1203-first', headRef: 'fix/1203-first' }],
   })
   assert.equal(secondPr.problems.length, 1)
   assert.equal(secondPr.problems[0].check, 'duplicate-pr')
   assert.match(secondPr.problems[0].message, /#1203.*#1213/)
+  assert.deepEqual(duplicatePr({
+    number: 1213,
+    title: 'fix: first fix',
+    body: 'Fixes #1203',
+    open: [{ number: 1240, body: 'Fixes #1203', headRef: 'fix/1203-second' }],
+  }).problems, [])
   const splitPr = duplicatePr({
     number: 1344,
     title: 'refactor: step two',
@@ -1343,10 +1363,25 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
     title: 'bug: window opens off screen',
     body: 'I found while using the app that the window opened off screen.\n\n### Pull request it came from\n\n_No response_\n',
   }).problems, [])
-  // Team members filing an ordinary bug report (not a review/PR finding) also pass without a source PR link.
+  // Team members and outside contributors filing ordinary bug reports ("review" / "Finding" in plain UI prose) pass without a source PR link.
   assert.deepEqual(findingLink({
     title: 'bug: window opens off screen',
     body: 'I found while using the app that the window opened off screen.\n\n### Agent name\n\nantigravity\n\n### Pull request it came from\n\n_No response_\n',
+    association: 'OWNER',
+  }).problems, [])
+  assert.deepEqual(findingLink({
+    title: 'bug: review button disappears',
+    body: 'The review button disappears when I open the app.',
+    association: 'OWNER',
+  }).problems, [])
+  assert.deepEqual(findingLink({
+    title: 'Bug: Finding the right config path fails',
+    body: 'Steps to reproduce when starting locally.',
+    association: 'NONE',
+  }).problems, [])
+  assert.deepEqual(findingLink({
+    title: 'Bug: Finding the right config path fails',
+    body: 'Steps to reproduce when starting locally.',
     association: 'OWNER',
   }).problems, [])
   assert.equal(findingLink({ title: 'docs: small check', body: 'Broken link in README.', isFinding: true }).problems.length, 1)
@@ -1360,10 +1395,14 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
     body: 'Found during a review of the resize layout.',
     association: 'COLLABORATOR',
   }).problems.length, 1)
-  // Unrelated issue references ("Related roadmap: #209") and hex colors (#000000) do not count as a source PR link.
+  // Unrelated issue references, hex colors ("from #123456 to #abcdef", #000000) do not count as a source PR link.
   assert.equal(findingLink({
     title: 'fix(board): resize glitch',
     body: 'Found during a review of the resize layout.\nAuthor: codex\nRelated roadmap: #209\nColor: #000000\n',
+  }).problems.length, 1)
+  assert.equal(findingLink({
+    title: 'fix(board): theme glitch',
+    body: 'Found during a review of the board theme.\nAuthor: codex\nThe color changes from #123456 to #abcdef.\n',
   }).problems.length, 1)
   assert.deepEqual(findingLink({
     title: 'fix(board): resize glitch',
@@ -1409,11 +1448,70 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
   const ownIssueRun = await runMain(['--event', join(setup.directory, 'issue-self.json')], apiEnv)
   assert.equal(ownIssueRun.status, 0, ownIssueRun.stdout + ownIssueRun.stderr)
 
+  // 6. --comment-issue posts a visible notice comment on a flagged issue and updates it when fixed, failing closed on write error.
+  const writes = []
+  globalThis.fetch = async (url, options = {}) => {
+    const method = (options.method ?? 'GET').toUpperCase()
+    if (method !== 'GET') {
+      writes.push({ method, path: url.pathname, body: JSON.parse(options.body) })
+      return { ok: true, status: 201, json: async () => ({ id: 901 }), headers: new Headers() }
+    }
+    const payload = url.pathname.endsWith('/issues') ? openIssues : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  const commentDupRun = await runMain(['--event', join(setup.directory, 'issue-dup.json'), '--comment-issue'], apiEnv)
+  assert.equal(commentDupRun.status, 1, commentDupRun.stdout + commentDupRun.stderr)
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].method, 'POST')
+  assert.match(writes[0].path, /\/issues\/200\/comments$/)
+  assert.match(writes[0].body.body, /<!-- issue-check:notice -->/)
+  assert.match(writes[0].body.body, /#88/)
+
+  writes.length = 0
+  globalThis.fetch = async (url, options = {}) => {
+    const method = (options.method ?? 'GET').toUpperCase()
+    if (method !== 'GET') {
+      writes.push({ method, path: url.pathname, body: JSON.parse(options.body) })
+      return { ok: true, status: 200, json: async () => ({ id: 901 }), headers: new Headers() }
+    }
+    if (url.pathname.endsWith('/issues/1257/comments')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [{ id: 901, user: { login: 'github-actions[bot]', type: 'Bot' }, body: '<!-- issue-check:notice -->\n**issue-check** flagged' }],
+        headers: new Headers(),
+      }
+    }
+    return { ok: true, status: 200, json: async () => (url.pathname.endsWith('/issues') ? openIssues : []), headers: new Headers() }
+  }
+  const commentResolvedRun = await runMain(['--event', join(setup.directory, 'issue-self.json'), '--comment-issue'], apiEnv)
+  assert.equal(commentResolvedRun.status, 0, commentResolvedRun.stdout + commentResolvedRun.stderr)
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].method, 'PATCH')
+  assert.match(writes[0].path, /\/issues\/comments\/901$/)
+  assert.match(writes[0].body.body, /all checks passed/)
+
+  globalThis.fetch = async (url, options = {}) => {
+    const method = (options.method ?? 'GET').toUpperCase()
+    if (method !== 'GET') return { ok: false, status: 403, headers: new Headers() }
+    return { ok: true, status: 200, json: async () => (url.pathname.endsWith('/issues') ? openIssues : []), headers: new Headers() }
+  }
+  const writeFailedRun = await runMain(['--event', join(setup.directory, 'issue-dup.json'), '--comment-issue'], apiEnv)
+  assert.equal(writeFailedRun.status, 2)
+
+  // 7. Duplicate open pull requests only fail the later pull request (#17 stays clean against #99, fails against earlier #12).
   const calls = []
   globalThis.fetch = githubAnswers(calls, {
-    pulls: [{ number: 99, title: 'fix: earlier fix', body: 'Fixes #42\nAuthor: claude, fix/42-first', head: { ref: 'fix/42-first' } }],
+    pulls: [{ number: 99, created_at: '2030-01-02T00:00:00Z', title: 'fix: later competing fix', body: 'Fixes #42\nAuthor: claude, fix/42-later', head: { ref: 'fix/42-later' } }],
+  })
+  const origPrRun = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
+  assert.equal(origPrRun.status, 0, origPrRun.stdout + origPrRun.stderr)
+
+  calls.length = 0
+  globalThis.fetch = githubAnswers(calls, {
+    pulls: [{ number: 12, created_at: '2029-12-01T00:00:00Z', title: 'fix: earlier fix', body: 'Fixes #42\nAuthor: claude, fix/42-first', head: { ref: 'fix/42-first' } }],
   })
   const dupPrRun = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
   assert.equal(dupPrRun.status, 1, dupPrRun.stdout + dupPrRun.stderr)
-  assert.match(dupPrRun.stdout, /FAIL duplicate-pr: issue #42 already has an open pull request #99/)
+  assert.match(dupPrRun.stdout, /FAIL duplicate-pr: issue #42 already has an open pull request #12/)
 })
