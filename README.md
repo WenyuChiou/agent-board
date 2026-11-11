@@ -22,7 +22,7 @@ npx @wenyuchiou/agent-board@next
 ```
 
 - `setup` shows what it will change and asks once before it writes.
-- Then open a new session of your agent and type `/agent-board` (`$agent-board` in Codex; Cursor has no such command, so use the second command).
+- Then open a new session of your agent and type `/agent-board` (`$agent-board` in Codex; Cursor has no such command, so use the second command). With only Claude Code, the second command works after that new session.
 - Per-agent steps, language, options and other ways to install: [setup guide](docs/SETUP.md#after-setup-per-agent).
 
 ## What you get
@@ -40,9 +40,9 @@ npx @wenyuchiou/agent-board@next
 
 | | Agent | Open the board | Your reply reaches it |
 |:-:|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | At once (confirmed) |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | At its next turn |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | At its next turn |
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | Sent when it is free |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | Handed over at its next turn |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | Handed over at its next turn |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | The second Quick start command | You paste it |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | You paste it |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | You paste it |
@@ -52,13 +52,13 @@ npx @wenyuchiou/agent-board@next
 
 | | Agent | Open the board | Your reply reaches it |
 |:-:|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | The pane beside its chat | Not yet |
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` (board page) | Not yet |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page (second command) | Not yet |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page (second command) | Not tested yet |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page (second command) | Not tested yet |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page (second command) | Not yet |
 
-- Board page: run the second Quick start command in any terminal, the app's own included.
+- Board page: run the second Quick start command in a terminal on this computer, the app's own included.
 - dot and other web chats report by hand: [how](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste).
 
 ## Answer from the board

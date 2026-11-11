@@ -22,7 +22,7 @@ npx @wenyuchiou/agent-board@next
 ```
 
 - `setup` 会先列出要改什么，问你一次才写入。
-- 接着开一个 agent 的新对话，输入 `/agent-board`（Codex 是 `$agent-board`；Cursor 没有这种命令，改用第二个命令）。
+- 接着开一个 agent 的新对话，输入 `/agent-board`（Codex 是 `$agent-board`；Cursor 没有这种命令，改用第二个命令）。只有 Claude Code 的话，要先开了这个新对话，第二个命令才会打开看板。
 - 各 agent 的步骤、语言、选项和其他安装方式：[安装指南](docs/SETUP.md#after-setup-per-agent)（英文）。
 
 ## 你会得到什么
@@ -40,9 +40,9 @@ npx @wenyuchiou/agent-board@next
 
 | | Agent | 打开看板 | 你的回复怎么送到 |
 |:-:|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | 立即送达（会确认） |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 下一轮才收到 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 下一轮才收到 |
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | 它空下来就送达 |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 下一轮交给它 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 下一轮交给它 |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 快速开始的第二个命令 | 你自己粘贴 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己粘贴 |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己粘贴 |
@@ -52,13 +52,13 @@ npx @wenyuchiou/agent-board@next
 
 | | Agent | 打开看板 | 你的回复怎么送到 |
 |:-:|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | 聊天旁的面板 | 暂不支持 |
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board`（看板网页） | 暂不支持 |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板网页（第二个命令） | 暂不支持 |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页（第二个命令） | 尚未测试 |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板网页（第二个命令） | 尚未测试 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板网页（第二个命令） | 暂不支持 |
 
-- 看板网页：在任何终端运行快速开始的第二个命令，app 自带的终端也行。
+- 看板网页：在这台电脑的终端运行快速开始的第二个命令，app 自带的终端也行。
 - dot 和其他网页版聊天要手动汇报：[怎么做](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)（英文）。
 
 ## 在看板上回复

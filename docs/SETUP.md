@@ -192,7 +192,7 @@ terminal board; CI prints text. `--html` and the old spelling `--serve` start or
 open the page (`--serve` prints only the address, with no text board); `--lan` opens it and shows the phone address; `--watch` selects the terminal board, `--print` prints text, and `--json`
 returns the board for agents.
 
-The board follows the system language when it is Traditional or Simplified Chinese, and English otherwise; `--lang en`, `--lang zh-TW` or `--lang zh-CN` on the board command (as on `setup`) chooses. `--html --no-open` starts the page without opening a browser window (`--no-open` alone does not: in an interactive terminal over SSH or without a display it still gives the terminal board).
+Without `--lang` or a language it saved, the board follows the system language when it is Traditional or Simplified Chinese, and English otherwise; `--lang en`, `--lang zh-TW` or `--lang zh-CN` on the board command (as on `setup`) chooses. `--html --no-open` starts the page without opening a browser window (`--no-open` alone does not: in an interactive terminal over SSH or without a display it still gives the terminal board).
 
 These board calls run the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
 the board the Claude Code plugin's connector last connected, else
@@ -244,7 +244,7 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 
 Start a new session of each agent: a session that was already open is not connected.
 
-Open the board in the new session with `/agent-board`, or `$agent-board` in Codex. Cursor has no such command: use `npx @wenyuchiou/agent-board@next` in a terminal.
+Open the board in the new session with `/agent-board`, or `$agent-board` in Codex. Cursor has no such command: use `npx @wenyuchiou/agent-board@next` in a terminal. In Hermes Agent, ask it for the Agent Board skill.
 
 - **Claude Code** connects through its plugin, which a yes to setup installs. If you did not answer yes (setup only previewed, or ran `--apply` without a terminal): `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
 - **Codex:** a yes to setup trusts its hooks. If you did not answer yes, trust them in `/hooks` ([how](CODEX.md)).

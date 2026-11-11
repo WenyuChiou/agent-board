@@ -71,9 +71,9 @@ const BOARD_COMMANDS = { 'Claude Code': '/agent-board', Codex: '$agent-board', A
 // described, and the words of the phone row. The cells follow docs/MESSAGING.md "Agent and surface support"
 // (Proposed or None is "Not yet", Implemented and not tested is "Not tested", no such surface is a dash).
 const WORDS = {
-  en: { now: 'At once (confirmed)', next: 'At its next turn', paste: 'You paste it', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: 'Ask it for the Agent Board skill' },
-  'zh-TW': { now: '立即送到（會確認）', next: '下一輪才收到', paste: '你自己貼上', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留到那個對話的下一回合才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '請它執行 Agent Board skill' },
-  'zh-CN': { now: '立即送达（会确认）', next: '下一轮才收到', paste: '你自己粘贴', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留到那个对话的下一回合才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '让它执行 Agent Board skill' },
+  en: { now: 'Sent when it is free', next: 'Handed over at its next turn', paste: 'You paste it', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: 'Ask it for the Agent Board skill' },
+  'zh-TW': { now: '它空下來就送到', next: '下一輪交給它', paste: '你自己貼上', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留到那個對話的下一回合才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '請它執行 Agent Board skill' },
+  'zh-CN': { now: '它空下来就送达', next: '下一轮交给它', paste: '你自己粘贴', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留到那个对话的下一回合才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '让它执行 Agent Board skill' },
 }
 // Each agent's command-line reply in the terminal table, a key of WORDS.
 const REPLY = { 'Claude Code': 'now', Codex: 'next', Antigravity: 'next', Cursor: 'paste', OpenCode: 'paste', 'Grok Build': 'paste', 'Hermes Agent': 'paste' }
@@ -435,9 +435,9 @@ describe('L0 discover and install from the README', () => {
     }
     // Words of the page and pane cells; "Not tested yet" is MESSAGING.md's Implemented with no live run.
     const DESKTOP = {
-      en: { pane: 'The pane beside its chat', page: 'Board page (second command)', notYet: 'Not yet', untested: 'Not tested yet', second: 'The second Quick start command' },
-      'zh-TW': { pane: '聊天旁的面板', page: '看板網頁（第二個指令）', notYet: '尚未支援', untested: '尚未測試', second: '快速開始的第二個指令' },
-      'zh-CN': { pane: '聊天旁的面板', page: '看板网页（第二个命令）', notYet: '暂不支持', untested: '尚未测试', second: '快速开始的第二个命令' },
+      en: { pane: '`/agent-board` (board page)', page: 'Board page (second command)', notYet: 'Not yet', untested: 'Not tested yet', second: 'The second Quick start command' },
+      'zh-TW': { pane: '`/agent-board`（看板網頁）', page: '看板網頁（第二個指令）', notYet: '尚未支援', untested: '尚未測試', second: '快速開始的第二個指令' },
+      'zh-CN': { pane: '`/agent-board`（看板网页）', page: '看板网页（第二个命令）', notYet: '暂不支持', untested: '尚未测试', second: '快速开始的第二个命令' },
     }
     // Agents with a desktop app or IDE in docs/MESSAGING.md "Agent and surface support", and what that table says of each.
     const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'untested'], Cursor: ['page', 'untested'], OpenCode: ['page', 'notYet'] }
@@ -475,6 +475,7 @@ describe('L0 discover and install from the README', () => {
       for (const [icon, agent, open, reply] of apps) {
         assert.match(icon, /\swidth="28"/, `${name}: ${agent}'s mark is drawn at 28 px`)
         assert.equal(open, desk[DESK[agent][0]], `${name}: how ${agent}'s app opens the board`)
+        assert.equal(agent, /alt="([^"]+)"/.exec(icon)[1], `${name}: ${agent}'s desktop row name matches its icon`)
         assert.equal(reply, desk[DESK[agent][1]], `${name}: ${agent}'s app reply`)
       }
       assert.doesNotMatch(text, /Muse/i, `${name}: Muse Code is not in the README`)
@@ -656,6 +657,7 @@ describe('L0 discover and install from the README', () => {
       assert.ok(setup.includes('`--lang en`, `--lang zh-TW` or `--lang zh-CN`') && setup.includes('follows the system language'), 'SETUP.md: the language flag and the system-language default')
       assert.ok(setup.includes('`要設定這些嗎？[Y/n]`') && setup.includes('`要设置这些吗？[Y/n]`'), 'SETUP.md: the question is localized')
       assert.ok(setup.includes('Open the board in the new session with `/agent-board`, or `$agent-board` in Codex. Cursor has no such command'), 'SETUP.md: how to open the board per agent, and that Cursor has no command')
+      assert.ok(setup.includes('In Hermes Agent, ask it for the Agent Board skill.'), 'SETUP.md: how to open the board in Hermes Agent')
       assert.ok(setup.includes('## Install from a clone') && setup.includes('## Let an agent install it'), 'SETUP.md: the clone route and the agent-install prompt')
       assert.doesNotMatch(first, /`--no-open`/, `${name}: Quick start does not give --no-open alone`)
       // The stable tag is still 0.24.2, whose launcher has no `remove`.
