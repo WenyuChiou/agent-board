@@ -1344,8 +1344,18 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
     body: 'I found while using the app that the window opened off screen.\n\n### Pull request it came from\n\n_No response_\n',
   }).problems, [])
   assert.equal(findingLink({ title: 'docs: small check', body: 'Broken link in README.', isFinding: true }).problems.length, 1)
+  // Bug-form Agent name field and issue author_association identify lane findings even without an Author line.
+  assert.equal(findingLink({
+    title: 'fix(board): resize glitch',
+    body: '### What happened, and what you expected\n\nFound while reviewing the resize change.\n\n### Agent name\n\nantigravity\n\n### Pull request it came from\n\n_No response_\n',
+  }).problems.length, 1)
+  assert.equal(findingLink({
+    title: 'fix(board): resize glitch',
+    body: 'Found during testing of the resize layout.',
+    association: 'COLLABORATOR',
+  }).problems.length, 1)
 
-  // 5. CLI --event for both issues (duplicate + missing finding link) and PR (duplicate Fixes #42 for team author).
+  // 5. CLI --event for both issues (duplicate + missing finding link, plus form-shaped event) and PR (duplicate Fixes #42 for team author).
   const setup = fixture(t)
   const originalFetch = globalThis.fetch
   t.after(() => { globalThis.fetch = originalFetch })
@@ -1361,6 +1371,20 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
   assert.equal(dupIssueRun.status, 1, dupIssueRun.stdout + dupIssueRun.stderr)
   assert.match(dupIssueRun.stdout, /FAIL duplicate-issue: open issue #88/)
   assert.match(dupIssueRun.stdout, /FAIL finding-link:/)
+
+  setup.put('issue-form.json', JSON.stringify({
+    repository: { full_name: 'synthetic/example' },
+    issue: {
+      number: 201,
+      state: 'open',
+      author_association: 'NONE',
+      title: 'fix(board): form finding without link',
+      body: '### What happened, and what you expected\n\nFound while reviewing the resize change.\n\n### Agent name\n\nantigravity\n\n### Pull request it came from\n\n_No response_\n',
+    },
+  }))
+  const formFindingRun = await runMain(['--event', join(setup.directory, 'issue-form.json')], apiEnv)
+  assert.equal(formFindingRun.status, 1, formFindingRun.stdout + formFindingRun.stderr)
+  assert.match(formFindingRun.stdout, /FAIL finding-link:/)
 
   setup.put('issue-self.json', JSON.stringify({
     repository: { full_name: 'synthetic/example' },

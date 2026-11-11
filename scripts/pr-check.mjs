@@ -209,15 +209,20 @@ export const duplicateIssue = ({ title = '', number = null, openIssues = [] } = 
 }
 
 // A lane that files a finding links the pull request it came from (#1325).
-export const findingLink = ({ title = '', body = '', number = null, isFinding = false } = {}) => {
+export const findingLink = ({ title = '', body = '', number = null, association = null, isFinding = false } = {}) => {
   const output = result()
   const clean = stripComments(body ?? '')
   const hasAuthor = /^[ \t]*Author:[ \t]*\S/im.test(clean)
+  const isTeamAuthor = isKnownAssociation(association) && !isOutsideAssociation(association)
+  const agentSection = clean.match(/^#{2,3}[ \t]*Agent name[ \t]*\r?\n+([^\r\n#][^\r\n]*)/im)?.[1]?.trim() ?? ''
+  const hasFormAgent = Boolean(agentSection && !/^(?:none|n\/a|manual|_no response_)$/i.test(agentSection))
   const hasFindingTitle = /\bfinding\b/i.test(String(title ?? ''))
   const hasFindingCue = /\b(?:finding|found\s+(?:by|in|on|during|while|from)|from\s+(?:the\s+)?(?:review|outside\s+review|audit|user-sim)|review\s+finding|audit\s+finding|split\s+from|source\s+pr)\b/i.test(clean)
+  const hasReviewFormCue = /\b(?:finding|review(?:ing)?|outside\s+review|audit|user-sim|split\s+from|source\s+pr|follow-?up)\b|\bfound\s+(?:by|while\s+reviewing|during\s+review|in\s+(?:pr|pull\s+request))\b/i.test(clean)
   const fromPrSection = clean.match(/^#{2,3}[ \t]*Pull request it came from[ \t]*\r?\n+([^\r\n#][^\r\n]*)/im)?.[1]?.trim() ?? ''
   const hasSectionAnswer = Boolean(fromPrSection && !/^(?:none|n\/a|_no response_)$/i.test(fromPrSection))
-  if (!isFinding && !hasFindingTitle && !(hasAuthor && hasFindingCue) && !hasSectionAnswer) return output
+  const isLaneFinding = isFinding || hasFindingTitle || hasSectionAnswer || ((hasAuthor || isTeamAuthor) && hasFindingCue) || (hasFormAgent && hasReviewFormCue)
+  if (!isLaneFinding) return output
 
   // Strip standalone Fixes/Part of lines so a roadmap or issue link such as "Part of #209" does not mask a missing source PR link.
   const withoutLeadingIssues = linesOf(clean).filter(line => !/^\s*(?:Fixes|Part of|Closes|Resolves)\s+#\d+\b/i.test(line)).join('\n')
@@ -234,7 +239,7 @@ export const findingLink = ({ title = '', body = '', number = null, isFinding = 
   return output
 }
 
-export const checkIssue = ({ title = '', body = '', number = null, openIssues = null, isFinding = false } = {}) => {
+export const checkIssue = ({ title = '', body = '', number = null, association = null, openIssues = null, isFinding = false } = {}) => {
   const output = result()
   const add = next => {
     output.problems.push(...next.problems)
@@ -242,7 +247,7 @@ export const checkIssue = ({ title = '', body = '', number = null, openIssues = 
   }
   if (openIssues === null) output.info.push('duplicate-issue: skipped (offline).')
   else add(duplicateIssue({ title, number, openIssues }))
-  add(findingLink({ title, body, number, isFinding }))
+  add(findingLink({ title, body, number, association, isFinding }))
   return output
 }
 
@@ -1031,6 +1036,7 @@ const runIssueCheck = async ({ options, cwd, repo, issue }) => {
     title: target.title,
     body: target.body ?? '',
     number: target.number ?? null,
+    association: target.author_association ?? null,
     openIssues,
     isFinding: Boolean(options['--finding']),
   })
