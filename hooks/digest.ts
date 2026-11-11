@@ -209,7 +209,15 @@ const isQuoted = (line: string, mark: number): boolean => {
   // after the mark closes (`他問"要不要?"好的`). Otherwise the partner opens a later quotation, and the
   // question asks, when a space comes before it (`stray " here? "Yes"`, #1290) or the quote before
   // the mark stands between spaces (`要修這個 " 嗎？回答"好"即可`), and that quotation closes.
-  const partner = line.indexOf('"', mark + 1)
+  // An escaped quote (`\"`) is a character here too, so it is never the partner.
+  const nextQuote = (from: number): number => {
+    for (let i = from; i < line.length; i += 1) {
+      if (line[i] === '\\') i += 1
+      else if (line[i] === '"') return i
+    }
+    return -1
+  }
+  const partner = nextQuote(mark + 1)
   const isRightAfter = /^[?？]["”」』)）]*$/.test(line.slice(mark, partner))
   const isSpaced = (at: number): boolean => /\s/.test(line[at - 1] ?? ' ') && /\s/.test(line[at + 1] ?? ' ')
   // It closes when the next straight quote touches the text before it (`"Yes"`, `"👍"`, `","`), not
