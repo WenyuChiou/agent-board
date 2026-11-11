@@ -197,13 +197,17 @@ const run = (path, passed, { isSetup = false, isRemove = false, env = process.en
       console.error(message(`agent-board: the board script at ${shown(path)} did not return JSON for --json, so it is probably from an older release. To update it, preview: npx ${name}@${v} setup, then add --apply.`, `agent-board：${shown(path)} 的看板程式對 --json 沒有回傳 JSON，可能是較舊的版本。更新前先預覽：npx ${name}@${v} setup，再加上 --apply。`, `agent-board：${shown(path)} 的看板程序对 --json 没有返回 JSON，可能是较旧的版本。更新前先预览：npx ${name}@${v} setup，再加上 --apply。`))
       process.exit(1)
     }
-    process.stdout.write(result.stdout)
   }
-  if (result.signal) {
-    process.kill(process.pid, result.signal)
-    process.exit(1)
+  const finish = () => {
+    if (result.signal) {
+      process.kill(process.pid, result.signal)
+      process.exit(1)
+    }
+    process.exit(result.status ?? 1)
   }
-  process.exit(result.status ?? 1)
+  // Node writes stdout to a pipe asynchronously on macOS (and Windows), and process.exit drops what is still queued.
+  if (isJsonChecked && typeof result.stdout === 'string') process.stdout.write(result.stdout, finish)
+  else finish()
 }
 const unknown = word => {
   console.error(message(`agent-board: unknown command "${word}". The board takes options such as --print or --json; run agent-board --help.`, `agent-board：不認得的指令「${word}」。看板用的是 --print、--json 這類選項；請執行 agent-board --help。`, `agent-board：不认识的命令「${word}」。看板用的是 --print、--json 这类选项；请运行 agent-board --help。`))

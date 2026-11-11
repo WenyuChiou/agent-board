@@ -427,6 +427,23 @@ test('--json through an edited older board script still fails instead of printin
   assert.equal(newer.stdout, '{"ok":true}\n')
 }))
 
+test('--json through a build the package does not know hands over all of a large JSON output before the launcher exits (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  // An edited current script: the launcher holds its output to check it is JSON, then passes it on.
+  const json = JSON.stringify({ items: 'x'.repeat(8 * 1024 * 1024) })
+  save(boardPath(f), `${prelude(f)}process.stdout.write(${JSON.stringify(json)})\n// edited by the person`)
+  // A reader that waits before it reads: the launcher's output then waits in its own queue, which an early exit drops
+  // (stdout to a pipe is asynchronous on Windows and macOS).
+  const reader = `const { spawn } = require('node:child_process')
+const board = spawn(process.execPath, [${JSON.stringify(join(pkg, 'bin/agent-board.mjs'))}, '--json'], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+board.stdout.pause()
+let size = 0
+setTimeout(() => { board.stdout.on('data', chunk => { size += chunk.length }); board.stdout.resume() }, 1500)
+board.stdout.on('end', () => process.stdout.write(String(size)))`
+  const result = spawnSync(process.execPath, ['-e', reader], { cwd: f.box, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 60000 })
+  assert.equal(result.stdout, String(json.length), 'every byte of the JSON reaches a reader that is slow to read')
+}))
+
 test('--json with --chat or --status through an older board script fails with the notice too (review of #1328)', () => fixture(f => {
   const pkg = packed(f)
   const text = `${prelude(f)}process.stdout.write('Agent Board (text, not JSON)\\n')\n// 0.24.2`
