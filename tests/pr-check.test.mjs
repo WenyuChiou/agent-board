@@ -6,9 +6,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr,
-  isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
-  privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
+  addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkIssue, checkPr,
+  duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
+  main, naming, needsBundle, outsideClaim, privateData, report, reportMarkdown, reviewOf, rulesPage, sections,
+  stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -1216,9 +1217,10 @@ test('pr-check passes a team pull request with no claim on its issue', async t =
   const passed = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
   assert.equal(passed.status, 0, passed.stdout + passed.stderr)
   assert.equal(passed.stdout.includes('claim'), false)
-  // A team author's check reads neither the issue's comments nor the open pull requests, so a failed lookup it does
-  // not need cannot stop it.
-  assert.equal(calls.some(path => path.endsWith('/issues/42/comments') || path.endsWith('/pulls')), false, calls.join(' '))
+  // A team author's check does not read the issue's comments for a claim (#607); it still reads /pulls to flag
+  // a second pull request fixing the same issue (#1325).
+  assert.equal(calls.some(path => path.endsWith('/issues/42/comments')), false, calls.join(' '))
+  assert.equal(calls.some(path => path.endsWith('/pulls')), true, calls.join(' '))
 })
 
 test('pr-check passes a team pull request when more than eight pull requests are open', async t => {
@@ -1249,4 +1251,129 @@ test('pr-check passes a team pull request when more than eight pull requests are
   const passed = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
   assert.equal(passed.status, 0, passed.stdout + passed.stderr)
   assert.equal(calls.some(path => path.endsWith('/files')), false)
+})
+
+test('pr-check flags duplicate open issues, duplicate open pull requests and lane findings without a PR link, and accepts a PR fixing its own issue (#1257/#1259)', async t => {
+  // 1. Duplicate open issue title is flagged with the existing open issue number; PRs in /issues and self are ignored.
+  const openIssues = [
+    { number: 88, state: 'open', title: 'fix(board): stale card badge stays visible after exit' },
+    { number: 89, state: 'closed', title: 'fix(board): closed issue with same title' },
+    { number: 1257, state: 'open', title: "fix(pr-check): an approval needs the full head sha, and a lane's own fresh reviewer is not refused" },
+    { number: 1259, state: 'open', title: "fix(pr-check): an approval needs the full head sha, and a lane's own fresh reviewer is not refused", pull_request: { url: 'https://api.example.invalid/pulls/1259' } },
+  ]
+  const dupExact = duplicateIssue({ title: 'Fix(board): stale card badge stays visible after exit.', openIssues })
+  assert.equal(dupExact.problems.length, 1)
+  assert.equal(dupExact.problems[0].check, 'duplicate-issue')
+  assert.match(dupExact.problems[0].message, /#88/)
+  // Conventional prefix change still matches when descriptive body carries enough words.
+  const dupPrefix = duplicateIssue({ title: 'ci(board): stale card badge stays visible after exit', openIssues })
+  assert.equal(dupPrefix.problems.length, 1)
+  assert.match(dupPrefix.problems[0].message, /#88/)
+  // Short generic remainder after prefix is not falsely equated across distinct prefixes.
+  assert.deepEqual(issueTitleKeys('fix(board): add badge'), ['fix(board): add badge'])
+  // Closed issue and self-edit are not flagged.
+  assert.deepEqual(duplicateIssue({ title: 'fix(board): closed issue with same title', openIssues }).problems, [])
+  assert.deepEqual(duplicateIssue({ number: 88, title: 'fix(board): stale card badge stays visible after exit', openIssues }).problems, [])
+  // Offline issue check skips duplicate lookup cleanly.
+  assert.ok(checkIssue({ title: 'fix(board): new title', body: '', openIssues: null }).info.includes('duplicate-issue: skipped (offline).'))
+
+  // 2. Duplicate open PR fixing the same issue is flagged with the existing PR number; Part of #N steps are allowed.
+  const secondPr = duplicatePr({
+    number: 1240,
+    title: 'fix: duplicate fix',
+    body: 'Fixes #1203\nAuthor: codex, fix/1203-second',
+    open: [{ number: 1213, title: 'fix: first fix', body: 'Fixes #1203\nAuthor: claude, fix/1203-first', headRef: 'fix/1203-first' }],
+  })
+  assert.equal(secondPr.problems.length, 1)
+  assert.equal(secondPr.problems[0].check, 'duplicate-pr')
+  assert.match(secondPr.problems[0].message, /#1203.*#1213/)
+  const splitPr = duplicatePr({
+    number: 1344,
+    title: 'refactor: step two',
+    body: 'Part of #209\nAuthor: codex, refactor/step-two',
+    open: [{ number: 1338, title: 'docs: step one', body: 'Part of #209\nAuthor: claude, docs/step-one', headRef: 'docs/step-one' }],
+  })
+  assert.deepEqual(splitPr.problems, [])
+  // Local preflight (--body-file, number: null) ignores our own branch's PR while still flagging another branch.
+  assert.deepEqual(duplicatePr({
+    number: null, branch: 'fix/own', title: 'fix: own', body: 'Fixes #42',
+    open: [{ number: 50, body: 'Fixes #42', headRef: 'fix/own' }],
+  }).problems, [])
+  assert.equal(duplicatePr({
+    number: null, branch: 'fix/own', title: 'fix: own', body: 'Fixes #42',
+    open: [{ number: 51, body: 'Fixes #42', headRef: 'fix/other' }],
+  }).problems.length, 1)
+
+  // 3. A PR fixing its own issue (#1257 with its PR #1259 sharing the same title) is not a duplicate on either side.
+  const sharedTitle = "fix(pr-check): an approval needs the full head sha, and a lane's own fresh reviewer is not refused"
+  assert.deepEqual(duplicateIssue({
+    number: 1257,
+    title: sharedTitle,
+    openIssues,
+  }).problems, [])
+  const ownPrBody = `Fixes #1257\nAuthor: codex, branch \`${branch}\`\n\n## What and why\nApprove full head sha.\n\n## Checks\n- [x] Run the tests - passed\n`
+  const selfPr = checkPr({
+    ...syntheticPr(),
+    number: 1259,
+    title: sharedTitle,
+    body: ownPrBody,
+    changelogText: '# Changelog\n\n## Unreleased\n\n- Check full head sha (#1257). Tests: `a synthetic check explains the result`.\n\n## 1.0.0\n',
+    added: [{ path: 'CHANGELOG.md', line: 5, text: '- Check full head sha (#1257). Tests: `a synthetic check explains the result`.' }],
+    association: 'COLLABORATOR',
+    open: [{ number: 1259, title: sharedTitle, body: ownPrBody, headRef: branch }],
+  })
+  assert.deepEqual(selfPr.problems, [])
+
+  // 4. Lane finding must link the PR it came from; normal reports and linked findings pass.
+  const missingLink = findingLink({
+    title: 'fix(board): button flickers on resize',
+    body: 'Found while reviewing the board resize change.\n\nPart of #209\nAuthor: antigravity, lane check\n',
+  })
+  assert.equal(missingLink.problems.length, 1)
+  assert.equal(missingLink.problems[0].check, 'finding-link')
+  assert.deepEqual(findingLink({
+    title: 'fix(board): button flickers on resize',
+    body: 'Found in #1299 while reviewing the board resize change.\n\nAuthor: antigravity, lane check\n',
+  }).problems, [])
+  assert.deepEqual(findingLink({
+    title: 'fix(board): button flickers on resize',
+    body: '### Pull request it came from\n\nhttps://github.com/WenyuChiou/agent-board/pull/1306\n\nAuthor: claude\n',
+  }).problems, [])
+  assert.deepEqual(findingLink({
+    title: 'bug: window opens off screen',
+    body: 'I found while using the app that the window opened off screen.\n\n### Pull request it came from\n\n_No response_\n',
+  }).problems, [])
+  assert.equal(findingLink({ title: 'docs: small check', body: 'Broken link in README.', isFinding: true }).problems.length, 1)
+
+  // 5. CLI --event for both issues (duplicate + missing finding link) and PR (duplicate Fixes #42 for team author).
+  const setup = fixture(t)
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async url => {
+    const payload = url.pathname.endsWith('/issues') ? openIssues : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  setup.put('issue-dup.json', JSON.stringify({
+    repository: { full_name: 'synthetic/example' },
+    issue: { number: 200, state: 'open', title: 'fix(board): stale card badge stays visible after exit', body: 'Finding: leftover badge.\nAuthor: antigravity' },
+  }))
+  const dupIssueRun = await runMain(['--event', join(setup.directory, 'issue-dup.json')], apiEnv)
+  assert.equal(dupIssueRun.status, 1, dupIssueRun.stdout + dupIssueRun.stderr)
+  assert.match(dupIssueRun.stdout, /FAIL duplicate-issue: open issue #88/)
+  assert.match(dupIssueRun.stdout, /FAIL finding-link:/)
+
+  setup.put('issue-self.json', JSON.stringify({
+    repository: { full_name: 'synthetic/example' },
+    issue: { number: 1257, state: 'open', title: sharedTitle, body: 'Found in #1259 follow-up.\nAuthor: codex' },
+  }))
+  const ownIssueRun = await runMain(['--event', join(setup.directory, 'issue-self.json')], apiEnv)
+  assert.equal(ownIssueRun.status, 0, ownIssueRun.stdout + ownIssueRun.stderr)
+
+  const calls = []
+  globalThis.fetch = githubAnswers(calls, {
+    pulls: [{ number: 99, title: 'fix: earlier fix', body: 'Fixes #42\nAuthor: claude, fix/42-first', head: { ref: 'fix/42-first' } }],
+  })
+  const dupPrRun = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
+  assert.equal(dupPrRun.status, 1, dupPrRun.stdout + dupPrRun.stderr)
+  assert.match(dupPrRun.stdout, /FAIL duplicate-pr: issue #42 already has an open pull request #99/)
 })

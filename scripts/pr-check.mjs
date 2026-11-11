@@ -96,7 +96,7 @@ export const addedLines = unifiedDiff => {
 }
 
 export const issueLine = (body, title, { isOptional = false } = {}) => {
-  const output = { issue: null, kind: null, issues: [], ...result() }
+  const output = { issue: null, kind: null, issues: [], items: [], ...result() }
   if (isReleaseTitle(title)) {
     output.info.push('issue: release pull requests need no issue line.')
     return output
@@ -117,6 +117,7 @@ export const issueLine = (body, title, { isOptional = false } = {}) => {
   output.issue = listed[0].number
   output.kind = listed[0].kind
   output.issues = listed.map(item => item.number)
+  output.items = listed
   for (const number of new Set(output.issues.filter((item, index) => output.issues.indexOf(item) !== index))) {
     output.problems.push(problem('issue', `#${number} is listed more than once.`, 'give each issue one "Fixes #N" or "Part of #N" line.'))
   }
@@ -128,6 +129,120 @@ export const issueLine = (body, title, { isOptional = false } = {}) => {
       output.problems.push(problem('issue', `a closing keyword also names #${closing[2]}.`, output.issues.length === 1 ? 'remove the other closing reference so this pull request covers only its first issue.' : 'remove the other closing reference so this pull request closes only the issues on its first lines.'))
     }
   }
+  return output
+}
+
+const linkedIssues = body => {
+  const items = []
+  for (const line of linesOf(stripComments(body ?? '')).map(text => text.trim()).filter(Boolean)) {
+    const match = line.match(/^(Fixes|Closes|Resolves|Part of)\s+#(\d+)\b/i)
+    if (!match) break
+    items.push({ number: Number(match[2]), kind: match[1].toLowerCase() === 'part of' ? 'part of' : 'fixes' })
+  }
+  return items
+}
+
+// Two open pull requests must not both claim to fix the same issue (#1240 and #1213 on #1203).
+// "Part of #N" marks split steps that share a parent issue (#209), so those are left alone.
+export const duplicatePr = ({ body = '', title = '', number = null, branch = null, open = [] } = {}) => {
+  const output = result()
+  if (isReleaseTitle(title) || open === null || open === undefined) return output
+  const fixing = [...new Set(issueLine(body, title).items.filter(item => item.kind === 'fixes').map(item => item.number))]
+  if (!fixing.length) return output
+  const reported = new Set()
+  for (const other of open) {
+    if (!other || other.number === number) continue
+    if (number === null && branch && other.headRef && other.headRef === branch) continue
+    const otherFixing = new Set(linkedIssues(other.body ?? '').filter(item => item.kind === 'fixes').map(item => item.number))
+    for (const issueNumber of fixing) {
+      if (!otherFixing.has(issueNumber)) continue
+      const key = `${issueNumber}:${other.number}`
+      if (reported.has(key)) continue
+      reported.add(key)
+      output.problems.push(problem(
+        'duplicate-pr',
+        `issue #${issueNumber} already has an open pull request #${other.number}.`,
+        `finish or close #${other.number} first, or use "Part of #${issueNumber}" for an agreed split step (CONTRIBUTING rule 3).`,
+      ))
+    }
+  }
+  return output
+}
+
+const normalizeTitlePart = text => String(text ?? '')
+  .toLowerCase()
+  .replace(/[`'"]/g, '')
+  .replace(/^[\s.,:;!?()[\]-]+|[\s.,:;!?()[\]-]+$/g, '')
+  .replace(/\s+/g, ' ')
+  .trim()
+
+export const issueTitleKeys = title => {
+  const full = normalizeTitlePart(title)
+  if (!full) return []
+  const keys = new Set([full])
+  const stripped = full.match(/^(?:bug|task|feat|fix|docs|test|refactor|chore|perf|ci|build|style|revert|rules)(?:\([^)]*\))?:\s*(.+)$/i)?.[1]
+  const body = stripped ? normalizeTitlePart(stripped) : ''
+  // Only match across prefixes when the descriptive title carries enough context on its own.
+  if (body && body.length >= 16 && body.split(' ').length >= 3) keys.add(body)
+  return [...keys]
+}
+
+// GitHub's /issues endpoint includes pull requests (which carry pull_request); only open issues count here so a pull
+// request sharing its own issue's title (#1259 and #1257) never reads as a duplicate issue.
+export const duplicateIssue = ({ title = '', number = null, openIssues = [] } = {}) => {
+  const output = result()
+  const keys = new Set(issueTitleKeys(title))
+  if (!keys.size || openIssues === null || openIssues === undefined) return output
+  for (const existing of openIssues) {
+    if (!existing || existing.pull_request) continue
+    if (existing.number === number) continue
+    if (existing.state && existing.state !== 'open') continue
+    if (issueTitleKeys(existing.title).some(key => keys.has(key))) {
+      output.problems.push(problem(
+        'duplicate-issue',
+        `open issue #${existing.number} already has a matching title.`,
+        `comment on #${existing.number} instead of opening a second issue, or rename this issue if it covers a separate problem (docs/dev/team-process.md).`,
+      ))
+    }
+  }
+  return output
+}
+
+// A lane that files a finding links the pull request it came from (#1325).
+export const findingLink = ({ title = '', body = '', number = null, isFinding = false } = {}) => {
+  const output = result()
+  const clean = stripComments(body ?? '')
+  const hasAuthor = /^[ \t]*Author:[ \t]*\S/im.test(clean)
+  const hasFindingTitle = /\bfinding\b/i.test(String(title ?? ''))
+  const hasFindingCue = /\b(?:finding|found\s+(?:by|in|on|during|while|from)|from\s+(?:the\s+)?(?:review|outside\s+review|audit|user-sim)|review\s+finding|audit\s+finding|split\s+from|source\s+pr)\b/i.test(clean)
+  const fromPrSection = clean.match(/^#{2,3}[ \t]*Pull request it came from[ \t]*\r?\n+([^\r\n#][^\r\n]*)/im)?.[1]?.trim() ?? ''
+  const hasSectionAnswer = Boolean(fromPrSection && !/^(?:none|n\/a|_no response_)$/i.test(fromPrSection))
+  if (!isFinding && !hasFindingTitle && !(hasAuthor && hasFindingCue) && !hasSectionAnswer) return output
+
+  // Strip standalone Fixes/Part of lines so a roadmap or issue link such as "Part of #209" does not mask a missing source PR link.
+  const withoutLeadingIssues = linesOf(clean).filter(line => !/^\s*(?:Fixes|Part of|Closes|Resolves)\s+#\d+\b/i.test(line)).join('\n')
+
+  const hasNumberRef = [...withoutLeadingIssues.matchAll(/#(\d+)\b/g)].some(match => Number(match[1]) !== number)
+  const hasPullUrl = [...withoutLeadingIssues.matchAll(/github\.com\/[^/\s]+\/[^/\s]+\/pull\/(\d+)\b/gi)].some(match => Number(match[1]) !== number)
+  if (hasNumberRef || hasPullUrl) return output
+
+  output.problems.push(problem(
+    'finding-link',
+    'a finding filed by a lane must link the pull request it came from.',
+    'name or link the source pull request in the issue body, for example "Found in #1299".',
+  ))
+  return output
+}
+
+export const checkIssue = ({ title = '', body = '', number = null, openIssues = null, isFinding = false } = {}) => {
+  const output = result()
+  const add = next => {
+    output.problems.push(...next.problems)
+    output.info.push(...next.info)
+  }
+  if (openIssues === null) output.info.push('duplicate-issue: skipped (offline).')
+  else add(duplicateIssue({ title, number, openIssues }))
+  add(findingLink({ title, body, number, isFinding }))
   return output
 }
 
@@ -717,6 +832,10 @@ export const checkPr = data => {
     output.info.push('claim and cap: not checked, the author is unknown here. The team needs neither; a contributor from outside the team needs both (CONTRIBUTING rules 3 and 10), and CI checks them.')
   }
   // The team has no limit on open pull requests (#607); only an outside author's are counted.
+  if (issue.items.some(item => item.kind === 'fixes')) {
+    if (data.open === null) output.info.push('duplicate-pr: skipped (offline).')
+    else add(duplicatePr({ body: data.body, title: data.title, number: data.number, branch: data.branch, open: data.open }))
+  }
   if (isOutside) {
     if (data.open === null) output.info.push('cap: skipped (offline).')
     else add(cap({ open: data.open, number: data.number, login: data.login }))
@@ -754,11 +873,14 @@ export const reportMarkdown = ({ problems, info }, header) => [
 const usage = `Usage:
   node scripts/pr-check.mjs --pr <N> [-R owner/repo] [--repo-dir <dir>]
   node scripts/pr-check.mjs --body-file <file> --title <title> [--base <ref>] [--repo-dir <dir>]
+  node scripts/pr-check.mjs --issue <N> [--finding] [-R owner/repo] [--repo-dir <dir>]
+  node scripts/pr-check.mjs --issue-title <title> [--issue-body-file <file>] [--finding] [-R owner/repo] [--repo-dir <dir>]
   node scripts/pr-check.mjs --event <file> [--repo-dir <dir>]
 
 Options:
   --offline       Skip issue, claim, open-PR cap and review network checks
   --no-bundle     Skip the Bun board bundle check
+  --finding       Check the issue as a finding filed by a lane
   --help          Print this usage
 
 Default repository: WenyuChiou/agent-board. Default base: origin/main.
@@ -767,8 +889,8 @@ Exit codes: 0 passed, 1 check problems, 2 usage or environment error.
 
 const parseArgs = argv => {
   const options = {}
-  const flags = new Set(['--offline', '--no-bundle', '--help'])
-  const values = new Set(['--pr', '-R', '--repo-dir', '--body-file', '--title', '--base', '--event'])
+  const flags = new Set(['--offline', '--no-bundle', '--finding', '--help'])
+  const values = new Set(['--pr', '-R', '--repo-dir', '--body-file', '--title', '--base', '--issue', '--issue-title', '--issue-body-file', '--event'])
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i]
     if (Object.hasOwn(options, key)) throw new Error(`duplicate option ${key}`)
@@ -777,9 +899,13 @@ const parseArgs = argv => {
     else throw new Error(`unknown option or missing value: ${safeText(key)}`)
   }
   if (options['--help']) return options
-  if (['--pr', '--body-file', '--event'].filter(key => options[key]).length !== 1) throw new Error('choose exactly one of --pr, --body-file or --event; use --help for usage.')
+  if (['--pr', '--body-file', '--issue', '--issue-title', '--event'].filter(key => options[key]).length !== 1) {
+    throw new Error('choose exactly one of --pr, --body-file, --issue, --issue-title or --event; use --help for usage.')
+  }
   if (options['--body-file'] ? !options['--title'] : options['--title'] || options['--base']) throw new Error('--body-file needs --title; --title and --base belong only to --body-file mode.')
+  if (options['--issue-body-file'] && !options['--issue-title']) throw new Error('--issue-body-file belongs only to --issue-title mode.')
   if (options['--pr'] && !/^[1-9]\d*$/.test(options['--pr'])) throw new Error('--pr must be a positive integer.')
+  if (options['--issue'] && !/^[1-9]\d*$/.test(options['--issue'])) throw new Error('--issue must be a positive integer.')
   return options
 }
 
@@ -870,6 +996,48 @@ const requireCommit = sha => {
   if (typeof sha !== 'string' || !/^[0-9a-f]{40,64}$/i.test(sha)) throw new Error('pull request metadata needs full commit SHAs.')
 }
 
+const printCheckResult = (checked, header, { isEvent = false } = {}) => {
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    try { appendFileSync(process.env.GITHUB_STEP_SUMMARY, reportMarkdown(checked, header)) } catch { throw new Error('could not append the GitHub step summary.') }
+  }
+  const printed = report(checked, header)
+  if (isEvent) {
+    // GitHub Actions reads no command of either syntax until this random token comes back; the error
+    // messages printed outside it are fixed text and numbers, never pull request text.
+    const token = randomBytes(16).toString('hex')
+    console.log(`::stop-commands::${token}\n${printed}\n::${token}::`)
+  } else {
+    console.log(printed)
+  }
+  return checked.problems.length ? 1 : 0
+}
+
+const runIssueCheck = async ({ options, cwd, repo, issue }) => {
+  if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('repository must be owner/repo.')
+  const api = options['--offline'] ? null : apiReader(options, repo, cwd)
+  let target = issue
+  if (options['--issue']) {
+    if (!api) throw new Error('network check failed for --issue; pass --issue-title with --offline to check locally.')
+    target = await api(`issues/${options['--issue']}`)
+  }
+  if (!target || typeof target.title !== 'string') throw new Error('issue metadata is incomplete or invalid.')
+  if (target.pull_request) throw new Error(`#${target.number} is a pull request, not an issue.`)
+  if (target.state === 'closed') {
+    console.log('pr-check: issue check not run: the issue is closed.')
+    return 0
+  }
+  const openIssues = api ? await api('issues?state=open', { isList: true }) : null
+  const checked = checkIssue({
+    title: target.title,
+    body: target.body ?? '',
+    number: target.number ?? null,
+    openIssues,
+    isFinding: Boolean(options['--finding']),
+  })
+  const header = target.number ? `issue #${target.number}` : 'new issue'
+  return printCheckResult(checked, header, { isEvent: Boolean(options['--event']) })
+}
+
 export const main = async (argv = process.argv.slice(2)) => {
   // Windows would otherwise run a git.exe or gh.exe from the checked-out pull request before the real one.
   if (process.platform === 'win32') process.env.NoDefaultCurrentDirectoryInExePath = '1'
@@ -884,8 +1052,18 @@ export const main = async (argv = process.argv.slice(2)) => {
     let data
     let base
     let baseRef
+    if (options['--issue'] || options['--issue-title']) {
+      const issue = options['--issue-title']
+        ? { number: null, title: options['--issue-title'], body: options['--issue-body-file'] ? readText(resolve(options['--issue-body-file'])) : '', state: 'open' }
+        : null
+      return await runIssueCheck({ options, cwd, repo, issue })
+    }
     if (options['--event']) {
       const event = readJson(readText(resolve(options['--event'])))
+      if (event.issue && !event.pull_request) {
+        if (!event.repository) throw new Error('event must contain issue and repository metadata.')
+        return await runIssueCheck({ options, cwd, repo: event.repository.full_name, issue: event.issue })
+      }
       const pr = event.pull_request
       if (!pr || !event.repository) throw new Error('event must contain pull_request and repository metadata.')
       // Merged metadata cannot enter the merge queue again, but its public body still needs privacy checks.
@@ -969,14 +1147,14 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.prComments = null
     if (!options['--offline']) {
       const api = apiReader(options, repo, cwd)
-      // The team needs no claim and has no cap (#607), so a team author's check reads neither the open pull requests
-      // nor the issue comments: a failed lookup it does not need must not stop it. The open list also gives the
-      // author's association when the event did not.
+      // Open pull requests are read both for an outside author's cap (#607) and to flag a second pull request fixing the
+      // same issue (#1325). Team authors still skip issue-comment claim lookups.
       const isTeam = () => isKnownAssociation(data.association) && !isOutsideAssociation(data.association)
-      if (!isTeam()) {
+      const parsedIssue = issueLine(data.body, data.title)
+      if (!isTeam() || parsedIssue.items.some(item => item.kind === 'fixes')) {
         const open = []
         for (const pr of await api('pulls?state=open', { isList: true })) {
-          open.push({ number: pr.number, title: pr.title, body: pr.body ?? '', createdAt: pr.created_at, labels: pr.labels, isOutside: isOutsideAssociation(pr.author_association), association: pr.author_association, login: pr.user?.login ?? null })
+          open.push({ number: pr.number, title: pr.title, body: pr.body ?? '', createdAt: pr.created_at, labels: pr.labels, isOutside: isOutsideAssociation(pr.author_association), association: pr.author_association, login: pr.user?.login ?? null, headRef: pr.head?.ref ?? null })
         }
         data.open = open
         const own = open.find(pr => pr.number === data.number)
@@ -985,7 +1163,7 @@ export const main = async (argv = process.argv.slice(2)) => {
           data.login ??= own.login ?? undefined
         }
       }
-      const [first, ...more] = [...new Set(issueLine(data.body, data.title).issues)]
+      const [first, ...more] = [...new Set(parsedIssue.issues)]
       const lookup = async number => {
         const issueData = await api(`issues/${number}`, { isMissingAllowed: true })
         return { issueData, issueComments: issueData === false || isTeam() ? [] : await api(`issues/${number}/comments`, { isList: true }) }
@@ -1021,19 +1199,7 @@ export const main = async (argv = process.argv.slice(2)) => {
       else checked.problems.push(problem('bundle', 'the board bundle (hooks/board-script.ts and its parts) is out of date.', 'run "npx --yes bun@1.4.2 scripts/build-board.ts" and commit hooks/board-script*.ts with the source change.'))
     }
     const header = `${data.number === null ? 'new pull request' : `#${data.number}`} ${data.branch} at ${data.head.slice(0, 7)}`
-    if (process.env.GITHUB_STEP_SUMMARY) {
-      try { appendFileSync(process.env.GITHUB_STEP_SUMMARY, reportMarkdown(checked, header)) } catch { throw new Error('could not append the GitHub step summary.') }
-    }
-    const printed = report(checked, header)
-    if (options['--event']) {
-      // GitHub Actions reads no command of either syntax until this random token comes back; the error
-      // messages printed outside it are fixed text and numbers, never pull request text.
-      const token = randomBytes(16).toString('hex')
-      console.log(`::stop-commands::${token}\n${printed}\n::${token}::`)
-    } else {
-      console.log(printed)
-    }
-    return checked.problems.length ? 1 : 0
+    return printCheckResult(checked, header, { isEvent: Boolean(options['--event']) })
   } catch (error) {
     console.error(`pr-check: ${oneLine(safeText(error.message))}`)
     return 2
