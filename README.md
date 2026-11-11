@@ -18,11 +18,12 @@ With Node.js 22+, in any terminal:
 
 ```sh
 npx @wenyuchiou/agent-board@next setup
+# open a new session of your agent, then:
 npx @wenyuchiou/agent-board@next
 ```
 
 - `setup` shows what it will change and asks once before it writes.
-- Then open a new session of your agent and type `/agent-board` (`$agent-board` in Codex; Cursor has no such command, so use the second command). With only Claude Code, the second command works after that new session.
+- In that new session, type `/agent-board` (`$agent-board` in Codex; in Hermes, ask it for the Agent Board skill), or run the second command (Cursor has no such command).
 - Per-agent steps, language, options and other ways to install: [setup guide](docs/SETUP.md#after-setup-per-agent).
 
 ## What you get
@@ -41,8 +42,8 @@ npx @wenyuchiou/agent-board@next
 | | Agent | Open the board | Your reply reaches it |
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | Sent when it is free |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | Handed over at its next turn |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | Handed over at its next turn |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | Handed over at its next turn, one per turn |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | Handed over at its next turn, one per turn |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | The second Quick start command | You paste it |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | You paste it |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | You paste it |
@@ -53,12 +54,13 @@ npx @wenyuchiou/agent-board@next
 | | Agent | Open the board | Your reply reaches it |
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` (board page) | Not yet |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page (second command) | Not yet |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page (second command) | Not tested yet |
-| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page (second command) | Not tested yet |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page (second command) | Not yet |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page | Not yet |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | Not tested yet |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page | Not tested yet |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page | Not yet |
 
-- Board page: run the second Quick start command in a terminal on this computer, the app's own included.
+- Board page: run `npx @wenyuchiou/agent-board@next --html` in a terminal, the app's own included.
+- Not yet or Not tested yet: copy your answer from the board and paste it into the app.
 - dot and other web chats report by hand: [how](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste).
 
 ## Answer from the board
@@ -68,7 +70,7 @@ npx @wenyuchiou/agent-board@next
 An answer to an agent's question and a message you send it travel the same way, by the button you press:
 
 - **Send** hands it to a connected session; a confirmation from that session means it was received. With no confirmation it may still have arrived, so look at the agent before you use **Copy answer**, or it may get it twice. Send needs [messaging on](docs/MESSAGING.md#local-storage).
-- **Queue for the agent's next turn** holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires.
+- **Queue for the agent's next turn** holds it until that session's next turn, one message a turn, oldest first, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires.
 - **Copy answer** puts it on your clipboard to paste into that agent.
 - Answered in the agent's own window? Press **Already answered, hide** to clear the card.
 

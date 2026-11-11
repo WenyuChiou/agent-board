@@ -18,11 +18,12 @@ Claude Code、Codex、Antigravity 等 AI agent 都向你电脑上的同一块看
 
 ```sh
 npx @wenyuchiou/agent-board@next setup
+# 开一个 agent 的新对话后：
 npx @wenyuchiou/agent-board@next
 ```
 
 - `setup` 会先列出要改什么，问你一次才写入。
-- 接着开一个 agent 的新对话，输入 `/agent-board`（Codex 是 `$agent-board`；Cursor 没有这种命令，改用第二个命令）。只有 Claude Code 的话，要先开了这个新对话，第二个命令才会打开看板。
+- 在新对话里输入 `/agent-board`（Codex 是 `$agent-board`；Hermes 让它执行 Agent Board skill），或运行第二个命令（Cursor 没有这种命令）。
 - 各 agent 的步骤、语言、选项和其他安装方式：[安装指南](docs/SETUP.md#after-setup-per-agent)（英文）。
 
 ## 你会得到什么
@@ -40,9 +41,9 @@ npx @wenyuchiou/agent-board@next
 
 | | Agent | 打开看板 | 你的回复怎么送到 |
 |:-:|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | 它空下来就送达 |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 下一轮交给它 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 下一轮交给它 |
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | 它空下来就发出 |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 下一轮起交给它，一轮一条 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 下一轮起交给它，一轮一条 |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 快速开始的第二个命令 | 你自己粘贴 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己粘贴 |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己粘贴 |
@@ -53,12 +54,13 @@ npx @wenyuchiou/agent-board@next
 | | Agent | 打开看板 | 你的回复怎么送到 |
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board`（看板网页） | 暂不支持 |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板网页（第二个命令） | 暂不支持 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页（第二个命令） | 尚未测试 |
-| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板网页（第二个命令） | 尚未测试 |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板网页（第二个命令） | 暂不支持 |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板网页 | 暂不支持 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页 | 尚未测试 |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板网页 | 尚未测试 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板网页 | 暂不支持 |
 
-- 看板网页：在这台电脑的终端运行快速开始的第二个命令，app 自带的终端也行。
+- 看板网页：在终端运行 `npx @wenyuchiou/agent-board@next --html`，app 自带的终端也行。
+- 暂不支持或尚未测试：从看板复制回复，粘贴到 app 里。
 - dot 和其他网页版聊天要手动汇报：[怎么做](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste)（英文）。
 
 ## 在看板上回复
@@ -68,7 +70,7 @@ npx @wenyuchiou/agent-board@next
 回复 agent 的提问，和主动给它发消息，走的是同一条路，看你点哪个按钮：
 
 - **发送**把它交给已连接的对话；对话回确认才代表收到。没有确认也可能已经送到，先看一下那个 agent 再用**复制回答**，免得它收到两次。发送需要[开启消息功能](docs/MESSAGING.md#local-storage)（英文）。
-- **排入 agent 的下一回合**会留到那个对话的下一回合才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收。
+- **排入 agent 的下一回合**会留到那个对话的下一回合才送，一回合交一条，先排的先送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收。
 - **复制回答**把它放进剪贴板，由你粘贴到那个 agent。
 - 已经在 agent 自己的窗口里回复了？点**已回复，先隐藏**就能收掉这张卡。
 
