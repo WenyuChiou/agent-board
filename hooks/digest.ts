@@ -207,13 +207,12 @@ const isQuoted = (line: string, mark: number): boolean => {
   }
   // A quote the reply talks about (`escape " here?`) has no partner after the mark. A partner right
   // after the mark closes (`他問"要不要?"好的`). Otherwise the partner opens a later quotation, and the
-  // question asks, when a space comes before it (`stray " here? "Yes"`, #1290) or the quote before
-  // the mark stands between spaces (`要修這個 " 嗎？回答"好"即可`), and that quotation closes. A quote
-  // opened right after a reporting word in the same sentence (`他問 "`, `I asked "`) is what was said,
-  // so its partner closes it (`他問 " 要不要？我可以幫忙"然後說"好"`).
+  // question asks, only when a space comes before it, as a closing quote never has (`stray " here?
+  // "Yes"`, #1290), and that quotation closes. A quote opened right after a reporting word in the same
+  // sentence (`他問 "`, `I asked "`) is what was said, so its partner closes it. Any other partner
+  // closes, as on main (`他表示 " 要不要？我可以幫忙"然後說"好"`).
   const partner = line.indexOf('"', mark + 1)
   const isRightAfter = /^[?？]["”」』)）]*$/.test(line.slice(mark, partner))
-  const isSpaced = (at: number): boolean => /\s/.test(line[at - 1] ?? ' ') && /\s/.test(line[at + 1] ?? ' ')
   const isReported = REPORTS.test(line.slice(0, Math.max(straight, 0)).split(/[.!?。！？]/).pop() ?? '')
   // It closes at the next straight quote when only a word stands between (`"Yes"`, `"42"`, `","`),
   // or when that quote touches the text before it, not a space (`" and you said "blue"` opens
@@ -235,7 +234,7 @@ const isQuoted = (line: string, mark: number): boolean => {
     }
     return isClosed && after === -1
   }
-  const isOpener = !isReported && (/\s/.test(line[partner - 1] ?? '') || isSpaced(straight)) && isLaterQuotation()
+  const isOpener = !isReported && /\s/.test(line[partner - 1] ?? '') && isLaterQuotation()
   const isCloser = partner !== -1 && (isRightAfter || !isOpener)
   if (straight >= 0 && isCloser) open.push(straight)
   // An apostrophe also sits inside words, so a single quote counts only when it closes right
