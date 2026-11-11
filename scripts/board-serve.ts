@@ -93,6 +93,10 @@ const isNewerVersion = (candidate: string, current: string): boolean => {
   }
   return false
 }
+// The launcher's update advice, whole or not at all: on Windows it can be two commands, one per shell, and a cut would
+// leave one that runs with a wrong folder. 1000 characters hold both for a folder of about 400 (#1304).
+export const wholeUpdate = (text: string | undefined): string | null => text !== undefined && text !== '' && text.length <= 1000 ? text : null
+
 export const boardVersion = RELEASED.reduce((highest, release) => {
   return isNewerVersion(release.version, highest) ? release.version : highest
 }, '0.0.0')
@@ -456,7 +460,7 @@ export const startServer = (o: ServeOptions): void => {
           const now = Date.now()
           const view = o.view()
           const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
-          const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion, update: isLan ? null : (process.env.AGENT_BOARD_UPDATE_COMMAND ?? '').slice(0, 500) || null }, unreadable: view.unreadable ?? [] }
+          const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion, update: isLan ? null : wholeUpdate(process.env.AGENT_BOARD_UPDATE_COMMAND) }, unreadable: view.unreadable ?? [] }
           const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.

@@ -8041,6 +8041,22 @@ test('the update command with a home path reaches the local page but never the p
   }
 })
 
+// Two commands, one per shell, for a long Windows folder with `$` are longer than the old 500-character cut, which
+// ended the text inside the PowerShell command (Greptile on #1328). The advice reaches the page whole, or not at all.
+test('the update advice reaches the page whole, both shell commands of a long folder included, or not at all (#1304)', { timeout: 30_000 }, async () => {
+  const folder = `C:\\Boards\\$cache ${'x'.repeat(200)}`
+  const two = `Command Prompt: npx @wenyuchiou/agent-board@9.9.9 setup --data-dir "${folder}"; PowerShell: npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '${folder}'`
+  assert.ok(two.length > 500 && two.length <= 1000, String(two.length))
+  for (const [update, shown] of [[two, two], ['npx '.repeat(260), null]]) {
+    const board = await page('', { AGENT_BOARD_UPDATE_COMMAND: update })
+    try {
+      assert.equal((await board.call('GET', '/api/board')).json().model.view.versions.update, shown)
+    } finally {
+      await board.close()
+    }
+  }
+})
+
 test("--serve --lan prints the page's network address, a QR code of it and that the link is unencrypted, and a second run gives the same address", { timeout: 60_000 }, async t => {
   const board = serveIn()
   const urls = []
