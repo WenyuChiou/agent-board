@@ -2384,6 +2384,59 @@ test('#1302 a .new copy setup wrote is removed, not emptied, once the person res
   assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(f.root, 'install-codex.json'), 'utf8')).files, `${f.skill}.new`), false)
 }))
 
+// Review of #1328 (two-hour read): a .new copy shared by two agents is one file, so an update by one agent updates the other's record too.
+const sharedCopyUpdate = f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const fresh = readFileSync(f.skill, 'utf8')
+  const copy = `${f.skill}.new`
+  f.save(f.skill, `${fresh}Synthetic user edit\n`)
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  assert.equal(readFileSync(copy, 'utf8'), fresh)
+  // The state an older release left: both records name the copy with the older bytes, which are still on disk.
+  const older = '---\nname: agent-board\n---\n\nAn older release wrote this.\n'
+  const sha = text => createHash('sha256').update(text).digest('hex')
+  f.save(copy, older)
+  const records = ['codex', 'cursor'].map(agent => join(f.root, `install-${agent}.json`))
+  for (const record of records) {
+    const data = JSON.parse(readFileSync(record, 'utf8'))
+    data.files[copy] = sha(older)
+    writeFileSync(record, `${JSON.stringify(data, null, 2)}\n`)
+  }
+  const recorded = agent => JSON.parse(readFileSync(join(f.root, `install-${agent}.json`), 'utf8')).files[copy]
+  // One agent updates the copy.
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(readFileSync(copy, 'utf8'), fresh, 'the copy is updated')
+  return { fresh, copy, older, sha, recorded }
+}
+
+test('#1302 when one agent updates a shared .new copy, the other agent\'s record follows (review of #1328)', () => fixture(f => {
+  const { fresh, sha, recorded } = sharedCopyUpdate(f)
+  assert.equal(recorded('codex'), sha(fresh))
+  assert.equal(recorded('cursor'), sha(fresh), 'the sibling record names the bytes now on disk')
+}))
+
+test('#1302 restoring the older bytes of a shared .new copy is an edit to both agents, never overwritten by the sibling (review of #1328)', () => fixture(f => {
+  const { copy, older } = sharedCopyUpdate(f)
+  f.save(copy, older)
+  for (const agent of ['codex', 'cursor']) {
+    const preview = JSON.parse(f.install('--agent', agent, '--json').stdout)
+    assert.deepEqual(preview.conflicts, [copy], agent)
+    assert.notEqual(f.install('--agent', agent, '--apply').status, 0, agent)
+    assert.equal(readFileSync(copy, 'utf8'), older, `${agent} leaves the person's bytes`)
+  }
+}))
+
+test('#1302 a shared .new copy one agent updated is removed once the generated file is restored and each agent has run (review of #1328)', () => fixture(f => {
+  const { fresh, copy } = sharedCopyUpdate(f)
+  f.save(f.skill, fresh)
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  assert.equal(existsSync(copy), false, 'no copy is left behind')
+  for (const agent of ['codex', 'cursor']) assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(f.root, `install-${agent}.json`), 'utf8')).files, copy), false, agent)
+}))
+
 // An install from an older release: the worker and one hook are owned (their hashes are recorded) but are not what this version would write.
 const olderInstall = f => {
   assert.equal(f.install('--apply').status, 0)

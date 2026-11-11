@@ -1684,7 +1684,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (sibling.files === undefined) continue
         const siblingFiles = { ...object(sibling.files) } as Record<string, string>
         let updatedSibling = false
-        for (const sharedFile of [script, worker, skill]) {
+        // A .new copy several agents share is one file: when this agent rewrites it, every record that names it follows (#1302).
+        for (const sharedFile of [script, worker, skill, ...Object.keys(siblingFiles).filter(file => file.endsWith('.new'))]) {
           const nextText = files[sharedFile]
           if (Object.hasOwn(siblingFiles, sharedFile) && nextText !== undefined && changes.some(change => change.file === sharedFile) && siblingFiles[sharedFile] !== hash(nextText)) {
             siblingFiles[sharedFile] = hash(nextText)

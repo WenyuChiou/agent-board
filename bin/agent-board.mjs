@@ -177,7 +177,7 @@ const isWin = process.platform === 'win32'
 const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(home.toLowerCase()) : path.startsWith(home)) ? `~${path.slice(home.length)}` : path
 // The path as one argument for the shell the command is shown for: single quotes on POSIX. On Windows, double quotes,
 // which cmd and PowerShell both read; PowerShell runs $(...) and backticks inside them, so such a path gets its single quotes.
-const quoted = text => !isWin ? `'${text.replaceAll("'", "'\\''")}'` : /[$`]/.test(text) ? `'${text.replaceAll("'", "''")}'` : `"${text}"`
+const quoted = (text, shell) => !isWin ? `'${text.replaceAll("'", "'\\''")}'` : shell !== 'cmd' && /[$`]/.test(text) ? `'${text.replaceAll("'", "''")}'` : `"${text}"`
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
 const run = (path, passed, { isSetup = false, isRemove = false, env = process.env, isJsonChecked = false } = {}) => {
   const setupCmd = isRemove ? `npx ${name} remove` : `npx ${name} setup`
@@ -307,9 +307,20 @@ if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
         // A moved data folder: the board script's own folder is where the board is now.
         if (!agents) { root = dirname(installed); agents = listed(root) ?? [] }
         const folder = shown(root)
-        const opts = (agents.length ? ` --agent ${agents.join(',')}` : '') + (root !== join(home, '.agent-board') ? ` --data-dir ${/[^\w.:\\/~@+,=-]/.test(folder) ? quoted(folder) : folder}` : '')
-        updateCommand = `npx ${name}@${v} setup${opts}`
-        console.error(message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
+        const agentOpt = agents.length ? ` --agent ${agents.join(',')}` : ''
+        const needsQuote = root !== join(home, '.agent-board') && /[^\w.:\/~@+,=-]/.test(folder)
+        const dataOpt = style => root !== join(home, '.agent-board') ? ` --data-dir ${needsQuote ? quoted(folder, style) : folder}` : ''
+        // Command Prompt reads only double quotes and PowerShell runs $(...) and backticks inside them, so such a path is shown once per shell.
+        const isTwoShells = isWin && needsQuote && /[$`]/.test(folder)
+        const opts = agentOpt + dataOpt()
+        const command = `npx ${name}@${v} setup${isTwoShells ? agentOpt + dataOpt('cmd') : opts}`
+        const labels = message(['Command Prompt:', 'PowerShell:'], ['命令提示字元：', 'PowerShell：'], ['命令提示符：', 'PowerShell：'])
+        const forPowerShell = `npx ${name}@${v} setup${opts}`
+        updateCommand = isTwoShells ? `${labels[0]} ${command}${message('; ', '；', '；')}${labels[1]} ${forPowerShell}` : command
+        const two = isTwoShells ? `\n  ${labels[0]} ${command}\n  ${labels[1]} ${forPowerShell}` : ''
+        console.error(isTwoShells
+          ? message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview with the command for your shell, then add --apply:${two}`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先用你的終端機對應的指令預覽，再加上 --apply：${two}`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先用你的终端对应的命令预览，再加上 --apply：${two}`)
+          : message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
       } else {
         console.error(old
           ? message(`agent-board ${v}: the board script at ${path} is from ${old}; the Claude Code plugin wrote it. To update it, update the agent-board plugin in Claude Code, then run /progress connect.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版，由 Claude Code 外掛寫入。更新：先在 Claude Code 更新 agent-board 外掛，再執行 /progress connect。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版，由 Claude Code 插件写入。更新：先在 Claude Code 更新 agent-board 插件，再运行 /progress connect。`)

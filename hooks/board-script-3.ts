@@ -1971,7 +1971,7 @@ export const LINES = [
 "          continue;",
 "        const siblingFiles = { ...object2(sibling.files) };",
 "        let updatedSibling = false;",
-"        for (const sharedFile of [script, worker, skill]) {",
+"        for (const sharedFile of [script, worker, skill, ...Object.keys(siblingFiles).filter((file) => file.endsWith(\".new\"))]) {",
 "          const nextText = files[sharedFile];",
 "          if (Object.hasOwn(siblingFiles, sharedFile) && nextText !== undefined && changes.some((change) => change.file === sharedFile) && siblingFiles[sharedFile] !== hash2(nextText)) {",
 "            siblingFiles[sharedFile] = hash2(nextText);",
