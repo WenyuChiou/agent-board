@@ -4153,7 +4153,8 @@ test('a pasted block never takes the place of Claude’s, another agent’s or a
   expect(problem(SERVE_FILE, pasted('b2c3d4e5', 'dot'))).toBe('notYours')
   const unclosed = '## launch\n<!-- auto session=c0ffee12 agent=muse state=working updated=2026-10-17T08:00:00Z -->\n### Draft\n- [ ] Outline\n'
   expect(problem(unclosed, pasted('c0ffee12', 'muse'))).toBe('notYours')
-  expect(problem(SERVE_FILE, pasted('c0ffee12', 'claude'))).toBe('badBlock')
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'claude'))).toBe('reservedAgent')
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'claude', '- [ ] No title first'))).toBe('badBlock')
   expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse').replace(' agent=muse', ''))).toBe('badBlock')
   expect(problem(SERVE_FILE, pasted('C0FFEE12', 'muse'))).toBe('badBlock')
   expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse', '- [ ] No title first'))).toBe('badBlock')

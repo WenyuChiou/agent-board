@@ -857,6 +857,7 @@ export const ZH_CN: Strings = {
   pasteNoBlock: '找不到开头 <!-- auto … --> 和结尾 <!-- /auto … --> 都在的区块。',
   pasteMixed: '开头和结尾标记的 session id 不一样。',
   pasteBadBlock: '开头标记的下一行要是“### 标题”；区块里不能有 ```、<!-- -->、# 标题或第二个区块。',
+  pasteReservedAgent: '代理名称“claude”保留给 Claude Code 使用。请网页聊天改用“claude-web”，再粘贴一次。',
   pasteNoProject: '新区块的第一行要写“## 项目名称”。',
   pasteNotYours: '这个 id 属于本地报告器、有续接信息的 session、另一个 agent，或没有结尾标记的区块，不能盖掉。',
   pasteBadTime: '来源时间缺少或无效。请报告者提供当前完整进度，updated= 使用真实 UTC 时间并以 Z 结尾，再粘贴一次。',
