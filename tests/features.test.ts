@@ -1817,6 +1817,10 @@ test('a lone straight quote, such as an inch mark, is a literal character, and t
   expect(lastQuestion('他表示 "要不要？ ","')).toBeNull()
   expect(lastQuestion('他表示 "要不要？ "，"')).toBeNull()
   expect(lastQuestion('他表示 "要不要？ "，桌高12" 然後寫"👍')).toBeNull()
+  // 表示 reports what was said too, so a quote alone between spaces after it still opens a quotation.
+  expect(lastQuestion('他表示 " 要不要？ "，接著說",42"。')).toBeNull()
+  expect(lastQuestion('他表示 " 要不要？ "然後寫",')).toBeNull()
+  expect(lastQuestion('他表示 " 要不要？ "然后写",')).toBeNull()
   // A straight quote in code is a character, so it neither opens nor closes a quotation.
   expect(lastQuestion('The tokens are `name"` and `"`. Should I escape both? "No" leaves them unchanged.')).toBe('Should I escape both?')
   expect(lastQuestion('I compared `name"` and `"` and then asked "Ready?"')).toBeNull()

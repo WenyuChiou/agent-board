@@ -187,8 +187,8 @@ const CLOSERS = new Set(Object.values(OPENERS))
 // A question mark inside a quote that follows other words is a question told about, not one
 // put to the person: `… and asked "Blue or green?"` (#1273). Two shapes do ask: a quote that
 // wraps the whole question, and a quoted last option after `or` (`"red" row or "blue row?"`),
-// unless the sentence reports what was asked or said (`The test asked either "x" or "Ready?"`).
-const REPORTS = /\b(?:ask(?:ed|s)?|sa(?:id|ys)|wr(?:ote|ites)|repl(?:ied|ies)|typed|prompt(?:ed|s)?)\b|問|问|說|说|寫|写|回覆|回复/i
+// unless the sentence reports what was asked or said (`The test asked either "x" or "Ready?"`, `他表示 " 要不要？ "`).
+const REPORTS = /\b(?:ask(?:ed|s)?|sa(?:id|ys)|wr(?:ote|ites)|repl(?:ied|ies)|typed|prompt(?:ed|s)?)\b|問|问|說|说|寫|写|回覆|回复|表示/i
 const isLoneQuote = (line: string, at: number): boolean => {
   const before = line[at - 1] ?? ' '
   return /\d/.test(before) || /\S/.test(before) && /^(?:\s|$)/.test(line.slice(at + 1))

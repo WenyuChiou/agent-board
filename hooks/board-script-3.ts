@@ -74,7 +74,7 @@ export const LINES = [
 "};",
 "var OPENERS = { \"“\": \"”\", \"‘\": \"’\", \"「\": \"」\", \"『\": \"』\" };",
 "var CLOSERS = new Set(Object.values(OPENERS));",
-"var REPORTS = /\\b(?:ask(?:ed|s)?|sa(?:id|ys)|wr(?:ote|ites)|repl(?:ied|ies)|typed|prompt(?:ed|s)?)\\b|問|问|說|说|寫|写|回覆|回复/i;",
+"var REPORTS = /\\b(?:ask(?:ed|s)?|sa(?:id|ys)|wr(?:ote|ites)|repl(?:ied|ies)|typed|prompt(?:ed|s)?)\\b|問|问|說|说|寫|写|回覆|回复|表示/i;",
 "var isLoneQuote = (line, at) => {",
 "  const before = line[at - 1] ?? \" \";",
 "  return /\\d/.test(before) || /\\S/.test(before) && /^(?:\\s|$)/.test(line.slice(at + 1));",
