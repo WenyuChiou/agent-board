@@ -95,7 +95,7 @@ Your history stays beside `progress.md`; [Update and uninstall](docs/GUIDE.md#up
 | If the board looks old | A session that was already open may still run the version it loaded: start a new session of that agent. To update, see [the guide](docs/GUIDE.md#update-and-uninstall). |
 | An agent shows up twice | It may be connected both by the Claude plugin and by setup: [what to remove](docs/GUIDE.md#troubleshooting). |
 
-To check one agent's setup: `npx @wenyuchiou/agent-board@next --codex-doctor --agent codex` (add `--data-dir <folder>` when setup put the board in a folder you chose; also `cursor`, `opencode`, `grok`, `hermes`, `antigravity`; the [guide](docs/GUIDE.md#troubleshooting) has the rest). It changes nothing. For Claude Code, run `claude plugin list` and `/progress connect status`. More answers: the guide's [FAQ](docs/GUIDE.md#faq) and [Troubleshooting](docs/GUIDE.md#troubleshooting). Found a bug? Open the [bug form](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml) and follow the [safe-report steps](docs/GUIDE.md#reporting-a-problem-safely): no session ids, home-folder paths or tokens.
+To check Claude Code's setup, run `claude plugin list` and `/progress connect status`. More answers: the guide's [FAQ](docs/GUIDE.md#faq) and [Troubleshooting](docs/GUIDE.md#troubleshooting). Found a bug? Open the [bug form](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml) and follow the [safe-report steps](docs/GUIDE.md#reporting-a-problem-safely): no session ids, home-folder paths or tokens.
 
 ## Documentation
 

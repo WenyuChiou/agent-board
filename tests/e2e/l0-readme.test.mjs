@@ -525,9 +525,9 @@ describe('L0 discover and install from the README', () => {
     'zh-TW': { cli: '用命令列版本測過', untested: '這些 agent 的桌面 app 和 IDE 擴充', terminal: ['在互動式終端機裡，透過 SSH 連線或在沒有顯示器的 Linux 上', 'CI 裡印出純文字', '其他情況都開網頁', '在互動式終端機加 `--watch`'] },
     'zh-CN': { cli: '用命令行版本测过', untested: '这些 agent 的桌面 app 和 IDE 扩展', terminal: ['在交互式终端里，通过 SSH 连接或在没有显示器的 Linux 上', 'CI 里打印纯文本', '其他情况都开网页', '在交互式终端加 `--watch`'] },
   }
-  // codex_095/096: the commands a README or the clone route gives reach the right board, in any shell. Run in a
-  // journey world (tests/e2e/lib/world.mjs), never against this machine's own folders.
-  test('L0 README: the doctor command works in any shell, and the clone route opens the board setup wrote in a chosen folder or the plugin board by its progress file', async () => {
+  // The doctor belongs in SETUP.md, and the clone route opens the chosen or plugin board.
+  // Run the journey in an isolated world, never against this machine's own folders.
+  test('L0 README: the READMEs leave the doctor to SETUP.md, and the clone route opens the board setup wrote in a chosen folder or the plugin board by its progress file', async () => {
     const world = makeWorld()
     try {
       const launcher = fileURLToPath(new URL('bin/agent-board.mjs', root))
@@ -543,25 +543,25 @@ describe('L0 discover and install from the README', () => {
       })
       const save = (path, text) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text) }
       const stub = name => `globalThis.AGENT_BOARD = {"lang":"en"}\nprocess.stdout.write(${JSON.stringify(`${name}:`)} + process.argv.slice(2).join(' '))\n`
-      // The doctor command names no shell variable; the package command hands its words to the installed board.
       for (const [name] of READMES) {
-        const text = read(name)
-        const line = text.split('\n').find(one => one.includes('--codex-doctor')) ?? ''
-        assert.ok(line.includes('`npx @wenyuchiou/agent-board@next --codex-doctor --agent codex`'), `${name}: the doctor command is the package command`)
-        assert.doesNotMatch(line, /\$HOME/, `${name}: the doctor command names no $HOME`)
-        assert.ok(line.includes('`--data-dir <'), `${name}: the doctor line says when to add --data-dir`)
+        assert.doesNotMatch(read(name), /--codex-doctor/, `${name}: the doctor is left to SETUP.md`)
+        assert.match(read(name), /issues\/new\?template=bug_report\.yml/, `${name}: the bug form link stays`)
       }
-      // The world's installed board (beside its progress file) runs the real doctor, which changes nothing.
-      const before = world.files()
-      const doctor = await run(launcher, ['--codex-doctor', '--agent', 'codex'])
-      assert.match(doctor.stdout, /^Codex: /, doctor.stderr || doctor.stdout)
-      assert.deepEqual(world.files(), before, 'the doctor wrote nothing')
+      assert.ok(read('docs/SETUP.md').includes('--codex-doctor --agent <name>'), 'SETUP.md: the doctor command is documented')
       // The clone route with a chosen folder, for Cursor: setup writes the board there, and --data-dir opens it.
       const chosen = join(world.root, 'boards', 'cursor board')
+      // Setup honors the world's progress override, so give this board a separate file from the default board.
+      const chosenProgress = join(chosen, 'progress.md')
+      world.env.CLAUDE_PROGRESS_FILE = chosenProgress
       const applied = await run(setup, ['--agent', 'cursor', '--data-dir', chosen, '--apply'])
+      world.env.CLAUDE_PROGRESS_FILE = world.path
       assert.equal(applied.status, 0, applied.stderr || applied.stdout)
+      save(world.path, '## Default board\n\n### Default board task\n- [ ] Work\n')
+      const title = 'Chosen folder board task'
+      save(chosenProgress, `## Chosen board\n\n### ${title}\n- [ ] Work\n`)
       const opened = await run(launcher, ['--data-dir', chosen, '--print'])
       assert.equal(opened.status, 0, opened.stderr || opened.stdout)
+      assert.ok(opened.stdout.includes(title), opened.stderr || opened.stdout)
       // A board the Claude Code plugin manages opens by its progress file.
       const progress = join(world.root, 'plugin', 'progress.md')
       save(join(dirname(progress), 'agent-board.mjs'), stub('plugin'))
