@@ -23,7 +23,7 @@ npx @wenyuchiou/agent-board
 
 `setup` 會找出這台電腦上的 agent，列出它要改什麼，只問一次（`Set these up? [Y/n]`）；回答 n 就什麼都不寫。沒有終端機可以回答時（例如在 agent 的對話裡），它只預覽，要寫入就加 `--apply`。第二個指令打開看板。接著開一個 agent 的新對話（原本就開著的不會接上），在裡面輸入 `/agent-board`；Codex 是 `$agent-board`。
 
-看板的系統語言是繁體或簡體中文時就用中文，否則用英文；要自己選，在 setup 指令後加 `--lang en`、`--lang zh-TW` 或 `--lang zh-CN`。看板指令加 `--no-open`，只啟動網頁、不打開瀏覽器視窗。更多選項見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。不用 npm，或想讓 agent 幫你裝：[同一份指南](docs/SETUP.md#let-an-agent-install-it)。
+系統語言是繁體或簡體中文時，看板就用中文，否則用英文；要自己選，在 setup 指令後加 `--lang en`、`--lang zh-TW` 或 `--lang zh-CN`。看板指令加 `--no-open`，只啟動網頁、不打開瀏覽器視窗。更多選項見[安裝指南](docs/SETUP.md#install-with-npm)（英文）。不用 npm，或想讓 agent 幫你裝：[同一份指南](docs/SETUP.md#let-an-agent-install-it)。
 
 ## 你會得到什麼
 
@@ -36,7 +36,7 @@ npx @wenyuchiou/agent-board
 
 ## 支援的 agent
 
-有 0.24.3 紀錄的有七個 agent，在 Windows 11 上測過（[對照紀錄](docs/validation/2026-11-10-parity-0.24.3.md)、[模擬使用者](docs/validation/2026-11-10-usersim-0.24.3.md)，皆為英文）。標「未實機執行」的步驟，只在合成環境檢查過。
+下面七個 agent 有 0.24.3 的實測紀錄，都在 Windows 11 上測過（[對照紀錄](docs/validation/2026-11-10-parity-0.24.3.md)、[模擬使用者](docs/validation/2026-11-10-usersim-0.24.3.md)，皆為英文）。標「未實機執行」的步驟，只在合成環境檢查過。
 
 | | Agent | 在 agent 裡開看板 | 問題會上看板 | 你的回答 |
 |:-:|---|---|---|---|
