@@ -436,23 +436,27 @@ describe('L0 discover and install from the README', () => {
         const [x1, y1] = points[after]
         return x1 === x0 ? y1 : y0 + (y1 - y0) * (at - x0) / (x1 - x0)
       }
-      const samples = (from, to) => Array.from({ length: Math.round((to - from) / 0.25) + 1 }, (_, i) => from + i * 0.25)
+      // Every opacity a span can reach: the lines between points are straight, so its lowest and
+      // highest values sit at the span's two ends or at a point inside it.
+      const valuesOver = (points, from, to) => [opacityAt(points, from), opacityAt(points, to), ...points.filter(([x]) => x >= from && x <= to).map(([, value]) => value)]
       // Amber means someone waits: the logo's light and its halo are off once the answer is sent,
       // through the start scene and the calm close (the last 30% of the loop), between stops too.
       const lights = [...svg.matchAll(/<circle class="a s (c\d+)" fill="#F8B500"/gi)].map(match => match[1])
       assert.equal(lights.length, 2, `${file}: the logo's light and its halo move`)
       for (const name of lights) {
         const points = pointsOf(name)
-        assert.ok(points.length > 0 && samples(70, 100).every(at => opacityAt(points, at) <= 0.1), `${file}: the logo's light (${name}) stays off after the answer is sent`)
+        assert.ok(points.length > 0 && valuesOver(points, 70, 100).every(value => value <= 0.1), `${file}: the logo's light (${name}) stays off after the answer is sent`)
       }
       // At the loop's end a row fades as a whole: the layers drawn over it (each step done, the
       // receipt; class `cover`) stay fully on while it fades, so the text under them never shows through.
+      // The rows fade from half a second before the loop's end until a quarter second before it.
       const end = 100 * (1 - 0.5 / Number(loop))
+      const gone = 100 * (1 - 0.25 / Number(loop))
       const layers = [...svg.matchAll(/<g class="a (c\d+) cover\b[^"]*">/g)].map(match => match[1])
       assert.ok(layers.length >= 5, `${file}: the rows' done steps are layers drawn over them`)
       for (const name of layers) {
         const points = pointsOf(name)
-        assert.ok(samples(end, end + 25 / Number(loop) - 0.01).every(at => opacityAt(points, at) >= 0.99), `${file}: a layer drawn over a row (${name}) stays on until the row is gone`)
+        assert.ok(valuesOver(points, end, gone).every(value => value >= 0.99), `${file}: a layer drawn over a row (${name}) stays on until the row is gone`)
       }
       // The setup command stays on screen, the end frame included.
       const commands = [...svg.matchAll(new RegExp(`${literal(COMMAND)}</text>`, 'g'))]
