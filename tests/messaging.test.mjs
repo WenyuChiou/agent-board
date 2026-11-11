@@ -4148,9 +4148,8 @@ test('turn/start success is accepted, never acknowledged', async () => fixture(a
   } finally { await receiver.close() }
 }))
 
-test('a refusal from the daemon is rejected, an unclear result is uncertain, and nothing else is tried', async () => {
-  for (const [start, steer] of [['error'], ['empty'], ['ack', 'error']]) await fixture(async (board, dir) => {
-    // 'error' on turn/start, or an error answer to a steer of a turn that is no longer the running one.
+const codexResultCases = async cases => {
+  for (const [start, steer] of cases) await fixture(async (board, dir) => {
     const daemon = codexDaemon(dir, steer === undefined ? { start } : { status: 'active', steer })
     const receiver = codexReceiver(board, daemon, steer === undefined ? {} : { isSteerOn: true })
     try {
@@ -4165,7 +4164,12 @@ test('a refusal from the daemon is rejected, an unclear result is uncertain, and
       assert.ok(!methods.some(method => /^thread\/queue/.test(method) || method === (steer === undefined ? 'turn/steer' : 'turn/start')))
     } finally { await receiver.close() }
   })
-})
+}
+
+test('an unclear result is marked uncertain and nothing else is tried', () => codexResultCases([['empty']]))
+
+// An error answer of the daemon (a refused turn/start, or a steer of a turn that is no longer the running one) is a refusal before anything was done.
+test('a refusal from the daemon is rejected, and nothing else is tried', () => codexResultCases([['error'], ['ack', 'error']]))
 
 test('a Codex turn that ends without the ACK or fails after it never reads as acknowledged', async () => fixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { start: 'silent', endFlag: join(dir, 'end-turn') })

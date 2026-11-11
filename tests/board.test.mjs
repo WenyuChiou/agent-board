@@ -6451,7 +6451,7 @@ test('a plain board command keeps a page started with --codex-send, and a plain 
   const board = serveIn()
   let url = null
   try {
-    url = board.urlOf(await board.serve(['--quiet-board', '--codex-send']))
+    url = board.urlOf(await board.serve(['--quiet-board', '--codex-send', '--codex-steer']))
     assert.ok(url)
     const before = JSON.parse(readFileSync(board.served, 'utf8'))
     // The command the README tells (and /agent-board) does not know the flag: it must not replace the page and end Send to Codex.
