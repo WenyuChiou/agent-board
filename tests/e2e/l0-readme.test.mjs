@@ -142,7 +142,8 @@ describe('L0 discover and install from the README', () => {
       // Two copyable blocks, so a Claude-only setup has its new session before the board command runs (bin/agent-board.mjs):
       // setup, then one plain line saying to open a new session, then the bare npx command.
       const sequence = new RegExp('```sh\n' + literal('npx @wenyuchiou/agent-board@next setup') + '\n```\n\n' + literal(NEW_SESSION[lang]) + '\n\n```sh\n' + literal('npx @wenyuchiou/agent-board@next') + '\n```\n')
-      const install = sequence.exec(first)
+      // String match, since runner.test.mjs's L0 safety check reads a call named exec on a variable as a process call.
+      const install = first.match(sequence)
       assert.ok(install, `${name}: Quick start is the setup block, the exact new-session line, then the board block`)
       assert.equal([...first.matchAll(/```sh\n/g)].length, 2, `${name}: Quick start has two command blocks`)
       assert.ok(!/^#/m.test(first.slice(first.indexOf('```sh'), first.lastIndexOf('```'))), `${name}: no shell comment stands in for the new-session step`)
