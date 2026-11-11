@@ -2645,6 +2645,8 @@ test('setup still refuses a malformed host config that starts with a BOM', async
     assert.notEqual(applied.status, 0)
     assert.deepEqual(readFileSync(config), original)
     assert.equal(existsSync(f.root), false)
+    // Gemini CLI is retired (#1327): setup's front door no longer takes it as a target.
+    if (host === 'gemini') return
     const common = setupAgent(f, '--lang', 'en', '--agent', host, '--json')
     assertSetupStatus(common, 1)
     assert.equal(common.stderr, '')
@@ -6988,12 +6990,14 @@ test('OpenCode honors its config override for installation, doctor and removal',
   assert.ok(existsSync(join(f.env.OPENCODE_CONFIG_DIR, 'commands', 'agent-board.md')))
   assert.ok(!existsSync(join(f.home, '.config', 'opencode')))
   assert.equal(JSON.parse(f.command(['--codex-doctor', '--agent', 'opencode', '--json']).stdout).installed, true)
+  // A moved config folder: the plugin setup wrote in the old one goes (its bytes are still ours), and the new one is written (#1327).
   f.env.OPENCODE_CONFIG_DIR = join(f.home, 'changed-root')
-  assert.notEqual(f.install('--agent', 'opencode', '--apply').status, 0)
-  assert.ok(existsSync(plugin))
-  f.env.OPENCODE_CONFIG_DIR = join(f.home, 'native config')
-  assert.equal(f.command(['--codex-remove', '--agent', 'opencode', '--apply']).status, 0)
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
   assert.ok(!existsSync(plugin))
+  const moved = join(f.env.OPENCODE_CONFIG_DIR, 'plugins', 'agent-board-local.js')
+  assert.ok(existsSync(moved))
+  assert.equal(f.command(['--codex-remove', '--agent', 'opencode', '--apply']).status, 0)
+  assert.ok(!existsSync(moved))
 }))
 
 test('auto setup detects overridden host directories without scanning sessions', () => fixture(f => {
@@ -11895,8 +11899,8 @@ for (const agent of ['gemini', 'opencode']) {
     assert.deepEqual(plan.conflicts, [])
     assert.deepEqual(plan.changes.filter(change => change.file === old.old), [{ file: old.old, action: 'remove' }])
     assert.deepEqual(plan.changes.filter(change => change.file === old.now), [{ file: old.now, action: 'create' }])
-    const plain = setupAgent(f, '--lang', 'en', '--agent', agent)
-    assert.match(plain.stdout, /board\.(toml|md) \(the old \/board command; setup removes it\)/, plain.stdout)
+    // Gemini CLI is no longer a target of setup's front door (#1327), so its words are checked for OpenCode only.
+    if (agent !== 'gemini') assert.match(setupAgent(f, '--lang', 'en', '--agent', agent).stdout, /board\.(toml|md) \(the old \/board command; setup removes it\)/)
     assert.equal(existsSync(old.old), true, 'a preview changes nothing')
     const applied = f.install('--agent', agent, '--apply', '--json')
     assert.equal(applied.status, 0, applied.stderr)
@@ -11914,8 +11918,7 @@ for (const agent of ['gemini', 'opencode']) {
     assert.deepEqual(plan.conflicts, [])
     assert.deepEqual(plan.keptEdited, [old.old])
     assert.equal(plan.changes.some(change => change.file === old.old), false)
-    const plain = setupAgent(f, '--lang', 'en', '--agent', agent)
-    assert.match(plain.stdout, /board\.(toml|md) \(your edited old \/board command; setup leaves it; the command is now \/agent-board\)/, plain.stdout)
+    if (agent !== 'gemini') assert.match(setupAgent(f, '--lang', 'en', '--agent', agent).stdout, /board\.(toml|md) \(your edited old \/board command; setup leaves it; the command is now \/agent-board\)/)
     const applied = f.install('--agent', agent, '--apply', '--json')
     assert.equal(applied.status, 0, applied.stderr)
     assert.equal(readFileSync(old.old, 'utf8'), `${old.text}\nMy own line\n`)
