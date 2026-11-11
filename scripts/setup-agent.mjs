@@ -375,7 +375,7 @@ const main = () => {
   const hasDisabledPlugin = isPluginInstalled && isPluginDisabled(claudeDirectory)
   const isPluginNeeded = isAsking && !!claude && !isPluginInstalled
   const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
-  const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
+  const quote = value => /^[\w./:@=,-]+$/.test(value) ? value : process.platform === 'win32'
     ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
   const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
   const setupCommand = extra => {
@@ -663,6 +663,9 @@ const main = () => {
       const sessionAgents = available.map(agent => names[agent])
       steps.push(words(sessionAgents.length === 1 ? 'restartRemoveOne' : 'restartRemove', { agents: sessionAgents.join(message(', ', '、', '、')) }))
     }
+    // One retry command, still a removal, for every agent that was skipped.
+    const skipped = selected.filter((agent, i) => plans[i].conflicts.length)
+    if (skipped.length) steps.push(words('retry', { command: setupCommand(['--remove', '--agent', skipped.join(','), '--apply']) }))
   } else {
     const hasChanges = available.some(agent => plans[selected.indexOf(agent)].changes.length > 0)
     if (!apply && hasChanges) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
