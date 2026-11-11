@@ -1822,6 +1822,9 @@ test('a lone straight quote, such as an inch mark, is a literal character, and t
   expect(lastQuestion('他表示 " 要不要？ "然後寫",')).toBeNull()
   expect(lastQuestion('他表示 " 要不要？ "然后写",')).toBeNull()
   expect(lastQuestion('他心想 " 要不要？ "，接著寫",42"。')).toBeNull()
+  expect(lastQuestion('我在想 " 要不要繼續？ "，後來查了".NET 8"。')).toBeNull()
+  // A point between digits is a decimal, so the reporting word before it still counts.
+  expect(lastQuestion('他說版本1.2的提示是 " 要不要繼續？ "，後來查了".NET 8"。')).toBeNull()
   // 表示 also means "stands for", so a choice after it still asks.
   expect(lastQuestion('這個圖示表示「成功」還是「失敗？」')).toBe('這個圖示表示「成功」還是「失敗？」')
   // A straight quote in code is a character, so it neither opens nor closes a quotation.
