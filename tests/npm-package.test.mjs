@@ -12,6 +12,8 @@ import { setupPrograms } from './helpers/setup-programs.mjs'
 const repo = fileURLToPath(new URL('..', import.meta.url))
 const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
 const plugin = JSON.parse(readFileSync(join(repo, '.claude-plugin/plugin.json'), 'utf8'))
+// A folder as the launcher shows it in a command for this system's shell (bin/agent-board.mjs `quoted`).
+const shellQuoted = path => process.platform !== 'win32' ? `'${path.replaceAll("'", "'\\''")}'` : /[$`]/.test(path) ? `'${path.replaceAll("'", "''")}'` : `"${path}"`
 const save = (path, text) => {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, text)
@@ -465,7 +467,7 @@ test('the launcher hands an older script the update command for the install it r
   save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
   const custom = f.run(pkg, ['--data-dir', root, '--print'])
   success(custom)
-  assert.equal(custom.stdout, `update=${JSON.stringify(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir "${root}"`)}`)
+  assert.equal(custom.stdout, `update=${JSON.stringify(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir ${shellQuoted(root)}`)}`)
   const plugin = echo('globalThis.AGENT_BOARD = {}\n')
   const script = join(f.env.CLAUDE_CONFIG_DIR, 'agent-board.mjs')
   save(script, plugin)
@@ -572,7 +574,7 @@ test('an older plugin copy is told to update the plugin, and an older independen
   for (const [lang, preview, apply] of [['en', 'To update it, preview:', ', then add --apply.'], ['zh-TW', '更新前先預覽：', '，再加上 --apply。'], ['zh-CN', '更新前先预览：', '，再加上 --apply。']]) {
     const result = f.run(pkg, ['--data-dir', root, '--lang', lang])
     success(result)
-    assert.ok(result.stderr.includes(`${preview}${lang === 'en' ? ' ' : ''}npx ${manifest.name}@${manifest.version} setup --agent codex,cursor --data-dir "${root}"${apply}`), result.stderr)
+    assert.ok(result.stderr.includes(`${preview}${lang === 'en' ? ' ' : ''}npx ${manifest.name}@${manifest.version} setup --agent codex,cursor --data-dir ${shellQuoted(root)}${apply}`), result.stderr)
     assert.equal(result.stderr.includes('setup --apply'), false)
     assert.equal(result.stderr.trim().split('\n').length, 1)
   }
@@ -582,7 +584,7 @@ test('an older plugin copy is told to update the plugin, and an older independen
   const moved = f.run(pkg, ['--data-dir', other])
   success(moved)
   assert.ok(moved.stderr.includes(`is from 0.0.1. To update it, preview: npx ${manifest.name}@${manifest.version} setup --data-dir `), moved.stderr)
-  assert.ok(moved.stderr.includes(`--data-dir ${/[^\w.:\\/~@+,=-]/.test(other) ? `"${other}"` : other}, then add --apply.`), moved.stderr)
+  assert.ok(moved.stderr.includes(`--data-dir ${/[^\w.:\\/~@+,=-]/.test(other) ? shellQuoted(other) : other}, then add --apply.`), moved.stderr)
   assert.equal(moved.stderr.includes(gone), false)
   assert.equal(moved.stderr.includes('--agent'), false)
   assert.equal(moved.stderr.includes('could not compare'), false)
