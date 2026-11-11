@@ -793,19 +793,20 @@ const rowState = (task: { steps: string[] }, done: number, x: number, y: number,
 }
 
 // Needs you: the amber flag with its count, then the raised sheet with the agent's card.
-const needsFlag = (s: Strings, x: number, y: number, n: number): string => {
+const needsFlag = (s: Strings, x: number, y: number, n: number, k = 1): string => {
+  if (k !== 1) return `<g transform="translate(${num(x)} ${num(y)}) scale(${k})">${needsFlag(s, 0, 0, n)}</g>`
   const words = textW(s.pgNeeds, 14, 600)
   const fw = 12 + words + 10 + 10 + 14
   return `<path d="M${x} ${y + 6}a6 6 0 0 1 6 -6h${fw - 6}l-8 ${PG.flag / 2}l8 ${PG.flag / 2}h-${fw}z" fill="${LOOK.amber}"/><text x="${x + 12}" y="${y + 20}" font-size="14" font-weight="600" fill="${LOOK.onAmber}">${esc(s.pgNeeds)}<tspan dx="8" font-weight="700">${n}</tspan></text>`
 }
 type CardParts = { sheet: string; answers: string; picked: string; receipt: string; pick: [number, number]; send: [number, number] }
-const needsCard = (s: Strings, sample: PageSample, x: number, y: number, w: number): CardParts => {
+const needsCard = (s: Strings, sample: PageSample, x: number, y: number, w: number, question = 20): CardParts => {
   const top = y + PG.flag
   const h = PG.card
   const sheet = `<path d="M${x} ${top}h${w - 10}a10 10 0 0 1 10 10v${h - 20}a10 10 0 0 1 -10 10h-${w - 20}a10 10 0 0 1 -10 -10z" fill="${LOOK.surface}" stroke="${LOOK.strong}"/>
 ${iconTile('Claude Code', x + 16, top + 18, 24)}
 <text x="${x + 52}" y="${top + 34}" font-size="13"><tspan font-weight="600" fill="${LOOK.ink}">Claude Code</tspan><tspan fill="${LOOK.muted}"> · ${esc(sample.tasks.claude.project)} · ${esc(s.justNow)}</tspan></text>
-<text x="${x + 52}" y="${top + 66}" font-size="20" font-weight="600" fill="${LOOK.ink}">${esc(sample.question)}</text>`
+<text x="${x + 52}" y="${top + 66}" font-size="${num(question)}" font-weight="600" fill="${LOOK.ink}">${esc(sample.question)}</text>`
   const by = top + 82
   const widths = sample.options.map(option => Math.round(textW(option, 14) + 30))
   const xs = [x + 52, x + 52 + (widths[0] ?? 0) + 8]
@@ -843,6 +844,31 @@ ${sectionHead(s.pgWorking, headYB)}
 ${rows}`
 }
 
+// The board while Claude Code's question waits, as the cover shows it in scene 4 and the still and
+// the social card hold it: the flag a size up, the card at 1.2 with its question at 28 px, and the
+// other agents' rows under Working now.
+const ASKING = { card: 1.2, flag: 1.15, question: 28 / 1.2 }
+const ASK_CARD_TOP = contentTop + PG.flag * ASKING.flag
+const ASK_CARD_H = Math.round(PG.card * ASKING.card)
+const ASK_HEAD_Y = ASK_CARD_TOP + ASK_CARD_H + PG.sectionGap
+const askRowY = (n: number): number => ASK_HEAD_Y + PG.heading + n * (PG.row + PG.rowGap)
+const askingPage = (lang: Lang, pw: number, chipOf: (name: string, i: number) => string): string => {
+  const s = STRINGS[lang]
+  const sample = PAGE[lang] as PageSample
+  const rowW = pw - PG.side * 2
+  const card = needsCard(s, sample, 0, -PG.flag, rowW / ASKING.card, ASKING.question)
+  const rows = coverRows(lang).filter(row => row.name !== 'Claude Code').map((row, i) => {
+    const y = askRowY(i)
+    return `${rowFrame(s, row.name, row.task, PG.side, y, rowW)}${rowState(row.task, row.start, PG.side, y, rowW)}`
+  }).join('\n')
+  return `${pageHead(pw, LOOK.amber)}
+${LIVE_AGENTS.map(chipOf).join('')}${badgeAt(0, 1)}${chipsLine(pw)}
+${needsFlag(s, PG.side, contentTop, 1, ASKING.flag)}
+<g transform="translate(${PG.side} ${num(ASK_CARD_TOP)}) scale(${ASKING.card})"><g filter="url(#soft)">${card.sheet}</g>${card.answers}</g>
+${sectionHead(s.pgWorking, ASK_HEAD_Y)}
+${rows}`
+}
+
 // The README's cover, a 40 s loop in seven captioned scenes (1280 x 720). The words sit at the left,
 // the picture at the right. 1 asks the question every person who runs several agents has: which
 // one is waiting on you? 2 shows one agent stopped on a question while you were in another window.
@@ -859,27 +885,30 @@ const COVER_LOOP = 40
 const COVER_SCENES = [0, 4, 9, 15, 22, 28, 33]
 // Seconds: the three windows turn into rows, the question arrives, the pointer's way to an answer
 // and to Send, the answer delivered, Needs you folding away, and the command typed in scene 6.
-const COVER_T = { morph: 9, ask: 15, aim: 22.4, pick: 23.2, send: 23.95, sent: 24.1, fold: 25.8, type: 28.7, typed: 29.9, close: 33 }
+// The question arrives in order: the waiting row goes (ask), the other rows move down (ask + 0.2), then
+// the flag, the card and the heading fade into the space that is empty (show). The fold goes back in
+// the same order: flag and card leave together, the rows move up, the answered row comes back.
+const COVER_T = { morph: 9, ask: 15, show: 15.6, aim: 23.6, pick: 24.4, send: 25.3, sent: 25.5, fold: 27.0, type: 28.7, typed: 29.9, close: 33 }
 // The sentence of scenes 3 and 7 and of the social card (the owner's pick, Set 1 of the tagline
 // proposal). {…} marks the words in amber. The Chinese headline is the product's name for what it
 // is, since a word-for-word translation of the English reads oddly (owner 2026-11-11, Fable's
 // Set 1 name with its round-2 sub line A).
 const SET1: Record<Lang, { caption: string[]; sub: string[]; size: number }> = {
-  en: { caption: ['A board that shows', 'which AI agent is', '{waiting on you}.'], sub: ['Claude Code, Codex, Cursor', 'and more, on your own computer.', 'Questions show up in seconds.'], size: 48 },
+  en: { caption: ['A board that shows', 'which AI agent is', '{waiting on you}.'], sub: ['Claude Code, Codex, Cursor and more,', 'on your own computer.', 'Questions show up in seconds.'], size: 48 },
   'zh-TW': { caption: ['AI agent 進度看板'], sub: ['agent 一停下來{等你回答}，', '幾秒內就排到看板最上面，', '不用再一個個視窗找。'], size: 60 },
   'zh-CN': { caption: ['AI agent 进度看板'], sub: ['agent 一停下来{等你回复}，', '几秒内就排到看板最上面，', '不用再挨个窗口找。'], size: 60 },
 }
-type CoverScene = { caption: string[]; sub?: string[]; size?: number }
+type CoverScene = { caption: string[]; sub?: string[]; size?: number; subSize?: number }
 type CoverTerm = { project: string; steps: [string, string, string] }
 const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; works: string; synthetic: string; terms: Record<'codex' | 'antigravity' | 'claude', CoverTerm> }> = {
   en: {
-    label: 'Synthetic demo: Which AI agent is waiting on you? Three coding agents work side by side and one has stopped to ask “Blue or green?”. Agent Board puts that question first on one local page; an answer pressed there is delivered to Claude Code. Synthetic data.',
+    label: 'Synthetic demo: Which AI agent is waiting on you? Three AI agents work side by side and one has stopped to ask “Blue or green?”. Agent Board puts that question first on one local page; an answer pressed there is delivered to Claude Code. Synthetic data.',
     scenes: [
       { caption: ['Which AI agent is', '{waiting on you}?'] },
       { caption: ['One stopped to ask.', 'You were in', 'another window.'] },
       SET1.en,
       { caption: ['Its question goes', 'to the top.'], sub: ['On the board within seconds.'] },
-      { caption: ['Answer it', 'right there.'], sub: ['Claude Code gets it without', 'a window switch.'] },
+      { caption: ['Answer it', 'on the board.'], sub: ['Claude Code gets it directly;', 'Codex and Antigravity on their', 'next turn; copy for the rest.'] },
       { caption: ['One command', 'to start.'], sub: ['On your computer.', 'One Markdown file. No account.'] },
       SET1.en,
     ],
@@ -892,13 +921,13 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; works: st
     },
   },
   'zh-TW': {
-    label: '合成示範：現在哪個 AI agent 在等你？三個 coding agent 並排工作，其中一個停下來問「藍色還是綠色？」。Agent Board 把這個問題排在本機網頁的最上面，在那裡按下答案，就送到 Claude Code。合成資料。',
+    label: '合成示範：現在哪個 AI agent 在等你？三個 AI agent 並排工作，其中一個停下來問「藍色還是綠色？」。Agent Board 把這個問題排在本機網頁的最上面，在那裡按下答案，就送到 Claude Code。合成資料。',
     scenes: [
       { caption: ['現在哪個 AI agent', '{在等你}？'] },
       { caption: ['有一個停下來問你', '你人在別的視窗'] },
       SET1['zh-TW'],
-      { caption: ['它的問題直接', '排到最上面'], sub: ['幾秒內就上看板。'] },
-      { caption: ['在看板上', '直接回答'], sub: ['不用切視窗，', '答案直接送到 Claude Code。'] },
+      { caption: ['它的問題', '排到最上面'], sub: ['幾秒內就上看板。'] },
+      { caption: ['在看板上回答'], sub: ['不用切視窗：Claude Code 直接收到，', 'Codex、Antigravity 下一輪收到，', '其他 agent 一鍵複製。'] },
       { caption: ['一行指令', '就能開始'], sub: ['在你的電腦上跑，', '一個 Markdown 檔，不用帳號。'] },
       SET1['zh-TW'],
     ],
@@ -911,13 +940,13 @@ const COVER_WORDS: Record<Lang, { label: string; scenes: CoverScene[]; works: st
     },
   },
   'zh-CN': {
-    label: '合成演示：现在哪个 AI agent 在等你？三个 coding agent 并排工作，其中一个停下来问“蓝色还是绿色？”。Agent Board 把这个问题排在本机网页的最上面，在那里按下答案，就发给 Claude Code。合成数据。',
+    label: '合成演示：现在哪个 AI agent 在等你？三个 AI agent 并排工作，其中一个停下来问“蓝色还是绿色？”。Agent Board 把这个问题排在本机网页的最上面，在那里按下答案，就发给 Claude Code。合成数据。',
     scenes: [
       { caption: ['现在哪个 AI agent', '{在等你}？'] },
       { caption: ['有一个停下来问你', '你在别的窗口'] },
       SET1['zh-CN'],
-      { caption: ['它的提问直接', '排到最上面'], sub: ['几秒内就出现在看板上。'] },
-      { caption: ['在看板上', '直接回复'], sub: ['不用切窗口，', '答案直接送到 Claude Code。'] },
+      { caption: ['它的提问', '排到最上面'], sub: ['几秒内就出现在看板上。'] },
+      { caption: ['在看板上回复'], sub: ['不用切窗口：Claude Code 直接收到，', 'Codex、Antigravity 下一轮收到，', '其他 agent 一键复制。'] },
       { caption: ['一行命令', '就能开始'], sub: ['在你的电脑上运行，', '一个 Markdown 文件，不用账号。'] },
       SET1['zh-CN'],
     ],
@@ -952,7 +981,7 @@ const coverRows = (lang: Lang): CoverRow[] => {
     { name: 'Antigravity', task: sample.tasks.antigravity, start: 2, ticks: [[19.8, 3]] },
     { name: 'Claude Code', task: sample.tasks.claude, start: sample.asks, ticks: [] },
     { name: 'Cursor', task: COVER_CURSOR[lang], start: 1, ticks: [[18.4, 2]] },
-    { name: 'OpenCode', task: sample.tasks.opencode, start: 0, ticks: [[21.0, 1], [27.0, 2]] },
+    { name: 'OpenCode', task: sample.tasks.opencode, start: 0, ticks: [[21.0, 1], [26.2, 2]] },
   ]
 }
 // A caption's line with {…} in amber.
@@ -1029,17 +1058,14 @@ const cover = (lang: Lang): string => {
   const glow = (at: number, peak: number, length = 1): string => track([[at, 'opacity: 0'], [at + 0.15, `opacity: ${peak}`], [at + length, 'opacity: 0']])
 
   // ---- The board's page, in its own units (0, 0 under the browser's bar) ----
-  const CK = 1.2
-  const cardTop = contentTop + PG.flag
-  const cardH = Math.round(PG.card * CK)
-  const headYB = cardTop + cardH + PG.sectionGap
+  const CK = ASKING.card
+  const cardTop = ASK_CARD_TOP
   const rowYA = (i: number): number => contentTop + PG.heading + i * (PG.row + PG.rowGap)
   const others = rowsData.map((_, i) => i).filter(i => i !== askRow)
-  const rowYB = (i: number): number => headYB + PG.heading + others.indexOf(i) * (PG.row + PG.rowGap)
+  const rowYB = (i: number): number => askRowY(others.indexOf(i))
   const dyOf = (i: number): number => rowYB(i) - rowYA(i)
-  const headDy = headYB - contentTop
-  const rise = rowYA(askRow) - cardTop
-  const card = needsCard(s, sample, 0, -PG.flag, rowW / CK)
+  const headDy = ASK_HEAD_Y - contentTop
+  const card = needsCard(s, sample, 0, -PG.flag, rowW / CK, ASKING.question)
   const toPage = ([x, y]: [number, number]): [number, number] => [PG.side + x * CK, cardTop + y * CK]
   const toCanvas = (at: [number, number]): [number, number] => {
     const [x, y] = toPage(at)
@@ -1057,9 +1083,17 @@ const cover = (lang: Lang): string => {
     const flashes = row.ticks.map(([at]) => `<rect class="a ${glow(at, 0.08)}" x="${PG.side}" y="${y}" width="${rowW}" height="${PG.row}" rx="10" fill="${LOOK.ink}"/>`).join('')
     const note = isAsking ? swap(T.fold + 0.3, rowState(row.task, sample.asks, PG.side, y, rowW, s.claudeDelivered)) : ''
     // A thin amber outline marks the row that waits, until its question takes over the top.
-    const outline = isAsking ? `<rect class="a ${appear([[T.morph + 1.3, T.ask + 0.3]], 0, 0.5, 0.3)}" x="${PG.side - 1}" y="${y - 1}" width="${rowW + 2}" height="${PG.row + 2}" rx="11" fill="none" stroke="${LOOK.amber}" stroke-width="2"/>` : ''
+    const outline = isAsking ? `<rect class="a ${appear([[T.morph + 1.3, T.ask + 0.2]], 0, 0.5, 0.2)}" x="${PG.side - 1}" y="${y - 1}" width="${rowW + 2}" height="${PG.row + 2}" rx="11" fill="none" stroke="${LOOK.amber}" stroke-width="2"/>` : ''
     return `${rowFrame(s, row.name, row.task, PG.side, y, rowW)}${rowState(row.task, row.start, PG.side, y, rowW)}${overlays.join('')}${note}${flashes}${outline}`
   }
+  // Entrance (ask to show): the waiting row fades out, the rows move down to their places, and only
+  // then do the flag, the card and the heading fade in, in the space that is empty. The fold (27 s)
+  // is the same in reverse: flag and card leave, the rows move up, the answered row comes back.
+  const SLIDE = 0.4
+  const FOLD_OUT = 0.25
+  const FOLD_SLIDE = 0.3
+  const T_UP = T.fold + FOLD_OUT
+  const T_BACK = T_UP + FOLD_SLIDE
   const rowTrack = (i: number): string => {
     const at = ARRIVE + i * 0.12
     if (i === askRow) {
@@ -1067,10 +1101,10 @@ const cover = (lang: Lang): string => {
         [0, 'opacity: 0; transform: translateY(0px)'],
         [at, `opacity: 0; transform: translateY(12px); ${EASE}`],
         [at + 0.45, 'opacity: 1; transform: translateY(0px)'],
-        [T.ask, `opacity: 1; transform: translateY(0px); ${MOVE}`],
-        [T.ask + 0.5, `opacity: 0; transform: translateY(${-rise}px)`],
-        [T.fold, `opacity: 0; transform: translateY(${-rise}px); ${MOVE}`],
-        [T.fold + 0.6, 'opacity: 1; transform: translateY(0px)'],
+        [T.ask, 'opacity: 1; transform: translateY(0px)'],
+        [T.ask + 0.2, 'opacity: 0; transform: translateY(0px)'],
+        [T_BACK, 'opacity: 0; transform: translateY(0px)'],
+        [T_BACK + 0.3, 'opacity: 1; transform: translateY(0px)'],
         [LOOP - TAIL, 'opacity: 1; transform: translateY(0px)'],
         [LOOP, 'opacity: 0; transform: translateY(0px)'],
       ])
@@ -1078,49 +1112,47 @@ const cover = (lang: Lang): string => {
     const dy = dyOf(i)
     const isNew = i >= 3
     const first: Array<[number, string]> = isNew
-      ? [[0, `opacity: 0; transform: translateY(${dy}px)`], [T.ask + 0.3 + (i - 3) * 0.3, `opacity: 0; transform: translateY(${dy}px); ${EASE}`], [T.ask + 0.75 + (i - 3) * 0.3, `opacity: 1; transform: translateY(${dy}px)`]]
-      : [[0, 'opacity: 0; transform: translateY(0px)'], [at, `opacity: 0; transform: translateY(12px); ${EASE}`], [at + 0.45, 'opacity: 1; transform: translateY(0px)'], [T.ask, `opacity: 1; transform: translateY(0px); ${MOVE}`], [T.ask + 0.6, `opacity: 1; transform: translateY(${dy}px)`]]
+      ? [[0, `opacity: 0; transform: translateY(${dy}px)`], [T.show + (i - 3) * 0.15, `opacity: 0; transform: translateY(${dy}px); ${EASE}`], [T.show + 0.4 + (i - 3) * 0.15, `opacity: 1; transform: translateY(${dy}px)`]]
+      : [[0, 'opacity: 0; transform: translateY(0px)'], [at, `opacity: 0; transform: translateY(12px); ${EASE}`], [at + 0.45, 'opacity: 1; transform: translateY(0px)'], [T.ask + 0.2, `opacity: 1; transform: translateY(0px); ${MOVE}`], [T.ask + 0.2 + SLIDE, `opacity: 1; transform: translateY(${dy}px)`]]
     return track([
       ...first,
-      [T.fold, `opacity: 1; transform: translateY(${dy}px); ${MOVE}`],
-      [T.fold + 0.6, 'opacity: 1; transform: translateY(0px)'],
+      [T_UP, `opacity: 1; transform: translateY(${dy}px); ${MOVE}`],
+      [T_BACK, 'opacity: 1; transform: translateY(0px)'],
       [LOOP - TAIL, 'opacity: 1; transform: translateY(0px)'],
       [LOOP, 'opacity: 0; transform: translateY(0px)'],
     ])
   }
   const rows = rowsData.map((row, i) => `<g class="a ${rowTrack(i)} last">${rowBody(row, i)}</g>`).join('\n')
+  // Working now is left out of scene 3 (the waiting window is not "working"); it arrives with the flag.
   const heading = `<g class="a ${track([
-    [0, 'opacity: 0; transform: translateY(0px)'],
-    [ARRIVE - 0.1, `opacity: 0; transform: translateY(0px); ${EASE}`],
-    [ARRIVE + 0.3, 'opacity: 1; transform: translateY(0px)'],
-    [T.ask, `opacity: 1; transform: translateY(0px); ${MOVE}`],
-    [T.ask + 0.6, `opacity: 1; transform: translateY(${headDy}px)`],
-    [T.fold, `opacity: 1; transform: translateY(${headDy}px); ${MOVE}`],
-    [T.fold + 0.6, 'opacity: 1; transform: translateY(0px)'],
+    [0, `opacity: 0; transform: translateY(${headDy}px)`],
+    [T.show, `opacity: 0; transform: translateY(${headDy}px); ${EASE}`],
+    [T.show + 0.4, `opacity: 1; transform: translateY(${headDy}px)`],
+    [T_UP, `opacity: 1; transform: translateY(${headDy}px); ${MOVE}`],
+    [T_BACK, 'opacity: 1; transform: translateY(0px)'],
     [LOOP - TAIL, 'opacity: 1; transform: translateY(0px)'],
     [LOOP, 'opacity: 0; transform: translateY(0px)'],
   ])} last">${sectionHead(s.pgWorking, contentTop)}</g>`
-  // Claude Code's card: up from its row into Needs you, the answer picked and sent, then folded away.
+  // Claude Code's card fades in beneath the flag, is answered, and leaves with the flag at the fold.
   const cardMove = track([
-    [T.ask, `opacity: 0; transform: translateY(${rise}px); ${MOVE}`],
-    [T.ask + 0.6, 'opacity: 1; transform: translateY(0px)'],
-    [T.fold, `opacity: 1; transform: translateY(0px); ${MOVE}`],
-    [T.fold + 0.5, `opacity: 0; transform: translateY(${rise}px)`],
+    [T.show, `opacity: 0; transform: translateY(8px); ${EASE}`],
+    [T.show + 0.4, 'opacity: 1; transform: translateY(0px)'],
+    [T.fold, 'opacity: 1; transform: translateY(0px)'],
+    [T_UP, 'opacity: 0; transform: translateY(0px)'],
   ])
-  const cardSvg = `<g class="a ${cardMove}"><g transform="translate(${PG.side} ${cardTop}) scale(${CK})"><g filter="url(#soft)">${card.sheet}</g>${card.answers}${g([[T.pick + 0.05, T.fold + 0.5]], card.picked, 0, 0.18, 0.2)}${g([[T.sent, T.fold + 0.5]], card.receipt, 0, 0.18, 0.2)}</g></g>`
-  const flag = g([[T.ask + 0.15, T.sent + 0.35]], needsFlag(s, PG.side, contentTop, 1), 6, 0.35)
-  // The head row's seven chips: the three agents of scene 1 first, the rest as the board fills.
-  const chips = LIVE_AGENTS.map((name, i) => (i < 3 ? chipTile(name, i) : g([[T.ask + 0.3 + (i - 3) * 0.12, LOOP]], chipTile(name, i), 6, 0.35))).join('')
-  const badge = g([[T.ask + 0.2, T.sent]], badgeAt(0, 1), 0, 0.25)
+  const cardSvg = `<g class="a ${cardMove}"><g transform="translate(${PG.side} ${num(cardTop)}) scale(${CK})"><g filter="url(#soft)">${card.sheet}</g><g class="a ${track([[0, 'opacity: 1'], [T.sent, 'opacity: 1'], [T.sent + 0.18, 'opacity: 0']])}">${card.answers}</g>${g([[T.pick + 0.05, T.sent + 0.18]], card.picked, 0, 0.18, 0.01)}${g([[T.sent, T_UP]], card.receipt, 0, 0.18, 0.1)}</g></g>`
+  const flag = g([[T.show, T_UP]], needsFlag(s, PG.side, contentTop, 1, ASKING.flag), 6, 0.4, 0.25)
+  const chips = LIVE_AGENTS.map((name, i) => (i < 3 ? chipTile(name, i) : g([[T.show + (i - 3) * 0.12, LOOP]], chipTile(name, i), 6, 0.35))).join('')
+  const badge = g([[T.show + 0.1, T.sent]], badgeAt(0, 1), 0, 0.25)
   // The page's own logo lights with the cover's.
-  const headLight = `<circle class="a ${appear([[T.ask + 0.1, T.sent]], 0, 0.3)}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
+  const headLight = `<circle class="a ${appear([[T.show, T.sent]], 0, 0.3)}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
   const page = `${pageHead(pw, LOOK.ink, headLight)}${chips}${badge}${chipsLine(pw)}
 ${heading}
 ${rows}
 ${flag}
 ${cardSvg}`
-  const tab = `${tabFace('Agent Board', false)}${g([[T.ask + 0.1, T.sent]], `<rect x="84" y="12" width="250" height="24" fill="${LOOK.ground}"/>${tabFace(s.pgTabTitle(1), true)}`, 0, 0.2)}`
-  const board = `<g class="a ${appear([[T.morph, 28], [T.close, LOOP]], 0, 0.6, 0.4)} last">${browser('page', win.x, win.y, win.w, win.h, tab, page)}</g>`
+  const tab = `${tabFace('Agent Board', false)}${g([[T.show, T.sent]], `<rect x="84" y="12" width="250" height="24" fill="${LOOK.ground}"/>${tabFace(s.pgTabTitle(1), true)}`, 0, 0.1, 0.05)}`
+  const board = `<g class="a ${appear([[T.morph, 28], [T.close, LOOP]], 0, 0.6, 0.25)} last calm">${browser('page', win.x, win.y, win.w, win.h, tab, page)}</g>`
 
   // The pointer: in from below to the first answer, a press, on to Send, a press, and away.
   const pointer = (() => {
@@ -1240,7 +1272,7 @@ ${cardSvg}`
     const subTop = capY + (scene.caption.length - 1) * gap + (scene.caption.length === 1 ? 54 : 56)
     const sub = scene.sub.map((line, i) => `<tspan x="${L}" y="${subTop + i * 38}">${marked(line)}</tspan>`).join('')
     const subSpan: Array<[number, number]> = [[start + 0.15, ends[k] ?? LOOP]]
-    return `${head}\n<g class="a sub ${appear(subSpan, 10, 0.5)}${endsLoop(subSpan) ? ' last' : ''}"><text font-size="28" fill="${LOOK.muted}">${sub}</text></g>`
+    return `${head}\n<g class="a sub ${appear(subSpan, 10, 0.5)}${endsLoop(subSpan) ? ' last' : ''}"><text font-size="${scene.subSize ?? 28}" fill="${LOOK.muted}">${sub}</text></g>`
   }).join('\n')
   // The closing scene also names where it works.
   const worksY = 478
@@ -1250,8 +1282,10 @@ ${cardSvg}`
   const boxY = 604
   const boxW = 440
   const size = 17
-  const command = `<rect x="${L}" y="${boxY}" width="${boxW}" height="52" rx="12" fill="${LOOK.surface}"/><rect x="${L + 0.5}" y="${boxY + 0.5}" width="${boxW - 1}" height="51" rx="11.5" fill="none" stroke="url(#rim)"/>
+  const commandBox = `<rect x="${L}" y="${boxY}" width="${boxW}" height="52" rx="12" fill="${LOOK.surface}"/><rect x="${L + 0.5}" y="${boxY + 0.5}" width="${boxW - 1}" height="51" rx="11.5" fill="none" stroke="url(#rim)"/>
 <text x="${L + 20}" y="${boxY + 32}" font-family="${mono}" font-size="${size}" fill="${LOOK.ink}"><tspan fill="${LOOK.muted}">$ </tspan>${esc(COVER_COMMAND)}</text>`
+  // The terminal types the same command in scene 6, so the box dims while it does.
+  const command = `<g class="a ${track([[0, 'opacity: 1'], [T.type - 0.9, 'opacity: 1'], [T.type - 0.5, 'opacity: 0.25'], [T.close - 0.1, 'opacity: 0.25'], [T.close + 0.3, 'opacity: 1']])} last">${commandBox}</g>`
   // The scene markers under the left column, one lit for each scene; reduced motion hides them.
   const pipY = H - 36
   const pips = `<g class="pips">${COVER_SCENES.map((_, k) => `<rect x="${L + k * 36}" y="${pipY}" width="28" height="4" rx="2" fill="${LOOK.ink}" fill-opacity="0.16"/>`).join('')}${COVER_SCENES.map((start, k) => `<rect class="a ${appear([[start, ends[k] ?? LOOP]], 0, 0.3)}" x="${L + k * 36}" y="${pipY}" width="28" height="4" rx="2" fill="${LOOK.ink}"/>`).join('')}</g>`
@@ -1259,9 +1293,9 @@ ${cardSvg}`
   // The logo's light: amber while Claude Code asks, and once more as the closing scene begins.
   const lit = `<circle class="a s ${track([
     [0, 'opacity: 0; transform: scale(0.86)'],
-    [T.ask, 'opacity: 0; transform: scale(0.86)'],
-    [T.ask + 0.45, 'opacity: 1; transform: scale(1.18)'],
-    [T.ask + 1.1, 'opacity: 1; transform: scale(1)'],
+    [T.show, 'opacity: 0; transform: scale(0.86)'],
+    [T.show + 0.45, 'opacity: 1; transform: scale(1.18)'],
+    [T.show + 1.1, 'opacity: 1; transform: scale(1)'],
     [T.sent - 0.05, 'opacity: 1; transform: scale(1)'],
     [T.sent + 0.4, 'opacity: 0; transform: scale(1)'],
     [T.close, 'opacity: 0; transform: scale(0.86)'],
@@ -1271,18 +1305,20 @@ ${cardSvg}`
   ])}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
   const halo = `<circle class="a s ${track([
     [0, 'opacity: 0; transform: scale(1)'],
-    [T.ask, 'opacity: 0; transform: scale(1)'],
-    [T.ask + 0.05, 'opacity: 0.6; transform: scale(1)'],
-    [T.ask + 1.6, 'opacity: 0; transform: scale(1.9)'],
-    [T.ask + 2.6, 'opacity: 0.3; transform: scale(1.6)'],
-    [T.ask + 3.8, 'opacity: 0.05; transform: scale(1.1)'],
-    [T.ask + 5, 'opacity: 0.3; transform: scale(1.6)'],
+    [T.show, 'opacity: 0; transform: scale(1)'],
+    [T.show + 0.05, 'opacity: 0.6; transform: scale(1)'],
+    [T.show + 1.6, 'opacity: 0; transform: scale(1.9)'],
+    [T.show + 2.6, 'opacity: 0.3; transform: scale(1.6)'],
+    [T.show + 3.8, 'opacity: 0.05; transform: scale(1.1)'],
+    [T.show + 5, 'opacity: 0.3; transform: scale(1.6)'],
     [T.sent, 'opacity: 0; transform: scale(1.05)'],
     [T.close, 'opacity: 0; transform: scale(1)'],
     [T.close + 0.05, 'opacity: 0.6; transform: scale(1)'],
     [T.close + 1.5, 'opacity: 0; transform: scale(1.9)'],
   ])}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
-  const logo = lockupAt(L, 40, 30, LOOK.ink, `${halo}${lit}`)
+  const logo = lockupAt(L, 40, 30, LOOK.ink, `${halo}${lit}<circle class="still" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`)
+  // With reduced motion the board shows scene 4: Claude Code's question on top, the others working under it.
+  const still = `<g class="still">${browser('still', win.x, win.y, win.w, win.h, `${tabFace('Agent Board', false)}<rect x="84" y="12" width="250" height="24" fill="${LOOK.ground}"/>${tabFace(s.pgTabTitle(1), true)}`, askingPage(lang, pw, chipTile))}</g>`
 
   const tiles = [...(tileSink as Set<string>)].map(name => `<g id="${tileId(name)}">${tileDrawn(name, 0, 0, 48)}</g>`).join('')
   tileSink = null
@@ -1294,6 +1330,7 @@ ${cardSvg}`
 .a { opacity: 0; }
 /* A viewer that does not play CSS animation shows the closing scene still; a playing one follows its keyframes. */
 .a.last { opacity: 1; }
+.still { display: none; }
 .m { transform-box: fill-box; transform-origin: 100% 50%; }
 .s { transform-box: fill-box; transform-origin: center; }
 ${keyframes.join('\n')}
@@ -1302,6 +1339,8 @@ ${keyframes.map((_, i) => `.c${i} { animation-name: c${i} }`).join('\n')}
   .a { animation: none; opacity: 0; }
   .pips { display: none; }
   .last { opacity: 1; }
+  .calm { opacity: 0; }
+  .still { display: inline; }
 }
 </style>
 <g clip-path="url(#edge)">
@@ -1313,6 +1352,7 @@ ${command}
 ${pips}
 ${synthetic}
 ${board}
+${still}
 ${windows}
 ${scene6}
 ${presses}
@@ -1588,31 +1628,14 @@ ${outs}
 `
 }
 
-// The promotional card, for GitHub's social preview and for sharing: the cover's closing scene held
-// still at 1280 x 640. The sentence of scenes 3 and 7 (SET1) with amber on the words that name what
-// the board is for, the agents it works with, the repository, and the calm board.
+// The promotional card, for GitHub's social preview and for sharing, at 1280 x 640: the sentence of
+// scenes 3 and 7 (SET1) with amber on the words that name what the board is for, the agents it works
+// with, the repository, and the board of scene 4 with Claude Code's question on top (a link preview
+// is one picture, so it shows who is waiting).
 const PROMO_WORDS: Record<Lang, { works: string }> = {
   en: { works: 'Works with' },
   'zh-TW': { works: '支援' },
   'zh-CN': { works: '支持' },
-}
-
-// The board's page while nothing asks: the seven chips and every row at the step it has reached.
-const calmPage = (lang: Lang, pw: number): string => {
-  const s = STRINGS[lang]
-  const sample = PAGE[lang] as PageSample
-  const rowW = pw - PG.side * 2
-  const rows = coverRows(lang).map((row, i) => {
-    const y = contentTop + PG.heading + i * (PG.row + PG.rowGap)
-    const done = row.ticks.reduce((_, [, count]) => count, row.start)
-    const note = row.name === 'Claude Code' ? s.claudeDelivered : undefined
-    return `${rowFrame(s, row.name, row.task, PG.side, y, rowW)}${rowState(row.task, done, PG.side, y, rowW, note)}`
-  }).join('\n')
-  void sample
-  return `${pageHead(pw)}
-${LIVE_AGENTS.map((name, i) => chipTile(name, i)).join('')}${chipsLine(pw)}
-${sectionHead(s.pgWorking, contentTop)}
-${rows}`
 }
 
 const promo = (lang: Lang): string => {
@@ -1630,19 +1653,21 @@ const promo = (lang: Lang): string => {
   const sub = set.sub.map((line, i) => `<tspan x="72" y="${subTop + i * 38}">${marked(line)}</tspan>`).join('')
   const worksY = 478
   const icons = LIVE_AGENTS.map((name, i) => iconTile(name, 72 + i * 52, worksY + 16, 38)).join('\n')
-  const k = 0.8
+  const k = 0.88
   const pw = 658
-  const ph = 520
-  const wx = 690
+  const ph = 664
+  const wx = 650
   const wy = (H - ph * k) / 2
-  const window = `<g transform="translate(${wx} ${num(wy)}) scale(${k})">${browser('promo', 0, 0, pw, ph, tabFace('Agent Board', false), calmPage(lang, pw))}</g>`
+  const s = STRINGS[lang]
+  const tab = `${tabFace('Agent Board', false)}<rect x="84" y="12" width="250" height="24" fill="${LOOK.ground}"/>${tabFace(s.pgTabTitle(1), true)}`
+  const window = `<g transform="translate(${wx} ${num(wy)}) scale(${k})">${browser('promo', 0, 0, pw, ph, tab, askingPage(lang, pw, chipTile))}</g>`
   const label = `${set.caption.map(plain).join(' ')} ${set.sub.map(plain).join(' ')}`
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Agent Board: ${esc(label)}" font-family="${sansOf(lang)}">
 <title>Agent Board</title>
 <defs>${lookDefs(W, H, [0.75, 0.3])}</defs>
 <g clip-path="url(#edge)">
 ${lookGround(W, H)}
-${lockupAt(72, 64, 34, LOOK.ink)}
+${lockupAt(72, 64, 34, LOOK.amber)}
 <text font-size="${size}" font-weight="800" ${HEADLINE} fill="${LOOK.ink}">${head}</text>
 <text font-size="28" fill="${LOOK.muted}">${sub}</text>
 <text x="72" y="${worksY}" font-size="13" font-weight="600" letter-spacing="${isCjk ? '0.1em' : '0.16em'}" fill="${LOOK.muted}">${esc(isCjk ? w.works : w.works.toUpperCase())}</text>

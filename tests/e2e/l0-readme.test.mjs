@@ -26,7 +26,7 @@ const SECTIONS = {
 // question, and the page's receipt once the answer reached Claude Code (claudeDelivered in the
 // strings tables), in each locale. Scenes 3 and 7 say the same sentence.
 const SET1 = {
-  en: { caption: ['A board that shows', 'which AI agent is', 'waiting on you.'], sub: ['Claude Code, Codex, Cursor', 'and more, on your own computer.', 'Questions show up in seconds.'], amber: ['waiting on you'], subAmber: [] },
+  en: { caption: ['A board that shows', 'which AI agent is', 'waiting on you.'], sub: ['Claude Code, Codex, Cursor and more,', 'on your own computer.', 'Questions show up in seconds.'], amber: ['waiting on you'], subAmber: [] },
   'zh-TW': { caption: ['AI agent 進度看板'], sub: ['agent 一停下來等你回答，', '幾秒內就排到看板最上面，', '不用再一個個視窗找。'], amber: [], subAmber: ['等你回答'] },
   'zh-CN': { caption: ['AI agent 进度看板'], sub: ['agent 一停下来等你回复，', '几秒内就排到看板最上面，', '不用再挨个窗口找。'], amber: [], subAmber: ['等你回复'] },
 }
@@ -36,7 +36,7 @@ const SCENES = {
     { caption: ['One stopped to ask.', 'You were in', 'another window.'] },
     SET1.en,
     { caption: ['Its question goes', 'to the top.'], sub: ['On the board within seconds.'] },
-    { caption: ['Answer it', 'right there.'], sub: ['Claude Code gets it without', 'a window switch.'] },
+    { caption: ['Answer it', 'on the board.'], sub: ['Claude Code gets it directly;', 'Codex and Antigravity on their', 'next turn; copy for the rest.'] },
     { caption: ['One command', 'to start.'], sub: ['On your computer.', 'One Markdown file. No account.'] },
     SET1.en,
   ], 'Blue or green?', "Delivered. Waiting for Claude's reply."],
@@ -44,8 +44,8 @@ const SCENES = {
     { caption: ['現在哪個 AI agent', '在等你？'], amber: ['在等你'] },
     { caption: ['有一個停下來問你', '你人在別的視窗'] },
     SET1['zh-TW'],
-    { caption: ['它的問題直接', '排到最上面'], sub: ['幾秒內就上看板。'] },
-    { caption: ['在看板上', '直接回答'], sub: ['不用切視窗，', '答案直接送到 Claude Code。'] },
+    { caption: ['它的問題', '排到最上面'], sub: ['幾秒內就上看板。'] },
+    { caption: ['在看板上回答'], sub: ['不用切視窗：Claude Code 直接收到，', 'Codex、Antigravity 下一輪收到，', '其他 agent 一鍵複製。'] },
     { caption: ['一行指令', '就能開始'], sub: ['在你的電腦上跑，', '一個 Markdown 檔，不用帳號。'] },
     SET1['zh-TW'],
   ], '藍色還是綠色？', '已送達，正在等 Claude 回覆。'],
@@ -53,8 +53,8 @@ const SCENES = {
     { caption: ['现在哪个 AI agent', '在等你？'], amber: ['在等你'] },
     { caption: ['有一个停下来问你', '你在别的窗口'] },
     SET1['zh-CN'],
-    { caption: ['它的提问直接', '排到最上面'], sub: ['几秒内就出现在看板上。'] },
-    { caption: ['在看板上', '直接回复'], sub: ['不用切窗口，', '答案直接送到 Claude Code。'] },
+    { caption: ['它的提问', '排到最上面'], sub: ['几秒内就出现在看板上。'] },
+    { caption: ['在看板上回复'], sub: ['不用切窗口：Claude Code 直接收到，', 'Codex、Antigravity 下一轮收到，', '其他 agent 一键复制。'] },
     { caption: ['一行命令', '就能开始'], sub: ['在你的电脑上运行，', '一个 Markdown 文件，不用账号。'] },
     SET1['zh-CN'],
   ], '蓝色还是绿色？', '已送达，正在等 Claude 回复。'],
@@ -296,7 +296,7 @@ describe('L0 discover and install from the README', () => {
     }
   })
 
-  test('L0 README: the cover loops through seven captioned scenes in 30 to 45 seconds, moves with CSS alone and rests on its closing scene for reduced motion', () => {
+  test('L0 README: the cover loops through seven captioned scenes in 30 to 45 seconds, moves with CSS alone and, for reduced motion, rests on the closing sentence beside the board with the question on top', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io|\/badge\.svg"|docs\/images\/brand\//.test(match[0]))
@@ -407,15 +407,19 @@ describe('L0 discover and install from the README', () => {
       assert.doesNotMatch(svg, /Coming in 0\.24\.2|0\.24\.2 起提供|copied to the clipboard|已複製|已复制|progress\.html/i, `${file}: the cover does not teach the retired demo`)
       // A piece of text is in the end frame when every animated group round it stays for reduced
       // motion; text in no animated group is on screen in every frame.
-      const isKept = groups => groups.every(classes => !classes.includes('a') || classes.includes('last'))
+      // The calm board of scene 7 is hidden for reduced motion, and the still board (class `still`) is shown in its place.
+      const isKept = groups => groups.every(classes => !classes.includes('calm') && (!classes.includes('a') || classes.includes('last')))
       const shown = word => [...svg.matchAll(new RegExp(`>${literal(word)}</(?:text|tspan)>`, 'g'))]
-      // The end frame is the closing scene: the calm board with the page's receipt in Claude Code's row,
-      // and no question card left over (#1273). The question is asked in earlier scenes only.
-      const receipts = shown(delivered)
-      assert.ok(receipts.some(at => isKept(groupsAround(svg, at.index)) && groupsAround(svg, at.index).some(classes => classes.includes('last'))), `${file}: the end frame shows "${delivered}"`)
+      // The reduced-motion still keeps the closing sentence and shows the board of scene 4: Claude Code's
+      // question on top (a still picture has to show who is waiting), not the calm board with its receipt.
       const asked = shown(question)
-      assert.ok(asked.length > 0, `${file}: an earlier scene asks "${question}"`)
-      assert.ok(asked.every(at => !isKept(groupsAround(svg, at.index))), `${file}: the end frame holds no question card`)
+      assert.ok(asked.some(at => isKept(groupsAround(svg, at.index)) && groupsAround(svg, at.index).some(classes => classes.includes('still'))), `${file}: the still frame asks "${question}"`)
+      assert.ok(asked.some(at => !isKept(groupsAround(svg, at.index))), `${file}: an earlier scene asks "${question}" too`)
+      const receipts = shown(delivered)
+      assert.ok(receipts.length > 0 && receipts.every(at => !isKept(groupsAround(svg, at.index))), `${file}: the still frame shows no receipt`)
+      assert.ok(receipts.some(at => groupsAround(svg, at.index).some(classes => classes.includes('calm'))), `${file}: the calm closing board shows "${delivered}"`)
+      assert.match(svg, /@media[^{]*reduce[^{]*\{[\s\S]*\.calm\s*\{\s*opacity\s*:\s*0/, `${file}: reduced motion hides the calm board`)
+      assert.match(svg, /\.still\s*\{\s*display\s*:\s*none/, `${file}: the still board is hidden unless motion is reduced`)
       // The setup command stays on screen, the end frame included.
       const commands = [...svg.matchAll(new RegExp(`${literal(COMMAND)}</text>`, 'g'))]
       assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND}"`)
