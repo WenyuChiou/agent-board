@@ -543,9 +543,19 @@ describe('L0 discover and install from the README', () => {
       })
       const save = (path, text) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text) }
       const stub = name => `globalThis.AGENT_BOARD = {"lang":"en"}\nprocess.stdout.write(${JSON.stringify(`${name}:`)} + process.argv.slice(2).join(' '))\n`
-      for (const [name] of READMES) {
-        assert.doesNotMatch(read(name), /--codex-doctor/, `${name}: the doctor is left to SETUP.md`)
-        assert.match(read(name), /issues\/new\?template=bug_report\.yml/, `${name}: the bug form link stays`)
+      // The paragraph under the troubleshooting table keeps the Claude Code check, the guide links and the bug form.
+      const help = {
+        en: ['](docs/GUIDE.md#faq)', '](docs/GUIDE.md#troubleshooting)', '](docs/GUIDE.md#reporting-a-problem-safely)', 'no session ids, home-folder paths or tokens'],
+        'zh-TW': ['](docs/GUIDE.zh-TW.md#常見問題)', '](docs/GUIDE.zh-TW.md#疑難排解)', '](docs/GUIDE.zh-TW.md#安全地回報問題)', '不要放 session id、家目錄路徑或 token'],
+        'zh-CN': ['](docs/GUIDE.zh-CN.md#常见问题)', '](docs/GUIDE.zh-CN.md#问题排查)', '](docs/GUIDE.zh-CN.md#安全地报告问题)', '不要带 session id、主目录路径或 token'],
+      }
+      for (const [name, lang] of READMES) {
+        const text = read(name)
+        assert.doesNotMatch(text, /--codex-doctor/, `${name}: the doctor is left to SETUP.md`)
+        const line = text.split('\n').find(one => one.includes('issues/new?template=bug_report.yml')) ?? ''
+        for (const want of ['`claude plugin list`', '`/progress connect status`', ...help[lang]]) {
+          assert.ok(line.includes(want), `${name}: the help paragraph keeps ${want}`)
+        }
       }
       assert.ok(read('docs/SETUP.md').includes('--codex-doctor --agent <name>'), 'SETUP.md: the doctor command is documented')
       // The clone route with a chosen folder, for Cursor: setup writes the board there, and --data-dir opens it.
