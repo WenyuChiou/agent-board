@@ -6,10 +6,14 @@ The owner chose this plan on 2026-11-11, after a Fable 5.2 review of the whole p
 
 **Theme:** one command to install. From 0.25.0 on, the board keeps itself up to date. The Codex sessions it can see are listed. An approval a session is waiting on can be answered from the board, and the board says plainly how each answer reaches each agent.
 
-**Size:** about 20 issues and 8 new ones, plus the delivery work. The owner's answer on size, 2026-11-11: 「全部保留，晚一週」. Nothing moves out, and 0.25.0 ships about a week later than first planned. If it still slips, cut in this order and no other:
-1. The scenario-b receivers (a message to an agent that is busy): Grok first, then Hermes, then Cursor turn-end.
-2. The approval routes on the other hosts, each one whose check has not passed: OpenClaw, then Hermes, then Grok, then DeepSeek Harness. A cut route leaves "answer in its window" on its card.
-3. Never cut: D1, D3 (when F10 passes), OpenCode, the Codex record, the gate.
+**Size:** about 20 issues and 8 new ones, plus the delivery work. The owner's answer on size, 2026-11-11: 「全部保留，晚一週」. Nothing moves out, and 0.25.0 ships about a week later than first planned; Copilot's first step (below) adds about 3 to 5 days more. If it still slips, cut in this order and no other:
+1. The scenario-b receivers (a message to an agent that is busy): Grok first, then Hermes.
+2. The approval routes on the other hosts, each one whose check has not passed: DeepSeek Harness, then OpenClaw, then Grok, then Hermes. A cut route leaves "answer in its window" on its card.
+3. Never cut: D1, D3 (when F10 passes), OpenCode, the Codex record, the gate, and Cursor's two receiver steps in D2 (it enrolls on any hook event, and hands over at `stop`).
+
+A cut item waits for 0.26.0, not 0.25.1: a patch release adds no hook (line 3). Copilot's first step is not on this list: it leaves 0.25.0 only if its check, F11, fails.
+
+**Hosts in order of use.** Fable 5.2 read this plan from the person's side on 2026-11-11 (survey shares of regular agent users: Claude Code 71%, Copilot about 46%, Cursor 39%, Codex about 23%, OpenCode and Antigravity about 10% each; Windsurf among the less mentioned; none found for Grok, Hermes, OpenClaw or DeepSeek Harness). It found the hosts most people use getting the least: Copilot had no card at all, and Cursor, the third most used, was first in line to be cut. Three changes, each the owner's answer to one question, 2026-11-11: Cursor is never cut (above); Copilot gets a first step in 0.25.0 (below); the approval routes of the four small hosts are cut DeepSeek Harness first and Hermes last (above). The owner: 「我都同意」. The checks run in the same order (The checks, below).
 
 ## The bar, and the step ceilings
 
@@ -101,7 +105,7 @@ Records on the tagged head. The gate:
 3. The usersim record with the ledger, at the ceilings above with each needed host restart counted as a step, each journey ending in a real session's row.
 4. One live row: the daily check from inside Codex CLI and the Codex app (F4).
 5. Must-ship closed, and every lane-reviewed pull request read from outside.
-6. These nine AIs are tested live on the 0.25.0 head (the retired or deferred ones, Gemini CLI, Muse Code, Copilot and Windsurf, are not in it): Claude Code, Codex (CLI and app), OpenCode, Antigravity, Cursor, Grok Build, Hermes Agent, OpenClaw and DeepSeek Harness. Each has a dated record for the rows that apply to it: its row states (M7), its approval route or its "answer in its window" card (D3, other hosts), and delivery a and c (D2). A row a person must type into (the IDE rows) is run by the owner with the PM. `not run` is not accepted for these AIs. The owner, 2026-11-11: 「你剛剛提到的每個AI都要確實測試」.
+6. These ten AIs are tested live on the 0.25.0 head (the retired or deferred ones, Gemini CLI, Muse Code and Windsurf, are not in it): Claude Code, Codex (CLI and app), OpenCode, Antigravity, Cursor, GitHub Copilot CLI (if F11 passed; if it failed, its record says so and Copilot is not in 0.25.0), Grok Build, Hermes Agent, OpenClaw and DeepSeek Harness. Each has a dated record for the rows that apply to it: its row states (M7), its approval route or its "answer in its window" card (D3, other hosts), and delivery a and c (D2). A row a person must type into (the IDE rows) is run by the owner with the PM. `not run` is not accepted for these AIs. The owner, 2026-11-11: 「你剛剛提到的每個AI都要確實測試」.
 
 ## Delivery: an answer pressed on the board reaches the agent (lane E)
 
@@ -116,11 +120,11 @@ A next-turn mailbox cannot answer an agent that sits idle on a question. Only Cl
 
 ### D3. Approvals on the board
 The owner: 「0.25.0 就上，有條件」. The limits, exactly:
-- **Allow once** and **Deny** for Codex, OpenCode and Claude Code. Claude Code joins through its `PermissionRequest` hook (F13: its hook documentation says the hook can wait and answer allow or deny, and adds no standing rule unless the hook asks for one; one live run must still show what the terminal shows while the hook waits). Antigravity, Cursor, Grok, Hermes, OpenClaw and DeepSeek Harness get only what their route in "Approvals and questions on the other hosts" (below) allows, and only after that route's check has passed on a live record; until then their card shows the request and "answer in its window", with no button. Many Antigravity users run it in turbo mode (it always goes ahead and never asks), where there is nothing to approve: the board only shows its progress and hands it messages, at its next turn. The owner, 2026-11-11: 「它其实可以开一个 turbo 模式，就是一直都过不会问…只要发讯息，它也只是一个传送而已」.
+- **Allow once** and **Deny** for Codex, OpenCode and Claude Code. Claude Code joins through its `PermissionRequest` hook (F13: its hook documentation says the hook can wait and answer allow or deny, and adds no standing rule unless the hook asks for one; one live run must still show what the terminal shows while the hook waits). GitHub Copilot CLI shows a pending request and "answer in its window", with no button (its first step, below). Antigravity, Cursor, Grok, Hermes, OpenClaw and DeepSeek Harness get only what their route in "Approvals and questions on the other hosts" (below) allows, and only after that route's check has passed on a live record; until then their card shows the request and "answer in its window", with no button. Many Antigravity users run it in turbo mode (it always goes ahead and never asks), where there is nothing to approve: the board only shows its progress and hands it messages, at its next turn. The owner, 2026-11-11: 「它其实可以开一个 turbo 模式，就是一直都过不会问…只要发讯息，它也只是一个传送而已」.
 - No button where no hook runs: Claude Code in `bypassPermissions` or `dontAsk` mode, or with every hook turned off. A Claude Code session run with `-p` denies a call that no hook decides, so the 30 s fallback to the host's own prompt holds for interactive sessions only.
 - Approvals take their own route, a hook asking the local page, never the message path. This changes a written rule: `docs/MESSAGING.md` (lines 8, 235, 280, 431, 602) says a message never approves a tool. `MESSAGING.md` and `docs/dev/product-principles.md` change in the same pull request, by the owner's hand approval.
 - The local 127.0.0.1 page only. The LAN page says "an approval is waiting" and shows neither the command nor a button.
-- Each pending request is its own item, with the host's own request id; a session may have several, and a sub-agent's request shows on its parent's row. A press carries that id, the turn and the state the page drew; the server refuses it on any difference and redraws. Where the host gives no request id or turn (OpenCode's status events have no turn id), the board shows the request and no button.
+- Each pending request is its own item, with the host's own request id; a session may have several, and a sub-agent's request shows on its parent's row. A press carries that id, the turn and the state the page drew; the server refuses it on any difference and redraws. Where the host gives no request id, the board shows the request and no button. Where it gives a request id but no turn (OpenCode's status events have no turn id), the press carries the request id and the state the page drew, and OpenCode keeps its buttons only if F15 shows on a live record that such a press answers that one request and no other; if it does not, OpenCode shows the request and no button, and its line above and the release notes say so.
 - The command is shown in full after the board's `redact`. The journal keeps its hash and first words only. `scripts/codex-local.ts:638-639` and `docs/SETUP.md:326-328` promise that tool inputs and permission decisions are not kept; they change in the same pull request.
 - Allow once and Deny only: never "always", never "for this session". Where the host's route takes a message with a denial (Claude Code and Codex; on the other hosts, where their check shows it), a "Deny and say why" box sends it; elsewhere Deny goes without a reason. The owner, 2026-11-11: 「照建議」.
 - The hook waits only while a local page is open and has confirmed it drew the request, and at most 30 s. Otherwise it returns at once with no decision, and the host's own prompt appears as today; the one exception is a host the person has put under the board as the gate (below), where it denies instead. After that fallback the row says "asked in its window", with no button. The installed hook limit is 3 s today (`hooks/hook-safety.ts:17-24`), so this is a hook change: existing installs get it through the update entry (M3).
@@ -162,6 +166,14 @@ A route may need a one-time step inside that host: turning on a hook or a plugin
 
 **The board as the gate** (Grok, Hermes, and any host whose hook cannot allow): the person chooses, per host, to turn that host's own asking off and let the board's hook decide every tool call that would have asked. Setup never makes this choice: the person turns it on with one command, which the card offers. On Grok a hook that times out or crashes lets the call through, so with Grok's own asking off a failed hook would run a call unasked. The gate ships on a host only if its check (F18, F19) shows that a hook that crashes, times out or cannot reach the board stops the call; on a host where it does not, the gate is not offered, the host keeps its own asking, and its card offers Deny only. With no board page open, the hook denies and tells the agent "open the board to approve", so nothing runs unasked; the agent waits until the person is back. The owner, 2026-11-11, asked deny or let through: 「擋下」.
 
+### GitHub Copilot's first step
+Copilot is the second most used host and the board cannot show it at all. Copilot CLI documents hooks: `preToolUse`, which can allow or deny, and a `permissionRequest` event, with event names that match Claude Code's. Because a patch release adds no hook (line 3), the hooks go in now.
+- **F11 first** (half a day, a dated note): do these hooks fire in the installed Copilot CLI, with a session id, and what does each carry?
+- **If it passes:** setup connects Copilot CLI like the other hook hosts (its row, its setup and remove steps, its row states as far as its events show them), and a pending approval shows on its card with "answer in its window". Lane C.
+- **Not in 0.25.0:** Allow and Deny for Copilot (they need their own F10 check), answers or messages to it, and the Copilot IDE extension.
+- **If it fails:** Copilot is not in 0.25.0, and the note says why.
+- **Cost:** about 3 to 5 days, Fable 5.2's estimate if the hook shapes match Claude Code's, and one more live record (M8 line 6).
+
 ### D2. Receivers, one pull request per host
 In this order: OpenCode (#724: a new receiver on the DeepSeek pattern; wakes an idle session, hands over at `session.idle`), Codex turn end (#319: a `Stop` hand-over without the daemon; and #318, a session on the shared daemon taking a message idle or busy, pull request #1306 already open, which is the wake F6 asks about), Cursor (enroll on any hook event, hand over at `stop`), Hermes, Grok (only if F8 passes). Before the first, a small pull request moves the turn-event block out of `scripts/codex-local.ts:1076-1124` into `scripts/hook-delivery.ts`. Hook changes must land in this version, not a patch.
 - **Done when:** per host, the stand-in test passes and the live record marks a, b and c each as `now`, `later` or `cannot` (named), as M8's delivery table does: a and c at `now` or `later` for each host the pull request ships, and b `cannot` only where the cut order has cut it. The card's line agrees with the record. Every record quotes the line the card showed under Send; a record where the card promised one thing and another happened is a FAIL.
@@ -169,7 +181,7 @@ In this order: OpenCode (#724: a new receiver on the DeepSeek pattern; wakes an 
 
 ## The checks
 
-Half a day each, a dated note each, before the milestone they feed.
+Half a day each, a dated note each, before the milestone they feed. The host checks run in order of use: F6 (Codex) and F15 (OpenCode) first, then F17 (Cursor), then F11 (Copilot) and F16 (Antigravity), then F18 to F21.
 
 | Check | Answers | Feeds |
 |---|---|---|
@@ -183,7 +195,7 @@ Half a day each, a dated note each, before the milestone they feed.
 | F8 | Does Grok's `UserPromptSubmit` output reach the model, and does a blocked `Stop` continue? | D2 |
 | F9 | OpenCode: `promptAsync` or `prompt`, and does it wake an idle session? | D2 |
 | F10 | On each host that gets an approval button (Codex, OpenCode and Claude Code, then each other host's route before it ships): can a command inside the agent's session approve its own request, through the address file or otherwise? | D3, other hosts |
-| F11 | Copilot: its hooks and session id. Notes only. | 0.25.1 |
+| F11 | GitHub Copilot CLI: do `preToolUse` and `permissionRequest` fire in the installed version, with a session id, and what does each carry? | Copilot's first step |
 | F12 | Windsurf: hooks or MCP only. Notes only. | 0.25.1 |
 | F13 | Does Claude Code's `PermissionRequest` hook let the board's hook wait for the press and return allow or deny (and Antigravity, if it has such a hook)? Read 2026-11-11 from the hook documentation: yes for Claude Code, one live run left; no documented answer route for Antigravity. | D3 |
 | F14 | Does a Claude Code `PreToolUse` hook that returns the answers for its question tool close the question in the terminal and the desktop app, and in what form are several choices and "Other" given? | Answer or send |
@@ -201,7 +213,7 @@ Half a day each, a dated note each, before the milestone they feed.
 |---|---|---|
 | A, setup and upgrade | M2, M3, M5 | `scripts/codex-local.ts`, `scripts/setup-agent.mjs`, `bin/agent-board.mjs` |
 | B, the board | M4, M6, M7 | `scripts/board-cli.ts`, `scripts/board-serve.ts`, `scripts/codex-history.ts`, `hooks/view.ts`, `hooks/digest.ts` |
-| C, hosts | M1, then D2 OpenCode, Hermes and Grok hook tables | `hooks/portable-agents.ts`, `hooks/local-agents.ts`, `hooks/receivers/` |
+| C, hosts | M1, Copilot's first step (after F11), then D2 OpenCode, Hermes and Grok hook tables | `hooks/portable-agents.ts`, `hooks/local-agents.ts`, `hooks/receivers/` |
 | D, records | M0, then M8 | `docs/validation/`, tests |
 | E, delivery | the extraction, D1, D3, D2 Codex and Cursor | `scripts/hook-delivery.ts`, `hooks/hook-messages.ts`, `hooks/receivers/`, `hooks/serve.ts`, `scripts/messaging-matrix.mjs` |
 
@@ -219,6 +231,7 @@ Half a day each, a dated note each, before the milestone they feed.
 - "Nothing to install": Node 22 or newer and a terminal are needed once.
 - "No network use": one request a day, on by default.
 - "An agent cannot act as the person on the board": it can. An agent shown the page link, or that looks for it, can act as the person; `SECURITY.md` says so. The fix is 0.25.1.
+- "Approve from the board", "answer from the board" or Send for Copilot: 0.25.0 shows its progress and its requests only.
 - "Works with Muse Code" or "Gemini CLI". "Works in <app or IDE>" for a row not run.
 - "Stable" before the six gate lines hold.
 
@@ -226,7 +239,8 @@ Half a day each, a dated note each, before the milestone they feed.
 
 - **The token redesign:** a link that works once, a page session in no address, a separate credential for the board's own client. It must land before the rest of #1119.
 - **The wake for hook-only agents,** `board_wait` (#685), for Codex (if F6 fails), Antigravity, Cursor, Grok and Hermes.
-- **Copilot and one general MCP route** (setup writes the MCP entry, a `board_report` tool, `board_wait`) for Junie, Zed, Amp, Augment and Factory; Windsurf through the same route.
+- **One general MCP route** (setup writes the MCP entry, a `board_report` tool, `board_wait`) for Junie, Zed, Amp, Augment and Factory; Windsurf through the same route.
+- **Copilot's Allow and Deny** after its own F10 check: in 0.25.1 only if the hook 0.25.0 installs already holds them, since a patch release adds no hook (line 3); otherwise 0.26.0.
 - **Cloud bots:** the bridge plan (#866), the trial one release later.
 - **Remove polish and setup words that block nobody:** #1244, #1271, #1202, #1245, #1295, #768, #1275.
 - **CI flakes** #910, #835, #998, #1135, unless one blocks a merge. The first-try figure is reported, not a gate.
