@@ -1397,7 +1397,22 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const missingHeld: string[] = []
   const keptFiles = new Set<string>()
   const staleBeside = new Set<string>()
+  // The release table hashes the script from its second line on, so the first (settings) line is checked here:
+  // it must be one a release or this setup would write for this install, or the person edited it (review of #1328).
+  const isSettingsLine = (line: string): boolean => {
+    const head = 'globalThis.AGENT_BOARD = '
+    if (!line.startsWith(head)) return false
+    let data: Json
+    try { data = object(JSON.parse(line.slice(head.length))) } catch { return false }
+    const known = new Set(['hookVersion', 'path', 'codexRoot', 'lang'])
+    if (Object.keys(data).some(key => !known.has(key))) return false
+    if (typeof data.hookVersion !== 'number' || typeof data.path !== 'string' || typeof data.lang !== 'string') return false
+    if (!Object.hasOwn(STRINGS, data.lang) || ![progress, ...legacyProgress].includes(data.path)) return false
+    return data.codexRoot === undefined || data.codexRoot === root
+  }
   const isReleasedBoard = (text: string): boolean => {
+    const first = /^globalThis\.AGENT_BOARD[^\n]*\n/.exec(text)?.[0]
+    if (first !== undefined && !isSettingsLine(first.slice(0, -1).replace(/\r$/, ''))) return false
     const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))
     return RELEASED.some(release => release.board.includes(bodyHash))
   }
@@ -1449,6 +1464,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         }
       } else if (manifest.files[file] === undefined && !otherManifests.some(one => Object.hasOwn(object(one.files ?? {}), file))) {
         // Code the agent loads, with no record that setup wrote it, is not an edited copy of ours: it is someone else's file.
+        conflicts.push(file)
+      } else if (file === worker && manifest.files[file] === undefined) {
+        // A sibling agent's edited worker stays, and this agent has no old hooks to keep beside it: its new hooks would call
+        // that older worker. Its hooks are held back until the worker is restored or removed (review of #1328).
         conflicts.push(file)
       } else keptCode.push(file)
       keptFiles.add(file)

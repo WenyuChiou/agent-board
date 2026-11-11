@@ -11,7 +11,7 @@ import { inspect } from 'node:util'
 import { formatWriter } from './e2e/lib/faults.mjs'
 import { neverShown } from './fixtures/never-shown.mjs'
 import { hookOrDeferred, turnOrDeferred } from './helpers/deferred-turn.mjs'
-import { bundleFromDir } from '../scripts/bundle-text.mjs'
+import { bundleFromDir, bundleFromRef } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { HOOK_INPUT_TIMEOUT, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
@@ -2604,6 +2604,44 @@ test('#1302 an edited worker keeps the older hooks too, so no new hook runs it (
   assert.deepEqual(preview.keptHeldWorker, [f.hooks])
   const shown = setupAgent(f, '--agent', 'codex').stdout
   assert.ok(shown.includes('agent-board-hook.mjs') && shown.includes('hooks.json'), shown)
+}))
+
+// Two-hour review of #1328 (codex_127), finding 1: the release table hashes the board script from its second line on,
+// so the settings line itself must be one setup or a release wrote; an edited one is the person's.
+test('#1302 a released board script whose settings line the person edited is kept, not overwritten (review of #1328)', () => fixture(f => {
+  const released = bundleFromRef(fileURLToPath(new URL('..', import.meta.url)), 'agent-board--v0.24.3')
+  assert.equal(f.install('--apply').status, 0)
+  const head = readFileSync(f.script, 'utf8').split('\n', 1)[0]
+  // The settings line setup wrote for this install, above a released body: still a released board, updated as before.
+  f.save(f.script, `${head}\n${released}`)
+  const plain = JSON.parse(f.install('--json').stdout)
+  assert.deepEqual(plain.conflicts, [])
+  assert.deepEqual(plain.keptCode ?? [], [])
+  assert.equal(plain.changes.find(change => change.file === f.script)?.action, 'update', 'an untouched released board is updated')
+  // The same body under a settings line the person changed (here the progress file it reports to).
+  const edited = `${head.replace(/"path":"[^"]*"/, `"path":${JSON.stringify(join(f.home, 'my', 'progress.md'))}`)}\n${released}`
+  assert.notEqual(edited, `${head}\n${released}`)
+  f.save(f.script, edited)
+  const preview = JSON.parse(f.install('--json').stdout)
+  assert.notEqual(preview.changes.find(change => change.file === f.script)?.action, 'update', 'the edited line is not planned for overwrite')
+  assert.ok(preview.keptCode?.includes(f.script) || preview.conflicts.includes(f.script), JSON.stringify(preview))
+  f.install('--apply')
+  assert.equal(readFileSync(f.script, 'utf8'), edited, 'the person\'s settings line is still there')
+}))
+
+// Review of #1328, finding 2: an agent added after a sibling's worker was edited has no record of the worker, so its new hooks
+// must not be written to call that older worker.
+test('#1302 a new agent\'s hooks are held while a sibling\'s edited worker is kept (review of #1328)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const edited = `${readFileSync(worker, 'utf8')}// my own edit\n`
+  writeFileSync(worker, edited)
+  const record = join(f.root, 'install-cursor.json')
+  const preview = JSON.parse(f.install('--agent', 'cursor', '--json').stdout)
+  assert.ok(preview.conflicts.includes(worker), JSON.stringify(preview.conflicts))
+  assert.notEqual(f.install('--agent', 'cursor', '--apply').status, 0, 'the new agent stops')
+  assert.equal(existsSync(record), false, 'no record: none of its hooks were written')
+  assert.equal(readFileSync(worker, 'utf8'), edited)
 }))
 
 test('setup hashes foreign hook entries and restores a missing owned hook beside them', () => fixture(f => {

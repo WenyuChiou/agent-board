@@ -533,6 +533,80 @@ test('a custom path with % is shown once per shell on Windows, and each shell re
   }
 }))
 
+// Two-hour review of #1328 (codex_127), finding 4: the advice for a script that returns text for --json names the data folder.
+test('a script that does not return JSON for --json is answered with the update command for its own data folder (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, 'data dir')
+  save(join(root, 'install-codex.json'), '{}')
+  // Not a release the package knows, so the launcher holds its output and finds it is not JSON.
+  save(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = ${JSON.stringify({ lang: 'en' })}\nprocess.stdout.write('Agent Board (text, not JSON)\\n')\n// edited by the person`)
+  const result = f.run(pkg, ['--data-dir', root, '--json'])
+  assert.notEqual(result.status, 0)
+  assert.equal(result.stdout, '')
+  assert.ok(result.stderr.includes(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir ${shellQuoted(root)}`), result.stderr)
+}))
+
+// Finding 5: with --chat a folder under home is written home-relative, in a form each shell expands.
+test('with --chat a custom folder under home is shown in a form each shell expands (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, "data dir it's")
+  const reply = `globalThis.AGENT_BOARD = ${JSON.stringify({ codexRoot: root, lang: 'en' })}\nprocess.stdout.write(JSON.stringify({ update: process.env.AGENT_BOARD_UPDATE_COMMAND ?? null }))\n// 0.24.2`
+  save(join(root, 'install-codex.json'), '{}')
+  save(join(root, 'agent-board.mjs'), reply)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(reply)}'] }]\n`)
+  const shownFor = platform => {
+    const result = f.run(pkg, ['--data-dir', root, '--codex-doctor', '--json', '--chat'], { NODE_OPTIONS: `--require ${JSON.stringify(join(repo, `tests/fixtures/platform-${platform}.cjs`))}` })
+    success(result)
+    return { update: JSON.parse(result.stdout).update, stderr: result.stderr }
+  }
+  const base = `npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir`
+  // POSIX: a quoted ~ is not expanded, so the ~ stays outside the quotes.
+  const posix = shownFor('posix')
+  assert.equal(posix.update, `${base} ~/'data dir it'\\''s'`)
+  assert.ok(posix.stderr.includes(posix.update), posix.stderr)
+  // Windows: Command Prompt never expands ~, so each shell gets its own variable for the home folder.
+  const windows = shownFor('win32')
+  assert.equal(windows.update, `Command Prompt: ${base} "%USERPROFILE%\\data dir it's"; PowerShell: ${base} "$HOME\\data dir it's"`)
+  if (process.platform !== 'win32') {
+    // The shell that shows this command expands it to the folder.
+    const result = spawnSync('sh', ['-c', `printf %s ${posix.update.slice(posix.update.indexOf('~'))}`], { env: f.env, encoding: 'utf8', timeout: 15000 })
+    assert.equal(result.stdout, root)
+    return
+  }
+  // Stand-in npx shims, as npm installs them, that record the arguments.
+  const stub = join(f.box, 'stub')
+  save(join(stub, 'npx.cmd'), `@"${process.execPath}" "%~dp0npx.js" %*\r\n`)
+  save(join(stub, 'npx.ps1'), `& "${process.execPath}" "$PSScriptRoot\\npx.js" @args\r\nexit $LASTEXITCODE\r\n`)
+  save(join(stub, 'npx.js'), "require('node:fs').writeFileSync(process.env.STUB_OUT, JSON.stringify(process.argv.slice(2)))\n")
+  const out = join(f.box, 'argv.json')
+  const path = `${stub};${f.env.PATH ?? f.env.Path}`
+  const env = { ...f.env, PATH: path, Path: path, STUB_OUT: out }
+  const lines = Object.fromEntries(windows.stderr.split(/\r?\n/).map(line => /^ {2}(Command Prompt|PowerShell): (.+)$/.exec(line)).filter(Boolean).map(match => [match[1], match[2]]))
+  assert.deepEqual(Object.keys(lines).sort(), ['Command Prompt', 'PowerShell'], windows.stderr)
+  const shells = {
+    'Command Prompt': command => spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], { env, encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, timeout: 30000 }),
+    PowerShell: command => spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 }),
+  }
+  for (const [shell, runIn] of Object.entries(shells)) {
+    rmSync(out, { force: true })
+    const result = runIn(lines[shell])
+    assert.equal(result.status, 0, `${shell}: ${result.stderr}`)
+    assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), [`${manifest.name}@${manifest.version}`, 'setup', '--agent', 'codex', '--data-dir', root], shell)
+  }
+}))
+
+// Finding 6: the failure notice of --chat shows the home folder as ~, like every other path in that output.
+test('with --chat a failed comparison names the board script without the home folder (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  save(boardPath(f), `${prelude(f)}process.stdout.write('{"ok":true}\\n')\n// edited by the person`)
+  // The package cannot be read for the comparison.
+  rmSync(join(pkg, 'hooks/board-script.ts'), { force: true })
+  const result = f.run(pkg, ['--chat', '--json'])
+  success(result)
+  assert.ok(result.stderr.includes('could not compare the board script at ~'), result.stderr)
+  assert.equal(result.stderr.includes(f.home), false, result.stderr)
+}))
+
 test('the displayed update command quotes a custom path for the shell it is shown for (review of #1328)', () => fixture(f => {
   const pkg = packed(f)
   const root = join(f.home, "data $HOME $(touch pwned) it's")

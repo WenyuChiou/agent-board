@@ -180,7 +180,46 @@ const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(h
 // cmd expands %NAME% even inside double quotes, so for cmd each % steps out of the quotes as ^%, which cmd reads as a plain %.
 const quoted = (text, shell) => !isWin ? `'${text.replaceAll("'", "'\\''")}'` : shell !== 'cmd' && /[$`]/.test(text) ? `'${text.replaceAll("'", "''")}'` : shell === 'cmd' ? `"${text.replaceAll('%', '"^%"')}"` : `"${text}"`
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
-const run = (path, passed, { isSetup = false, isRemove = false, env = process.env, isJsonChecked = false } = {}) => {
+// The part of a path below the home folder, with its leading separator ('' for home itself); undefined elsewhere.
+const belowHome = path => {
+  if (!home) return undefined
+  const [a, b] = isWin ? [path.toLowerCase(), home.toLowerCase()] : [path, home]
+  return a === b ? '' : a.startsWith(b) && (path[home.length] === '/' || path[home.length] === '\\') ? path.slice(home.length) : undefined
+}
+// How to run setup again for the install whose board script is at `path`: the agents it was set up for and its data folder.
+// With --chat a folder under home is written home-relative, in a form each shell expands: ~/'rest' on POSIX (a quoted ~ is
+// not expanded), "%USERPROFILE%\rest" in Command Prompt, "$HOME\rest" in PowerShell. Command Prompt reads only double quotes and
+// expands %NAME% inside them, and PowerShell runs $(...) and backticks inside them, so such a path is shown once per shell.
+function setupAdvice(path, prelude) {
+  let root = typeof prelude.codexRoot === 'string' ? resolve(prelude.codexRoot) : dirname(path)
+  // The agents scripts/setup-agent.mjs knows; another install-*.json (a backup copy) is not one.
+  const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
+  const listed = folder => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
+  let agents = listed(root)
+  // A moved data folder: the board script's own folder is where the board is now.
+  if (!agents) { root = dirname(path); agents = listed(root) ?? [] }
+  const agentOpt = agents.length ? ` --agent ${agents.join(',')}` : ''
+  const isDefault = root === join(home, '.agent-board')
+  const rest = isChat ? belowHome(root) : undefined
+  const needsQuote = !isDefault && /[^\w.:\/~@+,=-]/.test(root)
+  const isTwoShells = isWin && !isDefault && (rest !== undefined || (needsQuote && /[$`%]/.test(root)))
+  const dataOpt = style => {
+    if (isDefault) return ''
+    if (rest !== undefined) {
+      if (isWin) return ` --data-dir ${style === 'cmd' ? `"%USERPROFILE%${rest.replaceAll('%', '"^%"')}"` : `"$HOME${rest.replace(/[`$]/g, '`$&')}"`}`
+      const below = rest.slice(1)
+      return ` --data-dir ~${below === '' ? '' : `/${/[^\w.:\/~@+,=-]/.test(below) ? quoted(below, style) : below}`}`
+    }
+    return ` --data-dir ${needsQuote ? quoted(root, style) : root}`
+  }
+  const opts = agentOpt + dataOpt()
+  const command = `npx ${name}@${v} setup${isTwoShells ? agentOpt + dataOpt('cmd') : opts}`
+  const forPowerShell = `npx ${name}@${v} setup${isTwoShells ? agentOpt + dataOpt('powershell') : opts}`
+  const labels = message(['Command Prompt:', 'PowerShell:'], ['命令提示字元：', 'PowerShell：'], ['命令提示符：', 'PowerShell：'])
+  const two = isTwoShells ? `\n  ${labels[0]} ${command}\n  ${labels[1]} ${forPowerShell}` : ''
+  return { opts, command, forPowerShell, isTwoShells, labels, two }
+}
+const run = (path, passed, { isSetup = false, isRemove = false, env = process.env, isJsonChecked = false, adviceFor = {} } = {}) => {
   const setupCmd = isRemove ? `npx ${name} remove` : `npx ${name} setup`
   // A script this package cannot vouch for may not know --json: its output is held until it parses as JSON.
   const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : isJsonChecked ? ['inherit', 'pipe', 'inherit'] : 'inherit', encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: setupCmd } : env, windowsHide: true })
@@ -195,7 +234,10 @@ const run = (path, passed, { isSetup = false, isRemove = false, env = process.en
     let isJson = false
     try { JSON.parse(result.stdout); isJson = true } catch {}
     if (result.status === 0 && !isJson) {
-      console.error(message(`agent-board: the board script at ${shown(path)} did not return JSON for --json, so it is probably from an older release. To update it, preview: npx ${name}@${v} setup, then add --apply.`, `agent-board：${shown(path)} 的看板程式對 --json 沒有回傳 JSON，可能是較舊的版本。更新前先預覽：npx ${name}@${v} setup，再加上 --apply。`, `agent-board：${shown(path)} 的看板程序对 --json 没有返回 JSON，可能是较旧的版本。更新前先预览：npx ${name}@${v} setup，再加上 --apply。`))
+      const { opts, command, forPowerShell, isTwoShells, labels, two } = setupAdvice(path, adviceFor)
+      console.error(isTwoShells
+        ? message(`agent-board: the board script at ${shown(path)} did not return JSON for --json, so it is probably from an older release. To update it, preview with the command for your shell, then add --apply:${two}`, `agent-board：${shown(path)} 的看板程式對 --json 沒有回傳 JSON，可能是較舊的版本。更新前先用你的終端機對應的指令預覽，再加上 --apply：${two}`, `agent-board：${shown(path)} 的看板程序对 --json 没有返回 JSON，可能是较旧的版本。更新前先用你的终端对应的命令预览，再加上 --apply：${two}`)
+        : message(`agent-board: the board script at ${shown(path)} did not return JSON for --json, so it is probably from an older release. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board：${shown(path)} 的看板程式對 --json 沒有回傳 JSON，可能是較舊的版本。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board：${shown(path)} 的看板程序对 --json 没有返回 JSON，可能是较旧的版本。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
       process.exit(1)
     }
   }
@@ -304,26 +346,8 @@ if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
       if (old === v) old = undefined
       const path = shown(installed)
       if (old && typeof prelude.codexRoot === 'string') {
-        let root = resolve(prelude.codexRoot)
-        // The agents scripts/setup-agent.mjs knows; another install-*.json (a backup copy) is not one.
-        const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
-        const listed = folder => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
-        let agents = listed(root)
-        // A moved data folder: the board script's own folder is where the board is now.
-        if (!agents) { root = dirname(installed); agents = listed(root) ?? [] }
-        const folder = shown(root)
-        const agentOpt = agents.length ? ` --agent ${agents.join(',')}` : ''
-        const needsQuote = root !== join(home, '.agent-board') && /[^\w.:\\/~@+,=-]/.test(folder)
-        const dataOpt = style => root !== join(home, '.agent-board') ? ` --data-dir ${needsQuote ? quoted(folder, style) : folder}` : ''
-        // Command Prompt reads only double quotes and expands %NAME% inside them, and PowerShell runs $(...) and backticks inside
-        // them, so such a path is shown once per shell.
-        const isTwoShells = isWin && needsQuote && /[$`%]/.test(folder)
-        const opts = agentOpt + dataOpt()
-        const command = `npx ${name}@${v} setup${isTwoShells ? agentOpt + dataOpt('cmd') : opts}`
-        const labels = message(['Command Prompt:', 'PowerShell:'], ['命令提示字元：', 'PowerShell：'], ['命令提示符：', 'PowerShell：'])
-        const forPowerShell = `npx ${name}@${v} setup${opts}`
+        const { opts, command, forPowerShell, isTwoShells, labels, two } = setupAdvice(installed, prelude)
         updateCommand = isTwoShells ? `${labels[0]} ${command}${message('; ', '；', '；')}${labels[1]} ${forPowerShell}` : command
-        const two = isTwoShells ? `\n  ${labels[0]} ${command}\n  ${labels[1]} ${forPowerShell}` : ''
         console.error(isTwoShells
           ? message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview with the command for your shell, then add --apply:${two}`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先用你的終端機對應的指令預覽，再加上 --apply：${two}`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先用你的终端对应的命令预览，再加上 --apply：${two}`)
           : message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
@@ -337,10 +361,10 @@ if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
       if (old && isBoardJson) process.exit(1)
     }
   } catch (error) {
-    console.error(message(`agent-board ${v}: could not compare the board script at ${installed} with this package (${code(error)}). It runs as it is.`, `agent-board ${v}：無法比對 ${installed} 的看板程式與這個套件（${code(error)}），照原樣執行。`, `agent-board ${v}：无法比对 ${installed} 的看板程序与这个包（${code(error)}），照原样运行。`))
+    console.error(message(`agent-board ${v}: could not compare the board script at ${shown(installed)} with this package (${code(error)}). It runs as it is.`, `agent-board ${v}：無法比對 ${shown(installed)} 的看板程式與這個套件（${code(error)}），照原樣執行。`, `agent-board ${v}：无法比对 ${shown(installed)} 的看板程序与这个包（${code(error)}），照原样运行。`))
   }
 }
 // A separate process preserves argv[1], which the installed page server identifies.
 const env = dataDir ? { ...process.env } : process.env
 if (dataDir) delete env.CLAUDE_PROGRESS_FILE
-run(installed, passArgs, { isJsonChecked: isJsonUnverified, env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v, AGENT_BOARD_UPDATE_COMMAND: updateCommand } })
+run(installed, passArgs, { isJsonChecked: isJsonUnverified, adviceFor: prelude, env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v, AGENT_BOARD_UPDATE_COMMAND: updateCommand } })
