@@ -475,7 +475,7 @@ const main = () => {
   }
   const fileLine = (file, changes) => {
     const change = changes.find(one => one.file === file)
-    return `  ${change?.action === 'remove' && !isRemove ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
+    return `  ${change?.action === 'remove' && !isRemove && !file.endsWith('.new') ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
   }
   const sharedChanges = [...new Map(results.flatMap(plan => plan.conflicts.length ? [] : changesFor(plan, true)).map(change => [change.file, change])).values()]
   const sharedFiles = [...new Set(filesByAgent.flat().filter(file => shared.has(file)))]

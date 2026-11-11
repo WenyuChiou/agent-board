@@ -2353,6 +2353,40 @@ test('Antigravity setup keeps a user-edited skill, writes the new one beside it,
   assert.equal(readFileSync(`${antigravitySkill}.new`, 'utf8'), fresh)
 }))
 
+test('#1302 setup never overwrites a .new copy the person edited, and names it instead of replacing it', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const antigravitySkill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
+  f.save(antigravitySkill, `${readFileSync(antigravitySkill, 'utf8')}Synthetic user edit
+`)
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const copy = `${antigravitySkill}.new`
+  const mine = `${readFileSync(copy, 'utf8')}Synthetic edit to the copy
+`
+  f.save(copy, mine)
+  const preview = f.install('--agent', 'antigravity')
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts, [copy])
+  const applied = f.install('--agent', 'antigravity', '--apply')
+  assert.notEqual(applied.status, 0)
+  assert.equal(readFileSync(copy, 'utf8'), mine)
+}))
+
+test('#1302 a .new copy setup wrote is removed, not emptied, once the person restores the generated file', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const fresh = readFileSync(f.skill, 'utf8')
+  f.save(f.skill, `${fresh}Synthetic user edit
+`)
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(readFileSync(`${f.skill}.new`, 'utf8'), fresh)
+  f.save(f.skill, fresh)
+  const preview = setupAgent(f, '--agent', 'codex')
+  assert.ok(preview.stdout.includes('SKILL.md.new'), preview.stdout)
+  assert.doesNotMatch(preview.stdout, /old \/board command/)
+  const applied = f.install('--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.equal(existsSync(`${f.skill}.new`), false)
+  assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(f.root, 'install-codex.json'), 'utf8')).files, `${f.skill}.new`), false)
+}))
+
 test('setup hashes foreign hook entries and restores a missing owned hook beside them', () => fixture(f => {
   const foreign = { hooks: [{ type: 'command', command: 'synthetic-foreign-stop --token synthetic-private-value' }] }
   f.save(f.hooks, JSON.stringify({ hooks: { Stop: [foreign] } }))

@@ -1388,10 +1388,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // host only reads gets the new file beside it; code a host loads keeps the old file and is named.
       if (remove) conflicts.push(file)
       else if (/\.(?:toml|md)$/.test(file)) {
-        keptText.push({ file, beside: `${file}.new` })
-        const beside = initial(`${file}.new`)
-        if (beside !== desired) changes.push({ file: `${file}.new`, action: beside === null ? 'create' : 'update' })
-        files[`${file}.new`] = desired
+        const copy = `${file}.new`
+        const beside = initial(copy)
+        // The copy is replaced only while it is still bytes setup wrote; one the person edited, or made, is theirs.
+        const isOurs = beside === null || beside === desired || hash(beside) === manifest.files[copy] || otherManifests.some(one => object(one.files ?? {})[copy] === hash(beside))
+        if (!isOurs) conflicts.push(copy)
+        else {
+          keptText.push({ file, beside: copy })
+          if (beside !== desired) changes.push({ file: copy, action: beside === null ? 'create' : 'update' })
+          files[copy] = desired
+        }
       } else keptCode.push(file)
       keptFiles.add(file)
     }
@@ -1599,7 +1605,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       else if (change.file === progress) {
         mkdirSync(dirname(progress), { recursive: true })
         writeFileSync(progress, '', { flag: 'wx', mode: 0o600 })
-      } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
+      } else if (remove || retired.includes(change.file) || change.action === 'remove') unlinkSync(change.file)
       else atomic(change.file, files[change.file] ?? '')
     }
     if (remove) {
