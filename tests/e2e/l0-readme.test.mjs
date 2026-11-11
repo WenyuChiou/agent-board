@@ -85,7 +85,12 @@ const section = (text, heading, level = 2) => {
   const start = lines.indexOf(`${'#'.repeat(level)} ${heading}`)
   if (start < 0) return undefined
   const next = new RegExp(`^#{1,${level}} `)
-  const end = lines.findIndex((line, i) => i > start && next.test(line))
+  // A shell comment inside a code block (`# open a new session …`) is not a heading.
+  let isCode = false
+  const end = lines.findIndex((line, i) => {
+    if (i > start && /^```/.test(line)) isCode = !isCode
+    return i > start && !isCode && next.test(line)
+  })
   return lines.slice(start + 1, end < 0 ? undefined : end).join('\n')
 }
 // The anchor GitHub gives a heading: lower case, punctuation dropped, each space a hyphen.
