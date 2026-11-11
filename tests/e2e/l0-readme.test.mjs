@@ -1,7 +1,10 @@
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
+import { spawnIsolated } from './lib/spawn.mjs'
+import { makeWorld } from './lib/world.mjs'
 
 // L0: what a newcomer meets first, before installing anything. Links and image files across the
 // three READMEs are #207's sync test; this journey keeps to the picture at the top.
@@ -15,41 +18,63 @@ const READMES = [
   ['README.zh-TW.md', 'zh-TW', '合成資料。'],
   ['README.zh-CN.md', 'zh-CN', '合成数据。'],
 ]
-// Each README's sections in the order a newcomer reads them, the same eight in every language.
+// Each README's sections in the order a newcomer reads them, the same ten in every language.
 const SECTIONS = {
-  en: ['Quick start', 'Key commands', 'Supported agents', 'What you see', 'How it works', 'Troubleshooting', 'Documentation', 'License'],
-  'zh-TW': ['快速開始', '常用指令', '支援的 agent', '你會看到什麼', '怎麼運作', '疑難排解', '文件', '授權'],
-  'zh-CN': ['快速开始', '常用命令', '支持的 agent', '你会看到什么', '怎么运作', '问题排查', '文档', '许可证'],
+  en: ['Quick start', 'What you get', 'Supported agents', 'Answer from the board', 'Open it anywhere', 'How it works', 'Update and remove', 'Troubleshooting', 'Documentation', 'License'],
+  'zh-TW': ['快速開始', '你會得到什麼', '支援的 agent', '在看板上回答', '在哪裡都能開', '怎麼運作', '更新與移除', '疑難排解', '文件', '授權'],
+  'zh-CN': ['快速开始', '你会得到什么', '支持的 agent', '在看板上回复', '在哪里都能开', '怎么运作', '更新和卸载', '问题排查', '文档', '许可证'],
 }
 
-// The six scenes, the page's Settings button, and the Send and receipt labels in each locale.
-const SCENES = {
-  en: [[['Every agent,', 'one board.'], ['Watch steps', 'tick off live.'], ['Questions jump', 'to the top.'], ['Make the board', 'yours.'], ['Send from', 'the board.'], ['One command', 'to start.']], 'Settings', ['Send to Codex', 'Sending to Codex; waiting for its reply…', '✓ Replied']],
-  'zh-TW': [[['每個 agent', '同一塊看板'], ['每一步', '即時打勾'], ['等你回答的', '排在最上面'], ['用你習慣的', '看板設定'], ['直接從看板', '傳送訊息'], ['一行指令', '開始使用']], '設定', ['傳給 Codex', '正在傳給 Codex，等它回完…', '✓ 已回覆']],
-  'zh-CN': [[['每个 agent', '同一块看板'], ['每一步', '实时打勾'], ['等你回答的', '排在最上面'], ['用你习惯的', '看板设置'], ['直接从看板', '发送消息'], ['一行命令', '开始使用']], '设置', ['发给 Codex', '正在发给 Codex，等它回完…', '✓ 已回复']],
+// The seven scenes' captions (the lines, the line under them and the words in amber), Claude Code's
+// question, and the page's receipt once the answer reached Claude Code (claudeDelivered in the
+// strings tables), in each locale. Scenes 3 and 7 say the same sentence.
+const SET1 = {
+  en: { caption: ['A board that shows', 'which AI agent is', 'waiting on you.'], sub: ['Claude Code, Codex, Cursor and more,', 'on your own computer.', 'Questions show up in seconds.'], amber: ['waiting on you'], subAmber: [] },
+  'zh-TW': { caption: ['AI agent 進度看板'], sub: ['agent 一停下來等你回答，', '幾秒內就排到看板最上面，', '不用再一個個視窗找。'], amber: [], subAmber: ['等你回答'] },
+  'zh-CN': { caption: ['AI agent 进度看板'], sub: ['agent 一停下来等你回复，', '几秒内就排到看板最上面，', '不用再挨个窗口找。'], amber: [], subAmber: ['等你回复'] },
 }
-// The first-run command stays on screen with reduced motion.
+const SCENES = {
+  en: [[
+    { caption: ['Which AI agent is', 'waiting on you?'], amber: ['waiting on you'] },
+    { caption: ['One stopped to ask.', 'You were in', 'another window.'] },
+    SET1.en,
+    { caption: ['Its question goes', 'to the top.'], sub: ['On the board within seconds.'] },
+    { caption: ['Answer it', 'on the board.'], sub: ['Claude Code gets it directly;', 'Codex and Antigravity on their', 'next turn; copy for the rest.'] },
+    { caption: ['One command', 'to start.'], sub: ['On your computer.', 'One Markdown file. No account.'] },
+    SET1.en,
+  ], 'Blue or green?', "Delivered. Waiting for Claude's reply."],
+  'zh-TW': [[
+    { caption: ['現在哪個 AI agent', '在等你？'], amber: ['在等你'] },
+    { caption: ['有一個停下來問你', '你人在別的視窗'] },
+    SET1['zh-TW'],
+    { caption: ['它的問題', '排到最上面'], sub: ['幾秒內就上看板。'] },
+    { caption: ['在看板上回答'], sub: ['不用切視窗：Claude Code 直接收到，', 'Codex、Antigravity 下一輪收到，', '其他 agent 一鍵複製。'] },
+    { caption: ['一行指令', '就能開始'], sub: ['在你的電腦上跑，', '一個 Markdown 檔，不用帳號。'] },
+    SET1['zh-TW'],
+  ], '藍色還是綠色？', '已送達，正在等 Claude 回覆。'],
+  'zh-CN': [[
+    { caption: ['现在哪个 AI agent', '在等你？'], amber: ['在等你'] },
+    { caption: ['有一个停下来问你', '你在别的窗口'] },
+    SET1['zh-CN'],
+    { caption: ['它的提问', '排到最上面'], sub: ['几秒内就出现在看板上。'] },
+    { caption: ['在看板上回复'], sub: ['不用切窗口：Claude Code 直接收到，', 'Codex、Antigravity 下一轮收到，', '其他 agent 一键复制。'] },
+    { caption: ['一行命令', '就能开始'], sub: ['在你的电脑上运行，', '一个 Markdown 文件，不用账号。'] },
+    SET1['zh-CN'],
+  ], '蓝色还是绿色？', '已送达，正在等 Claude 回复。'],
+}
+// The first-run command stays on screen in every frame, reduced motion included.
 const COMMAND = 'npx @wenyuchiou/agent-board'
-// The ten integrations the header names, in the support matrix's order (#407).
-const INTEGRATIONS = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode', 'Cursor', 'Grok Build', 'Muse Code', 'Hermes Agent', 'OpenClaw', 'DeepSeek Harness']
-// Each agent's board command, and the agents whose command is not run live yet.
-const BOARD_COMMANDS = { 'Claude Code': '/progress', Codex: '$agent-board' }
-const boardCommand = agent => BOARD_COMMANDS[agent] ?? '/agent-board'
-// A live run is recorded in docs/parity-matrix.json with its date, host version and surface (#466).
-// An agent leaves this list in the same change that records its run.
-const NOT_RUN_LIVE = ['Antigravity', 'Cursor', 'Grok Build', 'Muse Code', 'DeepSeek Harness']
-// The agents whose only check is the synthetic home: their row in the table of checks has no host version or record.
-const SYNTHETIC_ONLY = ['Cursor', 'Muse Code']
-// The setup and board commands still offered after #865 made the page the default.
-const OLD_COMMANDS = ['claude plugin marketplace add WenyuChiou/agent-board', 'claude plugin install agent-board@agent-board', '/hooks', '/progress', '$agent-board', '/agent-board', 'node "$HOME/.agent-board/agent-board.mjs"', 'node "$HOME/.agent-board/agent-board.mjs" --lan', 'node "$HOME/.agent-board/agent-board.mjs" --json', 'node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']
-// The code each surface row holds: terminal or desktop, browser, agent read, one agent's setup.
-const SURFACE_COMMANDS = [['node "$HOME/.agent-board/agent-board.mjs"'], ['node "$HOME/.agent-board/agent-board.mjs" --lan'], ['node "$HOME/.agent-board/agent-board.mjs" --json'], ['node "$HOME/.agent-board/agent-board.mjs" --codex-doctor --agent codex']]
-// Per language: the strip's label, the two command subsections, the caveat on a command
-// not run live yet, the board's page heading, and how each surface row starts.
+// The seven agents with a 0.24.3 record, in the support table's order, and each one's board command (none for Cursor).
+const LISTED = ['Claude Code', 'Codex', 'Antigravity', 'Cursor', 'OpenCode', 'Grok Build', 'Hermes Agent']
+const BOARD_COMMANDS = { 'Claude Code': '/agent-board', Codex: '$agent-board', Antigravity: '/agent-board', OpenCode: '/agent-board', 'Grok Build': '/agent-board', 'Hermes Agent': '/agent-board' }
+// The agents whose board command was not run live in 0.24.3 (docs/validation/2026-11-10-parity-0.24.3.md, column a).
+const NOT_RUN_LIVE = ['Codex', 'Antigravity', 'Grok Build']
+// What each README says per language: the phrase for a step not run live, how each answer path is described
+// and the words of the phone row.
 const WORDS = {
-  en: { label: 'Integrations', inAgent: 'Open the board in your agent', anywhere: 'Open the board anywhere', checked: 'How each agent was checked', old: ['Untested'], notLive: '(checked in a synthetic home, not run live yet)', page: "The board's page", surfaces: ['A terminal or desktop', 'A phone on the same Wi-Fi', 'An agent reading the board', "Check one agent's setup"] },
-  'zh-TW': { label: '整合', inAgent: '在你的 agent 裡打開看板', anywhere: '在任何地方打開看板', checked: '各個 agent 是怎麼驗證的', old: ['未驗證', '還沒驗證'], notLive: '（在測試環境檢查過，還沒實機執行）', page: '看板的網頁', surfaces: ['終端機或桌面', '同一個 Wi-Fi 的手機', 'Agent 讀取看板', '檢查某個 agent 的設定'] },
-  'zh-CN': { label: '集成', inAgent: '在你的 agent 里打开看板', anywhere: '在任何地方打开看板', checked: '每个 agent 是怎么验证的', old: ['未验证', '还没验证'], notLive: '（在测试环境检查过，还没实机运行）', page: '看板的网页', surfaces: ['终端或桌面', '同一个 Wi-Fi 的手机', 'Agent 读取看板', '检查某个 agent 的设置'] },
+  en: { notLive: '(not run live)', send: /\*\*Send\*\* hands the answer to a connected session; a confirmation from that session means it was received/, queue: /\*\*Queue\*\* holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /\*\*Copy\*\* puts it on your clipboard/, answers: { 'Claude Code': 'Send', Codex: 'Queue', Antigravity: 'Queue', Cursor: 'Copy', OpenCode: 'Copy', 'Grok Build': 'Copy', 'Hermes Agent': 'Copy' }, viewOnly: /cannot send an answer/, askNote: '(opened by a prompt asking for the skill)' },
+  'zh-TW': { notLive: '（未實機執行）', send: /\*\*傳送\*\*把回答交給已連線的對話；對話回確認才代表收到/, queue: /\*\*排到下一輪\*\*會留到那個對話的下一輪才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /\*\*複製\*\*把回答放進剪貼簿/, answers: { 'Claude Code': '傳送', Codex: '排到下一輪', Antigravity: '排到下一輪', Cursor: '複製', OpenCode: '複製', 'Grok Build': '複製', 'Hermes Agent': '複製' }, viewOnly: /不能傳送回答/, askNote: '（用提示請它執行 skill）' },
+  'zh-CN': { notLive: '（未实机运行）', send: /\*\*发送\*\*把回复交给已连接的对话；对话回确认才代表收到/, queue: /\*\*排到下一轮\*\*会留到那个对话的下一轮才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /\*\*复制\*\*把回复放进剪贴板/, answers: { 'Claude Code': '发送', Codex: '排到下一轮', Antigravity: '排到下一轮', Cursor: '复制', OpenCode: '复制', 'Grok Build': '复制', 'Hermes Agent': '复制' }, viewOnly: /不能发送回复/, askNote: '（用提示让它执行 skill）' },
 }
 // A piece of text as a pattern that matches it and nothing else.
 const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -88,14 +113,8 @@ const groupsAround = (svg, at) => {
 }
 
 describe('L0 discover and install from the README', () => {
-  test('L0 README: each README opens with its title, tagline, badges and cover, and its Quick start holds the install commands, --lan with its QR code and an I-use start for each main agent', () => {
-    const agents = ['Claude Code', 'Codex', 'Antigravity', 'OpenCode']
-    const taglines = { en: 'See what every AI coding agent is doing, and answer the one that needs you, from one board.', 'zh-TW': '每個 AI coding agent 在做什麼，一個看板看完；哪個在等你，就在那裡回它。', 'zh-CN': '每个 AI coding agent 在做什么，一个看板看完；哪个在等你，就在那里回它。' }
-    const labels = { en: agent => `I use ${agent}:`, 'zh-TW': agent => `我用 ${agent}：`, 'zh-CN': agent => `我用 ${agent}：` }
-    const phone = { en: /phone.*same Wi-?Fi/i, 'zh-TW': /同一.*Wi-?Fi.*手機/i, 'zh-CN': /同一.*Wi-?Fi.*手机/i }
-    const qr = { en: /QR/i, 'zh-TW': /QR/i, 'zh-CN': /二维码/ }
-    const trust = { en: /\btrust\b/i, 'zh-TW': /信得過/, 'zh-CN': /信得过/ }
-    const exposure = { en: /not encrypted.*anyone who has it can open/i, 'zh-TW': /沒有加密.*拿到的人都能(?:打開|開啟)/, 'zh-CN': /没有加密.*拿到的人都能打开/ }
+  test('L0 README: each README opens with its title, tagline, badges and cover, and its Quick start holds the install commands, the language flag and --no-open', () => {
+    const taglines = { en: 'A board that shows which AI agent is waiting on you.', 'zh-TW': '一塊本機看板，告訴你哪個 AI agent 在等你回答', 'zh-CN': '一块本机看板，告诉你哪个 AI agent 在等你回复' }
     for (const [name, lang] of READMES) {
       const text = read(name)
       const cover = text.indexOf(`docs/images/cover-${lang}-dark.svg`)
@@ -103,35 +122,22 @@ describe('L0 discover and install from the README', () => {
       // The top is the project's name, one line on what it does, its badges, then the picture.
       const top = text.slice(0, cover).split('\n').filter(Boolean)
       assert.equal(top[0], '<h1 align="center"><img alt="Agent Board" src="docs/images/brand/agent-board-logo.svg" width="360"></h1>', `${name}: the logo, which follows the reader's theme, is the title and comes first`)
-      assert.equal(top[1], `<p align="center"><b>${taglines[lang]}</b></p>`, `${name}: the original tagline follows the title`)
+      assert.equal(top[1], `<p align="center"><b>${taglines[lang]}</b></p>`, `${name}: the owner's tagline follows the title`)
       assert.match(top[2], /^<p align="center"><a href="LICENSE"><img [^>]*src="https:\/\/img\.shields\.io\//, `${name}: the badges follow the tagline`)
       assert.ok(!text.slice(0, cover).includes('npx @wenyuchiou/agent-board'), `${name}: no install command comes before the cover`)
+      assert.doesNotMatch(text, /coding agent|coding-agent/i, `${name}: it says AI agent, not coding agent`)
       const first = section(text, SECTIONS[lang][0])
       assert.ok(first, `${name}: Quick start exists`)
       const node = first.indexOf('Node.js 22')
-      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board setup\r?\nnpx @wenyuchiou\/agent-board)\r?\n```/.exec(first)
+      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board@next setup\r?\nnpx @wenyuchiou\/agent-board@next)\r?\n```/.exec(first)
       assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then setup and the board command in order`)
-      const lanLines = first.split('\n').filter(line => line.includes('npx @wenyuchiou/agent-board --lan'))
-      assert.equal(lanLines.length, 1, `${name}: one phone route in Quick start`)
-      const lan = lanLines[0]
-      assert.ok(first.indexOf(lan) > install.index + install[0].length, `${name}: LAN follows the install commands`)
-      assert.match(lan, qr[lang], `${name}: LAN mentions a QR code`)
-      assert.match(lan, phone[lang], `${name}: the phone is on the same Wi-Fi`)
-      assert.match(lan, trust[lang], `${name}: the LAN trust limit is stated`)
-      assert.match(lan, exposure[lang], `${name}: the link is unencrypted and anyone with it can open the page`)
-      const starts = first.split('\n').filter(line => /^- \*\*(?:I use |我用 )/.test(line))
-      assert.equal(starts.length, agents.length, `${name}: one start for each of the four agents`)
-      const allStarts = text.split('\n').filter(line => /^- \*\*(?:I use |我用 )/.test(line))
-      assert.deepEqual(allStarts, starts, `${name}: no I-use starts are duplicated or added outside Quick start`)
-      let at = first.indexOf(lan)
-      for (const [i, agent] of agents.entries()) {
-        const line = starts[i]
-        assert.ok(line.startsWith(`- **${labels[lang](agent)}**`), `${name}: start ${i + 1} is ${agent}`)
-        assert.ok(first.indexOf(line) > at, `${name}: ${agent}'s start is after the LAN line and preceding starts`)
-        assert.ok(codeSpans(line).includes(agent === 'Claude Code' ? '/agent-board' : boardCommand(agent)), `${name}: ${agent}'s start names its board command`)
-        at = first.indexOf(line)
-      }
-      assert.ok(starts[2].includes(WORDS[lang].notLive), `${name}: Antigravity is marked not run live`)
+      assert.ok(first.includes(`--lang ${lang}`), `${name}: Quick start says how to choose the language`)
+      assert.ok(first.includes('--no-open'), `${name}: Quick start says how to start the page without a window`)
+      assert.ok(first.includes('/agent-board') && first.includes('$agent-board') && first.includes('Cursor'), `${name}: Quick start names the board command inside an agent and says Cursor has none`)
+      assert.ok(first.includes('docs/SETUP.md#after-setup-per-agent'), `${name}: Quick start points to the per-agent steps after setup`)
+      assert.ok(first.includes('docs/SETUP.md#let-an-agent-install-it'), `${name}: Quick start links to the agent-install prompt`)
+      // The README stays short: one screen of reading for a newcomer, not the guide.
+      assert.ok(text.split('\n').length <= 140, `${name}: the README has at most 140 lines`)
     }
   })
 
@@ -142,7 +148,7 @@ describe('L0 discover and install from the README', () => {
       const commands = /```(?:sh|bash)\n([\s\S]*?)\n```/.exec(quick)?.[1]
       assert.ok(commands, `${name}: Quick start has a command block`)
       assert.ok(!commands.split('\n').some(line => /^\s*agent-board(?:\s|$)/.test(line)), `${name}: Quick start cannot require the global command`)
-      assert.ok(commands.split('\n').includes('npx @wenyuchiou/agent-board'), `${name}: Quick start opens the board with npx`)
+      assert.ok(commands.split('\n').includes('npx @wenyuchiou/agent-board@next'), `${name}: Quick start opens the board with npx, on the pre-release tag`)
     }
 
     for (const name of [...READMES.map(([readme]) => readme), 'docs/GUIDE.md', 'docs/GUIDE.zh-TW.md', 'docs/GUIDE.zh-CN.md']) {
@@ -158,7 +164,7 @@ describe('L0 discover and install from the README', () => {
     }
   })
 
-  test('the Quick start links to the uninstall steps in the guide in every language', () => {
+  test('Update and remove links to the uninstall steps in the guide in every language', () => {
     const links = {
       en: 'docs/GUIDE.md#update-and-uninstall',
       'zh-TW': 'docs/GUIDE.zh-TW.md#更新與移除',
@@ -170,82 +176,38 @@ describe('L0 discover and install from the README', () => {
       'zh-CN': /卸载/,
     }
     for (const [name, lang] of READMES) {
-      const quick = section(read(name), SECTIONS[lang][0])
-      assert.ok(quick, `${name}: Quick start exists`)
-      const line = quick.split('\n').find(l => words[lang].test(l) && l.includes(links[lang]))
-      assert.ok(line, `${name}: Quick start has a line on how to remove it linking to ${links[lang]}`)
+      const update = section(read(name), SECTIONS[lang][6])
+      assert.ok(update, `${name}: Update and remove exists`)
+      const line = update.split('\n').find(l => words[lang].test(l) && l.includes(links[lang]))
+      assert.ok(line, `${name}: Update and remove has a line on how to remove it linking to ${links[lang]}`)
+      assert.ok(update.includes('npx @wenyuchiou/agent-board@next remove --apply'), `${name}: Update and remove gives the remove command`)
     }
   })
 
-  test('L0 README: each README describes Send as docs/MESSAGING.md does and its cover alt text agrees', () => {
-    // Match the relationships in each local statement, rather than technical implementation
-    // vocabulary or isolated words that could appear in an unrelated paragraph.
-    const checks = {
-      en: {
-        starts: ['- **Answer the one that is waiting.**', '- **Tell an agent something without going there.**', '- **Answer** a question:'],
-        connected: /messaging (?:is )?on.*session (?:is )?connected/i,
-        actions: [/\*\*Send\*\*/i, /send it/i, /\*\*Send\*\*/i],
-        noSend: /\b(?:do not|don't|never)\s+(?:\*\*)?send/i,
-        fallback: /(?:otherwise (?:press \*\*Copy\*\*|\*\*Copy\*\*|copy|the board copies)|or \*\*Copy\*\*)/i,
-        answerQueue: /\*\*Send\*\* queues your answer.*confirmation from that session means it was received/i,
-        copyPress: /otherwise press \*\*Copy\*\*/i,
-        altConnected: /messaging (?:is )?on.*Codex session connected.*Send.*queues/i,
-        accepted: /accepted.*(?:does not|doesn't|not).*delivered/i,
-        receipt: /confirmation.*session.*means (?:it was )?(?:received|receipt).*not.*(?:work|task).*done/i,
-        lan: /LAN page (?:has )?no messaging/i,
-      },
-      'zh-TW': {
-        starts: ['- **回覆在等你的那一個。**', '- **不用切過去也能交代事情。**', '- **回覆**問題：'],
-        connected: /(?<![未沒])開(?:了|啟).*訊息功能.*對話(?:也)?連上/,
-        actions: [/\*\*傳送\*\*/, /(?:送過去|傳送)/, /\*\*傳送\*\*/],
-        noSend: /(?:不要|不能|不可|禁止)(?:\*\*)?(?:傳送|送過去)/,
-        fallback: /(?:否則|或)(?:看板幫你|按)?(?:\*\*)?複製/,
-        answerQueue: /\*\*傳送\*\*.*排進佇列.*對話.*確認.*才代表收到/,
-        copyPress: /否則按\*\*複製\*\*/,
-        altConnected: /(?<![未沒])開(?:了|啟).*訊息功能.*Codex.{0,12}對話(?:也)?連上.*(?:傳送|送出).*排.*佇列/,
-        accepted: /已接受.*不代表.*送到/,
-        receipt: /對話.*確認(?:才)?代表收到.*不代表.*做完/,
-        lan: /LAN 網頁沒有訊息功能/,
-      },
-      'zh-CN': {
-        starts: ['- **回复在等你的那一个。**', '- **不用切过去也能交代事情。**', '- **回复**问题：'],
-        connected: /(?<![未没])开(?:了|启).*消息功能.*对话(?:也)?连上/,
-        actions: [/\*\*发送\*\*/, /(?:送过去|发送)/, /\*\*发送\*\*/],
-        noSend: /(?:不要|不能|不可|禁止)(?:\*\*)?(?:发送|送过去)/,
-        fallback: /(?:否则|或)(?:看板帮你|按)?(?:\*\*)?复制/,
-        answerQueue: /\*\*发送\*\*.*排进队列.*对话.*确认.*才代表收到/,
-        copyPress: /否则按\*\*复制\*\*/,
-        altConnected: /(?<![未没])开(?:了|启).*消息功能.*Codex.{0,12}对话(?:也)?连上.*(?:发送|送出).*排.*队列/,
-        accepted: /已接受.*不代表.*送到/,
-        receipt: /对话.*确认(?:才)?代表收到.*不代表.*做完/,
-        lan: /LAN 网页没有消息功能/,
-      },
-    }
+  test('L0 README: each README describes Send, Queue and Copy as docs/MESSAGING.md does, says the phone page is view only and makes no claim 0.24.3 does not back', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
-      const what = section(text, SECTIONS[lang][3]) ?? ''
-      const pageSection = section(text, WORDS[lang].page, 3) ?? ''
-      const [answer, tell] = checks[lang].starts.slice(0, 2).map(start => what.split('\n').find(line => line.startsWith(start)) ?? '')
-      const page = pageSection.split('\n').find(line => line.startsWith(checks[lang].starts[2])) ?? ''
-      for (const [index, [label, line]] of [['answer', answer], ['tell', tell], ['page', page]].entries()) {
-        assert.ok(line, `${name}: ${label} explanation exists`)
-        assert.match(line, checks[lang].connected, `${name}: ${label} requires messaging on and a connected session`)
-        assert.match(line, checks[lang].actions[index], `${name}: ${label} offers Send`)
-        assert.doesNotMatch(line, checks[lang].noSend, `${name}: ${label} does not forbid Send`)
-        assert.match(line, checks[lang].fallback, `${name}: ${label} offers Copy otherwise`)
-      }
-      assert.match(answer, checks[lang].answerQueue, `${name}: Send queues the answer and session confirmation means receipt`)
-      for (const line of [answer, tell]) assert.match(line, checks[lang].copyPress, `${name}: Copy requires a button press`)
-      assert.ok(answer.includes('](docs/MESSAGING.md#local-storage)'), `${name}: Send links to the default local message hub`)
-      assert.match(page, checks[lang].lan, `${name}: the LAN page has no messaging`)
+      const words = WORDS[lang]
+      const answer = section(text, SECTIONS[lang][3]) ?? ''
+      assert.match(answer, words.send, `${name}: Send hands the answer to a connected session, which confirms it`)
+      assert.match(answer, words.queue, `${name}: Queue waits for the next turn and wakes no idle session`)
+      assert.match(answer, words.copy, `${name}: Copy puts the answer on the clipboard`)
+      assert.ok(answer.includes('](docs/MESSAGING.md#local-storage)'), `${name}: Send links to the local message hub`)
+      assert.ok(answer.includes(`docs/images/answer-${lang}.svg`), `${name}: the answer picture is shown`)
+      const anywhere = section(text, SECTIONS[lang][4]) ?? ''
+      const lan = anywhere.split('\n').filter(line => line.includes('--lan'))
+      assert.equal(lan.length, 1, `${name}: one phone route`)
+      assert.match(lan[0], words.viewOnly, `${name}: the LAN page is view only`)
+      assert.match(lan[0], lang === 'en' ? /phone.*same Wi-?Fi/i : lang === 'zh-TW' ? /同一.*Wi-?Fi.*手機/ : /同一.*Wi-?Fi.*手机/, `${name}: the phone is on the same Wi-Fi`)
+      assert.match(lan[0], lang === 'zh-CN' ? /二维码/ : /QR/, `${name}: LAN mentions a QR code`)
+      assert.match(lan[0], lang === 'en' ? /\btrust\b/i : lang === 'zh-TW' ? /信得過/ : /信得过/, `${name}: the LAN trust limit is stated`)
+      assert.match(lan[0], lang === 'en' ? /not encrypted.*anyone who has it can open/i : lang === 'zh-TW' ? /沒有加密.*拿到的人都能打開/ : /没有加密.*拿到的人都能打开/, `${name}: the link is unencrypted and anyone with it can open the page`)
+      // Claims 0.24.3 does not back: every agent receiving at once, no Copy, self-upgrade, an automatic percentage.
+      assert.doesNotMatch(text, /every agent (?:receives|gets)|no Copy|upgrades itself|\d+ ?% automatic|90%|不用複製|不用复制/i, `${name}: no claim 0.24.3 does not back`)
       const image = [...text.matchAll(/<img\b[^>]*>/g)].find(([tag]) => tag.includes(`docs/images/cover-${lang}-dark.svg`))?.[0] ?? ''
-      const alt = (/\balt="([^"]*)"/.exec(image)?.[1] ?? '').replaceAll('&quot;', '"')
+      const alt = /\balt="([^"]*)"/.exec(image)?.[1] ?? ''
       assert.ok(alt, `${name}: cover has alt text`)
-      assert.match(alt, checks[lang].altConnected, `${name}: alt describes the enabled, connected queue`)
-      assert.match(alt, checks[lang].accepted, `${name}: alt distinguishes accepted from delivered`)
-      assert.match(alt, checks[lang].receipt, `${name}: alt distinguishes receipt from completed work`)
-      assert.match(alt, checks[lang].lan, `${name}: alt says LAN has no messaging`)
-      assert.doesNotMatch(alt, /\b\d+\.\d+\.\d+\b|preview|預覽|预览/i, `${name}: the alt does not describe Send as an upcoming preview`)
+      assert.doesNotMatch(alt, /\b\d+\.\d+\.\d+\b|preview|預覽|预览/i, `${name}: the alt does not describe a coming version`)
     }
   })
 
@@ -265,7 +227,7 @@ describe('L0 discover and install from the README', () => {
     }
   })
 
-  test('L0 README: the cover loops through six captioned scenes in 20 to 30 seconds, moves with CSS alone and stands still on the setup scene for reduced motion', () => {
+  test('L0 README: the cover loops through seven captioned scenes in 30 to 45 seconds, moves with CSS alone and, for reduced motion, rests on the closing sentence beside the board with the question on top', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const first = [...text.matchAll(/<img\b[^>]*>/g)].find(match => !/img\.shields\.io|\/badge\.svg"|docs\/images\/brand\//.test(match[0]))
@@ -309,9 +271,9 @@ describe('L0 discover and install from the README', () => {
       assert.match(svg, /@keyframes\s+[\w-]+\s*\{/i, `${file}: CSS defines keyframes`)
       const rules = [...svg.matchAll(/\{([^{}]*)\}/g)]
       assert.ok(rules.some(rule => /\banimation-duration\s*:\s*[^;}\s][^;}]*(?:;|$)/i.test(rule[1]) && /\banimation-iteration-count\s*:\s*infinite\s*(?:;|$)/i.test(rule[1])), `${file}: one rule sets animation duration and infinite iteration`)
-      // The loop lasts 20 to 30 seconds: six scenes of a few seconds each, long enough to read a caption.
+      // The loop lasts 30 to 45 seconds: seven scenes of a few seconds each, long enough to read a caption.
       const loop = rules.map(rule => /\banimation-duration\s*:\s*(\d+(?:\.\d+)?)s\s*(?:;|$)/i.exec(rule[1])?.[1]).find(seconds => seconds !== undefined)
-      assert.ok(loop !== undefined && Number(loop) >= 20 && Number(loop) <= 30, `${file}: the loop lasts 20 to 30 seconds (it lasts ${loop}s)`)
+      assert.ok(loop !== undefined && Number(loop) >= 30 && Number(loop) <= 45, `${file}: the loop lasts 30 to 45 seconds (it lasts ${loop}s)`)
       // Two stops at one point of a keyframe leave the later one in force: an element meant to stay
       // on screen to the loop's end faded out that way once. Stops out of order go wrong the same way.
       const bodies = [...svg.matchAll(/@keyframes\s+[\w-]+\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g)]
@@ -348,36 +310,101 @@ describe('L0 discover and install from the README', () => {
       }
       for (const name of bound) assert.ok(named.has(name), `${file}: .${name} has its @keyframes`)
 
-      // The six captions, in order. Each is one <text> of two <tspan> lines inside an animated group;
-      // reduced motion keeps only the last scene's group.
-      const [scenes, settings, words] = SCENES[lang]
-      let at = -1
-      scenes.forEach(([first, second], k) => {
-        // String match: the journey safety check reads a call on a built RegExp as a process call.
-        const found = svg.match(new RegExp(`<g class="([^"]*)"><text\\b[^>]*>\\s*<tspan\\b[^>]*>${literal(first)}</tspan>\\s*<tspan\\b[^>]*>${literal(second)}</tspan>\\s*</text>`))
-        assert.ok(found, `${file}: scene ${k + 1} has its caption "${first} ${second}"`)
-        assert.ok(found[1].split(/\s+/).includes('a'), `${file}: scene ${k + 1}'s caption sits in an animated group`)
-        assert.ok(found.index > at, `${file}: scene ${k + 1}'s caption comes after scene ${k}'s`)
-        at = found.index
-        assert.equal(found[1].split(/\s+/).includes('last'), k === scenes.length - 1, `${file}: only scene ${scenes.length}'s caption stays for reduced motion`)
+      // The seven captions, in order. Each is one <text> of one <tspan> per line inside an animated group
+      // marked `cap`, with the words in amber in a <tspan> of their own; the line under it sits in a
+      // group marked `sub`. Reduced motion keeps only the closing scene's groups.
+      const [scenes, question, delivered] = SCENES[lang]
+      const lines = body => [...body.replace(/<tspan fill="[^"]*">([^<]*)<\/tspan>/g, '$1').matchAll(/<tspan\b[^>]*>([^<]*)<\/tspan>/g)].map(match => match[1])
+      const amber = body => [...body.matchAll(/<tspan fill="#F8B500">([^<]*)<\/tspan>/gi)].map(match => match[1])
+      // String matches: the journey safety check reads a call on a built RegExp as a process call.
+      const groupsOf = (svg, word) => svg.match(word === 'cap' ? /<g class="[^"]*\bcap\b[^"]*"><text\b[^>]*>[\s\S]*?<\/text><\/g>/g : /<g class="[^"]*\bsub\b[^"]*"><text\b[^>]*>[\s\S]*?<\/text><\/g>/g) ?? []
+      const groupOf = word => groupsOf(svg, word).map(group => /^<g class="([^"]*)"><text\b[^>]*>([\s\S]*)<\/text><\/g>$/.exec(group))
+      const captions = groupOf('cap')
+      assert.equal(captions.length, scenes.length, `${file}: one caption for each of the ${scenes.length} scenes`)
+      scenes.forEach((scene, k) => {
+        assert.deepEqual(lines(captions[k][2]), scene.caption, `${file}: scene ${k + 1} has its caption`)
+        assert.deepEqual(amber(captions[k][2]), scene.amber ?? [], `${file}: scene ${k + 1}'s caption has amber only on ${JSON.stringify(scene.amber ?? [])}`)
+        assert.ok(captions[k][1].split(/\s+/).includes('a'), `${file}: scene ${k + 1}'s caption sits in an animated group`)
+        assert.equal(captions[k][1].split(/\s+/).includes('last'), k === scenes.length - 1, `${file}: only scene ${scenes.length}'s caption stays for reduced motion`)
       })
-      // The Settings excerpt uses the page's localized label.
-      const footer = /<g [^>]*data-preview="page-footer"[^>]*>([\s\S]*?)<\/g>\s*<g class="a /.exec(svg)
-      assert.ok(footer, `${file}: the page footer is shown in an animated scene`)
-      assert.match(footer[1], new RegExp(`>${literal(settings)}</text>`), `${file}: the footer shows its localized Settings control`)
+      const subs = groupOf('sub')
+      const withSub = scenes.filter(scene => scene.sub !== undefined)
+      assert.equal(subs.length, withSub.length, `${file}: the scenes with a line under the caption have one`)
+      withSub.forEach((scene, k) => {
+        assert.deepEqual(lines(subs[k][2]), scene.sub, `${file}: sub line ${k + 1}`)
+        assert.deepEqual(amber(subs[k][2]), scene.subAmber ?? [], `${file}: sub line ${k + 1} has amber only on ${JSON.stringify(scene.subAmber ?? [])}`)
+        assert.equal(subs[k][1].split(/\s+/).includes('last'), k === withSub.length - 1, `${file}: only the closing scene's sub line stays for reduced motion`)
+      })
       assert.doesNotMatch(svg, /Coming in 0\.24\.2|0\.24\.2 起提供|copied to the clipboard|已複製|已复制|progress\.html/i, `${file}: the cover does not teach the retired demo`)
-      // A receipt is text without textLength: the terminal board's own rows carry it, so a row
-      // that reads the same as a receipt cannot stand in for it.
-      const receipt = word => `<text(?![^>]*textLength)[^>]*>${literal(word)}</text>`
-      for (const word of words) assert.match(svg, new RegExp(receipt(word)), `${file}: scene 5 shows "${word}"`)
-      // The end frame shows the setup command: reduced motion keeps every animated group round it.
+      // A piece of text is in the end frame when every animated group round it stays for reduced
+      // motion; text in no animated group is on screen in every frame.
+      // The calm board of scene 7 is hidden for reduced motion, and the still board (class `still`) is shown in its place.
+      const isKept = groups => groups.every(classes => !classes.includes('calm') && (!classes.includes('a') || classes.includes('last')))
+      const shown = word => [...svg.matchAll(new RegExp(`>${literal(word)}</(?:text|tspan)>`, 'g'))]
+      // The reduced-motion still keeps the closing sentence and shows the board of scene 4: Claude Code's
+      // question on top (a still picture has to show who is waiting), not the calm board with its receipt.
+      const asked = shown(question)
+      assert.ok(asked.some(at => isKept(groupsAround(svg, at.index)) && groupsAround(svg, at.index).some(classes => classes.includes('still'))), `${file}: the still frame asks "${question}"`)
+      assert.ok(asked.some(at => !isKept(groupsAround(svg, at.index))), `${file}: an earlier scene asks "${question}" too`)
+      const receipts = shown(delivered)
+      assert.ok(receipts.length > 0 && receipts.every(at => !isKept(groupsAround(svg, at.index))), `${file}: the still frame shows no receipt`)
+      assert.ok(receipts.some(at => groupsAround(svg, at.index).some(classes => classes.includes('calm'))), `${file}: the calm closing board shows "${delivered}"`)
+      assert.match(svg, /@media[^{]*reduce[^{]*\{[\s\S]*\.calm\s*\{\s*opacity\s*:\s*0/, `${file}: reduced motion hides the calm board`)
+      assert.match(svg, /\.still\s*\{\s*display\s*:\s*none/, `${file}: the still board is hidden unless motion is reduced`)
+      assert.match(reduced[1], /\.still\s*\{\s*display\s*:\s*inline/, `${file}: reduced motion shows the still board`)
+      // Keyframe stops of class cN as [percent, opacity] points, one per percent of a stop, and the
+      // opacity between two points, as the browser draws it (straight line; the easings used here
+      // do not overshoot).
+      const pointsOf = name => {
+        const body = svg.match(new RegExp(`@keyframes ${literal(name)} \\{((?:[^{}]|\\{[^{}]*\\})*)\\}`))?.[1] ?? ''
+        return [...body.matchAll(/([\d.%,\s]+)\{[^{}]*?opacity:\s*([\d.]+)/g)].flatMap(stop => stop[1].match(/[\d.]+/g).map(at => [Number(at), Number(stop[2])]))
+      }
+      const opacityAt = (points, at) => {
+        const after = points.findIndex(([x]) => x >= at)
+        if (after === -1) return points.at(-1)?.[1] ?? 1
+        if (after === 0) return points[0][1]
+        const [x0, y0] = points[after - 1]
+        const [x1, y1] = points[after]
+        return x1 === x0 ? y1 : y0 + (y1 - y0) * (at - x0) / (x1 - x0)
+      }
+      // Every opacity a span can reach: the lines between points are straight, so its lowest and
+      // highest values sit at the span's two ends or at a point inside it.
+      const valuesOver = (points, from, to) => [opacityAt(points, from), opacityAt(points, to), ...points.filter(([x]) => x >= from && x <= to).map(([, value]) => value)]
+      // Amber means someone waits: the logo's light and its halo are off once the answer is sent,
+      // through the start scene and the calm close (the last 30% of the loop), between stops too.
+      const lights = [...svg.matchAll(/<circle class="a s (c\d+)" fill="#F8B500"/gi)].map(match => match[1])
+      assert.equal(lights.length, 2, `${file}: the logo's light and its halo move`)
+      for (const name of lights) {
+        const points = pointsOf(name)
+        assert.ok(points.length > 0 && valuesOver(points, 70, 100).every(value => value <= 0.1), `${file}: the logo's light (${name}) stays off after the answer is sent`)
+      }
+      // At the loop's end a row fades as a whole: the layers drawn over it (each step done, the
+      // receipt; class `cover`) stay fully on while it fades, so the text under them never shows through.
+      // The rows fade from half a second before the loop's end until a quarter second before it.
+      const end = 100 * (1 - 0.5 / Number(loop))
+      const gone = 100 * (1 - 0.25 / Number(loop))
+      const layers = [...svg.matchAll(/<g class="a (c\d+) cover\b[^"]*">/g)].map(match => match[1])
+      assert.ok(layers.length >= 5, `${file}: the rows' done steps are layers drawn over them`)
+      for (const name of layers) {
+        const points = pointsOf(name)
+        assert.ok(valuesOver(points, end, gone).every(value => value >= 0.99), `${file}: a layer drawn over a row (${name}) stays on until the row is gone`)
+      }
+      // The setup command stays on screen, the end frame included.
       const commands = [...svg.matchAll(new RegExp(`${literal(COMMAND)}</text>`, 'g'))]
-      const isKept = groups => groups.some(classes => classes.includes('last')) && groups.every(classes => !classes.includes('a') || classes.includes('last'))
       assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND}"`)
+      // ...and every frame before it: the box's group may dim while the terminal of scene 6 types the
+      // same command, never vanish. (The terminal's own copy comes and goes with its scene.)
+      for (const command of commands.filter(command => isKept(groupsAround(svg, command.index)))) {
+        for (const classes of groupsAround(svg, command.index)) {
+          for (const name of classes.filter(word => /^c\d+$/.test(word))) {
+            assert.ok(pointsOf(name).every(([, value]) => value >= 0.25), `${file}: "${COMMAND}" stays on screen in every frame (${name})`)
+          }
+        }
+      }
     }
   })
 
-  test('L0 README: each README shows the cover before its first section, then the same eight sections in the same order', () => {
+  test('L0 README: each README shows the cover before its first section, then the same ten sections in the same order', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const cover = text.indexOf(`docs/images/cover-${lang}-dark.svg`)
@@ -389,65 +416,31 @@ describe('L0 discover and install from the README', () => {
     assert.equal(new Set(Object.values(SECTIONS).map(list => list.length)).size, 1, 'every language has the same number of sections')
   })
 
-  test("L0 README: under the cover, each README lists the same ten integrations in the support matrix's order, each as one dark chip with the agent's tile and name, its name as alt text and a link to its own support matrix", () => {
-    const chipsOf = {}
+  test('L0 README: the support table lists the seven agents with a 0.24.3 record, each with its icon, board command, answer path and the same not-run-live phrase, and leaves Muse Code out', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const words = WORDS[lang]
-      const header = headerOf(text)
-      const strip = header.match(new RegExp(`<p align="center"><b>${literal(words.label)}</b><br>\\n([\\s\\S]*?)\\n</p>`))
-      assert.ok(strip, `${name}: the header has an "${words.label}" strip`)
-      const cover = header.indexOf(`docs/images/cover-${lang}-dark.svg`)
-      assert.ok(strip.index > cover, `${name}: the strip comes after the cover`)
-      // GitHub breaks a line between an image and the text beside it, so each entry is one picture
-      // holding the tile and the name. Chips part only at a space, so the strip wraps on a narrow
-      // screen; nothing else sits between them, so dot and the web chats stay out of it.
-      const entry = /<a href="([^"]*)">(<img\b[^>]*>)<\/a>/g
-      assert.match(strip[1].replace(entry, ''), /^\n*$/, `${name}: the strip holds only its chips, one to a line`)
-      const attribute = (img, key) => img.match(new RegExp(`\\s${key}="([^"]*)"`))?.[1]
-      const chips = [...strip[1].matchAll(entry)].map(([, href, img]) => ({ href, ...Object.fromEntries(['src', 'height', 'alt'].map(key => [key, attribute(img, key)])) }))
-      assert.deepEqual(chips.map(chip => chip.alt), INTEGRATIONS, `${name}: the strip names the ten integrations in order`)
-      // The order is the support matrix's own: its rows with an icon, read in the same README.
-      const matrix = section(text, SECTIONS[lang][2])
-      assert.ok(matrix, `${name}: the support matrix section exists`)
-      assert.deepEqual(rows(matrix, '| <img').map(cells => cells[1]), INTEGRATIONS, `${name}: the matrix lists the same agents in the same order`)
-      assert.doesNotMatch(matrix.slice(0, matrix.indexOf('\n|')), /<img\b/, `${name}: no icons stand above the matrix`)
-      const darkCover = read(`docs/images/cover-${lang}-dark.svg`)
-      for (const { href, src, height, alt } of chips) {
-        const file = alt.toLowerCase().replaceAll(' ', '-')
-        assert.equal(src, `docs/images/agents/chip-${file}.svg`, `${name}: ${alt}'s chip`)
-        assert.ok(exists(src), `${name}: ${src} exists`)
-        assert.equal(href, anchorOf(SECTIONS[lang][2]), `${name}: ${alt} links to this README's support matrix`)
-        const svg = read(src)
-        assert.equal(/^<svg\b[^>]*\sheight="(\d+)"/.exec(svg)?.[1], height, `${name}: ${alt}'s chip is shown at its own height`)
-        assert.ok(svg.includes(`aria-label="${alt}"`) && svg.includes(`<title>${alt}</title>`), `${src} names ${alt}`)
-        assert.doesNotMatch(svg, /data:image\//, `${src} holds no embedded bitmap`)
-        // Drawn from the same icon source as the agent's own tile: the chip has the tile's colour and
-        // its whole mark (every path of a logo, or the letter of a tile without one), then the name.
-        const icon = read(`docs/images/agents/${file}.svg`)
-        const tile = /<rect width="48" height="48" rx="11" fill="(#[0-9A-Fa-f]{6})"/.exec(icon)?.[1]
-        assert.ok(tile && svg.includes(`fill="${tile}"`), `${src} shows ${alt}'s tile`)
-        const marks = [...icon.matchAll(/<path d="[^"]+"\/>|<text\b[^>]*>[^<]*<\/text>/g)].map(([mark]) => mark.startsWith('<path') ? mark : `>${/>([^<]*)</.exec(mark)[1]}</text>`)
-        assert.ok(marks.length > 0 && marks.every(mark => svg.includes(mark)), `${src} draws ${alt}'s mark`)
-        assert.match(svg, new RegExp(`<text\\b[^>]*>${literal(alt)}</text>`), `${src} shows the name ${alt}`)
-        // The chip's card is the dark cover's card, so the strip shares the README's one dark look.
-        const card = /<rect x="0\.5" y="0\.5" [^>]*fill="(#[0-9a-f]{6})"/.exec(svg)?.[1]
-        assert.ok(card && darkCover.includes(card), `${src}: its card colour ${card} is the dark cover's`)
+      const table = firstTable(section(text, SECTIONS[lang][2]) ?? '')
+      assert.ok(table, `${name}: the support table exists`)
+      const agents = rows(table, '| <img')
+      assert.deepEqual(agents.map(cells => /alt="([^"]+)"/.exec(cells[0])?.[1]), LISTED, `${name}: one row per agent, in order`)
+      for (const [icon, agent, command, question, answer] of agents) {
+        const file = /src="([^"]+)"/.exec(icon)[1]
+        assert.ok(exists(file), `${name}: ${file} exists`)
+        assert.equal(agent, /alt="([^"]+)"/.exec(icon)[1], `${name}: the row names ${agent}`)
+        assert.deepEqual(codeSpans(command), BOARD_COMMANDS[agent] ? [BOARD_COMMANDS[agent]] : [], `${name}: ${agent}'s board command`)
+        assert.equal(command.includes(words.notLive), NOT_RUN_LIVE.includes(agent), `${name}: ${agent} carries the not-run-live phrase only if its board command was not run live`)
+        assert.equal(command.includes(words.askNote), agent === 'Hermes Agent', `${name}: only Hermes's command carries the note that a prompt asked for the skill`)
+        assert.ok(question.length > 0, `${name}: ${agent} has its question cell`)
+        assert.ok(answer.startsWith(`**${words.answers[agent]}**`), `${name}: ${agent}'s answer path is ${words.answers[agent]}`)
       }
-      assert.equal(new Set(chips.map(chip => chip.height)).size, 1, `${name}: every chip has the same height`)
-      chipsOf[lang] = chips.map(chip => chip.src)
-      // The strip names integrations; how each was checked stays in the matrix.
-      assert.doesNotMatch(header.slice(strip.index), /verif|驗證|验证/i, `${name}: the header claims no verification`)
-      for (const mention of header.matchAll(/\bdot\b/g)) {
-        const before = header.slice(0, mention.index)
-        assert.ok(before.lastIndexOf('<sub>') > before.lastIndexOf('</sub>'), `${name}: dot is named only in the small note under the strip`)
-      }
+      assert.doesNotMatch(text, /Muse/i, `${name}: Muse Code is not in the README`)
+      assert.match(section(text, SECTIONS[lang][2]), lang === 'en' ? /earlier 0\.24\.3 head/ : /較早的 0\.24\.3|较早的 0\.24\.3/, `${name}: the live rows ran on an earlier 0.24.3 head, and the README says so`)
+      assert.equal(text.split(words.notLive).length - 1, NOT_RUN_LIVE.length, `${name}: the phrase appears once per agent not run live`)
     }
-    // One set of chips for every language: the names are product names.
-    for (const lang of ['zh-TW', 'zh-CN']) assert.deepEqual(chipsOf[lang], chipsOf.en, `the ${lang} README shows the English README's chips in the same order`)
   })
 
-  test('L0 README: the header has no Node badge and only small project badges, and the install steps keep Node 22+ for npm and 18+ for a checkout', () => {
+  test('L0 README: the header has no Node badge and only small project badges, and the install steps keep Node 22+ for npm', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const header = headerOf(text)
@@ -475,13 +468,19 @@ describe('L0 discover and install from the README', () => {
       assert.equal(badges.length, [...header.matchAll(/img\.shields\.io|\/badge\.svg/g)].length, `${name}: every badge is one of those`)
       const quick = section(text, SECTIONS[lang][0])
       assert.ok(quick, `${name}: Quick start exists`)
-      // npm needs Node 22, said before its commands; a checkout needs 18, said in its folded steps.
-      const details = quick.slice(quick.indexOf('<details>'), quick.indexOf('</details>'))
+      // npm needs Node 22, said before its commands.
       const npm = quick.search(/Node\.js 22\b/)
-      assert.ok(npm >= 0 && npm < quick.indexOf('npx @wenyuchiou/agent-board setup') && npm < quick.indexOf('<details>'), `${name}: Node.js 22 comes before the npm commands`)
-      assert.ok(/Node\.js 18\b/.test(details) && details.includes('git clone'), `${name}: the checkout steps ask for Node.js 18`)
+      assert.ok(npm >= 0 && npm < quick.indexOf('npx @wenyuchiou/agent-board@next setup'), `${name}: Node.js 22 comes before the npm commands`)
     }
   })
+
+  // A picture drawn in both themes is shown in its dark one. The only bitmap is the screenshot of the board's page,
+  // which render.ts cannot draw (CONTRIBUTING.md, Images).
+  const pictureProblem = (file, has) => {
+    if (!file.endsWith('.svg')) return /^docs\/images\/page-(en|zh-TW|zh-CN)-dark\.png$/.test(file) ? null : `${file} is a bitmap other than the page screenshot`
+    if (!file.endsWith('-dark.svg') && has(file.replace(/\.svg$/, '-dark.svg'))) return `${file} has a dark version to show instead`
+    return null
+  }
 
   test('L0 README: every README picture shows its dark SVG and none keeps a light source', () => {
     for (const [name, lang] of READMES) {
@@ -489,84 +488,139 @@ describe('L0 discover and install from the README', () => {
       assert.doesNotMatch(text, /<source\b/, `${name}: no picture switches source with the theme`)
       assert.doesNotMatch(text, /-light\.svg/, `${name}: no light SVG is referenced`)
       const pictures = [...text.matchAll(/\b(?:src|srcset)="(docs\/images\/[^"]+)"/g)].map(match => match[1])
-      for (const file of [`cover-${lang}`, `pane-${lang}`, `board/codex-${lang}`]) assert.ok(pictures.includes(`docs/images/${file}-dark.svg`), `${name}: shows docs/images/${file}-dark.svg`)
+      for (const file of [`cover-${lang}-dark.svg`, `answer-${lang}.svg`, `places-${lang}.svg`, `flow-${lang}.svg`, `page-${lang}-dark.png`]) assert.ok(pictures.includes(`docs/images/${file}`), `${name}: shows docs/images/${file}`)
       for (const file of pictures) {
         assert.ok(exists(file), `${name}: ${file} exists`)
-        // A picture drawn in both themes is shown in its dark one.
-        if (!file.endsWith('-dark.svg')) assert.ok(!exists(file.replace(/\.svg$/, '-dark.svg')), `${name}: ${file} has a dark version to show instead`)
+        const problem = pictureProblem(file, exists)
+        assert.equal(problem, null, `${name}: ${problem}`)
       }
     }
   })
 
-  test('the README marks every agent that was not run live with the same phrase', () => {
-    for (const [name, lang] of READMES) {
-      const text = read(name)
-      const words = WORDS[lang]
-      const table = firstTable(section(text, words.inAgent, 3) ?? '')
-      const agents = rows(table, '| <img')
-      assert.deepEqual(agents.map(([icon]) => /alt="([^"]+)"/.exec(icon)?.[1]), INTEGRATIONS, `${name}: every agent has a command row`)
-      for (const [icon, , command] of agents) {
-        const agent = /alt="([^"]+)"/.exec(icon)[1]
-        assert.equal(command.split(words.notLive).length - 1, NOT_RUN_LIVE.includes(agent) ? 1 : 0, `${name}: ${agent} carries the exact phrase once only if it was not run live`)
-      }
-      const starts = section(text, SECTIONS[lang][0]).split('\n').filter(line => line.includes('Antigravity') && line.startsWith('- **'))
-      assert.equal(starts.length, 1, `${name}: Quick start has one Antigravity start`)
-      assert.ok(starts[0].includes(words.notLive), `${name}: the Antigravity start carries the phrase`)
-      assert.equal(text.split(words.notLive).length - 1, NOT_RUN_LIVE.length + 1, `${name}: Quick start and only the ${NOT_RUN_LIVE.join(', ')} command cells carry the phrase`)
-      if (lang !== 'en') assert.ok(!text.includes(lang === 'zh-TW' ? '在合成環境檢查過，還沒實機執行' : '在合成环境检查过，还没实机运行'), `${name}: no old synthetic-home wording remains`)
-      for (const old of ['not verified yet', '還沒驗證', '还没验证']) assert.ok(!text.includes(old), `${name}: ${NOT_RUN_LIVE.join(', ')} no longer use "${old}"`)
-      // The table of what was checked says the same words, without the brackets, for an agent
-      // whose only check is the synthetic home; the other rows keep the host version or record.
-      const start = text.indexOf(`<summary><b>${words.checked}</b></summary>`)
-      assert.ok(start >= 0, `${name}: has the "${words.checked}" table`)
-      const checks = rows(firstTable(text.slice(start)), '| ').filter(([agent]) => INTEGRATIONS.includes(agent))
-      assert.deepEqual(checks.map(([agent]) => agent), INTEGRATIONS, `${name}: the table has a row for every agent`)
-      const phrase = words.notLive.slice(1, -1)
-      for (const [agent, cell] of checks) {
-        assert.equal(cell === phrase, SYNTHETIC_ONLY.includes(agent), `${name}: ${agent}'s checked cell is the phrase only if the synthetic home is its only check`)
-        assert.ok(!words.old.includes(cell), `${name}: ${agent}'s checked cell no longer says "${cell}"`)
-      }
-    }
+  test('L0 README: the page screenshot is the one bitmap a README may show, and an SVG drawn in both themes shows its dark one', () => {
+    const all = () => true
+    for (const lang of ['en', 'zh-TW', 'zh-CN']) assert.equal(pictureProblem(`docs/images/page-${lang}-dark.png`, all), null)
+    for (const file of ['docs/images/page-en-light.png', 'docs/images/page-fr-dark.png', 'docs/images/page-en-dark.jpg', 'docs/images/sub/page-en-dark.png', 'docs/images/interactive-board-en.jpg']) assert.notEqual(pictureProblem(file, all), null, file)
+    assert.notEqual(pictureProblem('docs/images/flow-en.svg', all), null)
+    assert.equal(pictureProblem('docs/images/flow-en.svg', () => false), null)
+    assert.equal(pictureProblem('docs/images/cover-en-dark.svg', all), null)
   })
 
-  test('L0 README: the key commands have a table per agent and a table per surface with the current board commands', () => {
+  test('L0 README: Open it anywhere has a row for an agent, a terminal, a phone and an agent reading the board, each with its command', () => {
+    const wanted = [['/agent-board', '$agent-board'], ['npx @wenyuchiou/agent-board', 'HERMES_HOME', 'OPENCODE_CONFIG_DIR', '--watch'], ['npx @wenyuchiou/agent-board --lan'], ['npx @wenyuchiou/agent-board --json']]
     for (const [name, lang] of READMES) {
-      const text = read(name)
-      const words = WORDS[lang]
-      const keys = section(text, SECTIONS[lang][1])
-      assert.ok(keys, `${name}: the key commands section exists`)
-      const inAgent = firstTable(section(keys, words.inAgent, 3) ?? '')
-      const anywhere = firstTable(section(keys, words.anywhere, 3) ?? '')
-      assert.ok(inAgent && anywhere, `${name}: the section has a table under "${words.inAgent}" and one under "${words.anywhere}"`)
-      // One row per agent, in the matrix's order, each with its icon and one board command.
-      const agents = rows(inAgent, '| <img')
-      assert.deepEqual(agents.map(cells => /alt="([^"]+)"/.exec(cells[0])?.[1]), INTEGRATIONS, `${name}: one row per agent, in order`)
-      for (const [icon, where, command] of agents) {
-        const agent = /alt="([^"]+)"/.exec(icon)[1]
-        assert.ok(where.startsWith(agent), `${name}: ${agent}'s row names it`)
-        assert.deepEqual(codeSpans(command), [boardCommand(agent)], `${name}: ${agent}'s board command`)
-        assert.equal(command.includes(words.notLive), NOT_RUN_LIVE.includes(agent), `${name}: ${agent}'s command is marked not run live only if it has no recorded live run`)
-      }
-      // One row per surface, in order, each beside its own board script command, so two swapped
-      // commands fail.
+      const anywhere = section(read(name), SECTIONS[lang][4])
+      assert.ok(anywhere, `${name}: Open it anywhere exists`)
       const surfaces = rows(anywhere, '|').slice(2)
-      assert.equal(surfaces.length, SURFACE_COMMANDS.length, `${name}: terminal or desktop, phone, agent read and one agent's setup`)
-      surfaces.forEach(([where, command], i) => {
-        assert.ok(where.startsWith(words.surfaces[i]), `${name}: surface row ${i + 1} is "${words.surfaces[i]}"`)
-        assert.deepEqual(codeSpans(command), SURFACE_COMMANDS[i], `${name}: "${words.surfaces[i]}" runs ${SURFACE_COMMANDS[i][0]}`)
+      assert.equal(surfaces.length, wanted.length, `${name}: an agent, a terminal, a phone and an agent reading the board`)
+      surfaces.forEach(([, how], i) => assert.deepEqual(codeSpans(how), wanted[i], `${name}: surface row ${i + 1} runs ${wanted[i].join(' or ')}`))
+      assert.ok(anywhere.includes(`docs/images/places-${lang}.svg`), `${name}: the places picture is shown`)
+    }
+  })
+
+  // #1326's bot-route review (codex_089): the commands a README gives do what it says on every computer.
+  const ASK = { en: 'shows what it would change and, when there is something to set up, asks once (`Set these up? [Y/n]`, or `要設定這些嗎？[Y/n]` and `要设置这些吗？[Y/n]` on a Chinese system); a no writes nothing.', 'zh-TW': '列出它要改什麼；有東西要設定時才問一次（繁體中文系統上是 `要設定這些嗎？[Y/n]`，英文系統上是 `Set these up? [Y/n]`）；回答 n 就什麼都不寫。', 'zh-CN': '列出它要改什么；有东西要设置时才问一次（简体中文系统上是 `要设置这些吗？[Y/n]`，英文系统上是 `Set these up? [Y/n]`）；回答 n 就什么都不写。' }
+  const SCOPE = {
+    en: { cli: 'each run as its command-line tool', untested: 'the desktop apps and IDE extensions of these agents', terminal: ['in an interactive terminal over SSH or on Linux with no display', 'plain text in CI', 'the page everywhere else', 'in any interactive terminal'] },
+    'zh-TW': { cli: '用命令列版本測過', untested: '這些 agent 的桌面 app 和 IDE 擴充', terminal: ['在互動式終端機裡，透過 SSH 連線或在沒有顯示器的 Linux 上', 'CI 裡印出純文字', '其他情況都開網頁', '在互動式終端機加 `--watch`'] },
+    'zh-CN': { cli: '用命令行版本测过', untested: '这些 agent 的桌面 app 和 IDE 扩展', terminal: ['在交互式终端里，通过 SSH 连接或在没有显示器的 Linux 上', 'CI 里打印纯文本', '其他情况都开网页', '在交互式终端加 `--watch`'] },
+  }
+  // The doctor belongs in SETUP.md, and the clone route opens the chosen or plugin board.
+  // Run the journey in an isolated world, never against this machine's own folders.
+  test('L0 README: the READMEs leave the doctor to SETUP.md, and the clone route opens the board setup wrote in a chosen folder or the plugin board by its progress file', async () => {
+    const world = makeWorld()
+    try {
+      const launcher = fileURLToPath(new URL('bin/agent-board.mjs', root))
+      const setup = fileURLToPath(new URL('scripts/setup-agent.mjs', root))
+      const run = (file, args) => new Promise((done, fail) => {
+        const child = spawnIsolated(process.execPath, [file, ...args], { cwd: world.root, env: world.env, stdio: ['ignore', 'pipe', 'pipe'] })
+        let stdout = ''
+        let stderr = ''
+        child.stdout.on('data', chunk => { stdout += chunk })
+        child.stderr.on('data', chunk => { stderr += chunk })
+        child.on('error', fail)
+        child.on('close', status => done({ status, stdout, stderr }))
       })
-      // The steps after setup are a list under Quick start: Claude Code's plugin, Codex's hooks,
-      // the plugin reloads and dot's merge.
-      const quick = section(text, SECTIONS[lang][0])
-      const steps = quick.slice(0, quick.indexOf('<details>')).split('\n').filter(line => line.startsWith('- ') && !/^- \*\*(?:I use |我用 )/.test(line)).join('\n')
-      for (const agent of ['Claude Code', 'Codex', 'OpenCode', 'OpenClaw', 'dot']) assert.ok(steps.includes(agent), `${name}: the steps after setup name ${agent}`)
-      for (const link of ['docs/CODEX.md', 'AGENTS.md#report-your-progress-to-the-progress-pane', 'docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste']) assert.ok(steps.includes(`](${link})`), `${name}: the steps after setup link to ${link}`)
-      // Each old command is still there: a board command once for each agent that uses it, any other once.
-      const spans = codeSpans([steps, inAgent, anywhere].join('\n'))
-      for (const command of OLD_COMMANDS) {
-        const uses = INTEGRATIONS.filter(agent => boardCommand(agent) === command).length
-        assert.equal(spans.filter(span => span === command).length, uses || 1, `${name}: \`${command}\` appears ${uses || 1} time(s) in the new layout`)
+      const save = (path, text) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text) }
+      const stub = name => `globalThis.AGENT_BOARD = {"lang":"en"}\nprocess.stdout.write(${JSON.stringify(`${name}:`)} + process.argv.slice(2).join(' '))\n`
+      // The paragraph under the troubleshooting table keeps the Claude Code check, the guide links and the bug form.
+      const help = {
+        en: ['](docs/GUIDE.md#faq)', '](docs/GUIDE.md#troubleshooting)', '](docs/GUIDE.md#reporting-a-problem-safely)', 'no session ids, home-folder paths or tokens'],
+        'zh-TW': ['](docs/GUIDE.zh-TW.md#常見問題)', '](docs/GUIDE.zh-TW.md#疑難排解)', '](docs/GUIDE.zh-TW.md#安全地回報問題)', '不要放 session id、家目錄路徑或 token'],
+        'zh-CN': ['](docs/GUIDE.zh-CN.md#常见问题)', '](docs/GUIDE.zh-CN.md#问题排查)', '](docs/GUIDE.zh-CN.md#安全地报告问题)', '不要带 session id、主目录路径或 token'],
       }
+      for (const [name, lang] of READMES) {
+        const text = read(name)
+        assert.doesNotMatch(text, /--codex-doctor/, `${name}: the doctor is left to SETUP.md`)
+        const line = text.split('\n').find(one => one.includes('issues/new?template=bug_report.yml')) ?? ''
+        for (const want of ['`claude plugin list`', '`/progress connect status`', ...help[lang]]) {
+          assert.ok(line.includes(want), `${name}: the help paragraph keeps ${want}`)
+        }
+      }
+      assert.ok(read('docs/SETUP.md').includes('--codex-doctor --agent <name>'), 'SETUP.md: the doctor command is documented')
+      // The clone route with a chosen folder, for Cursor: setup writes the board there, and --data-dir opens it.
+      const chosen = join(world.root, 'boards', 'cursor board')
+      // Setup honors the world's progress override, so give this board a separate file from the default board.
+      const chosenProgress = join(chosen, 'progress.md')
+      world.env.CLAUDE_PROGRESS_FILE = chosenProgress
+      const applied = await run(setup, ['--agent', 'cursor', '--data-dir', chosen, '--apply'])
+      world.env.CLAUDE_PROGRESS_FILE = world.path
+      assert.equal(applied.status, 0, applied.stderr || applied.stdout)
+      save(world.path, '## Default board\n\n### Default board task\n- [ ] Work\n')
+      const title = 'Chosen folder board task'
+      save(chosenProgress, `## Chosen board\n\n### ${title}\n- [ ] Work\n`)
+      const opened = await run(launcher, ['--data-dir', chosen, '--print'])
+      assert.equal(opened.status, 0, opened.stderr || opened.stdout)
+      assert.ok(opened.stdout.includes(title), opened.stderr || opened.stdout)
+      // A board the Claude Code plugin manages opens by its progress file.
+      const progress = join(world.root, 'plugin', 'progress.md')
+      save(join(dirname(progress), 'agent-board.mjs'), stub('plugin'))
+      const plugin = await run(launcher, ['--progress-file', progress, '--print'])
+      assert.ok(plugin.stdout.startsWith('plugin:'), plugin.stderr || plugin.stdout)
+      const clone = section(read('docs/SETUP.md'), 'Install from a clone')
+      assert.ok(clone.includes('when setup wrote the board there') && clone.includes('`--progress-file <'), 'SETUP.md: the clone route says when --data-dir applies, and opens a plugin board by its progress file')
+      assert.doesNotMatch(clone, /also finds a board the Claude Code\s+plugin manages/, 'SETUP.md: the clone route does not promise the bare command finds the plugin board')
+    } finally { await world.close() }
+  })
+
+  test('L0 README: the no-window page command, the clone route, the global install on @next and the tested command-line tools are right in all three languages', () => {
+    const clone = section(read('docs/SETUP.md'), 'Install from a clone')
+    assert.ok(clone, 'SETUP.md: Install from a clone exists')
+    for (const step of ['git clone https://github.com/WenyuChiou/agent-board.git', 'cd agent-board', 'node scripts/setup-agent.mjs\n', 'node scripts/setup-agent.mjs --apply']) {
+      assert.ok(`${clone}\n`.includes(step), `SETUP.md: the clone route runs ${step.trim()}`)
+    }
+    // codex_090: in a terminal the first command asks once and a yes writes; the board command is setup's own,
+    // which names a custom data folder; the per-agent steps differ (Codex `$agent-board`, Cursor none).
+    assert.ok(clone.includes('`Set these up? [Y/n]`') && clone.includes('a no writes nothing'), 'SETUP.md: the clone route says the first command asks once in a terminal')
+    assert.doesNotMatch(clone, /first `setup-agent\.mjs` only previews/, 'SETUP.md: the clone route does not say the first command only previews')
+    assert.ok(clone.includes('(#after-setup-per-agent)'), 'SETUP.md: the clone route sends the reader to the per-agent steps')
+    // codex_093 + Greptile r4536141917: after a yes, setup prints no board command (only "type /agent-board",
+    // which Cursor lacks), so the clone route gives the launcher itself, which reads --data-dir.
+    assert.ok(clone.includes('`node bin/agent-board.mjs`') && clone.includes('`--data-dir <folder>`'), 'SETUP.md: the clone route opens the board with node bin/agent-board.mjs and --data-dir <folder>')
+    assert.doesNotMatch(clone, /board command in setup's Next steps/, "SETUP.md: the clone route does not promise a board command setup's yes path never prints")
+    assert.ok(read('bin/agent-board.mjs').includes("join(resolve(dataDir), 'agent-board.mjs')"), 'bin/agent-board.mjs: --data-dir opens the board installed in that folder')
+    // codex_093: setup asks only when there is something to set up, and in the system's language.
+    assert.ok(clone.includes('when there is something to set up') && clone.includes('`要設定這些嗎？[Y/n]`'), 'SETUP.md: the clone route says when setup asks and that the question is localized')
+    assert.doesNotMatch(clone, /`\/agent-board` inside an agent/, 'SETUP.md: the clone route does not give /agent-board for every agent')
+    for (const [name, lang] of READMES) {
+      const text = read(name)
+      const first = section(text, SECTIONS[lang][0])
+      // `--no-open` alone gives the terminal board in an interactive terminal over SSH or without a display.
+      assert.ok(first.includes('`--html --no-open`'), `${name}: Quick start starts the page with no window by --html --no-open`)
+      assert.doesNotMatch(first, /`--no-open`/, `${name}: Quick start does not give --no-open alone`)
+      assert.ok(first.includes('docs/SETUP.md#install-from-a-clone'), `${name}: Quick start links the clone route`)
+      // The stable tag is still 0.24.2, whose launcher has no `remove`.
+      assert.ok(text.includes('`npm install -g @wenyuchiou/agent-board@next`'), `${name}: the global install uses @next`)
+      assert.doesNotMatch(text, /npm install -g @wenyuchiou\/agent-board`/, `${name}: no global install of the stable tag`)
+      // The 0.24.3 record ran each agent's command-line tool; Cursor's was cursor-agent; apps and IDEs were not run.
+      const support = section(text, SECTIONS[lang][2])
+      assert.ok(support.includes('`cursor-agent`') && support.includes(SCOPE[lang].cli) && support.includes(SCOPE[lang].untested), `${name}: the support section says the record ran the command-line tools and not the apps or IDEs`)
+      // codex_093: setup asks only when there is something to set up, in the system's language.
+      assert.ok(text.includes(ASK[lang]), `${name}: Quick start says when setup asks and how the question reads`)
+      // Which surface the bare command picks (hooks/surface.ts): the terminal board only in an interactive terminal over SSH
+      // or on Linux with no display, text in CI, the page otherwise; --watch in any interactive terminal.
+      const terminalRow = text.split('\n').find(line => line.startsWith('|') && line.includes('`npx @wenyuchiou/agent-board`'))
+      for (const words of SCOPE[lang].terminal) assert.ok(terminalRow?.includes(words), `${name}: the terminal row says ${words}`)
     }
   })
 })

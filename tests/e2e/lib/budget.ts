@@ -45,3 +45,9 @@ export const RETIREMENT_PROGRESS_BYTES = RETIREMENT_LIVE_BLOCKS * RETIREMENT_BLO
 // a day, plus the file that run writes. PowerShell stays under it. It counts turn files; the
 // reporters' count file dropped.log is checked on its own.
 export const RETIREMENT_INBOX_FILES = 3 * 2 + 1
+// #768, docs/validation/USER-SIM.md "Fast enough": a setup preview within 10 s, the board and its page open within 5 s.
+// tests/e2e/l4-startup-time.test.mjs times each from a new empty home, in each of this many runs.
+export const SETUP_PREVIEW_MS = 10_000
+export const BOARD_OPEN_MS = 5000
+export const PAGE_OPEN_MS = 5000
+export const STARTUP_RUNS = 5

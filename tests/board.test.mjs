@@ -3831,7 +3831,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   }
   let model = viewed(first)
   let clockNow = now === undefined ? Date.now() : now
-  let scheduled
+  let scheduled, pollMs
   const delays = []
   const windowEvents = {}
   const win = {
@@ -3860,8 +3860,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     Date: { now: () => clockNow },
     setTimeout: (run, delay) => {
       delays.push(delay)
-      // Only the board's own poll (every 3 seconds) is the next redraw; the short waits of a moving page are not.
-      if (delay === 3000 || delay === undefined) scheduled = run
+      // Identify the shipped refresh callback, independently of its delay or motion timers.
+      if (run.name === 'refresh') { scheduled = run; pollMs = delay }
       return 1
     },
     clearTimeout: () => {},
@@ -3916,6 +3916,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     active: () => document.activeElement,
     title: () => document.title,
     delays,
+    get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: () => windowEvents.pagehide?.(),
     restore: persisted => windowEvents.pageshow?.({ persisted }),
@@ -10756,10 +10757,14 @@ test('official agent marks retain their source viewport on every board surface',
         assert.ok(image.includes('fill="#0082FB"'))
         assert.ok(image.includes(`<path d="${icon.paths[0]}"/>`))
       }
-      for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const theme of ['light', 'dark']) {
-        const cover = readFileSync(new URL(`../docs/images/cover-${lang}-${theme}.svg`, import.meta.url), 'utf8')
-        assert.ok(cover.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/${theme}`)
-        assert.ok(cover.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/${theme}`)
+      // The new dark covers show only agents with a live record, and Muse Code has none yet; the old
+      // light covers keep its mark until they retire.
+      for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+        const light = readFileSync(new URL(`../docs/images/cover-${lang}-light.svg`, import.meta.url), 'utf8')
+        assert.ok(light.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/light`)
+        assert.ok(light.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/light`)
+        const dark = readFileSync(new URL(`../docs/images/cover-${lang}-dark.svg`, import.meta.url), 'utf8')
+        assert.ok(!dark.includes(`<path d="${icon.paths[0]}"/>`), `Muse is off the dark cover until it has a live record: ${lang}`)
       }
     } else assert.equal(icon.ink, undefined, 'existing marks retain their white foreground')
     if (official[icon.file]) {
@@ -11060,7 +11065,7 @@ test("the page's motion stops under reduced motion and every change still lands"
     const needs = shownWords(dom.node('needs'))
     assert.ok(needs.includes('Gamma question') && needs.includes('Beta question') && !needs.includes('Alpha question'), `${motion}: ${needs}`)
     assert.equal(dom.node('count-needs').textContent, '2', motion)
-    if (motion === 'reduce') assert.deepEqual(dom.delays.filter(delay => delay !== 3000), [], 'nothing waits for a transition')
+    if (motion === 'reduce') assert.deepEqual(dom.delays.filter(delay => delay !== dom.pollMs), [], 'nothing waits for a transition')
   }
 })
 
@@ -13225,12 +13230,12 @@ test('a Hidden notice restores that exact question directly, including after a r
   }
 })
 
-test('after Send the hide button named by each README is visible without More', async () => {
+test('after Send the hide button named by each README and guide is visible without More', async () => {
   const isVisible = node => {
     for (let one = node; one; one = one.parentNode) if (one.hidden || one.inert || String(one.className || '').split(' ').includes('gone')) return false
     return true
   }
-  for (const [lang, readme] of [['en', 'README.md'], ['zh-TW', 'README.zh-TW.md'], ['zh-CN', 'README.zh-CN.md']]) {
+  for (const [lang, readme, guide] of [['en', 'README.md', 'docs/GUIDE.md'], ['zh-TW', 'README.zh-TW.md', 'docs/GUIDE.zh-TW.md'], ['zh-CN', 'README.zh-CN.md', 'docs/GUIDE.zh-CN.md']]) {
     const html = await sourcePage(lang)
     const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
     const model = cardsModel()
@@ -13245,7 +13250,7 @@ test('after Send the hide button named by each README is visible without More', 
     await dom.flush()
     const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
     assert.ok(hide, 'the documented hide button is visible after sending')
-    assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), readme)
+    for (const file of [readme, guide]) assert.ok(readFileSync(new URL('../' + file, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), file)
     hide.click()
     await dom.flush()
     assert.equal(dom.requests.at(-1).body.type, 'hide')
