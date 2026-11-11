@@ -2384,6 +2384,69 @@ test('#1302 a .new copy setup wrote is removed, not emptied, once the person res
   assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(f.root, 'install-codex.json'), 'utf8')).files, `${f.skill}.new`), false)
 }))
 
+// An install from an older release: the worker and one hook are owned (their hashes are recorded) but are not what this version would write.
+const olderInstall = f => {
+  assert.equal(f.install('--apply').status, 0)
+  const record = join(f.root, 'install-codex.json')
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const manifest = JSON.parse(readFileSync(record, 'utf8'))
+  writeFileSync(worker, '// older worker\n')
+  manifest.files[worker] = createHash('sha256').update('// older worker\n').digest('hex')
+  const config = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  const hook = config.hooks.Stop.find(entry => entry.hooks?.[0]?.command === manifest.groups.Stop.hooks[0].command)
+  hook.hooks[0].command += ' --older'
+  manifest.groups.Stop = hook
+  writeFileSync(f.hooks, JSON.stringify(config, null, 2) + '\n')
+  writeFileSync(record, JSON.stringify(manifest, null, 2) + '\n')
+  writeFileSync(f.script, readFileSync(f.script, 'utf8') + '// my own edit\n')
+  return { worker, hooksText: readFileSync(f.hooks, 'utf8'), workerText: readFileSync(worker, 'utf8'), scriptText: readFileSync(f.script, 'utf8') }
+}
+
+test('#1302 an edited board script keeps the older worker and hooks too, names every file it did not update, and the doctor says the install is not current', () => fixture(f => {
+  const before = olderInstall(f)
+  const preview = JSON.parse(f.install('--json').stdout)
+  assert.deepEqual(preview.conflicts, [])
+  assert.deepEqual(preview.keptCode, [f.script])
+  assert.deepEqual([...preview.keptHeld].sort(), [before.worker, f.hooks].sort())
+  const applied = f.install('--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.equal(readFileSync(f.script, 'utf8'), before.scriptText)
+  assert.equal(readFileSync(before.worker, 'utf8'), before.workerText)
+  assert.equal(readFileSync(f.hooks, 'utf8'), before.hooksText)
+  const again = JSON.parse(f.install('--json').stdout)
+  assert.deepEqual(again.changes.filter(change => change.file !== f.script), [])
+  const shown = setupAgent(f, '--agent', 'codex').stdout
+  assert.ok(shown.includes('agent-board-hook.mjs') && shown.includes('not updated: it works with your edited board script'), shown)
+  assert.ok(shown.includes('agent-board.mjs') && shown.includes('setup kept your copy'), shown)
+  const plain = f.install('--plain').stdout
+  assert.ok(plain.includes(f.script) && plain.includes('Kept your edited file'), plain)
+  assert.ok(plain.includes(before.worker) && plain.includes('Not updated'), plain)
+  // The package's own board script (the installed one is the edited copy, which would judge itself current).
+  const pristine = join(f.home, 'pristine-board.mjs')
+  writeFileSync(pristine, bundleFromDir(new URL('..', import.meta.url)))
+  const doctor = spawnSync(process.execPath, [pristine, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-doctor'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 }).stdout
+  assert.ok(doctor.includes('installed, but not the current version'), doctor)
+  assert.ok(doctor.includes(before.worker), doctor)
+}))
+
+test('#1302 the doctor does not call an install current while an edited worker was kept', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  writeFileSync(worker, readFileSync(worker, 'utf8') + '// my own edit\n')
+  const doctor = f.command(['--codex-doctor']).stdout
+  assert.ok(doctor.includes('installed, but not the current version'), doctor)
+  assert.ok(doctor.includes(worker), doctor)
+  const plain = f.install('--plain').stdout
+  assert.ok(plain.includes('Kept your edited file') && plain.includes(worker), plain)
+}))
+
+test('#1302 an agent setup never installed is skipped, not given new hooks, when the shared board script is edited', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  writeFileSync(f.script, readFileSync(f.script, 'utf8') + '// my own edit\n')
+  const preview = JSON.parse(f.install('--agent', 'codex', '--json').stdout)
+  assert.deepEqual(preview.conflicts, [f.script])
+}))
+
 test('setup hashes foreign hook entries and restores a missing owned hook beside them', () => fixture(f => {
   const foreign = { hooks: [{ type: 'command', command: 'synthetic-foreign-stop --token synthetic-private-value' }] }
   f.save(f.hooks, JSON.stringify({ hooks: { Stop: [foreign] } }))

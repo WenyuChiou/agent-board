@@ -330,6 +330,11 @@ export type LocalPlan = {
   keptShared?: { file: string; usedBy: string[] }[]
   // An old /board command file the person edited: setup leaves it and names it here (#868).
   keptEdited?: string[]
+  // Generated files the person edited (#1302): text gets the new version beside it; code is kept as it is.
+  keptText?: { file: string; beside: string }[]
+  keptCode?: string[]
+  // Files left at the old version because the person's edited board script stays.
+  keptHeld?: string[]
   applied?: boolean
 }
 
@@ -343,15 +348,22 @@ export const codexDoctorOutput = (result: LocalPlan & {
   const words = s.localSummary
   const host = s.agentNames[result.agent] ?? result.agent
   const hasHook = result.installed || result.reportHook === 'connect'
-  const lines = [words.doctor(host, result.installed ? words.installed : hasHook ? words.connector : words.missing)]
+  // Installed, but an edited board script or worker was kept, so it is not the current version (#1302).
+  const isOutdated = result.installed && ((result.keptCode?.length ?? 0) + (result.keptHeld?.length ?? 0) > 0)
+  const lines = [words.doctor(host, isOutdated ? words.outdated : result.installed ? words.installed : hasHook ? words.connector : words.missing)]
   if (result.problem) lines.push(result.problem)
   for (const file of result.conflicts) lines.push(words.conflict(file))
+  if (isOutdated) {
+    for (const file of result.keptCode ?? []) lines.push(words.keptCode(file))
+    for (const file of result.keptHeld ?? []) lines.push(words.keptHeld(file))
+  }
   if (!hasHook) for (const change of result.changes) lines.push(words.needsUpdate(change.file))
   const isPending = result.capabilities.lifecycle === 'adapter-pending'
   if (isPending) lines.push(words.pending)
   if (result.agent === 'codex' && result.installed) lines.push(result.hooksTrusted === true ? words.trusted : result.hooksTrusted === false ? words.untrusted : words.trustUnknown)
   lines.push(s.codexDoctor)
   lines.push(result.conflicts.length ? words.review(command)
+    : isOutdated ? words.outdatedNext
     : !hasHook ? words.setup(command)
     : isPending ? words.skill(host)
     // --codex-trust works only on an installed Codex, not on one the connector hooked.
@@ -385,6 +397,9 @@ export const codexSetupOutput = (result: LocalPlan, s: Strings, command: string,
   const lines = [words.removal(host, isApplied ? words.setupApplied : result.conflicts.length ? words.setupBlocked : result.changes.length ? words.setupPreview : words.setupCurrent)]
   for (const change of result.changes) lines.push(isApplied ? words.setupWritten(change.file) : words.setupFile(change.file))
   for (const file of result.conflicts) lines.push(words.conflict(file))
+  for (const one of result.keptText ?? []) lines.push(words.keptText(one.file, one.beside))
+  for (const file of result.keptCode ?? []) lines.push(words.keptCode(file))
+  for (const file of result.keptHeld ?? []) lines.push(words.keptHeld(file))
   lines.push(result.conflicts.length ? words.review(command)
     : isApplied || !result.changes.length ? words.setupCheck(check)
     : words.setupApply(`${command} --apply`))
@@ -1366,12 +1381,20 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const keptEdited: string[] = []
   const keptText: { file: string; beside: string }[] = []
   const keptCode: string[] = []
+  const keptHeld: string[] = []
   const keptFiles = new Set<string>()
   const staleBeside = new Set<string>()
   const isReleasedBoard = (text: string): boolean => {
     const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))
     return RELEASED.some(release => release.board.includes(bodyHash))
   }
+  const isOwned = (file: string, existing: string | null): boolean => existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing))))
+  // An edited board script stays. The worker and hooks that call it then stay as they were too, so an upgrade
+  // never leaves new hooks calling an old script (the 0.24.2 script has no --plan-event). An agent setup never
+  // installed has no old hooks to keep, so it is skipped like any other conflict.
+  const scriptNow = initial(script)
+  const isScriptKept = !remove && scriptNow !== null && !isOwned(script, scriptNow) && scriptNow !== files[script]
+  const isHeld = isScriptKept && manifest.files[script] !== undefined
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
@@ -1382,11 +1405,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (usedBy.length) { keptShared.push({ file, usedBy }); continue }
     }
     if (remove && existing === null && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
-    const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing))))
+    const owned = isOwned(file, existing)
+    if (isHeld && file !== script && !/\.(?:toml|md)$/.test(file)) {
+      if (existing !== desired) keptHeld.push(file)
+      keptFiles.add(file)
+      continue
+    }
     if (existing !== null && !owned && existing !== desired) {
       // A generated file the person edited never stops an upgrade and is never overwritten (#1302). Text a
       // host only reads gets the new file beside it; code a host loads keeps the old file and is named.
-      if (remove) conflicts.push(file)
+      if (remove || (file === script && !isHeld)) conflicts.push(file)
       else if (/\.(?:toml|md)$/.test(file)) {
         const copy = `${file}.new`
         const beside = initial(copy)
@@ -1422,6 +1450,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // A host-directory override must not strand an old active plugin outside the
   // new ownership record. Remove the old scoped install before changing roots.
   for (const file of Object.keys(manifest.files)) if (!(file in files) && !retired.includes(file) && !staleBeside.has(file)) conflicts.push(file)
+  if (isHeld) {
+    // The hooks stay as they are: the config is left byte for byte and the record keeps the old entries.
+    const wouldChange = agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== (nextConfigText ?? '') : !isSame(hookConfig, nextConfig)
+    if (wouldChange || hasMissingGroup) keptHeld.push(nativeConfig)
+    nextConfig = { ...hookConfig }
+    nextConfigText = initial(nativeConfig) ?? ''
+    for (const key of Object.keys(groups)) delete groups[key]
+    Object.assign(groups, manifest.groups)
+    hasMissingGroup = false
+  }
   const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
   nextConfigText ??= `${JSON.stringify(nextConfig, null, 2)}\n`
   if (hasNativeConfig && (!remove || Object.keys(manifest.groups).length)) {
@@ -1485,7 +1523,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.
