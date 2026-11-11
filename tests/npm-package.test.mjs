@@ -409,6 +409,47 @@ test('--json through an installed board script from an older release fails with 
   assert.ok(plain.stderr.includes('is from 0.24.2.'))
 }))
 
+test('--json through an edited older board script still fails instead of printing text and exiting 0 (#1304, review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const text = `${prelude(f)}process.stdout.write('Agent Board (text, not JSON)\\n')\n// 0.24.2`
+  // An edited copy of a released script hashes as no release at all.
+  save(boardPath(f), `${text}\n// edited by the person`)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  const edited = f.run(pkg, ['--json'])
+  assert.notEqual(edited.status, 0, 'an edited older script cannot return JSON')
+  assert.equal(edited.stdout, '', 'nothing but JSON may ever reach stdout')
+  // A script that does return JSON is left alone, even when it is a build the package does not know.
+  save(boardPath(f), `${prelude(f)}process.stdout.write('{"ok":true}\\n')\n// a newer build`)
+  const newer = f.run(pkg, ['--json'])
+  success(newer)
+  assert.equal(newer.stdout, '{"ok":true}\n')
+}))
+
+test('--json with --chat or --status through an older board script fails with the notice too (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const text = `${prelude(f)}process.stdout.write('Agent Board (text, not JSON)\\n')\n// 0.24.2`
+  save(boardPath(f), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  for (const extra of ['--chat', '--status']) {
+    const json = f.run(pkg, ['--json', extra])
+    assert.notEqual(json.status, 0, `--json ${extra} fails through an older script`)
+    assert.equal(json.stdout, '', `--json ${extra} prints no text`)
+  }
+}))
+
+test('the displayed update command quotes a custom path for the shell it is shown for (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, "data $HOME $(touch pwned) it's")
+  const echo = `globalThis.AGENT_BOARD = ${JSON.stringify({ codexRoot: root, lang: 'en' })}\nprocess.stdout.write('update=' + JSON.stringify(process.env.AGENT_BOARD_UPDATE_COMMAND ?? null))\n// 0.24.2`
+  save(join(root, 'install-codex.json'), '{}')
+  save(join(root, 'agent-board.mjs'), echo)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(echo)}'] }]\n`)
+  // Shown for a POSIX shell: single quotes, a quote inside written as '\''.
+  const posix = f.run(pkg, ['--data-dir', root, '--print'], { NODE_OPTIONS: `--require ${JSON.stringify(join(repo, 'tests/fixtures/platform-posix.cjs'))}` })
+  success(posix)
+  assert.equal(posix.stdout, `update=${JSON.stringify(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir '${root.replaceAll("'", "'\\''")}'`)}`)
+}))
+
 test('the launcher hands an older script the update command for the install it runs, and none for a plugin copy (#1304)', () => fixture(f => {
   const pkg = packed(f)
   const root = join(f.home, 'data dir')

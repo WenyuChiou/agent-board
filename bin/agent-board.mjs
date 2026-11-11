@@ -175,16 +175,28 @@ const home = homedir()
 const isWin = process.platform === 'win32'
 // --chat output may be pasted into a chat app, so it shows the home folder as ~, as the board's own --chat does.
 const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(home.toLowerCase()) : path.startsWith(home)) ? `~${path.slice(home.length)}` : path
+// The path as one argument for the shell the command is shown for: single quotes on POSIX, double quotes on Windows (no quote can occur in a Windows path).
+const quoted = text => isWin ? `"${text}"` : `'${text.replaceAll("'", "'\\''")}'`
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
-const run = (path, passed, { isSetup = false, isRemove = false, env = process.env } = {}) => {
+const run = (path, passed, { isSetup = false, isRemove = false, env = process.env, isJsonChecked = false } = {}) => {
   const setupCmd = isRemove ? `npx ${name} remove` : `npx ${name} setup`
-  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : 'inherit', encoding: 'utf8', env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: setupCmd } : env, windowsHide: true })
+  // A script this package cannot vouch for may not know --json: its output is held until it parses as JSON.
+  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : isJsonChecked ? ['inherit', 'pipe', 'inherit'] : 'inherit', encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: setupCmd } : env, windowsHide: true })
   if (result.error) {
     console.error(message(`agent-board: could not start ${shown(path)} (${code(result.error)}).`, `agent-board：無法啟動 ${shown(path)}（${code(result.error)}）。`, `agent-board：无法启动 ${shown(path)}（${code(result.error)}）。`))
     process.exit(1)
   }
   if (isSetup && result.stderr) {
     process.stderr.write(result.status === 0 ? result.stderr : result.stderr.replaceAll(resolve(pkg), '<agent-board package>').replaceAll(resolve(pkg).replaceAll('\\', '/'), '<agent-board package>'))
+  }
+  if (isJsonChecked && typeof result.stdout === 'string') {
+    let isJson = false
+    try { JSON.parse(result.stdout); isJson = true } catch {}
+    if (result.status === 0 && !isJson) {
+      console.error(message(`agent-board: the board script at ${shown(path)} did not return JSON for --json, so it is probably from an older release. To update it, preview: npx ${name}@${v} setup, then add --apply.`, `agent-board：${shown(path)} 的看板程式對 --json 沒有回傳 JSON，可能是較舊的版本。更新前先預覽：npx ${name}@${v} setup，再加上 --apply。`, `agent-board：${shown(path)} 的看板程序对 --json 没有返回 JSON，可能是较旧的版本。更新前先预览：npx ${name}@${v} setup，再加上 --apply。`))
+      process.exit(1)
+    }
+    process.stdout.write(result.stdout)
   }
   if (result.signal) {
     process.kill(process.pid, result.signal)
@@ -263,13 +275,16 @@ language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? systemLang(process.
 const hash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
 // The command that updates the install being run, for the page to show; empty when the notice names no command.
 let updateCommand = ''
-if (!isChat && !args.includes('--status')) {
+// --json promises JSON, so a script that cannot return it is found out even for --chat and --status.
+let isJsonUnverified = args.includes('--json')
+if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
   try {
     // The bundle is kept in hooks/board-script.ts and its parts; the shared reader joins them.
     const bundled = bundleFromDir(pkg)
     const digest = hash(readFileSync(installed, 'utf8'))
     // Setup prepends account settings to the raw bundle; align that header here.
-    if (digest !== hash(`\n${bundled}`)) {
+    if (digest === hash(`\n${bundled}`)) isJsonUnverified = false
+    else {
       const releases = readFileSync(join(pkg, 'hooks/released.ts'), 'utf8')
       let old
       for (const match of releases.matchAll(/version:\s*'([^']+)'\s*,\s*board:\s*\[([^\]]*)\]/g)) {
@@ -287,7 +302,7 @@ if (!isChat && !args.includes('--status')) {
         // A moved data folder: the board script's own folder is where the board is now.
         if (!agents) { root = dirname(installed); agents = listed(root) ?? [] }
         const folder = shown(root)
-        const opts = (agents.length ? ` --agent ${agents.join(',')}` : '') + (root !== join(home, '.agent-board') ? ` --data-dir ${/[^\w.:\\/~@+,=-]/.test(folder) ? `"${folder}"` : folder}` : '')
+        const opts = (agents.length ? ` --agent ${agents.join(',')}` : '') + (root !== join(home, '.agent-board') ? ` --data-dir ${/[^\w.:\\/~@+,=-]/.test(folder) ? quoted(folder) : folder}` : '')
         updateCommand = `npx ${name}@${v} setup${opts}`
         console.error(message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
       } else {
@@ -305,4 +320,4 @@ if (!isChat && !args.includes('--status')) {
 // A separate process preserves argv[1], which the installed page server identifies.
 const env = dataDir ? { ...process.env } : process.env
 if (dataDir) delete env.CLAUDE_PROGRESS_FILE
-run(installed, passArgs, { env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v, AGENT_BOARD_UPDATE_COMMAND: updateCommand } })
+run(installed, passArgs, { isJsonChecked: isJsonUnverified, env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v, AGENT_BOARD_UPDATE_COMMAND: updateCommand } })
