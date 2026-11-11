@@ -8018,6 +8018,29 @@ test('with --lan the page also opens on the local network, with a token of its o
   }
 })
 
+test('the update command with a home path reaches the local page but never the page on the local network (#1304)', { timeout: 30_000 }, async t => {
+  const update = 'npx @wenyuchiou/agent-board@9.9.9 setup --data-dir /home/synthetic-person/board'
+  const board = await page('', { AGENT_BOARD_UPDATE_COMMAND: update })
+  try {
+    const { call, token } = board
+    assert.equal((await call('GET', '/api/board')).json().model.view.versions.update, update)
+    const opened = await call('POST', '/api/lan', { body: {} })
+    if (opened.status === 409) {
+      t.skip(`no local network address here: ${opened.json().note}`)
+      return
+    }
+    const lan = new URL(opened.json().url)
+    const phone = lan.searchParams.get('t')
+    assert.notEqual(phone, token)
+    const seen = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': phone })
+    assert.equal(seen.status, 200, seen.body)
+    assert.equal(seen.json().model.view.versions.update, null)
+    assert.ok(!seen.body.includes('synthetic-person'))
+  } finally {
+    await board.close()
+  }
+})
+
 test("--serve --lan prints the page's network address, a QR code of it and that the link is unencrypted, and a second run gives the same address", { timeout: 60_000 }, async t => {
   const board = serveIn()
   const urls = []

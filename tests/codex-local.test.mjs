@@ -2440,6 +2440,40 @@ test('#1302 the doctor does not call an install current while an edited worker w
   assert.ok(plain.includes('Kept your edited file') && plain.includes(worker), plain)
 }))
 
+// What a person sees when the edited board script stays and the worker or the hooks it needs are gone.
+const missingHeldCase = (f, remove) => {
+  assert.equal(f.install('--apply').status, 0)
+  writeFileSync(f.script, readFileSync(f.script, 'utf8') + '// my own edit\n')
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const gone = remove(worker)
+  const hooksBefore = readFileSync(f.hooks, 'utf8')
+  const preview = JSON.parse(f.install('--json').stdout)
+  assert.deepEqual(preview.missingHeld, [gone])
+  assert.ok(preview.conflicts.includes(gone), JSON.stringify(preview.conflicts))
+  const applied = f.install('--apply')
+  assert.notEqual(applied.status, 0)
+  assert.equal(existsSync(worker), gone !== worker)
+  assert.equal(readFileSync(f.hooks, 'utf8'), hooksBefore)
+  const shown = setupAgent(f, '--agent', 'codex').stdout
+  assert.ok(shown.includes('skipped') && shown.includes('missing: setup cannot put back the old version'), shown)
+  assert.ok(!shown.includes('you edited it, so'), shown)
+  assert.ok(shown.includes('Retry after fixing'), shown)
+  const plain = f.install('--plain').stdout
+  assert.ok(plain.includes('Missing: ') && plain.includes(gone), plain)
+  const pristine = join(f.home, 'pristine-board.mjs')
+  writeFileSync(pristine, bundleFromDir(new URL('..', import.meta.url)))
+  const doctor = spawnSync(process.execPath, [pristine, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-doctor'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 }).stdout
+  assert.ok(doctor.includes('Missing: ') && !doctor.includes('installed, but not the current version'), doctor)
+}
+
+test('#1302 an edited board script and a deleted worker stop that agent with a missing-file line, and the worker is not written back', () => fixture(f => {
+  missingHeldCase(f, worker => { rmSync(worker); return worker })
+}))
+
+test('#1302 an edited board script and removed hook entries stop that agent with a missing line, and the hooks are not written back', () => fixture(f => {
+  missingHeldCase(f, () => { writeFileSync(f.hooks, JSON.stringify({ hooks: {} }, null, 2) + '\n'); return f.hooks })
+}))
+
 test('#1302 an agent setup never installed is skipped, not given new hooks, when the shared board script is edited', () => fixture(f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   writeFileSync(f.script, readFileSync(f.script, 'utf8') + '// my own edit\n')

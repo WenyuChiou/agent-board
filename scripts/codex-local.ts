@@ -335,6 +335,8 @@ export type LocalPlan = {
   keptCode?: string[]
   // Files left at the old version because the person's edited board script stays.
   keptHeld?: string[]
+  // Held files or hooks that are gone: setup cannot put the old version back while the edited board script stays.
+  missingHeld?: string[]
   applied?: boolean
 }
 
@@ -353,6 +355,7 @@ export const codexDoctorOutput = (result: LocalPlan & {
   const lines = [words.doctor(host, isOutdated ? words.outdated : result.installed ? words.installed : hasHook ? words.connector : words.missing)]
   if (result.problem) lines.push(result.problem)
   for (const file of result.conflicts) lines.push(words.conflict(file))
+  for (const file of result.missingHeld ?? []) lines.push(words.heldMissing(file))
   if (isOutdated) {
     for (const file of result.keptCode ?? []) lines.push(words.keptCode(file))
     for (const file of result.keptHeld ?? []) lines.push(words.keptHeld(file))
@@ -397,6 +400,7 @@ export const codexSetupOutput = (result: LocalPlan, s: Strings, command: string,
   const lines = [words.removal(host, isApplied ? words.setupApplied : result.conflicts.length ? words.setupBlocked : result.changes.length ? words.setupPreview : words.setupCurrent)]
   for (const change of result.changes) lines.push(isApplied ? words.setupWritten(change.file) : words.setupFile(change.file))
   for (const file of result.conflicts) lines.push(words.conflict(file))
+  for (const file of result.missingHeld ?? []) lines.push(words.heldMissing(file))
   for (const one of result.keptText ?? []) lines.push(words.keptText(one.file, one.beside))
   for (const file of result.keptCode ?? []) lines.push(words.keptCode(file))
   for (const file of result.keptHeld ?? []) lines.push(words.keptHeld(file))
@@ -1382,6 +1386,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const keptText: { file: string; beside: string }[] = []
   const keptCode: string[] = []
   const keptHeld: string[] = []
+  const missingHeld: string[] = []
   const keptFiles = new Set<string>()
   const staleBeside = new Set<string>()
   const isReleasedBoard = (text: string): boolean => {
@@ -1407,7 +1412,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (remove && existing === null && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
     const owned = isOwned(file, existing)
     if (isHeld && file !== script && !/\.(?:toml|md)$/.test(file)) {
-      if (existing !== desired) keptHeld.push(file)
+      // A held file setup wrote and the person deleted cannot be put back as the old version: this agent stops.
+      if (existing === null && manifest.files[file] !== undefined) { missingHeld.push(file); conflicts.push(file) }
+      else if (existing !== desired) keptHeld.push(file)
       keptFiles.add(file)
       continue
     }
@@ -1453,7 +1460,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (isHeld) {
     // The hooks stay as they are: the config is left byte for byte and the record keeps the old entries.
     const wouldChange = agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== (nextConfigText ?? '') : !isSame(hookConfig, nextConfig)
-    if (wouldChange || hasMissingGroup) keptHeld.push(nativeConfig)
+    if (hasMissingGroup) { missingHeld.push(nativeConfig); conflicts.push(nativeConfig) }
+    else if (wouldChange) keptHeld.push(nativeConfig)
     nextConfig = { ...hookConfig }
     nextConfigText = initial(nativeConfig) ?? ''
     for (const key of Object.keys(groups)) delete groups[key]
@@ -1523,7 +1531,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.
