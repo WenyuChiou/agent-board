@@ -48,7 +48,9 @@ try {
   for (const lang of ['en', 'zh-TW', 'zh-CN']) {
     const page = await serve(lang)
     try {
-      const context = await browser.newContext({ colorScheme: 'dark', viewport: { width: 1440, height: 780 }, deviceScaleFactor: 2, locale: lang })
+      // 960 wide, so the README's 860-pixel picture shows the words near their real size: a 1440-wide
+      // shot came out at about 9-pixel text. Below 1280 the page uses one column, so nothing is cut.
+      const context = await browser.newContext({ colorScheme: 'dark', viewport: { width: 960, height: 760 }, deviceScaleFactor: 2, locale: lang })
       const tab = await context.newPage()
       await tab.goto(page.url)
       await tab.waitForSelector('body')
