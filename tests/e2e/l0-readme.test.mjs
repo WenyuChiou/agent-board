@@ -425,7 +425,7 @@ describe('L0 discover and install from the README', () => {
       // opacity between two points, as the browser draws it (straight line; the easings used here
       // do not overshoot).
       const pointsOf = name => {
-        const body = new RegExp(`@keyframes ${literal(name)} \\{((?:[^{}]|\\{[^{}]*\\})*)\\}`).exec(svg)?.[1] ?? ''
+        const body = svg.match(new RegExp(`@keyframes ${literal(name)} \\{((?:[^{}]|\\{[^{}]*\\})*)\\}`))?.[1] ?? ''
         return [...body.matchAll(/([\d.%,\s]+)\{[^{}]*?opacity:\s*([\d.]+)/g)].flatMap(stop => stop[1].match(/[\d.]+/g).map(at => [Number(at), Number(stop[2])]))
       }
       const opacityAt = (points, at) => {
@@ -454,6 +454,9 @@ describe('L0 discover and install from the README', () => {
         const points = pointsOf(name)
         assert.ok(samples(end, end + 25 / Number(loop) - 0.01).every(at => opacityAt(points, at) >= 0.99), `${file}: a layer drawn over a row (${name}) stays on until the row is gone`)
       }
+      // The setup command stays on screen, the end frame included.
+      const commands = [...svg.matchAll(new RegExp(`${literal(COMMAND)}</text>`, 'g'))]
+      assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND}"`)
       // ...and every frame before it: the box's group may dim while the terminal of scene 6 types the
       // same command, never vanish. (The terminal's own copy comes and goes with its scene.)
       for (const command of commands.filter(command => isKept(groupsAround(svg, command.index)))) {
