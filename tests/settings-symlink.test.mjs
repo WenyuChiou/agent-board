@@ -276,6 +276,27 @@ test('a read of the settings file does not wait on a FIFO with no writer (#1276)
   }
 })
 
+// The plugin write reads the file back after the rename. That read blocked on a FIFO put at the path right after the
+// rename, so `/progress style` hung until its timeout (#1276, Greptile on 968bfcc4). A preload swaps the path there.
+test('the plugin write does not wait on a FIFO put at the path right after its rename (#1276)', { skip: noFifo }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-fifo-after-'))
+  try {
+    const settings = join(dir, 'progress-settings.json')
+    const swap = join(dir, 'swap.cjs')
+    writeFileSync(swap, `const fs = require('node:fs')
+const { execFileSync } = require('node:child_process')
+const rename = fs.renameSync
+fs.renameSync = (from, to) => { rename(from, to); fs.unlinkSync(to); execFileSync('mkfifo', [to]) }
+`)
+    const wrote = spawnSync(process.execPath, ['--require', swap, '-e', SETTINGS_WRITE, '--', settings, '{"style":"blue"}\n', 'missing', ''], { timeout: 5000, encoding: 'utf8' })
+    assert.equal(wrote.error, undefined, 'the write came back')
+    assert.equal(wrote.status, SETTINGS_UNSAFE)
+    assert.ok(!lstatSync(settings).isFile(), 'the FIFO the preload put there is still there')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // The startup language read and the terminal board's style read both come before any guarded save. A FIFO with no
 // writer blocked them for good on Linux and macOS (#1276); the board must still start and print.
 test('the board starts and prints with a FIFO at the settings path (#1276)', { skip: noFifo }, () => {

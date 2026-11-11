@@ -47,17 +47,23 @@ else say(found)
 export const SETTINGS_WRITE = `
 const fs = require('node:fs')
 const [file, next, kind, base] = process.argv.slice(1)
-const held = () => {
+// Every read here, the one after the rename too, refuses a link or a non-regular file and never waits for a writer.
+const look = () => {
   try {
     const stat = fs.lstatSync(file)
-    if (stat.isSymbolicLink() || !stat.isFile()) return 'unsafe'
+    if (stat.isSymbolicLink() || !stat.isFile()) return { kind: 'unsafe' }
     const flag = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0)
-    return fs.readFileSync(file, { encoding: 'utf8', flag }) === base && kind === 'ok' ? 'same' : 'changed'
+    return { kind: 'ok', text: fs.readFileSync(file, { encoding: 'utf8', flag }) }
   } catch (error) {
-    if (error && error.code === 'ENOENT') return kind === 'missing' ? 'same' : 'changed'
-    if (error && ['ELOOP', 'EISDIR', 'ENXIO', 'EAGAIN'].includes(error.code)) return 'unsafe'
+    if (error && error.code === 'ENOENT') return { kind: 'missing' }
+    if (error && ['ELOOP', 'EISDIR', 'ENXIO', 'EAGAIN'].includes(error.code)) return { kind: 'unsafe' }
     throw error
   }
+}
+const held = () => {
+  const now = look()
+  if (now.kind === 'unsafe') return 'unsafe'
+  return now.kind === kind && (kind === 'missing' || now.text === base) ? 'same' : 'changed'
 }
 const finish = () => {
   let mode = 0o600
@@ -80,9 +86,14 @@ const finish = () => {
       return late === 'unsafe' ? ${SETTINGS_UNSAFE} : ${SETTINGS_CHANGED}
     }
     fs.renameSync(temp, file)
-    return fs.readFileSync(file, 'utf8') === next ? 0 : ${SETTINGS_CHANGED}
   } catch {
     try { fs.unlinkSync(temp) } catch {}
+    return 1
+  }
+  try {
+    const after = look()
+    return after.kind === 'ok' && after.text === next ? 0 : after.kind === 'unsafe' ? ${SETTINGS_UNSAFE} : ${SETTINGS_CHANGED}
+  } catch {
     return 1
   }
 }
