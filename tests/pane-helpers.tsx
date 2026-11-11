@@ -27,7 +27,7 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
-import { SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script'
+import { SETTINGS_CHANGED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script'
 import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED, PENDING_COMMIT, PENDING_STAGE } from '../hooks/ledger-move'
 import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
@@ -328,6 +328,9 @@ const engineBeneath = (on: On, world: World): MockClock => {
       const file = posix(e.argv[4] ?? '')
       world.ran?.push([...e.argv])
       if (world.unsafeFiles?.has(file) === true) return { value: { exitCode: SETTINGS_UNSAFE, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      // Written only when the file still holds the text the change was worked out from.
+      const held = world.files.get(file)
+      if ((e.argv[6] === 'ok' ? held : undefined) !== (e.argv[6] === 'ok' ? e.argv[7] : undefined) || (e.argv[6] === 'missing' && held !== undefined)) return { value: { exitCode: SETTINGS_CHANGED, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
       world.files.set(file, e.argv[5] ?? '')
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }

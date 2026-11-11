@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,8 +8,8 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { EN } from '../hooks/strings-en.ts'
-import { SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script.ts'
-import { readSettings, replaceSettings } from '../scripts/settings-file.ts'
+import { SETTINGS_CHANGED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script.ts'
+import { readSettings, replaceSettings, updateSettings } from '../scripts/settings-file.ts'
 
 const post = (port, token, path, body) => new Promise((resolve, reject) => {
   const req = request({
@@ -165,21 +165,94 @@ test('a settings file with invalid JSON still says it is not valid JSON (#1261)'
   }
 })
 
-test('a link swapped in after the check is replaced, never written through (#1276)', { skip: noLinks }, () => {
+test('a link swapped in after the check is refused, never written through (#1276)', { skip: noLinks }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'settings-swap-'))
   try {
     const settings = join(dir, 'progress-settings.json')
     const victim = join(dir, 'victim.json')
     writeFileSync(settings, '{"old":true}\n')
     writeFileSync(victim, '{"keep":true}\n')
-    // The path is a regular file when checked; the swap happens before the new file is put in place.
-    const done = replaceSettings(settings, '{"style":"blue"}\n', () => { unlinkSync(settings); symlinkSync(victim, settings) })
-    assert.equal(done, true)
+    // The path is a regular file when checked; the swap happens after the new file is written.
+    const done = replaceSettings(settings, '{"old":true}\n', '{"style":"blue"}\n', () => { unlinkSync(settings); symlinkSync(victim, settings) })
+    assert.equal(done, 'unsafe')
     assert.equal(readFileSync(victim, 'utf8'), '{"keep":true}\n')
-    assert.equal(lstatSync(settings).isSymbolicLink(), false)
-    assert.equal(readFileSync(settings, 'utf8'), '{"style":"blue"}\n')
+    assert.equal(lstatSync(settings).isSymbolicLink(), true)
     assert.deepEqual(readdirSync(dir).sort(), ['progress-settings.json', 'victim.json'])
   } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Two saves in a row (#1276, Greptile): the second read the file before the first wrote, and its write put
+// the old text back over the first. The write now checks the file still holds what the change was worked out
+// from, and the change is worked out again from the fresh text.
+test('a save made between the read and the write is kept, not undone (#1276)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-two-writers-'))
+  try {
+    const settings = join(dir, 'progress-settings.json')
+    writeFileSync(settings, '{"lang":"en"}\n')
+    const other = () => writeFileSync(settings, '{"lang":"zh-TW"}\n')
+    // The write alone: the file changed under it, so nothing is written over it.
+    assert.equal(replaceSettings(settings, '{"lang":"en"}\n', '{"lang":"en","style":"blue"}\n', other), 'changed')
+    assert.equal(readFileSync(settings, 'utf8'), '{"lang":"zh-TW"}\n')
+    // The whole save: worked out again from the fresh text, so both picks are in the file.
+    writeFileSync(settings, '{"lang":"en"}\n')
+    const saved = updateSettings(settings, text => JSON.stringify({ ...JSON.parse(text ?? '{}'), style: 'blue' }) + '\n', other)
+    assert.equal(saved.result, 'ok')
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { lang: 'zh-TW', style: 'blue' })
+    assert.deepEqual(readdirSync(dir).filter(name => name.endsWith('.tmp')), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the plugin write refuses when the file no longer holds the text it was worked out from (#1276)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-script-two-'))
+  try {
+    const settings = join(dir, 'progress-settings.json')
+    const write = (next, kind, base) => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, next, kind, base], { timeout: 5000, encoding: 'utf8' }).status
+    // Another save landed after the plugin read '{"lang":"en"}'.
+    writeFileSync(settings, '{"lang":"zh-TW"}\n')
+    assert.equal(write('{"lang":"en","style":"blue"}\n', 'ok', '{"lang":"en"}\n'), SETTINGS_CHANGED)
+    assert.equal(readFileSync(settings, 'utf8'), '{"lang":"zh-TW"}\n')
+    // It read no file, and one has appeared since.
+    assert.equal(write('{"style":"blue"}\n', 'missing', ''), SETTINGS_CHANGED)
+    assert.equal(readFileSync(settings, 'utf8'), '{"lang":"zh-TW"}\n')
+    // The text it read is still there: written.
+    assert.equal(write('{"lang":"zh-TW","style":"blue"}\n', 'ok', '{"lang":"zh-TW"}\n'), 0)
+    assert.equal(readFileSync(settings, 'utf8'), '{"lang":"zh-TW","style":"blue"}\n')
+    assert.deepEqual(readdirSync(dir).filter(name => name.endsWith('.tmp')), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// A rename puts a new file at the path, and the new file got the process's default mode: under a umask of 022 a
+// file kept private (0600) became readable by everyone (#1276, Greptile). Both writers copy the old file's bits.
+test('both writers keep the settings file private: 0600 stays 0600 under a umask of 022, and a new file is 0600 (#1276)', { skip: process.platform === 'win32' && 'Windows has no POSIX permission bits' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-mode-'))
+  const before = process.umask(0o022)
+  try {
+    const settings = join(dir, 'progress-settings.json')
+    const modeOf = () => (statSync(settings).mode & 0o777).toString(8)
+    const script = (next, kind, base) => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, next, kind, base], { timeout: 5000, encoding: 'utf8' }).status
+    writeFileSync(settings, '{"a":1}\n')
+    chmodSync(settings, 0o600)
+    assert.equal(replaceSettings(settings, '{"a":1}\n', '{"a":2}\n'), 'ok')
+    assert.equal(modeOf(), '600', 'replaceSettings keeps 0600')
+    assert.equal(script('{"a":3}\n', 'ok', '{"a":2}\n'), 0)
+    assert.equal(modeOf(), '600', 'the plugin write keeps 0600')
+    chmodSync(settings, 0o640)
+    assert.equal(replaceSettings(settings, '{"a":3}\n', '{"a":4}\n'), 'ok')
+    assert.equal(modeOf(), '640', 'another mode is kept as it was')
+    unlinkSync(settings)
+    assert.equal(replaceSettings(settings, null, '{"b":1}\n'), 'ok')
+    assert.equal(modeOf(), '600', 'replaceSettings makes a new file 0600')
+    unlinkSync(settings)
+    assert.equal(script('{"b":2}\n', 'missing', ''), 0)
+    assert.equal(modeOf(), '600', 'the plugin write makes a new file 0600')
+  } finally {
+    process.umask(before)
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -195,7 +268,7 @@ test('a read of the settings file does not wait on a FIFO with no writer (#1276)
     assert.equal(ran.error, undefined)
     assert.equal(ran.status, 0)
     assert.deepEqual(JSON.parse(ran.stdout), { kind: 'unsafe' })
-    const wrote = spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, '{}'], { timeout: 5000, encoding: 'utf8' })
+    const wrote = spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, '{}', 'missing', ''], { timeout: 5000, encoding: 'utf8' })
     assert.equal(wrote.error, undefined)
     assert.equal(wrote.status, SETTINGS_UNSAFE)
   } finally {
@@ -230,7 +303,7 @@ test('the plugin scripts read a plain file, report a missing one, and refuse a l
   try {
     const settings = join(dir, 'progress-settings.json')
     const read = () => JSON.parse(spawnSync(process.execPath, ['-e', SETTINGS_READ, '--', settings], { timeout: 5000, encoding: 'utf8' }).stdout)
-    const write = text => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, text], { timeout: 5000, encoding: 'utf8' }).status
+    const write = (text, kind = 'missing', base = '') => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, text, kind, base], { timeout: 5000, encoding: 'utf8' }).status
     assert.deepEqual(read(), { kind: 'missing' })
     assert.equal(write('{"style":"green"}\n'), 0)
     assert.deepEqual(read(), { kind: 'ok', text: '{"style":"green"}\n' })

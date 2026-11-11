@@ -5,7 +5,7 @@ export const LINES = [
 "",
 "// scripts/codex-local.ts",
 "import { createHash as createHash5, randomUUID } from \"node:crypto\";",
-"import { chmodSync, closeSync as closeSync8, constants as constants3, existsSync as existsSync4, fstatSync as fstatSync6, fsyncSync as fsyncSync2, lstatSync as lstatSync8, mkdirSync as mkdirSync6, openSync as openSync8, readFileSync as readFileSync9, readdirSync as readdirSync6, readSync as readSync5, realpathSync as realpathSync4, renameSync as renameSync6, rmdirSync as rmdirSync5, statSync as statSync5, unlinkSync as unlinkSync9, writeFileSync as writeFileSync8 } from \"node:fs\";",
+"import { chmodSync as chmodSync2, closeSync as closeSync8, constants as constants3, existsSync as existsSync4, fstatSync as fstatSync6, fsyncSync as fsyncSync2, lstatSync as lstatSync8, mkdirSync as mkdirSync6, openSync as openSync8, readFileSync as readFileSync9, readdirSync as readdirSync6, readSync as readSync5, realpathSync as realpathSync4, renameSync as renameSync6, rmdirSync as rmdirSync5, statSync as statSync5, unlinkSync as unlinkSync9, writeFileSync as writeFileSync8 } from \"node:fs\";",
 "import { homedir as homedir2 } from \"node:os\";",
 "import { basename as basename3, dirname as dirname6, isAbsolute as isAbsolute4, join as join12, relative as relative2, resolve as resolve9, sep } from \"node:path\";",
 "import { performance as performance3 } from \"node:perf_hooks\";",

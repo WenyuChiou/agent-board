@@ -27,7 +27,7 @@ import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
-import { readSettings, replaceSettings } from './settings-file'
+import { readSettings, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
@@ -750,15 +750,12 @@ const barStyleNow = (): BarStyle => barStyleOf(settingsNow())
 type SaveResult = 'ok' | 'invalid' | 'unsafe'
 const saveSettings = (patch: Record<string, unknown>): { result: SaveResult; text?: string } => {
   const file = settingsPath(path)
-  let found: ReturnType<typeof readSettings>
-  try { found = readSettings(file) } catch (error) { throw fileError(file, error, true) }
-  if (found.kind === 'unsafe') return { result: 'unsafe' }
-  const next = withBoardSettings(found.kind === 'ok' ? found.text : null, patch)
-  if (next === null) return { result: 'invalid' }
-  // A failed write names the file on the page, as a failed read does.
-  try { if (!replaceSettings(file, next)) return { result: 'unsafe' } } catch (error) { throw fileError(file, error) }
-  settingsKept = { text: next, at: Date.now() }
-  return { result: 'ok', text: next }
+  // The change is worked out from the file as it is when written, so a save made meanwhile is kept (#1276).
+  // A failed read or write names the file on the page.
+  let saved: ReturnType<typeof updateSettings>
+  try { saved = updateSettings(file, text => withBoardSettings(text, patch)) } catch (error) { throw fileError(file, error) }
+  if (saved.result === 'ok') settingsKept = { text: saved.text ?? null, at: Date.now() }
+  return saved
 }
 const saveBarStyle = (style: BarStyle): SaveResult => saveSettings({ style }).result
 

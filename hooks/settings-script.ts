@@ -4,6 +4,7 @@
 // refused, the read does not wait for a writer, and the write is a new file renamed over the path, so
 // it never goes through what the path points to. Run as `node -e SCRIPT -- <file> [<text>]`.
 export const SETTINGS_UNSAFE = 71
+export const SETTINGS_CHANGED = 72
 
 // Prints one JSON line: {kind:'missing'}, {kind:'unsafe'} or {kind:'ok',text}. Exit 1 on any other error.
 export const SETTINGS_READ = `
@@ -37,22 +38,49 @@ if (found === null) process.exitCode = 1
 else say(found)
 `
 
-// Exit 0 when written, ${SETTINGS_UNSAFE} when the path is a link or not a regular file (nothing written), 1 otherwise.
+// `node -e SCRIPT -- <file> <next> <kind> <base>`: replaces the file with <next>, which was worked out from <base> (the
+// text read earlier; <kind> is 'ok' for a file that held it, 'missing' for none). The file is read again just before
+// the swap and once after it: when it no longer holds <base>, nothing is written over it and the exit is
+// 72, so the caller reads and works the change out again and a save made meanwhile is not undone.
+// The new file gets the old one's permission bits (0600 when there was none).
+// Exit 0 when written, 71 when the path is a link or not a regular file (nothing written), 1 otherwise.
 export const SETTINGS_WRITE = `
 const fs = require('node:fs')
-const [file, text] = process.argv.slice(1)
+const [file, next, kind, base] = process.argv.slice(1)
+const held = () => {
+  try {
+    const stat = fs.lstatSync(file)
+    if (stat.isSymbolicLink() || !stat.isFile()) return 'unsafe'
+    const flag = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0) | (fs.constants.O_NOFOLLOW || 0)
+    return fs.readFileSync(file, { encoding: 'utf8', flag }) === base && kind === 'ok' ? 'same' : 'changed'
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return kind === 'missing' ? 'same' : 'changed'
+    if (error && ['ELOOP', 'EISDIR', 'ENXIO', 'EAGAIN'].includes(error.code)) return 'unsafe'
+    throw error
+  }
+}
 const finish = () => {
+  let mode = 0o600
   try {
     const stat = fs.lstatSync(file)
     if (stat.isSymbolicLink() || !stat.isFile()) return ${SETTINGS_UNSAFE}
+    mode = stat.mode & 0o777
   } catch (error) {
     if (!error || error.code !== 'ENOENT') return 1
   }
   const temp = file + '.' + process.pid + '.' + Date.now().toString(36) + '.tmp'
   try {
-    fs.writeFileSync(temp, text, { flag: 'wx' })
+    const early = held()
+    if (early !== 'same') return early === 'unsafe' ? ${SETTINGS_UNSAFE} : ${SETTINGS_CHANGED}
+    fs.writeFileSync(temp, next, { flag: 'wx', mode })
+    fs.chmodSync(temp, mode)
+    const late = held()
+    if (late !== 'same') {
+      fs.unlinkSync(temp)
+      return late === 'unsafe' ? ${SETTINGS_UNSAFE} : ${SETTINGS_CHANGED}
+    }
     fs.renameSync(temp, file)
-    return 0
+    return fs.readFileSync(file, 'utf8') === next ? 0 : ${SETTINGS_CHANGED}
   } catch {
     try { fs.unlinkSync(temp) } catch {}
     return 1
