@@ -6447,6 +6447,21 @@ require('node:module').syncBuiltinESMExports()
   } finally { await board.end([]) }
 })
 
+test('a plain board command keeps a page started with --codex-send, and a plain stop ends it', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  let url = null
+  try {
+    url = board.urlOf(await board.serve(['--quiet-board', '--codex-send']))
+    assert.ok(url)
+    const before = JSON.parse(readFileSync(board.served, 'utf8'))
+    // The command the README tells (and /agent-board) does not know the flag: it must not replace the page and end Send to Codex.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).pid, before.pid, 'the page was not replaced')
+    const stopped = await new Promise((done, fail) => execFile(process.execPath, [board.script, 'stop'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+    assert.equal(stopped.trim(), EN.serveStopped)
+  } finally { await board.end([url]) }
+})
+
 test('the board command in a read-only sandbox reuses a running page\'s link', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'acl-denied.cjs')
