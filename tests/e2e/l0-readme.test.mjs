@@ -420,9 +420,32 @@ describe('L0 discover and install from the README', () => {
       assert.ok(receipts.some(at => groupsAround(svg, at.index).some(classes => classes.includes('calm'))), `${file}: the calm closing board shows "${delivered}"`)
       assert.match(svg, /@media[^{]*reduce[^{]*\{[\s\S]*\.calm\s*\{\s*opacity\s*:\s*0/, `${file}: reduced motion hides the calm board`)
       assert.match(svg, /\.still\s*\{\s*display\s*:\s*none/, `${file}: the still board is hidden unless motion is reduced`)
+      assert.match(reduced[1], /\.still\s*\{\s*display\s*:\s*inline/, `${file}: reduced motion shows the still board`)
+      // Keyframe stops of class cN as [percent where the stop starts, opacity] pairs.
+      const stopsOf = name => {
+        const body = new RegExp(`@keyframes ${literal(name)} \\{((?:[^{}]|\\{[^{}]*\\})*)\\}`).exec(svg)?.[1] ?? ''
+        return [...body.matchAll(/([\d.%,\s]+)\{[^{}]*?opacity:\s*([\d.]+)/g)].map(stop => [Math.min(...stop[1].match(/[\d.]+/g).map(Number)), Number(stop[2])])
+      }
+      // Amber means someone waits: the logo's light and its halo are off once the answer is sent,
+      // through the start scene and the calm close (the last 30% of the loop), and at the loop's end.
+      const lights = [...svg.matchAll(/<circle class="a s (c\d+)" fill="#F8B500"/gi)].map(match => match[1])
+      assert.equal(lights.length, 2, `${file}: the logo's light and its halo move`)
+      for (const name of lights) {
+        const stops = stopsOf(name)
+        assert.ok(stops.length > 0 && stops.at(-1)[1] <= 0.1 && stops.filter(([at]) => at >= 70).every(([, value]) => value <= 0.1), `${file}: the logo's light (${name}) stays off after the answer is sent`)
+      }
       // The setup command stays on screen, the end frame included.
       const commands = [...svg.matchAll(new RegExp(`${literal(COMMAND)}</text>`, 'g'))]
       assert.ok(commands.some(command => isKept(groupsAround(svg, command.index))), `${file}: the end frame shows "${COMMAND}"`)
+      // ...and every frame before it: the box's group may dim while the terminal of scene 6 types the
+      // same command, never vanish. (The terminal's own copy comes and goes with its scene.)
+      for (const command of commands.filter(command => isKept(groupsAround(svg, command.index)))) {
+        for (const classes of groupsAround(svg, command.index)) {
+          for (const name of classes.filter(word => /^c\d+$/.test(word))) {
+            assert.ok(stopsOf(name).every(([, value]) => value >= 0.25), `${file}: "${COMMAND}" stays on screen in every frame (${name})`)
+          }
+        }
+      }
     }
   })
 

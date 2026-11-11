@@ -1035,7 +1035,8 @@ const cover = (lang: Lang): string => {
   const TAIL = 0.5
   // On screen during each of `spans` (rising `rise` px into place), and gone between. A span that
   // starts at 0 is already there at the loop's start, and one that ends at the loop's end leaves
-  // over the last TAIL seconds, so the loop turns by a cross-fade from scene 7 to scene 1.
+  // over the first half of the last TAIL seconds; scene 1 comes back in the second half, so the
+  // loop turns in order and no two captions share the same pixels.
   const appear = (spans: Array<[number, number]>, rise = 0, fin = 0.4, fout = 0.3): string => {
     const y = (v: number): string => (rise === 0 ? '' : `; transform: translateY(${v}px)`)
     const on = `opacity: 1${y(0)}`
@@ -1044,10 +1045,10 @@ const cover = (lang: Lang): string => {
     for (const [start, end] of spans) {
       if (start <= 0) stops.push([0, on])
       else stops.push([start, `opacity: 0${y(rise)}; ${EASE}`], [start + fin, on])
-      if (end >= LOOP) stops.push([LOOP - TAIL, on], [LOOP, gone])
+      if (end >= LOOP) stops.push([LOOP - TAIL, on], [LOOP - TAIL / 2, gone])
       else stops.push([end - fout, on], [end, gone])
     }
-    if ((spans[0]?.[0] ?? 1) <= 0) stops.push([LOOP - TAIL, gone], [LOOP, on])
+    if ((spans[0]?.[0] ?? 1) <= 0) stops.push([LOOP - TAIL / 2, gone], [LOOP, on])
     return track(stops)
   }
   const endsLoop = (spans: Array<[number, number]>): boolean => spans.some(([, end]) => end >= LOOP)
@@ -1106,7 +1107,7 @@ const cover = (lang: Lang): string => {
         [T_BACK, 'opacity: 0; transform: translateY(0px)'],
         [T_BACK + 0.3, 'opacity: 1; transform: translateY(0px)'],
         [LOOP - TAIL, 'opacity: 1; transform: translateY(0px)'],
-        [LOOP, 'opacity: 0; transform: translateY(0px)'],
+        [LOOP - TAIL / 2, 'opacity: 0; transform: translateY(0px)'],
       ])
     }
     const dy = dyOf(i)
@@ -1119,7 +1120,7 @@ const cover = (lang: Lang): string => {
       [T_UP, `opacity: 1; transform: translateY(${dy}px); ${MOVE}`],
       [T_BACK, 'opacity: 1; transform: translateY(0px)'],
       [LOOP - TAIL, 'opacity: 1; transform: translateY(0px)'],
-      [LOOP, 'opacity: 0; transform: translateY(0px)'],
+      [LOOP - TAIL / 2, 'opacity: 0; transform: translateY(0px)'],
     ])
   }
   const rows = rowsData.map((row, i) => `<g class="a ${rowTrack(i)} last">${rowBody(row, i)}</g>`).join('\n')
@@ -1131,7 +1132,7 @@ const cover = (lang: Lang): string => {
     [T_UP, `opacity: 1; transform: translateY(${headDy}px); ${MOVE}`],
     [T_BACK, 'opacity: 1; transform: translateY(0px)'],
     [LOOP - TAIL, 'opacity: 1; transform: translateY(0px)'],
-    [LOOP, 'opacity: 0; transform: translateY(0px)'],
+    [LOOP - TAIL / 2, 'opacity: 0; transform: translateY(0px)'],
   ])} last">${sectionHead(s.pgWorking, contentTop)}</g>`
   // Claude Code's card fades in beneath the flag, is answered, and leaves with the flag at the fold.
   const cardMove = track([
@@ -1218,8 +1219,8 @@ ${cardSvg}`
       [4.6, `opacity: ${dim}; ${spot}`],
       [T.morph, `opacity: ${dim}; ${spot}; ${MOVE}`],
       [T.morph + 0.8, `opacity: 0; ${row}`],
-      [LOOP - TAIL - 0.01, `opacity: 0; ${row}`],
-      [LOOP - TAIL, `opacity: 0; ${spot}`],
+      [LOOP - TAIL / 2 - 0.01, `opacity: 0; ${row}`],
+      [LOOP - TAIL / 2, `opacity: 0; ${spot}`],
       [LOOP, `opacity: 1; ${spot}`],
     ])
     return `<g class="a ${name1}">${terminal('dark', mono, name, body, WIN_ROWS, 0, 0, WIN_COLS)}</g>`
@@ -1290,7 +1291,7 @@ ${cardSvg}`
   const pipY = H - 36
   const pips = `<g class="pips">${COVER_SCENES.map((_, k) => `<rect x="${L + k * 36}" y="${pipY}" width="28" height="4" rx="2" fill="${LOOK.ink}" fill-opacity="0.16"/>`).join('')}${COVER_SCENES.map((start, k) => `<rect class="a ${appear([[start, ends[k] ?? LOOP]], 0, 0.3)}" x="${L + k * 36}" y="${pipY}" width="28" height="4" rx="2" fill="${LOOK.ink}"/>`).join('')}</g>`
   const synthetic = `<text x="${L + boxW}" y="${pipY + 5}" text-anchor="end" font-size="12" fill="${LOOK.muted}" fill-opacity="0.7">${esc(w.synthetic)}</text>`
-  // The logo's light: amber while Claude Code asks, and once more as the closing scene begins.
+  // The logo's light: amber while Claude Code asks, and off once the answer is sent (amber means waiting).
   const lit = `<circle class="a s ${track([
     [0, 'opacity: 0; transform: scale(0.86)'],
     [T.show, 'opacity: 0; transform: scale(0.86)'],
@@ -1298,10 +1299,6 @@ ${cardSvg}`
     [T.show + 1.1, 'opacity: 1; transform: scale(1)'],
     [T.sent - 0.05, 'opacity: 1; transform: scale(1)'],
     [T.sent + 0.4, 'opacity: 0; transform: scale(1)'],
-    [T.close, 'opacity: 0; transform: scale(0.86)'],
-    [T.close + 0.35, 'opacity: 1; transform: scale(1.18)'],
-    [T.close + 1, 'opacity: 1; transform: scale(1)'],
-    [T.close + 1.6, 'opacity: 0; transform: scale(1)'],
   ])}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
   const halo = `<circle class="a s ${track([
     [0, 'opacity: 0; transform: scale(1)'],
@@ -1312,9 +1309,6 @@ ${cardSvg}`
     [T.show + 3.8, 'opacity: 0.05; transform: scale(1.1)'],
     [T.show + 5, 'opacity: 0.3; transform: scale(1.6)'],
     [T.sent, 'opacity: 0; transform: scale(1.05)'],
-    [T.close, 'opacity: 0; transform: scale(1)'],
-    [T.close + 0.05, 'opacity: 0.6; transform: scale(1)'],
-    [T.close + 1.5, 'opacity: 0; transform: scale(1.9)'],
   ])}" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`
   const logo = lockupAt(L, 40, 30, LOOK.ink, `${halo}${lit}<circle class="still" fill="${LOOK.amber}" cx="${WORDMARK.light.cx}" cy="${WORDMARK.light.cy}" r="${WORDMARK.light.r}"/>`)
   // With reduced motion the board shows scene 4: Claude Code's question on top, the others working under it.
@@ -1367,7 +1361,7 @@ ${pointer}
 const ANSWER_WORDS: Record<Lang, { title: string; heads: [string, string, string]; notes: [[string, string], [string, string], [string, string]]; label: string }> = {
   en: {
     title: 'How your answer gets there',
-    heads: ['Sent now', 'Queued for the next turn', 'Copied for one paste'],
+    heads: ['Sent directly', 'Queued for the next turn', 'Copied for one paste'],
     notes: [
       ['Claude Code CLI received it', 'and confirmed it.'],
       ['Antigravity CLI received it.', 'Codex CLI queues it; delivery not yet tested.'],
@@ -1377,7 +1371,7 @@ const ANSWER_WORDS: Record<Lang, { title: string; heads: [string, string, string
   },
   'zh-TW': {
     title: '你的回覆怎麼送到',
-    heads: ['立刻送到', '排進下一回合', '複製，貼一次'],
+    heads: ['直接送到', '排進下一回合', '複製，貼一次'],
     notes: [
       ['Claude Code CLI 收到了，', '也回了確認。'],
       ['Antigravity CLI 已收到。', 'Codex CLI 也會排入，送達還沒實測。'],
@@ -1387,7 +1381,7 @@ const ANSWER_WORDS: Record<Lang, { title: string; heads: [string, string, string
   },
   'zh-CN': {
     title: '你的回复怎么送到',
-    heads: ['立刻送到', '排进下一回合', '复制，粘贴一次'],
+    heads: ['直接送到', '排进下一回合', '复制，粘贴一次'],
     notes: [
       ['Claude Code CLI 收到了，', '也回了确认。'],
       ['Antigravity CLI 已收到。', 'Codex CLI 也会排入，送达还没实测。'],
