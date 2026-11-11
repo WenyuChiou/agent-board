@@ -475,6 +475,64 @@ test('--json with --chat or --status through an older board script fails with th
   }
 }))
 
+test('--json for a maintenance mode through an older board script runs it, as 0.24.2 answers --codex-doctor --json (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  // 0.24.2 printed the text board for a plain --json, but JSON for --codex-doctor --json.
+  const text = `${prelude(f)}process.stdout.write(process.argv.includes('--codex-doctor') ? '{"doctor":"ok"}\\n' : process.argv.includes('--codex-trust') ? 'trust text\\n' : 'Agent Board (text, not JSON)\\n')\n// 0.24.2`
+  save(boardPath(f), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  const doctor = f.run(pkg, ['--codex-doctor', '--json'])
+  success(doctor)
+  assert.equal(doctor.stdout, '{"doctor":"ok"}\n')
+  assert.ok(doctor.stderr.includes('is from 0.24.2.'), doctor.stderr)
+  // A maintenance mode whose older script answers --json with text is still caught: its output is checked as JSON.
+  const trust = f.run(pkg, ['--codex-trust', '--json'])
+  assert.notEqual(trust.status, 0, 'text for --json fails')
+  assert.equal(trust.stdout, '', 'nothing but JSON may ever reach stdout')
+  // The board document itself is still refused before the older script runs.
+  const board = f.run(pkg, ['--json'])
+  assert.notEqual(board.status, 0)
+  assert.equal(board.stdout, '')
+}))
+
+test('a custom path with % is shown once per shell on Windows, and each shell receives it exactly (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  // Command Prompt expands %USERNAME% even inside double quotes.
+  const root = join(f.home, 'data %USERNAME% 100%')
+  const echo = `globalThis.AGENT_BOARD = ${JSON.stringify({ codexRoot: root, lang: 'en' })}\nprocess.stdout.write('update=' + JSON.stringify(process.env.AGENT_BOARD_UPDATE_COMMAND ?? null))\n// 0.24.2`
+  save(join(root, 'install-codex.json'), '{}')
+  save(join(root, 'agent-board.mjs'), echo)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(echo)}'] }]\n`)
+  const shown = f.run(pkg, ['--data-dir', root, '--print'], { NODE_OPTIONS: `--require ${JSON.stringify(join(repo, 'tests/fixtures/platform-win32.cjs'))}` })
+  success(shown)
+  const base = `npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir`
+  // For Command Prompt each % steps out of the quotes as ^%; PowerShell reads % inside double quotes as it is.
+  const forCmd = `"${root.replaceAll('%', '"^%"')}"`
+  assert.equal(shown.stdout, `update=${JSON.stringify(`Command Prompt: ${base} ${forCmd}; PowerShell: ${base} "${root}"`)}`)
+  const lines = Object.fromEntries(shown.stderr.split(/\r?\n/).map(line => /^ {2}(Command Prompt|PowerShell): (.+)$/.exec(line)).filter(Boolean).map(match => [match[1], match[2]]))
+  assert.deepEqual(Object.keys(lines).sort(), ['Command Prompt', 'PowerShell'], shown.stderr)
+  if (process.platform !== 'win32') return
+  // Stand-in npx shims, as npm installs them (npx.cmd for Command Prompt, npx.ps1 for PowerShell), that record the arguments.
+  const stub = join(f.box, 'stub')
+  save(join(stub, 'npx.cmd'), `@"${process.execPath}" "%~dp0npx.js" %*\r\n`)
+  save(join(stub, 'npx.ps1'), `& "${process.execPath}" "$PSScriptRoot\\npx.js" @args\r\nexit $LASTEXITCODE\r\n`)
+  save(join(stub, 'npx.js'), "require('node:fs').writeFileSync(process.env.STUB_OUT, JSON.stringify(process.argv.slice(2)))\n")
+  const out = join(f.box, 'argv.json')
+  const path = `${stub};${f.env.PATH ?? f.env.Path}`
+  // USERNAME is set, so an expanded %USERNAME% would show in the path received.
+  const env = { ...f.env, PATH: path, Path: path, STUB_OUT: out, USERNAME: 'someone-else' }
+  const shells = {
+    'Command Prompt': command => spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], { env, encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, timeout: 30000 }),
+    PowerShell: command => spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 }),
+  }
+  for (const [shell, runIn] of Object.entries(shells)) {
+    rmSync(out, { force: true })
+    const result = runIn(lines[shell])
+    assert.equal(result.status, 0, `${shell}: ${result.stderr}`)
+    assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), [`${manifest.name}@${manifest.version}`, 'setup', '--agent', 'codex', '--data-dir', root], shell)
+  }
+}))
+
 test('the displayed update command quotes a custom path for the shell it is shown for (review of #1328)', () => fixture(f => {
   const pkg = packed(f)
   const root = join(f.home, "data $HOME $(touch pwned) it's")

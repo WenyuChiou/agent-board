@@ -177,7 +177,8 @@ const isWin = process.platform === 'win32'
 const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(home.toLowerCase()) : path.startsWith(home)) ? `~${path.slice(home.length)}` : path
 // The path as one argument for the shell the command is shown for: single quotes on POSIX. On Windows, double quotes,
 // which cmd and PowerShell both read; PowerShell runs $(...) and backticks inside them, so such a path gets its single quotes.
-const quoted = (text, shell) => !isWin ? `'${text.replaceAll("'", "'\\''")}'` : shell !== 'cmd' && /[$`]/.test(text) ? `'${text.replaceAll("'", "''")}'` : `"${text}"`
+// cmd expands %NAME% even inside double quotes, so for cmd each % steps out of the quotes as ^%, which cmd reads as a plain %.
+const quoted = (text, shell) => !isWin ? `'${text.replaceAll("'", "'\\''")}'` : shell !== 'cmd' && /[$`]/.test(text) ? `'${text.replaceAll("'", "''")}'` : shell === 'cmd' ? `"${text.replaceAll('%', '"^%"')}"` : `"${text}"`
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
 const run = (path, passed, { isSetup = false, isRemove = false, env = process.env, isJsonChecked = false } = {}) => {
   const setupCmd = isRemove ? `npx ${name} remove` : `npx ${name} setup`
@@ -282,6 +283,10 @@ const hash = text => createHash('sha256').update(text.includes('\n') ? text.slic
 let updateCommand = ''
 // --json promises JSON, so a script that cannot return it is found out even for --chat and --status.
 let isJsonUnverified = args.includes('--json')
+// The maintenance modes (scripts/codex-local.ts): an older script may already answer their --json, so only the board
+// document is refused outright below; their output is still held and checked as JSON.
+const maintenanceModes = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event', '--mailbox']
+const isBoardJson = isJsonUnverified && !args.some(arg => maintenanceModes.includes(arg))
 if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
   try {
     // The bundle is kept in hooks/board-script.ts and its parts; the shared reader joins them.
@@ -310,8 +315,9 @@ if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
         const agentOpt = agents.length ? ` --agent ${agents.join(',')}` : ''
         const needsQuote = root !== join(home, '.agent-board') && /[^\w.:\\/~@+,=-]/.test(folder)
         const dataOpt = style => root !== join(home, '.agent-board') ? ` --data-dir ${needsQuote ? quoted(folder, style) : folder}` : ''
-        // Command Prompt reads only double quotes and PowerShell runs $(...) and backticks inside them, so such a path is shown once per shell.
-        const isTwoShells = isWin && needsQuote && /[$`]/.test(folder)
+        // Command Prompt reads only double quotes and expands %NAME% inside them, and PowerShell runs $(...) and backticks inside
+        // them, so such a path is shown once per shell.
+        const isTwoShells = isWin && needsQuote && /[$`%]/.test(folder)
         const opts = agentOpt + dataOpt()
         const command = `npx ${name}@${v} setup${isTwoShells ? agentOpt + dataOpt('cmd') : opts}`
         const labels = message(['Command Prompt:', 'PowerShell:'], ['命令提示字元：', 'PowerShell：'], ['命令提示符：', 'PowerShell：'])
@@ -326,8 +332,9 @@ if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
           ? message(`agent-board ${v}: the board script at ${path} is from ${old}; the Claude Code plugin wrote it. To update it, update the agent-board plugin in Claude Code, then run /progress connect.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版，由 Claude Code 外掛寫入。更新：先在 Claude Code 更新 agent-board 外掛，再執行 /progress connect。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版，由 Claude Code 插件写入。更新：先在 Claude Code 更新 agent-board 插件，再运行 /progress connect。`)
           : message(`agent-board ${v}: the board script at ${path} is a different build (newer, or edited). It runs as it is.`, `agent-board ${v}：${path} 的看板程式是另一個版本（較新，或被改過），照原樣執行。`, `agent-board ${v}：${path} 的看板程序是另一个版本（较新，或被改过），照原样运行。`))
       }
-      // An older script cannot return the JSON this version promises, so the call fails with the notice instead of printing text and exiting 0 (#1304).
-      if (old && args.includes('--json')) process.exit(1)
+      // An older script cannot return the board document this version promises, so that call fails with the notice instead of
+      // printing text and exiting 0 (#1304). A maintenance mode's --json runs, and its output is checked as JSON.
+      if (old && isBoardJson) process.exit(1)
     }
   } catch (error) {
     console.error(message(`agent-board ${v}: could not compare the board script at ${installed} with this package (${code(error)}). It runs as it is.`, `agent-board ${v}：無法比對 ${installed} 的看板程式與這個套件（${code(error)}），照原樣執行。`, `agent-board ${v}：无法比对 ${installed} 的看板程序与这个包（${code(error)}），照原样运行。`))
