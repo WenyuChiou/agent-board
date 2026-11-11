@@ -12673,8 +12673,8 @@ test('the page of a grouped board draws each question once, copies an answer and
       assert.ok(fresh.node('board').textContent.includes(words.pgReady))
       // With nothing connected the empty board names no agent and tells how to start.
       assert.ok(fresh.node('board').textContent.includes(words.pgStartAny))
-      // (The version label and the project's name on GitHub are the same in every language.)
-      const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ')
+      // (The version label, the update command and the project's name on GitHub are the same in every language.)
+      const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion' && key !== 'pgVersionsOlder').map(([, value]) => value).join(' ')
       if (words === EN) assert.doesNotMatch(labels, /\p{Script=Han}/u)
       else assert.doesNotMatch(labels.replaceAll('Agent Board', '').replaceAll('GitHub', '').replaceAll('Claude Code', '').replaceAll('Codex', ''), /[A-Za-z]/)
     }
