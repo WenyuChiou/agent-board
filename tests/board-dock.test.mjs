@@ -182,7 +182,7 @@ test('#1084: the computer\'s page keeps the window place in the settings file; a
 const literal = value => `'${value.replace(/'/g, "''")}'`
 const runLaunch = (programs, answer, cwd) => new Promise(done => {
   const command = dockCommand(programs, literal(cwd), 1500, true)
-  const child = spawn(join(process.env.SystemRoot ?? 'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  const child = spawn(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
   let out = ''
   let isAnswered = false
   child.stdout.setEncoding('utf8')
@@ -202,7 +202,7 @@ test('#1084: the launch PowerShell reads the screens, then starts the program wi
     const stand = join(root, 'stand-in.mjs')
     writeFileSync(stand, `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(seen)}, JSON.stringify(process.argv.slice(2)))\n`)
     const app = `--app=${address}&dock=1`
-    const started = await runLaunch(`${literal('C:\no\such\browser.exe')}, ${literal(process.execPath)}`, `"${stand}" "--window-size=480,1040" "${app}"`, root)
+    const started = await runLaunch(`${literal(join(root, 'no-such-browser.exe'))}, ${literal(process.execPath)}`, `"${stand}" "--window-size=480,1040" "${app}"`, root)
     assert.equal(started.code, 0, started.lines.join('\n'))
     const probe = probeOf(started.lines[0])
     assert.ok(probe !== null && probe.works.length >= 1, `the probe reads every monitor: ${started.lines[0]}`)
@@ -210,7 +210,7 @@ test('#1084: the launch PowerShell reads the screens, then starts the program wi
     for (let i = 0; i < 100 && !existsSync(seen); i++) await new Promise(r => setTimeout(r, 100))
     assert.deepEqual(JSON.parse(readFileSync(seen, 'utf8')), ['--window-size=480,1040', app])
 
-    const none = await runLaunch(literal('C:\no\such\browser.exe'), `"${app}"`, root)
+    const none = await runLaunch(literal(join(root, 'no-such-browser.exe')), `"${app}"`, root)
     assert.equal(none.code, 1)
     const unanswered = await runLaunch(literal(process.execPath), null, root)
     assert.equal(unanswered.code, 2)
