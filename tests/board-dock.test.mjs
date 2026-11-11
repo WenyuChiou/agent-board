@@ -173,6 +173,10 @@ test('#1084: the computer\'s page keeps the window place in the settings file; a
     assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')).window, { x: -1500, y: 20, width: 700, height: 900 })
     assert.equal((await postFrom('pnew', { x: 20, y: 20, width: 700, height: 900 })).status, 200)
     assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')).window, { x: 20, y: 20, width: 700, height: 900 })
+    // A page that said it is gone is retired: its late report is refused too.
+    assert.equal((await fetch(new URL('/api/page-gone', page), { method: 'POST', headers: { 'x-board-token': token, 'x-board-page': 'pnew', 'content-type': 'application/json' }, body: '{}' })).status, 200)
+    assert.equal((await postFrom('pnew', { x: 30, y: 30, width: 700, height: 900 })).status, 409)
+    assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')).window, { x: 20, y: 20, width: 700, height: 900 })
     // A settings file that is a folder, or a link to another file, is left as it is (#1261).
     const settings = join(root, 'progress-settings.json')
     rmSync(settings)
