@@ -42,16 +42,19 @@ const writeClaude = async (f, isWaiting) => {
   writeFileSync(f.progress, upsertAutoBlock(previous, await claudeMirror(f, isWaiting), EN))
 }
 
+// The README's support table names the agents with a live record; every agent here still walks its own
+// journey, so the table's agents must all be among them (Muse Code, DeepSeek Harness and OpenClaw are not in it).
 const listedAgents = () => {
-  const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8').replaceAll('\r\n', '\n')
-  const heading = readme.indexOf('### Open the board in your agent\n')
+  const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8')
+  const heading = readme.search(/^## Supported agents\r?$/m)
   assert.ok(heading >= 0)
-  const lines = readme.slice(heading).split('\n')
+  const lines = readme.slice(heading).split(/\r?\n/)
   const start = lines.findIndex(line => line.startsWith('|'))
   const end = lines.findIndex((line, i) => i > start && !line.startsWith('|'))
   const names = lines.slice(start, end).filter(line => line.startsWith('| <img')).map(line => /alt="([^"]+)"/.exec(line)?.[1])
-  assert.deepEqual(names, Object.keys(agents), 'README command table lists the ten agents in order')
-  return names
+  assert.equal(names.length, 7, 'the README support table lists the seven agents with a live record')
+  for (const name of names) assert.ok(name in agents, `${name} has a journey`)
+  return Object.keys(agents)
 }
 
 const cache = new Map()

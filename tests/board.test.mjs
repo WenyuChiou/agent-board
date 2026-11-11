@@ -17,7 +17,7 @@ import childProcess from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
-import { pickSurface, AGENT_ENV_VARS } from '../hooks/surface.ts'
+import { pickSurface, AGENT_ENV_VARS, sshTargetOf, pagePortOf } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
@@ -624,7 +624,15 @@ test('a --serve whose server cannot start says so without mentioning a page', ()
     'zh-CN': '打不开看板网页：服务器没有启动。',
   }
   for (const [lang, line] of Object.entries(lines)) {
-    const text = run(lang, ['--serve', '--no-open', '--port', '65536'])
+    let text = ''
+    try {
+      run(lang, ['--serve', '--no-open', '--port', '65536'])
+      assert.fail('a --serve that started no page exits non-zero (#1292)')
+    } catch (error) {
+      if (error.code === 'ERR_ASSERTION') throw error
+      assert.equal(error.status, 1, 'a --serve that started no page exits 1 (#1292)')
+      text = error.stdout
+    }
     assert.equal(text.trim().split('\n').at(-1), line)
     assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
     assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
@@ -3823,7 +3831,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   }
   let model = viewed(first)
   let clockNow = now === undefined ? Date.now() : now
-  let scheduled
+  let scheduled, pollMs
   const delays = []
   const windowEvents = {}
   const win = {
@@ -3852,8 +3860,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     Date: { now: () => clockNow },
     setTimeout: (run, delay) => {
       delays.push(delay)
-      // Only the board's own poll (every 3 seconds) is the next redraw; the short waits of a moving page are not.
-      if (delay === 3000 || delay === undefined) scheduled = run
+      // Identify the shipped refresh callback, independently of its delay or motion timers.
+      if (run.name === 'refresh') { scheduled = run; pollMs = delay }
       return 1
     },
     clearTimeout: () => {},
@@ -3908,6 +3916,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     active: () => document.activeElement,
     title: () => document.title,
     delays,
+    get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: () => windowEvents.pagehide?.(),
     restore: persisted => windowEvents.pageshow?.({ persisted }),
@@ -5686,6 +5695,9 @@ const serveIn = () => {
   }
   const serve = (extra = []) =>
     new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+  // A start that fails exits 1 (#1292): its output and status, for the tests of that failure.
+  const serveFailing = (extra = [], timeout = 20_000) =>
+    new Promise(done => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout }, (error, out) => done({ status: error ? error.code : 0, out })))
   const urlOf = out => out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0] ?? null
   const served = servedAt(run, path)
   // Closes every page it was given, and the one its address file names when a test could not read
@@ -5713,7 +5725,7 @@ const serveIn = () => {
     }
     await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
-  return { dir, path, script, env, serve, urlOf, served, end }
+  return { dir, path, script, env, serve, serveFailing, urlOf, served, end }
 }
 
 // A test that may run out of time writes what it saw so far to stderr just before the test runner
@@ -6047,10 +6059,11 @@ test('Windows page startup times out without leaving its child or ready files', 
   let pid
   try {
     const began = performance.now()
-    const out = await board.serve()
+    const { status, out } = await board.serveFailing()
     const elapsed = performance.now() - began
     assert.ok(elapsed >= 9000 && elapsed < 18000, `startup ended after ${elapsed} ms`)
     assert.equal(out.trim(), EN.serveFailed(EN.serveNotStarted))
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
     assert.ok(existsSync(marker), 'the child must start before the timeout')
     pid = Number(readFileSync(marker, 'utf8'))
     for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
@@ -6136,6 +6149,46 @@ test('over SSH, in a terminal with no browser, plain agent-board runs the live t
   } finally {
     if (child && child.exitCode === null) child.kill()
     await board.end([])
+  }
+})
+
+test('over SSH with a config folder variable set, plain agent-board opens the page and says how to forward its port (#1283)', { timeout: 40_000 }, async () => {
+  for (const name of ['HERMES_HOME', 'OPENCODE_CONFIG_DIR']) {
+    const board = serveIn()
+    let url = null
+    try {
+      const shim = join(board.dir, 'ssh-page-shim.cjs')
+      writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
+      // A person's own profile can set an agent's config folder; that still picks the page.
+      const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '', [name]: join(board.dir, 'own-config') }
+      for (const key of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[key]
+      const out = await new Promise((done, fail) => {
+        execFile(process.execPath, ['--require', shim, board.script], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
+      })
+      url = board.urlOf(out)
+      assert.ok(url, `${name}: the page's address is printed: ${JSON.stringify(out)}`)
+      const port = Number(new URL(url).port)
+      const lines = out.trim().split('\n')
+      assert.equal(lines.at(-1), url, `${name}: the address stays the last line`)
+      assert.equal(lines.at(-2), EN.serveSshHint(port, '203.0.113.9', url), `${name}: the line before it says how to forward the port`)
+      assert.doesNotMatch(out, /\u001b\[\?1049h|Opened Agent Board|No browser found/, `${name}: no terminal board, no window, no browser note`)
+      const runAgain = extra => new Promise((done, fail) => {
+        execFile(process.execPath, ['--require', shim, board.script], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
+      })
+      // An SSH server on another port: the command must name it, or the forward reaches port 22.
+      const other = (await runAgain({ SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222' })).trim().split('\n')
+      assert.equal(other.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', url), `${name}: the SSH port is named`)
+      // A page already open somewhere on the remote computer: the person here still needs the forward.
+      await fetch(url)
+      const open = (await runAgain({})).trim().split('\n')
+      assert.equal(open.at(-1), EN.boardPageAlreadyOpen(url), `${name}: the page counts as open`)
+      assert.equal(open.at(-2), EN.serveSshHint(port, '203.0.113.9', url), `${name}: the forward is still offered`)
+      // The terminal board's `o` keeps its note to the address alone, so no two addresses run together.
+      const keys = spawnSync(process.execPath, [board.script, '--keys', 'o', '--no-open'], { env, encoding: 'utf8', timeout: 20_000, windowsHide: true })
+      assert.equal(keys.status, 0, keys.stderr)
+      assert.ok(keys.stdout.includes(url), keys.stdout)
+      assert.doesNotMatch(keys.stdout, /\?t=[\w-]+(?:http|Forward)/, `${name}: the address is not joined to another line`)
+    } finally { await board.end([url]) }
   }
 })
 
@@ -6237,7 +6290,22 @@ test('the SSH hint links to the page with its token', () => {
     assert.ok(hint.includes(`ssh -L ${port}:127.0.0.1:${port} ${host}`), hint)
     assert.ok(hint.includes(url), hint)
   }
-  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshHost(), server.url)'))
+  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshTargetOf(process.env), server.url)'))
+  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(pagePortOf(opened.url), sshTargetOf(process.env), opened.url)'))
+})
+
+test('the SSH forwarding command names a valid non-22 SSH port and the page port a URL leaves out (#1283)', () => {
+  const at = port => ({ SSH_CONNECTION: `203.0.113.5 50000 203.0.113.9 ${port}`, HOSTNAME: 'board.example' })
+  assert.equal(sshTargetOf(at(22)), '203.0.113.9')
+  assert.equal(sshTargetOf(at(2222)), '-p 2222 203.0.113.9')
+  assert.equal(sshTargetOf(at(1)), '-p 1 203.0.113.9')
+  assert.equal(sshTargetOf(at(65535)), '-p 65535 203.0.113.9')
+  for (const bad of ['0', '65536', '99999', '-1', 'x22', '']) assert.equal(sshTargetOf(at(bad)), '203.0.113.9', `port ${JSON.stringify(bad)} is not passed to ssh -p`)
+  assert.equal(sshTargetOf({ SSH_CONNECTION: '203.0.113.5 50000', HOSTNAME: 'board.example' }), 'board.example')
+  assert.equal(sshTargetOf({ SSH_TTY: '/dev/pts/0' }), 'host')
+  assert.equal(pagePortOf('http://127.0.0.1:43210/?t=synthetic'), 43210)
+  assert.equal(pagePortOf('http://127.0.0.1:80/?t=synthetic'), 80, 'a URL drops :80, the command must not say 0')
+  assert.equal(pagePortOf('http://127.0.0.1/?t=synthetic'), 80)
 })
 
 test('an agent or a pipe running agent-board with no surface flag opens one page and prints one bare URL', async () => {
@@ -6461,7 +6529,8 @@ test('Windows page startup refuses an existing address file granted to another a
     url = board.urlOf(await board.serve(['--quiet-board']))
     assert.ok(url)
     execFileSync(icacls, [board.served, '/grant', '*S-1-1-0:R', '/L'], { windowsHide: true, stdio: 'pipe' })
-    const again = await board.serve(['--quiet-board'])
+    const { status, out: again } = await board.serveFailing(['--quiet-board'])
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
     assert.ok(!again.includes(url), 'the widened address must not be used to contact or open the running page')
     assert.equal(again.trim(), EN.serveStoreFailed('MESSAGE_STORE_IN_USE', board.served.replace(/\.json$/, '-messages')))
   } finally {
@@ -6551,7 +6620,10 @@ require('node:module').syncBuiltinESMExports()
       renameSync(other.served, replay)
       const renamed = fs.lstatSync(replay)
       assert.deepEqual([renamed.dev, renamed.ino, renamed.size], [original.dev, original.ino, original.size])
-      victimUrl = victim.urlOf(await victim.serve(['--quiet-board']))
+      const started = await victim.serveFailing(['--quiet-board'])
+      victimUrl = victim.urlOf(started.out)
+      // Failing closed starts no page, so that start exits 1 (#1292).
+      assert.equal(started.status, location === 'legacy' ? 0 : 1, started.out)
       assert.deepEqual(readFileSync(requests, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)), [], 'a mismatched record authorizes no request to the other board')
       const pid = JSON.parse(otherBytes.toString('utf8')).pid
       assert.doesNotThrow(() => process.kill(pid, 0), 'the other owned board remains running')
@@ -7028,7 +7100,8 @@ require('node:module').syncBuiltinESMExports()
 `)
   board.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
   try {
-    const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 50_000 }, (error, text) => (error ? fail(error) : done(text))))
+    const { status, out } = await board.serveFailing(['--quiet-board'], 50_000)
+    assert.equal(status, 1, 'no page started, so the command exits 1 (#1292)')
     assert.equal(board.urlOf(out), null, out)
     assert.equal(out.trim(), EN.serveStoreFailed('ACL_CHECK_TIMEOUT', messages), out)
   } finally { await board.end([]) }
@@ -7132,6 +7205,7 @@ require('node:module').syncBuiltinESMExports()
     try {
       const ran = spawnSync(process.execPath, [board.script, '--serve', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 30_000 })
       assert.equal(ran.stdout.trim(), EN.serveFailed(fault === 'timeout' ? EN.serveRuntimeCheckTimeout : EN.serveRuntimePrivate), fault)
+      assert.equal(ran.status, 1, `a --serve that started no page exits non-zero (#1292): ${fault}`)
       assert.ok(!existsSync(board.served), 'the empty file is discarded')
       assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [], fault)
       assert.ok(!ran.stdout.includes('http:'))
@@ -10668,10 +10742,14 @@ test('official agent marks retain their source viewport on every board surface',
         assert.ok(image.includes('fill="#0082FB"'))
         assert.ok(image.includes(`<path d="${icon.paths[0]}"/>`))
       }
-      for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const theme of ['light', 'dark']) {
-        const cover = readFileSync(new URL(`../docs/images/cover-${lang}-${theme}.svg`, import.meta.url), 'utf8')
-        assert.ok(cover.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/${theme}`)
-        assert.ok(cover.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/${theme}`)
+      // The new dark covers show only agents with a live record, and Muse Code has none yet; the old
+      // light covers keep its mark until they retire.
+      for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+        const light = readFileSync(new URL(`../docs/images/cover-${lang}-light.svg`, import.meta.url), 'utf8')
+        assert.ok(light.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/light`)
+        assert.ok(light.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/light`)
+        const dark = readFileSync(new URL(`../docs/images/cover-${lang}-dark.svg`, import.meta.url), 'utf8')
+        assert.ok(!dark.includes(`<path d="${icon.paths[0]}"/>`), `Muse is off the dark cover until it has a live record: ${lang}`)
       }
     } else assert.equal(icon.ink, undefined, 'existing marks retain their white foreground')
     if (official[icon.file]) {
@@ -10972,7 +11050,7 @@ test("the page's motion stops under reduced motion and every change still lands"
     const needs = shownWords(dom.node('needs'))
     assert.ok(needs.includes('Gamma question') && needs.includes('Beta question') && !needs.includes('Alpha question'), `${motion}: ${needs}`)
     assert.equal(dom.node('count-needs').textContent, '2', motion)
-    if (motion === 'reduce') assert.deepEqual(dom.delays.filter(delay => delay !== 3000), [], 'nothing waits for a transition')
+    if (motion === 'reduce') assert.deepEqual(dom.delays.filter(delay => delay !== dom.pollMs), [], 'nothing waits for a transition')
   }
 })
 
@@ -13137,12 +13215,12 @@ test('a Hidden notice restores that exact question directly, including after a r
   }
 })
 
-test('after Send the hide button named by each README is visible without More', async () => {
+test('after Send the hide button named by each README and guide is visible without More', async () => {
   const isVisible = node => {
     for (let one = node; one; one = one.parentNode) if (one.hidden || one.inert || String(one.className || '').split(' ').includes('gone')) return false
     return true
   }
-  for (const [lang, readme] of [['en', 'README.md'], ['zh-TW', 'README.zh-TW.md'], ['zh-CN', 'README.zh-CN.md']]) {
+  for (const [lang, readme, guide] of [['en', 'README.md', 'docs/GUIDE.md'], ['zh-TW', 'README.zh-TW.md', 'docs/GUIDE.zh-TW.md'], ['zh-CN', 'README.zh-CN.md', 'docs/GUIDE.zh-CN.md']]) {
     const html = await sourcePage(lang)
     const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
     const model = cardsModel()
@@ -13157,7 +13235,7 @@ test('after Send the hide button named by each README is visible without More', 
     await dom.flush()
     const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
     assert.ok(hide, 'the documented hide button is visible after sending')
-    assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), readme)
+    for (const file of [readme, guide]) assert.ok(readFileSync(new URL('../' + file, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), file)
     hide.click()
     await dom.flush()
     assert.equal(dom.requests.at(-1).body.type, 'hide')

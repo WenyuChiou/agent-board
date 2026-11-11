@@ -194,10 +194,10 @@ test('after removal, the commands the README and remove output point to print pl
   // 1. All three READMEs point to npx @wenyuchiou/agent-board rather than the direct node script
   for (const [name, expectedLang] of [['README.md', 'en'], ['README.zh-TW.md', 'zh-TW'], ['README.zh-CN.md', 'zh-CN']]) {
     const text = readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
-    assert.ok(!text.includes('`node "$HOME/.agent-board/agent-board.mjs"`'), `${name} must not point to removed board script in surface table`)
-    assert.ok(!text.includes('node "$HOME/.agent-board/agent-board.mjs" --codex-doctor'), `${name} must not point to removed board script in troubleshooting`)
-    assert.ok(text.includes('`npx @wenyuchiou/agent-board`'), `${name} must point to npx launcher in surface table`)
-    assert.ok(text.includes('npx @wenyuchiou/agent-board --codex-doctor --agent codex'), `${name} must point to npx launcher in troubleshooting`)
+    assert.ok(!text.includes('agent-board.mjs'), `${name} must not point to the board script that remove deletes`)
+    for (const flags of ['', ' --lan', ' --json']) {
+      assert.ok(text.includes(`\`npx @wenyuchiou/agent-board${flags}\``), `${name} must point to the npx launcher: npx @wenyuchiou/agent-board${flags}`)
+    }
   }
 
   // 2. After remove --apply, remove's output names the npx command and explains the direct command stops working

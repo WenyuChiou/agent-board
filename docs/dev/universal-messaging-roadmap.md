@@ -186,7 +186,7 @@ Any agent or person who is not an author of a slice may run its QA; `antigravity
 ```sh
 node scripts/review-queue.mjs
 gh pr list --repo WenyuChiou/agent-board --state open --json number,title,isDraft,headRefName,headRefOid
-gh issue list --repo WenyuChiou/agent-board --state open --milestone "0.25.0 Send to Claude, hand-off, versions and doctor" --json number,title,labels,assignees
+gh issue list --repo WenyuChiou/agent-board --state open --milestone "Phase 2: Send to Claude, hand-off, versions and doctor" --json number,title,labels,assignees
 ```
 
 ### Step 2 — Technical QA Checklist on Incoming PRs
