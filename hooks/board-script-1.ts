@@ -7,7 +7,7 @@ export const LINES = [
 "import { createHash as createHash5, randomUUID } from \"node:crypto\";",
 "import { chmodSync, closeSync as closeSync8, constants as constants2, existsSync as existsSync4, fstatSync as fstatSync6, fsyncSync as fsyncSync2, lstatSync as lstatSync7, mkdirSync as mkdirSync6, openSync as openSync8, readFileSync as readFileSync8, readdirSync as readdirSync6, readSync as readSync5, realpathSync as realpathSync4, renameSync as renameSync5, rmdirSync as rmdirSync5, statSync as statSync5, unlinkSync as unlinkSync8, writeFileSync as writeFileSync7 } from \"node:fs\";",
 "import { homedir as homedir2 } from \"node:os\";",
-"import { basename as basename3, dirname as dirname6, isAbsolute as isAbsolute4, join as join12, relative as relative2, resolve as resolve9, sep } from \"node:path\";",
+"import { basename as basename3, dirname as dirname6, isAbsolute as isAbsolute4, join as join13, relative as relative2, resolve as resolve9, sep } from \"node:path\";",
 "import { performance as performance3 } from \"node:perf_hooks\";",
 "import { pathToFileURL } from \"node:url\";",
 "",
