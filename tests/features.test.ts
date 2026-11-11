@@ -1799,8 +1799,11 @@ test('a lone straight quote, such as an inch mark, is a literal character, and t
   expect(lastQuestion('Should I fix the stray " here? "Yes" is fine. The rack is 12" wide.')).toBe('Should I fix the stray " here?')
   expect(lastQuestion('他問 " 要不要？我可以幫忙"然後走了，桌子高12"。')).toBeNull()
   expect(lastQuestion('Should I fix the stray " here? "," is valid.')).toBe('Should I fix the stray " here?')
-  // An escaped quote is a character, so it opens no later quotation.
-  expect(lastQuestion('Should I fix the stray " here? \\"Yes\\" is fine.')).toBe('Should I fix the stray " here?')
+  expect(lastQuestion('Should I fix the stray " here? "42" is fine.')).toBe('Should I fix the stray " here?')
+  // A quote opened right after a reporting word reports what was said, so a later quotation does not undo it.
+  expect(lastQuestion('他問 " 要不要？我可以幫忙"然後說"好"')).toBeNull()
+  expect(lastQuestion('他問 " 要不要？我可以幫忙"然後寫"好')).toBeNull()
+  expect(lastQuestion('I asked "Ready? The label is \\"blue\\".')).toBeNull()
   // A straight quote in code is a character, so it neither opens nor closes a quotation.
   expect(lastQuestion('The tokens are `name"` and `"`. Should I escape both? "No" leaves them unchanged.')).toBe('Should I escape both?')
   expect(lastQuestion('I compared `name"` and `"` and then asked "Ready?"')).toBeNull()

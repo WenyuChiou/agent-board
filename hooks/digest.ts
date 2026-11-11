@@ -208,22 +208,18 @@ const isQuoted = (line: string, mark: number): boolean => {
   // A quote the reply talks about (`escape " here?`) has no partner after the mark. A partner right
   // after the mark closes (`他問"要不要?"好的`). Otherwise the partner opens a later quotation, and the
   // question asks, when a space comes before it (`stray " here? "Yes"`, #1290) or the quote before
-  // the mark stands between spaces (`要修這個 " 嗎？回答"好"即可`), and that quotation closes.
-  // An escaped quote (`\"`) is a character here too, so it is never the partner.
-  const nextQuote = (from: number): number => {
-    for (let i = from; i < line.length; i += 1) {
-      if (line[i] === '\\') i += 1
-      else if (line[i] === '"') return i
-    }
-    return -1
-  }
-  const partner = nextQuote(mark + 1)
+  // the mark stands between spaces (`要修這個 " 嗎？回答"好"即可`), and that quotation closes. A quote
+  // opened right after a reporting word in the same sentence (`他問 "`, `I asked "`) is what was said,
+  // so its partner closes it (`他問 " 要不要？我可以幫忙"然後說"好"`).
+  const partner = line.indexOf('"', mark + 1)
   const isRightAfter = /^[?？]["”」』)）]*$/.test(line.slice(mark, partner))
   const isSpaced = (at: number): boolean => /\s/.test(line[at - 1] ?? ' ') && /\s/.test(line[at + 1] ?? ' ')
-  // It closes when the next straight quote touches the text before it (`"Yes"`, `"👍"`, `","`), not
-  // a space (`" and you said "blue"` opens another) nor a digit (`12"` is an inch mark), and the
-  // quotes after that pair up to the end of the line as the loop above pairs them. With no such
-  // quote the partner closes the earlier quotation instead (`他問 " 要不要？我可以幫忙"然後走了`).
+  const isReported = REPORTS.test(line.slice(0, Math.max(straight, 0)).split(/[.!?。！？]/).pop() ?? '')
+  // It closes at the next straight quote when only a word stands between (`"Yes"`, `"42"`, `","`),
+  // or when that quote touches the text before it, not a space (`" and you said "blue"` opens
+  // another) nor a digit (`12"` is an inch mark); the quotes after it pair up to the end of the line
+  // as the loop above pairs them. With no such quote the partner closes the earlier quotation
+  // instead (`他問 " 要不要？我可以幫忙"然後走了`).
   const isLaterQuotation = (): boolean => {
     let isClosed = false
     let after = -1
@@ -232,13 +228,14 @@ const isQuoted = (line: string, mark: number): boolean => {
       if (char === '\\') i += 1
       else if (char !== '"') continue
       else if (isClosed) after = after >= 0 || isLoneQuote(line, i) ? -1 : i
+      else if (!/\s/.test(line.slice(partner + 1, i))) isClosed = true
       else if (/\d/.test(line[i - 1] ?? '')) continue
       else if (/\s/.test(line[i - 1] ?? ' ')) return false
       else isClosed = true
     }
     return isClosed && after === -1
   }
-  const isOpener = (/\s/.test(line[partner - 1] ?? '') || isSpaced(straight)) && isLaterQuotation()
+  const isOpener = !isReported && (/\s/.test(line[partner - 1] ?? '') || isSpaced(straight)) && isLaterQuotation()
   const isCloser = partner !== -1 && (isRightAfter || !isOpener)
   if (straight >= 0 && isCloser) open.push(straight)
   // An apostrophe also sits inside words, so a single quote counts only when it closes right
