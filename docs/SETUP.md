@@ -221,8 +221,9 @@ it only previews, and `node scripts/setup-agent.mjs --apply` writes. It takes th
 `npx @wenyuchiou/agent-board@next setup`, such as `--agent codex` or `--data-dir <folder>`. On
 Windows, use the exact paths it prints. Then finish [the steps your agent needs](#after-setup-per-agent),
 and open the board from this folder with `node bin/agent-board.mjs`; add `--data-dir <folder>`
-when setup wrote the board there. Without it, the command also finds a board the Claude Code
-plugin manages, beside its progress file.
+when setup wrote the board there. A board the Claude Code plugin manages opens with
+`/agent-board` in Claude Code, or from this folder with `--progress-file <path to its progress.md>`
+(`~/.claude/progress.md` unless you moved it).
 
 ## Let an agent install it
 

@@ -95,7 +95,7 @@ npx @wenyuchiou/agent-board@next remove --apply
 | 看板看起來是舊版 | 原本就開著的對話可能還在跑它載入時的版本：開一個那個 agent 的新對話。更新方式見[使用指南](docs/GUIDE.zh-TW.md#更新與移除)。 |
 | 同一個 agent 出現兩次 | 可能同時被 Claude 外掛和 setup 接上：[要拿掉哪個](docs/GUIDE.zh-TW.md#疑難排解)。 |
 
-檢查某個 agent 的設定：`npx @wenyuchiou/agent-board@next --codex-doctor --agent codex`（設定時用了 `--data-dir` 的話，也加上 `--data-dir <資料夾>`；也可用 `cursor`、`opencode`、`grok`、`hermes`、`antigravity`，其餘見[使用指南](docs/GUIDE.zh-TW.md#疑難排解)），它不會改任何東西。Claude Code 請跑 `claude plugin list` 和 `/progress connect status`。更多答案在使用指南的[常見問題](docs/GUIDE.zh-TW.md#常見問題)和[疑難排解](docs/GUIDE.zh-TW.md#疑難排解)。發現 bug 的話，用 [bug 表單](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml)開一個 issue，並照[安全回報步驟](docs/GUIDE.zh-TW.md#安全地回報問題)做：不要放 session id、家目錄路徑或 token。
+檢查某個 agent 的設定：`npx @wenyuchiou/agent-board@next --codex-doctor --agent codex`（setup 把看板放在你指定的資料夾時，加上 `--data-dir <資料夾>`；也可用 `cursor`、`opencode`、`grok`、`hermes`、`antigravity`，其餘見[使用指南](docs/GUIDE.zh-TW.md#疑難排解)），它不會改任何東西。Claude Code 請跑 `claude plugin list` 和 `/progress connect status`。更多答案在使用指南的[常見問題](docs/GUIDE.zh-TW.md#常見問題)和[疑難排解](docs/GUIDE.zh-TW.md#疑難排解)。發現 bug 的話，用 [bug 表單](https://github.com/WenyuChiou/agent-board/issues/new?template=bug_report.yml)開一個 issue，並照[安全回報步驟](docs/GUIDE.zh-TW.md#安全地回報問題)做：不要放 session id、家目錄路徑或 token。
 
 ## 文件
 
