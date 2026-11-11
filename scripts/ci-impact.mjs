@@ -146,6 +146,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // Grew past the floor with #1162's terminal setup tests: 45.3 s and 52.3 s in the two Windows
   // runs of main a89f4199 (run 42472161465, Node 22 and 24), x 1.5 and rounded up (#1159).
   'tests/setup-guidance.test.mjs': 80_000,
+  // Grew past the floor with #1327's six Gemini retirement tests: 65.5 s and 68.8 s in two Windows Node 24
+  // part 2/6 runs of c8e94120 (run 43007335735, attempts 1 and 2; 54.9 s before them), x 1.5 and rounded up.
+  'tests/host-upgrade.test.mjs': 105_000,
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
