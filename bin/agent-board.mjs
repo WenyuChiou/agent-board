@@ -308,7 +308,7 @@ if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
         if (!agents) { root = dirname(installed); agents = listed(root) ?? [] }
         const folder = shown(root)
         const agentOpt = agents.length ? ` --agent ${agents.join(',')}` : ''
-        const needsQuote = root !== join(home, '.agent-board') && /[^\w.:\/~@+,=-]/.test(folder)
+        const needsQuote = root !== join(home, '.agent-board') && /[^\w.:\\/~@+,=-]/.test(folder)
         const dataOpt = style => root !== join(home, '.agent-board') ? ` --data-dir ${needsQuote ? quoted(folder, style) : folder}` : ''
         // Command Prompt reads only double quotes and PowerShell runs $(...) and backticks inside them, so such a path is shown once per shell.
         const isTwoShells = isWin && needsQuote && /[$`]/.test(folder)
