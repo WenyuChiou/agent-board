@@ -3831,7 +3831,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   }
   let model = viewed(first)
   let clockNow = now === undefined ? Date.now() : now
-  let scheduled
+  let scheduled, pollMs
   const delays = []
   const windowEvents = {}
   const win = {
@@ -3860,8 +3860,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     Date: { now: () => clockNow },
     setTimeout: (run, delay) => {
       delays.push(delay)
-      // Only the board's own poll (every 3 seconds) is the next redraw; the short waits of a moving page are not.
-      if (delay === 3000 || delay === undefined) scheduled = run
+      // Identify the shipped refresh callback, independently of its delay or motion timers.
+      if (run.name === 'refresh') { scheduled = run; pollMs = delay }
       return 1
     },
     clearTimeout: () => {},
@@ -3916,6 +3916,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     active: () => document.activeElement,
     title: () => document.title,
     delays,
+    get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: () => windowEvents.pagehide?.(),
     restore: persisted => windowEvents.pageshow?.({ persisted }),
@@ -11049,7 +11050,7 @@ test("the page's motion stops under reduced motion and every change still lands"
     const needs = shownWords(dom.node('needs'))
     assert.ok(needs.includes('Gamma question') && needs.includes('Beta question') && !needs.includes('Alpha question'), `${motion}: ${needs}`)
     assert.equal(dom.node('count-needs').textContent, '2', motion)
-    if (motion === 'reduce') assert.deepEqual(dom.delays.filter(delay => delay !== 3000), [], 'nothing waits for a transition')
+    if (motion === 'reduce') assert.deepEqual(dom.delays.filter(delay => delay !== dom.pollMs), [], 'nothing waits for a transition')
   }
 })
 
