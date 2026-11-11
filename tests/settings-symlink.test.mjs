@@ -503,3 +503,51 @@ test('a lock older than ten seconds belongs to a dead writer: the save takes it 
     assert.equal(existsSync(lock), false)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+// Review of #1339 (codex_128, finding 1): a lock older than 10 s was taken over whatever its owner was doing, so a
+// writer that was merely slow (paused, or waiting on a busy disk) lost its lock and two saves both reported success.
+// A lock is now taken over only when the pid in it is no longer a running process.
+const OLD = 60
+const lockedSettings = (owner, ageSeconds = OLD) => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-lock-'))
+  const settings = join(dir, 'progress-settings.json')
+  const lock = `${settings}.agent-board.lock`
+  writeFileSync(settings, '{"lang":"en"}\n')
+  writeFileSync(lock, `${owner} ${Date.now() - ageSeconds * 1000}\n`)
+  const when = new Date(Date.now() - ageSeconds * 1000)
+  utimesSync(lock, when, when)
+  return { dir, settings, lock }
+}
+const finishedPid = () => spawnSync(process.execPath, ['-e', '0']).pid
+const scriptWrite = (settings, next, base) => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, 'ok'], { input: JSON.stringify({ next, base }), timeout: 15000, encoding: 'utf8' })
+
+test('a lock held for over 10 s by a process that still runs is not taken over: the save stops and says why (#1276)', { timeout: 30_000 }, () => {
+  const held = lockedSettings(process.pid)
+  try {
+    assert.throws(() => replaceSettings(held.settings, '{"lang":"en"}\n', '{"lang":"zh-TW"}\n'), /another save of the settings file is in progress.*delete .*agent-board\.lock/)
+    assert.equal(readFileSync(held.settings, 'utf8'), '{"lang":"en"}\n')
+    assert.equal(existsSync(held.lock), true, 'the live owner keeps its lock')
+    const ran = scriptWrite(held.settings, '{"lang":"zh-TW"}\n', '{"lang":"en"}\n')
+    assert.equal(ran.status, 1)
+    assert.equal(readFileSync(held.settings, 'utf8'), '{"lang":"en"}\n')
+    assert.equal(existsSync(held.lock), true)
+  } finally {
+    rmSync(held.dir, { recursive: true, force: true })
+  }
+})
+
+test('a lock left by a process that has ended is taken over by both writers (#1276)', { timeout: 30_000 }, () => {
+  const dead = finishedPid()
+  const a = lockedSettings(dead)
+  try {
+    assert.equal(replaceSettings(a.settings, '{"lang":"en"}\n', '{"lang":"zh-TW"}\n'), 'ok')
+    assert.equal(readFileSync(a.settings, 'utf8'), '{"lang":"zh-TW"}\n')
+    assert.equal(existsSync(a.lock), false)
+  } finally { rmSync(a.dir, { recursive: true, force: true }) }
+  const b = lockedSettings(dead)
+  try {
+    assert.equal(scriptWrite(b.settings, '{"lang":"zh-TW"}\n', '{"lang":"en"}\n').status, 0)
+    assert.equal(readFileSync(b.settings, 'utf8'), '{"lang":"zh-TW"}\n')
+    assert.equal(existsSync(b.lock), false)
+  } finally { rmSync(b.dir, { recursive: true, force: true }) }
+})

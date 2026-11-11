@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,11 +12,11 @@ const loader = registerHooks({
     return nextResolve(specifier, context)
   },
 })
-let parseProgress, buildView, serveModel, boardCounts, boardStatus, boardText, boardDocument, readQueuedMessaging, queueMessage, mailboxId, BOARD_SCRIPT, EN, ZH_TW, STRINGS
+let parseProgress, buildView, serveModel, cardSendKey, sendKey, boardCounts, boardStatus, boardText, boardDocument, readQueuedMessaging, queueMessage, mailboxId, BOARD_SCRIPT, EN, ZH_TW, STRINGS
 try {
   ;({ parseProgress } = await import('../hooks/parse.ts'))
   ;({ buildView } = await import('../hooks/view.ts'))
-  ;({ serveModel } = await import('../hooks/serve.ts'))
+  ;({ serveModel, cardSendKey, sendKey } = await import('../hooks/serve.ts'))
   ;({ boardCounts, boardStatus } = await import('../hooks/board-status.ts'))
   ;({ boardText } = await import('../hooks/board.ts'))
   ;({ boardDocument } = await import('../hooks/board-json.ts'))
@@ -213,4 +213,57 @@ test('a message bound to no question hands over none of two questions in one ses
   const bound = serveModel(twoView(), [], EN, new Set(), false, shown(storedFor('Q-2', mailbox(first))), false, group)
   assert.equal(bound.view.needs.handled.length, 1)
   assert.equal(bound.asks.find(ask => ask.key === bound.view.needs.handled[0]).text, 'Keep the draft?')
+})
+
+// Review of #1339 (codex_128), findings 7 to 9. One rule on every surface: only an answer from the board hands a
+// question over; a message with no question id hands over the session's only question whether or not its target is
+// connected at the moment; the card being sent is the one handed over, not every question of its session.
+const live = { id: 'conn_live', agent: 'codex', session: first, surface: 'synthetic', turn: 'turn-1', scope: 'turn', expires: now + 3_600_000 }
+const messagesFrom = (from, input = {}) => {
+  const queued = queueMessage({ messages: [] }, { id: `SYNTHETIC-${from.replace(/\W/g, '')}`, text: 'Blue', target: live.id, turn: live.turn, ...input }, from, live, now)
+  return queued.state.messages.map(({ nonce: _nonce, hash: _hash, ...one }) => one)
+}
+
+test('a message from another agent is not an answer: the question still needs the person, on the page and on the file readers', () => {
+  const messages = messagesFrom('claude:peer-session')
+  for (const connections of [[live], []]) {
+    const messaging = { connections, mailboxes: [], messages }
+    const model = serveModel(view(), [], EN, new Set(), false, messaging, false, group)
+    assert.deepEqual(model.view.needs.handled, [], `connections: ${connections.length}`)
+    const counts = boardCounts(view(), [], EN, now, messaging)
+    assert.deepEqual({ needs: counts.needs, queued: counts.queued }, { needs: 2, queued: 0 })
+  }
+})
+
+test('a board message to a live target with no question id is counted alike by the page and by the file readers', () => {
+  const messages = messagesFrom('board')
+  const page = serveModel(view(), [], EN, new Set(), false, { connections: [live], mailboxes: [], messages }, false, group)
+  const file = serveModel(view(), [], EN, new Set(), false, { connections: [], mailboxes: [], messages }, false, group)
+  assert.equal(page.view.needs.handled.length, 1)
+  assert.deepEqual(file.view.needs.handled, page.view.needs.handled)
+  const counts = boardCounts(view(), [], EN, now, { connections: [], mailboxes: [], messages })
+  assert.deepEqual({ needs: counts.needs, queued: counts.queued }, { needs: 1, queued: 1 })
+})
+
+test('a reply being sent hands over its own card, not the other question of the same session', () => {
+  const resumable = twoView()
+  const [one, two] = resumable.waiting
+  assert.ok(one.target && two.target, 'both questions carry the session to resume')
+  const plain = serveModel(resumable, [], EN, new Set(), false, undefined, true, group)
+  const [keyOne] = plain.asks.map(ask => ask.key)
+  const sending = new Set([sendKey(one.target), cardSendKey(keyOne)])
+  const model = serveModel(resumable, [], EN, sending, false, undefined, true, group)
+  assert.deepEqual(model.view.needs.handled, [keyOne])
+  assert.equal(model.view.needs.n, 2)
+})
+
+test('a message store folder that is a link is not read: every question waits, as the server refuses that folder', () => {
+  const { dir, messages } = folderWithStore()
+  try {
+    const linked = join(dir, 'linked')
+    // A junction is the folder link a Windows user can make without rights; lstat reports it as a link too.
+    symlinkSync(messages, linked, 'junction')
+    assert.equal(readQueuedMessaging(messages, Date.now()).messages.length, 1)
+    assert.equal(readQueuedMessaging(linked, Date.now()), undefined)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

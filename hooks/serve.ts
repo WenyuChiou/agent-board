@@ -98,6 +98,8 @@ export const sendMode = (agent: string, target: AgentTarget | null): SendMode =>
 
 // One send at a time per session: the key the server holds while a reply is on its way.
 export const sendKey = (target: AgentTarget): string => `${target.agent}:${target.session}`
+// The card whose reply is being sent, kept beside the session's key: a session's other open question is not handed over by it (#1296).
+export const cardSendKey = (cardKey: string): string => `card:${cardKey}`
 
 export const idleTimeout = (value: string | undefined): number => {
   if (value === undefined) return 0
@@ -373,8 +375,8 @@ const isFailedReceipt = (receipt: Receipt | undefined): boolean =>
 // questions in one session, one queued answer hands over one. `holder` is true when a message still held for
 // the session's next turn answers this question. A message bound to no question answers one only when the session
 // has exactly one open question (`openInSession`); with two or more it answers none, and the card keeps waiting.
-const holdsAnswer = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, isConnected: boolean, openInSession: number): boolean =>
-  to !== undefined && messages.some(one => one.to === to && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && (one.answers === undefined ? isConnected && openInSession === 1 : one.answers === questionId))
+const holdsAnswer = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
+  to !== undefined && messages.some(one => one.from === 'board' && one.to === to && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && (one.answers === undefined ? openInSession === 1 : one.answers === questionId))
 const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: ReadonlyMap<string, boolean>): string[] => {
   const sources = new Map<string, { isSending?: boolean; receipt?: Receipt }>()
   for (const one of [...model.asks, ...model.reminder, ...model.older, ...model.idle, ...model.stopped, ...model.groups.flatMap(group => group.rows)]) {
@@ -434,7 +436,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const hint = replyHint(ask, s, !isLan, true)
       const label = ask.step === null ? undefined : clipped(ask.text, LABEL_ROOM)
       const { heldBy } = holderOf(ask)
-      held.set(item.key, isSending(ask.target) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, connection !== undefined, heldBy === undefined ? 0 : openBy.get(heldBy) ?? 0))
+      held.set(item.key, sending.has(cardSendKey(item.key)) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, heldBy === undefined ? 0 : openBy.get(heldBy) ?? 0))
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
@@ -1745,7 +1747,13 @@ const PAGE_SCRIPT = String.raw`
   // An agent that waits on the person, or stopped a moment ago, is not "nothing" (#612).
   function quietLine(quiet, now) {
     // The questions whose answer is on its way are not asked of the person any more (#1296).
-    if (quiet && quiet.kind === 'asking') return Math.max(0, quiet.n - (pg.sentTotal - (pg.sentBy.own || 0))) > 0 ? w('pgQuietAsking', quiet.n - (pg.sentTotal - (pg.sentBy.own || 0))) : w('pgNoWorking');
+    if (quiet && quiet.kind === 'asking') {
+      var left = Math.max(0, quiet.n - (pg.sentTotal - (pg.sentBy.own || 0)));
+      if (left > 0) return w('pgQuietAsking', left);
+      // Every question has its answer on the way: an agent that stopped a moment ago is still said to have stopped.
+      if (quiet.stopped) return w('pgQuietStopped', agentName(quiet.stopped.agent), Math.max(1, Math.round((now - quiet.stopped.at) / 60000)));
+      return w('pgNoWorking');
+    }
     if (quiet && quiet.kind === 'stopped') return w('pgQuietStopped', agentName(quiet.agent), Math.max(1, Math.round((now - quiet.at) / 60000)));
     return w('pgNoWorking');
   }

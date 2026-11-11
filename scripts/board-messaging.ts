@@ -172,6 +172,8 @@ const openMessaging = (directory: string, isDefault = false) => {
 // the file cannot be read as one: those surfaces then count every question as waiting, as they did before.
 export const readQueuedMessaging = (directory: string, now: number) => {
   try {
+    // The server refuses a store folder that is a link; so does this read, and every question then waits (#1276 review).
+    if (lstatSync(resolve(directory)).isSymbolicLink()) return undefined
     const found = readSettings(join(resolve(directory), 'messages.json'))
     if (found.kind !== 'ok') return undefined
     const state = expireMailboxes(parseMessageStore(found.text, now), now)

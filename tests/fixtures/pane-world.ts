@@ -34,6 +34,8 @@ export const PROPS: RenderPropsOf['Pane'] = {
 
 export type World = {
   files: Map<string, string>
+  // Paths that are a link, a FIFO or a folder: the guarded settings read says `unsafe` for them (#1276).
+  unsafeFiles?: Set<string>
   dirs?: Set<string>
   unlistable?: Set<string>
   mtime: number
@@ -203,8 +205,9 @@ export const engineBeneath = (on: On, world: World): MockClock => {
   on('process.run', async ($, e) => {
     // The pane's hard-link ledger move acts on the files in memory as the real Node child would.
     if (e.argv[0] === 'node' && e.argv[2] === SETTINGS_READ && e.argv[3] === '--') {
-      const text = world.files.get(posix(e.argv[4] ?? ''))
-      return { value: { exitCode: 0, stdout: JSON.stringify(text === undefined ? { kind: 'missing' } : { kind: 'ok', text }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      const file = posix(e.argv[4] ?? '')
+      const text = world.files.get(file)
+      return { value: { exitCode: 0, stdout: JSON.stringify(world.unsafeFiles?.has(file) === true ? { kind: 'unsafe' } : text === undefined ? { kind: 'missing' } : { kind: 'ok', text }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv[0] === 'node' && e.argv[2] === LEDGER_LINK && e.argv[3] === '--') {
       world.ran?.push([...e.argv])

@@ -76,9 +76,18 @@ const held = () => {
   return now.kind === kind && (kind === 'missing' || now.text === base) ? 'same' : 'changed'
 }
 // The same lock as scripts/settings-file.ts: <file>.agent-board.lock, created exclusively with the pid and the time, held
-// from the re-read to the read-back, waited for up to 2 s, taken over when older than 10 s, removed at the end.
+// from the re-read to the read-back, waited for up to 2 s, removed at the end. Taken over only when older than 10 s and its
+// pid is no longer a running process: a lock whose owner may still be writing is never taken.
 const lockPath = file + '.agent-board.lock'
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const ownerGone = () => {
+  try {
+    const owner = Number(/^([1-9][0-9]*) /.exec(fs.readFileSync(lockPath, 'utf8'))?.[1])
+    if (!Number.isInteger(owner) || owner > 2147483647) return false
+    try { process.kill(owner, 0) } catch (error) { return !!error && error.code === 'ESRCH' }
+    return false
+  } catch { return false }
+}
 const lock = () => {
   const deadline = Date.now() + 2000
   for (;;) {
@@ -90,7 +99,7 @@ const lock = () => {
       if (!error || error.code !== 'EEXIST') throw error
       try {
         const held = fs.lstatSync(lockPath)
-        if (Date.now() - held.mtimeMs > 10000) {
+        if (Date.now() - held.mtimeMs > 10000 && ownerGone()) {
           const again = fs.lstatSync(lockPath)
           if (again.mtimeMs === held.mtimeMs && again.ino === held.ino) fs.unlinkSync(lockPath)
           continue

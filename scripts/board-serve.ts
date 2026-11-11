@@ -17,7 +17,7 @@ import { boardItems } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
 import { agentLabel } from '../hooks/strings'
-import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
+import { lanAddress, localHosts, pagePolicy, requestProblem, cardSendKey, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
@@ -381,11 +381,12 @@ export const startServer = (o: ServeOptions): void => {
     const key = sendKey(target)
     if (sending.has(key)) return { status: 409, note: o.s.serveSendBusy(agentLabel(target.agent, o.s)) }
     sending.add(key)
+    sending.add(cardSendKey(cardKey))
     replies.delete(key)
     run(plan, o.s, label)
       .then(result => replies.set(key, { ...result, at: Date.now(), key: cardKey }))
       .catch((error: unknown) => replies.set(key, { ok: false, note: o.s.serveSendFailed(label, String(error)), at: Date.now(), key: cardKey }))
-      .finally(() => sending.delete(key))
+      .finally(() => { sending.delete(key); sending.delete(cardSendKey(cardKey)) })
     return { status: 202, note: o.s.serveQueued(label) }
   }
 
@@ -481,7 +482,7 @@ export const startServer = (o: ServeOptions): void => {
         }
       }
       // Only the board script on the computer asks; the answer names progress.md's path.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size, pageAgo: pageAgo(Date.now()) })
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length, pageAgo: pageAgo(Date.now()) })
       return json(res, 404, {})
     }
     const body = await readBody(req)
