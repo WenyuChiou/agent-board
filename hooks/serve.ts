@@ -371,9 +371,10 @@ const isFailedReceipt = (receipt: Receipt | undefined): boolean =>
   receipt !== undefined && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
 // A question counts as handled by the message bound to it, not by any message to its session (#1296): with two
 // questions in one session, one queued answer hands over one. `holder` is true when a message still held for
-// the session's next turn answers this question (or, unbound, was sent to the session it is asked in).
-const holdsAnswer = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, isConnected: boolean): boolean =>
-  to !== undefined && messages.some(one => one.to === to && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && (one.answers === undefined ? isConnected : one.answers === questionId))
+// the session's next turn answers this question. A message bound to no question answers one only when the session
+// has exactly one open question (`openInSession`); with two or more it answers none, and the card keeps waiting.
+const holdsAnswer = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, isConnected: boolean, openInSession: number): boolean =>
+  to !== undefined && messages.some(one => one.to === to && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && (one.answers === undefined ? isConnected && openInSession === 1 : one.answers === questionId))
 const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: ReadonlyMap<string, boolean>): string[] => {
   const sources = new Map<string, { isSending?: boolean; receipt?: Receipt }>()
   for (const one of [...model.asks, ...model.reminder, ...model.older, ...model.idle, ...model.stopped, ...model.groups.flatMap(group => group.rows)]) {
@@ -405,6 +406,18 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const stoppedKeys = new Set(view.stopped.map(row => row.key))
   const turns: ServeTurn[] = []
   const items = boardItems(view, pending)
+  // The session an answer is held for, per ask: the live connection's address, else the ask's own session.
+  const holderOf = (ask: WaitingItem): { heldBy: string | undefined; connection: ReturnType<typeof reachable> | undefined } => {
+    const connection = ask.where === 'manual' || isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)
+    return { connection, heldBy: connection !== undefined ? address(connection.agent, connection.session) : ask.nativeSession === undefined ? undefined : address(ask.agent || 'claude', ask.nativeSession) }
+  }
+  // How many questions each session has open on the board, so a message bound to none can tell whether it can only mean one.
+  const openBy = new Map<string, number>()
+  for (const item of items) {
+    if (item.type !== 'ask') continue
+    const { heldBy } = holderOf(item.ask)
+    if (heldBy !== undefined) openBy.set(heldBy, (openBy.get(heldBy) ?? 0) + 1)
+  }
   for (const item of items) {
     if (item.type === 'ask') {
       const { ask } = item
@@ -420,8 +433,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan, true)
       const label = ask.step === null ? undefined : clipped(ask.text, LABEL_ROOM)
-      const heldBy = connection !== undefined ? address(connection.agent, connection.session) : ask.nativeSession === undefined ? undefined : address(ask.agent || 'claude', ask.nativeSession)
-      held.set(item.key, isSending(ask.target) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, connection !== undefined))
+      const { heldBy } = holderOf(ask)
+      held.set(item.key, isSending(ask.target) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, connection !== undefined, heldBy === undefined ? 0 : openBy.get(heldBy) ?? 0))
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),

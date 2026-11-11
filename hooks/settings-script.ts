@@ -75,6 +75,35 @@ const held = () => {
   if (now.kind === 'unsafe') return 'unsafe'
   return now.kind === kind && (kind === 'missing' || now.text === base) ? 'same' : 'changed'
 }
+// The same lock as scripts/settings-file.ts: <file>.agent-board.lock, created exclusively with the pid and the time, held
+// from the re-read to the read-back, waited for up to 2 s, taken over when older than 10 s, removed at the end.
+const lockPath = file + '.agent-board.lock'
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const lock = () => {
+  const deadline = Date.now() + 2000
+  for (;;) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx', 0o600)
+      try { fs.writeFileSync(fd, process.pid + ' ' + Date.now() + '\\n') } finally { fs.closeSync(fd) }
+      return
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error
+      try {
+        const held = fs.lstatSync(lockPath)
+        if (Date.now() - held.mtimeMs > 10000) {
+          const again = fs.lstatSync(lockPath)
+          if (again.mtimeMs === held.mtimeMs && again.ino === held.ino) fs.unlinkSync(lockPath)
+          continue
+        }
+      } catch (gone) {
+        if (gone && gone.code === 'ENOENT') continue
+        throw gone
+      }
+      if (Date.now() >= deadline) throw new Error('locked')
+      sleep(25)
+    }
+  }
+}
 const finish = () => {
   let mode = 0o600
   try {
@@ -111,5 +140,14 @@ const finish = () => {
     return 1
   }
 }
-process.exitCode = finish()
+let locked = false
+try {
+  lock()
+  locked = true
+  process.exitCode = finish()
+} catch {
+  process.exitCode = 1
+} finally {
+  if (locked) try { fs.unlinkSync(lockPath) } catch {}
+}
 `

@@ -190,3 +190,27 @@ test('a question-bound message to a live connection the store file holds is coun
   const counts = boardCounts(twoView(), [], EN, now, { connections: [], mailboxes: [], messages })
   assert.deepEqual({ needs: counts.needs, queued: counts.queued }, { needs: 1, queued: 1 })
 })
+
+// Codex 102 P1 on #1339: a message bound to no question marked every question of its session handled.
+const unboundFor = box => {
+  const queued = queueMessage({ messages: [], mailboxes: [box] }, { id: 'SYNTHETIC-QUEUED-3', text: 'Blue', target: box.id, turn: box.turn }, 'board', box, now)
+  return shown({ version: 2, ...queued.state })
+}
+
+test('a message bound to no question hands over the session\'s only question', () => {
+  const model = serveModel(view(), [], EN, new Set(), false, unboundFor(mailbox(first)), false, group)
+  assert.equal(model.view.needs.handled.length, 1)
+  const handled = model.view.needs.cards.find(card => card.key === model.view.needs.handled[0])
+  assert.equal(model.asks.find(ask => ask.key === handled.key).text, 'Blue or green?')
+})
+
+test('a message bound to no question hands over none of two questions in one session, and a bound one only its own', () => {
+  const unbound = unboundFor(mailbox(first))
+  const model = serveModel(twoView(), [], EN, new Set(), false, unbound, false, group)
+  assert.deepEqual(model.view.needs.handled, [])
+  const counts = boardCounts(twoView(), [], EN, now, unbound)
+  assert.deepEqual({ needs: counts.needs, queued: counts.queued }, { needs: 2, queued: 0 })
+  const bound = serveModel(twoView(), [], EN, new Set(), false, shown(storedFor('Q-2', mailbox(first))), false, group)
+  assert.equal(bound.view.needs.handled.length, 1)
+  assert.equal(bound.asks.find(ask => ask.key === bound.view.needs.handled[0]).text, 'Keep the draft?')
+})

@@ -1,4 +1,5 @@
 import { chmodSync, closeSync, constants, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { pid } from 'node:process'
 
 // The board's settings file (progress-settings.json) is one the person may have replaced with a link
 // or a folder. Every reader and writer here refuses those, and none of them can block (#1276).
@@ -28,6 +29,49 @@ export const readSettings = (file: string): SettingsRead => {
   }
 }
 
+// A save by our other writer (the plugin's `/progress style` script) between the last re-read and the rename would be
+// overwritten while both report success. Both writers therefore take `<settings file>.agent-board.lock`, created
+// exclusively (`wx`) and holding the pid and the time, around the re-read, the new file, the rename and the read-back.
+// A writer that finds it waits and tries again for up to LOCK_WAIT_MS, then gives up with an error (never a silent
+// overwrite); a lock older than LOCK_STALE_MS belongs to a writer that died and is taken over. It is removed in `finally`.
+// hooks/settings-script.ts carries the same rules for the plugin's script.
+const LOCK_WAIT_MS = 2000
+const LOCK_STALE_MS = 10_000
+const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+
+export const withSettingsLock = <T>(file: string, run: () => T): T => {
+  const lock = `${file}.agent-board.lock`
+  const deadline = Date.now() + LOCK_WAIT_MS
+  for (;;) {
+    try {
+      const fd = openSync(lock, 'wx', 0o600)
+      try { writeFileSync(fd, `${pid} ${Date.now()}\n`) } finally { closeSync(fd) }
+      break
+    } catch (error) {
+      if (!isCode(error, ['EEXIST'])) throw error
+      try {
+        const held = lstatSync(lock)
+        if (Date.now() - held.mtimeMs > LOCK_STALE_MS) {
+          // Taken over only when it is still the very file that looked stale.
+          const again = lstatSync(lock)
+          if (again.mtimeMs === held.mtimeMs && again.ino === held.ino) unlinkSync(lock)
+          continue
+        }
+      } catch (gone) {
+        if (isCode(gone, ['ENOENT'])) continue
+        throw gone
+      }
+      if (Date.now() >= deadline) throw new Error('another save of the settings file is in progress (' + lock + ')')
+      pause(25)
+    }
+  }
+  try {
+    return run()
+  } finally {
+    try { unlinkSync(lock) } catch {}
+  }
+}
+
 // Replaces the file with `next`, which was worked out from `base` (the text read earlier, or null for no file).
 // The file is read again just before the swap and once more right after it: when it no longer holds `base`
 // (another save got in between), nothing is written over it and the answer is 'changed', so the caller works
@@ -40,7 +84,10 @@ export const readSettings = (file: string): SettingsRead => {
 // change the path there.
 export type Replaced = 'ok' | 'unsafe' | 'changed'
 
-export const replaceSettings = (file: string, base: string | null, next: string, between?: () => void): Replaced => {
+export const replaceSettings = (file: string, base: string | null, next: string, between?: () => void): Replaced =>
+  withSettingsLock(file, () => replaceLocked(file, base, next, between))
+
+const replaceLocked = (file: string, base: string | null, next: string, between?: () => void): Replaced => {
   let mode = 0o600
   try {
     const stat = lstatSync(file)

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, lstatSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import fs, { chmodSync, existsSync, lstatSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -399,4 +401,105 @@ test('the plugin write takes its two texts from stdin and refuses input it canno
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// Codex 102 P1 on #1339: a save by our other writer between the last re-read and the rename was overwritten while both
+// reported success. Both writers now take `<file>.agent-board.lock`; these two tests hold the first writer just before its
+// rename (a patched renameSync / a preloaded one) while the second writer runs, which loses a key without the lock.
+const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const settingsModule = pathToFileURL(join(import.meta.dirname, '..', 'scripts', 'settings-file.ts')).href
+// A second CLI writer in its own process: adds one key through updateSettings, and says it started by touching `ready`.
+const cliWriterScript = dir => {
+  const script = join(dir, 'cli-writer.mjs')
+  writeFileSync(script, `import { writeFileSync } from 'node:fs'
+import { updateSettings } from ${JSON.stringify(settingsModule)}
+const [file, key, ready] = process.argv.slice(2)
+writeFileSync(ready, 'x')
+const done = updateSettings(file, text => JSON.stringify({ ...JSON.parse(text ?? '{}'), [key]: true }))
+process.exitCode = done.result === 'ok' ? 0 : 3
+`)
+  return script
+}
+const waitFor = async (path, ms = 8000) => {
+  const end = Date.now() + ms
+  while (!existsSync(path)) {
+    if (Date.now() > end) throw new Error(`${path} never appeared`)
+    await delay(10)
+  }
+}
+
+test('two CLI writers saving at the same time each keep their key (the lock covers re-read to read-back)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-lock-cli-'))
+  const file = join(dir, 'progress-settings.json')
+  const ready = join(dir, 'ready')
+  writeFileSync(file, '{"a":true}')
+  const real = fs.renameSync
+  let child
+  let exited
+  fs.renameSync = (from, to) => {
+    if (child === undefined) {
+      child = spawn(process.execPath, [cliWriterScript(dir), file, 'b', ready], { stdio: 'ignore' })
+      exited = new Promise(done => child.once('exit', code => done(code)))
+      const end = Date.now() + 8000
+      while (!existsSync(ready) && Date.now() < end) sleepSync(10)
+      sleepSync(800)
+    }
+    return real(from, to)
+  }
+  syncBuiltinESMExports()
+  try {
+    const mine = updateSettings(file, text => JSON.stringify({ ...JSON.parse(text ?? '{}'), c: true }))
+    assert.equal(mine.result, 'ok')
+  } finally {
+    fs.renameSync = real
+    syncBuiltinESMExports()
+  }
+  try {
+    assert.equal(await exited, 0)
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { a: true, b: true, c: true })
+    assert.equal(existsSync(`${file}.agent-board.lock`), false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('the plugin script and a CLI writer saving at the same time each keep their key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-lock-plugin-'))
+  const file = join(dir, 'progress-settings.json')
+  const atRename = join(dir, 'at-rename')
+  const preload = join(dir, 'hold-rename.cjs')
+  writeFileSync(preload, `const fs = require('node:fs')
+const real = fs.renameSync
+fs.renameSync = (from, to) => {
+  fs.writeFileSync(${JSON.stringify(atRename)}, 'x')
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1200)
+  return real(from, to)
+}
+`)
+  writeFileSync(file, '{"a":true}')
+  const plugin = spawn(process.execPath, ['-r', preload, '-e', SETTINGS_WRITE, '--', file, 'ok'], { stdio: ['pipe', 'ignore', 'ignore'] })
+  const pluginExit = new Promise(done => plugin.once('exit', code => done(code)))
+  plugin.stdin.end(JSON.stringify({ next: '{"a":true,"p":true}', base: '{"a":true}' }))
+  try {
+    await waitFor(atRename)
+    const cli = spawnSync(process.execPath, [cliWriterScript(dir), file, 'c', join(dir, 'ready')], { timeout: 15000, encoding: 'utf8' })
+    assert.equal(cli.status, 0, cli.stderr)
+    assert.equal(await pluginExit, 0)
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { a: true, p: true, c: true })
+    assert.equal(existsSync(`${file}.agent-board.lock`), false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a lock older than ten seconds belongs to a dead writer: the save takes it over and removes it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-lock-stale-'))
+  const file = join(dir, 'progress-settings.json')
+  const lock = `${file}.agent-board.lock`
+  try {
+    writeFileSync(file, '{"a":true}')
+    writeFileSync(lock, '999999 0')
+    const old = new Date(Date.now() - 20_000)
+    utimesSync(lock, old, old)
+    const done = updateSettings(file, text => JSON.stringify({ ...JSON.parse(text ?? '{}'), b: true }))
+    assert.equal(done.result, 'ok')
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { a: true, b: true })
+    assert.equal(existsSync(lock), false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
