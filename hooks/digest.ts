@@ -214,11 +214,12 @@ const isQuoted = (line: string, mark: number): boolean => {
   const partner = line.indexOf('"', mark + 1)
   const isRightAfter = /^[?？]["”」』)）]*$/.test(line.slice(mark, partner))
   const isReported = REPORTS.test(line.slice(0, Math.max(straight, 0)).split(/[.!?。！？]/).pop() ?? '')
-  // It closes at the next straight quote when only a word stands between (`"Yes"`, `"42"`, `","`),
-  // or when that quote touches the text before it, not a space (`" and you said "blue"` opens
-  // another) nor a digit (`12"` is an inch mark); the quotes after it pair up to the end of the line
-  // as the loop above pairs them. With no such quote the partner closes the earlier quotation
-  // instead (`他問 " 要不要？我可以幫忙"然後走了`).
+  // It closes at the next straight quote that touches the text before it, not a space (`" and you
+  // said "blue"` opens another) nor a digit (`12"` is an inch mark, but `"42"` closes), and that has
+  // a space, a mark or the end after it, not a letter: in `幫忙 "然後說"好"` and `幫忙 "然後寫"好` the
+  // partner closes the earlier quotation, as on main. The quotes after it pair up to the end of the
+  // line as the loop above pairs them. With no such quote the partner closes the earlier quotation
+  // instead (`他問 " 要不要？我可以幫忙"然後走了`, `幫忙 "，桌子高12"。`).
   const isLaterQuotation = (): boolean => {
     let isClosed = false
     let after = -1
@@ -227,9 +228,9 @@ const isQuoted = (line: string, mark: number): boolean => {
       if (char === '\\') i += 1
       else if (char !== '"') continue
       else if (isClosed) after = after >= 0 || isLoneQuote(line, i) ? -1 : i
-      else if (!/\s/.test(line.slice(partner + 1, i))) isClosed = true
-      else if (/\d/.test(line[i - 1] ?? '')) continue
+      else if (/\d/.test(line[i - 1] ?? '') && !/^[\d.,]+$/.test(line.slice(partner + 1, i))) continue
       else if (/\s/.test(line[i - 1] ?? ' ')) return false
+      else if (/[\p{L}\p{N}]/u.test(line[i + 1] ?? '')) return false
       else isClosed = true
     }
     return isClosed && after === -1
