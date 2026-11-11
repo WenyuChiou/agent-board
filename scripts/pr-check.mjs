@@ -580,12 +580,15 @@ export const rulesPage = ({ paths = [], body = '', headPaths }) => {
   return output
 }
 
+// The board's page is built by its own script in the browser, so render.ts cannot draw it: its README picture is a
+// screenshot of the real page, one per README language, dark only.
+const pageShot = /^docs\/images\/page-(en|zh-TW|zh-CN)-dark\.png$/
 // Judged by name, not by git's binary guess, which a .gitattributes line in the pull request could change.
 export const binaryImages = paths => {
   const output = result()
   for (const path of paths) {
-    if (/\.(png|jpe?g|gif|webp|bmp|ico)$/i.test(path) && !/^docs\/images\/social-preview[^/]*\.png$/.test(path)) {
-      output.problems.push(problem('images', `binary image added or changed: ${safeText(path)}.`, 'README pictures must be SVGs drawn by docs/preview/render.ts (CONTRIBUTING.md, Images).'))
+    if (/\.(png|jpe?g|gif|webp|bmp|ico)$/i.test(path) && !/^docs\/images\/social-preview[^/]*\.png$/.test(path) && !pageShot.test(path)) {
+      output.problems.push(problem('images', `binary image added or changed: ${safeText(path)}.`, 'README pictures must be SVGs drawn by docs/preview/render.ts; the one exception is the page screenshot docs/images/page-<en|zh-TW|zh-CN>-dark.png (CONTRIBUTING.md, Images).'))
     }
   }
   return output
