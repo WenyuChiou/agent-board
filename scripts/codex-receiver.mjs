@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { delimiter, isAbsolute, join } from 'node:path'
+import { isAbsolute, posix, win32 } from 'node:path'
 import { ackLine, boardClient, deliveryPrompt } from './message-client.mjs'
 import { openWebSocketStdio } from './ws-stdio.mjs'
 
@@ -26,9 +26,12 @@ const RETRY_MAX_MS = 30_000
 // the `codex.cmd` an npm install leaves is a shell script, so its Codex script is run by Node instead,
 // and a `.cmd` with no script beside it is refused (null).
 export const resolveCodexExecutable = ({ env = process.env, platform = process.platform, exists = existsSync } = {}) => {
+  // The platform asked about decides how a path is read, not the one the board runs on.
+  const flavor = platform === 'win32' ? win32 : posix
   const path = env.PATH ?? env.Path ?? ''
-  for (const folder of path.split(delimiter)) {
-    if (!isAbsolute(folder)) continue
+  for (const folder of path.split(flavor.delimiter)) {
+    if (!flavor.isAbsolute(folder)) continue
+    const join = flavor.join
     if (platform !== 'win32') {
       const file = join(folder, 'codex')
       if (exists(file)) return file
@@ -241,7 +244,10 @@ export const startCodexReceiver = ({
       if (daemon === null) {
         for (const thread of [...attached.keys()]) await drop(thread)
         if (Date.now() < retryAt) return
-        try { await connect() } catch (error) {
+        // Not `try { await connect() } catch`: tests/page-reader-fixture.mjs cuts the first `await x();` before a catch out of the bundle to
+        // drop the CLI's entry call, and must not find this one first.
+        const error = await connect().then(() => null, one => one)
+        if (error !== null) {
           failures += 1
           retryAt = Date.now() + Math.min(RETRY_MAX_MS, tickMs * 2 ** Math.min(failures, 5))
           onError(error)

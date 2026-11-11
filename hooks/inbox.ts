@@ -1,9 +1,9 @@
 import { baseName } from './parse'
 import { STRINGS } from './strings'
 import type { ProgressMirror } from '../types'
-import { boardRequestWords, HOST_TURN_KEYS, inboxTurnKey, isBoardRequest, RECEIPT_FOLDER_KEYS, RECEIPT_SESSION_KEYS } from './board-commands'
+import { boardRequestWords, deliveryRequestWords, HOST_TURN_KEYS, inboxTurnKey, isBoardRequest, RECEIPT_FOLDER_KEYS, RECEIPT_SESSION_KEYS } from './board-commands'
 
-const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
+const BOARD_WORDS = [...boardRequestWords(Object.values(STRINGS)), ...deliveryRequestWords(Object.values(STRINGS))]
 
 // What another agent's hook handed over at the end of a turn or a session, saved by the
 // reporter script as one file in the inbox (`<agent>-<prompt|turn|end>-<time>-<pid>.json`). Every

@@ -92,7 +92,8 @@ export const boardClient = address => {
           // Ownership failures are terminal even if they happen to look like a
           // network exception. Only a verified host may recover its board poll.
           let isOwned = false
-          try { isOwned = await verify() } catch (error) { await close(); onError(error); return }
+          // Promise.resolve: the bundled board is searched for its entry call as `await name();` before a catch, and this must not be found first.
+          try { isOwned = await Promise.resolve(verify()) } catch (error) { await close(); onError(error); return }
           if (!isOwned || isClosed) { await close(); return }
           // Being busy does not revoke ownership or sending authority. Keep the
           // lease alive while leaving inbound messages durably queued, unclaimed.
