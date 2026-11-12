@@ -89,7 +89,15 @@ export const dockArguments = (address: string, remembered: Rect | null, probe: {
   const place = probe === null ? null : launchPlace(remembered, probe.foreground, probe.works)
   if (place === null || profile === null) return [`--app=${address}`]
   const mode = place === remembered ? `dock=2&at=${place.x},${place.y},${place.width},${place.height}` : 'dock=1'
-  return [...profileFlags(profile), ...placeFlags(place), `--app=${address}&${mode}`]
+  return [...profileFlags(profile), ...placeFlags(place), `--app=${withQuery(address, mode)}`]
+}
+
+// The options go in the address's query, before any fragment: an open for an approval ends in
+// `#k=<key>` (#1368), which the page reads whole.
+const withQuery = (address: string, query: string): string => {
+  const hash = address.indexOf('#')
+  const base = hash < 0 ? address : address.slice(0, hash)
+  return `${base}${base.includes('?') ? '&' : '?'}${query}${hash < 0 ? '' : address.slice(hash)}`
 }
 
 // The screens' work areas, read by the launch PowerShell (DPI-unaware, so in the browser's own

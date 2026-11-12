@@ -56,6 +56,15 @@ test('#1084: a remembered place is used on the next open, and one on a monitor t
   // A remembered place is told apart from the dock and carried in the address too.
   assert.equal(dockArguments(address, remembered, { foreground: main, works: [main, left] }, 'p').at(-1), `--app=${address}&dock=2&at=-1500,100,700,900`)
   assert.equal(dockArguments(address, remembered, { foreground: main, works: [main] }, 'p').at(-1), `--app=${address}&dock=1`)
+  // An open for an approval ends in `#k=<key>` (#1368): the options go in the query, the key stays whole.
+  const keyed = `${address}#k=Ab_c-9`
+  assert.equal(dockArguments(keyed, null, { foreground: main, works: [main] }, 'p').at(-1), `--app=${address}&dock=1#k=Ab_c-9`)
+  const page = new URL(dockArguments(keyed, remembered, { foreground: main, works: [main, left] }, 'p').at(-1).slice('--app='.length))
+  assert.equal(page.searchParams.get('dock'), '2')
+  assert.equal(page.searchParams.get('at'), '-1500,100,700,900')
+  assert.equal(page.hash, '#k=Ab_c-9')
+  // An address with no query gets one.
+  assert.equal(dockArguments('http://127.0.0.1:4242/#k=x', null, { foreground: main, works: [main] }, 'p').at(-1), '--app=http://127.0.0.1:4242/?dock=1#k=x')
 })
 
 test('#1084: the probe line and the window file are read strictly', () => {
