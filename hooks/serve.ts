@@ -528,6 +528,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       // A Claude session still at work that this board cannot reach: its card says so and copies.
       const isOpenClaude = !isLan && send === 'claude' && row.auto !== 'ended'
       const nextLabel = row.next === null ? undefined : clipped(row.next.step, LABEL_ROOM)
+      // A row is handed over by the board's own message to its session, read from the messages alone (as a question
+      // is), so the network page, which has no connection, counts it as the local page does. A message bound to no
+      // question is the row's only when the session has no open question to take it.
+      const heldBy = connection !== undefined ? address(connection.agent, connection.session) : row.nativeSession === undefined ? undefined : address(row.agent || 'claude', row.nativeSession)
+      const rowTurn = heldBy !== undefined && (openBy.get(heldBy) ?? 0) === 0 ? 1 : 0
+      held.set(item.key, isSending(row.target) || holdsAnswer(messaging?.messages ?? [], heldBy, undefined, rowTurn))
+      if (answerFailed(messaging?.messages ?? [], heldBy, undefined, rowTurn)) failed.add(item.key)
       const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
       rows.push({

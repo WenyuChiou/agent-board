@@ -309,6 +309,39 @@ test('the network page model counts a queued answer as handled, from state that 
   assert.deepEqual(handledOnly(messaging).connections, [])
 })
 
+// Greptile P1 on #1339 (round 2 of the same class, R6): a stuck card's handled decision came from the reachable
+// mailbox and the page's `isSending`, which the network page does not have. The decision now comes from the board's
+// own message for the card, so the local page, the network page and the CLI agree for every kind of card.
+const stuckSource = `## Synthetic project abcdef03
+<!-- auto session=abcdef03 agent=codex resume=${first} state=waiting updated=${new Date(now).toISOString()} -->
+### Synthetic task abcdef03
+- [!] Config file is missing — need the sample
+<!-- /auto session=abcdef03 -->
+`
+const kindsTable = [
+  { kind: 'question', source: block(first, 'Blue or green?', 'abcdef01'), text: 'Blue or green?', failed: false, handled: 1 },
+  { kind: 'question, answer failed', source: block(first, 'Blue or green?', 'abcdef01'), text: 'Blue or green?', failed: true, handled: 0 },
+  { kind: 'stuck card', source: stuckSource, text: 'Config file is missing', failed: false, handled: 1 },
+  { kind: 'stuck card, answer failed', source: stuckSource, text: 'Config file is missing', failed: true, handled: 0 },
+]
+for (const row of kindsTable) {
+  test(`one queued board answer counts alike on the local page, the network page and the CLI: ${row.kind}`, () => {
+    const box = mailbox(first)
+    const queued = queueMessage({ messages: [], mailboxes: [box] }, { id: 'SYNTHETIC-KIND-1', text: SECRET, target: box.id, turn: 'session' }, 'board', box, now)
+    const messaging = shown({ version: 2, ...queued.state })
+    if (row.failed) Object.assign(messaging.messages[0], { status: 'rejected', error: 'TARGET_DISCONNECTED', updated: now + 1 })
+    const one = buildView(parseProgress(row.source), [], null, now, 0, {}, EN)
+    const local = serveModel(one, [], EN, new Set(), false, messaging, false, group)
+    const phone = serveModel(one, [], EN, new Set(), true, handledOnly(messaging), false, group)
+    assert.equal(local.view.needs.cards.length, 1, row.kind)
+    assert.equal(local.view.needs.handled.length, row.handled, `local ${row.kind}`)
+    assert.deepEqual(phone.view.needs.handled, local.view.needs.handled, `network ${row.kind}`)
+    const counts = boardCounts(one, [], EN, now, messaging)
+    assert.deepEqual([counts.needs, counts.queued], [1 - row.handled, row.handled], `CLI ${row.kind}`)
+    assert.ok(!JSON.stringify(phone).includes(SECRET) && !JSON.stringify(handledOnly(messaging)).includes(SECRET), 'the network page holds no message text')
+  })
+}
+
 const getBoard = (port, token, host) => new Promise((resolve, reject) => {
   const req = request({ host: '127.0.0.1', port, method: 'GET', path: '/api/board', headers: { host: `${host}:${port}`, 'x-board-token': token } }, res => {
     let data = ''
