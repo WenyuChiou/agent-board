@@ -57,8 +57,13 @@ const summaries = [
     "shared": "Shared",
     "retire": "{file} (the old /board command; setup removes it)",
     "keptEdited": "{file} (your edited old /board command; setup leaves it; the command is now /agent-board)",
+    "keptText": "{file} (you edited it, so setup leaves your copy as it is; the new version goes in {beside})",
+    "keptCode": "{file} (you edited it and the agent runs it, so setup kept your copy and did not install the new version; to get the new one, move your copy aside and run setup again)",
+    "keptHeld": "{file} (not updated: it works with your edited board script, which setup kept; to update both, move your script aside and run setup again)",
+    "keptHeldWorker": "{file} (not updated: it works with your edited agent-board-hook.mjs, which setup kept; to update both, move that file aside and run setup again)",
+    "heldMissing": "{file} (missing: setup cannot put back the old version while your edited board script stays; restore or move your agent-board.mjs, then run setup again)",
     "ready": "already set up",
-    "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry with {command}.",
+    "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry.",
     "retry": "Retry after fixing the conflicting files: {command}",
     "skillOnly": "board skill only; automatic reporting is unavailable",
     "claude": "connects through its plugin",
@@ -115,8 +120,13 @@ const summaries = [
     "shared": "共用",
     "retire": "{file}（舊的 /board 命令；setup 會移除）",
     "keptEdited": "{file}（你改過的舊 /board 命令；setup 不動它；命令已改成 /agent-board）",
+    "keptText": "{file}（你改過這個檔案，所以 setup 不動它，新版放在 {beside}）",
+    "keptCode": "{file}（你改過這個檔案，而且 agent 會直接執行它，所以 setup 保留你的版本，沒有裝新版；想換成新版，請先把你的版本移開，再執行一次 setup）",
+    "keptHeld": "{file}（沒有更新：它要配合你改過的看板程式，而 setup 保留了你的版本；要一起更新，請先把你的看板程式移開，再執行一次 setup）",
+    "keptHeldWorker": "{file}（沒有更新：它要配合你改過的 agent-board-hook.mjs，而 setup 保留了你的版本；要一起更新，請先把該檔案移開，再執行一次 setup）",
+    "heldMissing": "{file}（找不到：你改過的看板程式還在，setup 無法補回舊版；請還原或移開你的 agent-board.mjs，再執行一次 setup）",
     "ready": "已設定完成",
-    "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案，再執行 {command} 重試。",
+    "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案後重試。",
     "retry": "修正衝突的檔案後重試：{command}",
     "skillOnly": "僅提供看板技能；尚無自動回報功能",
     "claude": "透過外掛接上看板",
@@ -173,8 +183,13 @@ const summaries = [
     "shared": "共用",
     "retire": "{file}（旧的 /board 命令；setup 会移除）",
     "keptEdited": "{file}（你改过的旧 /board 命令；setup 不动它；命令已改成 /agent-board）",
+    "keptText": "{file}（你改过这个文件，所以 setup 不动它，新版放在 {beside}）",
+    "keptCode": "{file}（你改过这个文件，而且 agent 会直接运行它，所以 setup 保留了你的版本，没有装新版；想换成新版，请先把你的版本移走，再运行一次 setup）",
+    "keptHeld": "{file}（没有更新：它要配合你改过的看板程序，而 setup 保留了你的版本；要一起更新，请先把你的看板程序移走，再运行一次 setup）",
+    "keptHeldWorker": "{file}（没有更新：它要配合你改过的 agent-board-hook.mjs，而 setup 保留了你的版本；要一起更新，请先把该文件移走，再运行一次 setup）",
+    "heldMissing": "{file}（找不到：你改过的看板程序还在，setup 无法补回旧版；请还原或移走你的 agent-board.mjs，再运行一次 setup）",
     "ready": "已设置完成",
-    "skipped": "已跳过：无法安全更新 {files}。请修复或移走冲突的文件，再运行 {command} 重试。",
+    "skipped": "已跳过：无法安全更新 {files}。请修复或移走冲突的文件后重试。",
     "retry": "修复冲突的文件后重试：{command}",
     "skillOnly": "仅提供看板技能；暂无自动报告功能",
     "claude": "通过插件接上看板",
@@ -372,7 +387,7 @@ const main = () => {
   const hasDisabledPlugin = isPluginInstalled && isPluginDisabled(claudeDirectory)
   const isPluginNeeded = isAsking && !!claude && !isPluginInstalled
   const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
-  const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
+  const quote = value => /^[\w./:@=,-]+$/.test(value) ? value : process.platform === 'win32'
     ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
   const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
   const setupCommand = extra => {
@@ -472,7 +487,7 @@ const main = () => {
   }
   const fileLine = (file, changes) => {
     const change = changes.find(one => one.file === file)
-    return `  ${change?.action === 'remove' && !isRemove ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
+    return `  ${change?.action === 'remove' && !isRemove && !file.endsWith('.new') ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
   }
   const sharedChanges = [...new Map(results.flatMap(plan => plan.conflicts.length ? [] : changesFor(plan, true)).map(change => [change.file, change])).values()]
   const sharedFiles = [...new Set(filesByAgent.flat().filter(file => shared.has(file)))]
@@ -491,16 +506,29 @@ const main = () => {
     const alreadyCurrent = isShowingApplied && !plan.conflicts.length && plan.managedBy !== 'connector'
       ? changesFor(plans[i], false).filter(change => !changed.has(change.file)).length : 0
     const current = alreadyCurrent > 0 ? `; ${words('current', { count: alreadyCurrent })}` : ''
-    const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.map(shortPath).join(', '), command: setupCommand([isRemove ? '--remove' : '', '--agent', agent, '--apply'].filter(Boolean)) })
+    const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.map(shortPath).join(', ') })
       : describe(ownChanges) || (isRemove ? words('noInstalled') : words('ready'))
     const capability = !isRemove && plan.managedBy !== 'connector' && !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
     // An install plan removes a file only to retire the old /board command (#868), so the preview says so.
     const files = !isShowingApplied && !plan.conflicts.length ? filesByAgent[i].filter(file => !shared.has(file)).map(file => fileLine(file, ownChanges)) : []
     // An old /board file the person edited stays; say so in the preview and after applying.
-    const kept = plan.conflicts.length ? [] : (plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`)
+    const missing = (plan.missingHeld ?? []).map(file => `  ${words('heldMissing', { file: shortPath(file) })}`)
+    const kept = plan.conflicts.length ? missing : (plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`)
     return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
   })
   lines.push(...agentLines)
+  // A file the person edited is named once, even when several agents share it (#1302).
+  if (!isRemove) {
+    const keptLines = new Set()
+    for (const plan of results) {
+      if (plan.conflicts.length) continue
+      for (const one of plan.keptText ?? []) keptLines.add(`  ${words('keptText', { file: shortPath(one.file), beside: shortPath(one.beside) })}`)
+      for (const file of plan.keptCode ?? []) keptLines.add(`  ${words('keptCode', { file: shortPath(file) })}`)
+      for (const file of plan.keptHeld ?? []) keptLines.add(`  ${words('keptHeld', { file: shortPath(file) })}`)
+      for (const file of plan.keptHeldWorker ?? []) keptLines.add(`  ${words('keptHeldWorker', { file: shortPath(file) })}`)
+    }
+    lines.push(...keptLines)
+  }
   if (hasClaude && !isRemove) lines.push(`Claude Code: ${words('claude')}`)
   if (isRemove && results.length) {
     const progress = results[0]?.progress || join(data, 'progress.md')
@@ -627,6 +655,9 @@ const main = () => {
           sessions.push(names[agent])
         }
       }
+      // One retry command for every agent that was skipped, here as in the run without a terminal.
+      const skippedAgents = selected.filter((agent, i) => plans[i].conflicts.length)
+      if (skippedAgents.length) next.push(words('retry', { command: setupCommand(['--agent', skippedAgents.join(','), '--apply']) }))
       if (hasInstalledPlugin && isPluginDisabled(claudeDirectory)) next.push(enablePluginStep())
       if (isPluginReady) sessions.push('Claude Code')
       if (sessions.length) {
@@ -653,6 +684,9 @@ const main = () => {
         steps.push(words('directRemoved', { command: launcherCommand }))
       }
     }
+    // One retry command, still a removal, for every agent that was skipped.
+    const skipped = selected.filter((agent, i) => plans[i].conflicts.length)
+    if (skipped.length) steps.push(words('retry', { command: setupCommand(['--remove', '--agent', skipped.join(','), '--apply']) }))
   } else {
     const hasChanges = available.some(agent => plans[selected.indexOf(agent)].changes.length > 0)
     if (!apply && hasChanges) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
@@ -689,7 +723,9 @@ const main = () => {
     }
     if (isPluginInstalled && !hasDisabledPlugin && hasChanges) sessionAgents.push('Claude Code')
     if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
-    for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
+    // One retry command for every agent that was skipped.
+    const skipped = selected.filter((agent, i) => plans[i].conflicts.length)
+    if (skipped.length) steps.push(words('retry', { command: setupCommand(['--agent', skipped.join(','), '--apply']) }))
     if (hasDisabledPlugin) steps.push(enablePluginStep())
     else if (hasClaude && !isPluginInstalled) steps.push(words('plugin'))
     if (available.length && hasChanges) {

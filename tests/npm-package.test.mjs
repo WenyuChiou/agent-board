@@ -6,12 +6,15 @@ import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import { bundleFiles, bundleFromDir } from '../scripts/bundle-text.mjs'
 import { setupPrograms } from './helpers/setup-programs.mjs'
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
 const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
 const plugin = JSON.parse(readFileSync(join(repo, '.claude-plugin/plugin.json'), 'utf8'))
+// A folder as the launcher shows it in a command for this system's shell (bin/agent-board.mjs `quoted`).
+const shellQuoted = path => process.platform !== 'win32' ? `'${path.replaceAll("'", "'\\''")}'` : /[$`]/.test(path) ? `'${path.replaceAll("'", "''")}'` : `"${path}"`
 const save = (path, text) => {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, text)
@@ -391,6 +394,329 @@ test('an installed board script from another build gets a one-line note naming i
   assert.equal(unreadable.stderr.trim().split('\n').length, 1)
 }))
 
+test('--json through an installed board script from an older release fails with the notice instead of printing text and exiting 0 (#1304)', () => fixture(f => {
+  const pkg = packed(f)
+  // What 0.24.2's script did with --json: print the text board and exit 0.
+  const text = `${prelude(f)}process.stdout.write('Agent Board (text, not JSON)\\n')\n// 0.24.2`
+  save(boardPath(f), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  for (const [lang, older] of [['en', 'is from 0.24.2.'], ['zh-TW', '是 0.24.2 版']]) {
+    const json = f.run(pkg, ['--json', '--lang', lang])
+    assert.notEqual(json.status, 0, 'the call fails')
+    assert.equal(json.stdout, '', 'nothing but JSON may ever reach stdout')
+    assert.ok(json.stderr.includes(older), json.stderr)
+    assert.ok(json.stderr.includes(`npx ${manifest.name}@${manifest.version} setup`), json.stderr)
+    assert.equal(json.stderr.trim().split('\n').length, 1)
+  }
+  // Without --json the older script still runs, with the same note.
+  const plain = f.run(pkg, ['--print'])
+  success(plain)
+  assert.ok(plain.stdout.includes('Agent Board (text, not JSON)'))
+  assert.ok(plain.stderr.includes('is from 0.24.2.'))
+}))
+
+test('--json through an edited older board script still fails instead of printing text and exiting 0 (#1304, review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const text = `${prelude(f)}process.stdout.write('Agent Board (text, not JSON)\\n')\n// 0.24.2`
+  // An edited copy of a released script hashes as no release at all.
+  save(boardPath(f), `${text}\n// edited by the person`)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  const edited = f.run(pkg, ['--json'])
+  assert.notEqual(edited.status, 0, 'an edited older script cannot return JSON')
+  assert.equal(edited.stdout, '', 'nothing but JSON may ever reach stdout')
+  // A script that does return JSON is left alone, even when it is a build the package does not know.
+  save(boardPath(f), `${prelude(f)}process.stdout.write('{"ok":true}\\n')\n// a newer build`)
+  const newer = f.run(pkg, ['--json'])
+  success(newer)
+  assert.equal(newer.stdout, '{"ok":true}\n')
+}))
+
+test('--json through a build the package does not know hands over all of a large JSON output before the launcher exits (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  // An edited current script: the launcher holds its output to check it is JSON, then passes it on.
+  const json = JSON.stringify({ items: 'x'.repeat(8 * 1024 * 1024) })
+  save(boardPath(f), `${prelude(f)}process.stdout.write(${JSON.stringify(json)})\n// edited by the person`)
+  // A reader that waits before it reads: the launcher's output then waits in its own queue, which an early exit drops
+  // (stdout to a pipe is asynchronous on Windows and macOS).
+  const reader = `const { spawn } = require('node:child_process')
+const board = spawn(process.execPath, [${JSON.stringify(join(pkg, 'bin/agent-board.mjs'))}, '--json'], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+board.stdout.pause()
+let size = 0
+setTimeout(() => { board.stdout.on('data', chunk => { size += chunk.length }); board.stdout.resume() }, 1500)
+board.stdout.on('end', () => process.stdout.write(String(size)))`
+  const result = spawnSync(process.execPath, ['-e', reader], { cwd: f.box, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 60000 })
+  assert.equal(result.stdout, String(json.length), 'every byte of the JSON reaches a reader that is slow to read')
+}))
+
+test('--json through a build the package does not know waits for an asynchronous stdout writer before it exits (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  save(boardPath(f), `${prelude(f)}process.stdout.write('{"ok":true}\\n')\n// edited by the person`)
+  // A stdout that, like a pipe on macOS, takes a write now and delivers it a moment later (calling back when it has): an exit
+  // before the callback loses the text. The preload records what was delivered before the process ended.
+  const delivered = join(f.box, 'delivered.txt')
+  const preload = join(f.box, 'async-stdout.cjs')
+  save(preload, `const { appendFileSync } = require('node:fs')
+// Only the launcher (bin/agent-board.mjs); the board script it starts inherits NODE_OPTIONS and writes normally.
+if (/[\\\\/]bin[\\\\/]agent-board\\.mjs$/.test(process.argv[1] ?? '')) process.stdout.write = (text, callback) => {
+  setTimeout(() => { appendFileSync(${JSON.stringify(delivered)}, String(text)); if (typeof callback === 'function') callback() }, 100)
+  return true
+}
+`)
+  const result = f.run(pkg, ['--json'], { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })
+  success(result)
+  assert.equal(readFileSync(delivered, 'utf8'), '{"ok":true}\n', 'the JSON is delivered before the launcher exits')
+}))
+
+test('--json with --chat or --status through an older board script fails with the notice too (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const text = `${prelude(f)}process.stdout.write('Agent Board (text, not JSON)\\n')\n// 0.24.2`
+  save(boardPath(f), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  for (const extra of ['--chat', '--status']) {
+    const json = f.run(pkg, ['--json', extra])
+    assert.notEqual(json.status, 0, `--json ${extra} fails through an older script`)
+    assert.equal(json.stdout, '', `--json ${extra} prints no text`)
+  }
+}))
+
+test('--json for a maintenance mode through an older board script runs it, as 0.24.2 answers --codex-doctor --json (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  // 0.24.2 printed the text board for a plain --json, but JSON for --codex-doctor --json.
+  const text = `${prelude(f)}process.stdout.write(process.argv.includes('--codex-doctor') ? '{"doctor":"ok"}\\n' : process.argv.includes('--codex-trust') ? 'trust text\\n' : 'Agent Board (text, not JSON)\\n')\n// 0.24.2`
+  save(boardPath(f), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  const doctor = f.run(pkg, ['--codex-doctor', '--json'])
+  success(doctor)
+  assert.equal(doctor.stdout, '{"doctor":"ok"}\n')
+  assert.ok(doctor.stderr.includes('is from 0.24.2.'), doctor.stderr)
+  // A maintenance mode whose older script answers --json with text is still caught: its output is checked as JSON.
+  const trust = f.run(pkg, ['--codex-trust', '--json'])
+  assert.notEqual(trust.status, 0, 'text for --json fails')
+  assert.equal(trust.stdout, '', 'nothing but JSON may ever reach stdout')
+  // The board document itself is still refused before the older script runs.
+  const board = f.run(pkg, ['--json'])
+  assert.notEqual(board.status, 0)
+  assert.equal(board.stdout, '')
+}))
+
+test('a Windows folder ending in a backslash reaches the command whole in cmd and PowerShell (#1328)', () => fixture(f => {
+  const source = readFileSync(join(repo, 'bin/agent-board.mjs'), 'utf8')
+  const start = source.indexOf('const quoted =')
+  const end = source.indexOf('\nconst code =', start)
+  assert.ok(start >= 0 && end > start)
+  const helper = source.match(/^const doubleTrailingBackslashes = .+$/m)?.[0] ?? ''
+  const quoted = runInNewContext(`${helper}\n${source.slice(start, end)}\nquoted`, { isWin: true })
+  assert.equal(quoted('C:\\', 'cmd'), '"C:\\\\"')
+  assert.equal(quoted('C:\\', 'powershell'), '"C:\\\\"')
+  const withSpace = 'C:\\Synthetic board \\'
+  const withDollar = 'C:\\Synthetic $board \\'
+  assert.equal(quoted(withDollar, 'powershell'), "'C:\\Synthetic $board \\\\'")
+  if (process.platform !== 'win32') return
+  const probe = join(f.box, 'quote-probe.cmd')
+  save(probe, `@echo off\r\n"${process.execPath}" -e "console.log(JSON.stringify(process.argv[1]))" ${quoted('C:\\', 'cmd')}\r\n`)
+  const cmd = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', `"${probe}"`], { env: f.env, encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true })
+  assert.equal(cmd.status, 0, cmd.stderr)
+  assert.equal(JSON.parse(cmd.stdout.trim()), 'C:\\')
+  for (const path of [withSpace, withDollar]) {
+    const command = `& '${process.execPath.replaceAll("'", "''")}' -e 'console.log(JSON.stringify(process.argv[1]))' ${quoted(path, 'powershell')}`
+    const ps = spawnSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], { env: f.env, encoding: 'utf8', windowsHide: true })
+    assert.equal(ps.status, 0, ps.stderr)
+    assert.equal(JSON.parse(ps.stdout.trim()), path)
+  }
+}))
+
+test('the launcher passes the plugin update steps to the board it starts (#1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const script = join(f.env.CLAUDE_CONFIG_DIR, 'agent-board.mjs')
+  const text = `globalThis.AGENT_BOARD = {}\nprocess.stdout.write(JSON.stringify({ command: process.env.AGENT_BOARD_UPDATE_COMMAND, kind: process.env.AGENT_BOARD_UPDATE_KIND }))\n// 0.24.2`
+  save(script, text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  const result = f.run(pkg, ['--print'])
+  success(result)
+  assert.deepEqual(JSON.parse(result.stdout), { command: '/progress connect', kind: 'plugin' })
+}))
+
+test('a custom path with % is shown once per shell on Windows, and each shell receives it exactly (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  // Command Prompt expands %USERNAME% even inside double quotes.
+  const root = join(f.home, 'data %USERNAME% 100%')
+  const echo = `globalThis.AGENT_BOARD = ${JSON.stringify({ codexRoot: root, lang: 'en' })}\nprocess.stdout.write('update=' + JSON.stringify(process.env.AGENT_BOARD_UPDATE_COMMAND ?? null))\n// 0.24.2`
+  save(join(root, 'install-codex.json'), '{}')
+  save(join(root, 'agent-board.mjs'), echo)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(echo)}'] }]\n`)
+  const shown = f.run(pkg, ['--data-dir', root, '--print'], { NODE_OPTIONS: `--require ${JSON.stringify(join(repo, 'tests/fixtures/platform-win32.cjs'))}` })
+  success(shown)
+  const base = `npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir`
+  // For Command Prompt each % steps out of the quotes as ^%; PowerShell reads % inside double quotes as it is.
+  const forCmd = `"${root.replaceAll('%', '"^%"')}"`
+  assert.equal(shown.stdout, `update=${JSON.stringify(`Command Prompt: ${base} ${forCmd}; PowerShell: ${base} "${root}"`)}`)
+  const lines = Object.fromEntries(shown.stderr.split(/\r?\n/).map(line => /^ {2}(Command Prompt|PowerShell): (.+)$/.exec(line)).filter(Boolean).map(match => [match[1], match[2]]))
+  assert.deepEqual(Object.keys(lines).sort(), ['Command Prompt', 'PowerShell'], shown.stderr)
+  if (process.platform !== 'win32') return
+  // Stand-in npx shims, as npm installs them (npx.cmd for Command Prompt, npx.ps1 for PowerShell), that record the arguments.
+  const stub = join(f.box, 'stub')
+  save(join(stub, 'npx.cmd'), `@"${process.execPath}" "%~dp0npx.js" %*\r\n`)
+  save(join(stub, 'npx.ps1'), `& "${process.execPath}" "$PSScriptRoot\\npx.js" @args\r\nexit $LASTEXITCODE\r\n`)
+  save(join(stub, 'npx.js'), "require('node:fs').writeFileSync(process.env.STUB_OUT, JSON.stringify(process.argv.slice(2)))\n")
+  const out = join(f.box, 'argv.json')
+  const path = `${stub};${f.env.PATH ?? f.env.Path}`
+  // USERNAME is set, so an expanded %USERNAME% would show in the path received.
+  const env = { ...f.env, PATH: path, Path: path, STUB_OUT: out, USERNAME: 'someone-else' }
+  const shells = {
+    'Command Prompt': command => spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], { env, encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, timeout: 30000 }),
+    PowerShell: command => spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 }),
+  }
+  for (const [shell, runIn] of Object.entries(shells)) {
+    rmSync(out, { force: true })
+    const result = runIn(lines[shell])
+    assert.equal(result.status, 0, `${shell}: ${result.stderr}`)
+    assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), [`${manifest.name}@${manifest.version}`, 'setup', '--agent', 'codex', '--data-dir', root], shell)
+  }
+}))
+
+// Two-hour review of #1328 (codex_127), finding 4: the advice for a script that returns text for --json names the data folder.
+test('a script that does not return JSON for --json is answered with the update command for its own data folder (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, 'data dir')
+  save(join(root, 'install-codex.json'), '{}')
+  // Not a release the package knows, so the launcher holds its output and finds it is not JSON.
+  save(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = ${JSON.stringify({ lang: 'en' })}\nprocess.stdout.write('Agent Board (text, not JSON)\\n')\n// edited by the person`)
+  const result = f.run(pkg, ['--data-dir', root, '--json'])
+  assert.notEqual(result.status, 0)
+  assert.equal(result.stdout, '')
+  assert.ok(result.stderr.includes(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir ${shellQuoted(root)}`), result.stderr)
+}))
+
+// Finding 5: with --chat a folder under home is written home-relative, in a form each shell expands.
+test('with --chat a custom folder under home is shown in a form each shell expands (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, "data dir it's")
+  const reply = `globalThis.AGENT_BOARD = ${JSON.stringify({ codexRoot: root, lang: 'en' })}\nprocess.stdout.write(JSON.stringify({ update: process.env.AGENT_BOARD_UPDATE_COMMAND ?? null }))\n// 0.24.2`
+  save(join(root, 'install-codex.json'), '{}')
+  save(join(root, 'agent-board.mjs'), reply)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(reply)}'] }]\n`)
+  const shownFor = platform => {
+    const result = f.run(pkg, ['--data-dir', root, '--codex-doctor', '--json', '--chat'], { NODE_OPTIONS: `--require ${JSON.stringify(join(repo, `tests/fixtures/platform-${platform}.cjs`))}` })
+    success(result)
+    return { update: JSON.parse(result.stdout).update, stderr: result.stderr }
+  }
+  const base = `npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir`
+  // POSIX: a quoted ~ is not expanded, so the ~ stays outside the quotes.
+  const posix = shownFor('posix')
+  assert.equal(posix.update, `${base} ~/'data dir it'\\''s'`)
+  assert.ok(posix.stderr.includes(posix.update), posix.stderr)
+  // Windows: Command Prompt never expands ~, so each shell gets its own variable for the home folder.
+  const windows = shownFor('win32')
+  assert.equal(windows.update, `Command Prompt: ${base} "%USERPROFILE%\\data dir it's"; PowerShell: ${base} "$HOME\\data dir it's"`)
+  if (process.platform !== 'win32') {
+    // The shell that shows this command expands it to the folder.
+    const result = spawnSync('sh', ['-c', `printf %s ${posix.update.slice(posix.update.indexOf('~'))}`], { env: f.env, encoding: 'utf8', timeout: 15000 })
+    assert.equal(result.stdout, root)
+    return
+  }
+  // Stand-in npx shims, as npm installs them, that record the arguments.
+  const stub = join(f.box, 'stub')
+  save(join(stub, 'npx.cmd'), `@"${process.execPath}" "%~dp0npx.js" %*\r\n`)
+  save(join(stub, 'npx.ps1'), `& "${process.execPath}" "$PSScriptRoot\\npx.js" @args\r\nexit $LASTEXITCODE\r\n`)
+  save(join(stub, 'npx.js'), "require('node:fs').writeFileSync(process.env.STUB_OUT, JSON.stringify(process.argv.slice(2)))\n")
+  const out = join(f.box, 'argv.json')
+  const path = `${stub};${f.env.PATH ?? f.env.Path}`
+  const env = { ...f.env, PATH: path, Path: path, STUB_OUT: out }
+  const lines = Object.fromEntries(windows.stderr.split(/\r?\n/).map(line => /^ {2}(Command Prompt|PowerShell): (.+)$/.exec(line)).filter(Boolean).map(match => [match[1], match[2]]))
+  assert.deepEqual(Object.keys(lines).sort(), ['Command Prompt', 'PowerShell'], windows.stderr)
+  const shells = {
+    'Command Prompt': command => spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], { env, encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, timeout: 30000 }),
+    PowerShell: command => spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 }),
+  }
+  for (const [shell, runIn] of Object.entries(shells)) {
+    rmSync(out, { force: true })
+    const result = runIn(lines[shell])
+    assert.equal(result.status, 0, `${shell}: ${result.stderr}`)
+    assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), [`${manifest.name}@${manifest.version}`, 'setup', '--agent', 'codex', '--data-dir', root], shell)
+  }
+}))
+
+// Finding 6: the failure notice of --chat shows the home folder as ~, like every other path in that output.
+test('with --chat a failed comparison names the board script without the home folder (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  save(boardPath(f), `${prelude(f)}process.stdout.write('{"ok":true}\\n')\n// edited by the person`)
+  // The package cannot be read for the comparison.
+  rmSync(join(pkg, 'hooks/board-script.ts'), { force: true })
+  const result = f.run(pkg, ['--chat', '--json'])
+  success(result)
+  assert.ok(result.stderr.includes('could not compare the board script at ~'), result.stderr)
+  assert.equal(result.stderr.includes(f.home), false, result.stderr)
+}))
+
+test('the displayed update command quotes a custom path for the shell it is shown for (review of #1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, "data $HOME $(touch pwned) it's")
+  const echo = `globalThis.AGENT_BOARD = ${JSON.stringify({ codexRoot: root, lang: 'en' })}\nprocess.stdout.write('update=' + JSON.stringify(process.env.AGENT_BOARD_UPDATE_COMMAND ?? null))\n// 0.24.2`
+  save(join(root, 'install-codex.json'), '{}')
+  save(join(root, 'agent-board.mjs'), echo)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(echo)}'] }]\n`)
+  // Shown for a POSIX shell: single quotes, a quote inside written as '\''.
+  const posix = f.run(pkg, ['--data-dir', root, '--print'], { NODE_OPTIONS: `--require ${JSON.stringify(join(repo, 'tests/fixtures/platform-posix.cjs'))}` })
+  success(posix)
+  assert.equal(posix.stdout, `update=${JSON.stringify(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir '${root.replaceAll("'", "'\\''")}'`)}`)
+  // Shown on Windows: Command Prompt reads only double quotes and PowerShell runs $(...) and backticks inside them, so a path
+  // with $ or a backtick is shown once per shell (a quote inside doubled for PowerShell); other paths keep one command.
+  const windows = f.run(pkg, ['--data-dir', root, '--print'], { NODE_OPTIONS: `--require ${JSON.stringify(join(repo, 'tests/fixtures/platform-win32.cjs'))}` })
+  success(windows)
+  const base = `npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir`
+  assert.equal(windows.stdout, `update=${JSON.stringify(`Command Prompt: ${base} "${root}"; PowerShell: ${base} '${root.replaceAll("'", "''")}'`)}`)
+}))
+
+test('on Windows each shown update command, run in its own shell, receives the exact path (review of #1328)', { skip: process.platform !== 'win32' }, () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, "data $HOME $(touch pwned) `tick` it's")
+  const echo = `globalThis.AGENT_BOARD = ${JSON.stringify({ codexRoot: root, lang: 'en' })}\n// 0.24.2`
+  save(join(root, 'install-codex.json'), '{}')
+  save(join(root, 'agent-board.mjs'), echo)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(echo)}'] }]\n`)
+  const shown = f.run(pkg, ['--data-dir', root, '--print'], { NODE_OPTIONS: `--require ${JSON.stringify(join(repo, 'tests/fixtures/platform-win32.cjs'))}` })
+  const lines = Object.fromEntries(shown.stderr.split(/\r?\n/).map(line => /^ {2}(Command Prompt|PowerShell): (.+)$/.exec(line)).filter(Boolean).map(match => [match[1], match[2]]))
+  assert.deepEqual(Object.keys(lines).sort(), ['Command Prompt', 'PowerShell'], shown.stderr)
+  // A stand-in npx that records the arguments it receives.
+  const stub = join(f.box, 'stub')
+  save(join(stub, 'npx.cmd'), `@"${process.execPath}" "%~dp0npx.js" %*\r\n`)
+  save(join(stub, 'npx.js'), "require('node:fs').writeFileSync(process.env.STUB_OUT, JSON.stringify(process.argv.slice(2)))\n")
+  const out = join(f.box, 'argv.json')
+  const path = `${stub};${f.env.PATH ?? f.env.Path}`
+  const env = { ...f.env, PATH: path, Path: path, STUB_OUT: out }
+  const expected = [`${manifest.name}@${manifest.version}`, 'setup', '--agent', 'codex', '--data-dir', root]
+  const shells = {
+    'Command Prompt': command => spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], { env, encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, timeout: 30000 }),
+    PowerShell: command => spawnSync('powershell.exe', ['-NoProfile', '-Command', command], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 }),
+  }
+  for (const [shell, runIn] of Object.entries(shells)) {
+    rmSync(out, { force: true })
+    const result = runIn(lines[shell])
+    assert.equal(result.status, 0, `${shell}: ${result.stderr}`)
+    assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), expected, shell)
+  }
+}))
+
+test('the launcher hands an older script the update command for the install it runs and the plugin reconnect command (#1304)', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, 'data dir')
+  const echo = head => `${head}process.stdout.write('update=' + JSON.stringify(process.env.AGENT_BOARD_UPDATE_COMMAND ?? null))\n// 0.24.2`
+  const text = echo(`globalThis.AGENT_BOARD = ${JSON.stringify({ codexRoot: root, lang: 'en' })}\n`)
+  save(join(root, 'install-codex.json'), '{}')
+  save(join(root, 'agent-board.mjs'), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  const custom = f.run(pkg, ['--data-dir', root, '--print'])
+  success(custom)
+  assert.equal(custom.stdout, `update=${JSON.stringify(`npx ${manifest.name}@${manifest.version} setup --agent codex --data-dir ${shellQuoted(root)}`)}`)
+  const plugin = echo('globalThis.AGENT_BOARD = {}\n')
+  const script = join(f.env.CLAUDE_CONFIG_DIR, 'agent-board.mjs')
+  save(script, plugin)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(plugin)}'] }]\n`)
+  const fromPlugin = f.run(pkg, ['--print'])
+  success(fromPlugin)
+  assert.equal(fromPlugin.stdout, 'update="/progress connect"')
+}))
+
 test('the board script beside CLAUDE_PROGRESS_FILE runs with the arguments unchanged and its own path as argv[1]', () => fixture(f => {
   const pkg = packed(f)
   const script = join(f.home, 'plugin data/agent-board.mjs')
@@ -488,7 +814,7 @@ test('an older plugin copy is told to update the plugin, and an older independen
   for (const [lang, preview, apply] of [['en', 'To update it, preview:', ', then add --apply.'], ['zh-TW', '更新前先預覽：', '，再加上 --apply。'], ['zh-CN', '更新前先预览：', '，再加上 --apply。']]) {
     const result = f.run(pkg, ['--data-dir', root, '--lang', lang])
     success(result)
-    assert.ok(result.stderr.includes(`${preview}${lang === 'en' ? ' ' : ''}npx ${manifest.name}@${manifest.version} setup --agent codex,cursor --data-dir "${root}"${apply}`), result.stderr)
+    assert.ok(result.stderr.includes(`${preview}${lang === 'en' ? ' ' : ''}npx ${manifest.name}@${manifest.version} setup --agent codex,cursor --data-dir ${shellQuoted(root)}${apply}`), result.stderr)
     assert.equal(result.stderr.includes('setup --apply'), false)
     assert.equal(result.stderr.trim().split('\n').length, 1)
   }
@@ -498,7 +824,7 @@ test('an older plugin copy is told to update the plugin, and an older independen
   const moved = f.run(pkg, ['--data-dir', other])
   success(moved)
   assert.ok(moved.stderr.includes(`is from 0.0.1. To update it, preview: npx ${manifest.name}@${manifest.version} setup --data-dir `), moved.stderr)
-  assert.ok(moved.stderr.includes(`--data-dir ${/[^\w.:\\/~@+,=-]/.test(other) ? `"${other}"` : other}, then add --apply.`), moved.stderr)
+  assert.ok(moved.stderr.includes(`--data-dir ${/[^\w.:\\/~@+,=-]/.test(other) ? shellQuoted(other) : other}, then add --apply.`), moved.stderr)
   assert.equal(moved.stderr.includes(gone), false)
   assert.equal(moved.stderr.includes('--agent'), false)
   assert.equal(moved.stderr.includes('could not compare'), false)

@@ -175,10 +175,58 @@ const home = homedir()
 const isWin = process.platform === 'win32'
 // --chat output may be pasted into a chat app, so it shows the home folder as ~, as the board's own --chat does.
 const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(home.toLowerCase()) : path.startsWith(home)) ? `~${path.slice(home.length)}` : path
+// The path as one argument for the shell the command is shown for: single quotes on POSIX. On Windows, double quotes,
+// which cmd and PowerShell both read; PowerShell runs $(...) and backticks inside them, so such a path gets its single quotes.
+// cmd expands %NAME% even inside double quotes, so for cmd each % steps out of the quotes as ^%, which cmd reads as a plain %.
+// A native Windows argument parser treats backslashes immediately before a closing double quote as escapes.
+const doubleTrailingBackslashes = text => text.replace(/\\+$/, '$&$&')
+const quoted = (text, shell) => !isWin ? `'${text.replaceAll("'", "'\\''")}'` : shell !== 'cmd' && /[$`]/.test(text) ? `'${(/\s/.test(text) ? doubleTrailingBackslashes(text) : text).replaceAll("'", "''")}'` : shell === 'cmd' ? `"${doubleTrailingBackslashes(text.replaceAll('%', '"^%"'))}"` : `"${doubleTrailingBackslashes(text)}"`
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
-const run = (path, passed, { isSetup = false, isRemove = false, env = process.env } = {}) => {
+// The part of a path below the home folder, with its leading separator ('' for home itself); undefined elsewhere.
+const belowHome = path => {
+  if (!home) return undefined
+  const [a, b] = isWin ? [path.toLowerCase(), home.toLowerCase()] : [path, home]
+  return a === b ? '' : a.startsWith(b) && (path[home.length] === '/' || path[home.length] === '\\') ? path.slice(home.length) : undefined
+}
+// How to run setup again for the install whose board script is at `path`: the agents it was set up for and its data folder.
+// With --chat a folder under home is written home-relative, in a form each shell expands: ~/'rest' on POSIX (a quoted ~ is
+// not expanded), "%USERPROFILE%\rest" in Command Prompt, "$HOME\rest" in PowerShell. Command Prompt reads only double quotes and
+// expands %NAME% inside them, and PowerShell runs $(...) and backticks inside them, so such a path is shown once per shell.
+function setupAdvice(path, prelude) {
+  let root = typeof prelude.codexRoot === 'string' ? resolve(prelude.codexRoot) : dirname(path)
+  // The agents scripts/setup-agent.mjs knows; another install-*.json (a backup copy) is not one.
+  const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
+  const listed = folder => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
+  let agents = listed(root)
+  // A moved data folder: the board script's own folder is where the board is now.
+  if (!agents) { root = dirname(path); agents = listed(root) ?? [] }
+  const agentOpt = agents.length ? ` --agent ${agents.join(',')}` : ''
+  const isDefault = root === join(home, '.agent-board')
+  const rest = isChat ? belowHome(root) : undefined
+  const needsQuote = !isDefault && /[^\w.:\/~@+,=-]/.test(root)
+  const isTwoShells = isWin && !isDefault && (rest !== undefined || (needsQuote && /[$`%]/.test(root)))
+  const dataOpt = style => {
+    if (isDefault) return ''
+    if (rest !== undefined) {
+      // Both shells read a backslash; a folder given with forward slashes is shown the same way.
+      const winRest = doubleTrailingBackslashes(rest.replaceAll('/', '\\'))
+      if (isWin) return ` --data-dir ${style === 'cmd' ? `"%USERPROFILE%${winRest.replaceAll('%', '"^%"')}"` : `"$HOME${winRest.replace(/[`$]/g, '`$&')}"`}`
+      const below = rest.slice(1)
+      return ` --data-dir ~${below === '' ? '' : `/${/[^\w.:\/~@+,=-]/.test(below) ? quoted(below, style) : below}`}`
+    }
+    return ` --data-dir ${needsQuote ? quoted(root, style) : root}`
+  }
+  const opts = agentOpt + dataOpt()
+  const command = `npx ${name}@${v} setup${isTwoShells ? agentOpt + dataOpt('cmd') : opts}`
+  const forPowerShell = `npx ${name}@${v} setup${isTwoShells ? agentOpt + dataOpt('powershell') : opts}`
+  const labels = message(['Command Prompt:', 'PowerShell:'], ['命令提示字元：', 'PowerShell：'], ['命令提示符：', 'PowerShell：'])
+  const two = isTwoShells ? `\n  ${labels[0]} ${command}\n  ${labels[1]} ${forPowerShell}` : ''
+  return { opts, command, forPowerShell, isTwoShells, labels, two }
+}
+const run = (path, passed, { isSetup = false, isRemove = false, env = process.env, isJsonChecked = false, adviceFor = {} } = {}) => {
   const setupCmd = isRemove ? `npx ${name} remove` : `npx ${name} setup`
-  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : 'inherit', encoding: 'utf8', env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: setupCmd } : env, windowsHide: true })
+  // A script this package cannot vouch for may not know --json: its output is held until it parses as JSON.
+  const result = spawnSync(process.execPath, [path, ...passed], { stdio: isSetup ? ['inherit', 'inherit', 'pipe'] : isJsonChecked ? ['inherit', 'pipe', 'inherit'] : 'inherit', encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, env: isSetup ? { ...env, AGENT_BOARD_SETUP_COMMAND: setupCmd } : env, windowsHide: true })
   if (result.error) {
     console.error(message(`agent-board: could not start ${shown(path)} (${code(result.error)}).`, `agent-board：無法啟動 ${shown(path)}（${code(result.error)}）。`, `agent-board：无法启动 ${shown(path)}（${code(result.error)}）。`))
     process.exit(1)
@@ -186,11 +234,27 @@ const run = (path, passed, { isSetup = false, isRemove = false, env = process.en
   if (isSetup && result.stderr) {
     process.stderr.write(result.status === 0 ? result.stderr : result.stderr.replaceAll(resolve(pkg), '<agent-board package>').replaceAll(resolve(pkg).replaceAll('\\', '/'), '<agent-board package>'))
   }
-  if (result.signal) {
-    process.kill(process.pid, result.signal)
-    process.exit(1)
+  if (isJsonChecked && typeof result.stdout === 'string') {
+    let isJson = false
+    try { JSON.parse(result.stdout); isJson = true } catch {}
+    if (result.status === 0 && !isJson) {
+      const { opts, command, forPowerShell, isTwoShells, labels, two } = setupAdvice(path, adviceFor)
+      console.error(isTwoShells
+        ? message(`agent-board: the board script at ${shown(path)} did not return JSON for --json, so it is probably from an older release. To update it, preview with the command for your shell, then add --apply:${two}`, `agent-board：${shown(path)} 的看板程式對 --json 沒有回傳 JSON，可能是較舊的版本。更新前先用你的終端機對應的指令預覽，再加上 --apply：${two}`, `agent-board：${shown(path)} 的看板程序对 --json 没有返回 JSON，可能是较旧的版本。更新前先用你的终端对应的命令预览，再加上 --apply：${two}`)
+        : message(`agent-board: the board script at ${shown(path)} did not return JSON for --json, so it is probably from an older release. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board：${shown(path)} 的看板程式對 --json 沒有回傳 JSON，可能是較舊的版本。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board：${shown(path)} 的看板程序对 --json 没有返回 JSON，可能是较旧的版本。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
+      process.exit(1)
+    }
   }
-  process.exit(result.status ?? 1)
+  const finish = () => {
+    if (result.signal) {
+      process.kill(process.pid, result.signal)
+      process.exit(1)
+    }
+    process.exit(result.status ?? 1)
+  }
+  // Node writes stdout to a pipe asynchronously on macOS (and Windows), and process.exit drops what is still queued.
+  if (isJsonChecked && typeof result.stdout === 'string') process.stdout.write(result.stdout, finish)
+  else finish()
 }
 const unknown = word => {
   console.error(message(`agent-board: unknown command "${word}". The board takes options such as --print or --json; run agent-board --help.`, `agent-board：不認得的指令「${word}」。看板用的是 --print、--json 這類選項；請執行 agent-board --help。`, `agent-board：不认识的命令「${word}」。看板用的是 --print、--json 这类选项；请运行 agent-board --help。`))
@@ -261,13 +325,23 @@ try { prelude = JSON.parse(readFileSync(installed, 'utf8').split('\n', 1)[0].rep
 language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? systemLang(process.env.LANG) ?? 'en'
 // The first line holds account settings, so it must not affect build comparisons.
 const hash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
-if (!isChat && !args.includes('--status')) {
+// The command that updates the install being run, for the page to show; empty when the notice names no command.
+let updateCommand = ''
+let updateKind = ''
+// --json promises JSON, so a script that cannot return it is found out even for --chat and --status.
+let isJsonUnverified = args.includes('--json')
+// The maintenance modes (scripts/codex-local.ts): an older script may already answer their --json, so only the board
+// document is refused outright below; their output is still held and checked as JSON.
+const maintenanceModes = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--codex-trust', '--hermes-trust', '--codex-report', '--codex-event', '--agent-status', '--plan-event', '--mailbox']
+const isBoardJson = isJsonUnverified && !args.some(arg => maintenanceModes.includes(arg))
+if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
   try {
     // The bundle is kept in hooks/board-script.ts and its parts; the shared reader joins them.
     const bundled = bundleFromDir(pkg)
     const digest = hash(readFileSync(installed, 'utf8'))
     // Setup prepends account settings to the raw bundle; align that header here.
-    if (digest !== hash(`\n${bundled}`)) {
+    if (digest === hash(`\n${bundled}`)) isJsonUnverified = false
+    else {
       const releases = readFileSync(join(pkg, 'hooks/released.ts'), 'utf8')
       let old
       for (const match of releases.matchAll(/version:\s*'([^']+)'\s*,\s*board:\s*\[([^\]]*)\]/g)) {
@@ -277,27 +351,26 @@ if (!isChat && !args.includes('--status')) {
       if (old === v) old = undefined
       const path = shown(installed)
       if (old && typeof prelude.codexRoot === 'string') {
-        let root = resolve(prelude.codexRoot)
-        // The agents scripts/setup-agent.mjs knows; another install-*.json (a backup copy) is not one.
-        const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
-        const listed = folder => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
-        let agents = listed(root)
-        // A moved data folder: the board script's own folder is where the board is now.
-        if (!agents) { root = dirname(installed); agents = listed(root) ?? [] }
-        const folder = shown(root)
-        const opts = (agents.length ? ` --agent ${agents.join(',')}` : '') + (root !== join(home, '.agent-board') ? ` --data-dir ${/[^\w.:\\/~@+,=-]/.test(folder) ? `"${folder}"` : folder}` : '')
-        console.error(message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
+        const { opts, command, forPowerShell, isTwoShells, labels, two } = setupAdvice(installed, prelude)
+        updateCommand = isTwoShells ? `${labels[0]} ${command}${message('; ', '；', '；')}${labels[1]} ${forPowerShell}` : command
+        console.error(isTwoShells
+          ? message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview with the command for your shell, then add --apply:${two}`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先用你的終端機對應的指令預覽，再加上 --apply：${two}`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先用你的终端对应的命令预览，再加上 --apply：${two}`)
+          : message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
       } else {
+        if (old) { updateCommand = '/progress connect'; updateKind = 'plugin' }
         console.error(old
           ? message(`agent-board ${v}: the board script at ${path} is from ${old}; the Claude Code plugin wrote it. To update it, update the agent-board plugin in Claude Code, then run /progress connect.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版，由 Claude Code 外掛寫入。更新：先在 Claude Code 更新 agent-board 外掛，再執行 /progress connect。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版，由 Claude Code 插件写入。更新：先在 Claude Code 更新 agent-board 插件，再运行 /progress connect。`)
           : message(`agent-board ${v}: the board script at ${path} is a different build (newer, or edited). It runs as it is.`, `agent-board ${v}：${path} 的看板程式是另一個版本（較新，或被改過），照原樣執行。`, `agent-board ${v}：${path} 的看板程序是另一个版本（较新，或被改过），照原样运行。`))
       }
+      // An older script cannot return the board document this version promises, so that call fails with the notice instead of
+      // printing text and exiting 0 (#1304). A maintenance mode's --json runs, and its output is checked as JSON.
+      if (old && isBoardJson) process.exit(1)
     }
   } catch (error) {
-    console.error(message(`agent-board ${v}: could not compare the board script at ${installed} with this package (${code(error)}). It runs as it is.`, `agent-board ${v}：無法比對 ${installed} 的看板程式與這個套件（${code(error)}），照原樣執行。`, `agent-board ${v}：无法比对 ${installed} 的看板程序与这个包（${code(error)}），照原样运行。`))
+    console.error(message(`agent-board ${v}: could not compare the board script at ${shown(installed)} with this package (${code(error)}). It runs as it is.`, `agent-board ${v}：無法比對 ${shown(installed)} 的看板程式與這個套件（${code(error)}），照原樣執行。`, `agent-board ${v}：无法比对 ${shown(installed)} 的看板程序与这个包（${code(error)}），照原样运行。`))
   }
 }
 // A separate process preserves argv[1], which the installed page server identifies.
 const env = dataDir ? { ...process.env } : process.env
 if (dataDir) delete env.CLAUDE_PROGRESS_FILE
-run(installed, passArgs, { env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v } })
+run(installed, passArgs, { isJsonChecked: isJsonUnverified, adviceFor: prelude, env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v, AGENT_BOARD_UPDATE_COMMAND: updateCommand, AGENT_BOARD_UPDATE_KIND: updateKind } })

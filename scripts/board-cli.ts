@@ -25,7 +25,7 @@ import type { BarStyle } from '../hooks/progress-bar'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, manualStepRef, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
-import { boardVersion, startServer } from './board-serve'
+import { boardVersion, startServer, wholeUpdate } from './board-serve'
 import { moveLockAside } from './board-messaging'
 import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
@@ -2541,7 +2541,7 @@ const boardJson = (days?: number, projectFilter?: string) => {
   const packageVersion = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
   const group = {
     now, repoOf: repoLookup(worktreeRepoName),
-    versions: { board, package: /^\d+\.\d+\.\d+$/.test(packageVersion) ? packageVersion : null },
+    versions: { board, package: /^\d+\.\d+\.\d+$/.test(packageVersion) ? packageVersion : null, update: wholeUpdate(process.env.AGENT_BOARD_UPDATE_COMMAND, s) },
     unreadable: current.unreadable ?? [],
   }
   let finished: FinishedTask[] | undefined

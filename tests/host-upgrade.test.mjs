@@ -168,3 +168,62 @@ test("an upgrade from 0.24.2 keeps a /board file the person changed and names it
   assert.ok(existsSync(join(f.home, newCommands.gemini)), 'the new /agent-board command is there beside it')
   await openPage(f, f.script, flagsIn(f, newCommands.gemini), 'new gemini command')
 })
+
+// #1302: a generated file the person edited never stops an upgrade and is never overwritten.
+const sharedSkill = '.agents/skills/agent-board/SKILL.md'
+const hookRunner = '.agent-board/agent-board-hook.mjs'
+
+test('an upgrade keeps an edited shared skill, writes the new one beside it, and still upgrades every agent that shares it (#1302)', async t => {
+  const old = oldRelease(t)
+  if (!old) return
+  const f = await oldHome(old)
+  const mine = '\nMy own line about the quarterly report.\n'
+  appendFileSync(join(f.home, sharedSkill), mine)
+  const edited = read(f, sharedSkill)
+  const plan = await apply(f, upgradeIds)
+  assert.equal(read(f, sharedSkill), edited, 'the edited skill stays exactly as the person left it')
+  assert.ok(read(f, sharedSkill).includes('My own line about the quarterly report.'))
+  const beside = `${sharedSkill}.new`
+  assert.ok(existsSync(join(f.home, beside)), 'the new skill is written beside it')
+  assert.ok(!read(f, beside).includes('My own line'), 'the new file is the generated text')
+  assert.ok(read(f, beside).startsWith('---'), 'the new file is a whole skill')
+  for (const target of plan.plans) {
+    assert.deepEqual(target.conflicts, [], `${target.agent}: nothing is skipped`)
+    assert.ok(!target.changes.some(change => resolve(change.file) === resolve(join(f.home, sharedSkill))), `${target.agent}: the edited skill is not written`)
+  }
+  assert.ok(plan.plans.some(target => target.keptText?.some(one => resolve(one.file) === resolve(join(f.home, sharedSkill)) && resolve(one.beside) === resolve(join(f.home, beside)))), 'a plan names the kept file and the file beside it')
+  // The rest of the upgrade happened: the new /agent-board commands exist and the old /board ones are retired.
+  for (const file of Object.values(newCommands)) assert.ok(existsSync(join(f.home, file)), `${file} is written`)
+  for (const file of Object.values(oldCommands)) assert.ok(!existsSync(join(f.home, file)), `${file} is retired`)
+  // Hand-kept work is untouched, and a second apply changes nothing.
+  assert.ok(readFileSync(f.progress, 'utf8').includes('Prepare the quarterly report'))
+  const again = await repeatApply(f)
+  assertRepeat(again, upgradeIds)
+  assert.equal(read(f, sharedSkill), edited, 'a second apply keeps the edit too')
+  const output = await setup(f, ['--apply'])
+  assert.ok(output.includes('SKILL.md'), `the output names the file\n${output}`)
+  assert.ok(output.includes('SKILL.md.new'), `and the file beside it\n${output}`)
+  assert.ok(!output.includes('skipped'), output)
+})
+
+test('an upgrade keeps an edited hook runner, says so, and still upgrades the rest (#1302)', async t => {
+  const old = oldRelease(t)
+  if (!old) return
+  const f = await oldHome(old)
+  appendFileSync(join(f.home, hookRunner), '\n// my own change\n')
+  const edited = read(f, hookRunner)
+  const boardBefore = readFileSync(f.script, 'utf8')
+  const plan = await apply(f, upgradeIds)
+  assert.equal(read(f, hookRunner), edited, 'the edited hook runner stays exactly as it was')
+  assert.ok(!existsSync(join(f.home, `${hookRunner}.new`)), 'code a host loads gets no copy beside it')
+  assert.notEqual(readFileSync(f.script, 'utf8'), boardBefore, 'the board script is still upgraded')
+  for (const target of plan.plans) {
+    assert.deepEqual(target.conflicts, [], `${target.agent}: nothing is skipped`)
+    assert.ok(target.keptCode?.some(file => resolve(file) === resolve(join(f.home, hookRunner))), `${target.agent}: names the kept hook runner`)
+  }
+  assertRepeat(await repeatApply(f), upgradeIds)
+  assert.equal(read(f, hookRunner), edited)
+  const output = await setup(f, ['--apply'])
+  assert.ok(output.includes('agent-board-hook.mjs'), `the output names it\n${output}`)
+  assert.ok(output.includes('kept your copy'), `and says it kept the old file\n${output}`)
+})

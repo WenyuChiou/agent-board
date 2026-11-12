@@ -8075,6 +8075,84 @@ test('with --lan the page also opens on the local network, with a token of its o
   }
 })
 
+test('the page shows the plugin update steps in each language when the plugin wrote an older board (#1328)', { timeout: 30_000 }, async () => {
+  const advice = {
+    en: 'To update it, update the agent-board plugin in Claude Code, then run /progress connect.',
+    'zh-TW': '更新：先在 Claude Code 更新 agent-board 外掛，再執行 /progress connect。',
+    'zh-CN': '更新：先在 Claude Code 更新 agent-board 插件，再运行 /progress connect。',
+  }
+  for (const [lang, expected] of Object.entries(advice)) {
+    const source = `globalThis.AGENT_BOARD.lang = ${JSON.stringify(lang)}\n${BOARD_SCRIPT}`
+    const board = await page('', { AGENT_BOARD_PACKAGE_VERSION: '99.9.9', AGENT_BOARD_UPDATE_COMMAND: '/progress connect', AGENT_BOARD_UPDATE_KIND: 'plugin' }, [], undefined, source)
+    try {
+      const model = (await board.call('GET', '/api/board')).json().model
+      assert.equal(model.view.versions.update, expected)
+      const dom = await pageDom(await sourcePage(lang), model)
+      assert.ok(dom.node('versions').textContent.includes(expected), dom.node('versions').textContent)
+      assert.ok(!dom.node('versions').textContent.includes('--apply'))
+    } finally { await board.close() }
+  }
+})
+
+test('the page points to the terminal in each language when the update command is too long to show whole (#1328)', { timeout: 30_000 }, async () => {
+  const advice = {
+    en: 'Run npx @wenyuchiou/agent-board in a terminal to see the full update command.',
+    'zh-TW': '在終端機執行 npx @wenyuchiou/agent-board，查看完整更新指令。',
+    'zh-CN': '在终端运行 npx @wenyuchiou/agent-board，查看完整更新命令。',
+  }
+  const update = `npx @wenyuchiou/agent-board setup --data-dir "C:\\Boards\\${'x'.repeat(1000)}"`
+  for (const [lang, expected] of Object.entries(advice)) {
+    const source = `globalThis.AGENT_BOARD.lang = ${JSON.stringify(lang)}\n${BOARD_SCRIPT}`
+    const board = await page('', { AGENT_BOARD_PACKAGE_VERSION: '99.9.9', AGENT_BOARD_UPDATE_COMMAND: update }, [], undefined, source)
+    try {
+      const model = (await board.call('GET', '/api/board')).json().model
+      assert.equal(model.view.versions.update, expected)
+      const dom = await pageDom(await sourcePage(lang), model)
+      assert.ok(dom.node('versions').textContent.includes(expected), dom.node('versions').textContent)
+      assert.ok(!dom.node('versions').textContent.includes('--apply'))
+    } finally { await board.close() }
+  }
+})
+
+test('the update command with a home path reaches the local page but never the page on the local network (#1304)', { timeout: 30_000 }, async t => {
+  const update = 'npx @wenyuchiou/agent-board@9.9.9 setup --data-dir /home/synthetic-person/board'
+  const board = await page('', { AGENT_BOARD_UPDATE_COMMAND: update })
+  try {
+    const { call, token } = board
+    assert.equal((await call('GET', '/api/board')).json().model.view.versions.update, update)
+    const opened = await call('POST', '/api/lan', { body: {} })
+    if (opened.status === 409) {
+      t.skip(`no local network address here: ${opened.json().note}`)
+      return
+    }
+    const lan = new URL(opened.json().url)
+    const phone = lan.searchParams.get('t')
+    assert.notEqual(phone, token)
+    const seen = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': phone })
+    assert.equal(seen.status, 200, seen.body)
+    assert.equal(seen.json().model.view.versions.update, null)
+    assert.ok(!seen.body.includes('synthetic-person'))
+  } finally {
+    await board.close()
+  }
+})
+
+// Two commands, one per shell, for a long Windows folder with `$` are longer than the old 500-character cut, which
+// ended the text inside the PowerShell command (Greptile on #1328). Longer advice gets a terminal fallback.
+test('the update advice reaches the page whole, or gives a terminal fallback (#1304)', { timeout: 30_000 }, async () => {
+  const folder = `C:\\Boards\\$cache ${'x'.repeat(200)}`
+  const two = `Command Prompt: npx @wenyuchiou/agent-board@9.9.9 setup --data-dir "${folder}"; PowerShell: npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '${folder}'`
+  assert.ok(two.length > 500 && two.length <= 1000, String(two.length))
+  for (const [update, shown] of [[two, two], ['npx '.repeat(260), EN.pgVersionsUpdateFallback]]) {
+    const board = await page('', { AGENT_BOARD_UPDATE_COMMAND: update })
+    try {
+      assert.equal((await board.call('GET', '/api/board')).json().model.view.versions.update, shown)
+    } finally {
+      await board.close()
+    }
+  }
+})
+
 test("--serve --lan prints the page's network address, a QR code of it and that the link is unencrypted, and a second run gives the same address", { timeout: 60_000 }, async t => {
   const board = serveIn()
   const urls = []
@@ -12318,8 +12396,18 @@ test('the footer links to the project', async () => {
     assert.match(dom.node('versions').textContent, /^v\d/)
     const apart = structuredClone(model)
     apart.view.versions.package = '99.0.0'
+    // Without a command from the launcher (a plugin board, or an unknown install) the page names no update command.
     await dom.redraw(apart)
-    assert.equal(dom.node('versions').textContent, EN.pgVersions(model.view.versions.board, '99.0.0'))
+    assert.equal(dom.node('versions').textContent, EN.pgVersionsOlder(model.view.versions.board, '99.0.0'))
+    // The launcher's own command, which names a custom data folder, is what the page shows (#1304).
+    apart.view.versions.update = 'npx @wenyuchiou/agent-board@99.0.0 setup --agent codex --data-dir /synthetic/board'
+    await dom.redraw(apart)
+    assert.equal(dom.node('versions').textContent, `${EN.pgVersionsOlder(model.view.versions.board, '99.0.0')} ${EN.pgVersionsUpdate(apart.view.versions.update)}`)
+    assert.match(dom.node('versions').textContent, /setup --agent codex --data-dir \/synthetic\/board, then add --apply/)
+    const behind = structuredClone(model)
+    behind.view.versions.package = '0.0.1'
+    await dom.redraw(behind)
+    assert.equal(dom.node('versions').textContent, EN.pgVersions(model.view.versions.board, '0.0.1'))
   } finally { await board.close() }
   for (const words of [ZH_TW, ZH_CN]) {
     assert.notEqual(words.pgGithub, EN.pgGithub)
@@ -12724,8 +12812,9 @@ test('the page of a grouped board draws each question once, copies an answer and
       assert.ok(fresh.node('board').textContent.includes(words.pgReady))
       // With nothing connected the empty board names no agent and tells how to start.
       assert.ok(fresh.node('board').textContent.includes(words.pgStartAny))
-      // (The version label and the project's name on GitHub are the same in every language.)
-      const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ')
+      // (The version label and the project's name on GitHub are the same in every language; the update
+      // command is filled in by the launcher, so only the flag it ends with is taken out.)
+      const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ').replaceAll('--apply', '')
       if (words === EN) assert.doesNotMatch(labels, /\p{Script=Han}/u)
       else assert.doesNotMatch(labels.replaceAll('Agent Board', '').replaceAll('GitHub', '').replaceAll('Claude Code', '').replaceAll('Codex', ''), /[A-Za-z]/)
     }

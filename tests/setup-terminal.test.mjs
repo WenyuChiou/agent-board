@@ -108,12 +108,33 @@ test('a conflicting agent is skipped once, with its retry command, while the oth
   assert.ifError(result.error)
   // As without a terminal, setup exits nonzero only when every selected agent is skipped.
   assert.equal(result.status, 0, result.stderr)
-  assert.match(result.stdout, /Codex: skipped: .*--agent codex --apply/)
+  assert.match(result.stdout, /Codex: skipped: setup cannot safely update .*hooks\.json/)
+  assert.equal(result.stdout.match(/--agent codex --apply/g)?.length, 1, result.stdout)
+  assert.match(result.stdout, /Retry after fixing the conflicting files: .*--agent codex --apply/)
   assert.doesNotMatch(result.stdout, /Codex files:/)
   assert.equal(readFileSync(join(f.env.CODEX_HOME, 'hooks.json'), 'utf8'), 'synthetic conflicting file')
   assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), true)
   assert.deepEqual(claudeCalls(f), pluginCommands)
   assert.equal(f.commands.calls().some(call => call.program === 'codex'), false)
+}))
+
+test('#1302 one retry command names every skipped agent, with no shell quotes around the list', () => terminal(f => {
+  mkdirSync(join(f.env.HOME, '.cursor'), { recursive: true })
+  writeFileSync(join(f.env.CODEX_HOME, 'hooks.json'), 'synthetic conflicting file')
+  writeFileSync(join(f.env.HOME, '.cursor', 'hooks.json'), 'synthetic conflicting file')
+  const result = f.invoke(['--agent', 'codex,cursor,hermes', '--lang', 'en'])
+  assert.ifError(result.error)
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /Retry after fixing the conflicting files: .*--agent codex,cursor --apply/)
+}))
+
+test('#1302 a blocked removal names one retry command that keeps --remove and lists the skipped agents', () => terminal(f => {
+  for (const agent of ['codex', 'hermes']) assert.equal(f.invoke(['--agent', agent, '--lang', 'en', '--apply']).status, 0)
+  const skill = join(f.env.HOME, '.agents', 'skills', 'agent-board', 'SKILL.md')
+  writeFileSync(skill, `${readFileSync(skill, 'utf8')}Synthetic user edit\n`)
+  const result = f.invoke(['--remove', '--agent', 'codex,hermes', '--lang', 'en', '--apply'])
+  assert.ifError(result.error)
+  assert.match(result.stdout, /Retry after fixing the conflicting files: .*--remove --agent codex,hermes --apply/)
 }))
 
 test('terminal no and end of input write nothing and retain the manual apply step', () => {
