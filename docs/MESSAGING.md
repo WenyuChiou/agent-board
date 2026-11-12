@@ -46,25 +46,38 @@ out again after 30 seconds, at most three times, with the same ACK code and a li
 a repeat; after that it stays uncertain and blocks that target until the open-message limit (OpenCode's claims follow the
 rule below instead). A `board_inbox` claim is never handed out again.
 A receiver that runs inside the host (OpenCode, DeepSeek) waits up to two seconds for a busy board or store, where a
-turn-start hook waits well under a second. A take that still fails is reported as a failure, not as an empty mailbox, and
-OpenCode's receiver tries again after 2 seconds, then 4, up to 60. It asks the host whether the session is idle before
-each take and hands a claim back when the session turns busy, so a long turn does not use it up.
+turn-start hook waits well under a second. A take that still fails is reported as a failure, not as an empty mailbox.
+OpenCode's receiver asks the host whether the session is idle before each take and hands a claim back when the session
+turns busy, so a long turn does not use it up.
 
 OpenCode's wake costs a model turn, so the board promises at most one wake per message. Its plugin tells the board a
 wake is about to start (`--mailbox attempt --ref`, answered only for the current claim) before it calls the host, and
-from then on the board never hands that message out again, whatever happens to the host call. A claim the plugin did not
-mark goes back to queued when its 30-second lease passes, as often as needed, with no repeat line, and is never expired
-while the mailbox is open. A marked message the host never confirms (the model's `agent_board_ack` or a 204 answer) reads
-"sent, not confirmed" on its card after 30 minutes and keeps its text, so you can copy it; an accept or an ack that comes
-later is still taken. From then on it no longer holds the session's next message, and a day later it expires like any
-other open message. The plugin takes a marked message back (`--mailbox release --unsent`) only when the host answered
-400 or 404, which proves it was not sent (any other error answer may come after the turn started, so the message stays a
-started wake); `--unsent` also takes back one that read "sent, not confirmed" meanwhile. A repeated `attempt` is answered
-ok only while the message is still an active started wake. An OpenCode message accepted after a 204 answer that the model
-acknowledges after the 30 minutes is still acknowledged. Each workspace the host loads the plugin for has its own
-receiver. `release` answers `NOT_HELD` for a ref the board does not hold and
-`WAKE_STARTED` for a marked one without `--unsent`; `end` answers `ok: false` with a code when its write fails. The
-plugin reads no message of the conversation to decide any of this.
+from then on the board never hands that message out again, whatever happens to the host call.
+
+A message left waiting after a lost answer or a failed lookup goes out at the session's next event, the next board write,
+or the plugin's 30-second tick, whichever comes first, if the session is idle then. No step of the plugin keeps a timer
+of its own for it. The tick reads the board's file and goes on for each session it knows that has a message queued, or
+claimed and not marked as a wake, or a step still owed to the board; with nothing waiting it makes no board call. Every
+twentieth tick (every second tick when there is no board folder to read) each session takes once, which keeps its mailbox
+open. A claim the plugin did not mark is handed to the next take from the same mailbox at once, without waiting for its
+30-second lease, and the old ref then answers `CLAIM_LOST` to an attempt; the lease still gives it back to queued, as often
+as needed, with no repeat line, and it is never expired while the mailbox is open. A session whose metadata lookup failed
+is looked up again at the tick, up to 20 times.
+
+The plugin takes a marked message back (`--mailbox release --unsent`) in three cases: the host answered 400 or 404, which
+proves it was not sent; the session changed after the attempt was saved, before the host was called; and an attempt
+the board did not answer `ok`, whether or not it saved the mark, since the host was never called. Any other error answer
+or a call that never answered may come after the turn started, so the message stays a started wake. `--unsent` also takes
+back one that read "sent, not confirmed" meanwhile, and a release that failed is owed to the board until it is saved.
+
+A started wake the host never confirms (the model's `agent_board_ack`), and one the host took with a 204 answer that the
+model never acknowledged, read "sent, not confirmed" on the card after 30 minutes and keep their text, so you can copy it;
+an accept or an ack that comes later is still taken. From then on the message no longer holds the session's next message,
+and a day later it expires like any other open message. A repeated `attempt` is answered ok only while the message is
+still an active started wake. Each workspace the host loads the plugin for has its own receiver. `release` answers
+`NOT_HELD` for a ref the board does not hold and `WAKE_STARTED` for a marked one without `--unsent`; `end` answers
+`ok: false` with a code when its write fails, and the tick asks again, a few times. The plugin reads no message of the
+conversation to decide any of this.
 
 Mailboxes expire after 12 hours. Session end rejects queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create

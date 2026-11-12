@@ -256,7 +256,11 @@ export const AgentBoardLocal = async ({ client, directory }) => ${board === unde
       // A known session notes the new reply at once, as events do before their lookup.
       if (open.has(sessionID)) open.get(sessionID).isReplying = true
       const info = current(await client.session.get({ path: { id: sessionID } }))
-      if (info.error) throw Error('HOST_METADATA_FAILED')
+      if (info.error) {
+        // The receiver's tick looks the session up again, so a session whose only lookup failed is still learned.
+        if (isNewest()) receiver?.retryLookup(sessionID, 'working')
+        throw Error('HOST_METADATA_FAILED')
+      }
       // A subagent's session is never noted, so it keeps no order entry.
       if (info.data?.parentID) sequence.last.delete(sessionID)
       if (!info.data || info.data.id !== sessionID || info.data.parentID) return
@@ -292,7 +296,10 @@ export const AgentBoardLocal = async ({ client, directory }) => ${board === unde
     // A known session notes a finished reply at once: OpenCode may exit before the lookup returns.
     if (open.has(session) && state !== 'ended') open.get(session).isReplying = state === 'working'
     const info = event.type === 'session.deleted' ? { data: p.info } : current(await client.session.get({ path: { id: session } }))
-    if (info.error) throw Error('HOST_METADATA_FAILED')
+    if (info.error) {
+      if (state !== 'ended' && isNewest()) receiver?.retryLookup(session, state)
+      throw Error('HOST_METADATA_FAILED')
+    }
     // A subagent's session is never noted, so it keeps no order entry.
     if (info.data?.parentID) sequence.last.delete(session)
     if (!info.data || info.data.id !== session || info.data.parentID || !isLatest()) return

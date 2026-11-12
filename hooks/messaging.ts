@@ -119,18 +119,24 @@ export const MAILBOX_REDELIVERIES = 3
 export const UNCONFIRMED = 'UNCONFIRMED'
 // OpenCode's plugin wakes the session itself, which costs a model turn and may not be repeated, so its named claims
 // follow other rules (#724): a claim nobody marked as a wake goes back to queued at its lease, any number of times, with
-// no repeat count and no repeat line; a marked one is never handed out again. Every other hook keeps the rule above.
+// no repeat count and no repeat line, or sooner to a new take from the same mailbox; a marked one is never handed out
+// again. Every other hook keeps the rule above.
 const isAtMostOnce = (one: Pick<Message, 'to' | 'ref'>): boolean => one.ref !== undefined && one.to.startsWith('opencode:')
 const isLeasePassed = (one: Message, now: number): boolean => one.status === 'uncertain' && one.error === '' && one.ref !== undefined && isMailboxTarget(one.target) && now - one.claimed >= MAILBOX_LEASE_MS
 const isLapsed = (one: Message, now: number): boolean => isLeasePassed(one, now) && (isAtMostOnce(one) ? one.attempted === undefined : (one.redelivered ?? 0) < MAILBOX_REDELIVERIES)
-// What the pruning does to an OpenCode claim: the lapsed one returns to queued; a started wake becomes "sent, not
-// confirmed" at the open limit and keeps its text. Undefined for any other message.
+// An OpenCode claim nobody marked: its plugin lost the answer to the take, or gave up before the attempt. The plugin's next take
+// from the same mailbox gets it at once instead of waiting out the lease; the old ref then answers CLAIM_LOST to an attempt.
+const isUnmarked = (one: Message): boolean => isAtMostOnce(one) && one.status === 'uncertain' && one.error === '' && one.attempted === undefined && isMailboxTarget(one.target)
+// What the pruning does to an OpenCode claim: the lapsed one returns to queued; a started wake, and one the host took with
+// a 204 answer that the model never acknowledged, become "sent, not confirmed" at the open limit and keep their text. Undefined
+// for any other message.
 const settleWake = (one: Message, now: number): Message | undefined => {
   if (!isAtMostOnce(one)) return undefined
   if (isLapsed(one, now)) {
     const { ref: _ref, ...rest } = one
     return { ...rest, status: 'queued', claimed: 0, updated: now }
   }
+  if (one.status === 'accepted' && one.awaitsAck === true) return now - one.updated > OPEN_LIMIT_MS ? { ...one, status: 'uncertain', error: UNCONFIRMED, updated: now, hasAccepted: true } : undefined
   if (one.attempted === undefined || one.status !== 'uncertain' || one.error !== '' && one.error !== UNCONFIRMED) return undefined
   // A day after it read "sent, not confirmed" it expires like any other open message, so its text is not kept for ever.
   if (one.error === UNCONFIRMED) return now - one.updated >= FINISHED_KEEP_MS ? settled({ ...one, error: 'EXPIRED', updated: now }) : one
@@ -179,8 +185,8 @@ const isHolding = (one: Pick<Message, 'status' | 'error'>): boolean => isOpen(on
 // A finished message keeps its hash, not its text, and no more of its reply than an ACK line holds.
 const settled = (one: Message): Message => isFinished(one) && (one.text !== '' || one.reply.length > ACK_MAX) ? { ...one, text: '', reply: one.reply.slice(0, ACK_MAX) } : one
 export const pruneMessages = (state: MessageState, now: number): MessageState => {
-  // A claim an OpenCode plugin made is never expired while it is unsent (it returns to queued) or a wake that was started
-  // (it reads "sent, not confirmed" and keeps its text); every other message follows the open limit.
+  // A claim an OpenCode plugin made is never expired while it is unsent (it returns to queued) or a wake that was started or
+  // accepted (it reads "sent, not confirmed" and keeps its text); every other message follows the open limit.
   const kept = state.messages.filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(one => {
     const wake = settleWake(one, now)
     if (wake !== undefined) return wake
@@ -301,18 +307,18 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   if (target.contested || target.expires <= now) return { state, messages: [] }
   const to = address(target.agent, target.session)
   // A lapsed claim stops blocking only the binding that takes it again; any other still waits behind it.
-  const isRetaken = (one: Message): boolean => isLapsed(one, now) && one.target === target.id && one.turn === target.turn
+  const isRetaken = (one: Message): boolean => (isLapsed(one, now) || isUnmarked(one)) && one.target === target.id && one.turn === target.turn
   const busy = state.messages.some(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isHolding(one) && !isHookDelivered(one) && !isRetaken(one))
   // A message the board checked a route for goes only to a claimant on that same surface; on any other it stays queued.
   // The agent's own MCP pull is exempt: it asks for its messages itself, so nothing starts a turn on an unchecked surface.
-  const canClaim = (one: Message): boolean => (one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE) && (one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))
+  const canClaim = (one: Message): boolean => (one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE) && (one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now) || isUnmarked(one))
     || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === 'queued')
   const messages = busy ? [] : state.messages.filter(canClaim).slice(0, 1)
   if (messages.length === 0) return { state, messages }
   // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.
-  const claimed = messages.map(({ ref: _ref, ...one }) => ({
+  const claimed = messages.map(({ ref: previous, ...one }) => ({
     ...one, target: target.id, turn: target.turn, status: 'uncertain' as const, claimed: now, nonce: one.nonce || nonce, updated: now,
-    ...(one.status === 'uncertain' && !isAtMostOnce(one) ? { redelivered: (one.redelivered ?? 0) + 1 } : {}), ...(ref === undefined ? {} : { ref }),
+    ...(one.status === 'uncertain' && !isAtMostOnce({ to: one.to, ref: previous }) ? { redelivered: (one.redelivered ?? 0) + 1 } : {}), ...(ref === undefined ? {} : { ref }),
   }))
   return { state: { ...state, messages: state.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }
 }

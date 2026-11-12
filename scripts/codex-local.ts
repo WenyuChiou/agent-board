@@ -29,7 +29,7 @@ import { windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
-import { address, deliveryText, SURFACE_IDS } from '../hooks/messaging'
+import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { deliverTurnEvent } from './hook-delivery'
 import { hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
@@ -503,8 +503,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // messages.json changes when the board queues a message.
   if (mode === '--mailbox') {
     const action = flag('--mailbox'), session = flag('--session')
-    // OpenCode's plugin (#724) also acknowledges and sends for its own session: ack upgrades an accepted message, send goes through the board's peer route.
-    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'send', 'release', 'attempt'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
+    // OpenCode's plugin (#724) also acknowledges for its own session: ack upgrades an accepted message.
+    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'release', 'attempt'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
     const directory = defaultMessagesDirectory(progress, home, process.env, process.platform)
     // This path runs in the plugin's own process with seconds to spare, so it waits for a busy board or store (a turn-start hook cannot).
     const mailbox = hookMailbox(directory, 5000, 2000, 2000)
@@ -544,7 +544,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
       await mailbox.accept(agent, session, id, nonce, Date.now())
       answer({ ok: true })
-    } else if (action === 'accept' || action === 'ack' || action === 'send') {
+    } else if (action === 'accept' || action === 'ack') {
       // The plugin passes free text as base64, so a word that starts with two hyphens is not read as a flag.
       const text = (name: string): string | undefined => { const value = flag(name); return value === undefined ? undefined : Buffer.from(value, 'base64').toString('utf8') }
       try {
@@ -553,16 +553,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           const id = flag('--id'), nonce = flag('--nonce')
           if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
           await mailbox.acceptOrThrow(agent, session, id, nonce, Date.now(), args.includes('--awaits-ack'))
-        } else if (action === 'ack') {
+        } else {
           const id = flag('--id'), nonce = flag('--nonce'), summary = text('--summary-b64')
           if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
           await mailbox.ack(agent, session, id, nonce, `ACK ${nonce}${summary ? ` ${summary}` : ''}`, Date.now())
-        } else {
-          const to = flag('--to-agent'), toSession = flag('--to-session'), body = text('--text-b64'), identity = folderIdentity(flag('--cwd'))
-          if (to === undefined || toSession === undefined || body === undefined) throw new Error('INVALID_MAILBOX_CALL')
-          const folderDigest = identity?.folderCanonicalDigest ?? identity?.folderDigest
-          if (folderDigest === undefined) throw new Error('WORKSPACE_UNKNOWN')
-          await mailbox.send({ agent: to, session: toSession, text: body, id: randomUUID().replaceAll('-', ''), from: address(agent, session), folderDigest }, Date.now())
         }
         answer({ ok: true })
       } catch (error) {

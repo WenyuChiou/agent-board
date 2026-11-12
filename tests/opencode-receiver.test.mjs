@@ -2,7 +2,6 @@ import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { registerHooks, createRequire } from 'node:module'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
-import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -21,16 +20,17 @@ const importTs = async path => {
 
 const wait = ms => new Promise(done => setTimeout(done, ms))
 const TIMING_KEY = Symbol.for('agent-board.opencode-timing')
-// Short deadlines for the receiver's own clocks, so a test that waits out a hung call or a backoff takes
+// Short deadlines for the receiver's own clocks, so a test that waits out a hung call or the settle wait takes
 // milliseconds. The board script's own calls are not run in this mode, so none of them is cut short.
-const FAST = { hostMs: 120, boardMs: 200, backoffMs: 25, backoffMaxMs: 200, settleMs: 300, leaseMs: 80 }
+// The plugin's 30-second tick is never waited for: the plugin's setInterval is a stand-in here, and a test runs the tick itself.
+const FAST = { hostMs: 120, boardMs: 200, settleMs: 300 }
 
 // The plugin OpenCode would load, with a stand-in client that records what the plugin asks of OpenCode, and a
 // mailbox folder under a temporary home. By default the board is stood in for by the board's own mailbox
 // functions, called in this process on the same messages.json (so there is no process per call, and a test can
 // delay, lose or refuse an answer, and move the board's clock). With { spawn: true } every call runs the real
 // board script, as OpenCode's plugin does.
-const fixture = async (fn, { spawn: isSpawn = false } = {}) => {
+const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatching = true } = {}) => {
   const home = mkdtempSync(join(tmpdir(), 'agent-board-opencode-'))
   const exitListeners = process.listeners('exit')
   const children = []
@@ -63,7 +63,23 @@ const fixture = async (fn, { spawn: isSpawn = false } = {}) => {
     }
     // The board's clock moves on, and its store is pruned as it would be by the next call.
     const advance = ms => { clock.skew += ms; writeState(readState()) }
-    const calls = { promptAsync: [], status: [], sent: [], lookups: 0, board: [], atWake: [], faults: {}, prompts: [], answers: [], cwds: [] }
+    const calls = { promptAsync: [], status: [], sent: [], lookups: 0, board: [], atWake: [], faults: {}, prompts: [], answers: [], cwds: [], gets: 0 }
+    // The plugin's interval timers: nothing runs them but tick().
+    const intervals = new Set()
+    const fakeSetInterval = (run, ms) => { const one = { run, ms, unref() {} }; intervals.add(one); return one }
+    const fakeClearInterval = one => { intervals.delete(one) }
+    const tick = () => { for (const one of [...intervals]) one.run() }
+    // Waits until no call is running and no call has started for a moment.
+    const quiet = async () => {
+      let last = ''
+      for (const end = Date.now() + 15_000; Date.now() < end;) {
+        await wait(70)
+        const now = `${calls.board.length}/${calls.status.length}/${calls.promptAsync.length}/${calls.gets}`
+        if (running.size === 0 && now === last) return
+        last = now
+      }
+      assert.fail('the receiver did not go quiet')
+    }
     const sessions = new Map()
     const code = error => error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING'
     // The board script's answer to one --mailbox call, worked out from the same functions the script runs.
@@ -127,30 +143,15 @@ const fixture = async (fn, { spawn: isSpawn = false } = {}) => {
       return child
     }
     const settled = () => running.size === 0
-    // Sessions that must never be left with a message waiting and nothing running or timed to take it.
-    const guarded = new Set()
-    const busyNow = new Set()
     let receiverOf = () => null
-    const stalled = () => {
-      for (const session of guarded) {
-        if (busyNow.has(session) || running.size > 0) continue
-        let isOpen
-        try { isOpen = store().messages.some(one => one.to === `opencode:${session}` && (one.status === 'queued' || one.status === 'uncertain' && one.attempted === undefined && one.error === '')) } catch { continue }
-        if (isOpen && !receiverOf()?.holds(session)) return session
-      }
-      return null
-    }
     const until = async (check, label) => {
-      for (const end = Date.now() + 15_000; Date.now() < end; await wait(10)) {
-        if (check()) return
-        const lost = stalled()
-        if (lost !== null) assert.fail(`${label}: a message for ${lost} waits and nothing is running or timed`)
-      }
+      for (const end = Date.now() + 15_000; Date.now() < end; await wait(10)) if (check()) return
       assert.fail(label)
     }
     const client = {
       session: {
         get: async ({ path }) => {
+          calls.gets += 1
           if (calls.getFails) return { error: { name: 'Failed' } }
           const hold = calls.holdGet
           if (hold) { calls.holdGet = null; await hold }
@@ -206,31 +207,33 @@ const fixture = async (fn, { spawn: isSpawn = false } = {}) => {
     // Each folder watcher the plugin starts, and whether it closed it.
     const watchers = []
     const watchBoard = (...args) => {
+      // A test of the tick alone watches nothing, so no board write of its own wakes the receiver.
+      if (!isWatching) return { on() {}, close() {} }
       const watcher = watch(...args)
       const close = watcher.close.bind(watcher)
       watcher.close = () => { watcher.isClosed = true; return close() }
       watchers.push(watcher)
       return watcher
     }
-    const names = ['createRequire', 'spawnSync', 'tool', 'spawnBoard', 'readBoardStore', 'watchBoard', 'joinBoard', 'boardFolderExists']
+    const names = ['createRequire', 'spawnSync', 'tool', 'spawnBoard', 'readBoardStore', 'watchBoard', 'joinBoard', 'boardFolderExists', 'setInterval', 'clearInterval']
     const build = async () => {
-      if (!isSpawn) globalThis[TIMING_KEY] = FAST
+      if (!isSpawn) globalThis[TIMING_KEY] = { ...FAST, ...timing }
       try {
-        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0] }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), tool, spawnBoard, readFileSync, watchBoard, join, existsSync)
+        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0] }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), tool, spawnBoard, readFileSync, watchBoard, join, existsSync, fakeSetInterval, fakeClearInterval)
         const hooks = await factory.plugin({ client, directory: home })
         receiverOf = factory.receiver
         return { hooks, receiver: factory.receiver, plugin: factory.plugin }
       } finally { delete globalThis[TIMING_KEY] }
     }
     let { hooks, plugin } = await build()
-    const reported = state => { if (state.type === 'busy') busyNow.add(state.session); else busyNow.delete(state.session); return hooks.event({ event: { type: 'session.status', properties: { sessionID: state.session, status: { type: state.type } } } }) }
-    const idle = session => { busyNow.delete(session); return hooks.event({ event: { type: 'session.idle', properties: { sessionID: session } } }) }
+    const reported = state => hooks.event({ event: { type: 'session.status', properties: { sessionID: state.session, status: { type: state.type } } } })
+    const idle = session => hooks.event({ event: { type: 'session.idle', properties: { sessionID: session } } })
     const created = session => hooks.event({ event: { type: 'session.created', properties: { info: { id: session } } } })
     const deleted = session => hooks.event({ event: { type: 'session.deleted', properties: { info: { id: session } } } })
     // The receiver's own state change, with no event handler (and so no reply capture) around it.
-    const note = (session, state) => { if (state === 'working') busyNow.add(session); else busyNow.delete(session); receiverOf().note(session, state) }
+    const note = (session, state) => receiverOf().note(session, state)
     const rebuild = async () => { ({ hooks, plugin } = await build()); return hooks }
-    const f = { home, board, progress, directory, calls, sessions, queue, message, store, until, settled, reported, idle, created, deleted, note, save, watchers, advance, clock, prompts, guard: session => guarded.add(session), rebuild, plugin: options => plugin(options), receiver: () => receiverOf(), count: action => calls.board.filter(one => one === action).length }
+    const f = { tick, quiet, home, board, progress, directory, calls, sessions, queue, message, store, until, settled, reported, idle, created, deleted, note, save, watchers, advance, clock, prompts, rebuild, plugin: options => plugin(options), receiver: () => receiverOf(), count: action => calls.board.filter(one => one === action).length }
     Object.defineProperty(f, 'hooks', { get: () => hooks })
     await fn(f)
   } finally {
@@ -244,7 +247,7 @@ const fixture = async (fn, { spawn: isSpawn = false } = {}) => {
   }
 }
 
-test('opencodePlugin wakes an idle session through client.session.promptAsync and binds send and ack to context.sessionID', () => fixture(async f => {
+test('opencodePlugin wakes an idle session through client.session.promptAsync and binds ack to context.sessionID', () => fixture(async f => {
   f.queue('ses_idle', 'wake-message-1', 'Synthetic wake text')
   await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_idle' } } } })
   await f.until(() => f.calls.promptAsync.length === 1 && f.message('wake-message-1').status === 'accepted' && f.settled(), 'the idle session was woken and the message accepted')
@@ -258,39 +261,13 @@ test('opencodePlugin wakes an idle session through client.session.promptAsync an
   assert.equal(f.message('wake-message-1').nonce, nonce)
 
   // The two tools take no session argument: the host's context.sessionID is the only session they act for.
-  const { agent_board_ack: ack, agent_board_send: send } = f.hooks.tool
+  const { agent_board_ack: ack } = f.hooks.tool
+  assert.deepEqual(Object.keys(f.hooks.tool).filter(name => name.startsWith('agent_board_')).sort(), ['agent_board_ack', 'agent_board_progress'])
   assert.deepEqual(Object.keys(ack.args).sort(), ['id', 'nonce', 'summary'])
-  assert.deepEqual(Object.keys(send.args).sort(), ['agent', 'session', 'text'])
   await assert.rejects(ack.execute({ id: 'wake-message-1', nonce, session: 'ses_idle' }, { sessionID: 'ses_other' }), /NO_SESSION/)
   await assert.rejects(ack.execute({ id: 'wake-message-1', nonce, session: 'ses_idle' }, {}), /NO_SESSION/)
   await assert.rejects(ack.execute({ id: 'wake-message-1', nonce: 'zzzzzz' }, { sessionID: 'ses_idle' }), /INVALID_ARGUMENTS/)
   assert.equal(f.message('wake-message-1').status, 'accepted')
-  await assert.rejects(send.execute({ agent: 'opencode', session: 'ses_target', text: 'hello' }, { sessionID: 'ses_other' }), /NO_SESSION/)
-
-  // The board's own peer route is stood in for, to read who the send says it comes from.
-  const received = []
-  const server = createServer((req, res) => {
-    let body = ''
-    req.on('data', chunk => { body += chunk })
-    req.on('end', () => {
-      received.push({ url: req.url, token: req.headers['x-board-token'], body: JSON.parse(body) })
-      res.setHeader('content-type', 'application/json')
-      res.end(JSON.stringify({ id: 'sent' }))
-    })
-  })
-  await new Promise(done => server.listen(0, '127.0.0.1', done))
-  try {
-    writeFileSync(join(f.directory, 'server.lock'), String(process.pid))
-    writeFileSync(join(f.directory, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${server.address().port}/?t=tok-1` }))
-    assert.equal(await send.execute({ agent: 'opencode', session: 'ses_target', text: '--starts with hyphens' }, { sessionID: 'ses_idle' }), 'Sent.')
-  } finally { await new Promise(done => server.close(done)) }
-  assert.equal(received.length, 1)
-  assert.equal(received[0].url, '/api/messages/peer-send')
-  assert.equal(received[0].body.from, 'opencode:ses_idle')
-  assert.equal(received[0].body.agent, 'opencode')
-  assert.equal(received[0].body.session, 'ses_target')
-  assert.equal(received[0].body.text, '--starts with hyphens')
-  assert.match(received[0].body.folderDigest, /^[0-9a-f]{64}$/)
 }, { spawn: true }))
 
 test('in-process plugin receivers mark transport acceptance without re-queueing and upgrade to acknowledged on explicit ack', () => fixture(async f => {
@@ -324,6 +301,8 @@ test('in-process plugin receivers mark transport acceptance without re-queueing 
   await f.reported({ session: 'ses_ack', type: 'busy' })
   await f.idle('ses_ack')
   await f.until(() => f.calls.promptAsync.length >= 2 && f.settled(), 'the second wake was tried')
+  f.tick()
+  await f.until(() => f.calls.promptAsync.length >= 3 && f.settled(), 'the tick tried the second wake again')
   assert.notEqual(f.message('ack-message-2').status, 'accepted')
   assert.notEqual(f.message('ack-message-2').status, 'acknowledged')
 }))
@@ -472,7 +451,7 @@ test('opencodePlugin holds the message when the host status lookup fails', () =>
 test('the OpenCode tool words and replies come from the string tables', async () => {
   const { STRINGS } = await importTs('../hooks/strings.ts')
   const local = await importTs('../hooks/local-agents.ts')
-  for (const [lang, strings] of Object.entries(STRINGS)) for (const key of ['opencodeSendTool', 'opencodeAckTool', 'opencodeSent', 'opencodeAcknowledged', 'opencodeAckNote']) assert.equal(typeof strings[key], 'string', `${lang} ${key}`)
+  for (const [lang, strings] of Object.entries(STRINGS)) for (const key of ['opencodeAckTool', 'opencodeAcknowledged', 'opencodeAckNote']) assert.equal(typeof strings[key], 'string', `${lang} ${key}`)
   const source = local.opencodePlugin(process.execPath, 'worker.mjs', 'progress.md', 'Progress', 'home', undefined, 'board.mjs', STRINGS['zh-TW'])
   assert.ok(source.includes(JSON.stringify(STRINGS['zh-TW'].opencodeAcknowledged)))
   assert.ok(source.includes(JSON.stringify(STRINGS['zh-TW'].opencodeAckTool)))
@@ -481,43 +460,52 @@ test('the OpenCode tool words and replies come from the string tables', async ()
 
 // Delivery that does not depend on the receiver's own guesses (#724): the host's status and the board's store decide.
 
-test('opencodePlugin tries a failed take again within seconds, with no board write and no tick, and then wakes the session', () => fixture(async f => {
+test('opencodePlugin takes again at the next tick after a failed take, with no event and no board write, and then wakes the session', () => fixture(async f => {
   f.calls.canned = { take: 1 }
   f.queue('ses_retake', 'retake-message-1', 'Synthetic text after a failed take')
   await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_retake' } } } })
   await f.until(() => f.calls.canned.take === 0 && f.settled(), 'the first take answered with a failure')
+  await f.quiet()
   assert.equal(f.calls.promptAsync.length, 0)
-  await f.until(() => f.calls.promptAsync.length === 1 && f.message('retake-message-1').status === 'accepted' && f.settled(), 'the take was tried again and the session woken')
-}))
+  f.tick()
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('retake-message-1').status === 'accepted' && f.settled(), 'the tick took again and the session was woken')
+}, { watch: false }))
 
-test('opencodePlugin gives up a host status lookup that never answers, so the session is not left locked and its message is woken later (#1366 review)', () => fixture(async f => {
+test('opencodePlugin gives up a host status lookup that never answers, so the session is not left locked and its message is woken at the next tick (#1366 review)', () => fixture(async f => {
+  await f.created('ses_hung')
+  await f.quiet()
   f.queue('ses_hung', 'hung-message-1', 'Synthetic text while the host does not answer')
   // The first lookup never settles; the ones after it answer.
   f.calls.gate = new Promise(() => {})
   await f.idle('ses_hung')
-  await f.until(() => f.calls.status.length >= 1, 'the host status was asked')
+  await f.until(() => f.calls.status.length >= 2, 'the host status was asked')
   f.calls.gate = null
+  await f.quiet()
   assert.equal(f.calls.promptAsync.length, 0)
-  await f.until(() => f.calls.promptAsync.length === 1 && f.message('hung-message-1').status === 'accepted' && f.settled(), 'the hung lookup was given up and the session woken on the retry clock')
-}))
+  f.tick()
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('hung-message-1').status === 'accepted' && f.settled(), 'the hung lookup was given up and the session woken at a tick')
+}, { watch: false }))
 
-test('opencodePlugin looks again within seconds after a failed host status lookup, with no further event or board write', () => fixture(async f => {
+test('opencodePlugin looks again at the next tick after a failed host status lookup, with no further event or board write', () => fixture(async f => {
+  await f.created('ses_status_retry')
+  await f.quiet()
   f.queue('ses_status_retry', 'status-retry-message-1', 'Synthetic text after a failed status lookup')
   f.calls.statusFails = true
-  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_status_retry' } } } })
   await f.idle('ses_status_retry')
-  await f.until(() => f.calls.status.length >= 1 && f.settled(), 'the host status was asked and failed')
+  await f.until(() => f.calls.status.length >= 2 && f.settled(), 'the host status was asked and failed')
+  await f.quiet()
   f.calls.statusFails = false
   assert.equal(f.calls.promptAsync.length, 0)
   assert.equal(f.message('status-retry-message-1').status, 'queued')
-  await f.until(() => f.calls.promptAsync.length === 1 && f.message('status-retry-message-1').status === 'accepted' && f.settled(), 'the status was asked again on its own and the session woken')
-}))
+  f.tick()
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('status-retry-message-1').status === 'accepted' && f.settled(), 'the status was asked again at the tick and the session woken')
+}, { watch: false }))
 
 test('--mailbox take for OpenCode answers ok false with a code while the store is held, and plain message null for an empty mailbox', () => fixture(async f => {
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   f.queue('ses_take_cli', 'take-cli-message-1', 'Synthetic text for the take answers')
-  const call = action => {
-    const result = spawnSync(process.execPath, [f.board, '--mailbox', action, '--agent', 'opencode', '--home', f.home, '--progress-file', f.progress, '--session', 'ses_take_cli', '--surface', 'CLI'], { encoding: 'utf8', windowsHide: true, timeout: 20000 })
+  const call = (action, extra = []) => {
+    const result = spawnSync(process.execPath, [f.board, '--mailbox', action, '--agent', 'opencode', '--home', f.home, '--progress-file', f.progress, '--session', 'ses_take_cli', '--surface', 'CLI', ...extra], { encoding: 'utf8', windowsHide: true, timeout: 20000 })
     assert.equal(result.status, 0, result.stderr)
     return JSON.parse(result.stdout.trim().split('\n').pop())
   }
@@ -532,8 +520,10 @@ test('--mailbox take for OpenCode answers ok false with a code while the store i
   assert.equal(failed.message, null)
   assert.equal(typeof failed.watch, 'string')
   assert.equal(f.message('take-cli-message-1').status, 'queued')
-  // With the store free the message is taken, and what is left is an empty mailbox, which is not a failure.
-  assert.equal(call('take').message.id, 'take-cli-message-1')
+  // With the store free the message is taken, and once its wake is marked what is left is an empty mailbox, which is not a failure.
+  const ref = 'a1b2c3d4e5f6'
+  assert.equal(call('take', ['--ref', ref]).message.id, 'take-cli-message-1')
+  assert.deepEqual(call('attempt', ['--ref', ref]), { ok: true })
   const empty = call('take')
   assert.equal(empty.message, null)
   assert.equal('ok' in empty, false)
@@ -541,14 +531,9 @@ test('--mailbox take for OpenCode answers ok false with a code while the store i
 }, { spawn: true }))
 
 test('opencodePlugin wakes a session whose idle event was lost at the next tick, because the host lists no entry for it', () => fixture(async f => {
-  // The plugin's one-minute tick is captured so the test can run it.
-  const ticks = []
-  const real = globalThis.setInterval
-  globalThis.setInterval = (run, ms, ...rest) => { ticks.push(run); return real(run, ms, ...rest) }
-  try {
-    await f.reported({ session: 'ses_lost_idle', type: 'busy' })
-  } finally { globalThis.setInterval = real }
-  assert.equal(ticks.length, 1)
+  await f.created('ses_lost_idle')
+  await f.quiet()
+  await f.reported({ session: 'ses_lost_idle', type: 'busy' })
   f.queue('ses_lost_idle', 'lost-idle-message-1', 'Synthetic text after a lost idle event')
   // The idle event is dropped: its session lookup fails.
   f.calls.getFails = true
@@ -556,18 +541,10 @@ test('opencodePlugin wakes a session whose idle event was lost at the next tick,
   f.calls.getFails = false
   await wait(500)
   assert.equal(f.calls.promptAsync.length, 0)
-  ticks[0]()
+  f.tick()
   await f.until(() => f.calls.promptAsync.length === 1 && f.message('lost-idle-message-1').status === 'accepted' && f.settled(), 'the tick found the session idle and gave the message')
-}))
+}, { watch: false }))
 
-test('opencodePlugin still wakes the session within the wait after one failed take', () => fixture(async f => {
-  f.calls.canned = { take: 1 }
-  f.queue('ses_first', 'first-message-1', 'Synthetic text of the first test with a failed take')
-  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_first' } } } })
-  await f.until(() => f.calls.promptAsync.length === 1 && f.message('first-message-1').status === 'accepted' && f.settled(), 'the idle session was woken and the message accepted')
-  assert.equal(f.calls.promptAsync[0].path.id, 'ses_first')
-  assert.match(f.calls.promptAsync[0].body.parts[0].text, /Synthetic text of the first test/)
-}))
 
 // The board's side of an OpenCode wake (#1366): one wake at most for a message, and "sent, not confirmed" when the
 // outcome of a wake cannot be known. These are the board's own functions with the time passed in.
@@ -754,7 +731,6 @@ test('B7 the --mailbox calls of the script: attempt, release and end answer ok a
 // The receiver (#1366): the board records "wake started" before the host is called, and from then on nothing sends
 // that message again on a timer. The board is stood in for in this process; the receiver's own deadlines are short.
 test('R1 the wake is recorded on the board before the host is called, then woken once and accepted', () => fixture(async f => {
-  f.guard('ses_r1')
   f.queue('ses_r1', 'r1-message', 'Synthetic text for the normal path')
   await f.created('ses_r1')
   await f.until(() => f.message('r1-message').status === 'accepted' && f.settled(), 'the message was woken and accepted')
@@ -764,43 +740,53 @@ test('R1 the wake is recorded on the board before the host is called, then woken
   assert.equal(f.calls.lookups, 0)
 }))
 
-test('R2 an attempt that answers ok false twice wakes nothing meanwhile, then wakes once', () => fixture(async f => {
-  f.guard('ses_r2')
+test('R2 an attempt that answers ok false is followed at once by release --unsent and wakes nothing; each tick takes it again, and the third wakes once', () => fixture(async f => {
   f.calls.faults.attempt = ['fail', 'fail']
   f.queue('ses_r2', 'r2-message', 'Synthetic text while the attempt fails')
   await f.created('ses_r2')
-  await f.until(() => f.count('attempt') >= 1 && f.settled(), 'the first attempt failed')
+  await f.quiet()
   assert.equal(f.calls.promptAsync.length, 0)
+  assert.equal(f.count('release'), 1)
+  assert.equal(f.message('r2-message').status, 'queued')
+  f.tick()
+  await f.quiet()
+  assert.equal(f.calls.promptAsync.length, 0)
+  assert.equal(f.count('release'), 2)
+  f.tick()
   await f.until(() => f.message('r2-message').status === 'accepted' && f.settled(), 'the message was woken after the third attempt')
   assert.equal(f.calls.promptAsync.length, 1)
   assert.equal(f.count('attempt'), 3)
-  assert.equal(f.count('take'), 1, 'the same claim was asked again, not taken again')
-}))
+  assert.equal(f.count('take'), 3, 'each tick took the message again')
+}, { watch: false }))
 
-test('R3 an attempt the board applied but whose answer was lost wakes nothing until a repeat attempt answers ok', () => fixture(async f => {
-  f.guard('ses_r3')
+test('R3 an attempt the board applied but whose answer was lost is released as unsent at once, so no mark stays, and the next tick wakes it once', () => fixture(async f => {
   f.calls.faults.attempt = ['lose']
   f.queue('ses_r3', 'r3-message', 'Synthetic text while the attempt answer is lost')
   await f.created('ses_r3')
-  await f.until(() => f.count('attempt') >= 1 && f.settled(), 'the first attempt was made')
-  assert.equal(typeof f.message('r3-message').attempted, 'number', 'the board applied it')
+  await f.quiet()
+  const back = f.message('r3-message')
+  assert.deepEqual([back.status, back.attempted, back.ref], ['queued', undefined, undefined], 'the board applied the attempt and the release took it back')
   assert.equal(f.calls.promptAsync.length, 0)
-  await f.until(() => f.message('r3-message').status === 'accepted' && f.settled(), 'the repeat attempt answered ok and the message was woken')
+  f.tick()
+  await f.until(() => f.message('r3-message').status === 'accepted' && f.settled(), 'the next tick woke it')
   assert.equal(f.calls.promptAsync.length, 1)
   assert.equal(f.count('attempt'), 2)
-}))
+}, { watch: false }))
 
-test('R4 a host that refuses the wake gives the message back as not sent, wakes it again after the backoff, and it arrives once', () => fixture(async f => {
-  f.guard('ses_r4')
+test('R4 a host that refuses the wake gives the message back as not sent at once, wakes it again at the next tick, and it arrives once', () => fixture(async f => {
   f.calls.prompts.push(f.prompts.refuse)
   f.queue('ses_r4', 'r4-message', 'Synthetic text for a refused wake')
   await f.created('ses_r4')
   await f.until(() => f.calls.promptAsync.length === 1 && f.settled(), 'the first wake was refused')
+  await f.quiet()
+  assert.equal(f.count('release'), 1)
+  assert.equal(f.message('r4-message').status, 'queued')
+  f.tick()
   await f.until(() => f.message('r4-message').status === 'accepted' && f.settled(), 'the message was woken again and accepted')
   assert.equal(f.calls.promptAsync.length, 2)
   assert.equal(f.calls.sent.length, 1, 'it arrived once')
   assert.equal(f.count('release'), 1)
-}))
+}, { watch: false }))
 
 test('R5 a wake that passes the deadline and completes after two leases is the only wake', () => fixture(async f => {
   let open
@@ -853,19 +839,19 @@ test('R7 a wake that failed and never arrived is not repeated: after 31 minutes 
   assert.equal(f.calls.lookups, 0)
 }))
 
-test('R8 an accept that fails three times after a 204 is retried until saved, with one wake', () => fixture(async f => {
-  f.guard('ses_r8')
+test('R8 an accept that fails three times after a 204 is saved at the ticks that follow, with one wake', () => fixture(async f => {
   f.calls.faults.accept = ['fail', 'fail', 'fail']
   f.queue('ses_r8', 'r8-message', 'Synthetic text while the accept fails')
   await f.created('ses_r8')
-  await f.until(() => f.message('r8-message').status === 'accepted' && f.settled(), 'the accept was saved at last')
+  await f.quiet()
+  assert.equal(f.message('r8-message').status, 'uncertain', 'the accept was not saved yet')
+  for (let round = 0; round < 4 && f.message('r8-message').status !== 'accepted'; round++) { f.tick(); await f.quiet() }
+  assert.equal(f.message('r8-message').status, 'accepted', 'the accept was saved at last')
   assert.equal(f.calls.promptAsync.length, 1)
   assert.equal(f.count('accept'), 4)
-  assert.equal(f.count('take'), 1)
-}))
+}, { watch: false }))
 
 test('R9 a busy status answer that returns after a newer idle event is discarded and asked again, so the message is woken with no further event', () => fixture(async f => {
-  f.guard('ses_r9')
   let open
   f.calls.gate = new Promise(done => { open = done })
   f.calls.answers.push('busy')
@@ -897,30 +883,41 @@ test('R10 an idle status answer that returns after a newer busy event takes noth
   await f.until(() => f.message('r10-message').status === 'accepted' && f.settled(), 'the next idle woke it')
 }))
 
-test('R11 a status lookup that fails and then hangs takes nothing, keeps a timer armed and wakes the message later', () => fixture(async f => {
-  f.guard('ses_r11')
-  f.calls.answers.push('fail', 'hang')
-  f.queue('ses_r11', 'r11-message', 'Synthetic text while the status fails and hangs')
+test('R11 a status lookup that fails and then hangs takes nothing, and the next two ticks look again and wake the message', () => fixture(async f => {
   await f.created('ses_r11')
-  await f.until(() => f.calls.status.length >= 1, 'the status was asked')
-  assert.equal(f.count('take'), 0)
+  await f.quiet()
+  f.queue('ses_r11', 'r11-message', 'Synthetic text while the status fails and hangs')
+  f.calls.answers.push('fail', 'hang')
+  await f.idle('ses_r11')
+  await f.quiet()
+  assert.equal(f.count('take'), 1, 'only the take that opened the mailbox')
+  f.tick()
+  await f.quiet()
+  assert.equal(f.count('take'), 1)
+  assert.equal(f.calls.promptAsync.length, 0)
+  f.tick()
   await f.until(() => f.message('r11-message').status === 'accepted' && f.settled(), 'the message was woken after the status worked')
-  assert.ok(f.calls.status.length >= 3)
+  assert.ok(f.calls.status.length >= 4)
   assert.equal(f.calls.promptAsync.length, 1)
-}))
+}, { watch: false }))
 
-test('R12 a take that answers ok false and then hangs is tried again within the short wait, and the message is woken', () => fixture(async f => {
-  f.guard('ses_r12')
-  f.calls.faults.take = ['fail', 'hang']
-  f.queue('ses_r12', 'r12-message', 'Synthetic text while the take fails and hangs')
+test('R12 a take that answers ok false and then hangs is taken again at the next two ticks, and the message is woken', () => fixture(async f => {
   await f.created('ses_r12')
-  await f.until(() => f.message('r12-message').status === 'accepted' && f.settled(), 'the message was woken after the third take')
-  assert.equal(f.count('take'), 3)
+  await f.quiet()
+  f.queue('ses_r12', 'r12-message', 'Synthetic text while the take fails and hangs')
+  f.calls.faults.take = ['fail', 'hang']
+  await f.idle('ses_r12')
+  await f.quiet()
+  f.tick()
+  await f.quiet()
+  assert.equal(f.calls.promptAsync.length, 0)
+  f.tick()
+  await f.until(() => f.message('r12-message').status === 'accepted' && f.settled(), 'the message was woken after the fourth take')
+  assert.equal(f.count('take'), 4)
   assert.equal(f.calls.promptAsync.length, 1)
-}))
+}, { watch: false }))
 
 test('R13 a session that turns busy between the take and the attempt gets no attempt and no wake; the claim returns at the lease and is woken at the next idle', () => fixture(async f => {
-  f.guard('ses_r13')
   f.calls.faults.release = ['fail']
   f.calls.faults.take = ['slow']
   f.queue('ses_r13', 'r13-message', 'Synthetic text taken as the session turns busy')
@@ -946,7 +943,6 @@ test('R14 an idle event right after a wake and before any busy event is not sent
   await f.hooks.tool.agent_board_ack.execute({ id: 'r14-first', nonce: f.message('r14-first').nonce }, { sessionID: 'ses_r14' })
   f.queue('ses_r14', 'r14-second', 'Synthetic second text')
   const takes = f.count('take')
-  f.guard('ses_r14')
   await f.idle('ses_r14')
   await wait(80)
   assert.equal(f.count('take'), takes, 'nothing was taken into the gap')
@@ -964,16 +960,15 @@ test('R14 an idle event right after a wake and before any busy event is not sent
 }))
 
 test('R15 a lost idle event is healed by the tick, which asks the host and wakes', () => fixture(async f => {
-  const ticks = []
-  const real = globalThis.setInterval
-  globalThis.setInterval = (run, ms, ...rest) => { ticks.push(run); return real(run, ms, ...rest) }
-  try { await f.reported({ session: 'ses_r15', type: 'busy' }) } finally { globalThis.setInterval = real }
+  await f.created('ses_r15')
+  await f.quiet()
+  await f.reported({ session: 'ses_r15', type: 'busy' })
   f.queue('ses_r15', 'r15-message', 'Synthetic text after a lost idle event')
   await wait(200)
   assert.equal(f.calls.promptAsync.length, 0)
-  ticks[0]()
+  f.tick()
   await f.until(() => f.message('r15-message').status === 'accepted' && f.settled(), 'the tick found the session idle and woke it')
-}))
+}, { watch: false }))
 
 test('R16 a new plugin instance on a board that holds a marked message wakes nothing for it', () => fixture(async f => {
   f.calls.prompts.push(f.prompts.lost)
@@ -988,18 +983,23 @@ test('R16 a new plugin instance on a board that holds a marked message wakes not
   assert.equal(f.message('r16-message').status, 'uncertain')
 }))
 
-test('R17 an end that fails once is tried again and reported once', () => fixture(async f => {
+test('R17 an end that fails once is tried again at the next tick and reported once', () => fixture(async f => {
   f.calls.faults.end = ['fail']
   await f.created('ses_r17')
   await f.until(() => f.count('take') === 1 && f.settled(), 'the mailbox was opened')
   await f.deleted('ses_r17')
+  await f.until(() => f.count('end') === 1 && f.settled(), 'the end was tried')
+  await f.quiet()
+  assert.equal(f.count('end'), 1, 'nothing asked again before the tick')
+  f.tick()
   await f.until(() => f.count('end') === 2 && f.settled(), 'the end was tried again')
+  f.tick()
   await wait(100)
   assert.equal(f.count('end'), 2)
   assert.ok(!(f.store().mailboxes ?? []).some(one => one.session === 'ses_r17'), 'the mailbox is closed')
   const log = join(f.home, '.agent-board', 'hook-errors.log')
   assert.equal((existsSync(log) ? readFileSync(log, 'utf8') : '').split('MAILBOX_FAILED').length - 1, 1)
-}))
+}, { watch: false }))
 
 test('the card says sent, not confirmed in all three languages, and the page asks for it', async () => {
   const { STRINGS } = await importTs('../hooks/strings.ts')
@@ -1059,46 +1059,65 @@ test('R19 an error answer that does not prove the wake was not sent leaves it a 
   assert.deepEqual([kept.status, kept.error, kept.attempted !== undefined], ['uncertain', '', true])
 }))
 
-test('R20 a 400 answer from the host takes the wake back and it is woken again once (round 2)', () => fixture(async f => {
+test('R20 a 400 answer from the host takes the wake back and the next tick wakes it again once (round 2)', () => fixture(async f => {
   f.calls.prompts.push(f.prompts.http(400))
   f.queue('ses_r20', 'r20-message', 'Synthetic text for a 400 answer')
   await f.created('ses_r20')
+  await f.until(() => f.calls.promptAsync.length === 1 && f.settled(), 'the first wake was refused')
+  await f.quiet()
+  f.tick()
   await f.until(() => f.message('r20-message').status === 'accepted' && f.settled(), 'the message was woken again and accepted')
   assert.equal(f.calls.promptAsync.length, 2)
   assert.equal(f.calls.sent.length, 1)
   assert.equal(f.count('release'), 1)
-}))
+}, { watch: false }))
 
-test('R21 a session marked busy whose retry lookup fails is looked at again, and the message is woken with no further event or tick (round 2)', () => fixture(async f => {
-  f.guard('ses_r21')
-  f.calls.answers.push('busy', 'fail')
-  f.queue('ses_r21', 'r21-message', 'Synthetic text for a busy answer and then a failed lookup')
+test('R21 a session marked busy whose next lookup fails is looked at again at the next tick, and the message is woken with no further event (round 2)', () => fixture(async f => {
   await f.created('ses_r21')
+  await f.quiet()
+  f.queue('ses_r21', 'r21-message', 'Synthetic text for a busy answer and then a failed lookup')
+  f.calls.answers.push('busy', 'fail')
+  await f.idle('ses_r21')
+  await f.quiet()
+  assert.equal(f.calls.promptAsync.length, 0)
+  f.tick()
+  await f.quiet()
+  assert.equal(f.calls.promptAsync.length, 0, 'the lookup at this tick failed')
+  f.tick()
   await f.until(() => f.message('r21-message').status === 'accepted' && f.settled(), 'the message was woken after the lookup worked')
-  assert.ok(f.calls.status.length >= 3)
+  assert.ok(f.calls.status.length >= 4)
   assert.equal(f.calls.promptAsync.length, 1)
-}))
+}, { watch: false }))
 
-test('R22 a wake the host refused whose release could not be saved for over 30 minutes is still taken back, and woken once (round 2)', () => fixture(async f => {
+test('R22 a wake the host refused whose release could not be saved for over 30 minutes is still taken back at a tick, and woken once (round 2)', () => fixture(async f => {
   f.calls.prompts.push(f.prompts.refuse)
-  f.calls.faults.release = ['fail', 'fail', 'fail', 'fail', 'fail', 'fail']
+  f.calls.faults.release = ['fail', 'fail']
   f.queue('ses_r22', 'r22-message', 'Synthetic text for a refused wake whose release failed')
   await f.created('ses_r22')
   await f.until(() => f.calls.promptAsync.length === 1, 'the first wake was refused')
+  await f.quiet()
+  f.tick()
+  await f.quiet()
+  assert.equal(f.count('release'), 2)
   f.advance(31 * 60_000)
-  await f.until(() => f.message('r22-message').status === 'accepted' && f.settled(), 'the message was taken back and woken again')
+  f.tick()
+  await f.quiet()
+  assert.equal(f.message('r22-message').status, 'queued', 'the release saved at last took it back')
+  f.tick()
+  await f.until(() => f.message('r22-message').status === 'accepted' && f.settled(), 'the message was woken again')
   assert.equal(f.calls.promptAsync.length, 2)
   assert.equal(f.calls.sent.length, 1)
   assert.equal(f.message('r22-message').error, '')
-}))
+}, { watch: false }))
 
-test('R23 an OpenCode message accepted after a 204 answer and acknowledged by the model after 31 minutes is acknowledged (round 2)', () => fixture(async f => {
+test('R23 an OpenCode message accepted after a 204 answer and acknowledged by the model after 31 minutes is acknowledged; meanwhile it reads sent, not confirmed (round 2)', () => fixture(async f => {
   f.queue('ses_r23', 'r23-message', 'Synthetic text for a late ack')
   await f.created('ses_r23')
   await f.until(() => f.message('r23-message').status === 'accepted' && f.settled(), 'the message was accepted')
   const nonce = f.message('r23-message').nonce
   f.advance(31 * 60_000)
-  assert.deepEqual([f.message('r23-message').status, f.message('r23-message').error], ['uncertain', 'EXPIRED'])
+  const waiting = f.message('r23-message')
+  assert.deepEqual([waiting.status, waiting.error, waiting.hasAccepted, waiting.text], ['uncertain', 'UNCONFIRMED', true, 'Synthetic text for a late ack'])
   await f.hooks.tool.agent_board_ack.execute({ id: 'r23-message', nonce }, { sessionID: 'ses_r23' })
   assert.equal(f.message('r23-message').status, 'acknowledged')
   assert.equal(f.calls.promptAsync.length, 1)
@@ -1139,9 +1158,178 @@ test('B12 a late ack on an expired message that had been accepted is taken for O
     const nonce = taken.message.nonce
     state = b.act(state, 'mailbox-accept', { agent, session: 's1', id: 'm1', nonce, awaitsAck: true }, T0 + 2 * SEC).state
     const expired = b.prune(state, T0 + 33 * MIN)
-    assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].hasAccepted], ['uncertain', 'EXPIRED', true])
+    assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].hasAccepted], ['uncertain', agent === 'opencode' ? 'UNCONFIRMED' : 'EXPIRED', true])
     const ack = () => b.act(expired, 'mailbox-ack', { agent, session: 's1', id: 'm1', nonce, reply: `ACK ${nonce} done` }, T0 + 34 * MIN).state
     if (agent === 'opencode') assert.deepEqual([ack().messages[0].status, ack().messages[0].error], ['acknowledged', ''])
     else assert.throws(ack, /MESSAGE_EXPIRED/)
   }
 })
+
+// Round 3 of the #1366 review: one 30-second tick is the only recovery path, and it decides from the board's file.
+test('B13 a new take from the same mailbox gets an OpenCode claim nobody marked at once, and the old ref attempt says CLAIM_LOST (round 3)', async () => {
+  const b = await mailbox()
+  const first = b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0)
+  assert.equal(first.message.id, 'm1')
+  // Two seconds later, well inside the lease, the same mailbox asks again.
+  const second = b.take(first.state, 'opencode', 's1', refOf(2), T0 + 2 * SEC)
+  assert.equal(second.message?.id, 'm1')
+  assert.deepEqual([second.message.nonce, second.message.redelivered], [first.message.nonce, undefined])
+  assert.ok(!b.messaging.deliveryText(second.message, b.STRINGS.en).includes(b.STRINGS.en.messagesDeliveryRepeat), 'no repeat line')
+  assert.deepEqual([second.state.messages[0].ref, second.state.messages[0].status], [refOf(2), 'uncertain'])
+  assert.throws(() => b.act(second.state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + 3 * SEC), /CLAIM_LOST/)
+  const marked = b.act(second.state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(2) }, T0 + 3 * SEC)
+  assert.equal(marked.result.ok, true)
+  // A marked claim is never taken over, and another agent's claim keeps its lease.
+  assert.equal(b.take(marked.state, 'opencode', 's1', refOf(3), T0 + 4 * SEC).message, null)
+  const codex = b.take(b.seed('codex', 's1'), 'codex', 's1', refOf(1), T0)
+  assert.equal(b.take(codex.state, 'codex', 's1', refOf(2), T0 + 2 * SEC).message, null)
+})
+
+test('B14 an OpenCode message accepted after a 204 with no ack reads "sent, not confirmed" at 30 minutes, keeps its text, and still takes a late ack (round 3)', async () => {
+  const b = await mailbox()
+  const taken = b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0)
+  const nonce = taken.message.nonce
+  const marked = b.act(taken.state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + SEC).state
+  const accepted = b.act(marked, 'mailbox-accept', { agent: 'opencode', session: 's1', id: 'm1', nonce, awaitsAck: true }, T0 + 2 * SEC).state
+  assert.equal(accepted.messages[0].status, 'accepted')
+  assert.equal(b.prune(accepted, T0 + 25 * MIN).messages[0].status, 'accepted')
+  const late = b.prune(accepted, T0 + 33 * MIN)
+  assert.deepEqual([late.messages[0].status, late.messages[0].error, late.messages[0].hasAccepted, late.messages[0].text], ['uncertain', 'UNCONFIRMED', true, 'Synthetic text for the board cases'])
+  // It no longer holds the session's next message, and a late ack is still taken.
+  const box = late.mailboxes.find(one => one.agent === 'opencode' && one.session === 's1')
+  b.messaging.queueMessage(late, { id: 'm2', target: box.id, turn: 'session', text: 'Synthetic second message' }, 'board', box, T0 + 33 * MIN)
+  const acked = b.act(late, 'mailbox-ack', { agent: 'opencode', session: 's1', id: 'm1', nonce, reply: `ACK ${nonce} done` }, T0 + 34 * MIN).state
+  assert.deepEqual([acked.messages[0].status, acked.messages[0].error], ['acknowledged', ''])
+  // A day later it expires like any other open message, and its text goes.
+  const gone = b.prune(late, T0 + 33 * MIN + 1441 * MIN).messages[0]
+  assert.deepEqual([gone.status, gone.error, gone.text], ['uncertain', 'EXPIRED', ''])
+})
+
+test('R24 a take the board saved whose answer was lost is woken at the next tick, with no event and no board write (round 3)', () => fixture(async f => {
+  f.calls.faults.take = ['lose']
+  f.queue('ses_r24', 'r24-message', 'Synthetic text for a lost take answer')
+  await f.created('ses_r24')
+  await f.quiet()
+  const claimed = f.message('r24-message')
+  assert.deepEqual([claimed.status, claimed.attempted, typeof claimed.ref], ['uncertain', undefined, 'string'], 'the board saved the claim')
+  assert.equal(f.calls.promptAsync.length, 0)
+  assert.equal(f.count('take'), 1, 'nothing asked again before the tick')
+  f.tick()
+  await f.until(() => f.message('r24-message').status === 'accepted' && f.settled(), 'the tick took the claim over and woke the session')
+  assert.equal(f.calls.promptAsync.length, 1)
+  assert.equal(f.count('take'), 2)
+}, { watch: false }))
+
+test('R25 an attempt saved with its answer lost is released as unsent at once; after 31 busy minutes the next idle wakes it once (round 3)', () => fixture(async f => {
+  f.calls.faults.attempt = ['lose']
+  f.queue('ses_r25', 'r25-message', 'Synthetic text for a lost attempt answer')
+  await f.created('ses_r25')
+  await f.quiet()
+  const back = f.message('r25-message')
+  assert.deepEqual([back.status, back.attempted, back.ref], ['queued', undefined, undefined], 'released as unsent, busy or not')
+  assert.equal(f.count('release'), 1)
+  assert.equal(f.calls.promptAsync.length, 0)
+  await f.reported({ session: 'ses_r25', type: 'busy' })
+  f.advance(31 * 60_000)
+  assert.equal(f.message('r25-message').status, 'queued')
+  await f.idle('ses_r25')
+  await f.until(() => f.message('r25-message').status === 'accepted' && f.settled(), 'the next idle woke it')
+  assert.equal(f.calls.promptAsync.length, 1)
+}, { watch: false }))
+
+test('R26 a failed status lookup at the end of the settle wait is looked at again at the next tick, and the follow-up is woken (round 3)', () => fixture(async f => {
+  f.queue('ses_r26', 'r26-first', 'Synthetic first text')
+  await f.created('ses_r26')
+  await f.until(() => f.message('r26-first').status === 'accepted' && f.settled(), 'the first message was woken')
+  await f.hooks.tool.agent_board_ack.execute({ id: 'r26-first', nonce: f.message('r26-first').nonce }, { sessionID: 'ses_r26' })
+  // The next lookup is the one the settle wait ends with.
+  f.calls.answers.push('fail')
+  f.queue('ses_r26', 'r26-second', 'Synthetic follow-up text')
+  const asked = f.calls.status.length
+  await f.until(() => f.calls.status.length > asked && f.settled(), 'the settle wait ended with a status lookup that failed')
+  await f.quiet()
+  assert.equal(f.calls.promptAsync.length, 1)
+  assert.equal(f.message('r26-second').status, 'queued')
+  f.tick()
+  await f.until(() => f.message('r26-second').status === 'accepted' && f.settled(), 'the tick looked again and woke the follow-up')
+  assert.equal(f.calls.promptAsync.length, 2)
+}, { watch: false }))
+
+test('R27 a new session whose only metadata lookup failed is learned at the next tick and its message is woken; a subagent is not, and the lookup stops after 20 tries (round 3)', () => fixture(async f => {
+  f.calls.getFails = true
+  f.queue('ses_r27', 'r27-message', 'Synthetic text for a session not yet learned')
+  await f.created('ses_r27').catch(() => {})
+  await f.quiet()
+  f.calls.getFails = false
+  assert.equal(f.count('take'), 0)
+  assert.equal(f.calls.promptAsync.length, 0)
+  f.tick()
+  await f.until(() => f.message('r27-message').status === 'accepted' && f.settled(), 'the tick learned the session and woke it')
+  assert.equal(f.calls.promptAsync.length, 1)
+  // A session with a parent is looked up again, found to be a subagent, and never registered.
+  f.sessions.set('ses_r27_child', { parentID: 'ses_r27' })
+  f.queue('ses_r27_child', 'r27-child', 'Synthetic text for a subagent')
+  f.calls.getFails = true
+  await f.created('ses_r27_child').catch(() => {})
+  f.calls.getFails = false
+  const takes = f.count('take')
+  f.tick()
+  await f.quiet()
+  assert.equal(f.count('take'), takes)
+  assert.equal(f.message('r27-child').status, 'queued')
+  // A lookup that keeps failing is repeated 20 times and then given up.
+  f.calls.getFails = true
+  await f.created('ses_r27_never').catch(() => {})
+  const first = f.calls.gets
+  for (let round = 0; round < 25; round++) { f.tick(); await wait(15) }
+  assert.equal(f.calls.gets - first, 20)
+}, { watch: false }))
+
+test('R28 for every fault the host and the board can be given, one tick later the message is woken once or is back to queued (round 3)', async () => {
+  const cases = []
+  for (const fault of ['fail', 'hang', 'lose']) for (const action of ['take', 'attempt', 'accept']) cases.push({ name: `${action} ${fault}`, set: f => { f.calls.faults[action] = [fault] } })
+  for (const fault of ['fail', 'hang', 'lose']) cases.push({ name: `release ${fault}`, set: f => { f.calls.prompts.push(f.prompts.refuse); f.calls.faults.release = [fault] } })
+  for (const fault of ['fail', 'hang']) cases.push({ name: `status ${fault}`, set: f => { f.calls.answers.push(fault) } })
+  cases.push({ name: 'status error answer', set: f => { f.calls.statusError = true }, mend: f => { f.calls.statusError = false } })
+  cases.push({ name: 'session lookup error answer', isFresh: true, set: f => { f.calls.getFails = true }, mend: f => { f.calls.getFails = false } })
+  cases.push({ name: 'wake refused', set: f => { f.calls.prompts.push(f.prompts.refuse) } })
+  cases.push({ name: 'wake answered 500', set: f => { f.calls.prompts.push(f.prompts.http(500)) } })
+  cases.push({ name: 'wake arrived, answer lost', set: f => { f.calls.prompts.push(f.prompts.arrivedThenLost) } })
+  cases.push({ name: 'wake never arrived, answer lost', set: f => { f.calls.prompts.push(f.prompts.lost) } })
+  let open
+  cases.push({ name: 'wake answered after the deadline', set: f => { f.calls.prompts.push(f.prompts.late(new Promise(done => { open = done }))) }, mend: () => open() })
+  for (const one of cases) {
+    await fixture(async f => {
+      // The session is open, and its first take, which answered empty, taught the receiver the board folder. The fault is given after it.
+      if (!one.isFresh) { await f.created('ses_r28'); await f.quiet() }
+      f.queue('ses_r28', 'r28-message', 'Synthetic text for the fault loop')
+      one.set(f)
+      await (one.isFresh ? f.created('ses_r28') : f.idle('ses_r28')).catch(() => {})
+      await f.quiet()
+      one.mend?.(f)
+      f.tick()
+      await f.quiet()
+      const shown = f.message('r28-message')
+      const isQueued = shown.status === 'queued' && shown.ref === undefined && shown.attempted === undefined
+      const isWoken = f.calls.promptAsync.length >= 1 && shown.attempted !== undefined && shown.status !== 'queued'
+      assert.ok(isQueued || isWoken, `${one.name}: neither back to queued nor woken: ${JSON.stringify({ status: shown.status, error: shown.error, attempted: shown.attempted, ref: shown.ref, wakes: f.calls.promptAsync.length })}`)
+      assert.ok(!(shown.status === 'uncertain' && shown.attempted === undefined && shown.error === ''), `${one.name}: left claimed and unmarked`)
+      assert.ok(f.calls.sent.length <= 1, `${one.name}: arrived ${f.calls.sent.length} times`)
+    }, { timing: { settleMs: 40 }, watch: false })
+  }
+})
+
+test('R29 with nothing waiting a tick spawns no board call and asks the host nothing; the take that keeps the mailbox open comes every twentieth tick (round 3)', () => fixture(async f => {
+  await f.created('ses_r29')
+  await f.quiet()
+  const board = f.calls.board.length
+  const status = f.calls.status.length
+  for (let round = 1; round < 20; round++) { f.tick(); await wait(10) }
+  await f.quiet()
+  assert.equal(f.calls.board.length, board, 'nineteen ticks with nothing waiting')
+  assert.equal(f.calls.status.length, status)
+  f.tick()
+  await f.quiet()
+  assert.equal(f.calls.board.length, board + 1, 'the twentieth tick keeps the mailbox open')
+  assert.equal(f.calls.board.at(-1), 'take')
+}, { watch: false }))
