@@ -26,7 +26,7 @@ test('the installed doctor prints a full trust command without Codex on PATH in 
     setup('--agent', 'codex', '--lang', lang, '--apply')
     const doctor = boardCheck(f, ['--codex-doctor', '--agent', 'codex', '--lang', lang])
     assert.equal(doctor.status, 0, doctor.stderr)
-    const next = doctor.stdout.split(/\r?\n/).find(line => line.includes('--codex-trust')) ?? ''
+    const next = doctor.stdout.split(/\r?\n/).find(line => line.includes('--codex-trust') && line.includes('node ')) ?? ''
     assert.ok(next.includes('--codex-bin'), 'the doctor supplies the complete trust entry')
     assert.ok(next.includes('agent-board.mjs') || next.includes('String.fromCodePoint'), 'the doctor names the installed command, with safe path quoting when needed')
     assert.doesNotMatch(next, /--apply/)
