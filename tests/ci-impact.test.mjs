@@ -576,6 +576,8 @@ test('the time check passes the Windows times that failed pull requests after #1
     'tests/codex-fallback.test.mjs': 60_000, 'tests/prompt-hooks.test.mjs': 46_200, 'tests/host-upgrade.test.mjs': 42_600,
     'tests/setup-guidance.test.mjs': 52_600, 'tests/setup-terminal.test.mjs': 36_000, 'tests/settings-agents.test.mjs': 21_300,
   }
+  // #1302 added two upgrade tests: host-upgrade's slowest Windows Node 24 run since (run 43181075103).
+  slowest['tests/host-upgrade.test.mjs'] = 57_600
   for (const [path, ms] of Object.entries(slowest)) assert.ok(budgetOf(path) * 7 / 10 >= ms * 13 / 10, path + ': ' + budgetOf(path))
 })
 
