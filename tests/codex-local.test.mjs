@@ -3696,7 +3696,9 @@ test('SDK metadata and reporter execution share one deadline without a late writ
     const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
     const plugin = join(home, 'synthetic-plugin.mjs')
     writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub))
-    writeFileSync(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = {"hookVersion":1,"synthetic":true}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'late'), 1600)\n`)
+    // The plugin's OpenCode receiver (#724) calls this same script with --mailbox; those calls end at once,
+    // so only the reporter's run writes the pid and could write late.
+    writeFileSync(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = {"hookVersion":1,"synthetic":true}\nimport { writeFileSync } from 'node:fs'\nif (process.argv.includes('--mailbox')) process.exit(0)\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'late'), 1600)\n`)
     const { AgentBoardLocal } = await import(pathToFileURL(plugin))
     const adapter = await AgentBoardLocal({ client: { session: { get: async () => {
       // Leave room to start the real child on Windows; 600 + 1600 still
