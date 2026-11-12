@@ -559,7 +559,7 @@ test('the board time check fails a file over seventy percent of its budget and a
   assert.deepEqual(checkBoardTimes(unjudged), { ok: true, errors: [], warnings: [] })
 })
 
-test('the time check passes the Windows times that failed pull requests after #1361, and its 70% line is 1.3x each file\'s slowest recent run (#1364)', async () => {
+test('the time check passes the Windows times that failed pull requests after #1361, and its 70% line is at least 1.3x each file\'s slowest recent run (#1364)', async () => {
   const { checkBoardTimes, BOARD_FILE_BUDGETS_MS, BOARD_FILE_BUDGET_DEFAULT_MS } = await import('../scripts/ci-impact.mjs')
   const budgetOf = path => BOARD_FILE_BUDGETS_MS[path] ?? BOARD_FILE_BUDGET_DEFAULT_MS
   // Times from failed Windows Node 24 board jobs whose tests all passed (runs 43157566128, 43158052807, 43160255649).
