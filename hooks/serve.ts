@@ -62,15 +62,24 @@ const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerC
 // ended, one at work is working, any other (waiting on a question, done) is idle.
 const stateOf = (auto: 'working' | 'waiting' | 'ended' | null | undefined, isClosed: boolean): RowState => isClosed || auto === 'ended' ? 'ended' : auto === 'working' ? 'working' : 'idle'
 const rowState = (row: { auto: 'working' | 'waiting' | 'ended' | null; target: AgentTarget | null; isRecordedEnded?: true }): RowState => stateOf(row.auto, row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true)
+// Every row and question the view holds for a session, wherever it puts them: in the Needs you list, the
+// provisional, hidden, reminder and older lists, a group, Idle, Stopped, Due, Active, or the questions under
+// a row or a recent task. The view is read whole, not bucket by bucket, because each bucket added later
+// would otherwise cost a session its route until someone remembered to list it here (#1351, twice).
+const sessionRows = (value: unknown, found: Record<string, unknown>[] = [], seen = new Set<object>()): Record<string, unknown>[] => {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return found
+  seen.add(value)
+  if (typeof (value as Record<string, unknown>).nativeSession === 'string') found.push(value as Record<string, unknown>)
+  for (const child of Array.isArray(value) ? value : Object.values(value)) sessionRows(child, found, seen)
+  return found
+}
 // Conflicting rows cannot establish a session's state, even if one happens to appear first.
 export const sessionState = (view: View, agent: string, session: string): RowState | undefined => {
-  // Work due soon is listed only under view.due, so it is read too: a due date must not cost a session its route.
-  const rows = [...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped, ...view.due]
   const name = agent || 'claude'
-  const states = [
-    ...rows.filter(one => (one.agent || 'claude') === name && one.nativeSession === session).map(rowState),
-    ...view.waiting.filter(one => (one.agent || 'claude') === name && one.nativeSession === session).map(one => stateOf(one.auto, one.target?.isClosed === true)),
-  ]
+  const states = sessionRows(view)
+    .filter(one => ((one.agent as string | undefined) || 'claude') === name && one.nativeSession === session)
+    // A task row has steps; a question has only the state its session was in when it asked.
+    .map(one => 'steps' in one ? rowState(one as Parameters<typeof rowState>[0]) : stateOf(one.auto as Parameters<typeof stateOf>[0], (one.target as AgentTarget | null | undefined)?.isClosed === true))
   return states.length > 0 && states.every(state => state === states[0]) ? states[0] : undefined
 }
 // One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route

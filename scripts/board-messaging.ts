@@ -27,6 +27,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
     if (one.line !== undefined && !ROUTE_LINES.includes(one.line)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.surface !== undefined && (typeof one.surface !== 'string' || one.surface === '' || /[\r\n]/.test(one.surface))) throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
     messageId(one.turn)
     messageText(one.from, 300)
@@ -378,7 +379,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         const from = sender === undefined ? 'board' : address(sender.agent, sender.session)
         messageFields(input, ['id', 'target', 'turn', 'text', 'answers'])
         let target = connections.get(String(input.target)) ?? state.mailboxes?.find(one => one.id === input.target)
-        let line: RouteLine | undefined
+        let line: RouteLine | undefined, surface: string | undefined
         if (from === 'board' && !state.messages.some(one => one.id === input.id)) {
           const decision = sendDecision(String(input.target), [...connections.values()], state.mailboxes ?? [], gate?.stateOfSession ?? (() => undefined), gate?.routes ?? [], now)
           if (!decision.canSend) {
@@ -387,8 +388,9 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
           }
           target = decision.target
           line = decision.line
+          surface = decision.target.surface
         }
-        const queued = queueMessage(state, input, from, target, now, sender?.origin ?? 'local', undefined, line)
+        const queued = queueMessage(state, input, from, target, now, sender?.origin ?? 'local', undefined, line, surface)
         save(queued.state, now)
         // The nonce is the receiver's alone; a retried send never learns it.
         return shownMessage(queued.message)
