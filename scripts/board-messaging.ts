@@ -534,7 +534,7 @@ export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(di
 export const hookMailbox = (directory: string, budget: number) => {
   const deadline = Date.now() + budget
   const access = mailboxAccess(directory, Math.min(150, budget), Math.min(120, budget))
-  const call = async (action: string, body: Record<string, string>, now: number): Promise<Message | null> => {
+  const call = async (action: string, body: Record<string, unknown>, now: number): Promise<Message | null> => {
     try { return (await access.call(action, body, now)).message as Message ?? null } catch { return null }
   }
   return {
@@ -555,7 +555,8 @@ export const hookMailbox = (directory: string, budget: number) => {
       }
     },
     accept: (agent: string, session: string, id: string, nonce: string, now: number, awaitsAck = false) => call('mailbox-accept', { agent, session, id, nonce, ...(awaitsAck ? { awaitsAck: true } : {}) }, now),
-    // An in-process plugin's explicit acknowledgement and its send; a refusal keeps its code for the caller.
+    // An in-process plugin's acceptance, explicit acknowledgement and send; a refusal keeps its code for the caller, so only a saved acceptance reads as done.
+    acceptOrThrow: async (agent: string, session: string, id: string, nonce: string, now: number, awaitsAck = false): Promise<void> => { await access.call('mailbox-accept', { agent, session, id, nonce, ...(awaitsAck ? { awaitsAck: true } : {}) }, now) },
     ack: async (agent: string, session: string, id: string, nonce: string, reply: string, now: number): Promise<void> => { await access.call('mailbox-ack', { agent, session, id, nonce, reply }, now) },
     send: async (body: { agent: string; session: string; text: string; id: string; from: string; folderDigest: string }, now: number): Promise<void> => { await access.call('peer-send', body, now) },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),

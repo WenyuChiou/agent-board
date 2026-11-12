@@ -1,5 +1,6 @@
 import { boardPromptHelper, boardRequestWords } from './board-commands'
 import { STRINGS } from './strings'
+import type { Strings } from './i18n'
 import { opencodeReceiverSource } from './receivers/opencode'
 import { HOOK_VERSION, HOOK_WORKER_GRACE, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookTimeout, hostHookTimeout } from './hook-safety'
 
@@ -161,7 +162,7 @@ export const cursorEvent = (input: Record<string, unknown>): Record<string, unkn
 
 // OpenCode supplies no stable turn id on status events. At idle, its last reply goes only
 // to the board script's stdin, which keeps just its closing question.
-export const opencodePlugin = (node: string, script: string, progress: string, description: string, home: string, stepFormat = STRINGS.en.localAgentStepFormat, board?: string): string => `import { spawnSync } from 'node:child_process'
+export const opencodePlugin = (node: string, script: string, progress: string, description: string, home: string, stepFormat = STRINGS.en.localAgentStepFormat, board?: string, words: Strings = STRINGS.en): string => `import { spawnSync } from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
 ${hookGuardSource(home, 'opencode')}
 ${BOARD_PROMPT_HELPER}
@@ -189,7 +190,7 @@ const run = (mode, payload, session, deadline) => {
 }
 ${REPORT_TOOL_REPLY}
 ${board === undefined ? 'const receiver = null' : `let receiver = null
-${opencodeReceiverSource(node, board, progress, home)}`}
+${opencodeReceiverSource(node, board, progress, home, words)}`}
 // A one-shot \`opencode run\` exits without session.deleted (#217). As OpenCode exits, the
 // top-level sessions reported here and not seen to end are ended, all within one hook limit;
 // a board that is too slow gets them queued or logged, and OpenCode's exit never waits longer.

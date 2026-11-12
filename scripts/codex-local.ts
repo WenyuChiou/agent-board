@@ -515,16 +515,21 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
       answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary } })
-    } else if (action === 'accept') {
+    } else if (action === 'accept' && agent !== 'opencode') {
       const id = flag('--id'), nonce = flag('--nonce')
       if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
-      await mailbox.accept(agent, session, id, nonce, Date.now(), args.includes('--awaits-ack'))
+      await mailbox.accept(agent, session, id, nonce, Date.now())
       answer({ ok: true })
-    } else if (action === 'ack' || action === 'send') {
+    } else if (action === 'accept' || action === 'ack' || action === 'send') {
       // The plugin passes free text as base64, so a word that starts with two hyphens is not read as a flag.
       const text = (name: string): string | undefined => { const value = flag(name); return value === undefined ? undefined : Buffer.from(value, 'base64').toString('utf8') }
       try {
-        if (action === 'ack') {
+        if (action === 'accept') {
+          // OpenCode's plugin reports a message as given only after the board saved its acceptance.
+          const id = flag('--id'), nonce = flag('--nonce')
+          if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
+          await mailbox.acceptOrThrow(agent, session, id, nonce, Date.now(), args.includes('--awaits-ack'))
+        } else if (action === 'ack') {
           const id = flag('--id'), nonce = flag('--nonce'), summary = text('--summary-b64')
           if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
           await mailbox.ack(agent, session, id, nonce, `ACK ${nonce}${summary ? ` ${summary}` : ''}`, Date.now())
@@ -1318,7 +1323,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script, fileWords)
   if (agent === 'openclaw') {
     files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
     files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`

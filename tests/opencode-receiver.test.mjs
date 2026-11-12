@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { registerHooks, createRequire } from 'node:module'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -64,7 +64,7 @@ const fixture = async fn => {
       session: {
         get: async ({ path }) => ({ data: { id: path.id, ...(sessions.get(path.id) ?? {}) } }),
         messages: async () => ({ data: [] }),
-        status: async () => ({ data: calls.busy ?? {} }),
+        status: async () => { calls.status.push(1); if (calls.gate) await calls.gate; return { data: calls.busy ?? {} } },
         promptAsync: async options => {
           calls.promptAsync.push(options)
           if (calls.fail) return { error: { name: 'Failed' } }
@@ -89,7 +89,7 @@ const fixture = async fn => {
     const hooks = await factory({ client, directory: home })
     const reported = state => hooks.event({ event: { type: 'session.status', properties: { sessionID: state.session, status: { type: state.type } } } })
     const idle = session => hooks.event({ event: { type: 'session.idle', properties: { sessionID: session } } })
-    await fn({ home, directory, hooks, client, calls, sessions, queue, message, until, settled, reported, idle, save, watchers })
+    await fn({ home, board, progress, directory, hooks, client, calls, sessions, queue, message, until, settled, reported, idle, save, watchers })
   } finally {
     for (const child of children) if (!child.isClosed) child.kill()
     for (const end = Date.now() + 10_000; !children.every(child => child.isClosed) && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
@@ -231,3 +231,56 @@ test('opencodePlugin stops watching the board folder once it is removed, so Open
   rmSync(f.directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
   await f.until(() => f.watchers[0].isClosed === true, 'the watcher of the removed folder was closed')
 }))
+
+test('opencodePlugin puts the message id and the agent_board_ack instruction in the wake text', () => fixture(async f => {
+  f.queue('ses_text', 'text-message-1', 'Synthetic text for the wake envelope')
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_text' } } } })
+  await f.until(() => f.calls.promptAsync.length === 1 && f.settled(), 'the session was woken')
+  const text = f.calls.promptAsync[0].body.parts[0].text
+  const nonce = f.message('text-message-1').nonce
+  assert.match(text, /Synthetic text for the wake envelope/)
+  assert.ok(text.includes('text-message-1'), 'the wake text names the message id')
+  assert.ok(text.includes('agent_board_ack'), 'the wake text names the ack tool')
+  assert.ok(text.includes(nonce))
+}))
+
+test('--mailbox accept for OpenCode reports a refused acceptance and only a saved one as ok', () => fixture(async f => {
+  f.queue('ses_accept', 'accept-message-1', 'Synthetic text for acceptance')
+  const call = (action, extra) => {
+    const result = spawnSync(process.execPath, [f.board, '--mailbox', action, '--agent', 'opencode', '--home', f.home, '--progress-file', f.progress, '--session', 'ses_accept', '--surface', 'CLI', ...extra], { encoding: 'utf8', windowsHide: true, timeout: 20000 })
+    return JSON.parse(result.stdout.trim().split('\n').pop())
+  }
+  const taken = call('take', [])
+  assert.equal(taken.message.id, 'accept-message-1')
+  assert.equal(call('accept', ['--id', 'accept-message-1', '--nonce', 'ffffff', '--awaits-ack']).ok, false)
+  assert.equal(f.message('accept-message-1').status, 'uncertain')
+  assert.equal(call('accept', ['--id', 'accept-message-1', '--nonce', taken.message.nonce, '--awaits-ack']).ok, true)
+  assert.equal(f.message('accept-message-1').status, 'accepted')
+}))
+
+test('opencodePlugin does not wake a session that turned busy while the host status was pending', () => fixture(async f => {
+  f.queue('ses_late', 'late-message-1', 'Synthetic text for a late status')
+  let release
+  f.calls.gate = new Promise(done => { release = done })
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_late' } } } })
+  await f.until(() => f.calls.status.length === 1, 'the host status was asked')
+  // A newer event arrives while the older answer is still on its way; the older answer says idle.
+  await f.reported({ session: 'ses_late', type: 'busy' })
+  release()
+  await new Promise(done => setTimeout(done, 500))
+  assert.equal(f.calls.promptAsync.length, 0)
+  // The message is kept for the next session.idle.
+  f.calls.gate = null
+  await f.idle('ses_late')
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('late-message-1').status === 'accepted' && f.settled(), 'the message was given at the next idle')
+}))
+
+test('the OpenCode tool words and replies come from the string tables', async () => {
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const local = await importTs('../hooks/local-agents.ts')
+  for (const [lang, strings] of Object.entries(STRINGS)) for (const key of ['opencodeSendTool', 'opencodeAckTool', 'opencodeSent', 'opencodeAcknowledged', 'opencodeAckNote']) assert.equal(typeof strings[key], 'string', `${lang} ${key}`)
+  const source = local.opencodePlugin(process.execPath, 'worker.mjs', 'progress.md', 'Progress', 'home', undefined, 'board.mjs', STRINGS['zh-TW'])
+  assert.ok(source.includes(JSON.stringify(STRINGS['zh-TW'].opencodeAcknowledged)))
+  assert.ok(source.includes(JSON.stringify(STRINGS['zh-TW'].opencodeAckTool)))
+  assert.ok(!source.includes('Acknowledged.'))
+})
