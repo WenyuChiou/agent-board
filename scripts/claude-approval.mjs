@@ -3,13 +3,14 @@
 // holds the request open only while a page the board opened is in front of the person and has
 // drawn it, at most 30 seconds. A press there comes back as Allow once or Deny; anything else
 // (no page, no press, no board, an error) prints nothing, and Claude Code shows its own prompt.
-// It never answers in a mode where Claude Code would not ask, and it never sends
-// updatedPermissions, updatedInput or interrupt: nothing standing is ever added.
+// It does not use an address folder inside the session's working folder, and it does not ask the board
+// about a request to run without the sandbox. It never answers in a mode where Claude Code would not
+// ask, and it never sends updatedPermissions, updatedInput or interrupt: nothing standing is ever added.
 // Plain Node with no imports outside node:, as the plugin's hooks.json runs it directly. The
 // address rules are hooks/receiver.ts's (addressKey, addressFolder, addressFileName, parseAddress);
 // tests/approvals.test.mjs keeps the two in step.
 import { createHash } from 'node:crypto'
-import { lstatSync, readFileSync, statSync } from 'node:fs'
+import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -99,7 +100,7 @@ export const addressFile = (env = process.env, platform = process.platform) => {
   const isRuntimeOwn = !isWindows && runtime !== undefined && runtime !== '' && isOwn(runtime)
   const folder = addressFolder(isWindows, home, runtime, isRuntimeOwn)
   if (folder === null) return null
-  return { key, folder, file: [folder, addressFileName(key)].join(isWindows ? '\\' : '/') }
+  return { key, folder, home, file: [folder, addressFileName(key)].join(isWindows ? '\\' : '/') }
 }
 
 // The board's process is still running: a board that stopped without removing its file leaves an
@@ -115,11 +116,43 @@ export const isRunning = pid => {
   }
 }
 
-const readAddress = (env, platform) => {
+// A path as the disk spells it (links followed), lower-cased on Windows, where case does not count.
+const realOf = (path, platform) => {
+  const real = realpathSync.native(path)
+  return platform === 'win32' ? real.toLowerCase() : real
+}
+
+// The path is the folder or somewhere under it.
+export const isInside = (path, folder, platform = process.platform) => {
+  const sep = platform === 'win32' ? '\\' : '/'
+  return path === folder || path.startsWith(folder.endsWith(sep) ? folder : folder + sep)
+}
+
+// The session works in the home folder itself, the default folder of a new terminal.
+const isHome = (where, home, platform) => {
+  try { return typeof home === 'string' && home !== '' && where === realOf(home, platform) } catch { return false }
+}
+
+// An address folder inside the folder the session works in is one the agent can write: it could name
+// a listener of its own there and answer its own prompts. A session that says nothing of its folder is
+// not checked (Claude Code always sends it); one that names it badly is refused. The home folder itself
+// is excepted (owner, 2026-11-12): every address folder is under it, so the check would turn the board's
+// approvals off for any session started there, and SECURITY.md names what that leaves open.
+const isInsideSession = (found, cwd, platform) => {
+  if (cwd === undefined) return false
+  if (typeof cwd !== 'string' || cwd === '') return true
+  let where
+  try { where = realOf(cwd, platform) } catch { where = platform === 'win32' ? resolve(cwd).toLowerCase() : resolve(cwd) }
+  if (isHome(where, found.home, platform)) return false
+  return isInside(realOf(found.folder, platform), where, platform) || isInside(realOf(found.file, platform), where, platform)
+}
+
+const readAddress = (env, platform, cwd) => {
   const found = addressFile(env, platform)
   if (found === null) return null
   try {
     if (lstatSync(found.file).isSymbolicLink()) return null
+    if (isInsideSession(found, cwd, platform)) return null
     if (platform !== 'win32' && !isOwn(found.folder, found.file)) return null
     const text = readFileSync(found.file, 'utf8')
     if (!isRunning(JSON.parse(text)?.pid)) return null
@@ -127,6 +160,13 @@ const readAddress = (env, platform) => {
   } catch {
     return null
   }
+}
+
+// Bash's request to run outside the sandbox: Claude Code's own prompt decides it, never the board.
+// Any value but absent or false counts, so a string such as "true" is not a way past.
+export const isSandboxOff = input => {
+  const flag = input.tool_input?.dangerouslyDisableSandbox
+  return flag !== undefined && flag !== null && flag !== false
 }
 
 const bytesOf = value => Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8')
@@ -193,7 +233,9 @@ const readInput = () => new Promise(done => {
 export const run = async (env = process.env, platform = process.platform) => {
   const input = await readInput()
   if (input === null || typeof input !== 'object' || QUIET_MODES.has(input.permission_mode)) return null
-  const address = readAddress(env, platform)
+  // Not sent to the board at all: it could only allow or deny, and the board allowing is the thing refused.
+  if (isSandboxOff(input)) return null
+  const address = readAddress(env, platform, input.cwd)
   if (address === null) return null
   const stop = new AbortController()
   let timer = setTimeout(() => stop.abort(), HEADERS_MS)

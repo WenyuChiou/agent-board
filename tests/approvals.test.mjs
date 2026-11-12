@@ -461,6 +461,72 @@ test('the hook gives up within seconds on a board that hangs, answers wrongly or
   }
 })
 
+// A stand-in board that answers allow to anything it is asked, and counts what it is asked.
+const allowingBoard = async () => {
+  const seen = []
+  const server = createServer((req, res) => {
+    seen.push(req.url)
+    req.resume()
+    req.on('end', () => res.writeHead(200, { 'content-type': 'application/json' }).end('{"decision":{"behavior":"allow"}}'))
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  return {
+    seen, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token`,
+    close: async () => { server.closeAllConnections(); await new Promise(done => server.close(done)) },
+  }
+}
+const ALLOW = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }
+
+test('an address folder inside the working folder of the session is not used, and the host asks, unless the session works in the home folder itself', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    // The session works in a folder under the home that holds the address folder: the agent could have written it.
+    for (const cwd of [join(place.home, '.cache'), join(place.home, '.cache', 'agent-board')]) {
+      const answer = await runHook(place, request('npm run synthetic-inside', { cwd })).done
+      assert.equal(answer.decision, null, cwd)
+    }
+    if (isWindows) assert.equal((await runHook(place, request('npm run synthetic-case', { cwd: join(place.home, '.cache').toUpperCase() })).done).decision, null, 'case does not count on Windows')
+    assert.deepEqual(stand.seen, [], 'nothing was asked at the address')
+    // The home folder itself is excepted (owner, 2026-11-12): a terminal starts there, and every address folder is under it.
+    const homes = isWindows ? [place.home, place.home.toUpperCase()] : [place.home]
+    for (const cwd of homes) {
+      assert.deepEqual((await runHook(place, request('npm run synthetic-home', { cwd })).done).decision, ALLOW, cwd)
+    }
+    const atHome = homes.length
+    assert.equal(stand.seen.length, atHome)
+    // A folder beside it, or a prefix of its name, is not inside it; no folder named is not checked.
+    const beside = join(place.root, 'home-other')
+    mkdirSync(beside)
+    for (const input of [{ cwd: beside }, { cwd: join(place.root, 'hom') }, {}]) {
+      assert.deepEqual((await runHook(place, request('npm run synthetic-outside', input)).done).decision, ALLOW, JSON.stringify(input))
+    }
+    assert.equal(stand.seen.length, atHome + 3)
+    // A working folder that is not a path is refused rather than skipped.
+    assert.equal((await runHook(place, request('npm run synthetic-odd', { cwd: 7 })).done).decision, null)
+    assert.equal(stand.seen.length, atHome + 3)
+  } finally { await stand.close() }
+})
+
+test('a request to run without the sandbox is never allowed from the board', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    for (const flag of [true, 'true', 1]) {
+      const input = request('npm run synthetic-unsandboxed')
+      input.tool_input.dangerouslyDisableSandbox = flag
+      assert.equal((await runHook(place, input).done).decision, null, String(flag))
+    }
+    assert.deepEqual(stand.seen, [], 'it is not even sent to the board')
+    for (const flag of [false, undefined]) {
+      const input = request('npm run synthetic-sandboxed')
+      if (flag !== undefined) input.tool_input.dangerouslyDisableSandbox = flag
+      assert.deepEqual((await runHook(place, input).done).decision, ALLOW, String(flag))
+    }
+    assert.equal(stand.seen.length, 2)
+  } finally { await stand.close() }
+})
+
 test('a command cut to be sent or shown gets no button, and the hook returns no decision', async () => {
   const board = await startBoard()
   const page = await openPage(board)
