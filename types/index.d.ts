@@ -288,6 +288,7 @@ declare module 'claude-code' {
       opened: string[]
       doneSeen: Record<string, number>
       hiddenAsks: string[]
+      goneSessions: string[]
       questionLedger: QuestionLedger
       hasQuestionsProblem: boolean
       hasPendingQuestionsProblem: boolean

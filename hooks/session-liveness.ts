@@ -1,4 +1,4 @@
-import { sha256 } from './sha256'
+import { sha256 } from './sha256.ts'
 import type { ProgressProject } from '../types'
 
 // The liveness of an agent session, as pure data (#1092): whether the agent process
