@@ -325,7 +325,9 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   if (one.error === 'DISMISSED') throw new Error('MESSAGE_DISMISSED')
   if (one.status === 'queued') throw new Error('CLAIM_REQUIRED')
   if (!one.nonce || input.nonce !== one.nonce) throw new Error('TARGET_MISMATCH')
-  if (one.status === 'uncertain' && one.error === 'EXPIRED') throw new Error('MESSAGE_EXPIRED')
+  // OpenCode's 204 answer means the model works in the background and may ack after the open limit: that ack is still taken.
+  const isLateAck = input.status === 'acknowledged' && one.status === 'uncertain' && one.hasAccepted === true && one.to.startsWith('opencode:')
+  if (one.status === 'uncertain' && one.error === 'EXPIRED' && !isLateAck) throw new Error('MESSAGE_EXPIRED')
   if (!['uncertain', 'accepted', 'acknowledged', 'rejected'].includes(String(input.status))) throw new Error('INVALID_RECEIPT')
   const status = input.status as Message['status']
   const reply = input.reply === undefined ? '' : input.reply

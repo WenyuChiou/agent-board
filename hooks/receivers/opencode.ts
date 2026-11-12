@@ -8,6 +8,7 @@ import type { Strings } from '../i18n.ts'
 // client.session.promptAsync, which returns at once (OpenCode 1.19.3, docs/validation/2026-11-12-opencode-f9-wake.md).
 // A message the board saw a wake start for is never handed out again, so there is at most one wake per message;
 // if nobody can say whether it arrived, the card reads "sent, not confirmed" after 30 minutes and keeps the text.
+// Only a 400 or 404 answer from promptAsync takes it back; any other error leaves it a started wake.
 // The message is marked as accepted by the transport only after a 204 answer; it becomes acknowledged when the model
 // calls agent_board_ack (also when the answer was lost). A subagent's session (it has a parent) is never registered,
 // so it never receives one. Nothing here reads the conversation.
@@ -210,11 +211,13 @@ const boardReceiver = (client, directory) => {
     let result = 'unknown'
     try {
       const woke = await hostCall(() => client.session.promptAsync({ path: { id: session }, body: { parts: [{ type: 'text', text: message.text + '\\n\\n' + WORDS.note.split('{id}').join(message.id).split('{nonce}').join(message.nonce) }] } }))
-      result = woke?.error ? 'refused' : 'sent'
+      // OpenCode 1.19.3 documents only 400 and 404 for promptAsync; they come before the host stores anything, so only they
+      // prove the message was not sent. Any other error answer (a 500, no status) may come after the turn started.
+      result = !woke?.error ? 'sent' : woke.response?.status === 400 || woke.response?.status === 404 ? 'refused' : 'unknown'
     } catch {}
     if (!roots.has(session)) return
     if (result === 'refused') {
-      // The host said it did not take it: proof of not sent. The board takes the mark back, and it goes out again after the backoff.
+      // The host answered 400 or 404: proof of not sent. The board takes the mark back, and it goes out again after the backoff.
       if (!(await giveBack(session, ref, true))) held.set(session, { phase: 'unsent', message, ref })
       retryLater(session)
       hookError('MAILBOX_FAILED')
@@ -252,7 +255,8 @@ const boardReceiver = (client, directory) => {
       const seen = mark(session)
       const state = await hostState(session)
       if (roots.get(session) === 'busy' && mark(session) === seen && state === 'idle') { roots.set(session, 'idle'); recheck.delete(session) }
-      else if (isRetry && state === 'busy' && recheck.has(session)) retryLater(session)
+      // A lookup that fails leaves the session as it was, so it is asked again on the retry clock as for busy.
+      else if (isRetry && (state === 'busy' || state === 'unknown') && recheck.has(session)) retryLater(session)
     }
     await deliver(session)
   }

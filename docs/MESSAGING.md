@@ -58,7 +58,11 @@ while the mailbox is open. A marked message the host never confirms (the model's
 "sent, not confirmed" on its card after 30 minutes and keeps its text, so you can copy it; an accept or an ack that comes
 later is still taken. From then on it no longer holds the session's next message, and a day later it expires like any
 other open message. The plugin takes a marked message back (`--mailbox release --unsent`) only when the host answered
-with an error, which proves it was not sent. `release` answers `NOT_HELD` for a ref the board does not hold and
+400 or 404, which proves it was not sent (any other error answer may come after the turn started, so the message stays a
+started wake); `--unsent` also takes back one that read "sent, not confirmed" meanwhile. A repeated `attempt` is answered
+ok only while the message is still an active started wake. An OpenCode message accepted after a 204 answer that the model
+acknowledges after the 30 minutes is still acknowledged. Each workspace the host loads the plugin for has its own
+receiver. `release` answers `NOT_HELD` for a ref the board does not hold and
 `WAKE_STARTED` for a marked one without `--unsent`; `end` answers `ok: false` with a code when its write fails. The
 plugin reads no message of the conversation to decide any of this.
 

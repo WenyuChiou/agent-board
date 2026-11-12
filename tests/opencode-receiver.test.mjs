@@ -63,7 +63,7 @@ const fixture = async (fn, { spawn: isSpawn = false } = {}) => {
     }
     // The board's clock moves on, and its store is pruned as it would be by the next call.
     const advance = ms => { clock.skew += ms; writeState(readState()) }
-    const calls = { promptAsync: [], status: [], sent: [], lookups: 0, board: [], atWake: [], faults: {}, prompts: [], answers: [] }
+    const calls = { promptAsync: [], status: [], sent: [], lookups: 0, board: [], atWake: [], faults: {}, prompts: [], answers: [], cwds: [] }
     const sessions = new Map()
     const code = error => error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING'
     // The board script's answer to one --mailbox call, worked out from the same functions the script runs.
@@ -93,6 +93,7 @@ const fixture = async (fn, { spawn: isSpawn = false } = {}) => {
       const canned = (calls.canned?.[action] ?? 0) > 0
       if (canned) calls.canned[action] -= 1
       calls.board.push(action)
+      calls.cwds.push({ action, cwd: args[1][args[1].indexOf('--cwd') + 1] })
       if (isSpawn) {
         const line = JSON.stringify({ ok: false, code: 'BOARD_NOT_RUNNING', watch: directory, message: null })
         const child = canned ? spawn(process.execPath, ['-e', 'process.stdout.write(process.argv[1] + "\n")', line], args[2]) : spawn(...args)
@@ -178,7 +179,7 @@ const fixture = async (fn, { spawn: isSpawn = false } = {}) => {
           try { calls.atWake.push(store().messages) } catch { calls.atWake.push(null) }
           const next = calls.prompts.shift()
           if (next) return next(options)
-          if (calls.fail) return { error: { name: 'Failed' } }
+          if (calls.fail) return { error: { name: 'Failed' }, response: { status: 400 } }
           if (calls.neverArrives) throw new Error('answer lost')
           // The wake reached the session, but its answer was lost on the way back.
           calls.sent.push(options.body.parts[0].text)
@@ -189,7 +190,9 @@ const fixture = async (fn, { spawn: isSpawn = false } = {}) => {
     }
     const prompts = {
       // The host refuses the wake: proof it was not sent.
-      refuse: () => ({ error: { name: 'Failed' } }),
+      refuse: () => ({ error: { name: 'Failed' }, response: { status: 400 } }),
+      // The host answered with an error that does not prove the message was not sent.
+      http: status => () => ({ error: { name: 'Failed' }, response: { status } }),
       // The wake arrived, but its answer was lost.
       arrivedThenLost: options => { calls.sent.push(options.body.parts[0].text); throw new Error('answer lost') },
       // The wake never arrived and the call failed.
@@ -213,21 +216,21 @@ const fixture = async (fn, { spawn: isSpawn = false } = {}) => {
     const build = async () => {
       if (!isSpawn) globalThis[TIMING_KEY] = FAST
       try {
-        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => receiver }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), tool, spawnBoard, readFileSync, watchBoard, join, existsSync)
+        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0] }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), tool, spawnBoard, readFileSync, watchBoard, join, existsSync)
         const hooks = await factory.plugin({ client, directory: home })
         receiverOf = factory.receiver
-        return { hooks, receiver: factory.receiver }
+        return { hooks, receiver: factory.receiver, plugin: factory.plugin }
       } finally { delete globalThis[TIMING_KEY] }
     }
-    let { hooks } = await build()
+    let { hooks, plugin } = await build()
     const reported = state => { if (state.type === 'busy') busyNow.add(state.session); else busyNow.delete(state.session); return hooks.event({ event: { type: 'session.status', properties: { sessionID: state.session, status: { type: state.type } } } }) }
     const idle = session => { busyNow.delete(session); return hooks.event({ event: { type: 'session.idle', properties: { sessionID: session } } }) }
     const created = session => hooks.event({ event: { type: 'session.created', properties: { info: { id: session } } } })
     const deleted = session => hooks.event({ event: { type: 'session.deleted', properties: { info: { id: session } } } })
     // The receiver's own state change, with no event handler (and so no reply capture) around it.
     const note = (session, state) => { if (state === 'working') busyNow.add(session); else busyNow.delete(session); receiverOf().note(session, state) }
-    const rebuild = async () => { ({ hooks } = await build()); return hooks }
-    const f = { home, board, progress, directory, calls, sessions, queue, message, store, until, settled, reported, idle, created, deleted, note, save, watchers, advance, clock, prompts, guard: session => guarded.add(session), rebuild, receiver: () => receiverOf(), count: action => calls.board.filter(one => one === action).length }
+    const rebuild = async () => { ({ hooks, plugin } = await build()); return hooks }
+    const f = { home, board, progress, directory, calls, sessions, queue, message, store, until, settled, reported, idle, created, deleted, note, save, watchers, advance, clock, prompts, guard: session => guarded.add(session), rebuild, plugin: options => plugin(options), receiver: () => receiverOf(), count: action => calls.board.filter(one => one === action).length }
     Object.defineProperty(f, 'hooks', { get: () => hooks })
     await fn(f)
   } finally {
@@ -1014,3 +1017,131 @@ test('the agent_board_ack tool takes no summary as well as one', () => fixture(a
   assert.equal(ack.args.id.isOptional, undefined)
   assert.equal(await ack.execute({ id: 'nobody', nonce: 'ffffff' }, { sessionID: 'ses_none' }).catch(error => error.message), 'AGENT_BOARD_ACK_FAILED: NO_SESSION')
 }))
+
+// Round 2 of the #1366 review.
+test('R18 a plugin loaded twice gives each instance its own receiver, so a session wakes through its own client and directory (round 2)', () => fixture(async f => {
+  const second = { promptAsync: [] }
+  const client2 = { session: {
+    get: async ({ path }) => ({ data: { id: path.id } }),
+    messages: async () => ({ data: [] }),
+    status: async () => ({ data: {} }),
+    promptAsync: async options => { second.promptAsync.push(options); return { data: undefined } },
+  } }
+  const other = join(f.home, 'second-workspace')
+  const hooks2 = await f.plugin({ client: client2, directory: other })
+  f.queue('ses_two', 'r18-two', 'Synthetic text for the second workspace')
+  f.queue('ses_one', 'r18-one', 'Synthetic text for the first workspace')
+  await hooks2.event({ event: { type: 'session.created', properties: { info: { id: 'ses_two' } } } })
+  await f.until(() => second.promptAsync.length === 1 && f.settled(), 'the second instance woke its session through its own client')
+  assert.equal(second.promptAsync[0].path.id, 'ses_two')
+  assert.equal(f.calls.promptAsync.length, 0, 'the first client got no call for the second workspace')
+  assert.ok(f.calls.cwds.filter(one => one.action === 'take').every(one => one.cwd === other), 'the second workspace asked the board with its own directory')
+  await f.created('ses_one')
+  await f.until(() => f.calls.promptAsync.length === 1 && f.settled(), 'the first instance woke its session through its own client')
+  assert.equal(f.calls.promptAsync[0].path.id, 'ses_one')
+  assert.equal(second.promptAsync.length, 1)
+  assert.equal(f.calls.cwds.filter(one => one.action === 'take').at(-1).cwd, f.home)
+}))
+
+test('R19 an error answer that does not prove the wake was not sent leaves it a started wake with one call (round 2)', () => fixture(async f => {
+  f.calls.prompts.push(f.prompts.http(500))
+  f.queue('ses_r19', 'r19-message', 'Synthetic text for an error answer after the host may have started')
+  await f.created('ses_r19')
+  await f.until(() => f.calls.promptAsync.length === 1 && f.settled(), 'the wake was started')
+  for (let lease = 0; lease < 2; lease++) {
+    f.advance(31_000)
+    await f.idle('ses_r19')
+    await wait(250)
+  }
+  assert.equal(f.calls.promptAsync.length, 1)
+  assert.equal(f.count('release'), 0)
+  const kept = f.message('r19-message')
+  assert.deepEqual([kept.status, kept.error, kept.attempted !== undefined], ['uncertain', '', true])
+}))
+
+test('R20 a 400 answer from the host takes the wake back and it is woken again once (round 2)', () => fixture(async f => {
+  f.calls.prompts.push(f.prompts.http(400))
+  f.queue('ses_r20', 'r20-message', 'Synthetic text for a 400 answer')
+  await f.created('ses_r20')
+  await f.until(() => f.message('r20-message').status === 'accepted' && f.settled(), 'the message was woken again and accepted')
+  assert.equal(f.calls.promptAsync.length, 2)
+  assert.equal(f.calls.sent.length, 1)
+  assert.equal(f.count('release'), 1)
+}))
+
+test('R21 a session marked busy whose retry lookup fails is looked at again, and the message is woken with no further event or tick (round 2)', () => fixture(async f => {
+  f.guard('ses_r21')
+  f.calls.answers.push('busy', 'fail')
+  f.queue('ses_r21', 'r21-message', 'Synthetic text for a busy answer and then a failed lookup')
+  await f.created('ses_r21')
+  await f.until(() => f.message('r21-message').status === 'accepted' && f.settled(), 'the message was woken after the lookup worked')
+  assert.ok(f.calls.status.length >= 3)
+  assert.equal(f.calls.promptAsync.length, 1)
+}))
+
+test('R22 a wake the host refused whose release could not be saved for over 30 minutes is still taken back, and woken once (round 2)', () => fixture(async f => {
+  f.calls.prompts.push(f.prompts.refuse)
+  f.calls.faults.release = ['fail', 'fail', 'fail', 'fail', 'fail', 'fail']
+  f.queue('ses_r22', 'r22-message', 'Synthetic text for a refused wake whose release failed')
+  await f.created('ses_r22')
+  await f.until(() => f.calls.promptAsync.length === 1, 'the first wake was refused')
+  f.advance(31 * 60_000)
+  await f.until(() => f.message('r22-message').status === 'accepted' && f.settled(), 'the message was taken back and woken again')
+  assert.equal(f.calls.promptAsync.length, 2)
+  assert.equal(f.calls.sent.length, 1)
+  assert.equal(f.message('r22-message').error, '')
+}))
+
+test('R23 an OpenCode message accepted after a 204 answer and acknowledged by the model after 31 minutes is acknowledged (round 2)', () => fixture(async f => {
+  f.queue('ses_r23', 'r23-message', 'Synthetic text for a late ack')
+  await f.created('ses_r23')
+  await f.until(() => f.message('r23-message').status === 'accepted' && f.settled(), 'the message was accepted')
+  const nonce = f.message('r23-message').nonce
+  f.advance(31 * 60_000)
+  assert.deepEqual([f.message('r23-message').status, f.message('r23-message').error], ['uncertain', 'EXPIRED'])
+  await f.hooks.tool.agent_board_ack.execute({ id: 'r23-message', nonce }, { sessionID: 'ses_r23' })
+  assert.equal(f.message('r23-message').status, 'acknowledged')
+  assert.equal(f.calls.promptAsync.length, 1)
+}))
+
+test('B10 a repeated attempt answers ok only while the message is an active started wake (round 2)', async () => {
+  const b = await mailbox()
+  const attempt = (state, now) => b.act(state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, now)
+  const marked = attempt(b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0).state, T0 + SEC).state
+  assert.equal(attempt(marked, T0 + 2 * SEC).result.ok, true)
+  const late = b.prune(marked, T0 + 31 * MIN)
+  assert.equal(late.messages[0].error, 'UNCONFIRMED')
+  assert.throws(() => attempt(late, T0 + 32 * MIN), /CLAIM_LOST/)
+  const dismissed = b.messaging.dismissMessage(marked, 'm1', T0 + 2 * MIN)
+  assert.equal(dismissed.messages[0].error, 'DISMISSED')
+  assert.throws(() => attempt(dismissed, T0 + 3 * MIN), /CLAIM_LOST/)
+})
+
+test('B11 release --unsent also takes back a wake that read "sent, not confirmed", and it is handed out again once (round 2)', async () => {
+  const b = await mailbox()
+  const marked = b.act(b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0).state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + SEC).state
+  const late = b.prune(marked, T0 + 31 * MIN)
+  assert.equal(late.messages[0].error, 'UNCONFIRMED')
+  const back = b.act(late, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1), unsent: true }, T0 + 32 * MIN).state
+  assert.deepEqual([back.messages[0].status, back.messages[0].error, back.messages[0].ref, back.messages[0].attempted, back.messages[0].claimed], ['queued', '', undefined, undefined, 0])
+  const next = b.take(back, 'opencode', 's1', refOf(2), T0 + 32 * MIN)
+  assert.equal(next.message?.id, 'm1')
+  // A plain release still leaves a message that read "sent, not confirmed" as it is.
+  assert.throws(() => b.act(late, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + 32 * MIN), /NOT_HELD/)
+})
+
+test('B12 a late ack on an expired message that had been accepted is taken for OpenCode only (round 2)', async () => {
+  const b = await mailbox()
+  for (const agent of ['opencode', 'codex']) {
+    const taken = b.take(b.seed(agent, 's1'), agent, 's1', refOf(1), T0)
+    let state = taken.state
+    if (agent === 'opencode') state = b.act(state, 'mailbox-attempt', { agent, session: 's1', ref: refOf(1) }, T0 + SEC).state
+    const nonce = taken.message.nonce
+    state = b.act(state, 'mailbox-accept', { agent, session: 's1', id: 'm1', nonce, awaitsAck: true }, T0 + 2 * SEC).state
+    const expired = b.prune(state, T0 + 33 * MIN)
+    assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].hasAccepted], ['uncertain', 'EXPIRED', true])
+    const ack = () => b.act(expired, 'mailbox-ack', { agent, session: 's1', id: 'm1', nonce, reply: `ACK ${nonce} done` }, T0 + 34 * MIN).state
+    if (agent === 'opencode') assert.deepEqual([ack().messages[0].status, ack().messages[0].error], ['acknowledged', ''])
+    else assert.throws(ack, /MESSAGE_EXPIRED/)
+  }
+})

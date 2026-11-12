@@ -1,4 +1,4 @@
-import { address, claimMessages, disconnectMessages, MAILBOX_LEASE_MS, messageReceipt } from './messaging'
+import { address, claimMessages, disconnectMessages, MAILBOX_LEASE_MS, messageReceipt, UNCONFIRMED } from './messaging'
 import type { Connection, Message, MessageState } from './messaging'
 import { sha256 } from './sha256'
 
@@ -35,19 +35,25 @@ export const takeMailboxMessage = (state: MessageState, agent: string, session: 
 // A hook that stopped waiting never showed what the board claimed for it, so it hands the claim back
 // and the next turn has the message at once (#990). The ACK code stays, for a message shown before.
 // A started OpenCode wake (marked by attemptMailboxMessage) is handed back only with isUnsent, which the plugin sets
-// when it knows the host was never called (#724); a plain release leaves it as it is.
+// when it knows the host was never called (#724); a plain release leaves it as it is. A wake that read "sent, not
+// confirmed" meanwhile (the release could not be saved for 30 minutes) is taken back by isUnsent too.
 export const releaseMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number, isUnsent = false): MessageState => {
-  const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && message.error === '')
+  const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && (message.error === '' || isUnsent && message.error === UNCONFIRMED))
   if (one === undefined || one.attempted !== undefined && !isUnsent) return state
   const { ref: _ref, attempted: _attempted, ...kept } = one
-  return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, claimed: 0, updated: now } : message) }
+  return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, error: '', claimed: 0, updated: now } : message) }
 }
 // The OpenCode plugin tells the board it is about to wake the session with the message it holds under ref. Only the
 // current claim can be marked; asking again with the same ref answers the same, and any other ref has lost the claim.
 export const attemptMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number): MessageState => {
   const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref)
   if (one === undefined) throw new Error('CLAIM_LOST')
-  if (one.attempted !== undefined) return state
+  // Answered again only while it is still an active started wake; a message dismissed or read "sent, not confirmed"
+  // since is offered to the person to copy, so a receiver that repeats its attempt must not wake it.
+  if (one.attempted !== undefined) {
+    if (one.status === 'uncertain' && one.error === '') return state
+    throw new Error('CLAIM_LOST')
+  }
   if (one.status !== 'uncertain' || one.error !== '' || now - one.claimed >= MAILBOX_LEASE_MS) throw new Error('CLAIM_LOST')
   return { ...state, messages: state.messages.map(message => message === one ? { ...one, attempted: now, updated: now } : message) }
 }

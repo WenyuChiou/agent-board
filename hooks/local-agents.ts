@@ -189,8 +189,15 @@ const run = (mode, payload, session, deadline) => {
   return result.stdout
 }
 ${REPORT_TOOL_REPLY}
-${board === undefined ? 'const receiver = null' : `let receiver = null
-${opencodeReceiverSource(node, board, progress, home, words)}`}
+${board === undefined ? 'const receiver = null' : `// One receiver per workspace directory: OpenCode may load this plugin once for each, and a receiver wakes sessions
+// through the client and the directory of the instance that made it.
+const receivers = new Map()
+${opencodeReceiverSource(node, board, progress, home, words)}
+const receiverFor = (client, directory) => {
+  let one = receivers.get(directory)
+  if (one === undefined) { one = boardReceiver(client, directory); receivers.set(directory, one) }
+  return one
+}`}
 // A one-shot \`opencode run\` exits without session.deleted (#217). As OpenCode exits, the
 // top-level sessions reported here and not seen to end are ended, all within one hook limit;
 // a board that is too slow gets them queued or logged, and OpenCode's exit never waits longer.
@@ -242,7 +249,7 @@ const withStatusEvent = (event, action) => {
   })
 }
 
-export const AgentBoardLocal = async ({ client, directory }) => (${board === undefined ? '' : 'receiver ??= boardReceiver(client, directory), '}{
+export const AgentBoardLocal = async ({ client, directory }) => ${board === undefined ? '' : '{ const receiver = receiverFor(client, directory); return '}({
   'chat.message': async ({ sessionID }, output) => withHook(async (current, deadline) => {
       const isNewest = takeSequence(sessionID)
       pendingIdle.delete(sessionID)
@@ -341,5 +348,5 @@ export const AgentBoardLocal = async ({ client, directory }) => (${board === und
     }),
     ...(receiver?.tools ?? {}),
   },
-})
+})${board === undefined ? '' : ' }'}
 `
