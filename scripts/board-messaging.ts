@@ -439,7 +439,7 @@ export const createMessaging = (directory: string, isDefault = false, gate?: Mes
   }
 }
 
-const mailboxAccess = (directory: string, budget: number, storeBudget = budget) => {
+const mailboxAccess = (directory: string, budget: number, storeBudget = budget, writesRelease = false) => {
   const root = resolve(directory)
   let hasDeferred = false
   // A claim Windows would not let go of is still this hook's own, checked again before every write.
@@ -497,7 +497,8 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
         })
       }
       // Only a running board claims after the hook stopped waiting; the store is written by the hook itself.
-      if (action === 'peer-send' || action === 'mailbox-release') throw new Error('BOARD_NOT_RUNNING')
+      // An in-process plugin hands a claim back through the store itself (writesRelease); a hook that stopped waiting leaves that to a running board.
+      if (action === 'peer-send' || action === 'mailbox-release' && !writesRelease) throw new Error('BOARD_NOT_RUNNING')
       // A kept claim that is no longer on disk is gone, and a fresh one is taken.
       const kept = held
       held = null
@@ -539,8 +540,9 @@ export const hookMailbox = (directory: string, budget: number) => {
   }
   return {
     get hasDeferred() { return access.isDeferred() },
-    turn: async (agent: string, session: string, surface: string, now: number): Promise<Message | null> => {
-      const ref = randomBytes(6).toString('hex')
+    // An in-process plugin may name the claim (a 12-hex ref), so it can hand the claim back with release.
+    turn: async (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => {
+      const ref = named ?? randomBytes(6).toString('hex')
       try { return (await access.call('mailbox-turn', { agent, session, surface, ref }, now)).message as Message ?? null } catch (error) {
         // A board started before claims had names refuses the field until it restarts: ask it as before.
         if ((error as Error).message === 'UNKNOWN_FIELD') {
@@ -559,6 +561,11 @@ export const hookMailbox = (directory: string, budget: number) => {
     acceptOrThrow: async (agent: string, session: string, id: string, nonce: string, now: number, awaitsAck = false): Promise<void> => { await access.call('mailbox-accept', { agent, session, id, nonce, ...(awaitsAck ? { awaitsAck: true } : {}) }, now) },
     ack: async (agent: string, session: string, id: string, nonce: string, reply: string, now: number): Promise<void> => { await access.call('mailbox-ack', { agent, session, id, nonce, reply }, now) },
     send: async (body: { agent: string; session: string; text: string; id: string; from: string; folderDigest: string }, now: number): Promise<void> => { await access.call('peer-send', body, now) },
+    // A plugin that took a message and cannot hand it over gives the claim back at once instead of holding it.
+    release: async (agent: string, session: string, ref: string, now: number): Promise<void> => {
+      const left = deadline - Date.now()
+      await mailboxAccess(directory, Math.min(150, left), Math.min(120, left), true).call('mailbox-release', { agent, session, ref }, now)
+    },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
   }
 }

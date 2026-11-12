@@ -56,7 +56,7 @@ const WORDS = ${JSON.stringify({ send: words.opencodeSendTool, ack: words.openco
 const toB64 = text => Buffer.from(String(text), 'utf8').toString('base64')
 const boardReceiver = (client, directory) => {
   // A session is known only after the plugin saw it report as a top-level session; idle or busy as of its last event.
-  const roots = new Map(), taking = new Set(), failing = new Set(), again = new Set(), stashed = new Map(), woken = new Map(), given = new Set(), versions = new Map()
+  const roots = new Map(), taking = new Set(), failing = new Set(), again = new Set(), stashed = new Map(), woken = new Map(), given = new Set(), uncertain = new Set(), versions = new Map()
   let watcher = null, folder = null, pending = null, timer = null, ticks = 0
   const isDeliverable = message => {
     if (folder === null) return true
@@ -66,20 +66,50 @@ const boardReceiver = (client, directory) => {
     return Boolean(live && live.status === 'uncertain' && live.nonce === message.nonce && (!live.error || live.error === ''))
   }
   const accept = (session, message) => boardCall('accept', session, directory, ['--id', message.id, '--nonce', message.nonce, '--awaits-ack'])
+  // The host's own view of a session. OpenCode lists only sessions that are not idle (F9: \`{}\` for an idle
+  // one), so a lookup that answers with no entry means idle; a failed lookup, an error answer or an entry of
+  // no known shape leaves it unknown. A host without the lookup is left to the last event.
+  const hostState = async session => {
+    if (typeof client?.session?.status !== 'function') return 'idle'
+    let live
+    try { live = await client.session.status({}) } catch { return 'unknown' }
+    if (live?.error || live?.data == null || typeof live.data !== 'object') return 'unknown'
+    const entry = live.data[session]
+    if (entry === undefined) return 'idle'
+    if (!entry || typeof entry.type !== 'string') return 'unknown'
+    return entry.type === 'idle' ? 'idle' : 'busy'
+  }
+  // Whether the session's own messages hold the wake: a user part naming the message id (the ack note does).
+  // null when the host cannot say, which holds the message instead of waking the session a second time.
+  const reached = async (session, message) => {
+    let listed
+    try { listed = await client.session.messages({ path: { id: session } }) } catch { return null }
+    if (listed?.error || !Array.isArray(listed?.data)) return null
+    return listed.data.some(one => one?.info?.role === 'user' && Array.isArray(one.parts) && one.parts.some(part => part?.type === 'text' && typeof part.text === 'string' && part.text.includes(message.id)))
+  }
+  const newRef = () => Array.from(globalThis.crypto.getRandomValues(new Uint8Array(6)), byte => byte.toString(16).padStart(2, '0')).join('')
   const deliver = async session => {
     if (roots.get(session) !== 'idle') return
     // Every busy or ended event bumps the session's version, so an answer that began before it can be told from a current one.
     const version = versions.get(session) ?? 0
+    const isStale = () => (versions.get(session) ?? 0) !== version || roots.get(session) !== 'idle'
     // A message the board writes while a take is under way is taken right after it, not at the next tick.
     if (taking.has(session)) { again.add(session); return }
     taking.add(session)
     try {
-      let message = stashed.get(session)
+      let message = stashed.get(session), ref = null
       if (message !== undefined) {
         stashed.delete(session)
         if (!isDeliverable(message)) return
       } else {
-        const taken = await boardCall('take', session, directory)
+        // The host is asked before the take: a busy or unknown session claims nothing, so no claim waits out a long turn.
+        const state = await hostState(session)
+        if (!roots.has(session)) return
+        if (isStale()) return
+        if (state === 'busy') roots.set(session, 'busy')
+        if (state !== 'idle') return
+        ref = newRef()
+        const taken = await boardCall('take', session, directory, ['--ref', ref])
         // A board script that is missing, fails or does not answer keeps the card from offering Send. It is
         // logged once, until a call works again, so a timer that keeps asking does not fill the log.
         if (taken === null || typeof taken !== 'object') {
@@ -94,36 +124,56 @@ const boardReceiver = (client, directory) => {
       if (typeof message.text !== 'string' || typeof message.id !== 'string' || typeof message.nonce !== 'string') throw new Error('MAILBOX_FAILED')
       // A session that closed meanwhile does not get it: the claim runs out and the board hands it out again.
       if (!roots.has(session)) return
-      // It became busy while the message was being taken: hold it for the next session.idle.
-      if (roots.get(session) !== 'idle') { stashed.set(session, message); return }
-      // Given once: a message this process already handed over only has its acceptance retried.
+      // It became busy while the message was being taken: give the claim back, or a long turn would expire it.
+      // If the board cannot take it back, hold it for the next session.idle.
+      if (isStale()) {
+        if (ref === null || (await boardCall('release', session, directory, ['--ref', ref]))?.ok !== true) stashed.set(session, message)
+        return
+      }
+      // Given once: a message this process already handed over only has its acceptance retried. When the wake's
+      // answer was lost, the session's own messages say whether it arrived.
+      if (given.has(message.id) && uncertain.has(message.id)) {
+        const found = await reached(session, message)
+        if (found === null) { stashed.set(session, message); return }
+        uncertain.delete(message.id)
+        if (!found) given.delete(message.id)
+      }
       if (given.has(message.id)) {
         if ((await accept(session, message))?.ok !== true) throw new Error('MAILBOX_FAILED')
         return
       }
-      // The host's own view wins over the last event seen: a stale idle event must not wake a busy session.
-      if (typeof client?.session?.status === 'function') {
-        let live = null
-        try { live = await client.session.status({}) } catch {}
-        const entry = live?.data?.[session]
-        // A busy or ended event that came while the host was answering is newer than that answer: hold the message for the next idle.
+      // A message held earlier was not covered by the check before the take: the host's own view wins over the last event.
+      if (ref === null) {
+        const state = await hostState(session)
         if (!roots.has(session)) return
-        if ((versions.get(session) ?? 0) !== version || roots.get(session) !== 'idle') { stashed.set(session, message); return }
-        if (entry && entry.type !== 'idle') { roots.set(session, 'busy'); stashed.set(session, message); return }
+        if (!isStale() && state === 'busy') roots.set(session, 'busy')
+        if (state !== 'idle' || isStale()) { stashed.set(session, message); return }
       }
       roots.set(session, 'busy')
       woken.set(session, Date.now())
       given.add(message.id)
       if (given.size > 200) given.delete(given.values().next().value)
+      let woke = null, lost = false
       try {
-        const woke = await client.session.promptAsync({ path: { id: session }, body: { parts: [{ type: 'text', text: message.text + '\\n\\n' + WORDS.note.split('{id}').join(message.id).split('{nonce}').join(message.nonce) }] } })
-        if (woke?.error) throw new Error('MAILBOX_FAILED')
-      } catch (error) {
+        woke = await client.session.promptAsync({ path: { id: session }, body: { parts: [{ type: 'text', text: message.text + '\\n\\n' + WORDS.note.split('{id}').join(message.id).split('{nonce}').join(message.nonce) }] } })
+      } catch { lost = true }
+      const undo = () => { woken.delete(session); if (roots.has(session)) roots.set(session, 'idle') }
+      if (lost) {
+        // The answer was lost, so the wake may have arrived: it stays given, and the session's messages decide before any retry.
+        uncertain.add(message.id)
+        const found = await reached(session, message)
+        if (found !== true) {
+          undo()
+          if (found === null) stashed.set(session, message)
+          else { uncertain.delete(message.id); given.delete(message.id) }
+          throw new Error('MAILBOX_FAILED')
+        }
+        uncertain.delete(message.id)
+      } else if (woke?.error) {
         // Not handed over: the claim runs out and the board hands the message out again.
         given.delete(message.id)
-        woken.delete(session)
-        if (roots.has(session)) roots.set(session, 'idle')
-        throw error
+        undo()
+        throw new Error('MAILBOX_FAILED')
       }
       // Given first, then marked accepted: if the mark fails, the claim runs out and the session may get the
       // same message again, which beats losing it. Accepted is only the transport; the model's ack upgrades it.

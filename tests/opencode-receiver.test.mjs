@@ -58,16 +58,35 @@ const fixture = async fn => {
       for (const end = Date.now() + 30_000; Date.now() < end; await new Promise(done => setTimeout(done, 50))) if (check()) return
       assert.fail(label)
     }
-    const calls = { promptAsync: [], status: [] }
+    const calls = { promptAsync: [], status: [], sent: [] }
     const sessions = new Map()
     const client = {
       session: {
-        get: async ({ path }) => ({ data: { id: path.id, ...(sessions.get(path.id) ?? {}) } }),
-        messages: async () => ({ data: [] }),
-        status: async () => { calls.status.push(1); if (calls.gate) await calls.gate; return { data: calls.busy ?? {} } },
+        get: async ({ path }) => {
+          const hold = calls.holdGet
+          if (hold) { calls.holdGet = null; await hold }
+          return { data: { id: path.id, ...(sessions.get(path.id) ?? {}) } }
+        },
+        messages: async () => {
+          if (calls.messagesFail) throw new Error('messages lookup failed')
+          return { data: calls.sent.map(text => ({ info: { role: 'user' }, parts: [{ type: 'text', text }] })) }
+        },
+        // OpenCode names a busy session; the stand-in reports every other session as idle unless a test says otherwise.
+        status: async () => {
+          calls.status.push(1)
+          if (calls.gate) await calls.gate
+          if (calls.afterStatus) { const run = calls.afterStatus; calls.afterStatus = null; setTimeout(run, 0) }
+          if (calls.statusFails) throw new Error('status lookup failed')
+          if (calls.statusError) return { error: { name: 'Failed' } }
+          if (calls.noEntry) return { data: {} }
+          return { data: new Proxy({}, { get: (_target, key) => calls.busy?.[key] ?? { type: 'idle' } }) }
+        },
         promptAsync: async options => {
           calls.promptAsync.push(options)
           if (calls.fail) return { error: { name: 'Failed' } }
+          // The wake reached the session, but its answer was lost on the way back.
+          calls.sent.push(options.body.parts[0].text)
+          if (calls.lostAnswer) throw new Error('answer lost')
           return { data: undefined }
         },
       },
@@ -95,6 +114,7 @@ const fixture = async fn => {
     for (const end = Date.now() + 10_000; !children.every(child => child.isClosed) && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
     for (const listener of process.listeners('exit')) if (!exitListeners.includes(listener)) process.removeListener('exit', listener)
     delete globalThis[Symbol.for('agent-board.opencode-open-sessions')]
+    delete globalThis[Symbol.for('agent-board.opencode-sequence')]
     rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
   }
 }
@@ -205,7 +225,7 @@ test('opencodePlugin holds a message while the session is busy and wakes it at s
   await new Promise(done => setTimeout(done, 1000))
   await f.until(f.settled, 'no call is left running')
   assert.equal(f.calls.promptAsync.length, 1)
-  assert.equal(f.message('busy-message-2').status, 'uncertain')
+  assert.equal(f.message('busy-message-2').status, 'queued')
 }))
 
 test('opencodePlugin never registers a subagent session and never wakes a session it does not own', () => fixture(async f => {
@@ -219,6 +239,18 @@ test('opencodePlugin never registers a subagent session and never wakes a sessio
   assert.equal(f.calls.promptAsync.length, 0)
   assert.equal(f.message('child-message-1').status, 'queued')
   assert.equal(f.message('other-message-1').status, 'queued')
+}))
+
+test('opencodePlugin keeps no event order for a subagent session or a deleted session, so a long run does not grow it', () => fixture(async f => {
+  f.sessions.set('ses_child', { parentID: 'ses_parent' })
+  await f.reported({ session: 'ses_child', type: 'busy' })
+  await f.idle('ses_child')
+  await f.reported({ session: 'ses_gone', type: 'busy' })
+  await f.hooks.event({ event: { type: 'session.deleted', properties: { info: { id: 'ses_gone' } } } })
+  await f.until(f.settled, 'no call is left running')
+  const order = globalThis[Symbol.for('agent-board.opencode-sequence')]
+  assert.equal(order.last.has('ses_child'), false)
+  assert.equal(order.last.has('ses_gone'), false)
 }))
 
 test('opencodePlugin stops watching the board folder once it is removed, so OpenCode is not kept busy', () => fixture(async f => {
@@ -273,6 +305,84 @@ test('opencodePlugin does not wake a session that turned busy while the host sta
   f.calls.gate = null
   await f.idle('ses_late')
   await f.until(() => f.calls.promptAsync.length === 1 && f.message('late-message-1').status === 'accepted' && f.settled(), 'the message was given at the next idle')
+}))
+
+test('opencodePlugin keeps a session idle when a busy lookup returns after a newer idle event', () => fixture(async f => {
+  await f.reported({ session: 'ses_order', type: 'busy' })
+  // The busy event's lookup is slow; the idle event that follows it finishes first.
+  let release
+  f.calls.holdGet = new Promise(done => { release = done })
+  const slowBusy = f.reported({ session: 'ses_order', type: 'busy' })
+  await f.idle('ses_order')
+  release()
+  await slowBusy
+  // A message queued now is taken: the late busy answer did not make the session busy again.
+  f.queue('ses_order', 'order-message-1', 'Synthetic text after a late busy answer')
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('order-message-1').status === 'accepted' && f.settled(), 'the idle session was woken')
+}))
+
+test('opencodePlugin holds the message when the host status lookup fails', () => fixture(async f => {
+  f.queue('ses_unknown', 'unknown-message-1', 'Synthetic text while the status is unknown')
+  // A thrown lookup and an SDK error answer leave the state unknown.
+  let asked = 0
+  for (const failure of ['statusFails', 'statusError']) {
+    f.calls[failure] = true
+    await f.idle('ses_unknown')
+    asked += 1
+    await f.until(() => f.calls.status.length >= asked, `the host status was asked (${failure})`)
+    await new Promise(done => setTimeout(done, 300))
+    await f.until(f.settled, 'no call is left running')
+    f.calls[failure] = false
+    assert.equal(f.calls.promptAsync.length, 0, failure)
+    assert.equal(f.message('unknown-message-1').status, 'queued', failure)
+  }
+  // A lookup that answers with no entry for the session is idle: OpenCode lists only sessions that are not
+  // (F9, docs/validation/2026-11-12-opencode-f9-wake.md: `{}` for an idle session). The message is given.
+  f.calls.noEntry = true
+  await f.idle('ses_unknown')
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('unknown-message-1').status === 'accepted' && f.settled(), 'the message was given when the host listed no entry')
+}))
+
+test('opencodePlugin does not wake a session twice when the wake answer was lost but the message reached the session', () => fixture(async f => {
+  f.calls.lostAnswer = true
+  f.queue('ses_lost', 'lost-message-1', 'Synthetic text whose wake answer is lost')
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_lost' } } } })
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('lost-message-1').status === 'accepted' && f.settled(), 'the message that reached the session was accepted')
+  // A lookup of the session's messages that fails holds the next one instead of waking it again.
+  await f.hooks.tool.agent_board_ack.execute({ id: 'lost-message-1', nonce: f.message('lost-message-1').nonce }, { sessionID: 'ses_lost' })
+  f.queue('ses_lost', 'lost-message-2', 'Synthetic second text whose answer is lost')
+  f.calls.messagesFail = true
+  await f.reported({ session: 'ses_lost', type: 'busy' })
+  await f.idle('ses_lost')
+  await f.until(() => f.calls.promptAsync.length === 2 && f.settled(), 'the second wake was tried')
+  await new Promise(done => setTimeout(done, 400))
+  assert.notEqual(f.message('lost-message-2').status, 'accepted')
+  f.calls.messagesFail = false
+  await f.reported({ session: 'ses_lost', type: 'busy' })
+  await f.idle('ses_lost')
+  await f.until(() => f.message('lost-message-2').status === 'accepted' && f.settled(), 'the second message was accepted after the lookup worked')
+  assert.equal(f.calls.promptAsync.length, 2)
+}))
+
+test('opencodePlugin gives a message back to the board when the session turns busy during the take, so a long turn does not expire it', () => fixture(async f => {
+  const { pruneMessages, OPEN_LIMIT_MS } = await importTs('../hooks/messaging.ts')
+  f.queue('ses_take', 'take-message-1', 'Synthetic text taken as the session turns busy')
+  // The session turns busy right after the host status was read, while the board is still taking the message.
+  f.calls.afterStatus = () => { f.reported({ session: 'ses_take', type: 'busy' }) }
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_take' } } } })
+  await f.until(() => f.calls.status.length === 1, 'the host status was asked')
+  await new Promise(done => setTimeout(done, 1500))
+  await f.until(f.settled, 'no call is left running')
+  assert.equal(f.calls.promptAsync.length, 0)
+  // A busy turn longer than the board's limit does not expire what was given back.
+  const stored = JSON.parse(readFileSync(join(f.directory, 'messages.json'), 'utf8'))
+  const later = pruneMessages(stored, Date.now() + OPEN_LIMIT_MS + 60_000)
+  const kept = later.messages.find(one => one.id === 'take-message-1')
+  assert.equal(kept.status, 'queued')
+  assert.equal(kept.error, '')
+  // At the end of the turn it is given.
+  await f.idle('ses_take')
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('take-message-1').status === 'accepted' && f.settled(), 'the message was given at the next idle')
 }))
 
 test('the OpenCode tool words and replies come from the string tables', async () => {

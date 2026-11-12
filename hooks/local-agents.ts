@@ -218,6 +218,15 @@ const folderOf = (info, directory) => {
   return typeof folder === 'string' ? { cwd: folder } : {}
 }
 
+// Every status or reply event takes a number before its awaited lookup. The receiver is noted only by
+// the newest event of a session, so a busy lookup that returns after a newer idle cannot undo it.
+const sequence = globalThis[Symbol.for('agent-board.opencode-sequence')] ??= { count: 0, last: new Map() }
+const takeSequence = session => {
+  const mine = ++sequence.count
+  sequence.last.set(session, mine)
+  return () => sequence.last.get(session) === mine
+}
+
 // A pending idle lookup can report only until this session has newer activity.
 const withStatusEvent = (event, action) => {
   const p = event?.properties ?? {}
@@ -235,13 +244,16 @@ const withStatusEvent = (event, action) => {
 
 export const AgentBoardLocal = async ({ client, directory }) => (${board === undefined ? '' : 'receiver ??= boardReceiver(client, directory), '}{
   'chat.message': async ({ sessionID }, output) => withHook(async (current, deadline) => {
+      const isNewest = takeSequence(sessionID)
       pendingIdle.delete(sessionID)
       // A known session notes the new reply at once, as events do before their lookup.
       if (open.has(sessionID)) open.get(sessionID).isReplying = true
       const info = current(await client.session.get({ path: { id: sessionID } }))
       if (info.error) throw Error('HOST_METADATA_FAILED')
+      // A subagent's session is never noted, so it keeps no order entry.
+      if (info.data?.parentID) sequence.last.delete(sessionID)
       if (!info.data || info.data.id !== sessionID || info.data.parentID) return
-      receiver?.note(sessionID, 'working')
+      if (isNewest()) receiver?.note(sessionID, 'working')
       const where = folderOf(info.data, directory)
       // The reply may have ended while the lookup ran: a known session keeps what was noted since.
       const known = open.get(sessionID)
@@ -266,11 +278,16 @@ export const AgentBoardLocal = async ({ client, directory }) => (${board === und
     if (!session || !['session.created', 'session.status', 'session.idle', 'session.deleted'].includes(event.type)) return
     if (event.type === 'session.status' && !['busy', 'retry', 'idle'].includes(p.status?.type)) return
     const state = event.type === 'session.deleted' ? 'ended' : event.type === 'session.status' && p.status?.type !== 'idle' ? 'working' : 'waiting'
+    const isNewest = takeSequence(session)
+    // A deleted session frees its order entry whatever follows, a subagent's too; ended is never ordered.
+    if (state === 'ended') sequence.last.delete(session)
     if (state === 'working') pendingIdle.delete(session)
     // A known session notes a finished reply at once: OpenCode may exit before the lookup returns.
     if (open.has(session) && state !== 'ended') open.get(session).isReplying = state === 'working'
     const info = event.type === 'session.deleted' ? { data: p.info } : current(await client.session.get({ path: { id: session } }))
     if (info.error) throw Error('HOST_METADATA_FAILED')
+    // A subagent's session is never noted, so it keeps no order entry.
+    if (info.data?.parentID) sequence.last.delete(session)
     if (!info.data || info.data.id !== session || info.data.parentID || !isLatest()) return
     const where = folderOf(info.data, directory)
     // A known session keeps the state its latest event noted: an earlier lookup may return last.
@@ -281,7 +298,7 @@ export const AgentBoardLocal = async ({ client, directory }) => (${board === und
     } else if (known) known.where = where
     else open.set(session, { isReplying: state === 'working', where })
     let reply
-    if (state !== 'waiting') receiver?.note(session, state)
+    if (state === 'ended' || state === 'working' && isNewest()) receiver?.note(session, state)
     if (isIdle) {
       // Leave time for the status even if the messages request never settles.
       const wait = deadline - Date.now() - 1000
@@ -306,7 +323,7 @@ export const AgentBoardLocal = async ({ client, directory }) => (${board === und
     if (isLatest()) {
       // The board's status goes first; a message waiting for this idle session is handed over after it.
       try { run('--agent-status', { session_id: session, state, ...where, ...(reply === undefined ? {} : { last_assistant_message: reply }) }, undefined, deadline) }
-      finally { if (state === 'waiting') receiver?.note(session, state) }
+      finally { if (state === 'waiting' && isNewest()) receiver?.note(session, state) }
     }
   }),
   tool: {
