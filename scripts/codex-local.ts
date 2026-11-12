@@ -506,13 +506,21 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // OpenCode's plugin (#724) also acknowledges and sends for its own session: ack upgrades an accepted message, send goes through the board's peer route.
     if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'send', 'release'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
     const directory = defaultMessagesDirectory(progress, home, process.env, process.platform)
-    const mailbox = hookMailbox(directory, 5000)
+    // This path runs in the plugin's own process with seconds to spare, so it waits for a busy board or store (a turn-start hook cannot).
+    const mailbox = hookMailbox(directory, 5000, 2000, 2000)
     const answer = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value)}\n`) }
     if (action === 'take') {
       const surface = flag('--surface'), ref = flag('--ref')
       // OpenCode's plugin names the claim (12 hex), so it can release it again.
       if (ref !== undefined && (agent !== 'opencode' || !/^[0-9a-f]{12}$/.test(ref))) throw new Error('INVALID_MAILBOX_CALL')
-      const message = await mailbox.turn(agent, session, surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui || agent === 'opencode' && surface === SURFACE_IDS.cli ? surface : SURFACE_IDS.unknown, Date.now(), ref)
+      let message: Awaited<ReturnType<typeof mailbox.turnOrThrow>>
+      try {
+        message = await mailbox.turnOrThrow(agent, session, surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui || agent === 'opencode' && surface === SURFACE_IDS.cli ? surface : SURFACE_IDS.unknown, Date.now(), ref)
+      } catch (error) {
+        // A failed take is not an empty mailbox: the plugin tries again on its own clock.
+        answer({ ok: false, code: error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING', watch: directory, message: null })
+        return true
+      }
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line

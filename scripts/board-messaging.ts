@@ -532,30 +532,36 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
   return { call, isDeferred: () => hasDeferred }
 }
 export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(directory, budget).call
-export const hookMailbox = (directory: string, budget: number) => {
+// A turn-start hook has little time, so its waits are short (150 ms for the board, 120 ms for the store). An
+// in-process receiver that has seconds to spare may pass longer ones, so a busy board or store is waited for.
+export const hookMailbox = (directory: string, budget: number, boardWait = 150, storeWait = 120) => {
   const deadline = Date.now() + budget
-  const access = mailboxAccess(directory, Math.min(150, budget), Math.min(120, budget))
+  const access = mailboxAccess(directory, Math.min(boardWait, budget), Math.min(storeWait, budget))
   const call = async (action: string, body: Record<string, unknown>, now: number): Promise<Message | null> => {
     try { return (await access.call(action, body, now)).message as Message ?? null } catch { return null }
+  }
+  // The take itself; a failure is thrown, so a caller that must tell it from an empty mailbox can.
+  const takeTurn = async (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => {
+    const ref = named ?? randomBytes(6).toString('hex')
+    try { return (await access.call('mailbox-turn', { agent, session, surface, ref }, now)).message as Message ?? null } catch (error) {
+      // A board started before claims had names refuses the field until it restarts: ask it as before.
+      if ((error as Error).message === 'UNKNOWN_FIELD') {
+        if (deadline - Date.now() < boardWait) throw error
+        return (await access.call('mailbox-turn', { agent, session, surface }, Date.now())).message as Message ?? null
+      }
+      // The board may have claimed a message after this hook stopped waiting: hand it back (#990).
+      // Its own budget is what the hook has left; a claim not handed back waits out the lease.
+      const left = deadline - Date.now()
+      if (access.isDeferred() && left > 0) try { await mailboxAccess(directory, Math.min(boardWait, left)).call('mailbox-release', { agent, session, ref }, Date.now()) } catch {}
+      throw error
+    }
   }
   return {
     get hasDeferred() { return access.isDeferred() },
     // An in-process plugin may name the claim (a 12-hex ref), so it can hand the claim back with release.
-    turn: async (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => {
-      const ref = named ?? randomBytes(6).toString('hex')
-      try { return (await access.call('mailbox-turn', { agent, session, surface, ref }, now)).message as Message ?? null } catch (error) {
-        // A board started before claims had names refuses the field until it restarts: ask it as before.
-        if ((error as Error).message === 'UNKNOWN_FIELD') {
-          if (deadline - Date.now() < 150) return null
-          try { return (await access.call('mailbox-turn', { agent, session, surface }, Date.now())).message as Message ?? null } catch { return null }
-        }
-        // The board may have claimed a message after this hook stopped waiting: hand it back (#990).
-        // Its own budget is what the hook has left; a claim not handed back waits out the lease.
-        const left = deadline - Date.now()
-        if (access.isDeferred() && left > 0) try { await mailboxAccess(directory, Math.min(150, left)).call('mailbox-release', { agent, session, ref }, Date.now()) } catch {}
-        return null
-      }
-    },
+    turn: (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => takeTurn(agent, session, surface, now, named).catch(() => null),
+    // The same take for a caller that must tell a failed take from an empty mailbox; a deferred claim is handed back first.
+    turnOrThrow: takeTurn,
     accept: (agent: string, session: string, id: string, nonce: string, now: number, awaitsAck = false) => call('mailbox-accept', { agent, session, id, nonce, ...(awaitsAck ? { awaitsAck: true } : {}) }, now),
     // An in-process plugin's acceptance, explicit acknowledgement and send; a refusal keeps its code for the caller, so only a saved acceptance reads as done.
     acceptOrThrow: async (agent: string, session: string, id: string, nonce: string, now: number, awaitsAck = false): Promise<void> => { await access.call('mailbox-accept', { agent, session, id, nonce, ...(awaitsAck ? { awaitsAck: true } : {}) }, now) },
@@ -564,7 +570,7 @@ export const hookMailbox = (directory: string, budget: number) => {
     // A plugin that took a message and cannot hand it over gives the claim back at once instead of holding it.
     release: async (agent: string, session: string, ref: string, now: number): Promise<void> => {
       const left = deadline - Date.now()
-      await mailboxAccess(directory, Math.min(150, left), Math.min(120, left), true).call('mailbox-release', { agent, session, ref }, now)
+      await mailboxAccess(directory, Math.min(boardWait, left), Math.min(storeWait, left), true).call('mailbox-release', { agent, session, ref }, now)
     },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
   }

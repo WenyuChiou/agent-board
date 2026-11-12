@@ -47,8 +47,13 @@ const fixture = async fn => {
       const target = enrolled.mailboxes.find(one => one.id === mailboxId('opencode', session))
       save(file, JSON.stringify({ version: 2, ...queueMessage(enrolled, { id, target: target.id, turn: 'session', text }, 'board', target, now).state }))
     }
+    // A test can make the next calls of an action answer with a canned failure line instead of reaching the script.
     const spawnBoard = (...args) => {
-      const child = spawn(...args)
+      const action = args[1]?.[2]
+      const isCanned = (calls.canned?.[action] ?? 0) > 0
+      if (isCanned) calls.canned[action] -= 1
+      const line = JSON.stringify({ ok: false, code: 'BOARD_NOT_RUNNING', watch: directory, message: null })
+      const child = isCanned ? spawn(process.execPath, ['-e', 'process.stdout.write(process.argv[1] + "\n")', line], args[2]) : spawn(...args)
       children.push(child)
       child.on('close', () => { child.isClosed = true })
       return child
@@ -58,18 +63,21 @@ const fixture = async fn => {
       for (const end = Date.now() + 30_000; Date.now() < end; await new Promise(done => setTimeout(done, 50))) if (check()) return
       assert.fail(label)
     }
-    const calls = { promptAsync: [], status: [], sent: [] }
+    const calls = { promptAsync: [], status: [], sent: [], lookups: 0 }
     const sessions = new Map()
     const client = {
       session: {
         get: async ({ path }) => {
+          if (calls.getFails) return { error: { name: 'Failed' } }
           const hold = calls.holdGet
           if (hold) { calls.holdGet = null; await hold }
           return { data: { id: path.id, ...(sessions.get(path.id) ?? {}) } }
         },
         messages: async () => {
+          calls.lookups += 1
           if (calls.messagesFail) throw new Error('messages lookup failed')
-          return { data: calls.sent.map(text => ({ info: { role: 'user' }, parts: [{ type: 'text', text }] })) }
+          // With storeLag the host has the wake but does not list it yet.
+          return { data: (calls.storeLag ? [] : calls.sent).map(text => ({ info: { role: 'user' }, parts: [{ type: 'text', text }] })) }
         },
         // OpenCode names a busy session; the stand-in reports every other session as idle unless a test says otherwise.
         status: async () => {
@@ -84,6 +92,7 @@ const fixture = async fn => {
         promptAsync: async options => {
           calls.promptAsync.push(options)
           if (calls.fail) return { error: { name: 'Failed' } }
+          if (calls.neverArrives) throw new Error('answer lost')
           // The wake reached the session, but its answer was lost on the way back.
           calls.sent.push(options.body.parts[0].text)
           if (calls.lostAnswer) throw new Error('answer lost')
@@ -394,3 +403,148 @@ test('the OpenCode tool words and replies come from the string tables', async ()
   assert.ok(source.includes(JSON.stringify(STRINGS['zh-TW'].opencodeAckTool)))
   assert.ok(!source.includes('Acknowledged.'))
 })
+
+// Delivery that does not depend on the receiver's own guesses (#724): the host's status and the board's store decide.
+const wait = ms => new Promise(done => setTimeout(done, ms))
+
+test('opencodePlugin accepts a message whose wake answer was lost when the host lists the wake late, and wakes the session once', () => fixture(async f => {
+  f.calls.lostAnswer = true
+  f.calls.storeLag = true
+  f.queue('ses_lag', 'lag-message-1', 'Synthetic text whose wake is listed late')
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_lag' } } } })
+  await f.until(() => f.calls.promptAsync.length === 1 && f.settled(), 'the session was woken')
+  await wait(400)
+  // The host lists the wake before the receiver looks again.
+  f.calls.storeLag = false
+  await f.until(() => f.message('lag-message-1').status === 'accepted' && f.settled(), 'the message was accepted once the wake was listed')
+  assert.equal(f.calls.promptAsync.length, 1)
+}))
+
+test('opencodePlugin wakes a message whose wake never arrived again only after the claim lease, and the second text says it may be a repeat', () => fixture(async f => {
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  f.calls.neverArrives = true
+  f.queue('ses_never', 'never-message-1', 'Synthetic text whose wake never arrives')
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_never' } } } })
+  await f.until(() => f.calls.promptAsync.length === 1 && f.settled(), 'the session was woken')
+  // One lookup right away and one about two seconds later; neither miss is taken as proof.
+  await f.until(() => f.calls.lookups >= 2, 'the messages of the session were looked up a second time')
+  f.calls.neverArrives = false
+  await f.idle('ses_never')
+  await wait(800)
+  assert.equal(f.calls.promptAsync.length, 1, 'the claim is still held, so the board hands out nothing')
+  // The lease passes: the board hands the message out again, and only now is the wake sent again.
+  const lapsed = JSON.parse(readFileSync(join(f.directory, 'messages.json'), 'utf8'))
+  for (const one of lapsed.messages) if (one.id === 'never-message-1') one.claimed -= 31_000
+  f.save(join(f.directory, 'messages.json'), JSON.stringify(lapsed))
+  await f.idle('ses_never')
+  await f.until(() => f.calls.promptAsync.length === 2 && f.message('never-message-1').status === 'accepted' && f.settled(), 'the message was woken again after the lease')
+  const text = f.calls.promptAsync[1].body.parts[0].text
+  assert.ok(Object.values(STRINGS).some(one => text.includes(one.messagesDeliveryRepeat)), 'the second text carries the repeat line')
+}))
+
+test('opencodePlugin tries a failed take again within seconds, with no board write and no tick, and then wakes the session', () => fixture(async f => {
+  f.calls.canned = { take: 1 }
+  f.queue('ses_retake', 'retake-message-1', 'Synthetic text after a failed take')
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_retake' } } } })
+  await f.until(() => f.calls.canned.take === 0 && f.settled(), 'the first take answered with a failure')
+  assert.equal(f.calls.promptAsync.length, 0)
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('retake-message-1').status === 'accepted' && f.settled(), 'the take was tried again and the session woken')
+}))
+
+test('--mailbox take for OpenCode answers ok false with a code while the store is held, and plain message null for an empty mailbox', () => fixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  f.queue('ses_take_cli', 'take-cli-message-1', 'Synthetic text for the take answers')
+  const call = action => {
+    const result = spawnSync(process.execPath, [f.board, '--mailbox', action, '--agent', 'opencode', '--home', f.home, '--progress-file', f.progress, '--session', 'ses_take_cli', '--surface', 'CLI'], { encoding: 'utf8', windowsHide: true, timeout: 20000 })
+    assert.equal(result.status, 0, result.stderr)
+    return JSON.parse(result.stdout.trim().split('\n').pop())
+  }
+  const claim = claimMessageStore(f.directory)
+  const nonce = 'b'.repeat(32)
+  const pending = join(f.directory, `.message-pending-${process.pid}-${nonce}.json`)
+  f.save(pending, JSON.stringify({ version: 1, pid: process.pid, nonce }) + '\n')
+  let failed
+  try { failed = call('take') } finally { claim.release(); rmSync(pending, { force: true }) }
+  assert.equal(failed.ok, false)
+  assert.match(failed.code, /^[A-Z][A-Z0-9_]*$/)
+  assert.equal(failed.message, null)
+  assert.equal(typeof failed.watch, 'string')
+  assert.equal(f.message('take-cli-message-1').status, 'queued')
+  // With the store free the message is taken, and what is left is an empty mailbox, which is not a failure.
+  assert.equal(call('take').message.id, 'take-cli-message-1')
+  const empty = call('take')
+  assert.equal(empty.message, null)
+  assert.equal('ok' in empty, false)
+  assert.equal(typeof empty.watch, 'string')
+}))
+
+test('opencodePlugin tries a failed release again while the session is busy, so the message is queued again before the turn ends', () => fixture(async f => {
+  f.calls.canned = { release: 1 }
+  f.queue('ses_release', 'release-message-1', 'Synthetic text whose release fails once')
+  // The session turns busy while the board is taking the message, and the host keeps saying it is busy.
+  f.calls.afterStatus = () => { f.calls.busy = { ses_release: { type: 'busy' } }; f.reported({ session: 'ses_release', type: 'busy' }) }
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_release' } } } })
+  await f.until(() => f.calls.canned.release === 0 && f.settled(), 'the first release answered with a failure')
+  assert.equal(f.message('release-message-1').status, 'uncertain')
+  await f.until(() => f.message('release-message-1').status === 'queued' && f.settled(), 'the release was tried again and the message is queued')
+  assert.equal(f.calls.promptAsync.length, 0)
+  // At the end of the turn it is given.
+  f.calls.busy = null
+  await f.idle('ses_release')
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('release-message-1').status === 'accepted' && f.settled(), 'the message was given at the next idle')
+}))
+
+test('opencodePlugin takes an idle event a second after its wake as the end of the turn, so the next message is woken without another event', () => fixture(async f => {
+  f.queue('ses_quick', 'quick-message-1', 'Synthetic first text')
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_quick' } } } })
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('quick-message-1').status === 'accepted' && f.settled(), 'the first message was given')
+  // A very short turn: it ends a second after the wake.
+  await wait(1000)
+  await f.idle('ses_quick')
+  // The take that follows the idle event finds nothing to give; the ack waits for it so the two do not hold the store together.
+  await wait(500)
+  await f.until(f.settled, 'no call is left running')
+  await f.hooks.tool.agent_board_ack.execute({ id: 'quick-message-1', nonce: f.message('quick-message-1').nonce }, { sessionID: 'ses_quick' })
+  f.queue('ses_quick', 'quick-message-2', 'Synthetic second text')
+  await f.until(() => f.calls.promptAsync.length === 2 && f.message('quick-message-2').status === 'accepted' && f.settled(), 'the second message was woken with no further event')
+}))
+
+test('opencodePlugin does not wake twice when a second idle event follows right after a wake', () => fixture(async f => {
+  f.queue('ses_twice', 'twice-message-1', 'Synthetic text for a double idle')
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_twice' } } } })
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('twice-message-1').status === 'accepted' && f.settled(), 'the message was given')
+  await f.idle('ses_twice')
+  await f.idle('ses_twice')
+  await wait(800)
+  await f.until(f.settled, 'no call is left running')
+  assert.equal(f.calls.promptAsync.length, 1)
+}))
+
+test('opencodePlugin wakes a session whose idle event was lost at the next tick, because the host lists no entry for it', () => fixture(async f => {
+  // The plugin's one-minute tick is captured so the test can run it.
+  const ticks = []
+  const real = globalThis.setInterval
+  globalThis.setInterval = (run, ms, ...rest) => { ticks.push(run); return real(run, ms, ...rest) }
+  try {
+    await f.reported({ session: 'ses_lost_idle', type: 'busy' })
+  } finally { globalThis.setInterval = real }
+  assert.equal(ticks.length, 1)
+  f.queue('ses_lost_idle', 'lost-idle-message-1', 'Synthetic text after a lost idle event')
+  // The idle event is dropped: its session lookup fails.
+  f.calls.getFails = true
+  await f.idle('ses_lost_idle').catch(() => {})
+  f.calls.getFails = false
+  await wait(500)
+  assert.equal(f.calls.promptAsync.length, 0)
+  ticks[0]()
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('lost-idle-message-1').status === 'accepted' && f.settled(), 'the tick found the session idle and gave the message')
+}))
+
+test('opencodePlugin still wakes the session within the wait after one failed take', () => fixture(async f => {
+  f.calls.canned = { take: 1 }
+  f.queue('ses_first', 'first-message-1', 'Synthetic text of the first test with a failed take')
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_first' } } } })
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('first-message-1').status === 'accepted' && f.settled(), 'the idle session was woken and the message accepted')
+  assert.equal(f.calls.promptAsync[0].path.id, 'ses_first')
+  assert.match(f.calls.promptAsync[0].body.parts[0].text, /Synthetic text of the first test/)
+}))

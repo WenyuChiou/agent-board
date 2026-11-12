@@ -42,6 +42,10 @@ claim back, so the next turn has the message. A claim the hook named and nobody 
 out again after 30 seconds, at most three times, with the same ACK code and a line saying it may be
 a repeat; after that it stays uncertain and blocks that target until the open-message limit. A
 `board_inbox` claim is never handed out again.
+A receiver that runs inside the host (OpenCode, DeepSeek) waits up to two seconds for a busy board or store, where a
+turn-start hook waits well under a second. A take that still fails is reported as a failure, not as an empty mailbox, and
+OpenCode's receiver tries again after 2 seconds, then 4, up to 60. It asks the host whether the session is idle before
+each take and hands a claim back when the session turns busy, so a long turn does not use it up.
 
 Mailboxes expire after 12 hours. Session end rejects queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create
