@@ -11,6 +11,7 @@ import type {
 } from '../types'
 import { sha256 } from './sha256.ts'
 import { splitLines } from './lines.ts'
+import { blockKey } from './session-liveness.ts'
 
 // `## project` / `### task` / `> note` / `- [x] step`, plus the auto markers a session's
 // mod writes around its own block. Everything else is ignored, so free text never breaks
@@ -107,6 +108,11 @@ export const autoOf = (raw: string): ProgressAuto | null => {
   const state = SESSION_STATES.find(one => one === attrs.state) ?? 'waiting'
   const updated = Date.parse(attrs.updated ?? '')
   const pr = Number(attrs.pr)
+  // The liveness claim (#1092): a pid and start time that are not safe positive
+  // integers, or a host that is not a 64-hex hash, are no claim at all.
+  const agentPid = Number(attrs.agentpid)
+  const agentStarted = Number(attrs.agentstarted)
+  const host = attrs.host
   // `origin=run` is the one value that means anything (#399); `parent` only matters beside it.
   const isRun = attrs.origin === 'run'
   const replied = attrs.replied !== undefined
@@ -126,6 +132,9 @@ export const autoOf = (raw: string): ProgressAuto | null => {
     dir: folderOf(attrs.dir),
     pr: Number.isInteger(pr) && pr > 0 ? pr : null,
     ci: CI_STATES.find(one => one === attrs.ci) ?? null,
+    ...(Number.isSafeInteger(agentPid) && agentPid > 0 ? { agentPid } : {}),
+    ...(Number.isSafeInteger(agentStarted) && agentStarted > 0 ? { agentStarted } : {}),
+    ...(host !== undefined && /^[0-9a-f]{64}$/.test(host) ? { host } : {}),
     ...(isRun ? { isRun: true as const } : {}),
     ...(isRun && attrs.parent !== undefined && RESUME.test(attrs.parent) ? { parent: attrs.parent } : {}),
     ...(replied !== null && Number.isFinite(replied) ? { replied } : {}),
@@ -406,6 +415,9 @@ export const observedTime = (auto: ProgressAuto | null, now: number, seen: Reado
 
 export const isStale = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0, staleMs: number = STALE_MS): boolean =>
   auto !== null && (auto.state === 'working' || auto.state === 'waiting') && updated > 0 && now - updated > staleMs
+
+export const isStopped = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): boolean =>
+  isStale(auto, now, updated, staleMs) || (auto !== null && (auto.state === 'working' || auto.state === 'waiting') && gone.has(blockKey(auto)))
 
 // The key a finished hand-kept task is remembered by, to archive it a day later.
 export const doneKey = (project: string, title: string): string => `done:${project}::${title}`

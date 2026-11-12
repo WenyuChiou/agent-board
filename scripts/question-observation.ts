@@ -17,8 +17,10 @@ export const reusableQuestionObservation = (): typeof observeQuestions => {
   return (...input: Inputs) => {
     const [ledger, projects, mine, , , isSettled = false, , proofs] = input
     // These lists can be rebuilt or edited without a new container. Compare every field,
-    // including source times and producer evidence, before reusing an observation.
-    const sources = JSON.stringify([input[3], proofs, input[8] ?? [], input[9] ?? [], [...(input[10] ?? [])]])
+    // including source times and producer evidence, before reusing an observation. The
+    // dead set is compared by value too: a session that died since the last pass must
+    // not reuse an observation that still counted it live (#1092).
+    const sources = JSON.stringify([input[3], proofs, input[8] ?? [], input[9] ?? [], [...(input[10] ?? [])], [...(input[11] ?? [])]])
     if (previous?.ledger === ledger && previous.projects === projects && previous.mine === mine
       && previous.isSettled === isSettled && previous.proofs === proofs && previous.sources === sources) return previous.result
     const result = observeQuestions(...input)
