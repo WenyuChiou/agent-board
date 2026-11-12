@@ -151,18 +151,23 @@ export const duplicatePr = ({ body = '', title = '', number = null, branch = nul
   const fixing = [...new Set(issueLine(body, title).items.filter(item => item.kind === 'fixes').map(item => item.number))]
   if (!fixing.length) return output
   // A local run (--body-file) has no number. Its own open pull request is the one at its head commit and on its branch, else
-  // the earliest at its head commit (the local branch name may differ), else the one on its branch (commits not pushed yet).
-  // Only that one is skipped, so a fork reusing the branch name, or another pull request at the same commit, still counts
-  // (#1348). With none yet, every open one is earlier.
-  const atHead = number === null && head ? open.filter(other => other?.headSha === head).sort((a, b) => (a.number ?? 0) - (b.number ?? 0)) : []
-  const own = number !== null ? null
-    : atHead.find(other => branch && other?.headRef === branch) ?? atHead[0] ?? (branch ? open.find(other => other?.headRef === branch) : undefined) ?? null
+  // the one at its head commit (the local branch name may differ), else the one on its branch (commits not pushed yet), so a
+  // fork reusing the branch name, or another pull request at the same commit, still counts (#1348). When more than one fits
+  // equally (two forks with one branch name and one commit), the run says it cannot tell, skips them all and compares from the
+  // earliest, so it never flags its own; the check on the pull request has the number. With none yet, every open one is earlier.
+  const atHead = number === null && head ? open.filter(other => other?.headSha === head) : []
+  const atHeadOnBranch = atHead.filter(other => branch && other?.headRef === branch)
+  const onBranch = number === null && branch ? open.filter(other => other?.headRef === branch) : []
+  const candidates = (atHeadOnBranch.length ? atHeadOnBranch : atHead.length ? atHead : onBranch)
+    .slice().sort((a, b) => (a.number ?? 0) - (b.number ?? 0))
+  const own = candidates[0] ?? null
+  if (candidates.length > 1) output.info.push(`duplicate-pr: open pull requests ${candidates.map(other => `#${other.number}`).join(', ')} all match this branch or head commit, so this run cannot tell which is its own; the check on the pull request decides.`)
   const selfNumber = number ?? own?.number ?? null
   const selfCreated = createdAt ?? own?.createdAt ?? null
   const selfTime = selfCreated ? Date.parse(selfCreated) : NaN
   const reported = new Set()
   for (const other of open) {
-    if (!other || other === own || (selfNumber !== null && other.number === selfNumber)) continue
+    if (!other || candidates.includes(other) || (selfNumber !== null && other.number === selfNumber)) continue
     if (selfNumber !== null) {
       const otherTime = other.createdAt ? Date.parse(other.createdAt) : NaN
       const isOtherEarlier = Number.isFinite(selfTime) && Number.isFinite(otherTime) && selfTime !== otherTime

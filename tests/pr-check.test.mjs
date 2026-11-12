@@ -1585,6 +1585,17 @@ test('a reused branch name does not hide the earlier pull request, a CRLF or ind
   assert.deepEqual(onBranch('fix/first').problems, [])
   assert.match(onBranch('fix/second').problems[0]?.message ?? '', /#1203.*#1213/)
   assert.deepEqual(onBranch('mywork').problems, [])
+  assert.match(onBranch('mywork').info.join('\n'), /#1213, #1240 .*cannot tell/)
+  // Two forks with one branch name and one commit cannot be told apart locally: the run says so, flags neither, and still
+  // flags an older pull request but not a later one (#1348 round 5).
+  const forks = [
+    ...sameCommit.map(other => ({ ...other, headRef: 'fix/shared' })),
+    { number: 1300, createdAt: '2026-11-05T00:00:00Z', body: 'Fixes #1203', headRef: 'fix/later', headSha: 'e'.repeat(40) },
+    { number: 1100, createdAt: '2026-10-20T00:00:00Z', body: 'Fixes #1203', headRef: 'fix/older', headSha: 'f'.repeat(40) },
+  ]
+  const forkRun = duplicatePr({ number: null, title: 'fix: x', body: 'Fixes #1203', branch: 'fix/shared', head: shared, open: forks })
+  assert.match(forkRun.info.join('\n'), /#1213, #1240 .*cannot tell/)
+  assert.deepEqual(forkRun.problems.map(item => item.message), ['issue #1203 already has an open pull request #1100.'])
   const finding = 'Finding: badge stays after exit'
   const shapes = [
     // [what, input, flagged]
