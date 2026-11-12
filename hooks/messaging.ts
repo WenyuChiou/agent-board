@@ -36,6 +36,9 @@ export type Message = {
   // The route line the board showed when it sent this message (set only by the board), so a receipt is worded
   // for the route the message took, not for whatever the card shows after its mailbox has expired.
   line?: RouteLine
+  // The surface the board checked the route for (set only by the board). Another surface of the same session
+  // cannot claim the message, since the record shown for the first says nothing of it.
+  surface?: string
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
@@ -135,7 +138,7 @@ export const senderLabel = (from: string): string => {
 export const textHash = (text: string): string => sha256(JSON.stringify(text))
 // What anyone but the receiver is shown of a message: no nonce or hash, and a reply without the
 // nonce its ACK line carries.
-export const shownMessage = ({ nonce, hash: _hash, framingNonce: _framingNonce, ref: _ref, ...one }: Message): Omit<Message, 'nonce' | 'hash' | 'framingNonce' | 'ref'> => ({
+export const shownMessage = ({ nonce, hash: _hash, framingNonce: _framingNonce, ref: _ref, surface: _surface, ...one }: Message): Omit<Message, 'nonce' | 'hash' | 'framingNonce' | 'ref' | 'surface'> => ({
   ...one,
   reply: nonce !== '' && (one.reply === `ACK ${nonce}` || one.reply.startsWith(`ACK ${nonce} `)) ? one.reply.slice(`ACK ${nonce}`.length).trimStart() : one.reply,
 })
@@ -224,7 +227,7 @@ export const dismissMessage = (state: MessageState, id: string, now: number): Me
   }) : message) }
 }
 
-export const queueMessage = (state: MessageState, input: Record<string, unknown>, from: string, target: Connection | undefined, now: number, origin: Origin = 'local', framingNonce?: string, line?: RouteLine): { state: MessageState; message: Message } => {
+export const queueMessage = (state: MessageState, input: Record<string, unknown>, from: string, target: Connection | undefined, now: number, origin: Origin = 'local', framingNonce?: string, line?: RouteLine, surface?: string): { state: MessageState; message: Message } => {
   messageFields(input, ['id', 'target', 'turn', 'text', 'answers'])
   if (input.answers !== undefined && !isAnswersId(input.answers)) throw new Error('INVALID_ID')
   const answers = from === 'board' ? input.answers : undefined
@@ -259,7 +262,7 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
   if (state.messages.filter(isOpen).length >= OPEN_CAP || state.messages.length >= OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('MESSAGE_LIMIT')
-  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(line === undefined ? {} : { line }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
+  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
   return { state: { ...state, messages: [...state.messages, message] }, message }
 }
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string): { state: MessageState; messages: Message[] } => {
@@ -268,8 +271,9 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   // A lapsed claim stops blocking only the binding that takes it again; any other still waits behind it.
   const isRetaken = (one: Message): boolean => isLapsed(one, now) && one.target === target.id && one.turn === target.turn
   const busy = state.messages.some(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isRetaken(one))
-  const canClaim = (one: Message): boolean => one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))
-    || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === 'queued'
+  // A message the board checked a route for goes only to a claimant on that same surface; on any other it stays queued.
+  const canClaim = (one: Message): boolean => (one.surface === undefined || one.surface === target.surface) && (one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))
+    || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === 'queued')
   const messages = busy ? [] : state.messages.filter(canClaim).slice(0, 1)
   if (messages.length === 0) return { state, messages }
   // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.
