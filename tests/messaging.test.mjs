@@ -27,16 +27,29 @@ registerHooks({ resolve(specifier, context, next) {
     return next(`${specifier}.ts`, context)
   }
 } })
-const { createMessaging, moveLockAside } = await import('../scripts/board-messaging.ts')
+const { createMessaging: openTestMessaging, moveLockAside } = await import('../scripts/board-messaging.ts')
 const { hookMailbox, parseMessageStore } = await import('../scripts/board-messaging.ts')
 const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
 const { serveModel: realServeModel, serveAction: realServeAction } = await import('../hooks/serve.ts')
 const { RECEIVER_ROUTES } = await import('../hooks/receiver-routes.ts')
-const { routeOf } = await import('../hooks/messaging.ts')
+const { sendDecision, SURFACE_IDS } = await import('../hooks/messaging.ts')
 // The page's Send paths are tested with every route the receivers name taken as shown live; the
 // tests of what the real records allow (the end of this file) pass RECEIVER_ROUTES themselves.
 // tests/helpers/recorded-routes.json holds them, so the e2e worlds can hand the same table to a board they start.
 const recorded = JSON.parse(readFileSync(new URL('./helpers/recorded-routes.json', import.meta.url), 'utf8'))
+// Transport tests use a synthetic recorded route; source-server tests below supply real state.
+const testUnitRoutes = [...recorded]
+for (const agent of ['claude', 'codex', 'gemini', 'fixture']) for (const kind of ['live', 'mailbox', 'turn']) {
+  if (testUnitRoutes.some(one => one.agent === agent && one.kind === kind)) continue
+  const route = { line: 'now', record: 'docs/validation/synthetic.md', surfaces: Object.values(SURFACE_IDS) }
+  testUnitRoutes.push({ agent, kind, routes: { idle: route, working: route, ended: { line: 'none', record: null, surfaces: [] } } })
+}
+const createMessaging = (directory, isDefault = false) => openTestMessaging(directory, isDefault, { routes: testUnitRoutes, stateOfSession: () => 'idle' })
+const routeOf = (records, agent, kind, state, surface = '') => {
+  const target = { id: 'route-fixture', agent, session: 'route-session', turn: 'session', surface, scope: kind === 'mailbox' ? 'mailbox' : kind === 'live' ? 'session' : 'turn', expires: 2 }
+  const decision = sendDecision(target.id, kind === 'mailbox' ? [] : [target], kind === 'mailbox' ? [target] : [], () => state, records, 1)
+  return { line: decision.line, canSend: decision.canSend }
+}
 const serveModel = (view, pending, s, sending, isLan, messaging, allowResume, group, routes = recorded) => realServeModel(view, pending, s, sending, isLan, messaging, allowResume, group, routes)
 const serveAction = (items, request, s, isLan, connections, isMessaging, allowResume, routes = recorded) => realServeAction(items, request, s, isLan, connections, isMessaging, allowResume, routes)
 const { parseProgress } = await import('../hooks/parse.ts')
@@ -66,7 +79,7 @@ test('repeated page messaging snapshots check the store without starting Windows
 // The board shows a reply without the nonce its ACK line carries; the store keeps the line as it came.
 const storedReply = (dir, id) => JSON.parse(readFileSync(join(dir, 'messages', 'messages.json'), 'utf8')).messages.find(one => one.id === id)?.reply
 const pause = ms => new Promise(done => setTimeout(done, ms))
-const target = { id: 'binding1', agent: 'codex', session: 'session1', turn: 'turn1', surface: 'fixture', expires: 2000 }
+const target = { id: 'binding1', agent: 'codex', session: 'session1', turn: 'turn1', surface: 'CLI', expires: 2000 }
 const input = { id: 'AB-TEST-001', target: target.id, turn: target.turn, text: '收到後請回覆 ACK AB-TEST-001，並回報目前任務狀態；不要修改檔案或執行其他動作。' }
 
 const mailboxSeed = (now = Date.now()) => enrollMailbox({ messages: [] }, 'codex', 'mailbox-session', 'CLI', now, 43_200_000)
@@ -395,7 +408,7 @@ test('a Cursor mailbox card says the message waits for the chat to open, not for
 test('a DeepSeek mailbox card is a plain Send with no Copy, and an answer handed over says so without naming a next turn (#725)', async () => {
   const { servePage } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
-  const now = Date.now(), seed = enrollMailbox({ messages: [] }, 'deepseek', 'mailbox-session', 'dsh', now, 43_200_000), mailbox = seed.mailboxes[0]
+  const now = Date.now(), seed = enrollMailbox({ messages: [] }, 'deepseek', 'mailbox-session', 'Web', now, 43_200_000), mailbox = seed.mailboxes[0]
   const file = `## Synthetic\n<!-- auto session=abcdef01 agent=deepseek resume=mailbox-session state=waiting updated=${new Date(now).toISOString()} -->\n### Mailbox page\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
   const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
   const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
@@ -415,7 +428,7 @@ test('a DeepSeek mailbox card is a plain Send with no Copy, and an answer handed
   assert.equal(page.requests[0].body.text, 'Blue')
   // Handed over the moment the session was idle, not at a turn it starts later.
   const queued = queueMessage(seed, { id: 'deepseek-accepted', target: mailbox.id, turn: 'session', text: 'Blue' }, 'board', mailbox, now).state
-  const taken = takeMailboxMessage(queued, 'deepseek', 'mailbox-session', 'dsh', now + 1, 43_200_000, 'abcdef')
+  const taken = takeMailboxMessage(queued, 'deepseek', 'mailbox-session', 'Web', now + 1, 43_200_000, 'abcdef')
   const accepted = acceptMailboxMessage(taken.state, 'deepseek', 'mailbox-session', 'deepseek-accepted', 'abcdef', now + 2)
   await page.redraw(model(accepted.messages))
   assert.ok(!page.text().includes(EN.messagesHandedNextTurn))
@@ -432,7 +445,7 @@ test('a handed-over DeepSeek message is worded for the route it went out on, als
   // Only the board may name the line, and only a known one.
   assert.throws(() => queueMessage(seed, { id: 'line-peer', target: mailbox.id, turn: 'session', text: 'Blue', line: 'now' }, 'codex:other', mailbox, now), /UNKNOWN_FIELD/)
   assert.throws(() => queueMessage(seed, { id: 'line-bad', target: mailbox.id, turn: 'session', text: 'Blue', line: 'soon' }, 'board', mailbox, now), /UNKNOWN_FIELD/)
-  const queued = queueMessage(seed, { id: 'line-now', target: mailbox.id, turn: 'session', text: 'Blue', line: 'now' }, 'board', mailbox, now)
+  const queued = queueMessage(seed, { id: 'line-now', target: mailbox.id, turn: 'session', text: 'Blue' }, 'board', mailbox, now, 'local', undefined, 'now')
   assert.equal(queued.message.line, 'now')
   const taken = takeMailboxMessage(queued.state, 'deepseek', 'mailbox-session', 'Web', now + 1, 43_200_000, 'abcdef')
   const accepted = acceptMailboxMessage(taken.state, 'deepseek', 'mailbox-session', 'line-now', 'abcdef', now + 2)
@@ -515,7 +528,8 @@ test('the page offers Queue for next turn beside Copy, prefers a live poller, an
   const lan = serveModel(view, [], EN, new Set(), true, messaging)
   assert.equal(lan.asks[0].delivery, undefined)
   assert.notEqual(lan.asks[0].send, 'mailbox')
-  const accepted = acceptMailboxMessage(mailboxTake(mailboxQueue(seed, 'page-accepted')).state, 'codex', 'mailbox-session', 'page-accepted', 'abcdef', now + 2)
+  const queued = queueMessage(seed, { id: 'page-accepted', target: mailbox.id, turn: 'session', text: 'page-accepted' }, 'board', mailbox, now, 'local', undefined, 'nextTurn')
+  const accepted = acceptMailboxMessage(mailboxTake(queued.state).state, 'codex', 'mailbox-session', 'page-accepted', 'abcdef', now + 2)
   const received = serveModel(view, [], EN, new Set(), false, { ...messaging, messages: accepted.messages }, false, group)
   assert.equal(received.asks[0].isSending, false)
   assert.equal(received.asks[0].receipt.isMailbox, true)
@@ -533,7 +547,7 @@ const keptModel = (messages, now, kept = [keptQuestion()]) => {
 }
 // The board's message for one question, handed over at the session's next turn start.
 const answeredBy = (state, id, question, now) => {
-  const queued = queueMessage(state, { id, target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: id, answers: question }, 'board', state.mailboxes[0], now).state
+  const queued = queueMessage(state, { id, target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: id, answers: question }, 'board', state.mailboxes[0], now, 'local', undefined, 'nextTurn').state
   return acceptMailboxMessage(mailboxTake(queued, now).state, 'codex', 'mailbox-session', id, 'abcdef', now + 2)
 }
 
@@ -2039,7 +2053,7 @@ test('a temp file an earlier save could not remove does not block the saves afte
   try {
     store = createMessaging(dir)
     const now = Date.now()
-    const receiver = store.act('register', { agent: 'codex', session: 'stuck-temp', turn: 'turn1', surface: 'Synthetic' }, now)
+    const receiver = store.act('register', { agent: 'codex', session: 'stuck-temp', turn: 'turn1', surface: 'CLI' }, now)
     writeFileSync(join(dir, `messages.json.${process.pid}.tmp`), 'left by a save that could not remove it')
     assert.equal(store.act('send', { ...input, id: 'after-stuck-temp', target: receiver.id }, now).status, 'queued')
     assert.equal(JSON.parse(readFileSync(join(dir, 'messages.json'), 'utf8')).messages[0].id, 'after-stuck-temp')
@@ -4350,11 +4364,11 @@ test('a question asked while its session is working reads the working route, not
 })
 
 test('a route recorded for one surface is not offered on another, and the matrix names the surface the note ran on (#1351)', async () => {
-  const table = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md', surfaces: ['Web'] }, working: { line: 'nextTurn', record: 'docs/validation/synthetic.md' }, ended: { line: 'none', record: null } } }]
+  const table = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md', surfaces: ['Web'] }, working: { line: 'nextTurn', record: 'docs/validation/synthetic.md', surfaces: ['CLI'] }, ended: { line: 'none', record: null, surfaces: [] } } }]
   assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'idle', 'Web'), { line: 'now', canSend: true })
   assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'idle', 'TUI'), { line: 'now', canSend: false })
   assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'idle'), { line: 'now', canSend: false })
-  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'working', 'anything'), { line: 'nextTurn', canSend: true })
+  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'working', 'CLI'), { line: 'nextTurn', canSend: true })
   // A record that is not a non-empty string is no record, whatever else the route says.
   const bare = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now' }, working: { line: 'now', record: '' }, ended: { line: 'none', record: null } } }]
   assert.equal(routeOf(bare, 'alpha', 'mailbox', 'idle').canSend, false)
@@ -4376,8 +4390,8 @@ test('a route recorded for one surface is not offered on another, and the matrix
 })
 
 test('the line and Send of a route come from its record: no record gives none and Copy', () => {
-  const table = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'nextTurn', record: 'docs/validation/synthetic.md' }, working: { line: 'nextTurn', record: null }, ended: { line: 'none', record: null } } }]
-  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'idle'), { line: 'nextTurn', canSend: true })
+  const table = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'nextTurn', record: 'docs/validation/synthetic.md', surfaces: ['Web'] }, working: { line: 'nextTurn', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'idle', 'Web'), { line: 'nextTurn', canSend: true })
   assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'working'), { line: 'nextTurn', canSend: false })
   assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'ended'), { line: 'none', canSend: false })
   assert.deepEqual(routeOf(table, 'alpha', 'live', 'idle'), { line: 'none', canSend: false })
@@ -4402,7 +4416,11 @@ test('each receiver record names a validation note that exists, and the table th
   // Except that a running-turn adapter takes a message while idle too: tests register connections without a scope, which is a turn.
   // The generic adapters the transport tests register under the agent name `fixture` are recorded on every kind too, so the message API accepts them.
   assert.deepEqual(recorded.filter(one => one.agent === 'fixture').map(one => one.kind).sort(), ['live', 'mailbox', 'turn'])
-  assert.deepEqual(recorded.filter(one => one.agent !== 'fixture'), RECEIVER_ROUTES.map(one => ({ ...one, routes: Object.fromEntries(Object.entries(one.routes).map(([state, route]) => [state, one.kind === 'turn' && state === 'idle' ? { line: 'now', record: 'docs/validation/synthetic.md' } : { line: route.line, record: route.line === 'none' ? null : 'docs/validation/synthetic.md' }])) })))
+  const surfaces = recorded[0].routes.idle.surfaces
+  assert.deepEqual(recorded.filter(one => one.agent !== 'fixture'), RECEIVER_ROUTES.map(one => ({ ...one, routes: Object.fromEntries(Object.entries(one.routes).map(([state, route]) => {
+    const line = one.kind === 'turn' && state === 'idle' ? 'now' : route.line
+    return [state, { line, record: line === 'none' ? null : 'docs/validation/synthetic.md', surfaces: line === 'none' ? [] : surfaces }]
+  })) })))
 })
 
 test('with the receivers\' own records, a Claude card sends and a Codex card that no live note covers is refused in its own words (#1351)', () => fixture(async (board, dir) => {
@@ -4432,7 +4450,7 @@ test('with the receivers\' own records, a Claude card sends and a Codex card tha
 
 test('the routes the tests hand the board are checked whole: a missing record key, an unknown line or a non-list is refused, and only a non-empty string is a record (#1351)', async () => {
   const { isReceiverRoutes } = await import('../hooks/messaging.ts')
-  const good = { agent: 'alpha', kind: 'live', routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md' }, working: { line: 'stepEnd', record: null }, ended: { line: 'none', record: null } } }
+  const good = { agent: 'alpha', kind: 'live', routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md', surfaces: ['Web'] }, working: { line: 'stepEnd', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }
   assert.equal(isReceiverRoutes([good]), true)
   assert.equal(isReceiverRoutes({}), false)
   assert.equal(isReceiverRoutes([{ ...good, routes: { ...good.routes, idle: { line: 'now' } } }]), false)
@@ -4441,4 +4459,324 @@ test('the routes the tests hand the board are checked whole: a missing record ke
   assert.equal(isReceiverRoutes([{ ...good, kind: 'other' }]), false)
   assert.equal(isReceiverRoutes([{ ...good, routes: { ...good.routes, idle: { line: 'now', record: null, surfaces: [1] } } }]), false)
   assert.equal(isReceiverRoutes(JSON.parse(readFileSync(new URL('./helpers/recorded-routes.json', import.meta.url), 'utf8'))), true)
+})
+
+// The generated board is intentionally left untouched in this lane. These cases start the source
+// server so that both HTTP entry points exercise the implementation being changed.
+const shapeRoutes = []
+const shapeNote = 'docs/validation/synthetic.md'
+const shapeBaseline = () => [
+  { agent: 'claude', kind: 'live', routes: { idle: { line: 'now', record: shapeNote, surfaces: ['Claude Code'] }, working: { line: 'stepEnd', record: shapeNote, surfaces: ['Claude Code'] }, ended: { line: 'none', record: null, surfaces: [] } } },
+  { agent: 'codex', kind: 'turn', routes: { idle: { line: 'none', record: null, surfaces: [] }, working: { line: 'now', record: shapeNote, surfaces: ['Codex local proxy'] }, ended: { line: 'none', record: null, surfaces: [] } } },
+  { agent: 'deepseek', kind: 'mailbox', routes: { idle: { line: 'now', record: shapeNote, surfaces: ['Web'] }, working: { line: 'stepEnd', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } },
+  { agent: 'antigravity', kind: 'mailbox', routes: { idle: { line: 'nextTurn', record: shapeNote, surfaces: ['agy TUI'] }, working: { line: 'nextTurn', record: shapeNote, surfaces: ['agy TUI'] }, ended: { line: 'none', record: null, surfaces: [] } } },
+]
+let shapeFile = '# Synthetic board\n', shapeViewTransform = view => view, shapeServer
+let shapeSerial = 0
+const shapeSession = () => `11111111-2222-4333-8444-${String(++shapeSerial).padStart(12, '0')}`
+const shapeStart = async () => {
+  if (shapeServer) return shapeServer
+  const { startServer } = await import('../scripts/board-serve.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'send-shapes-'))
+  const messages = join(dir, 'messages')
+  mkdirSync(messages)
+  let stopped
+  const stoppedPromise = new Promise(resolve => { stopped = resolve })
+  const address = await new Promise((resolve, reject) => {
+    try {
+      startServer({
+        port: 0, messagesDirectory: messages, routes: shapeRoutes, s: EN, ping: {},
+        view: () => shapeViewTransform(buildView(parseProgress(shapeFile), [], null, Date.now(), 0, {}, EN)),
+        pending: () => [], act: () => '', tidy: () => '', clean: () => '', sweep: () => {}, sweepMs: 60_000,
+        paste: () => ({ isAdded: false, note: '' }), failure: () => null, idleMs: 0,
+        onReady: url => { resolve(url); return true }, onStop: () => { stopped(); reject(new Error('source server stopped before ready')) },
+      })
+    } catch (error) { reject(error) }
+  })
+  const url = new URL(address)
+  const call = async (path, body) => {
+    const response = await fetch(new URL(path, url), { method: body === undefined ? 'GET' : 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+    return { status: response.status, body: await response.json() }
+  }
+  shapeServer = { dir, messages, call, stoppedPromise }
+  return shapeServer
+}
+after(async () => {
+  if (!shapeServer) return
+  try { await shapeServer.call('/api/close', {}); await shapeServer.stoppedPromise }
+  finally { rmSync(shapeServer.dir, { recursive: true, force: true }) }
+})
+const shapeCase = async ({ agent = 'claude', state = 'idle', surface = 'Claude Code', kind = 'live', rows = true } = {}) => {
+  shapeRoutes.splice(0, shapeRoutes.length, ...shapeBaseline())
+  shapeViewTransform = view => view
+  const server = await shapeStart(), session = shapeSession()
+  shapeFile = rows ? stateFile(agent, state, session) : '# Synthetic board\n'
+  let target
+  if (kind === 'mailbox') {
+    const result = await server.call('/api/messages/mailbox-turn', { agent, session, surface })
+    assert.equal(result.status, 200)
+    target = { id: mailboxId(agent, session), turn: 'session', agent, session }
+  } else {
+    const result = await server.call('/api/messages/register', { agent, session, surface, turn: kind === 'turn' ? 'turn1' : 'session', scope: kind === 'turn' ? 'turn' : 'session' })
+    assert.equal(result.status, 200)
+    target = result.body
+  }
+  const card = async () => {
+    const response = await server.call('/api/board')
+    assert.equal(response.status, 200)
+    const model = response.body.model
+    return model.asks.find(one => (one.agent || 'claude') === agent) ?? [...model.idle, ...model.stopped, ...model.groups.flatMap(group => group.rows)].find(one => (one.agent || 'claude') === agent)
+  }
+  const direct = (id, extra = {}) => server.call('/api/messages/send', { id, target: target.id, turn: target.turn, text: 'Synthetic answer', ...extra })
+  const press = async (id, current = target) => {
+    const visible = await card()
+    assert.ok(visible, 'the session has a card')
+    return server.call('/api/act', { type: 'message', id, key: visible.key, fp: visible.fp, session: current.session, connection: current.id, turn: current.turn, asked: visible.text ?? visible.question ?? '', text: 'Synthetic answer' })
+  }
+  const remove = id => server.call('/api/messages/dismiss', { id })
+  return { ...server, target, session, card, direct, press, remove }
+}
+const shapeCopy = async (world, code = 'NO_RECORDED_ROUTE') => {
+  assert.equal((await world.card()).delivery, undefined)
+  assert.equal((await world.press(`shape-card-${shapeSerial}`)).status, 409)
+  const result = await world.direct(`shape-direct-${shapeSerial}`)
+  assert.equal(result.status, 409)
+  assert.equal(result.body.error, code)
+}
+const shapeSend = async (world, line) => {
+  assert.equal((await world.card()).delivery.id, world.target.id)
+  const id = `shape-direct-${shapeSerial}`
+  const direct = await world.direct(id)
+  assert.equal(direct.status, 200)
+  assert.equal(direct.body.line, line)
+  assert.equal((await world.remove(id)).status, 200)
+  const pressed = await world.press(`shape-card-${shapeSerial}`)
+  assert.equal(pressed.status, 200)
+  assert.equal(pressed.body.receipt.line, line)
+}
+
+test('shape 01: an unknown target is offline and has no card delivery', async () => {
+  const w = await shapeCase({ rows: false })
+  assert.equal(await w.card(), undefined)
+  const result = await w.direct('shape-unknown', { target: 'unknown-target' })
+  assert.deepEqual([result.status, result.body.error], [409, 'OFFLINE'])
+})
+test('shape 02: a recorded live route sends from the card and API with its line', async () => {
+  await shapeSend(await shapeCase(), 'now')
+})
+test('shape 03: an idle DeepSeek Web mailbox sends now from both paths', async () => {
+  await shapeSend(await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'Web' }), 'now')
+})
+test('shape 04: a shadowed mailbox is refused rather than redirected', async () => {
+  const w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'Web' })
+  const live = await w.call('/api/messages/register', { agent: 'deepseek', session: w.session, surface: 'Web', turn: 'session', scope: 'session' })
+  assert.equal(live.status, 200)
+  const result = await w.direct('shape-shadowed')
+  assert.deepEqual([result.status, result.body.error], [409, 'NO_RECORDED_ROUTE'])
+  assert.notEqual((await w.card()).delivery?.id, w.target.id)
+})
+test('shape 05: a card chooses the live route when its mailbox is shadowed', async () => {
+  const w = await shapeCase()
+  assert.equal((await w.call('/api/messages/mailbox-turn', { agent: 'claude', session: w.session, surface: 'Claude Code' })).status, 200)
+  await shapeSend(w, 'now')
+})
+test('shape 06: two live connections are contested on both paths', async () => {
+  const w = await shapeCase()
+  assert.equal((await w.call('/api/messages/register', { agent: 'claude', session: w.session, surface: 'Claude Code', turn: 'session', scope: 'session' })).status, 200)
+  await shapeCopy(w, 'CONTESTED')
+})
+test('shape 07: an expired connection and mailbox are offline', async () => {
+  for (const opts of [{}, { agent: 'deepseek', kind: 'mailbox', surface: 'Web' }]) {
+    const w = await shapeCase(opts), realNow = Date.now, originalFile = shapeFile
+    try {
+      const future = realNow() + 13 * 60 * 60 * 1000
+      Date.now = () => future
+      shapeFile = shapeFile.replace(/updated=\S+/, `updated=${new Date(future).toISOString()}`)
+      assert.equal((await w.card()).delivery, undefined)
+      assert.equal((await w.press(`shape-expired-card-${shapeSerial}`)).status, 409)
+      const result = await w.direct(`shape-expired-${shapeSerial}`)
+      assert.deepEqual([result.status, result.body.error], [409, 'OFFLINE'])
+    } finally { Date.now = realNow; shapeFile = originalFile }
+  }
+})
+test('shape 08: stale turn is refused on the card and direct API', async () => {
+  const w = await shapeCase({ agent: 'codex', state: 'working', kind: 'turn', surface: 'Codex local proxy' })
+  assert.equal((await w.press('shape-stale-card', { ...w.target, turn: 'old-turn' })).status, 409)
+  const result = await w.direct('shape-stale-api', { turn: 'old-turn' })
+  assert.deepEqual([result.status, result.body.error], [409, 'STALE_TURN'])
+})
+test('shape 09: a mailbox without a board row or question is Copy', async () => {
+  const w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'Web', rows: false })
+  assert.equal(await w.card(), undefined)
+  const result = await w.direct('shape-no-row')
+  assert.deepEqual([result.status, result.body.error], [409, 'NO_RECORDED_ROUTE'])
+})
+test('shape 10: a working DeepSeek row cannot borrow the idle record', async () => {
+  await shapeCopy(await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'Web', state: 'working' }))
+})
+test('shape 11: an idle Codex proxy cannot borrow the working record', async () => {
+  await shapeCopy(await shapeCase({ agent: 'codex', kind: 'turn', surface: 'Codex local proxy' }))
+})
+test('shape 12: a working question uses the working route for Codex and DeepSeek', async () => {
+  let w = await shapeCase({ agent: 'codex', kind: 'turn', surface: 'Codex local proxy', state: 'working' })
+  shapeFile = shapeFile.replace('- [~] Keep going', '- [?] Continue?')
+  await shapeSend(w, 'now')
+  w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'Web', state: 'working' })
+  shapeFile = shapeFile.replace('- [~] Keep going', '- [?] Continue?')
+  await shapeCopy(w)
+})
+test('shape 13: waiting and null questions use the idle route', async () => {
+  for (const isNull of [false, true]) {
+    const w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'Web' })
+    if (isNull) shapeViewTransform = view => ({ ...view, waiting: view.waiting.map(ask => ({ ...ask, auto: null })) })
+    await shapeSend(w, 'now')
+  }
+})
+test('shape 14: an ended row cannot send to a receiver', async () => {
+  for (const opts of [{ state: 'ended' }, { agent: 'deepseek', kind: 'mailbox', surface: 'Web', state: 'ended' }]) {
+    const w = await shapeCase(opts)
+    assert.equal((await w.card()).delivery, undefined)
+    assert.equal((await w.press(`shape-ended-card-${shapeSerial}`)).status, 409)
+    const result = await w.direct(`shape-ended-${shapeSerial}`)
+    assert.deepEqual([result.status, result.body.error], [409, 'NO_RECORDED_ROUTE'])
+  }
+})
+test('shape 15: conflicting board states for one session cannot send', async () => {
+  const w = await shapeCase()
+  const otherFile = stateFile('claude', 'working', w.session).replaceAll('abcdef01', 'abcdef02').replace('Route table', 'Other row')
+  const other = buildView(parseProgress(otherFile), [], null, Date.now(), 0, {}, EN)
+  shapeViewTransform = view => ({ ...view, groups: [...view.groups, ...other.groups], idle: [...view.idle, ...other.idle], stopped: [...view.stopped, ...other.stopped] })
+  await shapeCopy(w)
+})
+test('shape 16: DeepSeek TUI and a custom Codex proxy surface keep Copy', async () => {
+  await shapeCopy(await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'TUI' }))
+  await shapeCopy(await shapeCase({ agent: 'codex', kind: 'turn', surface: 'custom-proxy', state: 'working' }))
+})
+test('shape 17: a route without surfaces rejects the entire table', async () => {
+  const { isReceiverRoutes } = await import('../hooks/messaging.ts')
+  const routes = shapeBaseline()
+  delete routes[0].routes.idle.surfaces
+  assert.equal(isReceiverRoutes(routes), false)
+})
+test('shape 18: a recorded route with no surfaces rejects the table', async () => {
+  const { isReceiverRoutes } = await import('../hooks/messaging.ts')
+  const routes = shapeBaseline()
+  routes[0].routes.idle.surfaces = []
+  assert.equal(isReceiverRoutes(routes), false)
+})
+test('shape 19: an unrecognized connection surface keeps Copy', async () => {
+  const w = await shapeCase({ surface: 'unrecognized-surface' })
+  shapeRoutes[0].routes.idle.surfaces.push('unrecognized-surface')
+  await shapeCopy(w)
+})
+test('shape 20: DeepSeek Web is identified only by the first non-flag argument', async () => {
+  const { detectDeepseekSurface, deepseekReceiverSource } = await import('../hooks/receivers/deepseek.ts')
+  assert.equal(typeof detectDeepseekSurface, 'function')
+  assert.equal(detectDeepseekSurface(['web']), 'Web')
+  for (const args of [['tui', '--patch', 'web'], ['--profile', 'web'], []]) assert.equal(detectDeepseekSurface(args), 'unknown')
+  const source = deepseekReceiverSource('node', 'board', 'progress', 'home')
+  const generated = new Function('process', source.slice(source.indexOf('const detectSurface = '), source.indexOf('// One call')) + '\nreturn surface')
+  for (const [args, expected] of [[['web'], 'Web'], [['tui', '--patch', 'web'], 'unknown'], [['--profile', 'web'], 'unknown'], [[], 'unknown']]) {
+    assert.equal(generated({ argv: ['node', 'dsh', ...args] }), expected)
+  }
+})
+test('shape 21: an agent with no receiver record keeps Copy', async () => {
+  await shapeCopy(await shapeCase({ agent: 'opencode', surface: 'CLI TUI' }))
+})
+test('shape 22: a null, empty or none record keeps Copy', async () => {
+  for (const route of [{ line: 'now', record: null, surfaces: [] }, { line: 'now', record: '', surfaces: ['Claude Code'] }, { line: 'none', record: shapeNote, surfaces: ['Claude Code'] }]) {
+    const w = await shapeCase()
+    shapeRoutes[0].routes.idle = route
+    await shapeCopy(w)
+  }
+})
+test('shape 23: every recorded surface and state agrees with the card in three languages', async () => {
+  const { readReceiverRecords } = await import('../scripts/messaging-matrix.mjs')
+  const { agentLabel } = await import('../hooks/strings.ts')
+  const records = (await readReceiverRecords(join(import.meta.dirname, '..'))).filter(one => one.routes)
+  let checked = 0
+  for (const record of records) for (const surface of record.surfaces) for (const state of ['idle', 'working', 'ended']) for (const s of [EN, ZH_TW, ZH_CN]) {
+    assert.equal(typeof surface.id, 'string', `${record.source}: ${surface.name} needs a registered id`)
+    const route = record.routes[state], now = Date.now(), session = '11111111-2222-4333-8444-999999999999'
+    const view = buildView(parseProgress(stateFile(record.agent, state, session)), [], null, now, 0, {}, s)
+    const target = record.kind === 'mailbox' ? { connections: [], mailboxes: enrollMailbox({ messages: [] }, record.agent, session, surface.id, now, 43_200_000).mailboxes, messages: [] }
+      : { connections: [{ id: 'surface-matrix', agent: record.agent, session, surface: surface.id, turn: record.kind === 'turn' ? 'turn1' : 'session', scope: record.kind === 'turn' ? 'turn' : 'session', expires: now + 60_000 }], messages: [] }
+    const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+    const model = realServeModel(view, [], s, new Set(), false, target, false, group, RECEIVER_ROUTES)
+    const card = model.asks[0] ?? [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)].find(one => one.title === 'Route table')
+    const canSend = state !== 'ended' && route.line !== 'none' && typeof route.record === 'string' && route.record !== '' && route.surfaces.includes(surface.id)
+    assert.equal(card.delivery !== undefined, canSend, `${record.source}/${surface.id}/${state}`)
+    if (!(record.kind === 'mailbox' && state === 'ended')) {
+      const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint, chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: s.serveLineNone(name) }[route.line]
+      assert.equal(card.line, route.line, `${record.source}/${surface.id}/${state}`)
+      assert.ok(card.lineText.includes(words), `${record.source}/${surface.id}/${state}: ${card.lineText}`)
+    }
+    checked++
+  }
+  assert.ok(checked > 0)
+})
+test('shape 24: an expiry store lock returns 503 for card and direct sends', async () => {
+  const w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'Web' })
+  const visible = await w.card(), write = fs.writeFileSync, realNow = Date.now
+  let direct, pressed
+  try {
+    const future = realNow() + 13 * 60 * 60 * 1000
+    Date.now = () => future
+    fs.writeFileSync = (path, ...args) => {
+      if (String(path).startsWith(join(w.messages, 'messages.json.'))) throw Object.assign(new Error('synthetic busy'), { code: 'EBUSY' })
+      return write(path, ...args)
+    }
+    syncBuiltinESMExports()
+    direct = await w.direct('shape-busy-api')
+    pressed = await w.call('/api/act', { type: 'message', id: 'shape-busy-card', key: visible.key, fp: visible.fp, session: w.session, connection: w.target.id, turn: w.target.turn, asked: visible.text, text: 'Synthetic answer' })
+  } finally { Date.now = realNow; fs.writeFileSync = write; syncBuiltinESMExports() }
+  assert.deepEqual([direct.status, direct.body.error], [503, 'MESSAGE_STORE_BUSY'])
+  assert.equal(pressed.status, 503)
+})
+test('shape 25: a retry keeps the queued message after a state change and rejects different text', async () => {
+  const w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'Web' })
+  const first = await w.direct('shape-retry')
+  assert.equal(first.status, 200)
+  shapeFile = stateFile('deepseek', 'working', w.session)
+  const again = await w.direct('shape-retry')
+  assert.equal(again.status, 200)
+  assert.equal(again.body.id, first.body.id)
+  const conflict = await w.direct('shape-retry', { text: 'Different text' })
+  assert.deepEqual([conflict.status, conflict.body.error], [409, 'ID_CONFLICT'])
+})
+test('shape 26: receipts keep the sent line, older receipts are neutral, and callers cannot set line', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'Web' })
+  const injected = await w.direct('shape-forged-line', { line: 'nextTurn' })
+  assert.deepEqual([injected.status, injected.body.error], [409, 'UNKNOWN_FIELD'])
+  const sent = await w.direct('shape-receipt')
+  assert.equal(sent.status, 200)
+  assert.equal(sent.body.line, 'now')
+  const taken = await w.call('/api/messages/mailbox-turn', { agent: 'deepseek', session: w.session, surface: 'Web' })
+  assert.equal(taken.body.message.id, 'shape-receipt')
+  assert.equal((await w.call('/api/messages/mailbox-accept', { agent: 'deepseek', session: w.session, id: 'shape-receipt', nonce: taken.body.message.nonce })).status, 200)
+  const realNow = Date.now, originalFile = shapeFile
+  let model
+  try {
+    const future = realNow() + 13 * 60 * 60 * 1000
+    Date.now = () => future
+    shapeFile = shapeFile.replace(/updated=\S+/, `updated=${new Date(future).toISOString()}`)
+    model = (await w.call('/api/board')).body.model
+  } finally { Date.now = realNow; shapeFile = originalFile }
+  assert.equal(model.asks[0].receipt.line, 'now')
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  assert.ok(page.text().includes(EN.messagesHandedNow))
+  delete model.asks[0].receipt.line
+  model.asks[0].line = 'nextTurn'
+  const older = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  assert.ok(older.text().includes(EN.messagesHandedNow))
+  assert.ok(!older.text().includes(EN.messagesHandedNextTurn))
+})
+test('a peer send remains independent of recorded board routes', async () => {
+  const w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'TUI' })
+  const sender = await w.call('/api/messages/register', { agent: 'codex', session: shapeSession(), surface: 'fixture', turn: 'turn1' })
+  const result = await w.direct('shape-peer', { source: sender.body.id, secret: sender.body.secret })
+  assert.equal(result.status, 200)
 })

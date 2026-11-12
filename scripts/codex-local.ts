@@ -29,7 +29,7 @@ import { windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
-import { deliveryText } from '../hooks/messaging'
+import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { deliverTurnEvent } from './hook-delivery'
 import { hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
@@ -509,7 +509,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const answer = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value)}\n`) }
     if (action === 'take') {
       const surface = flag('--surface')
-      const message = await mailbox.turn(agent, session, surface === 'Web' || surface === 'TUI' ? surface : 'dsh', Date.now())
+      const message = await mailbox.turn(agent, session, surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui ? surface : SURFACE_IDS.unknown, Date.now())
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line

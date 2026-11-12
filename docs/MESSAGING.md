@@ -17,13 +17,20 @@ Temporary store locks (`EPERM`, `EBUSY`, `EAGAIN`) report HTTP 503 so polling ca
 recover within that deadline. Idle polls do not rewrite the message file. Sending
 and receipts are never automatically retried, including after a store lock.
 
-Use the existing reply box on the session's card. A matching live receiver enables Send;
-a hook mailbox offers Queue for next turn beside Copy. Internal connection ids stay hidden. There is no
+Use the existing reply box on the session's card. A matching receiver enables Send or
+Queue only when its session state, surface and route have a live record. When the state
+or route is unknown, the card offers Copy. Internal connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
 An offline card retains Copy. By default, the web UI and
 action API cannot spawn a CLI or resume a saved session. The existing copy-resume command
 remains available where the board already offered it.
+
+The direct message API applies the same recorded-route check to board sends. A mailbox
+with a live receiver for the same session is refused rather than redirected; an unrecorded
+route returns `NO_RECORDED_ROUTE`. Retrying an existing message id returns that message
+when its contents match, even if the route has since changed. The server records the route
+line itself; callers cannot supply `line`.
 
 ## Next-turn mailbox
 

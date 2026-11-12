@@ -1,9 +1,10 @@
 import { ackLine, boardClient, deliveryPrompt } from './message-client.mjs'
+import { SURFACE_IDS } from '../hooks/messaging.ts'
 
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
   host: 'Antigravity',
-  surfaces: [{ name: 'Exclusive-owner Stream CLI (stdin)', evidence: null, earlier: 'docs/validation/2026-10-19-native-hooks.md' }],
+  surfaces: [{ name: 'Exclusive-owner Stream CLI (stdin)', id: SURFACE_IDS.antigravityStream, evidence: null, earlier: 'docs/validation/2026-10-19-native-hooks.md' }],
   tier: 1,
   primitive: 'unknown',
   isImplemented: true,
@@ -11,15 +12,15 @@ export const messagingReceiver = {
   kind: 'live',
   // canReceive is true only while the session is idle. No live note shows either route yet.
   routes: {
-    idle: { line: 'now', record: null },
-    working: { line: 'stepEnd', record: null },
-    ended: { line: 'none', record: null },
+    idle: { line: 'now', record: null, surfaces: [] },
+    working: { line: 'stepEnd', record: null, surfaces: [] },
+    ended: { line: 'none', record: null, surfaces: [] },
   },
 }
 
 // The host already owns one initialized CLI stream. No process, login, saved
 // conversation, editor connection or model call is created by attaching.
-export const attachAntigravitySession = async ({ boardUrl, transport, session, state, verifyOwner, surface = 'Antigravity owned CLI stream', onError }) => {
+export const attachAntigravitySession = async ({ boardUrl, transport, session, state, verifyOwner, surface = SURFACE_IDS.antigravityStream, onError }) => {
   if (!transport || typeof transport.write !== 'function' || typeof transport.listen !== 'function' || typeof state !== 'function' || typeof verifyOwner !== 'function' || !await verifyOwner(transport) || !/^[a-f0-9-]{36}$/i.test(session)) throw new Error('VERIFIED_OWNER_REQUIRED')
   let pending = null, isClosed = false, receiver
   const verify = async () => {

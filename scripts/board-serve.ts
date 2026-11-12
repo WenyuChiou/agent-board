@@ -18,7 +18,9 @@ import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
 import { agentLabel } from '../hooks/strings'
 import type { ReceiverRoutes } from '../hooks/messaging'
-import { directRoute, lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
+import type { SendDecision } from '../hooks/messaging'
+import { RECEIVER_ROUTES } from '../hooks/receiver-routes'
+import { lanAddress, localHosts, pagePolicy, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
@@ -272,7 +274,7 @@ const run = (plan: SendPlan, s: Strings, label: string): Promise<Result> =>
 
 export const startServer = (o: ServeOptions): void => {
   const messaging = (() => {
-    try { return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory) }
+    try { return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory, { routes: o.routes ?? RECEIVER_ROUTES, stateOfSession: (agent, session) => sessionState(o.view(), agent, session) }) }
     // The code (EACCES, EPERM) goes along, so the person gets advice that fits the cause.
     catch (error) { throw Object.assign(new Error(error instanceof Error ? error.message : '', { cause: 'MESSAGE_STORE_FAILED' }), { code: error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined }) }
   })()
@@ -505,13 +507,6 @@ export const startServer = (o: ServeOptions): void => {
       const action = url.pathname.slice('/api/messages/'.length)
       // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
       if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
-      // A send that names no connected session as its sender is the board's own. It goes only where a card
-      // would offer Send: a route its receiver's record has shown live, on the target's state and surface.
-      if (action === 'send' && body.source === undefined) {
-        const snapshot = messaging.snapshot(Date.now())
-        const target = deliveryTargets(snapshot.connections, snapshot.mailboxes).find(one => one.id === body.target)
-        if (target !== undefined && !target.contested && target.expires > Date.now() && !directRoute(o.view(), target, o.routes).canSend) return json(res, 409, { error: 'NO_RECORDED_ROUTE' })
-      }
       try { return json(res, 200, messaging.act(action, body, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
       catch (error) {
         // A temporary file lock is storage unavailability, not a stale binding.
@@ -538,11 +533,18 @@ export const startServer = (o: ServeOptions): void => {
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})
           try {
-            const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text, line: action.line, ...(action.answers === undefined ? {} : { answers: action.answers }) }, Date.now())
+            const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text, ...(action.answers === undefined ? {} : { answers: action.answers }) }, Date.now())
             const notes = { queued: o.s.messagesQueued, uncertain: o.s.messagesUncertain, accepted: o.s.messagesAccepted, acknowledged: o.s.messagesAcknowledged, rejected: o.s.messagesRejected }
             const note = 'status' in receipt ? notes[receipt.status] : o.s.messagesFailed
             return json(res, 200, { note, receipt })
           } catch (error) {
+            const code = (error as { code?: unknown } | null)?.code
+            if (['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
+            const decision = (error as { decision?: SendDecision } | null)?.decision
+            if (error instanceof Error && error.message === 'NO_RECORDED_ROUTE' && decision !== undefined && !decision.canSend) {
+              const state = sessionState(o.view(), action.connection.agent, text(body.session))
+              return json(res, 409, { note: routeText(decision.line, false, action.connection.agent, o.s, state, decision.reason) })
+            }
             const notes: Record<string, string> = { ID_CONFLICT: o.s.messagesConflict, TARGET_BUSY: o.s.messagesBusy, PAIR_BUSY: o.s.messagesBusy, TEXT_REFUSED: o.s.messagesTextRefused, CONTESTED: o.s.messagesContested }
             return json(res, 409, { note: error instanceof Error ? notes[error.message] ?? o.s.messagesFailed : o.s.messagesFailed })
           }
@@ -585,6 +587,8 @@ export const startServer = (o: ServeOptions): void => {
         return json(res, pasted.isAdded ? 200 : 409, { note: pasted.note, review: pasted.review })
       }
     } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code
+      if (url.pathname === '/api/act' && body.type === 'message' && ['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
       const note = o.failure(error, isLan)
       if (note === null) {
         process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)

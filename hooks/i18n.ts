@@ -892,6 +892,8 @@ export const ZH_TW = {
   serveLineReopen: (agent: string): string => `傳送時會重新開啟 ${agent} 的這個對話，再把訊息交給它。`,
   serveLineNone: (agent: string): string => `${agent} 還不能從看板收訊息：請複製後貼到它的對話裡。`,
   serveLineUnrecorded: '這條路還沒有現場執行紀錄，所以只提供複製。',
+  serveLineStateUnknown: '無法確定對話狀態，所以只提供複製。',
+  serveLineShadowed: '另一個接收器已連到這個對話，這條路無法傳送。',
   serveSending: (agent: string): string => `正在傳給 ${agent}，等它回完…`,
   serveQueued: (agent: string): string => `已傳給 ${agent}；它回了就會顯示在這裡（可能要幾分鐘）。`,
   serveSent: (agent: string, reply: string): string => (reply === '' ? `已傳給 ${agent}。` : `已傳給 ${agent}，它回：${reply}`),

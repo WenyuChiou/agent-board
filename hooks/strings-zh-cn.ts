@@ -847,6 +847,8 @@ export const ZH_CN: Strings = {
   serveLineReopen: (agent: string): string => `发送时会重新打开 ${agent} 的这个会话，再把消息交给它。`,
   serveLineNone: (agent: string): string => `${agent} 还不能从看板收消息：请复制后贴到它的会话里。`,
   serveLineUnrecorded: '这条路还没有现场运行记录，所以只提供复制。',
+  serveLineStateUnknown: '无法确定会话状态，所以只提供复制。',
+  serveLineShadowed: '另一个接收器已连接到此会话，这条路无法发送。',
   serveSending: (agent: string): string => `正在发给 ${agent}，等它回完…`,
   serveQueued: (agent: string): string => `已发给 ${agent}；它回了就会显示在这里（可能要几分钟）。`,
   serveSent: (agent: string, reply: string): string => (reply === '' ? `已发给 ${agent}。` : `已发给 ${agent}，它回：${reply}`),

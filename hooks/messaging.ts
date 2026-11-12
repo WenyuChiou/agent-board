@@ -46,19 +46,40 @@ export type RouteLine = 'now' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' |
 export const ROUTE_LINES: readonly RouteLine[] = ['now', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
 export type RowState = 'idle' | 'working' | 'ended'
 export type RouteKind = 'live' | 'mailbox' | 'turn'
-// `surfaces`, when present, names the surfaces (a connection's `surface`) the note ran on: the route is
-// recorded for those only, and a connection on any other surface keeps Copy.
-export type Route = { line: RouteLine; record: string | null; surfaces?: readonly string[] }
+export const SURFACE_IDS = {
+  claude: 'Claude Code', codexProxy: 'Codex local proxy', codexSession: 'Codex owned session',
+  antigravityStream: 'Antigravity owned CLI stream', antigravityTui: 'agy TUI', antigravityIde: 'IDE',
+  cursor: 'IDE (Composer)', cli: 'CLI', web: 'Web', tui: 'TUI', unknown: 'unknown',
+} as const
+// A note covers only the surfaces on which its route was recorded.
+export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[] }
 export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route> }
-// The line a row shows and whether it may offer Send: only on a route with a record that was shown on the
-// connection's surface. A receiver with no record at all, a line of none, an empty record and a surface the
-// note did not run on give Copy.
-export const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteKind, state: RowState, surface?: string): { line: RouteLine; canSend: boolean } => {
-  const route = records.find(one => one.agent === (agent === '' ? 'claude' : agent) && one.kind === kind)?.routes[state]
-  if (route === undefined) return { line: 'none', canSend: false }
-  const isRecorded = typeof route.record === 'string' && route.record !== ''
-  const isOnSurface = route.surfaces === undefined || surface !== undefined && route.surfaces.includes(surface)
-  return { line: route.line, canSend: route.line !== 'none' && isRecorded && isOnSurface }
+type SendRefusal = 'NO_TARGET' | 'SHADOWED' | 'CONTESTED' | 'OFFLINE' | 'STATE_UNKNOWN' | 'SURFACE_UNKNOWN' | 'NO_RECORD'
+export type SendDecision =
+  | { canSend: true; line: RouteLine; target: Connection; state: RowState }
+  | { canSend: false; line: RouteLine; reason: SendRefusal }
+
+const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteKind, state: RowState): Route | undefined =>
+  records.find(one => one.agent === (agent === '' ? 'claude' : agent) && one.kind === kind)?.routes[state]
+
+export const sendDecision = (
+  targetId: string, connections: readonly Connection[], mailboxes: readonly Connection[],
+  stateOfSession: (agent: string, session: string) => RowState | undefined,
+  routes: readonly ReceiverRoutes[], now: number,
+): SendDecision => {
+  const target = connections.find(one => one.id === targetId) ?? mailboxes.find(one => one.id === targetId)
+  if (target === undefined) return { canSend: false, line: 'none', reason: 'NO_TARGET' }
+  const live = connections.filter(one => address(one.agent, one.session) === address(target.agent, target.session) && one.expires > now)
+  if (mailboxes.includes(target) && live.length > 0) return { canSend: false, line: 'none', reason: 'SHADOWED' }
+  if (target.contested || live.length > 1) return { canSend: false, line: 'none', reason: 'CONTESTED' }
+  if (target.expires <= now) return { canSend: false, line: 'none', reason: 'OFFLINE' }
+  const state = stateOfSession(target.agent, target.session)
+  if (state === undefined) return { canSend: false, line: 'none', reason: 'STATE_UNKNOWN' }
+  const route = routeOf(routes, target.agent, routeKind(target.scope), state)
+  if (route === undefined) return { canSend: false, line: 'none', reason: 'NO_RECORD' }
+  if (route.line === 'none' || typeof route.record !== 'string' || route.record === '') return { canSend: false, line: route.line, reason: 'NO_RECORD' }
+  if (target.surface === SURFACE_IDS.unknown || !Object.values(SURFACE_IDS).some(surface => surface === target.surface) || !Array.isArray(route.surfaces) || !route.surfaces.includes(target.surface)) return { canSend: false, line: route.line, reason: 'SURFACE_UNKNOWN' }
+  return { canSend: true, line: route.line, target, state }
 }
 // Whether a list read from outside (the tests' stand-in file) holds well-formed receiver routes: every entry
 // names an agent and a kind, and every state has a known line and a record that is a string or null. Anything
@@ -72,7 +93,8 @@ export const isReceiverRoutes = (value: unknown): value is ReceiverRoutes[] => A
     if (route === null || typeof route !== 'object') return false
     const { line, record, surfaces } = route as Record<string, unknown>
     return ROUTE_LINES.includes(line as RouteLine) && (record === null || typeof record === 'string')
-      && (surfaces === undefined || Array.isArray(surfaces) && surfaces.every(name => typeof name === 'string'))
+      && Array.isArray(surfaces) && surfaces.every(name => typeof name === 'string')
+      && (!(typeof record === 'string' && record !== '') || surfaces.length > 0)
   })
 })
 // A connection's scope names its kind of receiver: a session the host owns, a hook mailbox, or one turn.
@@ -202,10 +224,9 @@ export const dismissMessage = (state: MessageState, id: string, now: number): Me
   }) : message) }
 }
 
-export const queueMessage = (state: MessageState, input: Record<string, unknown>, from: string, target: Connection | undefined, now: number, origin: Origin = 'local', framingNonce?: string): { state: MessageState; message: Message } => {
-  messageFields(input, ['id', 'target', 'turn', 'text', 'answers', 'line'])
+export const queueMessage = (state: MessageState, input: Record<string, unknown>, from: string, target: Connection | undefined, now: number, origin: Origin = 'local', framingNonce?: string, line?: RouteLine): { state: MessageState; message: Message } => {
+  messageFields(input, ['id', 'target', 'turn', 'text', 'answers'])
   if (input.answers !== undefined && !isAnswersId(input.answers)) throw new Error('INVALID_ID')
-  if (input.line !== undefined && (from !== 'board' || !ROUTE_LINES.includes(input.line as RouteLine))) throw new Error('UNKNOWN_FIELD')
   const answers = from === 'board' ? input.answers : undefined
   const request = { id: messageId(input.id), target: messageId(input.target), turn: messageId(input.turn), from, text: messageText(input.text) }
   if (/^\s*agent board message(?:,| from )/im.test(request.text) || /reply first with this line alone|<<<\s*AB-|AB-[0-9a-f]{6,32}\s*>>>/i.test(request.text)) throw new Error('TEXT_REFUSED')
@@ -238,7 +259,7 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
   if (state.messages.filter(isOpen).length >= OPEN_CAP || state.messages.length >= OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('MESSAGE_LIMIT')
-  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(input.line === undefined ? {} : { line: input.line as RouteLine }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
+  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(line === undefined ? {} : { line }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
   return { state: { ...state, messages: [...state.messages, message] }, message }
 }
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string): { state: MessageState; messages: Message[] } => {

@@ -15,9 +15,9 @@ import { cellCode } from './progress-bar'
 import { RESUME } from './parse'
 import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from './view'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
-import type { Connection, Message, ReceiverRoutes, RouteLine, RowState } from './messaging'
+import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
 import { deliveryTargets } from './hook-messages'
-import { address, isMailboxTarget, isOpen, routeKind, routeOf } from './messaging'
+import { address, isMailboxTarget, isOpen, sendDecision } from './messaging'
 import { RECEIVER_ROUTES } from './receiver-routes'
 
 // The board's page: what `agent-board` shows in a browser for agents other than
@@ -62,19 +62,21 @@ const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerC
 // ended, one at work is working, any other (waiting on a question, done) is idle.
 const stateOf = (auto: 'working' | 'waiting' | 'ended' | null | undefined, isClosed: boolean): RowState => isClosed || auto === 'ended' ? 'ended' : auto === 'working' ? 'working' : 'idle'
 const rowState = (row: { auto: 'working' | 'waiting' | 'ended' | null; target: AgentTarget | null; isRecordedEnded?: true }): RowState => stateOf(row.auto, row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true)
-// The route a send straight to the message API (no card, no press) would take: the receiver's record for the
-// state the target's session is in on the board, read the way a card reads it. A session the board shows
-// nowhere counts as idle. Without a record on that state and surface, the API refuses as the page would.
-export const directRoute = (view: View, target: Connection, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): { line: RouteLine; canSend: boolean } => {
+// Conflicting rows cannot establish a session's state, even if one happens to appear first.
+export const sessionState = (view: View, agent: string, session: string): RowState | undefined => {
   const rows = [...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped]
-  const row = rows.find(one => (one.agent || 'claude') === target.agent && one.nativeSession === target.session)
-  const ask = row === undefined ? view.waiting.find(one => (one.agent || 'claude') === target.agent && one.nativeSession === target.session) : undefined
-  const state: RowState = row !== undefined ? rowState(row) : ask !== undefined ? stateOf(ask.auto, ask.target?.isClosed === true) : 'idle'
-  return routeOf(routes, target.agent, routeKind(target.scope), state, target.surface)
+  const name = agent || 'claude'
+  const states = [
+    ...rows.filter(one => (one.agent || 'claude') === name && one.nativeSession === session).map(rowState),
+    ...view.waiting.filter(one => (one.agent || 'claude') === name && one.nativeSession === session).map(one => stateOf(one.auto, one.target?.isClosed === true)),
+  ]
+  return states.length > 0 && states.every(state => state === states[0]) ? states[0] : undefined
 }
 // One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route
 // the record has not shown live also says only Copy is offered.
-const routeText = (line: RouteLine, canSend: boolean, agent: string, s: Strings, state: RowState = 'idle'): string => {
+export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: Strings, state: RowState = 'idle', reason?: Exclude<SendDecision, { canSend: true }>['reason']): string => {
+  if (reason === 'STATE_UNKNOWN') return s.serveLineStateUnknown
+  if (reason === 'SHADOWED') return s.serveLineShadowed
   const name = isClaudeAgent(agent) ? 'Claude' : agentLabel(agent, s)
   const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name))
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
@@ -400,6 +402,7 @@ const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): Ser
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
   const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes)
+  const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], (agent, session) => sessionState(view, agent, session), routes, group?.now ?? 0)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
@@ -424,12 +427,12 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const baseMode = isManual ? 'none' : sendMode(ask.agent, ask.target)
       // The receiver's record picks the line; a route it has not shown live keeps the card on Copy, and the
       // delivery is left off it so the page has nothing to send to.
-      const askState = stateOf(ask.auto, ask.target?.isClosed === true)
-      const route = found === undefined ? undefined : routeOf(routes, ask.agent, routeKind(found.scope), askState, found.surface)
+      const askState = sessionState(view, ask.agent, ask.nativeSession ?? '')
+      const route = found === undefined ? undefined : decisionFor(found)
       const connection = route?.canSend === true ? found : undefined
       const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : found ? 'none' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
-      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, ask.agent, s, askState) }
+      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, ask.agent, s, askState, route.canSend ? undefined : route.reason) }
         : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, ask.agent, s) } : { line: 'none' as const, canSend: false, lineText: '' }
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan, true)
@@ -486,12 +489,12 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const found = isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)
       const isContested = !isLan && found === undefined && (messaging?.connections.some(one => one.agent === (row.agent || 'claude') && one.session === row.nativeSession) ?? false)
       const baseMode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
-      const state = rowState(row)
-      const route = found === undefined ? undefined : routeOf(routes, row.agent, routeKind(found.scope), state, found.surface)
+      const state = sessionState(view, row.agent, row.nativeSession ?? '')
+      const route = found === undefined ? undefined : decisionFor(found)
       const connection = route?.canSend === true ? found : undefined
       const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : found ? 'none' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
-      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s, state) }
+      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s, state, route.canSend ? undefined : route.reason) }
         : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, row.agent, s) } : { line: 'none' as const, canSend: false, lineText: '' }
       // A Claude session still at work that this board cannot reach: its card says so and copies.
       const isOpenClaude = !isLan && send === 'claude' && row.auto !== 'ended'
@@ -656,7 +659,7 @@ export type ServeAction =
   | { type: 'hide'; key: string; text: string }
   | { type: 'unhide'; key: string | null }
   | { type: 'send'; target: AgentTarget; text: string; title: string }
-  | { type: 'message'; connection: Delivery; text: string; title: string; answers?: string; line: RouteLine }
+  | { type: 'message'; connection: Delivery; text: string; title: string; answers?: string }
   | { type: 'refuse'; note: string }
 
 const MAX_REPLY = 4000
@@ -674,8 +677,8 @@ export const replyText = (raw: string): string =>
 // gone or changed since the page drew it is refused, never taken for the one now in its place.
 // From the local network (`isLan`) a reply to an agent is refused: it would run a program on
 // the computer, and the network's page is plain HTTP that others on the network could read.
-export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false, connections: readonly Connection[] = [], isMessaging = false, allowResume = false, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeAction => {
-  const action = actionOf(items, request, s, isLan, connections, isMessaging, allowResume, routes)
+export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false, connections: readonly Connection[] = [], isMessaging = false, allowResume = false, _routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeAction => {
+  const action = actionOf(items, request, s, isLan, connections, isMessaging, allowResume)
   if (action.type === 'refuse' && action.note === '') return { type: 'refuse', note: s.pressNothing }
   if (action.type !== 'tick' && action.type !== 'archive' && action.type !== 'done' && action.type !== 'send' && action.type !== 'message') return action
   // The key is a project and a title, which another session's block can take over, and a step
@@ -686,7 +689,7 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   return action.type === 'tick' ? { ...action, ref: guardStep(action.ref, items) } : action
 }
 
-const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean, routes: readonly ReceiverRoutes[]): ServeAction => {
+const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean): ServeAction => {
   // A hidden question is off the board: it is named by the key it was hidden under.
   if (request.type === 'unhide') return request.key.startsWith('hidden:') ? { type: 'unhide', key: request.key.slice('hidden:'.length) } : { type: 'refuse', note: '' }
   const item = items.find(one => one.key === request.key)
@@ -743,12 +746,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'message') {
     const question = item.type === 'ask' ? item.ask.text : item.row.question ?? ''
     if (isLan || !connected || connected.id !== request.connection || connected.turn !== request.turn || connected.session !== request.session || (request.asked ?? '') !== question || !text) return { type: 'refuse', note: s.messagesFailed }
-    // The page offers Send only on a route its receiver's record has shown live; a press on any other is
-    // refused with the card's own words, so a page that was altered cannot send there either.
-    const state = item.type === 'ask' ? stateOf(item.ask.auto, target?.isClosed === true) : rowState(item.row)
-    const route = routeOf(routes, agent, routeKind(connected.scope), state, connected.surface)
-    if (!route.canSend) return { type: 'refuse', note: routeText(route.line, false, agent, s, state) }
-    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title, line: route.line, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
+    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
   }
   if (connected) return { type: 'refuse', note: s.boardLineChanged }
   if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }
@@ -1623,8 +1621,8 @@ const PAGE_SCRIPT = String.raw`
     clearEnqueueResult(key, receipt);
     if (!agent || String(agent).toLowerCase() === 'claude') return claudeReceipt(receipt, key, canSend);
     // A session that takes its message the moment it is idle is not handed one at a turn it starts later (#725).
-    line = receipt.line || line;
-    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : line === 'now' || line === 'stepEnd' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
+    line = receipt.line;
+    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : !line || line === 'now' || line === 'stepEnd' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     // A mailbox message that was handed over gets no ACK, so its id is done with here: the next send is a new message.
     if (receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
     // The server already took a nonce ACK off; a receipt kept from a version 1 store was

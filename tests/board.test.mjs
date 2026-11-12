@@ -7839,7 +7839,7 @@ test('an answer key on a route with no live record only copies, even with a conn
 `, {}, ['--messages-dir', messages])
   const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
   try {
-    await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })
+    await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })
     const out = spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', 'y'], { env, encoding: 'utf8', timeout: 30_000 }).stdout
     assert.ok(out.includes('copies the answer'), out)
     assert.ok(!out.includes('You answered'), out)
@@ -7861,7 +7861,7 @@ test('an answer key on the terminal board sends to a connected session through t
   const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
   const play = keys => spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }).stdout
   try {
-    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })).json()
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
     const sent = play('y')
     assert.ok(sent.includes('You answered “Yes, go ahead”.'), sent)
     const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
@@ -7907,7 +7907,7 @@ test('an answer key the page refuses shows the page note, sends nothing and neve
   // Not spawnSync: the page in front answers from this process.
   const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
   try {
-    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })).json()
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
     const refused = await play('y')
     assert.ok(refused.includes('Synthetic refusal from the page'), refused)
     assert.ok(!refused.includes('You answered'), refused)

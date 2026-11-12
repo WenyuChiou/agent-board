@@ -1,15 +1,15 @@
-// Routes: what a message from the board does today, and the validation note that showed it live (null: none did).
+import { SURFACE_IDS } from '../messaging.ts'
 export const messagingReceiver = {
   host: 'Gemini CLI',
   agent: 'gemini',
   kind: 'mailbox',
-  surfaces: [{ name: 'CLI', evidence: null }],
+  surfaces: [{ name: 'CLI', id: SURFACE_IDS.cli, evidence: null }],
   tier: 3,
   primitive: 'unknown',
   isImplemented: true,
   routes: {
-    idle: { line: 'nextTurn', record: null },
-    working: { line: 'nextTurn', record: null },
-    ended: { line: 'none', record: null },
+    idle: { line: 'nextTurn', record: null, surfaces: [] },
+    working: { line: 'nextTurn', record: null, surfaces: [] },
+    ended: { line: 'none', record: null, surfaces: [] },
   },
 }

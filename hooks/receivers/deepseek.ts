@@ -1,3 +1,5 @@
+import { SURFACE_IDS } from '../messaging.ts'
+
 // DeepSeek Harness receives a board message in its own process (#725). The agent-board-local plugin keeps
 // each root session's board mailbox open, so that session's card has a Send box. When a message waits and
 // the session is idle, the plugin takes it through the board script and gives it to the session with
@@ -8,7 +10,7 @@ export const messagingReceiver = {
   host: 'DeepSeek Harness',
   agent: 'deepseek',
   kind: 'mailbox',
-  surfaces: [{ name: 'Web', evidence: 'docs/validation/2026-11-08-deepseek-harness-live.md' }, { name: 'TUI', evidence: null }],
+  surfaces: [{ name: 'Web', id: SURFACE_IDS.web, evidence: 'docs/validation/2026-11-08-deepseek-harness-live.md' }, { name: 'TUI', id: SURFACE_IDS.tui, evidence: null }],
   tier: 1,
   primitive: '[P1]',
   isImplemented: true,
@@ -16,10 +18,21 @@ export const messagingReceiver = {
   // session is idle (tests only; the live note says a long busy session was not run). Ended: no mailbox.
   // The live run was `dsh web` only, so the idle record names the Web surface; the terminal interface keeps Copy.
   routes: {
-    idle: { line: 'now', record: 'docs/validation/2026-11-08-deepseek-harness-live.md', surfaces: ['Web'] },
-    working: { line: 'stepEnd', record: null },
-    ended: { line: 'none', record: null },
+    idle: { line: 'now', record: 'docs/validation/2026-11-08-deepseek-harness-live.md', surfaces: [SURFACE_IDS.web] },
+    working: { line: 'stepEnd', record: null, surfaces: [SURFACE_IDS.web] },
+    ended: { line: 'none', record: null, surfaces: [SURFACE_IDS.web] },
   },
+}
+
+// A bare option can consume the following argument, so do not infer a mode from an ambiguous command.
+export const detectDeepseekSurface = (args: readonly string[]): 'Web' | 'unknown' => {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!
+    if (arg === '--profile') { index++; continue }
+    if (arg.startsWith('-')) { if (arg.includes('=')) continue; return 'unknown' }
+    return arg === 'web' ? 'Web' : 'unknown'
+  }
+  return 'unknown'
 }
 
 // The receiver's part of the generated plugin: module-level code that the plugin's apply wires to the
@@ -28,9 +41,9 @@ export const deepseekReceiverSource = (node: string, board: string, progress: st
 import { readFileSync, watch } from 'node:fs'
 import { join } from 'node:path'
 import { spawn as spawnMailbox } from 'node:child_process'
-// The surface this dsh process runs: \`dsh web\` is the Web page, any other call the terminal interface. The board
-// offers Send only on the surface a live note ran on, so a process it cannot place stays on Copy.
-const surface = process.argv.slice(2).includes('web') ? 'Web' : 'TUI'
+// The board only sends when the command identifies the recorded Web surface.
+const detectSurface = ${detectDeepseekSurface.toString()}
+const surface = detectSurface(process.argv.slice(2))
 // One call to the board script's --mailbox; its one JSON line, or null when it failed or took too long.
 const mailboxCall = (action, session, extra = []) => new Promise(resolve => {
   let child, timer, output = ''

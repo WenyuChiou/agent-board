@@ -853,6 +853,8 @@ export const EN: Strings = {
   serveLineReopen: (agent: string): string => `Sending reopens this ${agent} session and hands it the message.`,
   serveLineNone: (agent: string): string => `${agent} can't receive messages from the board yet: copy this and paste it into its chat.`,
   serveLineUnrecorded: 'This route has not been checked live yet, so only Copy is offered.',
+  serveLineStateUnknown: 'The session state is unclear, so only Copy is offered.',
+  serveLineShadowed: 'Another receiver is connected to this session, so this route cannot send.',
   serveSending: (agent: string): string => `Sending to ${agent}; waiting for its reply…`,
   serveQueued: (agent: string): string => `Sent to ${agent}; its reply shows here when it comes (it can take a few minutes).`,
   serveSent: (agent: string, reply: string): string => (reply === '' ? `Sent to ${agent}.` : `Sent to ${agent}. It replied: ${reply}`),
