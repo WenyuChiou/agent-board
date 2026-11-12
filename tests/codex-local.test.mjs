@@ -7044,7 +7044,8 @@ test('opencode: a reporter that fails while OpenCode exits is logged and does no
   assert.deepEqual(run.calls.filter(call => call.isExiting), ['synthetic-one-shot', 'synthetic-second'].map(session => ({ session, state: 'ended', isExiting: true })))
   assert.equal(readFileSync(log, 'utf8').match(/opencode REPORTER_FAILED/g)?.length, 2)
   const spent = run.marks.end - run.marks.start
-  assert.ok(spent < 1000, `exit took ${spent} ms`)
+  // #1323: the exit fixture has no clock seam for plugin and file I/O work; allow for CI pauses.
+  assert.ok(spent < (process.env.CI ? 2000 : 1000), `exit took ${spent} ms`)
   for (const session of ['synthetic-one-shot', 'synthetic-second']) assert.equal(oneShotState(readFileSync(progress, 'utf8'), session), 'waiting')
 }, { retry: false }))
 

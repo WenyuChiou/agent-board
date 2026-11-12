@@ -34,14 +34,23 @@ export const parseArgs = argv => {
 
 // A name is its first word, lower case: "claude (PM)" and "Claude" are both "claude".
 const nameOf = text => (text ?? '').match(/[A-Za-z0-9][A-Za-z0-9_-]*/)?.[0].toLowerCase() ?? null
-const reviewingName = body => nameOf((body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1])
-const verdictName = body => nameOf((body ?? '').match(/^Review:[ \t]*(?:APPROVE|REQUEST CHANGES)\b[^\r\n]*?\bby[ \t]+(\S[^\r\n]*)/m)?.[1])
 // The full identity keeps the dispatching lane, like authorKey does: "codex (phase1)" and "codex (e2e)"
 // are distinct agents (CONTRIBUTING rule 7), so only the first word is not enough to tell them apart.
-// reviewingName and verdictName above stay first-word names: countOpenReviews keys its counts by them,
-// and the reviewers file lists first-word names. The author comparisons in classify use these instead.
+// countOpenReviews keys its counts by a claim's first word, since the reviewers file lists first-word names;
+// the author comparisons in classify use the full identity below, and only the same full name answers a claim.
 const fullName = text => (text ?? '').replace(/`/g, '').split(',')[0].replace(/\s+/g, ' ').trim().toLowerCase() || null
 const verdictFullName = body => fullName((body ?? '').match(/^Review:[ \t]*(?:APPROVE|REQUEST CHANGES)\b[^\r\n]*?\bby[ \t]+(\S[^\r\n]*)/m)?.[1])
+// A claim is "Reviewing: <head sha> by <reviewer>" and holds that head only (team-process, From claim to merge).
+// Only that form is a claim: the head's full sha, or 7 or more of its first characters as a Ready line may give,
+// in backticks only as a pair; then `by` between spaces; then a name with a letter or digit before any comma.
+// Anything else holds nothing. `key` is the name as a verdict must write it to answer the claim; `label` is shown.
+const claimOf = body => {
+  const line = (body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n\u2028\u2029]*)/m)?.[1]?.trim()
+  const claim = line?.match(/^(`?)([0-9a-f]{7,40})\1[ \t]+by[ \t]+(\S.*)$/i)
+  const key = claim ? fullName(claim[3]) : null
+  if (!claim || !key || !/[\p{L}\p{N}]/u.test(key)) return null
+  return { sha: claim[2].toLowerCase(), key, label: claim[3].trim() }
+}
 const identityOf = text => {
   const name = fullName(text)
   if (!name) return null
@@ -155,22 +164,38 @@ export const loadReviewers = ({ read = readFileSync, path = reviewersPath } = {}
 }
 
 // A Reviewing comment with no verdict lapses after this many hours, and anyone else may take the review (team-process).
-const reviewingLapseHours = 4
-const isLapsed = (time, nowMs) => Number.isFinite(nowMs) && Number.isFinite(time) && nowMs - time > reviewingLapseHours * hour
+const reviewingLapseHours = 2
+const isLapsed = (time, nowMs) => Number.isFinite(nowMs) && Number.isFinite(time) && nowMs - time >= reviewingLapseHours * hour
 
-// Reviews taken and not yet answered, by reviewer, over every open pull request (drafts too): a Reviewing comment
-// counts until the same name posts a verdict later on that pull request, or until it lapses when nowMs is given.
+// The claims on a head that no verdict has answered, in the order they were made, each with its time. Only a verdict
+// on that head whose reviewer is written as the claim wrote it (the same fullName) answers a claim, in the same
+// comment or a later one. A lane-less, other-lane or reworded name leaves the claim to lapse instead: a live claim
+// cleared by mistake lets a second reviewer, or the lane's two-hour route, start while a review is under way.
+// A second claim by the same name on the head does not restart its two hours (owner, 2026-11-12; #1358).
+// Each `Review:` line of a comment is read on its own, so a verdict's head and its reviewer come from one line.
+// The split uses every line end the `m` flag knows (LF, CRLF, CR, U+2028, U+2029), so no chunk holds two lines.
+const headVerdictNames = (body, head) => (body ?? '').split(/\r\n|[\n\r\u2028\u2029]/)
+  .filter(line => matchesHead(head, reviewOf(line)?.sha)).map(verdictFullName).filter(Boolean)
+const openClaims = (entries, head) => {
+  let open = []
+  for (const { comment, time } of entries) {
+    const claim = claimOf(comment.body)
+    if (claim && matchesHead(head, claim.sha) && !open.some(item => item.key === claim.key)) open.push({ ...claim, time })
+    const names = headVerdictNames(comment.body, head)
+    if (names.length) open = open.filter(item => !names.includes(item.key))
+  }
+  return open
+}
+
+// Reviews taken and not yet answered, by reviewer, over every open pull request (drafts too): the open claims on
+// each pull request's current head that have not lapsed, when nowMs is given, and are not the author's own.
 export const countOpenReviews = (prs, commentsByNumber, nowMs) => {
   const counts = new Map()
   for (const pr of prs) {
-    const open = new Set()
-    for (const { comment, time } of entriesOf(commentsFor(commentsByNumber, pr.number))) {
-      const taker = reviewingName(comment.body)
-      if (taker && !isLapsed(time, nowMs)) open.add(taker)
-      const giver = verdictName(comment.body)
-      if (giver) open.delete(giver)
-    }
-    for (const name of open) counts.set(name, (counts.get(name) ?? 0) + 1)
+    const author = authorKey(pr.body ?? '') ?? pr.author?.login ?? 'unknown'
+    const open = openClaims(entriesOf(commentsFor(commentsByNumber, pr.number)), (pr.headRefOid ?? '').toLowerCase())
+      .filter(claim => !isLapsed(claim.time, nowMs) && !sameAgent(claim.key, author))
+    for (const name of new Set(open.map(claim => nameOf(claim.key) ?? claim.key))) counts.set(name, (counts.get(name) ?? 0) + 1)
   }
   return counts
 }
@@ -220,12 +245,11 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     // Agents share one GitHub login, so a Reviewing name is compared with the Author line's agent name, never the login:
     // the author's own Reviewing does not count as a review taken. The comparison keeps the dispatching lane:
     // "codex (e2e)" taking a review of "codex (phase1)" is a different agent, not the author.
-    const taking = ready ? comments.slice(ready.order + 1)
-      .map(entry => ({ name: (entry.comment.body ?? '').match(/^Reviewing:[ \t]*(\S[^\r\n]*)/m)?.[1]?.trim(), time: entry.time }))
-      .filter(entry => entry.name && !sameAgent(entry.name, item.author)).at(-1) ?? null : null
-    // A Reviewing comment past its 4 hours no longer holds the review; the queue names who let it lapse.
-    const takenBy = taking && !isLapsed(taking.time, nowMs) ? taking.name : null
-    const lapsedBy = taking && !takenBy ? taking.name : null
+    // Only an open claim on the current head is a review taken (openClaims), wherever the Ready comments for it fall.
+    const taking = ready ? openClaims(comments, head).filter(claim => !sameAgent(claim.key, item.author)).at(-1) ?? null : null
+    // A Reviewing comment past its 2 hours no longer holds the review; the queue names who let it lapse.
+    const takenBy = taking && !isLapsed(taking.time, nowMs) ? taking.label : null
+    const lapsedBy = taking && !takenBy ? taking.label : null
     // What the review bots say about the head. A missing bot review never moves a pull request between groups.
     const extras = {
       bots: { codex: codexStateOf(comments, head), codexSecurity: codexSecurityOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
@@ -239,7 +263,8 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by, item.author)) {
       // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
       // even when it arrives from the shared login. The lane is part of the identity, so "codex (e2e)" approving
-      // "codex (phase1)" counts, while a verdict with no name keeps its old reading.
+      // "codex (phase1)" counts, while a verdict with no name keeps its old reading. This checks only who the author is:
+      // whether the reviewer is one the pull request's tier allows (outside the lane, another model family) is not checked here.
       result.waitingForAuthor.push({ ...item, detail: 'approval is by the author', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.

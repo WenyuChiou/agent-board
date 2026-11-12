@@ -1,9 +1,12 @@
 # The governance files of CONTRIBUTING rule 12. Once main requires review from
 # code owners, a pull request that changes one of these waits for the owner's own
 # review on GitHub; an agent's comment cannot stand in for it.
-# No other path has an owner, so every other pull request is reviewed as before.
 /.github/CODEOWNERS @WenyuChiou
 /.github/workflows/ @WenyuChiou
 /CONTRIBUTING.md @WenyuChiou
 /docs/dev/RULES.md @WenyuChiou
 /docs/dev/team-process.md @WenyuChiou
+/docs/dev/risk-paths.md @WenyuChiou
+
+# The risk tier's path list moved to docs/dev/risk-paths.md (owner, 2026-11-12; #1358): this file names only what waits
+# for the owner's own review once main requires review from code owners.

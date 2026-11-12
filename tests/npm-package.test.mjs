@@ -76,11 +76,14 @@ test('the launcher falls back to the system language before setup', () => fixtur
   assert.doesNotMatch(missing.stderr, /not set up for this account/)
 }))
 
-test('every Quick start says how to choose the language', () => {
-  for (const [file, heading, language] of [['README.md', 'Quick start', 'en'], ['README.zh-TW.md', '快速開始', 'zh-TW'], ['README.zh-CN.md', '快速开始', 'zh-CN']]) {
+// The language flags moved from the Quick start bullets to the setup guide, which every Quick start links.
+test('the setup guide says how to choose the language, and every Quick start links it', () => {
+  const setup = readFileSync(join(repo, 'docs/SETUP.md'), 'utf8')
+  for (const language of ['en', 'zh-TW', 'zh-CN']) assert.ok(setup.includes(`--lang ${language}`), `SETUP.md explains --lang ${language}`)
+  for (const [file, heading] of [['README.md', 'Quick start'], ['README.zh-TW.md', '快速開始'], ['README.zh-CN.md', '快速开始']]) {
     const section = readFileSync(join(repo, file), 'utf8').split(`## ${heading}`)[1]?.split('\n## ')[0]
     assert.ok(section, `${file} has its Quick start section`)
-    assert.ok(section.includes(`--lang ${language}`), `${file} explains its language flag`)
+    assert.ok(section.includes('docs/SETUP.md#after-setup-per-agent'), `${file} links the setup guide`)
   }
 })
 

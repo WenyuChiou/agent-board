@@ -127,8 +127,8 @@ export const checkResults = (plan, results) => {
   return { ok: errors.length === 0, errors }
 }
 
-// The time check (#902 step 4): a board part that takes longer than its budget, or one of its files
-// longer than its own budget, fails the plan check and names the slow files. The file budgets come
+// The time check (#902 step 4): a board part over its budget fails the check. A file over 70% of
+// its budget fails a pull request and is reported on other events (#1323). The file budgets come
 // from step 1's Windows board job logs (run 41985005370, main 63c29bb, then four parts): a file's total
 // there is summed across the eight board jobs, so one job's share is the total / 8 for a self-parted file (a quarter
 // of its tests in every job) and / 2 for a file that runs in one part per Node version. Each budget
@@ -136,16 +136,23 @@ export const checkResults = (plan, results) => {
 // board files step 1 never measured (added since) and keeps a small file from tripping on runner
 // jitter — the slowest unmeasured file, mcp-tools, took 12.6 s on a Linux VM. Step 1 predates #957's
 // speedups, so the budgets are upper bounds for the four files it touched, not tight fits.
+// Re-derived (#1364): a budget of 1.5x one run puts its 70% line at 1.05x that run, while the same file on the
+// same code varies far more between Windows runs (legacy-connect 105.6-148.0 s, prompt-hooks 29.1-46.2 s in the
+// six test runs after #1361), so pull requests failed on runner speed alone. Every file whose slowest Windows
+// Node 24 time in those runs, x 1.3, was over its 70% line now has budget = that slowest time x 1.3 / 0.7,
+// rounded up to five seconds (board and codex-local: one part's share): it fails a pull request only when it
+// runs 30% slower than its slowest recent run. page-regressions (6.5 s at most) keeps its old budget.
 export const BOARD_FILE_BUDGETS_MS = Object.freeze({
-  'tests/codex-local.test.mjs': 170_000,
-  'tests/board.test.mjs': 140_000,
-  'tests/legacy-connect.test.mjs': 185_000,
+  'tests/codex-local.test.mjs': 225_000, // slowest 120.4 s
+  'tests/board.test.mjs': 200_000, // slowest 105.5 s
+  'tests/legacy-connect.test.mjs': 275_000, // slowest 148.0 s
   'tests/page-regressions.test.mjs': 90_000,
-  'tests/codex-fallback.test.mjs': 80_000,
-  'tests/prompt-hooks.test.mjs': 65_000,
-  // Grew past the floor with #1162's terminal setup tests: 45.3 s and 52.3 s in the two Windows
-  // runs of main a89f4199 (run 42472161465, Node 22 and 24), x 1.5 and rounded up (#1159).
-  'tests/setup-guidance.test.mjs': 80_000,
+  'tests/codex-fallback.test.mjs': 115_000, // slowest 60.0 s
+  'tests/prompt-hooks.test.mjs': 90_000, // slowest 46.2 s
+  // Grew past the floor with #1162's terminal setup tests (#1159); slowest 52.6 s after #1361.
+  'tests/setup-guidance.test.mjs': 100_000,
+  'tests/host-upgrade.test.mjs': 80_000, // slowest 42.6 s
+  'tests/setup-terminal.test.mjs': 70_000, // slowest 36.0 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
@@ -158,20 +165,26 @@ export const BOARD_PART_BUDGET_MS = 480_000
 
 const seconds = ms => (ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)
 
-export const checkBoardTimes = timings => {
+export const checkBoardTimes = (timings, { isPullRequest = true } = {}) => {
   const errors = []
-  if (!timings || typeof timings !== 'object' || !Array.isArray(timings.files) || typeof timings.totalMs !== 'number') return { ok: false, errors: ['missing or invalid board timings'] }
+  const warnings = []
+  if (!timings || typeof timings !== 'object' || !Array.isArray(timings.files) || typeof timings.totalMs !== 'number') return { ok: false, errors: ['missing or invalid board timings'], warnings }
   const boardFiles = timings.files.filter(file => groupForTest(file.path) === 'board')
   const timed = boardFiles.filter(file => typeof file.ms === 'number')
   for (const file of timed) {
     const budget = BOARD_FILE_BUDGETS_MS[file.path] ?? BOARD_FILE_BUDGET_DEFAULT_MS
-    if (file.ms > budget) errors.push(file.path + ' took ' + seconds(file.ms) + 's, over its ' + seconds(budget) + 's budget')
+    const limit = budget * 7 / 10
+    if (file.ms > limit) {
+      const message = file.path + ' took ' + seconds(file.ms) + 's, over 70% of its ' + seconds(budget) + 's budget (' + seconds(limit) + 's)'
+      if (isPullRequest) errors.push(message)
+      else warnings.push(message)
+    }
   }
   if (boardFiles.length && timings.totalMs > BOARD_PART_BUDGET_MS) {
     const slowest = [...timed].sort((a, b) => b.ms - a.ms).slice(0, 5)
     errors.push('board part ' + (timings.part || '1/1') + ' took ' + seconds(timings.totalMs) + 's, over its ' + seconds(BOARD_PART_BUDGET_MS) + 's budget' + (slowest.length ? '; slowest files: ' + slowest.map(file => file.path + ' ' + seconds(file.ms) + 's').join(', ') : ''))
   }
-  return { ok: errors.length === 0, errors }
+  return { ok: errors.length === 0, errors, warnings }
 }
 
 // Where one run leaves its per-file times for the time check step below: the runner's temp folder
@@ -458,10 +471,11 @@ const main = async () => {
       }
       throw error
     }
-    const result = checkBoardTimes(timings)
+    const result = checkBoardTimes(timings, { isPullRequest: process.env.GITHUB_EVENT_NAME === 'pull_request' })
     const slowest = (timings.files ?? []).filter(file => typeof file.ms === 'number').sort((a, b) => b.ms - a.ms).slice(0, 3)
     console.log('board part ' + (timings.part || '1/1') + ': total ' + seconds(timings.totalMs) + 's of ' + seconds(BOARD_PART_BUDGET_MS) + 's budget' + (slowest.length ? '; slowest files: ' + slowest.map(file => file.path + ' ' + seconds(file.ms) + 's').join(', ') : '; per-file times are recorded on serial runs only'))
     for (const error of result.errors) console.log('time budget: ' + error)
+    for (const warning of result.warnings) console.log('time budget (reported only): ' + warning)
     if (!result.ok) process.exitCode = 1
     return
   }

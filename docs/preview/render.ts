@@ -1438,25 +1438,25 @@ ${lanes}
 `
 }
 
-// The same board in three places, side by side: the page in a browser, the terminal board, and the
+// The same board in three places, in two rows: the page in a browser, the terminal board, and the
 // pane beside Claude Code's chat; and a phone, which on the local network only views.
 const PLACES_WORDS: Record<Lang, { title: string; names: [string, string, string, string]; phone: string; label: string }> = {
   en: {
     title: 'Same board, three places',
     names: ['Browser', 'Terminal', 'Beside Claude Code’s chat', 'Phone'],
-    phone: 'View only on Wi-Fi',
+    phone: 'No sending on Wi-Fi',
     label: 'The same board in a browser, in a terminal and in the pane beside Claude Code’s chat; a phone on the same Wi-Fi can view it but not send. Synthetic data.',
   },
   'zh-TW': {
     title: '同一塊看板，三個地方',
     names: ['瀏覽器', '終端機', 'Claude Code 對話旁', '手機'],
-    phone: '同一個 Wi-Fi 下只能看',
+    phone: '同一個 Wi-Fi 下不能傳送',
     label: '同一塊看板，可以在瀏覽器、終端機，或 Claude Code 對話旁的面板打開；同一個 Wi-Fi 的手機可以看，但不能傳送。合成資料。',
   },
   'zh-CN': {
     title: '同一块看板，三个地方',
     names: ['浏览器', '终端', 'Claude Code 对话旁', '手机'],
-    phone: '同一个 Wi-Fi 下只能看',
+    phone: '同一个 Wi-Fi 下不能发送',
     label: '同一块看板，可以在浏览器、终端，或 Claude Code 对话旁的面板打开；同一个 Wi-Fi 的手机可以看，但不能发送。合成数据。',
   },
 }
@@ -1476,47 +1476,57 @@ const places = (lang: Lang): string => {
   const sample = PAGE[lang] as PageSample
   const w = PLACES_WORDS[lang]
   const W = 1280
-  const H = 520
-  const floor = 424
-  const gap = 44
-  const term = cliBoard(lang, 'dark', 'codex')
-  const side = pane(lang, 'dark')
-  const k = 0.6
-  const termBox = placed(term, 0, 0, k)
-  const sideBox = placed(side, 0, 0, k)
-  const pageW = 300
+  // Two rows of two, so each place is drawn near its own size and its words can still be read in a
+  // README 860 pixels wide: the browser and the phone on top, the terminal and the pane below. In one
+  // row of four the words came out a third of their size.
+  const gap = 96
+  const top = 96
+  const rowGap = 104
+  const pageW = 700
   const pageK = pageW / 740
   const pageH = 576 * pageK
   const phone = { w: 132, h: 266 }
-  const total = pageW + termBox.w + sideBox.w + phone.w + gap * 3
-  const x0 = (W - total) / 2
-  const xs = [x0, x0 + pageW + gap, x0 + pageW + gap + termBox.w + gap, x0 + pageW + gap + termBox.w + gap + sideBox.w + gap]
-  const [px, tx, sx, fx] = xs as [number, number, number, number]
-  const pageSvg = `<g transform="translate(${num(px)} ${num(floor - pageH)}) scale(${Math.round(pageK * 10000) / 10000})">${browser('mini', 0, 0, 740, 576, tabFace(s.pgTabTitle(1), true), pageAsking(lang, 740), false)}</g>`
-  const termSvg = placed(term, tx, floor - termBox.h, k).svg
-  const sideSvg = placed(side, sx, floor - sideBox.h, k).svg
-  // The phone: the page narrowed, with Claude Code's question and Copy, since the network page cannot send.
-  const fy = floor - phone.h
+  const phoneK = 1.9
+  const term = cliBoard(lang, 'dark', 'codex')
+  const side = pane(lang, 'dark')
+  const termK = 1
+  const sideK = 0.9
+  const termBox = placed(term, 0, 0, termK)
+  const sideBox = placed(side, 0, 0, sideK)
+  const floor1 = top + Math.max(pageH, phone.h * phoneK)
+  const floor2 = floor1 + rowGap + Math.max(termBox.h, sideBox.h)
+  const H = Math.round(floor2 + 84)
+  const row1 = pageW + gap + phone.w * phoneK
+  const row2 = termBox.w + gap + sideBox.w
+  const px = (W - row1) / 2
+  const fx = px + pageW + gap
+  const tx = (W - row2) / 2
+  const sx = tx + termBox.w + gap
+  const pageSvg = `<g transform="translate(${num(px)} ${num(floor1 - pageH)}) scale(${Math.round(pageK * 10000) / 10000})">${browser('mini', 0, 0, 740, 576, tabFace(s.pgTabTitle(1), true), pageAsking(lang, 740), false)}</g>`
+  const termSvg = placed(term, tx, floor2 - termBox.h, termK).svg
+  const sideSvg = placed(side, sx, floor2 - sideBox.h, sideK).svg
+  // The phone, drawn at its own size and scaled: the page narrowed, with Claude Code's question and
+  // Copy, since the network page cannot send.
   const q = sample.question
-  const sx2 = fx + 12
+  const sx2 = 12
   const sw = phone.w - 24
   const copyW = Math.round(textW(s.serveCopy, 11) + 22)
-  const phoneSvg = `<g filter="url(#soft)"><rect x="${fx}" y="${fy}" width="${phone.w}" height="${phone.h}" rx="22" fill="${LOOK.ground}"/></g>
-<rect x="${fx + 0.75}" y="${fy + 0.75}" width="${phone.w - 1.5}" height="${phone.h - 1.5}" rx="21.25" fill="none" stroke="${LOOK.strong}" stroke-width="1.5"/>
-<rect x="${fx + phone.w / 2 - 18}" y="${fy + 9}" width="36" height="8" rx="4" fill="${LOOK.surface}"/>
-${lockupAt(sx2, fy + 30, 9, LOOK.amber)}
-<line x1="${fx + 1}" y1="${fy + 48}" x2="${fx + phone.w - 1}" y2="${fy + 48}" stroke="${LOOK.line}"/>
-<path d="M${sx2} ${fy + 62}h${textW(s.pgNeeds, 10, 600) + 30}l-5 8l5 8h-${textW(s.pgNeeds, 10, 600) + 30}z" fill="${LOOK.amber}"/><text x="${sx2 + 6}" y="${fy + 74}" font-size="10" font-weight="600" fill="${LOOK.onAmber}">${esc(s.pgNeeds)}<tspan dx="5" font-weight="700">1</tspan></text>
-<rect x="${sx2}" y="${fy + 78}" width="${sw}" height="96" rx="8" fill="${LOOK.surface}" stroke="${LOOK.strong}"/>
-${iconTile('Claude Code', sx2 + 9, fy + 88, 16)}
-<text x="${sx2 + 31}" y="${fy + 100}" font-size="9" font-weight="600" fill="${LOOK.ink}">Claude Code</text>
-<text x="${sx2 + 9}" y="${fy + 127}" font-size="13" font-weight="600" fill="${LOOK.ink}">${esc(q)}</text>
-<rect x="${sx2 + 9}" y="${fy + 140}" width="${copyW}" height="24" rx="7" fill="${LOOK.surface}" stroke="${LOOK.ink}" stroke-opacity="0.5"/><text x="${num(sx2 + 9 + copyW / 2)}" y="${fy + 156}" text-anchor="middle" font-size="11" fill="${LOOK.ink}">${esc(s.serveCopy)}</text>
-${[0, 1].map(i => `<rect x="${sx2}" y="${fy + 186 + i * 34}" width="${sw}" height="26" rx="7" fill="${LOOK.surface}" stroke="${LOOK.line}"/><rect x="${sx2 + 8}" y="${fy + 194 + i * 34}" width="${i === 0 ? 58 : 44}" height="4" rx="2" fill="${LOOK.ink}" fill-opacity="0.5"/><rect x="${sx2 + 8}" y="${fy + 202 + i * 34}" width="${i === 0 ? 36 : 52}" height="3" rx="1.5" fill="${LOOK.ink}" fill-opacity="0.2"/>`).join('')}
-<rect x="${fx + phone.w / 2 - 22}" y="${fy + phone.h - 10}" width="44" height="3" rx="1.5" fill="${LOOK.ink}" fill-opacity="0.35"/>`
-  const centres = [px + pageW / 2, tx + termBox.w / 2, sx + sideBox.w / 2, fx + phone.w / 2]
-  const names = w.names.map((name, i) => `<text x="${num(centres[i] ?? 0)}" y="${floor + 40}" text-anchor="middle" font-size="16" font-weight="600" fill="${LOOK.ink}">${esc(name)}</text>`).join('')
-  const phoneNote = `<text x="${num(centres[3] ?? 0)}" y="${floor + 62}" text-anchor="middle" font-size="13" fill="${LOOK.muted}">${esc(w.phone)}</text>`
+  const phoneSvg = `<g transform="translate(${num(fx)} ${num(floor1 - phone.h * phoneK)}) scale(${phoneK})"><g filter="url(#soft)"><rect width="${phone.w}" height="${phone.h}" rx="22" fill="${LOOK.ground}"/></g>
+<rect x="0.75" y="0.75" width="${phone.w - 1.5}" height="${phone.h - 1.5}" rx="21.25" fill="none" stroke="${LOOK.strong}" stroke-width="1.5"/>
+<rect x="${phone.w / 2 - 18}" y="9" width="36" height="8" rx="4" fill="${LOOK.surface}"/>
+${lockupAt(sx2, 30, 9, LOOK.amber)}
+<line x1="1" y1="48" x2="${phone.w - 1}" y2="48" stroke="${LOOK.line}"/>
+<path d="M${sx2} 62h${textW(s.pgNeeds, 10, 600) + 30}l-5 8l5 8h-${textW(s.pgNeeds, 10, 600) + 30}z" fill="${LOOK.amber}"/><text x="${sx2 + 6}" y="74" font-size="10" font-weight="600" fill="${LOOK.onAmber}">${esc(s.pgNeeds)}<tspan dx="5" font-weight="700">1</tspan></text>
+<rect x="${sx2}" y="78" width="${sw}" height="96" rx="8" fill="${LOOK.surface}" stroke="${LOOK.strong}"/>
+${iconTile('Claude Code', sx2 + 9, 88, 16)}
+<text x="${sx2 + 31}" y="100" font-size="9" font-weight="600" fill="${LOOK.ink}">Claude Code</text>
+<text x="${sx2 + 9}" y="127" font-size="13" font-weight="600" fill="${LOOK.ink}">${esc(q)}</text>
+<rect x="${sx2 + 9}" y="140" width="${copyW}" height="24" rx="7" fill="${LOOK.surface}" stroke="${LOOK.ink}" stroke-opacity="0.5"/><text x="${num(sx2 + 9 + copyW / 2)}" y="156" text-anchor="middle" font-size="11" fill="${LOOK.ink}">${esc(s.serveCopy)}</text>
+${[0, 1].map(i => `<rect x="${sx2}" y="${186 + i * 34}" width="${sw}" height="26" rx="7" fill="${LOOK.surface}" stroke="${LOOK.line}"/><rect x="${sx2 + 8}" y="${194 + i * 34}" width="${i === 0 ? 58 : 44}" height="4" rx="2" fill="${LOOK.ink}" fill-opacity="0.5"/><rect x="${sx2 + 8}" y="${202 + i * 34}" width="${i === 0 ? 36 : 52}" height="3" rx="1.5" fill="${LOOK.ink}" fill-opacity="0.2"/>`).join('')}
+<rect x="${phone.w / 2 - 22}" y="${phone.h - 10}" width="44" height="3" rx="1.5" fill="${LOOK.ink}" fill-opacity="0.35"/></g>`
+  const spots: [number, number][] = [[px + pageW / 2, floor1], [tx + termBox.w / 2, floor2], [sx + sideBox.w / 2, floor2], [fx + (phone.w * phoneK) / 2, floor1]]
+  const names = w.names.map((name, i) => `<text x="${num(spots[i]?.[0] ?? 0)}" y="${num((spots[i]?.[1] ?? 0) + 40)}" text-anchor="middle" font-size="18" font-weight="600" fill="${LOOK.ink}">${esc(name)}</text>`).join('')
+  const phoneNote = `<text x="${num(spots[3]?.[0] ?? 0)}" y="${num(floor1 + 64)}" text-anchor="middle" font-size="14" fill="${LOOK.muted}">${esc(w.phone)}</text>`
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(w.label)}" font-family="${sansOf(lang)}">
 <title>${esc(w.title)}</title>
 <defs>${lookDefs(W, H, [0.5, 0.3])}<radialGradient id="floor"><stop offset="0" stop-color="#000" stop-opacity="0.45"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient></defs>
@@ -1524,7 +1534,8 @@ ${[0, 1].map(i => `<rect x="${sx2}" y="${fy + 186 + i * 34}" width="${sw}" heigh
 ${lookGround(W, H)}
 ${eyebrow(48, 52, w.title, lang)}
 <text x="${W - 48}" y="52" text-anchor="end" font-size="12" fill="${LOOK.muted}" fill-opacity="0.7">${esc(COVER_WORDS[lang].synthetic)}</text>
-<ellipse cx="${W / 2}" cy="${floor + 2}" rx="${total / 2 + 60}" ry="16" fill="url(#floor)"/>
+<ellipse cx="${W / 2}" cy="${num(floor1 + 2)}" rx="${num(row1 / 2 + 60)}" ry="16" fill="url(#floor)"/>
+<ellipse cx="${W / 2}" cy="${num(floor2 + 2)}" rx="${num(row2 / 2 + 60)}" ry="16" fill="url(#floor)"/>
 ${pageSvg}
 <g filter="url(#soft)">${termSvg}</g>
 <g filter="url(#soft)">${sideSvg}</g>

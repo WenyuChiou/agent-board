@@ -204,7 +204,8 @@ export const ZH_TW = {
     "keptData": "保留 {progress} 旁邊的資料與歷史紀錄（回答、提問、日誌、歸檔、工作階段）：",
     "applyRemove": "套用此移除變更：{command}",
     "restartRemove": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
-    "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。"
+    "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
+    "directRemoved": "直接執行的 node 指令已無法使用；請改用 {command}。"
   },
   setupNoAgent: {
     "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
@@ -914,6 +915,7 @@ export const ZH_TW = {
   pasteNoBlock: '找不到開頭 <!-- auto … --> 和結尾 <!-- /auto … --> 都在的區塊。',
   pasteMixed: '開頭和結尾標記的 session id 不一樣。',
   pasteBadBlock: '開頭標記的下一行要是「### 標題」；區塊裡不能有 ```、<!-- -->、# 標題或第二個區塊。',
+  pasteReservedAgent: '代理名稱「claude」保留給 Claude Code 使用。請網頁聊天改用「claude-web」，再貼一次。',
   pasteNoProject: '新區塊的第一行要寫「## 專案名稱」。',
   pasteNotYours: '這個 id 屬於本機回報器、有續接資訊的 session、另一個 agent，或沒有結尾標記的區塊，不能蓋掉。',
   pasteBadTime: '來源時間缺少或無效。請回報者提供目前完整進度，updated= 使用真實 UTC 時間並以 Z 結尾，再貼一次。',

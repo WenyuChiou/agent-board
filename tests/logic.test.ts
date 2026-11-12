@@ -1,5 +1,6 @@
 import { emptyQuestions, observeQuestions } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
+import { countedText } from './fixtures/counted-work'
 
 import type { ProgressMirror } from '../types'
 import { archivableAsking, countManualDone, confirmTask, extractAutoBlock, removeAutoBlock, renderAutoBlock, scanBlocks, setManualStep, stateWords, takeArchivable, takeManualDone, takeTask, upsertAutoBlock, cutEntries, stepWords } from '../hooks/blocks'
@@ -984,7 +985,7 @@ test('tasks already seen done before the upgrade get their three days from the f
   }
 })
 
-test('a sweep over the synthetic big board counts in under a second and moves nothing open', () => {
+test('a sweep over the synthetic big board visits each task once, scans bounded text and moves nothing open', () => {
   const day = 24 * HOUR
   const marks = [' ', '~', '?', '>', '!']
   const appended = Array.from({ length: 40 }, (_, index) => `### Synthetic completion ${index}\n- [x] Finished\n- [${index < 30 ? '-' : marks[(index - 30) % marks.length]}] Last step\n`).join('')
@@ -992,12 +993,25 @@ test('a sweep over the synthetic big board counts in under a second and moves no
   const projects = parseProgress(text)
   const seen = { ...withSeen({}, projects, BIG_AT - 30 * day), [SWEEP_ARMED_KEY]: BIG_AT - 4 * day }
   const age = (_key: string, project: string, task: typeof projects[number]['tasks'][number]) => handKeptSeenAt(seen, project, task, BIG_AT)
-  const countStart = Date.now()
-  const count = countManualDone(projects, BIG_AT, age)
-  expect(Date.now() - countStart).toBeLessThan(1000)
-  const takeStart = Date.now()
-  const out = takeManualDone(text, BIG_AT, age)
-  expect(Date.now() - takeStart).toBeLessThan(1000)
+  let visits = 0
+  const counted = projects.map(project => ({ ...project, tasks: project.tasks.map(task => ({
+    ...task,
+    get auto() {
+      visits += 1
+      return task.auto
+    },
+  })) }))
+  const count = countManualDone(counted, BIG_AT, age)
+  expect(visits).toBe(projects.reduce((sum, project) => sum + project.tasks.length, 0))
+  let observations = 0
+  const taken = countedText(text)
+  const out = takeManualDone(taken.text, BIG_AT, (key, project, task) => {
+    observations += 1
+    return age(key, project, task)
+  })
+  expect(observations).toBe(count)
+  // Re-reading the whole board for each of its thirty completions breaks this work bound.
+  expect(taken.work.splits).toBe(3)
   expect(count).toBe(30)
   expect(out.entries).toHaveLength(count)
   for (const entry of out.entries) expect(entry).not.toMatch(/- \[[ ~?>!]\]/)
