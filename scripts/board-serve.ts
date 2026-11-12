@@ -336,6 +336,9 @@ export const startServer = (o: ServeOptions): void => {
   const pageSecrets = new Map<string, { pairedAt: number; seen: number; watched: number }>()
   // A pairing key used twice: no page answers approvals again until the board restarts.
   let isApprovalOff = false
+  // A host asked for an approval since the board started: only then does an open page that cannot
+  // answer one make the board script open another.
+  let hasAsked = false
   const secretMs = o.approvalTimes?.secretMs ?? APPROVAL_SECRET_MS
   const graceMs = o.approvalTimes?.graceMs ?? APPROVAL_GRACE_MS
   // The sessions whose first press the person confirmed on the page.
@@ -563,9 +566,10 @@ export const startServer = (o: ServeOptions): void => {
         }
       }
       // Only the board script on the computer asks; the answer names progress.md's path.
-      // wantsKeyedPage: no open page can answer approvals, so the board script opens one with a key
-      // rather than pointing at a page that cannot. A paired page that is only hidden still can.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size, pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && !hasLiveSecret(Date.now()) })
+      // wantsKeyedPage: approvals are in use and no open page can answer them, so the board script
+      // opens one with a key rather than pointing at a page that cannot. A paired page that is only
+      // hidden still can; before any host asked, the page that is open is enough.
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size, pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && hasAsked && !hasLiveSecret(Date.now()) })
       return json(res, 404, {})
     }
     const body = await readBody(req)
@@ -592,6 +596,7 @@ export const startServer = (o: ServeOptions): void => {
         if (ask === null) return json(res, 400, {})
         // No decision where the host would not ask the person: refused, and nothing is shown.
         if (!isAskingMode(ask.mode)) return json(res, 403, {})
+        hasAsked = true
         // Approvals turned off, or too many kept: the host asks in its own window. Requests already
         // answered in their windows make room first.
         if (isApprovalOff) return json(res, 200, {})

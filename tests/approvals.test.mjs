@@ -257,6 +257,8 @@ test('the first press for a session waits for the confirm on the page, and later
 
 test('with no page the board opened, the hook returns at once and the row says asked in its window', async () => {
   const board = await startBoard()
+  // Before any host asks, a page that is open is enough: the board script opens no other.
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
   const alone = await runHook(board, request('npm run synthetic-no-page')).done
   assert.equal(alone.code, 0)
   assert.equal(alone.decision, null)
