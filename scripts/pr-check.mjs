@@ -146,6 +146,7 @@ export const authorLine = (body, branch) => {
     output.problems.push(problem('author', 'the Author line needs "<agent>, <branch>", with the comma.', 'write "Author: <your agent name>, <this branch>".'))
   } else {
     output.agent = name.split(/\s+/)[0].toLowerCase()
+    output.name = name
   }
   if (!namesBranch(comma === -1 ? author : author.slice(comma + 1), branch)) {
     output.problems.push(problem('author', 'the Author line does not name this pull request branch.', 'put the exact current branch on the Author line, optionally in backticks.'))
@@ -596,14 +597,25 @@ export const binaryImages = paths => {
 
 export const reviewOf = item => {
   if (!item) return null
+  // A GitHub review that requests changes holds the merge whatever its text quotes.
+  if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
+    const reviewer = item.user?.login ?? null
+    return { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
+  }
   const body = typeof item === 'string' ? item : item.body ?? ''
-  const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
+  // A request for changes anywhere in a comment holds the merge. Otherwise the first full-sha approval counts, since
+  // a short approval is no verdict under R2; a comment with only short approvals keeps its first one.
+  const matches = [...body.matchAll(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+)(?:,[ \t]*([^\r\n,']+)'s reviewer\b)?)?/gmi)]
+  const match = matches.find(found => found[1].toUpperCase() === 'REQUEST CHANGES') ?? matches.find(found => found[2].length === 40) ?? matches[0]
   if (match) {
     const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
+    // R2's exception: a lane posts its own fresh reviewer's verdict as `by <reviewer and model>, <lane>'s reviewer`.
+    const lane = match[4]?.trim()
     return {
       kind: match[1].toUpperCase(),
       sha: match[2].toLowerCase(),
       ...(reviewer ? { reviewer } : {}),
+      ...(lane ? { lane } : {}),
     }
   }
   if (typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
@@ -617,16 +629,32 @@ export const reviewOf = item => {
   return null
 }
 
+// Comments and GitHub reviews come from two lists; the latest verdict is the latest by time, not by list. From
+// GitHub every comment and submitted review has a time, so an item without one (a pending review) is no verdict yet.
+// At the same time a request for changes goes last, so a tie never lets an approval through.
+// Items with no times at all (a local run's synthetic list) keep their order.
+export const byTime = items => {
+  const at = item => Date.parse(item?.created_at ?? item?.submitted_at ?? '')
+  const holds = item => reviewOf(item)?.kind === 'REQUEST CHANGES' ? 1 : 0
+  if (!items.some(item => !Number.isNaN(at(item)))) return items
+  return items.filter(item => !Number.isNaN(at(item))).sort((a, b) => at(a) - at(b) || holds(a) - holds(b))
+}
+
 export const verdict = (comments, head, options = {}) => {
   const output = result()
-  const { isDraft = false, authorAgent = null, number = null } = options
-  const reviews = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
+  const { isDraft = false, authorAgent = null, authorName = null, number = null, isRelease = false, isOutside = false } = options
+  const all = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
+  // R2 asks for the full head sha, so an approval naming a prefix is not a verdict; an earlier full one still stands.
+  const reviews = all.filter(review => review.kind !== 'APPROVE' || review.sha.length === 40)
   const last = reviews.at(-1)
 
   if (!last) {
-    output.info.push('review: no review verdict yet.')
+    const short = all.at(-1)
+    output.info.push(short ? `review: APPROVE names ${short.sha.slice(0, 7)} without the full head sha.` : 'review: no review verdict yet.')
     if (!isDraft && number !== null) {
-      output.problems.push(problem('review', 'a ready pull request needs a qualifying review approval on the current head.', 'request a review and post "Review: APPROVE <head> by <reviewer>".'))
+      output.problems.push(short
+        ? problem('review', 'the approval does not name the full 40-character head sha (RULES.md, R2).', `post "Review: APPROVE ${head} by <reviewer>".`)
+        : problem('review', 'a ready pull request needs a qualifying review approval on the current head.', 'request a review and post "Review: APPROVE <head> by <reviewer>".'))
     }
     return output
   }
@@ -648,7 +676,14 @@ export const verdict = (comments, head, options = {}) => {
     return output
   }
 
-  if (authorAgent && last.reviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())) {
+  // The lane-reviewer form names the author's own lane: it counts on that lane's pull requests only, never on a
+  // release or a pull request from outside the team (R2).
+  // A reviewer named only as the author (the agent word, or the whole name on the Author line) is the author,
+  // whatever lane it claims. The checker cannot prove a reviewer is independent; R2's form is the lane's word.
+  const words = text => String(text ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  const isAuthorLane = Boolean(authorAgent && last.lane && [authorAgent, authorName].some(own => own && words(last.lane) === words(own)))
+  const isAuthorOnly = Boolean(authorAgent && last.reviewer && [authorAgent, authorName].some(own => own && words(last.reviewer) === words(own)))
+  if (authorAgent && last.reviewer && (isAuthorOnly || (isAuthorLane ? isRelease || isOutside : last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())))) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
       output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer.'))
@@ -723,7 +758,7 @@ export const checkPr = data => {
     add(outsideNotes({ paths: data.paths, numstat: data.numstat }))
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
-  else add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number }))
+  else add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, authorName: author.name ?? null, number: data.number, isRelease, isOutside }))
   if (data.isDraft) output.info.push(`draft: the reviewer starts when you run \`gh pr ready ${data.number}\` and comment \`Ready for review ${data.head}\`.`)
   return output
 }
@@ -998,15 +1033,10 @@ export const main = async (argv = process.argv.slice(2)) => {
       if (data.number === null) data.prComments = []
       else {
         const comments = await api(`issues/${data.number}/comments`, { isList: true })
-        const hasApproval = (Array.isArray(comments) ? comments : []).some(c => {
-          const r = reviewOf(c)
-          return r && r.kind === 'APPROVE'
-        })
-        let reviews = []
-        if (!hasApproval) {
-          try { reviews = await api(`pulls/${data.number}/reviews`, { isList: true }) } catch {}
-        }
-        data.prComments = [...(Array.isArray(comments) ? comments : []), ...(Array.isArray(reviews) ? reviews : [])]
+        // GitHub reviews are always read, so one that requests changes after an approval comment is not missed; a
+        // failed read fails the check like any other lookup, rather than counting as no reviews.
+        const reviews = await api(`pulls/${data.number}/reviews`, { isList: true })
+        data.prComments = byTime([...(Array.isArray(comments) ? comments : []), ...(Array.isArray(reviews) ? reviews : [])])
       }
     }
     const checked = checkPr(data)

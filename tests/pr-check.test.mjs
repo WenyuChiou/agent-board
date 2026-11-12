@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkPr,
   isOutsideAssociation, isSmallDocsFix, issueLine, main, naming, needsBundle, outsideClaim,
-  privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
+  byTime, privateData, report, reportMarkdown, reviewOf, rulesPage, sections, stripComments, testTitles, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -580,9 +580,12 @@ test('pr-check reports the last review verdict and distinguishes current and old
   const head = syntheticPr().head
   const comments = [{ body: 'Review: APPROVE 1234567' }, { body: `Review: REQUEST CHANGES ${head}` }]
   assert.match(verdict(comments, head).info[0], /REQUEST CHANGES.*current head/)
-  assert.match(verdict(comments.slice(0, 1), head).info[0], /older head/)
+  assert.match(verdict(comments.slice(0, 1), head).info[0], /without the full head sha/)
   assert.match(verdict([], head).info[0], /no review verdict/)
-  assert.deepEqual(reviewOf('Checks complete\nReview: APPROVE ABCDEF0\nReview: REQUEST CHANGES 1234567'), { kind: 'APPROVE', sha: 'abcdef0' })
+  // The first verdict line counts, but a short approval is no verdict (R2), so the next line of the comment does.
+  assert.deepEqual(reviewOf('Checks complete\nReview: APPROVE ABCDEF0\nReview: REQUEST CHANGES 1234567'), { kind: 'REQUEST CHANGES', sha: '1234567' })
+  assert.deepEqual(reviewOf('Checks complete\nReview: REQUEST CHANGES ABCDEF0\nReview: APPROVE 1234567'), { kind: 'REQUEST CHANGES', sha: 'abcdef0' })
+  assert.deepEqual(reviewOf('Review: APPROVE ABCDEF0'), { kind: 'APPROVE', sha: 'abcdef0' })
   assert.deepEqual(reviewOf('Review: REQUEST CHANGES `ABCDEF0`'), { kind: 'REQUEST CHANGES', sha: 'abcdef0' })
   assert.equal(reviewOf('Checks complete without a verdict'), null)
   assert.match(verdict([{ body: `Checks complete\nReview: REQUEST CHANGES \`${head}\`` }], head).info[0], /REQUEST CHANGES.*current head/)
@@ -632,6 +635,102 @@ test('approval gate: a ready pull request requires a qualifying review approval 
     prComments: [{ body: 'Review: APPROVE 0031e5df25a34216c69c7421d21c0c301d8c7c68 by R2 reviewer (antigravity)' }]
   })
   assert.ok(pr1189.problems.some(p => p.check === 'review' && p.message.includes('RULES.md, R2')))
+})
+
+test('approval gate: an approval needs the full head sha, and a lane\'s own fresh reviewer is not refused for sharing the author\'s name (#1257)', () => {
+  const head = syntheticPr().head
+  const codexPr = { ...syntheticPr(), body: 'Author: codex, fix/test-branch\n\n' + syntheticPr().body, prComments: [] }
+  const reviewProblems = data => checkPr(data).problems.filter(p => p.check === 'review')
+
+  // A seven-character prefix of the head is not the full sha R2 asks for.
+  const short = reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark, Muse's reviewer` }] })
+  assert.ok(short.some(p => p.message.includes('full 40-character head sha')), JSON.stringify(short))
+  assert.equal(reviewProblems({ ...codexPr, isDraft: true, prComments: [{ body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark` }] }).length, 0)
+
+  // The lane's own fresh reviewer, posted in R2's form, counts even though its name contains the author's.
+  assert.deepEqual(reviewOf(`Review: APPROVE ${head} by Codex gpt-6.1-terra, codex's reviewer`), { kind: 'APPROVE', sha: head.toLowerCase(), reviewer: 'Codex gpt-6.1-terra', lane: 'codex' })
+  assert.equal(reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, codex's reviewer` }] }).length, 0)
+
+  // Without that form, a reviewer named like the author is still refused.
+  const self = reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, read in full` }] })
+  assert.ok(self.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(self))
+
+  // The form counts only for the author's own lane, and never on a release or a pull request from outside the team.
+  const laneApproval = { body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, codex's reviewer` }
+  const otherLane = reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, muse's reviewer` }] })
+  assert.ok(otherLane.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(otherLane))
+  const release = reviewProblems({ ...codexPr, title: 'chore(release): Agent Board 9.9.9', prComments: [laneApproval] })
+  assert.ok(release.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(release))
+  const outside = reviewProblems({ ...codexPr, association: 'CONTRIBUTOR', prComments: [laneApproval] })
+  assert.ok(outside.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(outside))
+  // The form names the author's lane whatever the reviewer is called.
+  const namedOtherwise = { body: `Review: APPROVE ${head} by Claude Opus, codex's reviewer` }
+  assert.ok(reviewProblems({ ...codexPr, title: 'chore(release): Agent Board 9.9.9', prComments: [namedOtherwise] }).some(p => p.message.includes('RULES.md, R2')))
+  assert.equal(reviewProblems({ ...codexPr, prComments: [namedOtherwise] }).length, 0)
+
+  const shortComment = { body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark` }
+  // At the same second, a request for changes goes after an approval, whichever list each came from.
+  const tied = byTime([
+    { body: `Review: APPROVE ${head} by independent\nReview: REQUEST CHANGES ${head} by reviewer`, created_at: '2026-11-10T08:00:00Z' },
+    { body: `Review: REQUEST CHANGES ${head} by reviewer\nP1: synthetic finding`, created_at: '2026-11-10T09:00:00Z' },
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T09:00:00Z' },
+  ])
+  assert.ok(reviewProblems({ ...codexPr, prComments: tied }).some(p => p.message.includes('requested changes')), JSON.stringify(tied))
+
+  // Comments and GitHub reviews are read in time order, so an older GitHub approval does not clear a later request for changes.
+  const merged = byTime([
+    { body: `Review: REQUEST CHANGES ${head} by Muse Spark`, created_at: '2026-11-10T09:00:00Z' },
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T08:00:00Z' },
+  ])
+  assert.ok(reviewProblems({ ...codexPr, prComments: merged }).some(p => p.message.includes('requested changes')))
+  const undated = [{ body: 'a' }, { body: 'b' }]
+  assert.deepEqual(byTime(undated), undated)
+  // A pending review has no time yet and is no verdict, so it does not stop the others being read in order.
+  const withPending = byTime([...merged.reverse(), { state: 'PENDING', body: `Review: APPROVE ${head} by Muse Spark` }])
+  assert.ok(reviewProblems({ ...codexPr, prComments: withPending }).some(p => p.message.includes('requested changes')))
+  // A short approval after a valid GitHub approval of the head is no verdict, so the GitHub approval stands.
+  const after = byTime([
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T08:00:00Z' },
+    { body: `Review: APPROVE ${head.slice(0, 7)} by Muse Spark`, created_at: '2026-11-10T09:00:00Z' },
+  ])
+  assert.equal(reviewProblems({ ...codexPr, prComments: after }).length, 0)
+  // A later GitHub review that requests changes holds the merge even when its text quotes a short approval.
+  const quoted = byTime([
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T08:00:00Z' },
+    { state: 'CHANGES_REQUESTED', commit_id: head, user: { login: 'muse-reviewer' }, body: `Earlier: Review: APPROVE ${head.slice(0, 7)}
+Review: APPROVE ${head.slice(0, 7)} by Muse Spark`, submitted_at: '2026-11-10T09:00:00Z' },
+  ])
+  assert.ok(reviewProblems({ ...codexPr, prComments: quoted }).some(p => p.message.includes('requested changes')))
+  assert.equal(reviewProblems({ ...codexPr, prComments: [shortComment, { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' } }] }).length, 0)
+
+  // A request for changes still holds the merge whatever sha length it names.
+  assert.ok(reviewProblems({ ...codexPr, prComments: [{ body: `Review: REQUEST CHANGES ${head.slice(0, 7)} by Muse Spark` }] }).some(p => p.message.includes('requested changes')))
+  // A short approval quoted above a request for changes in one comment does not hide that request.
+  const quotedComment = byTime([
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T08:00:00Z' },
+    { body: `Review: APPROVE ${head.slice(0, 7)} by independent\nReview: REQUEST CHANGES ${head} by reviewer\nP1: synthetic finding`, created_at: '2026-11-10T09:00:00Z' },
+  ])
+  assert.ok(reviewProblems({ ...codexPr, prComments: quotedComment }).some(p => p.message.includes('requested changes')), JSON.stringify(quotedComment))
+  // A request for changes anywhere in a comment holds the merge, even after a full approval of the head in it.
+  const mixed = byTime([
+    { state: 'APPROVED', commit_id: head, user: { login: 'muse-reviewer' }, submitted_at: '2026-11-10T08:00:00Z' },
+    { body: `Review: APPROVE 76a88c2 by independent\nReview: APPROVE ${head} by independent\nReview: REQUEST CHANGES ${head} by reviewer\nP1: synthetic finding`, created_at: '2026-11-10T09:00:00Z' },
+  ])
+  assert.ok(reviewProblems({ ...codexPr, prComments: mixed }).some(p => p.message.includes('requested changes')), JSON.stringify(mixed))
+  assert.equal(reviewOf(`Review: APPROVE ${head} by independent\nReview: REQUEST CHANGES ${head} by reviewer`).kind, 'REQUEST CHANGES')
+  // The lane form does not let the author approve under its own name: the agent word or the whole Author name.
+  const bare = reviewProblems({ ...codexPr, prComments: [{ body: `Review: APPROVE ${head} by codex, codex's reviewer` }] })
+  assert.ok(bare.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(bare))
+  const localPr = { ...codexPr, body: codexPr.body.replace('Author: codex, fix/test-branch', 'Author: Codex (local), fix/test-branch') }
+  assert.ok(localPr.body.includes('Author: Codex (local), fix/test-branch'))
+  const whole = reviewProblems({ ...localPr, prComments: [{ body: `Review: APPROVE ${head} by Codex (local), codex's reviewer` }] })
+  assert.ok(whole.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(whole))
+  assert.equal(reviewProblems({ ...localPr, prComments: [{ body: `Review: APPROVE ${head} by Codex gpt-6.1-terra, codex's reviewer` }] }).length, 0)
+  // The lane named must be the author's own, word for word: another lane that starts with the same word is not.
+  const desktopPr = { ...codexPr, body: codexPr.body.replace('Author: codex, fix/test-branch', 'Author: codex (desktop), fix/test-branch') }
+  const remote = reviewProblems({ ...desktopPr, prComments: [{ body: `Review: APPROVE ${head} by codex gpt-6.1, codex (remote)'s reviewer` }] })
+  assert.ok(remote.some(p => p.message.includes('RULES.md, R2')), JSON.stringify(remote))
+  assert.equal(reviewProblems({ ...desktopPr, prComments: [{ body: `Review: APPROVE ${head} by codex gpt-6.1, codex (desktop)'s reviewer` }] }).length, 0)
 })
 
 test('pr-check combines issue state and draft information without mutating inputs', () => {
@@ -873,7 +972,8 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   const args = ['--event', event, '--repo-dir', setup.directory]
   const passed = await runMain(args, env)
   assert.equal(passed.status, 0, passed.stdout + passed.stderr)
-  assert.equal(calls.length, 5)
+  // The GitHub reviews are read even after an approval comment (#1257).
+  assert.equal(calls.length, 6)
   assert.ok(calls.every(call => call.host === 'api.example.invalid' && call.authorization === 'Bearer synthetic-token-value'))
   globalThis.fetch = async url => (url.pathname.endsWith('/issues/42') ? { ok: false, status: 404, headers: new Headers() } : { ok: true, status: 200, json: async () => [], headers: new Headers() })
   const missing = await runMain(args, env)
@@ -950,11 +1050,12 @@ const eventArgs = (setup, association, login = 'newcomer') => {
   return ['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory]
 }
 const apiEnv = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' }
-const githubAnswers = (calls, { labels = [], comments = [], pulls = [], reviews = [] }) => async url => {
+const githubAnswers = (calls, { labels = [], comments = [], pulls = [], reviews = [], prReviews = [] }) => async url => {
   calls.push(url.pathname)
   const isPrComments = url.pathname.endsWith('/issues/17/comments')
   const defaultReview = currentFixtureHead ? [{ body: `Review: APPROVE ${currentFixtureHead} by independent reviewer` }] : []
   const payload = isPrComments ? (reviews.length ? reviews : defaultReview) :
+    url.pathname.endsWith('/pulls/17/reviews') ? prReviews :
     url.pathname.endsWith('/issues/42') ? { state: 'open', labels } :
     url.pathname.endsWith('/issues/42/comments') ? comments :
     url.pathname.endsWith('/pulls') ? pulls : []
@@ -1219,6 +1320,30 @@ test('pr-check passes a team pull request with no claim on its issue', async t =
   // A team author's check reads neither the issue's comments nor the open pull requests, so a failed lookup it does
   // not need cannot stop it.
   assert.equal(calls.some(path => path.endsWith('/issues/42/comments') || path.endsWith('/pulls')), false, calls.join(' '))
+})
+
+test('pr-check reads the GitHub reviews after an approval comment, so a later request for changes holds the merge (#1257)', async t => {
+  const setup = fixture(t)
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const calls = []
+  const approval = { body: `Review: APPROVE ${setup.head} by independent reviewer`, created_at: '2030-01-01T08:00:00Z' }
+  const changes = { state: 'CHANGES_REQUESTED', commit_id: setup.head, user: { login: 'synthetic-reviewer' }, body: 'P1: synthetic finding', submitted_at: '2030-01-01T09:00:00Z' }
+  globalThis.fetch = githubAnswers(calls, { reviews: [approval], prReviews: [changes] })
+  const held = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
+  assert.equal(held.status, 1, held.stdout + held.stderr)
+  assert.match(held.stdout, /FAIL review: the latest review requested changes/)
+  assert.ok(calls.some(path => path.endsWith('/pulls/17/reviews')), calls.join(' '))
+  // With no later GitHub review the approval comment still passes.
+  globalThis.fetch = githubAnswers(calls, { reviews: [approval] })
+  const passed = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
+  // A failed read of the GitHub reviews fails the check; it is not taken as no reviews.
+  const answers = githubAnswers(calls, { reviews: [approval] })
+  globalThis.fetch = async url => url.pathname.endsWith('/pulls/17/reviews') ? { ok: false, status: 503, headers: new Headers() } : answers(url)
+  const unread = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
+  assert.equal(unread.status, 2, unread.stdout + unread.stderr)
+  assert.match(unread.stderr, /network check failed/)
 })
 
 test('pr-check passes a team pull request when more than eight pull requests are open', async t => {
