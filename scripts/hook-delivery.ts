@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { deliveryText } from '../hooks/messaging.ts'
+import { deliveryText, SURFACE_IDS } from '../hooks/messaging.ts'
 import { isSessionEnd, isTurnStart, turnStartEnvelope } from '../hooks/hook-messages.ts'
 import { sessionPushNote } from '../hooks/others.ts'
 import { parseProgress } from '../hooks/parse.ts'
@@ -48,7 +48,7 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
       try { await mailbox?.end(agent, session, Date.now()) } catch {}
     } else if (isTurnStart(agent, event)) {
       let message = null
-      try { message = await mailbox?.turn(agent, session, agent === 'cursor' ? 'IDE (Composer)' : agent === 'antigravity' ? 'IDE' : 'CLI', Date.now()) ?? null } catch {}
+      try { message = await mailbox?.turn(agent, session, agent === 'cursor' ? SURFACE_IDS.cursor : agent === 'antigravity' ? SURFACE_IDS.antigravityIde : SURFACE_IDS.cli, Date.now()) ?? null } catch {}
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       let pushed: string[] = []

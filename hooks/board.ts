@@ -890,7 +890,8 @@ export const routesOf = (model: unknown): Record<string, AnswerRoute> => {
     if (key === '') continue
     const fields = { agent: text(ask.agent), session: text(ask.session), asked: text(ask.text), fp: text(ask.fp) }
     const delivery = ask.delivery as Record<string, unknown> | null | undefined
-    if (ask.send === 'connected' && delivery != null && typeof delivery === 'object' && text(delivery.id) !== '' && text(delivery.turn) !== '') routes[key] = { mode: 'connected', ...fields, delivery: { id: text(delivery.id), turn: text(delivery.turn), agent: text(delivery.agent) } }
+    // A mailbox card (a hook or plugin that takes the message at a turn) is answered by the same message route as a live one.
+    if ((ask.send === 'connected' || ask.send === 'mailbox') && delivery != null && typeof delivery === 'object' && text(delivery.id) !== '' && text(delivery.turn) !== '') routes[key] = { mode: 'connected', ...fields, delivery: { id: text(delivery.id), turn: text(delivery.turn), agent: text(delivery.agent) } }
     else if (ask.send === 'send') routes[key] = { mode: 'send', ...fields }
   }
 

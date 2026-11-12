@@ -11,6 +11,11 @@
  * @property {1 | 2 | 3 | 4} tier
  * @property {'[P1]' | '[P2]' | '[P3]' | '[P4]' | '[P5]' | 'unknown'} primitive `unknown` when the roadmap names none for this surface.
  * @property {boolean} isImplemented True for a merged receiver with synthetic tests.
+ * @property {string} [agent] The agent name a connection carries (`claude`, `codex`), for the card's route.
+ * @property {'live' | 'mailbox' | 'turn'} [kind] How the receiver is reached: a live session, a hook mailbox, or one running turn.
+ * @property {Record<'idle' | 'working' | 'ended', { line: 'now' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none', record: string | null }>} [routes]
+ *   When a message from the board arrives for a session in each state; `record` is the `docs/validation/` note that showed
+ *   that route live, or null. The board offers Send only on a route with a record.
  */
 
 export const deliveryPrompt = message => {
