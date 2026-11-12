@@ -1493,7 +1493,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const result = { ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor }
     if (args.includes('--json')) output(result)
     // Name the Codex this check just reached: on Windows, command -v and where.exe's first line can be an npm shim that cannot start.
-    else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup', ['--plain']), host ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable!]) : undefined))
+    else {
+      // Keep the missing-program placeholder readable even when the install arguments need code-point quoting.
+      const trustCommand = executable ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable])
+        : `${boardRun(process.argv[1]!, args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json' && arg !== '--plain'))} --codex-trust --codex-bin ${quote(s.setupSummary.codexPath)}`
+      process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup', ['--plain']), trustCommand))
+    }
     return true
   }
   if (!args.includes('--apply')) { outputPlan(plan); return true }
