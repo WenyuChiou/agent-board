@@ -81,8 +81,12 @@ const held = () => {
 // The same lock as scripts/settings-file.ts: exclusive creation, a 2 s wait, and release by its creator.
 // Never take over another lock: its owner may still be writing, and inspecting it can block or race a fresh save.
 // Opened beside the file as given, so the file system resolves both alike; the full path is only for the message.
+// The message names the folder the open really lands in (the operating system's own real path, which follows a link
+// before a double-dot step, where a lexical resolve would drop the link), so deleting what it names removes the blocking lock.
 const lockFile = file + '.agent-board.lock'
-const lockPath = path.resolve(lockFile)
+const lockName = () => {
+  try { return path.join(fs.realpathSync.native(path.dirname(lockFile)), path.basename(lockFile)) } catch { return path.resolve(lockFile) }
+}
 let lockLeft = false
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 // Windows creates the file a dangling link at the lock path points to, so there anything at the path counts as held;
@@ -93,7 +97,7 @@ const withSettingsLock = (run) => {
   let fd
   let own
   for (;;) {
-    if (performance.now() >= deadline) throw Object.assign(new Error('another save of the settings file is in progress, or died holding its lock; if none is running, delete ' + lockPath), { code: 'SETTINGS_LOCKED' })
+    if (performance.now() >= deadline) throw Object.assign(new Error('another save of the settings file is in progress, or died holding its lock; if none is running, delete ' + lockName()), { code: 'SETTINGS_LOCKED' })
     if (process.platform === 'win32' && isTaken()) { sleep(25); continue }
     try {
       fd = fs.openSync(lockFile, 'wx', 0o600)
@@ -164,12 +168,12 @@ const finish = () => {
 try {
   process.exitCode = withSettingsLock(finish)
   if (process.exitCode === 0 && lockLeft) {
-    process.stdout.write(lockPath)
+    process.stdout.write(lockName())
     process.exitCode = ${SETTINGS_LOCK_LEFT}
   }
 } catch (error) {
   process.stderr.write(String(error && error.message || error) + '\\n')
-  if (error && error.code === 'SETTINGS_LOCKED') process.stdout.write(lockPath)
+  if (error && error.code === 'SETTINGS_LOCKED') process.stdout.write(lockName())
   process.exitCode = error && error.code === 'SETTINGS_LOCKED' ? ${SETTINGS_LOCKED} : 1
 }
 `

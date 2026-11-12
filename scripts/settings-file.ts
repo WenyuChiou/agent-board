@@ -1,6 +1,6 @@
-import { chmodSync, closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import type { BigIntStats } from 'node:fs'
-import { resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { pid, platform } from 'node:process'
 
 // The board's settings file (progress-settings.json) is one the person may have replaced with a link
@@ -42,6 +42,10 @@ const LOCK_WAIT_MS = 2000
 // Windows refuses to create a file at a path whose file is still being deleted (EPERM), and a folder there gives EPERM
 // or EACCES: each waits like a held lock, within the same 2 s.
 const LOCK_BUSY = platform === 'win32' ? ['EEXIST', 'EPERM', 'EACCES'] : ['EEXIST']
+// The lock the open lands in: the folder's real path (a link is followed before a `..`, which a lexical resolve gets wrong).
+const nameOf = (lock: string): string => {
+  try { return join(realpathSync.native(dirname(lock)), basename(lock)) } catch { return resolve(lock) }
+}
 const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
 // Windows creates the file a dangling link at the lock path points to, so there anything already at the path counts as
 // held. Only whether something is there is looked at, never what it is or who made it.
@@ -51,14 +55,14 @@ const isTaken = (path: string): boolean => {
 
 export const withSettingsLock = <T>(file: string, run: () => T, onLeft?: (lock: string) => void): T => {
   // The lock is opened beside the file as given, so the file system resolves both paths alike (a lexical resolve
-  // turns `link/..` into another folder); the full path is only for the message.
+  // turns `link/..` into another folder); the real path is only for the message.
   const lock = `${file}.agent-board.lock`
   const deadline = performance.now() + LOCK_WAIT_MS
   let fd: number
   // File ids are compared as bigints: 64-bit ids can round to one JavaScript number.
   let own: BigIntStats
   for (;;) {
-    if (performance.now() >= deadline) throw Object.assign(new Error('another save of the settings file is in progress, or died holding its lock; if none is running, delete ' + resolve(lock)), { code: 'SETTINGS_LOCKED' })
+    if (performance.now() >= deadline) throw Object.assign(new Error('another save of the settings file is in progress, or died holding its lock; if none is running, delete ' + nameOf(lock)), { code: 'SETTINGS_LOCKED' })
     if (platform === 'win32' && isTaken(lock)) { pause(25); continue }
     try {
       fd = openSync(lock, 'wx', 0o600)
@@ -89,7 +93,7 @@ export const withSettingsLock = <T>(file: string, run: () => T, onLeft?: (lock: 
       if (current.dev === own.dev && current.ino === own.ino) unlinkSync(lock)
     } catch (error) { isLeft = !isCode(error, ['ENOENT']) }
     closeSync(fd)
-    if (isLeft) onLeft?.(resolve(lock))
+    if (isLeft) onLeft?.(nameOf(lock))
   }
 }
 

@@ -369,15 +369,44 @@ const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): Ser
 
 // An answer that was sent, or queued for the session's next turn, no longer waits for the person (#1296). A message
 // that timed out or was refused waits again. The page, the terminal board, --status and --json all count from this.
-const isFailedReceipt = (receipt: Receipt | undefined): boolean =>
+const isFailedReceipt = (receipt: Pick<Message, 'status' | 'error' | 'hasAccepted'> | undefined): boolean =>
   receipt !== undefined && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
 // A question counts as handled by the message bound to it, not by any message to its session (#1296): with two
 // questions in one session, one queued answer hands over one. `holder` is true when a message still held for
 // the session's next turn answers this question. A message bound to no question answers one only when the session
 // has exactly one open question (`openInSession`); with two or more it answers none, and the card keeps waiting.
+const answersQuestion = (one: Omit<Message, 'nonce' | 'hash'>, to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
+  to !== undefined && one.from === 'board' && one.to === to && (one.answers === undefined ? openInSession === 1 : one.answers === questionId)
 const holdsAnswer = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
-  to !== undefined && messages.some(one => one.from === 'board' && one.to === to && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && (one.answers === undefined ? openInSession === 1 : one.answers === questionId))
-const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: ReadonlyMap<string, boolean>): string[] => {
+  messages.some(one => answersQuestion(one, to, questionId, openInSession) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)))
+// Whether the board's latest message for this very question failed. A later message to the same session from
+// anyone else says nothing about the answer being counted.
+const answerFailed = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
+  isFailedReceipt(messages.filter(one => answersQuestion(one, to, questionId, openInSession)).at(-1))
+// What the page on the local network is given of the messaging state: enough to tell which answers are queued, and no
+// connection, text or reply (that page shows counts only).
+export const handledOnly = (messaging: Messaging): Messaging => ({
+  connections: [],
+  mailboxes: [],
+  messages: messaging.messages.map(one => ({
+    id: one.id,
+    target: one.target,
+    turn: '',
+    from: one.from === 'board' ? 'board' : 'other',
+    to: one.to,
+    text: '',
+    origin: one.origin,
+    status: one.status,
+    updated: one.updated,
+    reply: '',
+    error: /^(TIMEOUT|EXPIRED|DISMISSED)/.exec(one.error)?.[0] ?? '',
+    ...(one.hasAccepted === true ? { hasAccepted: true } : {}),
+    hops: 0,
+    claimed: 0,
+    ...(one.answers === undefined ? {} : { answers: one.answers }),
+  })),
+})
+const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: ReadonlyMap<string, boolean>, failed: ReadonlySet<string>): string[] => {
   const sources = new Map<string, { isSending?: boolean; receipt?: Receipt }>()
   for (const one of [...model.asks, ...model.reminder, ...model.older, ...model.idle, ...model.stopped, ...model.groups.flatMap(group => group.rows)]) {
     const isSending = held.get(one.key) ?? ('isSending' in one ? one.isSending : undefined)
@@ -386,7 +415,10 @@ const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: Readonl
   return cards
     .filter(card => {
       const one = sources.get(card.sourceKey ?? card.key) ?? sources.get(card.key.replace(/^stuck:/, ''))
-      return one?.isSending === true && !isFailedReceipt(one.receipt)
+      // A question card is judged by the board's message for that question; a row, by the receipt it shows.
+      const key = card.sourceKey ?? card.key
+      const isFailed = held.has(key) ? failed.has(key) : held.has(card.key.replace(/^stuck:/, '')) ? failed.has(card.key.replace(/^stuck:/, '')) : isFailedReceipt(one?.receipt)
+      return one?.isSending === true && !isFailed
     })
     .map(card => card.key)
 }
@@ -401,6 +433,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const asks: ServeAsk[] = []
   // Per ask card: whether an answer to this very question is held (the page's `isSending` is per session).
   const held = new Map<string, boolean>()
+  const failed = new Set<string>()
   const groups = new Map<string, ServeRow[]>()
   const idle: ServeRow[] = []
   const idleKeys = new Set(view.idle.map(row => row.key))
@@ -425,7 +458,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const { ask } = item
       // A question gone from its agent's report is kept until it is answered; one the person answered
       // here, and its session took, needs nothing more from the person.
-      if (!isLan && ask.key.startsWith('retained::') && ask.questionId !== undefined && isAnswerHanded(messaging?.messages ?? [], ask.questionId)) continue
+      if (ask.key.startsWith('retained::') && ask.questionId !== undefined && isAnswerHanded(messaging?.messages ?? [], ask.questionId)) continue
       const isManual = ask.where === 'manual'
       const connection = isManual || isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)
       const isContested = !isManual && !isLan && connection === undefined && (messaging?.connections.some(one => one.agent === (ask.agent || 'claude') && one.session === ask.nativeSession) ?? false)
@@ -436,7 +469,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const hint = replyHint(ask, s, !isLan, true)
       const label = ask.step === null ? undefined : clipped(ask.text, LABEL_ROOM)
       const { heldBy } = holderOf(ask)
-      held.set(item.key, sending.has(cardSendKey(item.key)) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, heldBy === undefined ? 0 : openBy.get(heldBy) ?? 0))
+      const openInSession = heldBy === undefined ? 0 : openBy.get(heldBy) ?? 0
+      held.set(item.key, sending.has(cardSendKey(item.key)) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, openInSession))
+      if (answerFailed(messaging?.messages ?? [], heldBy, ask.questionId, openInSession)) failed.add(item.key)
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
@@ -624,7 +659,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     stuck: grouped.needs.stuck,
     versions: group.versions,
     agents: grouped.agents.map(one => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),
-    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref), held) },
+    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref), held, failed) },
     working: grouped.working.map(ref),
     quiet: grouped.quiet,
     all: { ...bucket(grouped.all), isHidden: grouped.all.isHidden },

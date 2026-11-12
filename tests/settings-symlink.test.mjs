@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import fs, { chmodSync, existsSync, lstatSync, lutimesSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import fs, { chmodSync, existsSync, lstatSync, realpathSync, lutimesSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { request } from 'node:http'
@@ -922,3 +922,32 @@ test('each language names the lock path and tells the person when to delete it',
   for (const words of [EN, ZH_TW, ZH_CN]) assert.ok(words.settingsLockLeft(lock).includes(lock))
   assert.match(EN.settingsLocked(lock), /in progress.*stopped.*If no save is running, delete/)
 })
+
+// Codex 182 P1 on #1339 (finding 3): the warning named the lock after a lexical resolve, while the writer opens the path
+// as given. Through a linked folder (and, where the system keeps the link before a double-dot step, `link/..`) those are
+// different locks, and deleting the named one leaves the blocking lock in place.
+for (const [label, via, isWindowsSkipped] of [['a linked folder', 'link', false], ['a linked folder and a double-dot step', 'link/..', true]]) {
+  test(`#1339: both writers name the lock that blocks them through ${label}`, { skip: isWindowsSkipped && process.platform === 'win32' ? 'Windows resolves a double-dot step in the path text before the file system sees it, so there is no second lock to name' : false }, t => {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-lock-name-'))
+    try {
+      const outside = join(dir, 'outside')
+      const inner = join(outside, 'inner')
+      mkdirSync(inner, { recursive: true })
+      // A junction is the folder link a Windows user can make without rights.
+      try { symlinkSync(inner, join(dir, 'link'), process.platform === 'win32' ? 'junction' : 'dir') } catch { return t.skip('this computer cannot make a folder link, so the link case did not run') }
+      const file = `${join(dir, 'link')}${via === 'link' ? '' : '/..'}/progress-settings.json`
+      // The folder the open lands in, and the lock held there by someone else.
+      const folder = via === 'link' ? inner : outside
+      const held = join(realpathSync.native(folder), 'progress-settings.json.agent-board.lock')
+      writeFileSync(held, 'someone else\n')
+      assert.equal(existsSync(held), true)
+      const cli = (() => { try { updateSettings(file, () => lockNext); return null } catch (error) { return error } })()
+      assert.equal(cli?.code, 'SETTINGS_LOCKED', String(cli))
+      assert.ok(cli.message.endsWith(`delete ${held}`), cli.message)
+      const plugin = writeScript(file, lockNext, 'missing', null)
+      assert.equal(plugin.status, SETTINGS_LOCKED, plugin.stderr)
+      assert.equal(plugin.stdout, held)
+      assert.ok(plugin.stderr.includes(`delete ${held}`), plugin.stderr)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+}

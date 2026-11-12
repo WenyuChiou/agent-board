@@ -17,7 +17,7 @@ import { boardItems } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
 import { agentLabel } from '../hooks/strings'
-import { lanAddress, localHosts, pagePolicy, requestProblem, cardSendKey, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
+import { handledOnly, lanAddress, localHosts, pagePolicy, requestProblem, cardSendKey, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
@@ -456,9 +456,9 @@ export const startServer = (o: ServeOptions): void => {
         try {
           const now = Date.now()
           const view = o.view()
-          const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
+          const state = messaging.snapshot(now, o.reports?.(false))
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
+          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, isLan ? handledOnly(state) : state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.
           const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)

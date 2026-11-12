@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { request } from 'node:http'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 
 const loader = registerHooks({
@@ -12,11 +14,11 @@ const loader = registerHooks({
     return nextResolve(specifier, context)
   },
 })
-let parseProgress, buildView, serveModel, cardSendKey, sendKey, boardCounts, boardStatus, boardText, boardDocument, readQueuedMessaging, queueMessage, mailboxId, BOARD_SCRIPT, EN, ZH_TW, STRINGS
+let parseProgress, buildView, serveModel, handledOnly, cardSendKey, sendKey, boardCounts, boardStatus, boardText, boardDocument, readQueuedMessaging, queueMessage, mailboxId, BOARD_SCRIPT, EN, ZH_TW, STRINGS
 try {
   ;({ parseProgress } = await import('../hooks/parse.ts'))
   ;({ buildView } = await import('../hooks/view.ts'))
-  ;({ serveModel, cardSendKey, sendKey } = await import('../hooks/serve.ts'))
+  ;({ serveModel, handledOnly, cardSendKey, sendKey } = await import('../hooks/serve.ts'))
   ;({ boardCounts, boardStatus } = await import('../hooks/board-status.ts'))
   ;({ boardText } = await import('../hooks/board.ts'))
   ;({ boardDocument } = await import('../hooks/board-json.ts'))
@@ -266,4 +268,120 @@ test('a message store folder that is a link is not read: every question waits, a
     assert.equal(readQueuedMessaging(messages, Date.now()).messages.length, 1)
     assert.equal(readQueuedMessaging(linked, Date.now()), undefined)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// Codex 182 P1 on #1339 (finding 1): the card took the receipt of the session's latest message, so an unrelated peer
+// message rejected on disconnect made a queued board answer count as unanswered. The answer being counted decides.
+test('a peer message rejected after a queued board answer does not make that answer count as unanswered', () => {
+  const [queued] = shown(stored()).messages
+  const rejected = { ...queued, id: 'SYNTHETIC-PEER-1', from: 'claude:peer-session', answers: undefined, status: 'rejected', error: 'TARGET_DISCONNECTED', updated: now + 1 }
+  const messaging = { connections: [], mailboxes: [mailbox(first), mailbox(second)], messages: [queued, rejected] }
+  const model = serveModel(view(), [], EN, new Set(), false, messaging, false, group)
+  assert.equal(model.view.needs.handled.length, 1)
+  assert.equal(model.asks.find(ask => ask.key === model.view.needs.handled[0]).text, 'Blue or green?')
+  const counts = boardCounts(view(), [], EN, now, messaging)
+  assert.deepEqual({ needs: counts.needs, queued: counts.queued }, { needs: 1, queued: 1 })
+  // The board's own answer failing still puts the question back.
+  const failed = { ...queued, status: 'rejected', error: 'TARGET_DISCONNECTED', updated: now + 2 }
+  const back = serveModel(view(), [], EN, new Set(), false, { ...messaging, messages: [queued, failed] }, false, group)
+  assert.deepEqual(back.view.needs.handled, [])
+})
+
+// Codex 182 P1 on #1339 (finding 2): the network page was given no messaging state, so it counted 1 needs you where
+// the local page and the CLI counted 0 needs you, 1 queued. It gets the state that decides handled, never a message's content.
+const SECRET = 'SYNTHETIC-SECRET-ANSWER-777'
+const secretStore = () => {
+  const box = mailbox(first)
+  const queued = queueMessage({ messages: [], mailboxes: [mailbox(first), mailbox(second)] }, { id: 'SYNTHETIC-QUEUED-9', text: SECRET, target: box.id, turn: 'session' }, 'board', box, now)
+  return { version: 2, ...queued.state }
+}
+
+test('the network page model counts a queued answer as handled, from state that holds no message content', () => {
+  const messaging = shown(secretStore())
+  const local = serveModel(view(), [], EN, new Set(), false, messaging, false, group)
+  const phone = serveModel(view(), [], EN, new Set(), true, handledOnly(messaging), false, group)
+  assert.equal(local.view.needs.handled.length, 1)
+  assert.deepEqual(phone.view.needs.handled, local.view.needs.handled)
+  assert.equal(phone.view.needs.n, local.view.needs.n)
+  const kept = JSON.stringify(handledOnly(messaging))
+  assert.ok(!kept.includes(SECRET), kept)
+  assert.ok(!JSON.stringify(phone).includes(SECRET))
+  assert.deepEqual(handledOnly(messaging).connections, [])
+})
+
+const getBoard = (port, token, host) => new Promise((resolve, reject) => {
+  const req = request({ host: '127.0.0.1', port, method: 'GET', path: '/api/board', headers: { host: `${host}:${port}`, 'x-board-token': token } }, res => {
+    let data = ''
+    res.setEncoding('utf8')
+    res.on('data', chunk => { data += chunk })
+    res.on('end', () => resolve({ status: res.statusCode, body: data }))
+  })
+  req.setTimeout(5000, () => req.destroy(new Error('HTTP request timed out')))
+  req.on('error', reject)
+  req.end()
+})
+const postJson = (port, token, path, body) => new Promise((resolve, reject) => {
+  const req = request({ host: '127.0.0.1', port, method: 'POST', path, headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', 'x-board-token': token } }, res => {
+    let data = ''
+    res.setEncoding('utf8')
+    res.on('data', chunk => { data += chunk })
+    res.on('end', () => resolve({ status: res.statusCode, body: data }))
+  })
+  req.on('error', reject)
+  req.end(JSON.stringify(body))
+})
+
+test('the local page, the network page and the CLI agree on one queued answer, and the network page shows no message text', { timeout: 40_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'queued-lan-'))
+  const messages = join(dir, 'messages')
+  mkdirSync(messages)
+  mkdirSync(join(dir, 'run'), { mode: 0o700 })
+  writeFileSync(join(messages, 'messages.json'), JSON.stringify(secretStore()))
+  writeFileSync(join(dir, 'progress.md'), source)
+  const script = join(dir, 'agent-board.mjs')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: join(dir, 'progress.md'), lang: 'en' })}\n${BOARD_SCRIPT}`)
+  // The network address is a made-up one that listens on the loopback, as the settings tests do.
+  const preload = join(dir, 'preload.cjs')
+  writeFileSync(preload, `const os = require('node:os'), { Server } = require('node:net')
+os.networkInterfaces = () => ({ synthetic: [{ address: '192.168.42.2', family: 'IPv4', internal: false }] })
+const listen = Server.prototype.listen
+Server.prototype.listen = function (...args) { if (args[1] === '192.168.42.2') args[1] = '127.0.0.1'; return Reflect.apply(listen, this, args) }
+`)
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, APPDATA: dir, LOCALAPPDATA: dir, NO_COLOR: '1', XDG_RUNTIME_DIR: join(dir, 'run'), LANG: 'en' }
+  const child = spawn(process.execPath, ['--require', preload, script, '--serve-child', '--messages-dir', messages], { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] })
+  let stderr = ''
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const exited = new Promise(done => child.once('exit', code => done(code)))
+  try {
+    const url = await new Promise((done, fail) => {
+      let out = ''
+      child.stdout.setEncoding('utf8')
+      child.stdout.on('data', chunk => { out += chunk; if (out.includes('\n')) done(new URL(out.split('\n')[0].trim())) })
+      exited.then(code => fail(new Error(`server exited with ${code}: ${stderr}`)))
+    })
+    const port = Number(url.port)
+    const token = url.searchParams.get('t')
+    const opened = await postJson(port, token, '/api/lan', { address: '192.168.42.2' })
+    assert.equal(opened.status, 200, opened.body)
+    const phone = new URL(JSON.parse(opened.body).url)
+    const local = await getBoard(port, token, '127.0.0.1')
+    const remote = await getBoard(Number(phone.port), phone.searchParams.get('t'), phone.hostname)
+    assert.equal(local.status, 200, local.body)
+    assert.equal(remote.status, 200, remote.body)
+    const localNeeds = JSON.parse(local.body).model.view.needs
+    const remoteNeeds = JSON.parse(remote.body).model.view.needs
+    assert.equal(localNeeds.handled.length, 1)
+    assert.deepEqual(remoteNeeds.handled, localNeeds.handled)
+    assert.equal(remoteNeeds.n, localNeeds.n)
+    assert.ok(!remote.body.includes(SECRET), 'the network page holds no message text')
+    assert.equal(JSON.parse(remote.body).messaging, undefined)
+    const cli = spawnSync(process.execPath, [script, '--json', '--messages-dir', messages], { cwd: dir, env, timeout: 20_000, encoding: 'utf8' })
+    const counts = JSON.parse(cli.stdout).counts
+    assert.deepEqual([counts.needs, counts.queued], [localNeeds.n - localNeeds.handled.length, localNeeds.handled.length])
+  } finally {
+    child.kill()
+    await Promise.race([exited, delay(1000)])
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
