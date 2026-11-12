@@ -529,7 +529,7 @@ test('the part given to a run reaches its test processes, even when the environm
 
 test('the board time check fails a file over seventy percent of its budget and a part over its full budget', async () => {
   const { checkBoardTimes, BOARD_FILE_BUDGETS_MS, BOARD_FILE_BUDGET_DEFAULT_MS, BOARD_PART_BUDGET_MS } = await import('../scripts/ci-impact.mjs')
-  assert.equal(BOARD_FILE_BUDGETS_MS['tests/board.test.mjs'], 140_000)
+  assert.equal(BOARD_FILE_BUDGETS_MS['tests/board.test.mjs'], 200_000)
   assert.equal(BOARD_FILE_BUDGET_DEFAULT_MS, 60_000)
   assert.equal(BOARD_PART_BUDGET_MS, 480_000)
   const base = { version: 1, part: '1/4', serial: true, totalMs: 300_000, files: [{ path: 'tests/board.test.mjs', ms: 90_000 }, { path: 'tests/ws-stdio.test.mjs', ms: 5_000 }] }
@@ -541,10 +541,10 @@ test('the board time check fails a file over seventy percent of its budget and a
     assert.deepEqual(checkBoardTimes(atLimit), { ok: true, errors: [], warnings: [] })
     assert.equal(checkBoardTimes({ ...atLimit, files: [{ path, ms: limit + 1 }] }).ok, false)
   }
-  const slowFile = { ...base, files: [{ path: 'tests/board.test.mjs', ms: 99_000 }] }
+  const slowFile = { ...base, files: [{ path: 'tests/board.test.mjs', ms: 141_000 }] }
   const overFile = checkBoardTimes(slowFile)
   assert.equal(overFile.ok, false)
-  assert.deepEqual(overFile.errors, ['tests/board.test.mjs took 99s, over 70% of its 140s budget (98s)'])
+  assert.deepEqual(overFile.errors, ['tests/board.test.mjs took 141s, over 70% of its 200s budget (140s)'])
   assert.deepEqual(checkBoardTimes(slowFile, { isPullRequest: false }), { ok: true, errors: [], warnings: overFile.errors })
   const overPart = checkBoardTimes({ ...base, totalMs: 500_000, files: [
     { path: 'tests/board.test.mjs', ms: 90_000 },
@@ -559,13 +559,33 @@ test('the board time check fails a file over seventy percent of its budget and a
   assert.deepEqual(checkBoardTimes(unjudged), { ok: true, errors: [], warnings: [] })
 })
 
+test('the time check passes the Windows times that failed pull requests after #1361, and its 70% line is at least 1.3x each file\'s slowest recent run (#1364)', async () => {
+  const { checkBoardTimes, BOARD_FILE_BUDGETS_MS, BOARD_FILE_BUDGET_DEFAULT_MS } = await import('../scripts/ci-impact.mjs')
+  const budgetOf = path => BOARD_FILE_BUDGETS_MS[path] ?? BOARD_FILE_BUDGET_DEFAULT_MS
+  // Times from failed Windows Node 24 board jobs whose tests all passed (runs 43157566128, 43158052807, 43160255649).
+  const failedPullRequestTimes = [
+    ['tests/legacy-connect.test.mjs', 144_500], ['tests/host-upgrade.test.mjs', 42_700], ['tests/board.test.mjs', 105_500],
+    ['tests/codex-fallback.test.mjs', 60_000], ['tests/prompt-hooks.test.mjs', 46_200],
+  ]
+  for (const [path, ms] of failedPullRequestTimes) {
+    assert.deepEqual(checkBoardTimes({ version: 1, part: '1/6', serial: true, totalMs: 300_000, files: [{ path, ms }] }), { ok: true, errors: [], warnings: [] }, path)
+  }
+  // The slowest Windows Node 24 time of each file in the six test runs after #1361 (#1364's table).
+  const slowest = {
+    'tests/legacy-connect.test.mjs': 148_000, 'tests/codex-local.test.mjs': 120_400, 'tests/board.test.mjs': 105_500,
+    'tests/codex-fallback.test.mjs': 60_000, 'tests/prompt-hooks.test.mjs': 46_200, 'tests/host-upgrade.test.mjs': 42_600,
+    'tests/setup-guidance.test.mjs': 52_600, 'tests/setup-terminal.test.mjs': 36_000, 'tests/settings-agents.test.mjs': 21_300,
+  }
+  for (const [path, ms] of Object.entries(slowest)) assert.ok(budgetOf(path) * 7 / 10 >= ms * 13 / 10, path + ': ' + budgetOf(path))
+})
+
 test('the CI time budget command fails an over-seventy-percent file on a pull request and only reports it on main', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'agent-board-budget-'))
   const timings = join(dir, 'timings.json')
   const command = fileURLToPath(new URL('../scripts/ci-impact.mjs', import.meta.url))
   const base = { version: 1, part: '1/4', serial: true, totalMs: 100_000 }
   try {
-    for (const [path, under, over] of [['tests/board.test.mjs', 97_000, 99_000], ['tests/ws-stdio.test.mjs', 41_000, 43_000]]) {
+    for (const [path, under, over] of [['tests/board.test.mjs', 139_000, 141_000], ['tests/ws-stdio.test.mjs', 41_000, 43_000]]) {
       for (const [event, ms, status] of [['pull_request', under, 0], ['pull_request', over, 1], ['push', over, 0]]) {
         await writeFile(timings, JSON.stringify({ ...base, files: [{ path, ms }] }))
         const result = spawnSync(process.execPath, [command, 'check'], {
@@ -678,7 +698,7 @@ test('the time check command fails on over-budget timings and passes on green on
     ] }))
     const red = run()
     assert.equal(red.status, 1)
-    assert.match(red.stdout, /tests\/board\.test\.mjs took 200s, over 70% of its 140s budget \(98s\)/)
+    assert.match(red.stdout, /tests\/board\.test\.mjs took 200s, over 70% of its 200s budget \(140s\)/)
     assert.match(red.stdout, /board part 1\/4 took 500s, over its 480s budget; slowest files: tests\/board\.test\.mjs 200s, tests\/codex-local\.test\.mjs 180s/)
     const missing = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: join(dir, 'missing.json') } })
     assert.equal(missing.status, 0)

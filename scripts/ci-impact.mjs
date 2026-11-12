@@ -136,16 +136,23 @@ export const checkResults = (plan, results) => {
 // board files step 1 never measured (added since) and keeps a small file from tripping on runner
 // jitter — the slowest unmeasured file, mcp-tools, took 12.6 s on a Linux VM. Step 1 predates #957's
 // speedups, so the budgets are upper bounds for the four files it touched, not tight fits.
+// Re-derived (#1364): a budget of 1.5x one run puts its 70% line at 1.05x that run, while the same file on the
+// same code varies far more between Windows runs (legacy-connect 105.6-148.0 s, prompt-hooks 29.1-46.2 s in the
+// six test runs after #1361), so pull requests failed on runner speed alone. Every file whose slowest Windows
+// Node 24 time in those runs, x 1.3, was over its 70% line now has budget = that slowest time x 1.3 / 0.7,
+// rounded up to five seconds (board and codex-local: one part's share): it fails a pull request only when it
+// runs 30% slower than its slowest recent run. page-regressions (6.5 s at most) keeps its old budget.
 export const BOARD_FILE_BUDGETS_MS = Object.freeze({
-  'tests/codex-local.test.mjs': 170_000,
-  'tests/board.test.mjs': 140_000,
-  'tests/legacy-connect.test.mjs': 185_000,
+  'tests/codex-local.test.mjs': 225_000, // slowest 120.4 s
+  'tests/board.test.mjs': 200_000, // slowest 105.5 s
+  'tests/legacy-connect.test.mjs': 275_000, // slowest 148.0 s
   'tests/page-regressions.test.mjs': 90_000,
-  'tests/codex-fallback.test.mjs': 80_000,
-  'tests/prompt-hooks.test.mjs': 65_000,
-  // Grew past the floor with #1162's terminal setup tests: 45.3 s and 52.3 s in the two Windows
-  // runs of main a89f4199 (run 42472161465, Node 22 and 24), x 1.5 and rounded up (#1159).
-  'tests/setup-guidance.test.mjs': 80_000,
+  'tests/codex-fallback.test.mjs': 115_000, // slowest 60.0 s
+  'tests/prompt-hooks.test.mjs': 90_000, // slowest 46.2 s
+  // Grew past the floor with #1162's terminal setup tests (#1159); slowest 52.6 s after #1361.
+  'tests/setup-guidance.test.mjs': 100_000,
+  'tests/host-upgrade.test.mjs': 80_000, // slowest 42.6 s
+  'tests/setup-terminal.test.mjs': 70_000, // slowest 36.0 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
