@@ -1574,6 +1574,17 @@ test('a reused branch name does not hide the earlier pull request, a CRLF or ind
   assert.equal(later.problems.length, 1)
   assert.match(later.problems[0].message, /#1203.*#1213/)
   assert.deepEqual(atHead('a'.repeat(40)).problems, [])
+  // Two pull requests at one commit, the later listed first: the run's branch picks its own, and a local name neither uses
+  // takes the earliest, so the original is never flagged against itself (#1348 round 4).
+  const shared = 'c'.repeat(40)
+  const sameCommit = [
+    { number: 1240, createdAt: '2026-11-02T00:00:00Z', body: 'Fixes #1203', headRef: 'fix/second', headSha: shared },
+    { number: 1213, createdAt: '2026-11-01T00:00:00Z', body: 'Fixes #1203', headRef: 'fix/first', headSha: shared },
+  ]
+  const onBranch = branch => duplicatePr({ number: null, title: 'fix: x', body: 'Fixes #1203', branch, head: shared, open: sameCommit })
+  assert.deepEqual(onBranch('fix/first').problems, [])
+  assert.match(onBranch('fix/second').problems[0]?.message ?? '', /#1203.*#1213/)
+  assert.deepEqual(onBranch('mywork').problems, [])
   const finding = 'Finding: badge stays after exit'
   const shapes = [
     // [what, input, flagged]
