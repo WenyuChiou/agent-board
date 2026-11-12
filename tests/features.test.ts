@@ -1,5 +1,6 @@
 import { emptyQuestions, observeQuestions, resolveQuestion, withCaptures } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
+import { countedText } from './fixtures/counted-work'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
@@ -2753,7 +2754,7 @@ test('a status or summary line that leads into the board is a look, while a lead
   expect(isBoardTurn(said(`現在跑了測試看板如下：\n\`\`\`\n${zh}\`\`\`\n先回限流。`)!)).toBe(false)
 })
 
-test('a reply full of board marks with no count line is read at once, not tried for seconds', () => {
+test('a reply full of board marks tries each bounded count line once and scans blank lines in linear work', () => {
   const said = (answer: string) => readTurn('grok-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt: '', last_assistant_message: answer }))
   // One long line, and many lines just short enough to be tried: each has every mark but the ✓,
   // some with long runs of digits. Then many blank lines before a board.
@@ -2761,17 +2762,17 @@ test('a reply full of board marks with no count line is read at once, not tried 
   const many = Array.from({ length: 50 }, () => `${'●1▸1⚑1'.repeat(66)} x`).join('\n')
   const digits = Array.from({ length: 100 }, () => `●${'1'.repeat(133)}▸${'1'.repeat(132)}⚑${'1'.repeat(132)}`).join('\n')
   const blank = `Here:${'\n'.repeat(40000)}Progress  ● 1 waiting  ▸ 1 in progress  ⚑ 0 due soon  ✓ 0 done today\n`
-  const runs = Array.from({ length: 3 }, () => {
-    const started = performance.now()
-    expect(isBoardTurn(said(long)!)).toBe(false)
-    expect(isBoardTurn(said(many)!)).toBe(false)
-    expect(isBoardTurn(said(digits)!)).toBe(false)
-    expect(isBoardTurn(said(blank)!)).toBe(true)
-    return performance.now() - started
-  })
-  // #1323: regex backtracking has no work counter, so the fastest of three runs stands for its cost: a CI
-  // pause would have to hit all three. The plugin runtime has no process.env to widen the limit on CI.
-  expect(Math.min(...runs)).toBeLessThan(500)
+  for (const [answer, expected] of [[long, false], [many, false], [digits, false], [blank, true]] as const) {
+    const counted = countedText(answer)
+    expect(isBoardAnswer(counted.text)).toBe(expected)
+    expect(isBoardTurn(said(answer)!)).toBe(expected)
+    expect(counted.work.splits).toBe(1)
+    expect(counted.work.countTries === 0).toBe(answer === long)
+    expect(counted.work.longestCount).toBeLessThanOrEqual(400)
+    expect(counted.work.countTries).toBeLessThanOrEqual(answer.split('\n').length)
+    expect(counted.work.countUnits).toBeLessThanOrEqual(answer.length)
+    expect(counted.work.lineReads).toBeLessThan(6 * answer.split('\n').length)
+  }
 })
 
 // --chat: the board as plain text for an agent that answers in a chat app (Telegram), sent as it is.
