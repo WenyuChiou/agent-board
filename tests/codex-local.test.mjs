@@ -7309,8 +7309,8 @@ test('deepseekLocalPlugin ignores subagents and gives a waiting board message to
     assert.fail(label)
   }
   const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, board)
-  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'watch', 'join']
-  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, watch, join)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
   const fake = (id, header = {}) => {
     const agent = { session: { header: { id, ...header } }, status: 'idle', received: [], followup(message) { agent.received.push(message); agent.status = 'running' } }
     return agent
@@ -7359,7 +7359,7 @@ test('deepseekLocalPlugin ignores subagents and gives a waiting board message to
     if (existsSync(log)) assert.ok(!readFileSync(log, 'utf8').includes('MAILBOX_FAILED'), readFileSync(log, 'utf8'))
     // A board script that cannot answer is logged, once, however often the session asks.
     const broken = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, join(f.home, 'missing-board.mjs'))
-    const failed = new Function(...names, `${broken.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, watch, join)
+    const failed = new Function(...names, `${broken.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
     const failedHooks = new Map()
     failed.apply({ on: (name, fn) => failedHooks.set(name, fn) })
     const lonely = fake('deepseek-lonely-session')

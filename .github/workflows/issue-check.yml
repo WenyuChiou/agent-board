@@ -1,0 +1,34 @@
+# Checks new or edited issues with scripts/pr-check.mjs: posts or updates a notice comment when a
+# title matches an open issue or a lane finding lacks a pull request link (#1325).
+# Issue fields are read from the event file and never enter a shell command.
+name: issue-check
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: issue-check-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  issue-check:
+    name: issue-check
+    if: github.repository == 'WenyuChiou/agent-board'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Check the issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/pr-check.mjs --event "$GITHUB_EVENT_PATH" --comment-issue
