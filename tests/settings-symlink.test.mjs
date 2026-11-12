@@ -5,7 +5,7 @@ import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { mock, test } from 'node:test'
 import { runInNewContext } from 'node:vm'
@@ -517,13 +517,15 @@ fs.renameSync = (from, to) => {
 // Every lock case runs in a child: a synchronous FIFO read must not hang the test process.
 const lockBase = '{"lang":"en"}\n'
 // A process that has ended: the old takeover read this pid and took the lock over (codex_166 finding 8).
+// The lock a writer names is under the folder's real path (Windows short names, macOS /var, Linux alike).
+const realLock = file => join(realpathSync.native(dirname(file)), `${basename(file)}.agent-board.lock`)
 const exitedPid = spawnSync(process.execPath, ['-e', '0']).pid
 const lockNext = '{"lang":"zh-TW"}\n'
 
 test('#1339: CLI reports a saved file whose owned lock cannot be removed', () => {
   const dir = mkdtempSync(join(tmpdir(), 'settings-left-cli-'))
   const file = join(dir, 'progress-settings.json')
-  const lock = resolve(`${file}.agent-board.lock`)
+  const lock = realLock(file)
   try {
     const normal = updateSettings(file, () => lockBase)
     assert.equal(normal.result, 'ok')
@@ -552,7 +554,7 @@ test('#1339: CLI reports a saved file whose owned lock cannot be removed', () =>
 test('#1339: plugin reports a saved file whose owned lock cannot be removed', () => {
   const dir = mkdtempSync(join(tmpdir(), 'settings-left-plugin-'))
   const file = join(dir, 'progress-settings.json')
-  const lock = resolve(`${file}.agent-board.lock`)
+  const lock = realLock(file)
   const preload = join(dir, 'left-lock.cjs')
   try {
     const normal = writeScript(file, lockBase, 'missing', null)
@@ -573,7 +575,7 @@ test('#1339: both writers report a failed lock identity check after saving', () 
   for (const writer of ['cli', 'plugin']) {
     const dir = mkdtempSync(join(tmpdir(), 'settings-left-stat-'))
     const file = join(dir, 'progress-settings.json')
-    const lock = resolve(`${file}.agent-board.lock`)
+    const lock = realLock(file)
     try {
       if (writer === 'cli') {
         const lstat = fs.lstatSync
@@ -604,7 +606,7 @@ fs.lstatSync = (name, ...args) => { if (String(name).endsWith('.agent-board.lock
 
 test('#1339: settings page names a left lock locally and only its file name on the network', { timeout: 30_000 }, async () => {
   const board = await serve({ leftLock: true, lan: true })
-  const lock = join(board.dir, 'progress-settings.json.agent-board.lock')
+  const lock = join(realpathSync.native(board.dir), 'progress-settings.json.agent-board.lock')
   try {
     const opened = await board.call('POST', '/api/lan', { body: { address: '192.168.42.2' } })
     assert.equal(opened.status, 200, opened.body)
@@ -630,7 +632,7 @@ test('#1339: the terminal style key shows the saved-but-left warning', () => {
     const path = join(dir, 'progress.md')
     const script = join(dir, 'board.mjs')
     const preload = join(dir, 'left-lock.cjs')
-    const lock = join(dir, 'progress-settings.json.agent-board.lock')
+    const lock = join(realpathSync.native(dir), 'progress-settings.json.agent-board.lock')
     writeFileSync(path, '# Progress\n\n## Demo\n- [ ] Task\n')
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
     writeFileSync(preload, `const fs = require('node:fs'), unlink = fs.unlinkSync
@@ -718,7 +720,7 @@ const runLockChild = (writer, file, { callback, preload, onWaiting } = {}) => ne
   const body = callback === undefined
     ? `if (replaceSettings(file, ${JSON.stringify(lockBase)}, ${JSON.stringify(lockNext)}) !== 'ok') throw new Error('save failed')`
     : `withSettingsLock(file, () => { ${callback} })`
-  const plugin = callback === undefined ? SETTINGS_WRITE : SETTINGS_WRITE.replace('withSettingsLock(finish)', `withSettingsLock(() => { ${callback} })`)
+  const plugin = callback === undefined ? SETTINGS_WRITE : SETTINGS_WRITE.replace('withSettingsLock(finish)', `withSettingsLock(() => { const lockPath = lockFile; ${callback} })`)
   const source = writer === 'plugin' ? plugin : cliLockScript(body)
   const args = [...(preload ? ['--require', preload] : []), ...(writer === 'cli' ? ['--input-type=module'] : []), '-e', source, '--', file, 'ok']
   const started = performance.now()
@@ -749,7 +751,7 @@ const lockSnapshot = file => {
 }
 const oldLock = (dir, shape) => {
   const file = join(dir, 'progress-settings.json')
-  const lock = `${file}.agent-board.lock`
+  const lock = realLock(file)
   const target = join(dir, 'lock-target')
   writeFileSync(file, lockBase)
   if (shape === 'folder') mkdirSync(lock)

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn, spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, realpathSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -587,7 +587,7 @@ test('Settings keeps phone agent rows read only and uses wrapping lists with 48 
 // (the page's path-privacy rule; codex_166 finding 6). The held lock stays as it was.
 test('a held settings lock names its full path on the local page and only its file name on the network page (#1276)', { timeout: 30_000 }, async () => {
   const f = fixture(true)
-  const lock = join(f.data, 'progress-settings.json.agent-board.lock')
+  const lock = join(realpathSync.native(f.data), 'progress-settings.json.agent-board.lock')
   writeFileSync(lock, 'synthetic held lock\n')
   const board = await f.start()
   try {
