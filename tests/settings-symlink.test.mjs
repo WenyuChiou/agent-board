@@ -610,14 +610,22 @@ for (const writer of ['cli', 'plugin']) {
     try {
       const { file, lock } = oldLock(dir, 'empty')
       const preload = join(dir, 'waiting.cjs')
+      // The writer meets the held lock as EEXIST from its exclusive create, or on Windows, where it looks first
+      // whether anything is at the lock path, as a look that finds something before it has created its own lock.
       writeFileSync(preload, `const fs = require('node:fs')
-const open = fs.openSync
-let said = false
+const open = fs.openSync, look = fs.lstatSync
+let said = false, made = false
+const say = () => { if (!said) { said = true; process.stdout.write('WAITING\\n') } }
 fs.openSync = (...args) => {
-  try { return open(...args) } catch (error) {
-    if (!said && String(args[0]) === ${JSON.stringify(lock)} && error.code === 'EEXIST') { said = true; process.stdout.write('WAITING\\n') }
+  try { const fd = open(...args); if (String(args[0]) === ${JSON.stringify(lock)}) made = true; return fd } catch (error) {
+    if (String(args[0]) === ${JSON.stringify(lock)} && error.code === 'EEXIST') say()
     throw error
   }
+}
+fs.lstatSync = (...args) => {
+  const found = look(...args)
+  if (!made && String(args[0]) === ${JSON.stringify(lock)}) say()
+  return found
 }
 require('node:module').syncBuiltinESMExports()
 `)
