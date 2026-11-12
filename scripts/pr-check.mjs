@@ -737,16 +737,30 @@ export const binaryImages = paths => {
   return output
 }
 
+// A lane's own reviewer says so in the parentheses right after its name, as one of their comma-separated notes:
+// `by codex (read-only, started new for this review), lane x` (RULES R2). Only that whole note counts, so a line
+// that says "not started new for this review", or says it anywhere else, is not one.
+const isFreshLine = line => {
+  const notes = line.match(/[ \t]by[ \t]+[^\r\n(,]*\(([^)\r\n]*)\)/i)?.[1] ?? ''
+  return notes.split(',').some(note => note.trim().toLowerCase() === 'started new for this review')
+}
+
+// On the light and normal tiers a reviewer the author's lane started new for this review may approve, whatever its
+// name; on the risk tier, or with no tier named, a reviewer named like the author is the author approving (RULES R2).
+export const isLaneReviewer = (review, tier) => review?.isFresh === true && (tier === 'light' || tier === 'normal')
+
 export const reviewOf = item => {
   if (!item) return null
   const body = typeof item === 'string' ? item : item.body ?? ''
   const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
   if (match) {
     const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
+    const isFresh = isFreshLine(body.slice(match.index).split(/\r?\n/, 1)[0])
     return {
       kind: match[1].toUpperCase(),
       sha: match[2].toLowerCase(),
       ...(reviewer ? { reviewer } : {}),
+      ...(isFresh ? { isFresh } : {}),
     }
   }
   if (typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
@@ -760,9 +774,12 @@ export const reviewOf = item => {
   return null
 }
 
+// The tier the body names on its `Tier:` line (RULES R2), or null when it names none.
+export const tierOf = body => stripComments(body ?? '').match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
+
 export const verdict = (comments, head, options = {}) => {
   const output = result()
-  const { isDraft = false, authorAgent = null, number = null } = options
+  const { isDraft = false, authorAgent = null, number = null, tier = null } = options
   const reviews = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
   const last = reviews.at(-1)
 
@@ -791,10 +808,10 @@ export const verdict = (comments, head, options = {}) => {
     return output
   }
 
-  if (authorAgent && last.reviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase())) {
+  if (authorAgent && last.reviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase()) && !isLaneReviewer(last, tier)) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
-      output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer.'))
+      output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer; on the light and normal tiers, a reviewer your lane starts new for this review says so on its verdict line ("started new for this review").'))
     }
     return output
   }
@@ -870,7 +887,7 @@ export const checkPr = data => {
     add(outsideNotes({ paths: data.paths, numstat: data.numstat }))
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
-  else add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number }))
+  else add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body) }))
   if (data.isDraft) output.info.push(`draft: the reviewer starts when you run \`gh pr ready ${data.number}\` and comment \`Ready for review ${data.head}\`.`)
   return output
 }
