@@ -4152,7 +4152,7 @@ export const LINES = [
 "var stateOf = (auto, isClosed) => isClosed || auto === \"ended\" ? \"ended\" : auto === \"working\" ? \"working\" : \"idle\";",
 "var rowState = (row) => stateOf(row.auto, row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true);",
 "var sessionState = (view, agent, session) => {",
-"  const rows = [...view.groups.flatMap((group) => group.rows), ...view.idle, ...view.stopped];",
+"  const rows = [...view.groups.flatMap((group) => group.rows), ...view.idle, ...view.stopped, ...view.due];",
 "  const name = agent || \"claude\";",
 "  const states = [",
 "    ...rows.filter((one) => (one.agent || \"claude\") === name && one.nativeSession === session).map(rowState),",
