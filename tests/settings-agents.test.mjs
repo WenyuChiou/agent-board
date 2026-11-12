@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn, spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, realpathSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -581,4 +581,25 @@ test('Settings keeps phone agent rows read only and uses wrapping lists with 48 
   assert.match(settingsCss, /min-width:48px;min-height:48px;max-width:100%/)
   assert.match(settingsCss, /grid-template-columns:minmax\(0,1fr\) auto/)
   assert.match(settingsCss, /overflow-wrap:anywhere/)
+})
+
+// A held settings lock: the local page names its full path, a phone on the network only its file name
+// (the page's path-privacy rule; codex_166 finding 6). The held lock stays as it was.
+test('a held settings lock names its full path on the local page and only its file name on the network page (#1276)', { timeout: 30_000 }, async () => {
+  const f = fixture(true)
+  const lock = join(realpathSync.native(f.data), 'progress-settings.json.agent-board.lock')
+  writeFileSync(lock, 'synthetic held lock\n')
+  const board = await f.start()
+  try {
+    const local = await board.call('POST', '/api/style', { style: 'blue' })
+    assert.equal(local.status, 409, local.text)
+    assert.equal(local.json().note, EN.settingsLocked(lock))
+    const opened = await board.call('POST', '/api/lan', { address: '192.168.42.2' })
+    assert.equal(opened.status, 200, opened.text)
+    const phone = await transport(new URL(opened.json().url), 'POST', '/api/style', { style: 'blue' })
+    assert.equal(phone.status, 409, phone.text)
+    assert.equal(phone.json().note, EN.settingsLocked('progress-settings.json.agent-board.lock'))
+    assert.ok(!phone.text.includes(f.data), 'the network page never shows the data folder')
+    assert.equal(readFileSync(lock, 'utf8'), 'synthetic held lock\n')
+  } finally { await board.close() }
 })

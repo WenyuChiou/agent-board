@@ -4,6 +4,7 @@ import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiv
 import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
+import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_LOCK_LEFT, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from './settings-script'
 import { LEDGER_LINK, LEDGER_RENAMES, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
 import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
@@ -1165,7 +1166,7 @@ const pollBarStyle = async ($: EngineInterface, path: string): Promise<void> => 
   const stat = await $.fs.stat(file).catch(() => undefined)
   const seen = stat === undefined ? '' : `${stat.mtimeMs}:${stat.size}`
   if (seen === barStyleSeen) return
-  const style = barStyleOf(stat === undefined ? null : await readText($, file).catch(() => null))
+  const style = barStyleOf(stat === undefined ? null : await readSettingsText($, file).catch(() => null))
   barStyleSeen = seen
   if ((await read($, barStyle)) === style) return
   await update($, barStyle, () => style)
@@ -1648,6 +1649,18 @@ const readText = async ($: EngineInterface, path: string): Promise<string> => {
     if (!(await $.fs.exists(path))) return ''
     throw error
   }
+}
+
+// The board's settings file as text, read by the guarded script: the host's own read follows a link and waits on a
+// FIFO (#1276). A missing file, a link or a file that is not a plain one read as empty, as nothing to read; a read
+// that fails throws. A process starts only when the caller reads, which the callers do on a change or a sweep.
+const readSettingsText = async ($: EngineInterface, file: string): Promise<string> => {
+  // No file, no process: a board with no settings file starts nothing to read it.
+  if (!(await $.fs.exists(file))) return ''
+  const found = await $.process.run(['node', '-e', SETTINGS_READ, '--', file], { timeoutMs: 10000 })
+  if (found.exitCode !== 0 || found.isStdoutTruncated) throw new Error('SETTINGS_UNREADABLE')
+  const body = JSON.parse(found.stdout) as { kind?: unknown; text?: unknown }
+  return body.kind === 'ok' && typeof body.text === 'string' ? body.text : ''
 }
 
 // Every write this session makes (its block, a tick, an archive) goes through one queue,
@@ -3204,7 +3217,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   // began moves no hand-kept task, rather than falling back to the times the pane kept in memory.
   const observed = isCleanUp ? (parseSeen(await readText($, seenPath(path))) ?? {}) : await read($, firstSeen)
   // Read on the sweep only, never on a poll; a missing or unreadable file means the default.
-  const historyDays = isNow || isCleanUp ? HISTORY_DAYS : historyDaysOf(await readText($, settingsPath(path)).catch(() => ''))
+  const historyDays = isNow || isCleanUp ? HISTORY_DAYS : historyDaysOf(await readSettingsText($, settingsPath(path)).catch(() => ''))
   // Counted with their number: two done blocks with the same title and steps make one entry text,
   // and both leave (#231).
   const archived = new Map<string, number>()
@@ -4272,15 +4285,35 @@ export const register: Register = (on, options) => {
       const style = barStyleFrom(styleArg[1] ?? '')
       if (style === null) return { text: s.barStyleUnknown }
       const file = settingsPath(await progressPath($))
-      // A file that exists but cannot be read, or does not read as JSON, is left as it is.
-      let text: string
-      try { text = await readText($, file) } catch { return { text: s.barStyleUnreadable } }
-      const next = withBarStyle(text, style)
-      if (next === null) return { text: s.barStyleUnreadable }
-      try { await $.fs.write(file, next) } catch { return { text: s.pressFailed } }
+      // A file that is a link or a folder, cannot be read, or does not read as JSON, is left as it is.
+      // The host's own file calls follow a link and wait on a FIFO, so Node reads and writes it (#1276).
+      // The change is worked out from the file as it is read just before the write; when another save got
+      // in between, the write is refused and the change is worked out again, so that save is kept.
+      let lockLeft: string | undefined
+      for (let attempt = 0; ; attempt++) {
+        if (attempt >= 4) return { text: s.pressFailed }
+        const found = await $.process.run(['node', '-e', SETTINGS_READ, '--', file], { timeoutMs: 10000 }).catch(() => null)
+        let current: { kind?: unknown; text?: unknown } | null = null
+        if (found?.exitCode === 0 && !found.isStdoutTruncated) {
+          try { current = JSON.parse(found.stdout) as { kind?: unknown; text?: unknown } } catch {}
+        }
+        if (current === null || (current.kind !== 'missing' && current.kind !== 'unsafe' && current.kind !== 'ok')) return { text: s.pressFailed }
+        if (current.kind === 'unsafe') return { text: s.barStyleUnsafe }
+        const base = current.kind === 'ok' && typeof current.text === 'string' ? current.text : null
+        const next = withBarStyle(base, style)
+        if (next === null) return { text: s.barStyleUnreadable }
+        // The texts go on stdin: process arguments can be listed by other users, and the file is private.
+        const wrote = await $.process.run(['node', '-e', SETTINGS_WRITE, '--', file, base === null ? 'missing' : 'ok'], { timeoutMs: 10000, stdin: JSON.stringify({ next, base }) }).catch(() => null)
+        if (wrote?.exitCode === SETTINGS_UNSAFE) return { text: s.barStyleUnsafe }
+        if (wrote?.exitCode === SETTINGS_CHANGED) continue
+        if (wrote?.exitCode === SETTINGS_LOCKED && !wrote.isStdoutTruncated) return { text: s.settingsLocked(wrote.stdout) }
+        if (wrote?.exitCode === SETTINGS_LOCK_LEFT && !wrote.isStdoutTruncated) { lockLeft = wrote.stdout; break }
+        if (wrote?.exitCode !== 0) return { text: s.pressFailed }
+        break
+      }
       await update($, barStyle, () => style)
       $.ui.invalidate('ui.render')
-      return { text: s.barStyleSet(barStyleName(style, s)) }
+      return { text: `${s.barStyleSet(barStyleName(style, s))}${lockLeft === undefined ? '' : ` ${s.settingsLockLeft(lockLeft)}`}` }
     }
     if (/^(整理|archive|tidy)$/i.test(arg)) {
       const moved = await enqueue(() => archiveOld($, true)).catch(() => null)

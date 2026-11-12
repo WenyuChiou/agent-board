@@ -27,6 +27,7 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
+import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_LOCK_LEFT, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script'
 import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED, PENDING_COMMIT, PENDING_STAGE } from '../hooks/ledger-move'
 import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
@@ -126,6 +127,14 @@ type World = {
   isMoveRefused?: (path: string) => boolean
   // A delete of this file fails, as with a file another program holds open.
   isRemoveRefused?: (path: string) => boolean
+  // Paths that are a link or a folder, as the settings scripts see them (#1276).
+  unsafeFiles?: Set<string>
+  // Settings files whose lock another save holds: the write script exits SETTINGS_LOCKED with the lock path on
+  // stdout, or with that output cut short (#1339, codex_166 finding 5).
+  lockedFiles?: Map<string, { stdout: string; isTruncated?: boolean }>
+  leftLocks?: Map<string, { stdout: string; isTruncated?: boolean }>
+  // What each settings write was given: its arguments, and what it read on stdin.
+  settingsWrites?: Array<{ argv: string[]; stdin: string | undefined }>
   // What the model answers asynchronously; a promise that never settles is a hung call.
   hang?: (prompt: string) => boolean
   holdComplete?: { reached: () => void; release: Promise<void> }
@@ -313,6 +322,30 @@ const engineBeneath = (on: On, world: World): MockClock => {
       if (world.node === null) return { deny: 'ENOENT' }
       if (world.liveFailure === 'timeout') return { deny: 'ETIMEDOUT' }
       return { value: { exitCode: world.liveFailure === 'exit' ? 1 : 0, stdout: world.liveOutput ?? '', stderr: 'SYNTHETIC_STARTUP_DETAIL', isStdoutTruncated: world.liveFailure === 'truncated', isStderrTruncated: false } }
+    }
+    if (e.argv[0] === 'node' && e.argv[2] === SETTINGS_READ && e.argv[3] === '--') {
+      const file = posix(e.argv[4] ?? '')
+      world.ran?.push([...e.argv])
+      const text = world.files.get(file)
+      const body = world.unsafeFiles?.has(file) === true ? { kind: 'unsafe' } : text === undefined ? { kind: 'missing' } : { kind: 'ok', text }
+      return { value: { exitCode: 0, stdout: JSON.stringify(body), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (e.argv[0] === 'node' && e.argv[2] === SETTINGS_WRITE && e.argv[3] === '--') {
+      const file = posix(e.argv[4] ?? '')
+      world.ran?.push([...e.argv])
+      if (world.unsafeFiles?.has(file) === true) return { value: { exitCode: SETTINGS_UNSAFE, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      const locked = world.lockedFiles?.get(file)
+      if (locked !== undefined) return { value: { exitCode: SETTINGS_LOCKED, stdout: locked.stdout, stderr: 'another save of the settings file is in progress', isStdoutTruncated: locked.isTruncated === true, isStderrTruncated: false } }
+      // Written only when the file still holds the text the change was worked out from.
+      // The texts arrive on stdin, as the script reads them, never in the arguments.
+      const given = JSON.parse(String((e as typeof e & { init?: { stdin?: string } }).init?.stdin ?? '{}')) as { next?: string; base?: string | null }
+      world.settingsWrites?.push({ argv: [...e.argv], stdin: (e as typeof e & { init?: { stdin?: string } }).init?.stdin })
+      const held = world.files.get(file)
+      if ((e.argv[5] === 'ok' ? held : undefined) !== (e.argv[5] === 'ok' ? given.base ?? undefined : undefined) || (e.argv[5] === 'missing' && held !== undefined)) return { value: { exitCode: SETTINGS_CHANGED, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      world.files.set(file, given.next ?? '')
+      const left = world.leftLocks?.get(file)
+      if (left !== undefined) return { value: { exitCode: SETTINGS_LOCK_LEFT, stdout: left.stdout, stderr: '', isStdoutTruncated: left.isTruncated === true, isStderrTruncated: false } }
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv[0] === 'node' && e.argv[2] === LEDGER_LINK && e.argv[3] === '--') {
       world.ran?.push([...e.argv])
