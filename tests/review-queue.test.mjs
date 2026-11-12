@@ -113,7 +113,7 @@ test('the reviewer queue lists the smallest pull request first and marks one Rea
 })
 
 test('a Reviewing comment after the Ready names who took the review', () => {
-  const comments = { 1: [comment('Reviewing: alice', '2026-10-20T07:00:00Z'), ready(head, '2026-10-20T08:00:00Z'), comment('Reviewing: bot-one', '2026-10-20T09:00:00Z')] }
+  const comments = { 1: [comment('Reviewing: alice', '2026-10-20T07:00:00Z'), ready(head, '2026-10-20T08:00:00Z'), comment(`Reviewing: ${head} by bot-one`, '2026-10-20T10:30:00Z')] }
   const queue = classify([pull(1)], comments, now)
   assert.equal(queue.needsReviewer[0].takenBy, 'bot-one')
   assert.match(formatQueue(queue), /taken by bot-one/)
@@ -121,11 +121,125 @@ test('a Reviewing comment after the Ready names who took the review', () => {
 
 test('a Reviewing comment from the pull request author does not count as taken, even from the shared login', () => {
   const prs = [pull(1, { body: 'Author: codex (x), branch' })]
-  const own = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('codex (x)', '2026-10-20T09:00:00Z'))] }, now)
+  const own = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('codex (x)', '2026-10-20T10:30:00Z'))] }, now)
   assert.equal(own.needsReviewer[0].takenBy, null)
   assert.equal(own.needsReviewer[0].lapsedBy, null)
-  const other = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('claude', '2026-10-20T09:00:00Z'))] }, now)
+  const other = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('claude', '2026-10-20T10:30:00Z'))] }, now)
   assert.equal(other.needsReviewer[0].takenBy, 'claude')
+})
+
+test('a Reviewing claim holds only the head it names (owner, 2026-11-12)', () => {
+  const prs = [pull(1, { body: 'Author: codex (x), branch' })]
+  const at = '2026-10-20T11:00:00Z'
+  for (const body of [`Reviewing: ${oldHead} by claude`, 'Reviewing: claude', `Reviewing: ${head.slice(0, 6)} by claude`, `Reviewing: ${head} claude`, `Reviewing: ${head.slice(0, 7)} (desktop)`, `Reviewing: ${head} by-claude`, `Reviewing: ${head} by `]) {
+    const queue = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), comment(body, at)] }, now)
+    assert.deepEqual([queue.needsReviewer[0].takenBy, queue.needsReviewer[0].lapsedBy], [null, null], body)
+  }
+  for (const body of [`Reviewing: ${head} by claude`, `Reviewing: \`${head.slice(0, 7)}\` by claude`, `Reviewing: ${head} By claude`]) {
+    const queue = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), comment(body, at)] }, now)
+    assert.equal(queue.needsReviewer[0].takenBy, 'claude', body)
+  }
+  // The open-review count follows the same rule: a claim on an earlier head leaves its reviewer free.
+  const one = { maxOpenReviews: 1, rules: [{ authors: ['*'], reviewers: ['claude', 'bot-one'] }] }
+  const both = [pull(1, { body: 'Author: codex, branch' }), pull(2)]
+  const stale = classify(both, { 1: [ready()], 2: [comment(`Reviewing: ${oldHead} by claude`, at)] }, now, one)
+  assert.equal(stale.needsReviewer[0].suggested, 'claude')
+  const held = classify(both, { 1: [ready()], 2: [comment(`Reviewing: ${head} by claude`, at)] }, now, one)
+  assert.equal(held.needsReviewer[0].suggested, 'bot-one')
+  // A late verdict on an earlier head does not answer the claim on the current one; a verdict on the current head does.
+  const late = classify(both, { 1: [ready()], 2: [comment(`Reviewing: ${head} by claude`, at), comment(`Review: REQUEST CHANGES ${oldHead} by claude`, '2026-10-20T11:30:00Z')] }, now, one)
+  assert.equal(late.needsReviewer[0].suggested, 'bot-one')
+  const done = classify(both, { 1: [ready()], 2: [comment(`Reviewing: ${head} by claude`, at), comment(`Review: REQUEST CHANGES ${head} by claude`, '2026-10-20T11:30:00Z')] }, now, one)
+  assert.equal(done.needsReviewer[0].suggested, 'claude')
+})
+
+test('only a verdict from the same agent, lane included, answers a claim on the head', () => {
+  const prs = [pull(1, { body: 'Author: claude, branch' })]
+  const claim = comment(`Reviewing: ${head} by codex (desktop)`, '2026-10-20T10:30:00Z', 2)
+  const after = (by, id = 3) => [ready(head, '2026-10-20T08:00:00Z', 1), claim, comment(`Review: REQUEST CHANGES ${head} by ${by}`, '2026-10-20T11:00:00Z', id), ready(head, '2026-10-20T11:15:00Z', id + 1)]
+  assert.equal(classify(prs, { 1: after('codex (cloud)') }, now).needsReviewer[0].takenBy, 'codex (desktop)')
+  assert.equal(classify(prs, { 1: after('codex (desktop)') }, now).needsReviewer[0].takenBy, null)
+  const one = { maxOpenReviews: 1, rules: [{ authors: ['*'], reviewers: ['codex', 'bot-one'] }] }
+  const both = [pull(1, { body: 'Author: claude, branch' }), pull(2)]
+  const open = by => classify(both, { 1: [ready()], 2: [comment(`Reviewing: ${head} by codex (desktop)`, '2026-10-20T11:00:00Z'), comment(`Review: REQUEST CHANGES ${head} by ${by}`, '2026-10-20T11:30:00Z', 2)] }, now, one)
+  assert.equal(open('codex (cloud)').needsReviewer[0].suggested, 'bot-one')
+  assert.equal(open('codex (desktop)').needsReviewer[0].suggested, 'codex')
+})
+
+test('only a verdict naming the reviewer as the claim did answers it, and a malformed claim holds nothing (#1358)', () => {
+  const tick = '`'
+  const prs = [pull(1, { body: 'Author: claude, branch' })]
+  const both = [pull(1, { body: 'Author: claude, branch' }), pull(2)]
+  const one = { maxOpenReviews: 1, rules: [{ authors: ['*'], reviewers: ['codex', 'bot-one'] }] }
+  const claim = `Reviewing: ${head} by codex (desktop)`
+  const verdictOn = (by, sha = head) => by === null ? [] : [comment(`Review: REQUEST CHANGES ${sha} by ${by}`, '2026-10-20T11:00:00Z', 3)]
+  const takenBy = (line, by = null, sha) => classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z', 1), comment(line, '2026-10-20T10:30:00Z', 2), ...verdictOn(by, sha), ready(head, '2026-10-20T11:15:00Z', 4)] }, now).needsReviewer[0].takenBy
+  const suggested = (line, by = null, sha) => classify(both, { 1: [ready(head, '2026-10-20T09:00:00Z', 1)], 2: [comment(line, '2026-10-20T10:45:00Z', 1), ...verdictOn(by, sha)] }, now, one).needsReviewer[0].suggested
+  for (const line of [`Reviewing: ${tick}${head} by codex (desktop)`, `Reviewing: ${head}${tick} by codex (desktop)`, `Reviewing: ${head} by ${tick}${tick}`, `Reviewing: ${head} by , x`, `Reviewing: ${head} by ()`, `Reviewing: ${head} by -`]) {
+    assert.equal(takenBy(line), null, line)
+    assert.equal(suggested(line), 'codex', line)
+  }
+  for (const line of [`Reviewing: ${tick}${head.slice(0, 7)}${tick} by dot`, `Reviewing: ${head} By dot`, `Reviewing:\t${head}\tby\tdot`, `Reviewing: ${head.toUpperCase()} by dot`]) assert.equal(takenBy(line), 'dot', line)
+  assert.equal(takenBy(`Reviewing: ${head} by 小路`), '小路')
+  for (const by of ['codex (desktop)', 'Codex  (Desktop)', `${tick}codex (desktop)${tick}`, 'codex (desktop), two notes']) {
+    assert.equal(takenBy(claim, by), null, by)
+    assert.equal(suggested(claim, by), 'codex', by)
+  }
+  for (const by of ['codex (cloud)', 'codex', 'codex, lane cloud', 'codex (desktop) - two notes', 'codex (desktop). notes']) {
+    assert.equal(takenBy(claim, by), 'codex (desktop)', by)
+    assert.equal(suggested(claim, by), 'bot-one', by)
+  }
+  assert.equal(takenBy(claim, 'codex (desktop)', oldHead), 'codex (desktop)')
+  assert.equal(suggested(claim, 'codex (desktop)', oldHead), 'bot-one')
+  assert.equal(takenBy(`Reviewing: ${head} by codex`, 'codex (cloud)'), 'codex')
+  assert.equal(takenBy(`Reviewing: ${head} by codex`, 'codex'), null)
+  const dotPr = [pull(1, { body: 'Author: dot, branch' })]
+  for (const by of ['claude code', 'claude: fine']) {
+    const queue = classify(dotPr, { 1: [ready(head, '2026-10-20T08:00:00Z', 1), comment(`Reviewing: ${head} by claude`, '2026-10-20T10:30:00Z', 2), ...verdictOn(by), ready(head, '2026-10-20T11:15:00Z', 4)] }, now)
+    assert.equal(queue.needsReviewer[0].takenBy, 'claude', by)
+  }
+  // One comment holding the claim and its verdict leaves nothing open.
+  const answeredAtOnce = `${claim}\nReview: REQUEST CHANGES ${head} by codex (desktop)`
+  assert.equal(takenBy(answeredAtOnce), null)
+  assert.equal(suggested(answeredAtOnce), 'codex')
+  // A verdict's head and reviewer come from one line: an unnamed head verdict beside an old-head verdict naming the
+  // claimant answers nothing, and a named head verdict on a later line of the comment does answer.
+  const mixed = `Review: REQUEST CHANGES ${head}\nReview: APPROVE ${oldHead} by codex (desktop)`
+  assert.equal(takenBy(`${claim}\n${mixed}`), 'codex (desktop)')
+  assert.equal(suggested(`${claim}\n${mixed}`), 'bot-one')
+  const later = (line2, at) => classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z', 1), comment(claim, '2026-10-20T10:30:00Z', 2), comment(line2, at, 3), ready(head, '2026-10-20T11:15:00Z', 4)] }, now).needsReviewer[0].takenBy
+  // Every line end the regular expressions' `m` flag knows splits the lines alike.
+  for (const end of ['\n', '\r\n', '\r', '\u2028', '\u2029']) {
+    const lines = `Review: REQUEST CHANGES ${head}${end}Review: APPROVE ${oldHead} by codex (desktop)`
+    assert.equal(later(lines, '2026-10-20T11:00:00Z'), 'codex (desktop)', JSON.stringify(end))
+    assert.equal(suggested(`${claim}${end}${lines}`), 'bot-one', JSON.stringify(end))
+    assert.equal(later(`Review: APPROVE ${oldHead} by dot${end}Review: REQUEST CHANGES ${head} by codex (desktop)`, '2026-10-20T11:00:00Z'), null, JSON.stringify(end))
+    assert.equal(takenBy(`${claim}${end}notes`), 'codex (desktop)', JSON.stringify(end))
+  }
+})
+
+test('the author’s own claim holds no review in the counts either, and a second claim by the same name does not restart its two hours', () => {
+  const one = { maxOpenReviews: 1, rules: [{ authors: ['*'], reviewers: ['codex', 'bot-one'] }] }
+  const own = [pull(1, { body: 'Author: claude, branch' }), pull(2, { body: 'Author: codex, branch' })]
+  const queue = classify(own, { 1: [ready(head, '2026-10-20T09:00:00Z', 1)], 2: [ready(head, '2026-10-20T09:00:00Z', 1), comment(`Reviewing: ${head} by codex`, '2026-10-20T11:00:00Z', 2)] }, now, one)
+  assert.equal(queue.needsReviewer[1].takenBy, null)
+  assert.equal(queue.needsReviewer[0].suggested, 'codex')
+  const prs = [pull(1, { body: 'Author: claude, branch' })]
+  const again = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z', 1), comment(`Reviewing: ${head} by dot`, '2026-10-20T09:00:00Z', 2), comment(`Reviewing: ${head} by dot`, '2026-10-20T11:30:00Z', 3)] }, now)
+  assert.deepEqual([again.needsReviewer[0].takenBy, again.needsReviewer[0].lapsedBy], [null, 'dot'])
+  // Once answered, a new claim after a new Ready holds again.
+  const renewed = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z', 1), comment(`Reviewing: ${head} by dot`, '2026-10-20T09:00:00Z', 2), comment(`Review: REQUEST CHANGES ${head} by dot`, '2026-10-20T09:30:00Z', 3), ready(head, '2026-10-20T11:00:00Z', 4), comment(`Reviewing: ${head} by dot`, '2026-10-20T11:30:00Z', 5)] }, now)
+  assert.equal(renewed.needsReviewer[0].takenBy, 'dot')
+})
+
+test('a second Ready for the same head keeps the claim made after the first, and a claim lapses at two hours to the minute', () => {
+  const prs = [pull(1, { body: 'Author: codex (x), branch' })]
+  const again = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z', 1), comment(`Reviewing: ${head} by claude`, '2026-10-20T10:30:00Z', 2), ready(head, '2026-10-20T11:00:00Z', 3)] }, now)
+  assert.equal(again.needsReviewer[0].takenBy, 'claude')
+  const answered = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z', 1), comment(`Reviewing: ${head} by claude`, '2026-10-20T10:30:00Z', 2), comment(`Review: REQUEST CHANGES ${head} by claude`, '2026-10-20T10:45:00Z', 3), ready(head, '2026-10-20T11:00:00Z', 4)] }, now)
+  assert.deepEqual([answered.needsReviewer[0].takenBy, answered.needsReviewer[0].lapsedBy], [null, null])
+  const edge = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), comment(`Reviewing: ${head} by claude`, '2026-10-20T10:00:00Z')] }, now)
+  assert.deepEqual([edge.needsReviewer[0].takenBy, edge.needsReviewer[0].lapsedBy], [null, 'claude'])
 })
 
 test('an approval named for the pull request author does not count as approved', () => {
@@ -148,7 +262,7 @@ test('a different lane of the same base name is a different agent, not the autho
   assert.deepEqual(same.approved, [])
   assert.deepEqual(same.approvedNow, [])
   assert.deepEqual(same.waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approval is by the author']])
-  const taken = classify([pull(1, { body: 'Author: codex (phase1), branch' })], { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('codex (e2e)', '2026-10-20T09:00:00Z'))] }, now)
+  const taken = classify([pull(1, { body: 'Author: codex (phase1), branch' })], { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', taking('codex (e2e)', '2026-10-20T10:30:00Z'))] }, now)
   assert.equal(taken.needsReviewer[0].takenBy, 'codex (e2e)')
 })
 
@@ -268,7 +382,7 @@ for (const [description, author, reviewer, isSame] of [
     assert.deepEqual(approval.approved.map(item => item.number), isSame ? [] : [1])
     assert.deepEqual(approval.approvedNow.map(item => item.number), isSame ? [] : [1])
     assert.deepEqual(approval.waitingForAuthor.map(item => item.detail), isSame ? ['approval is by the author'] : [])
-    const reviewing = classify(prs, { 1: [start, by('WenyuChiou', taking(reviewer, '2026-10-20T09:00:00Z'))] }, now)
+    const reviewing = classify(prs, { 1: [start, by('WenyuChiou', taking(reviewer, '2026-10-20T10:30:00Z'))] }, now)
     assert.equal(reviewing.needsReviewer[0].takenBy, isSame ? null : reviewer)
     assert.equal(reviewing.needsReviewer[0].lapsedBy, null)
   })
@@ -320,7 +434,7 @@ test('current-head verdicts determine approval or author changes and a new Ready
 
 test('the latest Ready and later take are selected in comment time order', () => {
   const comments = { 1: [
-    comment('Reviewing: bot-one', '2026-10-20T11:00:00Z', 4),
+    comment(`Reviewing: ${head} by bot-one`, '2026-10-20T11:00:00Z', 4),
     ready(head, '2026-10-20T10:00:00Z', 3),
     verdict('APPROVE', head, '2026-10-20T09:00:00Z', 2),
     ready(head, '2026-10-20T08:00:00Z', 1),
@@ -347,7 +461,7 @@ test('only a complete 7 to 40 character head prefix in a starting Ready comment 
 
 test('the text report cuts titles and cleans GitHub text before printing', () => {
   const prs = [pull(1, { title: `${'x'.repeat(75)}\n ghp_abc123`, body: 'Author: bot-one, branch' })]
-  const comments = { 1: [ready(), comment('Reviewing: alice\u001b[31m', '2026-10-20T10:00:00Z')] }
+  const comments = { 1: [ready(), comment(`Reviewing: ${head} by alice\u001b[31m`, '2026-10-20T10:00:00Z')] }
   const text = formatQueue(classify(prs, comments, now))
   assert.match(text, /Needs a reviewer \(1\)/)
   assert.ok(text.includes('x'.repeat(70)))
@@ -447,8 +561,8 @@ const team = {
   ],
 }
 const byAgent = agent => pull(1, { body: `Author: ${agent}, branch` })
-const taking = (name, at = '2026-10-20T08:00:00Z') => comment(`Reviewing: ${name}`, at)
-const answered = name => comment(`Review: APPROVE ${head} by ${name}`, '2026-10-20T10:00:00Z')
+const taking = (name, at = '2026-10-20T10:30:00Z') => comment(`Reviewing: ${head} by ${name}`, at)
+const answered = name => comment(`Review: APPROVE ${head} by ${name}`, '2026-10-20T11:00:00Z')
 
 test('the suggested reviewer is never the agent that wrote the pull request', () => {
   const everyone = { maxOpenReviews: 2, rules: [{ authors: ['*'], reviewers: ['claude', 'bot-one'] }] }
@@ -471,10 +585,10 @@ test('a reviewer already holding two open reviews is not suggested', () => {
   assert.equal(free.needsReviewer[0].suggested, 'bot-one')
 })
 
-test('a Reviewing comment with no verdict lapses after four hours and frees its reviewer', () => {
+test('a Reviewing comment with no verdict lapses after two hours and frees its reviewer', () => {
   const comments = {
-    1: [ready(head, '2026-10-20T06:00:00Z'), taking('bot-two', '2026-10-20T07:00:00Z')],
-    2: [taking('bot-one', '2026-10-20T07:00:00Z')], 3: [taking('bot-one', '2026-10-20T07:00:00Z')],
+    1: [ready(head, '2026-10-20T06:00:00Z'), taking('bot-two', '2026-10-20T09:00:00Z')],
+    2: [taking('bot-one', '2026-10-20T09:00:00Z')], 3: [taking('bot-one', '2026-10-20T09:00:00Z')],
     4: [ready(head, '2026-10-20T10:00:00Z')],
   }
   const prs = [byAgent('claude'), pull(2), pull(3), pull(4, { body: 'Author: codex, branch' })]
