@@ -433,7 +433,7 @@ test('only a message taken by a lease holder holds its session', async () => {
     }
     page('by-hook')
     const access = mcpMailbox(join(root, 'messages'))
-    const taken = (await access('mailbox-turn', { agent: 'codex', session: 'alpha', surface: 'hook' }, now)).message
+    const taken = (await access('mailbox-turn', { agent: 'codex', session: 'alpha', surface: SURFACE_IDS.cli }, now)).message
     await access('mailbox-accept', { agent: 'codex', session: 'alpha', id: taken.id, nonce: taken.nonce }, now)
     page('by-mcp')
     const inbox = await call(server, 'board_inbox', {}, now)

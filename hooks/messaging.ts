@@ -54,6 +54,8 @@ export const SURFACE_IDS = {
   antigravityStream: 'Antigravity owned CLI stream', antigravityTui: 'agy TUI', antigravityIde: 'IDE',
   cursor: 'IDE (Composer)', cli: 'CLI', web: 'Web', tui: 'TUI', unknown: 'unknown',
 } as const
+// The surface of an agent's own MCP pull (board_inbox); it is not a route surface a note can cover.
+export const MCP_SURFACE = 'mcp'
 // A note covers only the surfaces on which its route was recorded.
 export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[] }
 export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route> }
@@ -272,7 +274,8 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   const isRetaken = (one: Message): boolean => isLapsed(one, now) && one.target === target.id && one.turn === target.turn
   const busy = state.messages.some(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isRetaken(one))
   // A message the board checked a route for goes only to a claimant on that same surface; on any other it stays queued.
-  const canClaim = (one: Message): boolean => (one.surface === undefined || one.surface === target.surface) && (one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))
+  // The agent's own MCP pull is exempt: it asks for its messages itself, so nothing starts a turn on an unchecked surface.
+  const canClaim = (one: Message): boolean => (one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE) && (one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))
     || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === 'queued')
   const messages = busy ? [] : state.messages.filter(canClaim).slice(0, 1)
   if (messages.length === 0) return { state, messages }

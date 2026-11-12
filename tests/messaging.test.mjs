@@ -4888,3 +4888,19 @@ test('a board message goes only to the surface its route was checked for, and st
     assert.equal(taken.status, 'uncertain')
   } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
 })
+
+test("a session's own MCP inbox takes a board message bound to another surface of that session, and a hook mailbox on another surface still does not (#1351)", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'message-surface-mcp-'))
+  const note = 'docs/validation/synthetic.md'
+  const routes = [{ agent: 'deepseek', kind: 'mailbox', routes: { idle: { line: 'now', record: note, surfaces: ['Web'] }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  const hub = openTestMessaging(dir, false, { routes, stateOfSession: () => 'idle' })
+  try {
+    const now = Date.now()
+    const box = { agent: 'deepseek', session: 'ds-session' }
+    hub.act('mailbox-turn', { ...box, surface: 'Web' }, now)
+    hub.act('send', { id: 'AB-BOUND-2', target: mailboxId('deepseek', 'ds-session'), turn: 'session', text: 'hello' }, now + 1)
+    assert.equal(hub.act('mailbox-turn', { ...box, surface: 'TUI' }, now + 2).message, null)
+    assert.equal(hub.act('mailbox-turn', { ...box, surface: 'unknown' }, now + 3).message, null)
+    assert.equal(hub.act('mailbox-turn', { ...box, surface: 'mcp' }, now + 4).message?.id, 'AB-BOUND-2')
+  } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
+})
