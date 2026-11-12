@@ -6048,7 +6048,12 @@ require('node:module').syncBuiltinESMExports()
     url = board.urlOf(out)
     assert.ok(url, out)
     for (let tries = 0; !existsSync(opened) && tries < 50; tries++) await delay(100)
-    assert.deepEqual(readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean), [url], 'the address must not gain backticks')
+    // The board opens its own page, with its one-time approval key after the # (D3, #1318), which it
+    // never prints: the address before the key is the one served, and nothing gains backticks.
+    const recorded = readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean)
+    assert.equal(recorded.length, 1, `one launch: ${JSON.stringify(recorded)}`)
+    assert.ok(recorded[0].startsWith(`${url}#k=`), `the address must not gain backticks: ${recorded[0]}`)
+    assert.match(recorded[0].slice(`${url}#k=`.length), /^[\w-]{32}$/, 'the key is the only addition')
   } finally {
     await board.end(url ? [url] : [])
   }
