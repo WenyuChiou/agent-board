@@ -52,9 +52,9 @@ test('#1084: a remembered place is used on the next open, and one on a monitor t
   // The remembered place opens even on a screen too narrow to dock.
   const small = screen(1200)
   const kept = { x: 10, y: 10, width: 500, height: 600 }
-  assert.deepEqual(dockArguments(address, kept, { foreground: small, works: [small] }, 'p').slice(-3), ['--window-size=500,600', '--window-position=10,10', `--app=${address}&dock=2`])
-  // A remembered place is told apart from the dock, so the page does not move it.
-  assert.equal(dockArguments(address, remembered, { foreground: main, works: [main, left] }, 'p').at(-1), `--app=${address}&dock=2`)
+  assert.deepEqual(dockArguments(address, kept, { foreground: small, works: [small] }, 'p').slice(-3), ['--window-size=500,600', '--window-position=10,10', `--app=${address}&dock=2&at=10,10,500,600`])
+  // A remembered place is told apart from the dock and carried in the address too.
+  assert.equal(dockArguments(address, remembered, { foreground: main, works: [main, left] }, 'p').at(-1), `--app=${address}&dock=2&at=-1500,100,700,900`)
   assert.equal(dockArguments(address, remembered, { foreground: main, works: [main] }, 'p').at(-1), `--app=${address}&dock=1`)
 })
 
@@ -69,7 +69,7 @@ test('#1084: the probe line and the window file are read strictly', () => {
 })
 
 // The page's script in a stand-in window: the screen, the window's place and the timers are fake.
-const runDockScript = ({ search, place, avail, answer = () => Promise.resolve({ ok: true }) }) => {
+const runDockScript = ({ search, place, avail, answer = () => Promise.resolve({ ok: true }), navigation }) => {
   const timers = []
   const calls = []
   const moves = []
@@ -89,6 +89,7 @@ const runDockScript = ({ search, place, avail, answer = () => Promise.resolve({ 
     call: (path, body) => { calls.push([path, JSON.parse(JSON.stringify(body))]); return answer() },
     isClosed: false,
   }
+  if (navigation) context.performance = { getEntriesByType: kind => kind === 'navigation' ? [{ type: navigation }] : [] }
   vm.runInNewContext(dockScript, context)
   const tick = () => {
     for (const one of [...timers]) {
@@ -140,6 +141,29 @@ test('#1084: the docked page docks itself when the browser put it off its screen
   const tab = runDockScript({ search: '?t=abc', place: { x: 2000, y: 0, width: 560, height: 1392 }, avail: screen(1000) })
   assert.deepEqual(tab.moves, [])
   assert.equal(tab.timers.length, 0)
+})
+
+test("#1084: a page opened while the board's browser still runs (the flags dropped) moves itself to the place it was opened for; a reload does not", () => {
+  const main = screen(2560, 1392)
+  // The running browser put the new window at its own spot: the page goes to the remembered place.
+  const kept = runDockScript({ search: '?t=abc&dock=2&at=-1500,100,700,900', place: { x: 200, y: 150, width: 1024, height: 768 }, avail: main, navigation: 'navigate' })
+  assert.deepEqual(kept.moves, [['resize', 700, 900], ['move', -1500, 100]])
+  // Or to the dock, though the window is on its screen.
+  const docked = runDockScript({ search: '?t=abc&dock=1', place: { x: 200, y: 150, width: 1024, height: 768 }, avail: main, navigation: 'navigate' })
+  assert.deepEqual(docked.moves, [['resize', 560, 1392], ['move', 2000, 0]])
+  // Already there (the flags were read): nothing moves.
+  const there = runDockScript({ search: '?t=abc&dock=2&at=-1500,100,700,900', place: { x: -1500, y: 100, width: 700, height: 900 }, avail: main, navigation: 'navigate' })
+  assert.deepEqual(there.moves, [])
+  // A reload keeps where the person moved the window since.
+  for (const search of ['?t=abc&dock=2&at=-1500,100,700,900', '?t=abc&dock=1']) {
+    const reloaded = runDockScript({ search, place: { x: 200, y: 150, width: 1024, height: 768 }, avail: main, navigation: 'reload' })
+    assert.deepEqual(reloaded.moves, [], search)
+  }
+  // A bad 'at' moves nothing.
+  for (const at of ['1,2,3', '1,2,700,x', '0,0,50,900', '1.5,0,700,900', '']) {
+    const bad = runDockScript({ search: `?t=abc&dock=2&at=${at}`, place: { x: 200, y: 150, width: 1024, height: 768 }, avail: main, navigation: 'navigate' })
+    assert.deepEqual(bad.moves, [], at)
+  }
 })
 
 test('#1084: a place the computer did not keep is sent again while the window stays there, each wait longer', async () => {

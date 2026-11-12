@@ -81,14 +81,15 @@ export const profileFlags = (dir: string): string[] => [
 ]
 
 // The browser's arguments for one open of the page's address: docked (`dock=1`) or at the
-// remembered place (`dock=2`) in the board's own profile; else today's plain app window (no
-// profile folder, no screen read, or a screen narrower than DOCK_MIN_WORK). The page docks itself
-// only for `dock=1`: a remembered place may span two monitors, and the launcher has already
-// checked that its title bar is on one.
+// remembered place (`dock=2`, the place also in `at`) in the board's own profile; else today's
+// plain app window (no profile folder, no screen read, or a screen narrower than DOCK_MIN_WORK).
+// The address carries the place too: when the board's browser is still running (a minimized
+// board), it takes the address over and drops the flags, and the new page moves itself there.
 export const dockArguments = (address: string, remembered: Rect | null, probe: { foreground: Rect | null; works: readonly Rect[] } | null, profile: string | null): string[] => {
   const place = probe === null ? null : launchPlace(remembered, probe.foreground, probe.works)
   if (place === null || profile === null) return [`--app=${address}`]
-  return [...profileFlags(profile), ...placeFlags(place), `--app=${address}&dock=${place === remembered ? 2 : 1}`]
+  const mode = place === remembered ? `dock=2&at=${place.x},${place.y},${place.width},${place.height}` : 'dock=1'
+  return [...profileFlags(profile), ...placeFlags(place), `--app=${address}&${mode}`]
 }
 
 // The screens' work areas, read by the launch PowerShell (DPI-unaware, so in the browser's own
@@ -139,11 +140,26 @@ export const dockScript = String.raw`
       return { x: area.x + area.width - width, y: area.y, width: width, height: area.height };
     }
     function isInside(one, area) { return one.x >= area.x - 8 && one.y >= area.y - 8 && one.x + one.width <= area.x + area.width + 8 && one.y + one.height <= area.y + area.height + 8; }
+    function isNear(a, b) { return Math.abs(a.x - b.x) <= 8 && Math.abs(a.y - b.y) <= 8 && Math.abs(a.width - b.width) <= 8 && Math.abs(a.height - b.height) <= 8; }
+    function asked() {
+      var parts = null;
+      try { parts = (new URLSearchParams(location.search).get('at') || '').split(','); } catch (error) { return null; }
+      if (parts.length !== 4) return null;
+      for (var i = 0; i < 4; i++) if (!/^-?\d+$/.test(parts[i])) return null;
+      var one = { x: +parts[0], y: +parts[1], width: +parts[2], height: +parts[3] };
+      return one.width >= 100 && one.height >= 100 ? one : null;
+    }
+    // A board's browser still running (a minimized board) takes a new open over and drops the size
+    // and place flags, so a newly opened page goes to the place it was opened for itself: the dock
+    // (dock=1) or the remembered place in 'at' (dock=2). A reload is not a new open: a window the
+    // person moved since stays. The dock is also corrected whenever it is off its screen; a
+    // remembered place is not, as it may span two monitors.
+    var isNew = true;
+    try { var entry = performance.getEntriesByType('navigation')[0]; if (entry && entry.type !== 'navigate') isNew = false; } catch (error) {}
     var area = work(), now = place();
-    // Only the dock is corrected: a remembered place (dock=2) is where the person put it.
-    if (mode === '1' && !isInside(now, area)) {
-      var target = dock(area);
-      if (target) { try { window.resizeTo(target.width, target.height); window.moveTo(target.x, target.y); } catch (error) {} }
+    var target = mode === '1' ? dock(area) : asked();
+    if (target && ((isNew && !isNear(now, target)) || (mode === '1' && !isInside(now, area)))) {
+      try { window.resizeTo(target.width, target.height); window.moveTo(target.x, target.y); } catch (error) {}
     }
     var sent = null, seen = null, timer = null, isSending = false, wait = 1000, sendNumber = 0;
     function same(a, b) { return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height; }
