@@ -4185,6 +4185,18 @@ test('a running turn the daemon did not replay is looked up on attach, so steeri
   }
 }))
 
+test('a thread that went idle in the same read as its resume answer is not left looking busy', () => codexFixture(async (board, dir) => {
+  // The answer says active; the turn ends and the thread goes idle right behind it. The later notice wins.
+  const { daemon, id } = codexCase(dir, 0, { status: 'active', resumeRace: true })
+  const receiver = codexReceiver(board, daemon)
+  try {
+    const connection = await codexConnection(board)
+    await codexSend(board, connection, id)
+    await waitFor(async () => (await codexMessage(board, id))?.status === 'acknowledged')
+    assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 1)
+  } finally { await receiver.close() }
+}))
+
 test('the Codex receiver never contests a session someone else holds, and joins once it is gone', () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, {})
   const holder = (await board.call('/api/messages/register', { agent: 'codex', session: codexCurrent, surface: 'Synthetic holder', turn: 'session', scope: 'session' })).body

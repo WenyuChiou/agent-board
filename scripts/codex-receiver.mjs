@@ -151,7 +151,7 @@ export const startCodexReceiver = ({
     const state = one.state
     state.heard = Date.now()
     state.seen += 1
-    if (value.method === 'thread/status/changed' && typeof p.status?.type === 'string') state.status = p.status.type
+    if (value.method === 'thread/status/changed' && typeof p.status?.type === 'string') { state.status = p.status.type; state.statusEvents += 1 }
     else if (value.method === 'turn/started' && p.turn?.id) state.turn = p.turn.id
     else if (value.method === 'turn/completed' && p.turn?.id) {
       if (state.turn === p.turn.id) state.turn = null
@@ -176,7 +176,7 @@ export const startCodexReceiver = ({
   }
 
   const attach = async thread => {
-    const state = { status: 'unknown', turn: null, pending: null, heard: 0, seen: 0 }
+    const state = { status: 'unknown', turn: null, pending: null, heard: 0, seen: 0, statusEvents: 0 }
     const one = { state, receiver: null, isLost: false, settle: () => undefined }
     attached.set(thread, one)
     // The delivery turn settles when its own turn has ended: an ACK seen in another turn, or none, or a
@@ -212,8 +212,11 @@ export const startCodexReceiver = ({
     }
     try {
       // Resuming a loaded thread subscribes this connection to its events without starting a turn.
+      const statusEvents = state.statusEvents
       const resumed = await daemon.request('thread/resume', { threadId: thread, excludeTurns: true })
-      state.status = typeof resumed?.thread?.status?.type === 'string' ? resumed.thread.status.type : 'unknown'
+      // A status notice that came while the answer was on its way is at least as new as the answer, which can reach this
+      // code after notices that followed it in the same read.
+      if (state.statusEvents === statusEvents) state.status = typeof resumed?.thread?.status?.type === 'string' ? resumed.thread.status.type : 'unknown'
       if (isSteerOn && state.status === 'active' && state.turn === null) await learnTurn()
       const verify = async () => {
         let isLoaded = false

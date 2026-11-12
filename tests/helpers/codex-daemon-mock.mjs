@@ -17,7 +17,7 @@
 //   endFlag    a file whose appearance ends the running turn
 //   pidFile    file that gets this process's id
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { serveWebSocketProxy } from './ws-proxy-mock.mjs'
+import { serveWebSocketProxy, serverFrame } from './ws-proxy-mock.mjs'
 
 const config = JSON.parse(readFileSync(process.env.CODEX_MOCK_CONFIG, 'utf8'))
 const log = value => appendFileSync(config.log, JSON.stringify(value) + '\n')
@@ -43,6 +43,18 @@ serveWebSocketProxy({
     if (value.method === 'initialize') emit({ id: value.id, result: {} })
     if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: config.loaded, nextCursor: null } })
     if (value.method === 'thread/resume') {
+      if (config.resumeRace && running) {
+        // The answer says active, and the turn's end and the idle notice follow in the same write, so the client handles
+        // them before the code that awaited the answer continues.
+        const frames = [
+          { id: value.id, result: { thread: thread(threadId) } },
+          { method: 'turn/completed', params: { threadId, turn: { id: running, status: 'completed' } } },
+          { method: 'thread/status/changed', params: { threadId, status: { type: 'idle' } } },
+        ]
+        process.stdout.write(Buffer.concat(frames.map(frame => serverFrame(JSON.stringify(frame)))))
+        running = null
+        return
+      }
       emit({ id: value.id, result: { thread: thread(threadId) } })
       if (running && config.replay !== false) emit({ method: 'turn/started', params: { threadId, turn: { id: running } } })
     }
