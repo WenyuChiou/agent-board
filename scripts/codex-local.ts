@@ -1471,12 +1471,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           if (beside !== desired) changes.push({ file: copy, action: beside === null ? 'create' : 'update' })
           files[copy] = desired
         }
-      } else if (manifest.files[file] === undefined && !otherManifests.some(one => Object.hasOwn(object(one.files ?? {}), file))) {
-        // Code the agent loads, with no record that setup wrote it, is not an edited copy of ours: it is someone else's file.
-        conflicts.push(file)
-      } else if (file === worker && manifest.files[file] === undefined) {
-        // A sibling agent's edited worker stays, and this agent has no old hooks to keep beside it: its new hooks would call
-        // that older worker. Its hooks are held back until the worker is restored or removed (review of #1328).
+      } else if (manifest.files[file] === undefined) {
+        // Code the agent loads, with no record of its own that setup wrote it, is not an edited copy of ours. A sibling's
+        // record that matched these bytes made it owned above; one that does not match proves nothing, and anyone who can
+        // write a record in a custom data folder could name a planted file in it. So it is a conflict, never kept code and
+        // never loaded by the host. (A sibling's edited worker is held back the same way: review of #1328.)
         conflicts.push(file)
       } else keptCode.push(file)
       keptFiles.add(file)

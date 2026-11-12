@@ -2583,6 +2583,19 @@ test('#1302 a fresh OpenClaw setup stops on a plugin file it did not write, and 
   assert.equal(existsSync(join(f.home, '.openclaw', 'openclaw.json')), false, 'the host configuration does not load it')
 }))
 
+// Codex security review of #1328: another agent's record that merely names a file proves nothing about the bytes on disk.
+test('#1302 a sibling record naming the OpenClaw plugin with a wrong hash is a conflict and enables nothing', () => fixture(f => {
+  const plugin = join(f.root, 'adapters', 'openclaw', 'agent-board-local.mjs')
+  f.save(plugin, '// planted by another local user\n')
+  f.save(join(f.root, 'install-codex.json'), JSON.stringify({ files: { [plugin]: 'f'.repeat(64) }, progress: f.progress }))
+  const preview = JSON.parse(f.install('--agent', 'openclaw', '--json').stdout)
+  assert.ok(preview.conflicts.includes(plugin), JSON.stringify(preview))
+  assert.ok(!(preview.keptCode ?? []).includes(plugin), JSON.stringify(preview))
+  assert.notEqual(f.install('--agent', 'openclaw', '--apply').status, 0)
+  assert.equal(readFileSync(plugin, 'utf8'), '// planted by another local user\n')
+  assert.equal(existsSync(join(f.home, '.openclaw', 'openclaw.json')), false, 'the host configuration does not load it')
+}))
+
 // Review of #1328, finding 3: with the board script edited, one deleted hook of several is a missing hook, not an intact set.
 test('#1302 an edited board script and one deleted Hermes hook of several stop that agent, and the config is not rewritten (review of #1328)', () => fixture(f => {
   assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
@@ -2680,6 +2693,24 @@ test('#1302 a released board script whose settings line the person edited is kep
   assert.ok(preview.keptCode?.includes(f.script) || preview.conflicts.includes(f.script), JSON.stringify(preview))
   f.install('--apply')
   assert.equal(readFileSync(f.script, 'utf8'), edited, 'the person\'s settings line is still there')
+}))
+
+// Greptile on #1328: the settings line holds only bookkeeping setup rewrites from its own inputs (hookVersion, path, codexRoot)
+// and the language, which setup reads back from the line before it rewrites it. Editing the line and upgrading loses no choice.
+test('#1302 an upgrade over an edited settings line rewrites the bookkeeping and keeps the language the line held', () => fixture(f => {
+  const released = bundleFromRef(fileURLToPath(new URL('..', import.meta.url)), 'agent-board--v0.24.3')
+  assert.equal(f.install('--apply').status, 0)
+  const settings = JSON.parse(readFileSync(f.script, 'utf8').split('\n', 1)[0].replace('globalThis.AGENT_BOARD = ', ''))
+  const record = join(f.root, 'install-codex.json')
+  const manifest = JSON.parse(readFileSync(record, 'utf8'))
+  const lang = settings.lang === 'zh-TW' ? 'en' : 'zh-TW'
+  const edited = `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: 1, path: settings.path, lang })}\n${released}`
+  manifest.files[f.script] = createHash('sha256').update(`globalThis.AGENT_BOARD = ${JSON.stringify(settings)}\n${released}`).digest('hex')
+  f.save(record, JSON.stringify(manifest))
+  f.save(f.script, edited)
+  assert.equal(f.install('--apply').status, 0)
+  const now = JSON.parse(readFileSync(f.script, 'utf8').split('\n', 1)[0].replace('globalThis.AGENT_BOARD = ', ''))
+  assert.deepEqual(now, { ...settings, lang })
 }))
 
 // Review of #1328, finding 2: an agent added after a sibling's worker was edited has no record of the worker, so its new hooks
