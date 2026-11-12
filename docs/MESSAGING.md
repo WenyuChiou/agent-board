@@ -5,7 +5,10 @@ session and turn, or an explicitly identified idle session owned by its host. A 
 card alone never enables sending. The adapter must verify its
 existing host connection, register a short-lived lease, and keep it alive. Disconnected
 adapters lose their card's Send action within 15 seconds. Ordinary messages cannot
-approve tools, grant hook trust or merge a PR.
+approve tools, grant hook trust or merge a PR. A tool approval has its own route: Claude
+Code's `PermissionRequest` hook asks the local page, and only a press on the page the board
+opened itself can answer it. A message, an agent's MCP or CLI tool, or the page on the
+network never can ([SECURITY.md](../SECURITY.md#approvals-on-the-board)).
 
 A temporary network failure, timeout or HTTP 5xx during polling preserves the same
 verified binding only while its last confirmed lease remains valid. Successful polling
@@ -438,7 +441,9 @@ await receiver.close()
 API is agent-neutral; Claude Code, legacy Gemini, Cursor and other UI adapters still need their
 own supported transport and live acceptance. No shell typing, transcript scraping,
 credential discovery, automatic resume, or approval RPC is implemented by this client.
-The original host remains responsible for its normal permission checks.
+The original host remains responsible for its normal permission checks. Board approvals
+(Claude Code only so far) come through the plugin's hook, not this client; the host still
+asks in its own window whenever the board does not answer.
 
 An adapter declaring at least three parameters receives `begin()`. Finish every check that can
 refuse delivery, then call it immediately before writing to the external host. A failure

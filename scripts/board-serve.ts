@@ -32,6 +32,8 @@ import type { BarStyle } from '../hooks/progress-bar'
 import { isSettingsLang } from '../hooks/board-settings'
 import type { SettingsLang } from '../hooks/board-settings'
 import type { SettingsAgentControl } from './settings-agents'
+import { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_KEY_MS, APPROVAL_MAX, APPROVAL_PAGE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, APPROVAL_WINDOW_MS, approvalOf, approvalPlace, approvalsPayload, approvalTitle, decisionOf, isAskingMode, journalStep, pressProblem, readAsk, readPress } from '../hooks/approvals'
+import type { Approval, ApprovalDecision } from '../hooks/approvals'
 
 export type ServeOptions = {
   allowResume?: boolean
@@ -75,6 +77,15 @@ export type ServeOptions = {
   onReady: (url: string, port: number) => boolean
   onStop: () => void
   idleMs: number
+  // Opens the page in the person's browser at this address (with its one-time approval key) and
+  // says whether a window opened. Absent: the board script opens the page itself, and that page
+  // cannot answer approvals.
+  open?: (url: string, asApp: boolean) => Promise<boolean>
+  // A journal line for an approval answered on the board: its hash and first words only.
+  journal?: (entry: { project: string; task: string; step: string }) => void
+  // The tests' shorter waits; the board uses APPROVAL_DRAW_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS
+  // and APPROVAL_GRACE_MS.
+  approvalTimes?: { drawMs: number; pressMs: number; secretMs?: number; graceMs?: number }
 }
 
 type Result = { ok: boolean; note: string }
@@ -313,6 +324,61 @@ export const startServer = (o: ServeOptions): void => {
   // never crosses the network.
   let lan: { server: Server; host: string; token: string; url: string; lastSeen: number } | null = null
   let lanOpening: Promise<{ url: string } | { note: string }> | null = null
+  // Approvals (D3, #1318). The press needs a secret that only a page the board opened holds: the
+  // board opens the browser itself with a one-time key after the address's #, which is never in
+  // the address file, on standard output or in a reply, and the page trades it once for its
+  // secret, which it keeps in memory only. A command that reads the address file has the token
+  // and nothing more. The key does pass on the browser's command line: a used key stays known
+  // until it expires, and a second use of it turns approvals off (see the pair route).
+  const pairKeys = new Map<string, { until: number; secret: string }>()
+  // Each page secret: when it was given, when any page last asked for the board with it, and when
+  // a visible page did.
+  const pageSecrets = new Map<string, { pairedAt: number; seen: number; watched: number }>()
+  // A pairing key used twice: no page answers approvals again until the board restarts.
+  let isApprovalOff = false
+  const secretMs = o.approvalTimes?.secretMs ?? APPROVAL_SECRET_MS
+  const graceMs = o.approvalTimes?.graceMs ?? APPROVAL_GRACE_MS
+  // The sessions whose first press the person confirmed on the page.
+  const confirmed = new Set<string>()
+  type Pending = { item: Approval; answer?: ((decision: ApprovalDecision | null) => void) | undefined; timers: ReturnType<typeof setTimeout>[] }
+  const approvals = new Map<string, Pending>()
+  const secretOf = (headers: IncomingMessage['headers'], now: number): string => {
+    const secret = text(headers['x-board-approve'])
+    const held = secret === '' || isApprovalOff ? undefined : pageSecrets.get(secret)
+    if (held === undefined) return ''
+    // A page that stopped asking (closed, or its tab gone) takes its secret with it.
+    if (now - held.seen > secretMs) {
+      pageSecrets.delete(secret)
+      return ''
+    }
+    return secret
+  }
+  const isWatched = (now: number): boolean => !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs && now - held.watched < APPROVAL_PAGE_MS)
+  // A page that can answer approvals is still open, if only behind another window.
+  const hasLiveSecret = (now: number): boolean => !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs)
+  // The hook's answer: a decision, or none, and the host's own prompt asks. The request then stays
+  // on its row a minute as asked in its window, with no button.
+  const settleApproval = (id: string, decision: ApprovalDecision | null): void => {
+    const pending = approvals.get(id)
+    if (pending === undefined) return
+    pending.timers.forEach(clearTimeout)
+    pending.timers = []
+    const answer = pending.answer
+    pending.answer = undefined
+    if (decision === null) {
+      pending.item = { ...pending.item, state: 'window' }
+      const gone = setTimeout(() => approvals.delete(id), APPROVAL_WINDOW_MS)
+      // Holds no process open: a board that stops forgets it anyway.
+      gone.unref()
+      pending.timers.push(gone)
+    } else approvals.delete(id)
+    answer?.(decision)
+  }
+  const turnApprovalsOff = (): void => {
+    isApprovalOff = true
+    pageSecrets.clear()
+    for (const [id, pending] of [...approvals]) if (pending.answer !== undefined) settleApproval(id, null)
+  }
 
   const closeLan = (): void => {
     if (lan === null) return
@@ -324,6 +390,9 @@ export const startServer = (o: ServeOptions): void => {
   const stop = (): void => {
     if (isStopping) return
     isStopping = true
+    for (const id of [...approvals.keys()]) settleApproval(id, null)
+    for (const one of approvals.values()) one.timers.forEach(clearTimeout)
+    approvals.clear()
     // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
     try { messaging.close() } catch {}
     closeLan()
@@ -425,6 +494,12 @@ export const startServer = (o: ServeOptions): void => {
         // A bound on the memory: the oldest ids are forgotten first.
         if (retired.size > 256) retired.delete(retired.values().next().value as string)
       } else pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
+      // A page asking with its secret keeps it; only a visible one counts as watching for approvals.
+      const held = isReplaced ? undefined : pageSecrets.get(secretOf(req.headers, now))
+      if (held !== undefined) {
+        held.seen = now
+        if (req.headers['x-board-visible'] !== '0') held.watched = now
+      }
       // Pages that stopped asking long ago (a crashed window) are forgotten.
       if (pages.size > 32) for (const [other, one] of pages) if (now - one.at > 300_000) pages.delete(other)
     }
@@ -462,7 +537,9 @@ export const startServer = (o: ServeOptions): void => {
           const view = o.view()
           const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
+          // The page on the network learns only that an approval waits: no command, no button.
+          const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, isApprovalOff)
+          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now, ...(approvalsShown === undefined ? {} : { approvals: approvalsShown }) }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.
           const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
@@ -486,7 +563,9 @@ export const startServer = (o: ServeOptions): void => {
         }
       }
       // Only the board script on the computer asks; the answer names progress.md's path.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size, pageAgo: pageAgo(Date.now()) })
+      // wantsKeyedPage: no open page can answer approvals, so the board script opens one with a key
+      // rather than pointing at a page that cannot. A paired page that is only hidden still can.
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size, pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && !hasLiveSecret(Date.now()) })
       return json(res, 404, {})
     }
     const body = await readBody(req)
@@ -501,6 +580,147 @@ export const startServer = (o: ServeOptions): void => {
       }
       loadedAt = 0
       return json(res, 200, {})
+    }
+    if (url.pathname.startsWith('/api/approvals/') || url.pathname === '/api/open') {
+      // Never from the page on the network.
+      if (isLan) return json(res, 403, {})
+      const now = Date.now()
+      // The host's hook asks, as a script on the computer: a web page always sends an Origin.
+      if (url.pathname === '/api/approvals/ask') {
+        if (req.headers.origin !== undefined) return json(res, 403, {})
+        const ask = readAsk(body)
+        if (ask === null) return json(res, 400, {})
+        // No decision where the host would not ask the person: refused, and nothing is shown.
+        if (!isAskingMode(ask.mode)) return json(res, 403, {})
+        // Approvals turned off, or too many kept: the host asks in its own window. Requests already
+        // answered in their windows make room first.
+        if (isApprovalOff) return json(res, 200, {})
+        for (const [id, one] of [...approvals]) {
+          if (approvals.size < APPROVAL_MAX) break
+          if (one.answer !== undefined) continue
+          one.timers.forEach(clearTimeout)
+          approvals.delete(id)
+        }
+        if (approvals.size >= APPROVAL_MAX) return json(res, 200, {})
+        const item = approvalOf(ask, randomBytes(12).toString('base64url'), now, homedir(), isWindows, o.s)
+        const pending: Pending = { item, timers: [] }
+        approvals.set(item.id, pending)
+        // No turn, or no page in front of the person that can answer it: the host asks at once.
+        if (item.state === 'window' || !isWatched(now)) {
+          settleApproval(item.id, null)
+          return json(res, 200, {})
+        }
+        // The answer can take 30 seconds: the headers go now, so the hook tells a board that waits
+        // from one that hangs, and gives up on the second within seconds.
+        res.writeHead(200, { ...HEADERS, 'content-type': 'application/json; charset=utf-8' })
+        res.flushHeaders()
+        await new Promise<void>(done => {
+          let isDone = false
+          pending.answer = decision => {
+            if (isDone) return
+            isDone = true
+            res.end(JSON.stringify(decision === null ? {} : { decision }))
+            done()
+          }
+          // The page did not say it drew it: nobody is looking, so the host asks.
+          pending.timers.push(setTimeout(() => { if (approvals.get(item.id)?.item.state === 'asking') settleApproval(item.id, null) }, o.approvalTimes?.drawMs ?? APPROVAL_DRAW_MS))
+          pending.timers.push(setTimeout(() => settleApproval(item.id, null), o.approvalTimes?.pressMs ?? APPROVAL_PRESS_MS))
+          // The hook went away (its host answered in its own window, or stopped): the item goes.
+          res.on('close', () => {
+            if (isDone) return
+            isDone = true
+            const left = approvals.get(item.id)
+            if (left !== undefined) {
+              left.timers.forEach(clearTimeout)
+              approvals.delete(item.id)
+            }
+            done()
+          })
+        })
+        return
+      }
+      if (url.pathname === '/api/open') {
+        // Only the board script on the computer asks the board to open its page.
+        if (o.open === undefined) return json(res, 404, {})
+        if (req.headers.origin !== undefined) return json(res, 403, {})
+        for (const [key, one] of pairKeys) if (one.until < now) pairKeys.delete(key)
+        // A used key stays known until it expires, so it is never pushed out early; past this many
+        // in two minutes, or with approvals off, the page opens with no key.
+        const key = isApprovalOff || pairKeys.size >= 16 ? '' : randomBytes(24).toString('base64url')
+        if (key !== '') pairKeys.set(key, { until: now + APPROVAL_KEY_MS, secret: '' })
+        const isOpen = await o.open(`http://127.0.0.1:${port}/?t=${token}${key === '' ? '' : `#k=${key}`}`, body.asApp === true).catch(() => false)
+        if (!isOpen && key !== '') {
+          // No window opened, yet the key was used: whoever read it from the opener's command line
+          // paired, and it was not the person's page. Approvals go off, as for a key used twice.
+          if (pairKeys.get(key)?.secret) turnApprovalsOff()
+          pairKeys.delete(key)
+        }
+        return json(res, 200, { isOpen })
+      }
+      // The rest are the page's own. The Origin check only turns away a careless caller, as any
+      // program can send one: the one-time key and the page secret are what count.
+      if (req.headers.origin === undefined) return json(res, 403, {})
+      if (url.pathname === '/api/approvals/pair') {
+        const key = text(body.key)
+        const known = key === '' ? undefined : pairKeys.get(key)
+        // Only in time: a key read later from a browser's history opens nothing.
+        if (isApprovalOff || known === undefined || known.until < now) return json(res, 403, { note: isApprovalOff ? o.s.approvalOff : o.s.approvalNoSecret })
+        // A key used twice: another program read it, from the browser's command line, and one of
+        // the two pages is not the person's. Neither may answer, and approvals stay off until the
+        // board restarts.
+        if (known.secret !== '') {
+          turnApprovalsOff()
+          return json(res, 403, { note: o.s.approvalOff })
+        }
+        const secret = randomBytes(24).toString('base64url')
+        known.secret = secret
+        for (const [other, held] of pageSecrets) if (now - held.seen > secretMs) pageSecrets.delete(other)
+        if (pageSecrets.size >= 16) pageSecrets.delete(pageSecrets.keys().next().value as string)
+        // Counted as watching only once the page asks for the board while it is in front.
+        pageSecrets.set(secret, { pairedAt: now, seen: now, watched: 0 })
+        return json(res, 200, { secret })
+      }
+      const secret = secretOf(req.headers, now)
+      if (secret === '') return json(res, 403, { note: isApprovalOff ? o.s.approvalOff : o.s.approvalNoSecret })
+      if (url.pathname === '/api/approvals/drawn') {
+        // The page drew these, as they were: only then does the hook keep waiting for a press.
+        const drawn: unknown[] = Array.isArray(body.items) ? body.items : []
+        for (const one of drawn) {
+          if (one === null || typeof one !== 'object') continue
+          const seen = one as Record<string, unknown>
+          const pending = approvals.get(text(seen.id))
+          if (pending === undefined || pending.answer === undefined || pending.item.state !== 'asking' || text(seen.turn) !== pending.item.turn || text(seen.state) !== 'asking') continue
+          pending.item = { ...pending.item, state: 'shown' }
+        }
+        return json(res, 200, {})
+      }
+      if (url.pathname === '/api/approvals/press') {
+        const press = readPress(body)
+        if (press === null) return json(res, 400, {})
+        // A page paired a moment ago waits out the grace window: if its key was stolen, the real
+        // page's own use of the key turns approvals off before this page can press.
+        const wait = graceMs - (now - (pageSecrets.get(secret)?.pairedAt ?? now))
+        if (wait > 0) return json(res, 425, { note: o.s.approvalTooSoon(Math.ceil(wait / 1000)) })
+        const pending = approvals.get(press.id)
+        // An answered, ended or fallen-back request, or one drawn at another turn or state.
+        if (pending === undefined || pending.answer === undefined || pressProblem(pending.item, press) !== null) return json(res, 409, { note: o.s.approvalChanged })
+        const item = pending.item
+        const session = `${item.agent}:${item.session}`
+        const view = o.view()
+        // The first press for a session waits for the person's confirm on the page.
+        if (!confirmed.has(session) && !press.isConfirmed) return json(res, 428, { needsConfirm: true, note: o.s.approvalConfirm(agentLabel(item.agent, o.s), approvalTitle(view, item.agent, item.session, o.s)) })
+        confirmed.add(session)
+        settleApproval(item.id, decisionOf(item, press, o.s))
+        try {
+          const place = approvalPlace(view, item.agent, item.session)
+          o.journal?.({ project: place?.project || o.s.uncategorized, task: place?.task || agentLabel(item.agent, o.s), step: journalStep(item, press.behavior, o.s) })
+        } catch (error) {
+          // The decision already went to the host; a journal line that could not be written is said.
+          process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
+        }
+        return json(res, 200, { note: press.behavior === 'allow' ? o.s.approvalAllowed : o.s.approvalDenied })
+      }
+      return json(res, 404, {})
     }
     if (url.pathname.startsWith('/api/messages/')) {
       if (isLan) return json(res, 403, {})
