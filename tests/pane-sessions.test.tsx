@@ -505,11 +505,6 @@ test('a closed Claude session question folds into Older unanswered when its proc
     expect(host).not.toBeNull()
     const recentAt = Date.parse('2026-10-16T11:55:00Z')
     const board = `## demo\n<!-- auto session=a1b2c3d4 agent=claude state=waiting updated=2026-10-16T11:55:00Z agentpid=999999999 agentstarted=${recentAt - 1000} host=${host} -->\n### Release\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
-    const statuses: Array<string | undefined> = []
-    on('ui.status', (_$, event) => {
-      statuses.push(event.text)
-      return undefined
-    })
     const world: World = {
       files: new Map([[FILE, board]]),
       mtime: 1,
@@ -524,13 +519,13 @@ test('a closed Claude session question folds into Older unanswered when its proc
     await clock.advance(6100)
     const id = storedQuestion(world, 'Publish, OK?')
     expect(id.startsWith('question:')).toBe(true)
-    expect(statuses.at(-1) ?? '').toContain('1 need you')
+    expect(seen.status.at(-1) ?? '').toContain('1 need you')
     const notifiedBefore = seen.notified.length
     // Kill the process while leaving progress.md (and its mtime) untouched: the next
     // unchanged-file poll updates goneSessions, status line, reminders, and pane view.
     pidAlive = false
     await clock.advance(6100)
-    expect(statuses.at(-1) ?? '').not.toContain('1 need you')
+    expect(seen.status.at(-1) ?? '').not.toContain('1 need you')
     expect(seen.notified.slice(notifiedBefore)).toEqual([])
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
     expect(await ui.find({ type: 'Button', key: 'waiting::' })).toBeUndefined()
