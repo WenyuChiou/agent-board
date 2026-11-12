@@ -351,6 +351,18 @@ test('a page paired a moment ago cannot press until the grace window has passed'
   assert.equal((await waiting.done).decision.hookSpecificOutput.decision.behavior, 'allow')
 })
 
+test('a board that opens no window where it runs says it tried nothing, and its one-time key is gone', async () => {
+  // Over SSH or a test's board: the command that asked opens the page itself, with no key.
+  const board = await startBoard({ open: async () => null })
+  assert.deepEqual((await board.call('/api/open', { asApp: true })).body, { isOpen: false, hasTried: false })
+  const key = board.lastKey()
+  assert.ok(key, 'the board made a key before it knew no window would open')
+  const paired = await board.call('/api/approvals/pair', { key }, { origin: board.origin })
+  assert.equal(paired.status, 403)
+  // Refused as an unknown key, not because approvals went off: nobody paired with it.
+  assert.equal(paired.body.note, EN.approvalNoSecret)
+})
+
 test('a key used though no window opened turns approvals off, so whoever paired with it cannot press', async () => {
   // The opener ran but no browser came up, and a program that read the key from its command line paired first.
   let stolen = ''
@@ -361,7 +373,7 @@ test('a key used though no window opened turns approvals off, so whoever paired 
       return false
     },
   })
-  assert.equal((await board.call('/api/open', { asApp: true })).body.isOpen, false)
+  assert.deepEqual((await board.call('/api/open', { asApp: true })).body, { isOpen: false, hasTried: true })
   assert.notEqual(stolen, '', 'the stand-in paired with the key')
   const headers = { origin: board.origin, 'x-board-page': 'p-stolen', 'x-board-visible': '1', 'x-board-approve': stolen }
   await board.call('/api/board', undefined, headers)
@@ -537,7 +549,7 @@ test('HTTP calls with the address file\'s token cannot pair, press or learn the 
   })
   // It can see the request and make the board open a window for the person, and nothing more.
   assert.equal(result.hasCommand, true)
-  assert.deepEqual(JSON.parse(result.opened), { isOpen: true })
+  assert.deepEqual(JSON.parse(result.opened), { isOpen: true, hasTried: true })
   assert.ok(result.pairs.every(status => status === 403), JSON.stringify(result.pairs))
   assert.deepEqual(result.presses, [403, 403, 403])
   assert.equal(waiting.isRunning(), true)

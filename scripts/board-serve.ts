@@ -79,8 +79,9 @@ export type ServeOptions = {
   idleMs: number
   // Opens the page in the person's browser at this address (with its one-time approval key) and
   // says whether a window opened. Absent: the board script opens the page itself, and that page
-  // cannot answer approvals.
-  open?: (url: string, asApp: boolean) => Promise<boolean>
+  // cannot answer approvals. `null`: this board opens no window where it runs (over SSH, a test's
+  // board) and tried nothing. A rejection counts as tried, so the caller does not try again.
+  open?: (url: string, asApp: boolean) => Promise<boolean | null>
   // A journal line for an approval answered on the board: its hash and first words only.
   journal?: (entry: { project: string; task: string; step: string }) => void
   // The tests' shorter waits; the board uses APPROVAL_DRAW_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS
@@ -653,14 +654,17 @@ export const startServer = (o: ServeOptions): void => {
         // in two minutes, or with approvals off, the page opens with no key.
         const key = isApprovalOff || pairKeys.size >= 16 ? '' : randomBytes(24).toString('base64url')
         if (key !== '') pairKeys.set(key, { until: now + APPROVAL_KEY_MS, secret: '' })
-        const isOpen = await o.open(`http://127.0.0.1:${port}/?t=${token}${key === '' ? '' : `#k=${key}`}`, body.asApp === true).catch(() => false)
+        const tried = await o.open(`http://127.0.0.1:${port}/?t=${token}${key === '' ? '' : `#k=${key}`}`, body.asApp === true).catch(() => false)
+        const isOpen = tried === true
         if (!isOpen && key !== '') {
           // No window opened, yet the key was used: whoever read it from the opener's command line
           // paired, and it was not the person's page. Approvals go off, as for a key used twice.
           if (pairKeys.get(key)?.secret) turnApprovalsOff()
           pairKeys.delete(key)
         }
-        return json(res, 200, { isOpen })
+        // `hasTried`: this computer's browsers were tried and none opened, so the caller does not
+        // try them again (a second window when a launcher reported an error after all).
+        return json(res, 200, { isOpen, hasTried: tried !== null })
       }
       // The rest are the page's own. The Origin check only turns away a careless caller, as any
       // program can send one: the one-time key and the page secret are what count.

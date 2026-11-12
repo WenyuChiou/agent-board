@@ -1001,9 +1001,12 @@ const watchWindowsLaunch = (child: ChildProcess, done: (isOpen: boolean) => void
 }
 
 // A file or a page's address in the browser.
+// Over SSH no window would reach the person, and a board a test started never opens one on the
+// tester's screen (#959).
+const isNoWindowHere = (): boolean => Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY || process.env.AGENT_BOARD_TEST_PID)
+
 const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = false): void => {
-  // A board a test started never opens a window on the tester's screen (#959).
-  if (process.env.SSH_CONNECTION || process.env.SSH_TTY || process.env.AGENT_BOARD_TEST_PID) return done(false)
+  if (isNoWindowHere()) return done(false)
   const fallback = () => {
     if (process.platform === 'win32') {
       try { watchWindowsLaunch(windowsStart(target, []), done) } catch { done(false) }
@@ -1930,7 +1933,7 @@ const tokenOf = (url: string): string => new URL(url).searchParams.get('t') ?? '
 // `canOpenHere`: false when a page is open already and only one that can answer approvals is wanted:
 // if the board cannot open that one, the open page stays the only window.
 const openThroughBoard = async (url: string, asApp: boolean, canOpenHere = true): Promise<boolean> => {
-  if (!(process.env.SSH_CONNECTION || process.env.SSH_TTY || process.env.AGENT_BOARD_TEST_PID)) {
+  if (!isNoWindowHere()) {
     try {
       const answer = await fetch(`http://127.0.0.1:${new URL(url).port}/api/open`, {
         method: 'POST',
@@ -1938,12 +1941,20 @@ const openThroughBoard = async (url: string, asApp: boolean, canOpenHere = true)
         body: JSON.stringify({ asApp }),
         signal: AbortSignal.timeout(15_000),
       })
-      if (answer.ok && ((await answer.json()) as { isOpen?: unknown }).isOpen === true) return true
+      if (answer.ok) {
+        const reply = (await answer.json()) as { isOpen?: unknown; hasTried?: unknown }
+        if (reply.isOpen === true) return true
+        // The board tried this computer's browsers and none opened: trying them again from here
+        // fails the same way, or opens a second window when a launcher reported an error after all.
+        // A board started where no display reaches (a stale DISPLAY in tmux) now leaves the person the
+        // printed link rather than a window from here that could not answer approvals.
+        if (reply.hasTried === true) return false
+      }
     } catch {}
   }
-  // An older board (no such route), or one that opened no window itself (no browser where it runs,
-  // or a test's board, #959): this process opens the page as before, with this caller's browsers,
-  // and that page cannot answer approvals.
+  // An older board (no such route, or no `hasTried`), or one that opens no window where it runs (a
+  // test's board, #959): this process opens the page as before, with this caller's browsers, and
+  // that page cannot answer approvals.
   if (!canOpenHere) return false
   return new Promise<boolean>(done => openInBrowser(url, done, asApp))
 }
@@ -2063,7 +2074,8 @@ const serveChild = (): void => {
       failure: error => (error instanceof BoardFileError ? storageNote(error) : null),
       idleMs: idleMs(),
       // The page that can answer approvals is the one the board opens itself (D3, #1318).
-      open: (url, asApp) => new Promise<boolean>(done => openInBrowser(url, done, asApp)),
+      // A board that opens no window where it runs says it tried nothing, so the caller opens the page.
+      open: (url, asApp) => (isNoWindowHere() ? Promise.resolve(null) : new Promise<boolean>(done => openInBrowser(url, done, asApp))),
       // An approval answered on the board: a line marked apart from finished steps, with the
       // command's hash and first words only.
       journal: entry => {
@@ -2458,7 +2470,7 @@ const serveBoard = async (): Promise<void> => {
     if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && page !== 'open') {
       const isOpen = await openThroughBoard(url, false, page === 'none')
       // With a page already open, no window is missing.
-      if (!isOpen && page === 'none' && !process.env.AGENT_BOARD_TEST_PID && !process.env.SSH_CONNECTION && !process.env.SSH_TTY) {
+      if (!isOpen && page === 'none' && !isNoWindowHere()) {
         process.stderr.write(`${s.serveBrowserNone(url)}\n`)
       }
     }
@@ -2490,7 +2502,7 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
   const isOpen = isShape ? await openThroughBoard(address, true, page === 'none') : false
   // The board could not open a page that answers approvals beside the open one: point at that one.
   if (!isOpen && page === 'unkeyed') return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
-  const isSuppressed = Boolean(process.env.AGENT_BOARD_TEST_PID || process.env.SSH_CONNECTION || process.env.SSH_TTY)
+  const isSuppressed = isNoWindowHere()
   const note = isOpen
     ? s.boardPageWindowOpened(address)
     : isNoOpen || (isSuppressed && !isOpen)
