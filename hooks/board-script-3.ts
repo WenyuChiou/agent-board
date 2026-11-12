@@ -11004,7 +11004,7 @@ export const LINES = [
 "var browserProfile = () => {",
 "  try {",
 "    const runtime = process.env.XDG_RUNTIME_DIR;",
-"    const dir = join20(runtime ? join20(runtime, \"agent-board\") : join20(homedir5(), \".cache\", \"agent-board\"), \"browser\");",
+"    const dir = join21(runtime ? join21(runtime, \"agent-board\") : join21(homedir5(), \".cache\", \"agent-board\"), \"browser\");",
 "    privateFolder(dir);",
 "    return dir;",
 "  } catch {",
