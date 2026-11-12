@@ -853,6 +853,7 @@ const PAGE_WORDS = [
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
+  'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
@@ -917,6 +918,8 @@ ${sheetCss}
 .card{display:grid;grid-template-columns:24px minmax(0,1fr);gap:var(--s3);padding:var(--s4);min-width:0}
 .arrived>.fx>.fx-in{animation:glow var(--dur-glow) var(--ease-out)}
 .c-body{min-width:0;display:flex;flex-direction:column;gap:var(--s2)}
+.approval-command{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--text-sm);max-height:40vh;overflow:auto}
+.approval-why[hidden]{display:none}
 .c-meta,.r-meta,.note,.context{overflow-wrap:anywhere}
 .c-meta{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1) var(--s3);font-size:var(--text-xs);line-height:1.5;color:var(--muted)}
 .c-meta .who{color:var(--ink);font-weight:600}
@@ -1235,6 +1238,13 @@ const PAGE_SCRIPT = String.raw`
   'use strict';
   var W = JSON.parse(document.getElementById('words').textContent);
   var token = new URLSearchParams(location.search).get('t') || '';
+  // Approvals (D3, #1318): a page the board opened itself carries a one-time key after its #. It is
+  // traded once for this page's secret, which lives in this variable only: never in the tab's
+  // storage, which the browser writes to disk where a program could read it. The key leaves the
+  // address. A page opened any other way, or reloaded, shows the requests with no button.
+  var approveSecret = '';
+  var pairKey = /^#k=([\w-]+)$/.exec(location.hash || '');
+  if (pairKey) { try { history.replaceState(null, '', location.pathname + location.search); } catch (error) {} }
   var board = document.getElementById('board');
   var note = document.getElementById('note');
   var offline = document.getElementById('offline');
@@ -1429,6 +1439,7 @@ const PAGE_SCRIPT = String.raw`
   function call(path, body) {
     if (isUnreachable && body !== undefined) return Promise.reject();
     var headers = { 'x-board-token': token, 'x-board-page': pageId, 'x-board-visible': document.hidden ? '0' : '1' };
+    if (approveSecret) headers['x-board-approve'] = approveSecret;
     if (path === '/api/board' && body === undefined && boardEtag) headers['if-none-match'] = boardEtag;
     if (body !== undefined) headers['content-type'] = 'application/json';
     return fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' }).then(function (res) {
@@ -2881,6 +2892,83 @@ const PAGE_SCRIPT = String.raw`
     pg.sections.push({ block: block, list: list });
     return block;
   }
+  // Approvals on the board (D3, #1318): what the host asks to run, with Allow once, Deny, and Deny and
+  // say why where the host takes a reason. The buttons show only on a request this page drew and the
+  // board then marked shown; the page on the network gets one line and no command.
+  var latestApprovals = null;
+  var drawnSent = {};
+  var reasonOpen = {};
+  function approvalsWaiting(approvals) {
+    if (!approvals) return 0;
+    if (!approvals.cards) return approvals.waiting || 0;
+    return approvals.cards.filter(function (card) { return card.state !== 'window'; }).length;
+  }
+  function confirmDrawn(items) {
+    var fresh = items.filter(function (one) { return !drawnSent[one.id]; });
+    if (!fresh.length) return;
+    fresh.forEach(function (one) { drawnSent[one.id] = true; });
+    call('/api/approvals/drawn', { items: fresh }).then(function () { refresh(); }, function () {});
+  }
+  function pressApproval(card, behavior, reason, go, isConfirmed) {
+    if (isUnreachable) return;
+    busyOn(go);
+    say(w('pressPending'));
+    call('/api/approvals/press', { id: card.id, turn: card.turn, state: card.state, behavior: behavior, reason: reason || '', confirmed: isConfirmed === true }).then(function (data) {
+      busyOff(go);
+      // The first press for a session asks once, here, before anything reaches the agent.
+      if (data.needsConfirm) {
+        say('');
+        if (window.confirm(data.note || '')) pressApproval(card, behavior, reason, go, true);
+        return;
+      }
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert');
+      refresh();
+    }, function () { busyOff(go); say(w('serveOffline'), 'alert'); });
+  }
+  function approvalSection(approvals) {
+    if (!approvals) return null;
+    var wrap = el('section', 'needs-wrap approvals');
+    wrap.setAttribute('data-sec', 'needs');
+    add(wrap, el('h2', 'flag', w('approvalHead')));
+    if (!approvals.cards) return add(wrap, el('p', 't-quiet', approvals.note));
+    // Approvals turned off on the board: said once, above what still waits in its window.
+    if (approvals.note) add(wrap, el('p', 't-alert', approvals.note));
+    var list = el('ul', 'cards');
+    var drawn = [];
+    approvals.cards.forEach(function (card) {
+      var box = el('article', 'card');
+      var body = el('div', 'c-body');
+      add(body, add(el('div', 'c-meta'), el('span', 'who', agentName(card.agent)), el('span', '', card.title), card.isSubagent ? el('span', '', w('approvalSubagent')) : null));
+      add(body, el('p', 'q', card.tool));
+      add(body, el('pre', 'approval-command', card.command));
+      if (card.note) add(body, el('p', 'note', card.note));
+      if (card.canPress) {
+        var acts = el('div', 'answers');
+        var allow = button(w('approvalAllow'), function () { pressApproval(card, 'allow', '', allow); });
+        var deny = button(w('approvalDeny'), function () { pressApproval(card, 'deny', '', deny); });
+        add(acts, allow, deny);
+        add(body, acts);
+        if (card.canMessage) {
+          var why = el('div', 'approval-why');
+          why.hidden = !reasonOpen[card.id];
+          var area = el('textarea');
+          area.setAttribute('data-key', 'approval:' + card.id);
+          area.setAttribute('placeholder', w('approvalReasonPlaceholder'));
+          area.setAttribute('aria-label', w('approvalDenyWhy'));
+          area.maxLength = 2000;
+          var sendDeny = button(w('approvalSendDeny'), function () { pressApproval(card, 'deny', area.value.trim(), sendDeny); });
+          add(why, area, add(el('div', 'answers'), sendDeny));
+          add(acts, navButton(w('approvalDenyWhy'), function () { reasonOpen[card.id] = true; why.hidden = false; area.focus(); }));
+          add(body, why);
+        }
+      } else if (card.state === 'asking' && approveSecret) drawn.push({ id: card.id, turn: card.turn, state: card.state });
+      add(list, add(el('li'), add(box, body)));
+    });
+    add(wrap, add(el('div', 'sheet'), list));
+    // The board waits for a press only once this page says it drew the request.
+    if (drawn.length) setTimeout(function () { confirmDrawn(drawn); }, 0);
+    return wrap;
+  }
   function draw(model) {
     if (!model.view) return;
     var view = model.view;
@@ -2906,7 +2994,7 @@ const PAGE_SCRIPT = String.raw`
       pg.sentTotal += 1;
       pg.sentBy[who] = (pg.sentBy[who] || 0) + 1;
     });
-    var waitingNow = Math.max(0, view.needs.n - pg.sentTotal);
+    var waitingNow = Math.max(0, view.needs.n - pg.sentTotal) + approvalsWaiting(latestApprovals);
     pg.waitingNow = waitingNow;
     document.title = waitingNow ? w('pgTabTitle', waitingNow) : 'Agent Board';
     var version = view.versions;
@@ -2931,6 +3019,8 @@ const PAGE_SCRIPT = String.raw`
     drawChips(view);
     var parts = [];
     if (model.warning) parts.push(el('p', 't-alert', model.warning));
+    var asked = approvalSection(latestApprovals);
+    if (asked) parts.push(asked);
     var hasOwn = Object.keys(view.own.counts).some(function (key) { return view.own.counts[key] > 0; });
     document.getElementById('shell').setAttribute('data-empty', !view.agents.length && !hasOwn ? '1' : '');
     if (!view.agents.length && !hasOwn) parts.push(freshPage(view));
@@ -3045,7 +3135,8 @@ const PAGE_SCRIPT = String.raw`
       if (data.lang && !settingsLanguage.disabled) { languageKept = data.lang; settingsLanguage.value = data.lang; }
       notifyWaiting(data.model);
       connections = data.messaging && data.messaging.connections || [];
-      var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; })], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
+      latestApprovals = data.approvals || null;
+      var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; }), latestApprovals], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
       if (text !== last) {
         last = text;
         render(data.model);
@@ -3251,6 +3342,13 @@ const PAGE_SCRIPT = String.raw`
     resetTidy(true);
     say(w('tidyCancelled'), '', 'tidy');
   });
-  refresh();
+  function pairApprovals() {
+    if (!pairKey) return Promise.resolve();
+    return call('/api/approvals/pair', { key: pairKey[1] }).then(function (data) {
+      if (!data.ok || typeof data.secret !== 'string') return;
+      approveSecret = data.secret;
+    }, function () {});
+  }
+  pairApprovals().then(refresh);
 })();
 `

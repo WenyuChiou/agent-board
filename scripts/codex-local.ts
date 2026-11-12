@@ -682,6 +682,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const folder = filesByFolder(mode, agent) ? folderProject(rawCwd) : ''
       // Only metadata selected below is retained. Save no prompts, tool inputs,
       // or permission decisions from a hook payload, and nothing of a reply but its closing question.
+      // Board approvals (#1318) are a separate route, Claude Code's plugin hook: its journal line
+      // keeps the decision, the tool, the command's first words and its hash, never the command.
       // The plan mirror is the
       // one place a tool input is read (--plan-event, before this): only each step's text and status,
       // which a report carries. transcript_path is

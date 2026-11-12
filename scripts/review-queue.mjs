@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { authorKey, reviewOf } from './pr-check.mjs'
+import { authorKey, isLaneReviewer, reviewOf, tierOf } from './pr-check.mjs'
 import { bundleSources, safeLine } from './preflight.mjs'
 
 const usage = 'Usage: node scripts/review-queue.mjs [--repo owner/name] [--roadmap N] [--json] [--help]'
@@ -170,7 +170,7 @@ const isLapsed = (time, nowMs) => Number.isFinite(nowMs) && Number.isFinite(time
 // The claims on a head that no verdict has answered, in the order they were made, each with its time. Only a verdict
 // on that head whose reviewer is written as the claim wrote it (the same fullName) answers a claim, in the same
 // comment or a later one. A lane-less, other-lane or reworded name leaves the claim to lapse instead: a live claim
-// cleared by mistake lets a second reviewer, or the lane's two-hour route, start while a review is under way.
+// cleared by mistake lets a second reviewer start while a review is under way.
 // A second claim by the same name on the head does not restart its two hours (owner, 2026-11-12; #1358).
 // Each `Review:` line of a comment is read on its own, so a verdict's head and its reviewer come from one line.
 // The split uses every line end the `m` flag knows (LF, CRLF, CR, U+2028, U+2029), so no chunk holds two lines.
@@ -260,11 +260,12 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
       const isOverFourHours = hours > 4
       const suggestion = reviewers ? suggestReviewer(reviewers, { author: nameOf(item.author), isOverFourHours }, openCounts) : {}
       result.needsReviewer.push({ ...item, readyAt: ready.comment.created_at, hours, isOverFourHours, takenBy, lapsedBy, ...suggestion, ...extras })
-    } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by, item.author)) {
+    } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by, item.author) && !isLaneReviewer(latestHeadVerdict.verdict, tierOf(pr.body))) {
       // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
       // even when it arrives from the shared login. The lane is part of the identity, so "codex (e2e)" approving
-      // "codex (phase1)" counts, while a verdict with no name keeps its old reading. This checks only who the author is:
-      // whether the reviewer is one the pull request's tier allows (outside the lane, another model family) is not checked here.
+      // "codex (phase1)" counts, while a verdict with no name keeps its old reading. On the light and normal tiers a
+      // reviewer the lane started new for this review counts, as the PR check reads it. This checks only who the author
+      // is: whether the reviewer is one the pull request's tier allows (another model family on risk) is not checked here.
       result.waitingForAuthor.push({ ...item, detail: 'approval is by the author', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
