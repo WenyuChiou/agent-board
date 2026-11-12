@@ -2482,6 +2482,28 @@ test('#1302 an edited board script keeps the older worker and hooks too, names e
   assert.ok(doctor.includes(before.worker), doctor)
 }))
 
+// Codex bot on a24af394 (P1): the kept script, worker and hooks write the recorded board file, so a held install
+// that moved to another one would record the new file while they still wrote the old.
+test('#1302 an install that keeps an edited board script cannot move to another progress file: that agent stops and nothing changes (review of #1328)', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  writeFileSync(f.script, readFileSync(f.script, 'utf8') + '// my own edit\n')
+  const record = join(f.root, 'install-codex.json')
+  const recordBefore = readFileSync(record, 'utf8'), hooksBefore = readFileSync(f.hooks, 'utf8'), scriptBefore = readFileSync(f.script, 'utf8')
+  const moved = join(f.home, 'moved', 'progress.md')
+  const preview = JSON.parse(f.install('--progress-file', moved, '--json').stdout)
+  assert.ok(preview.conflicts.includes(f.script), JSON.stringify(preview.conflicts))
+  const applied = f.install('--progress-file', moved, '--apply')
+  assert.notEqual(applied.status, 0, applied.stdout)
+  assert.equal(readFileSync(record, 'utf8'), recordBefore)
+  assert.equal(readFileSync(f.hooks, 'utf8'), hooksBefore)
+  assert.equal(readFileSync(f.script, 'utf8'), scriptBefore)
+  assert.equal(existsSync(moved), false)
+  // At its recorded board the same install keeps the edit and goes on.
+  const kept = JSON.parse(f.install('--json').stdout)
+  assert.deepEqual(kept.conflicts, [])
+  assert.deepEqual(kept.keptCode, [f.script])
+}))
+
 test('#1302 the doctor does not call an install current while an edited worker was kept', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   const worker = join(f.root, 'agent-board-hook.mjs')

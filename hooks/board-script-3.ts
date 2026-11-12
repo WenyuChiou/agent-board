@@ -1645,6 +1645,8 @@ export const LINES = [
 "  const isWorkerHeld = !remove && !isScriptHeld && workerNow !== null && !isOwned(worker, workerNow) && workerNow !== files[worker] && manifest.files[worker] !== undefined;",
 "  const isHeld = isScriptHeld || isWorkerHeld;",
 "  const heldList = isScriptHeld ? keptHeld : keptHeldWorker;",
+"  if (isHeld && typeof loaded.progress === \"string\" && resolve9(loaded.progress) !== progress)",
+"    conflicts.push(isScriptHeld ? script : worker);",
 "  for (const [file, desired] of Object.entries(files)) {",
 "    const existing = initial(file);",
 "    const shared = file === script || file === worker || file === skill;",

@@ -1435,6 +1435,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const isWorkerHeld = !remove && !isScriptHeld && workerNow !== null && !isOwned(worker, workerNow) && workerNow !== files[worker] && manifest.files[worker] !== undefined
   const isHeld = isScriptHeld || isWorkerHeld
   const heldList = isScriptHeld ? keptHeld : keptHeldWorker
+  // The kept script, worker and hooks write the recorded board file, so a held install cannot move to another one:
+  // the record would name the new file while they still wrote the old. That agent stops (Codex bot on #1328).
+  if (isHeld && typeof loaded.progress === 'string' && resolve(loaded.progress) !== progress) conflicts.push(isScriptHeld ? script : worker)
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
