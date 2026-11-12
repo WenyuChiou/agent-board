@@ -82,6 +82,26 @@ test('#1339: /progress style names a held settings lock, and a cut-short path gi
   expect(JSON.stringify(await $.command.run({ ...TIDY, args: 'style blue' }))).toContain(EN.barStyleSet(EN.barStyleBlue))
 })
 
+test('#1339: /progress style keeps a saved style and names a lock it could not remove', async ($, on) => {
+  const lock = `${SETTINGS}.agent-board.lock`
+  const world: World = { files: new Map([[FILE, board(SEVEN)], [SETTINGS, '{"style":"green"}']]), leftLocks: new Map([[SETTINGS, { stdout: lock }]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    const saved = JSON.stringify(await $.command.run({ ...TIDY, args: 'style blue' }))
+    expect(saved).toContain(EN.barStyleSet(EN.barStyleBlue))
+    expect(saved).toContain(EN.settingsLockLeft(lock))
+    expect(JSON.parse(world.files.get(SETTINGS) ?? '{}')).toEqual({ style: 'blue' })
+    const done = pressNodes(await ui.drawn() as never).find(node => pressTexts(node as never).join('').endsWith('━━━━')) as Drawn | undefined
+    expect([DARK.accent, LIGHT.accent]).toContain(done?.props?.color)
+    world.leftLocks = new Map([[SETTINGS, { stdout: lock.slice(0, 8), isTruncated: true }]])
+    const cut = JSON.stringify(await $.command.run({ ...TIDY, args: 'style green' }))
+    expect(cut).toContain(EN.pressFailed)
+    expect(cut).not.toContain('If no save is running')
+  } finally { await ui.unmount() }
+})
+
 // #1276, Codex on #1339: the style poll and the history-days read used the host's read, which waits on a FIFO.
 // They now read through the guarded script; the host never reads the settings file, and the pick still shows.
 test('#1276: the style poll reads the settings file through the guarded script, never the host read', async ($, on) => {

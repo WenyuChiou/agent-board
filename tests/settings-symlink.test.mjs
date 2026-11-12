@@ -1,30 +1,40 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import fs, { chmodSync, existsSync, lstatSync, lutimesSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
-import { syncBuiltinESMExports } from 'node:module'
+import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { test } from 'node:test'
+import { mock, test } from 'node:test'
+import { runInNewContext } from 'node:vm'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
-import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script.ts'
+import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_LOCK_LEFT, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script.ts'
 import { readSettings, replaceSettings, updateSettings } from '../scripts/settings-file.ts'
+
+const sourceLoader = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (context.parentURL?.startsWith(new URL('../hooks/', import.meta.url).href) && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/i.test(specifier)) return nextResolve(`${specifier}.ts`, context)
+    return nextResolve(specifier, context)
+  },
+})
+const { settingsScript } = await import('../hooks/page-settings.ts')
+sourceLoader.deregister()
 
 // The plugin's write script: the file and the kind on its command line, the two texts as JSON on stdin (never in the arguments).
 const writeScript = (file, next, kind, base, node = []) => spawnSync(process.execPath, [...node, '-e', SETTINGS_WRITE, '--', file, kind], { input: JSON.stringify({ next, base: kind === 'ok' ? base : null }), timeout: 5000, encoding: 'utf8' })
 
-const post = (port, token, path, body) => new Promise((resolve, reject) => {
+const post = (port, token, path, body, host = '127.0.0.1') => new Promise((resolve, reject) => {
   const req = request({
     host: '127.0.0.1',
     port,
     method: 'POST',
     path,
-    headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', 'x-board-token': token },
+    headers: { host: `${host}:${port}`, 'content-type': 'application/json', 'x-board-token': token },
   }, res => {
     let data = ''
     res.setEncoding('utf8')
@@ -36,7 +46,7 @@ const post = (port, token, path, body) => new Promise((resolve, reject) => {
   req.end(JSON.stringify(body))
 })
 
-const serve = async () => {
+const serve = async ({ leftLock = false, lan = false } = {}) => {
   const dir = mkdtempSync(join(tmpdir(), 'settings-symlink-'))
   const run = join(dir, 'run')
   mkdirSync(run, { mode: 0o700 })
@@ -44,7 +54,21 @@ const serve = async () => {
   writeFileSync(path, '# Progress\n\n## Demo\n- [ ] Task\n')
   const script = join(dir, 'agent-board.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
-  const child = spawn(process.execPath, [script, '--serve-child'], {
+  const preload = join(dir, 'preload.cjs')
+  if (leftLock || lan) writeFileSync(preload, `const fs = require('node:fs')
+if (${leftLock}) {
+  const unlink = fs.unlinkSync
+  fs.unlinkSync = (file, ...args) => { if (String(file).endsWith('.agent-board.lock')) throw Object.assign(new Error('synthetic denied unlink'), { code: 'EACCES' }); return unlink(file, ...args) }
+}
+if (${lan}) {
+  const os = require('node:os'), { Server } = require('node:net')
+  os.networkInterfaces = () => ({ synthetic: [{ address: '192.168.42.2', family: 'IPv4', internal: false }] })
+  const listen = Server.prototype.listen
+  Server.prototype.listen = function (...args) { if (args[1] === '192.168.42.2') args[1] = '127.0.0.1'; return Reflect.apply(listen, this, args) }
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const child = spawn(process.execPath, [...(leftLock || lan ? ['--require', preload] : []), script, '--serve-child'], {
     cwd: dir,
     env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, APPDATA: dir, LOCALAPPDATA: dir, NO_COLOR: '1', XDG_RUNTIME_DIR: run, LANG: 'en' },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -495,6 +519,196 @@ const lockBase = '{"lang":"en"}\n'
 // A process that has ended: the old takeover read this pid and took the lock over (codex_166 finding 8).
 const exitedPid = spawnSync(process.execPath, ['-e', '0']).pid
 const lockNext = '{"lang":"zh-TW"}\n'
+
+test('#1339: CLI reports a saved file whose owned lock cannot be removed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-left-cli-'))
+  const file = join(dir, 'progress-settings.json')
+  const lock = resolve(`${file}.agent-board.lock`)
+  try {
+    const normal = updateSettings(file, () => lockBase)
+    assert.equal(normal.result, 'ok')
+    assert.equal(normal.lockLeft, undefined)
+    const unlink = fs.unlinkSync
+    const denied = mock.method(fs, 'unlinkSync', (name, ...args) => {
+      if (String(name).endsWith('.agent-board.lock')) throw Object.assign(new Error('synthetic denied unlink'), { code: 'EACCES' })
+      return unlink(name, ...args)
+    })
+    let saved
+    try {
+      syncBuiltinESMExports()
+      saved = updateSettings(file, () => lockNext)
+    } finally {
+      denied.mock.restore()
+      syncBuiltinESMExports()
+    }
+    assert.equal(saved.result, 'ok')
+    assert.equal(readFileSync(file, 'utf8'), lockNext)
+    assert.equal(existsSync(lock), true)
+    assert.equal(saved.lockLeft, lock)
+    assert.throws(() => updateSettings(file, () => lockBase), error => error.code === 'SETTINGS_LOCKED')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('#1339: plugin reports a saved file whose owned lock cannot be removed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-left-plugin-'))
+  const file = join(dir, 'progress-settings.json')
+  const lock = resolve(`${file}.agent-board.lock`)
+  const preload = join(dir, 'left-lock.cjs')
+  try {
+    const normal = writeScript(file, lockBase, 'missing', null)
+    assert.equal(normal.status, 0, normal.stderr)
+    assert.equal(normal.stdout, '')
+    writeFileSync(preload, `const fs = require('node:fs'), unlink = fs.unlinkSync
+fs.unlinkSync = (name, ...args) => { if (String(name).endsWith('.agent-board.lock')) throw Object.assign(new Error('synthetic denied unlink'), { code: 'EACCES' }); return unlink(name, ...args) }
+`)
+    const saved = writeScript(file, lockNext, 'ok', lockBase, ['--require', preload])
+    assert.equal(readFileSync(file, 'utf8'), lockNext)
+    assert.equal(existsSync(lock), true)
+    assert.equal(saved.status, SETTINGS_LOCK_LEFT, saved.stderr)
+    assert.equal(saved.stdout, lock)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('#1339: both writers report a failed lock identity check after saving', () => {
+  for (const writer of ['cli', 'plugin']) {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-left-stat-'))
+    const file = join(dir, 'progress-settings.json')
+    const lock = resolve(`${file}.agent-board.lock`)
+    try {
+      if (writer === 'cli') {
+        const lstat = fs.lstatSync
+        let checks = 0
+        const denied = mock.method(fs, 'lstatSync', (name, ...args) => {
+          if (String(name).endsWith('.agent-board.lock') && args[0]?.bigint && ++checks === 2) throw Object.assign(new Error('synthetic denied lstat'), { code: 'EACCES' })
+          return lstat(name, ...args)
+        })
+        let saved
+        try { syncBuiltinESMExports(); saved = updateSettings(file, () => lockNext) } finally { denied.mock.restore(); syncBuiltinESMExports() }
+        assert.equal(saved.result, 'ok')
+        assert.equal(saved.lockLeft, lock)
+      } else {
+        const preload = join(dir, 'left-stat.cjs')
+        writeFileSync(preload, `const fs = require('node:fs'), lstat = fs.lstatSync
+let checks = 0
+fs.lstatSync = (name, ...args) => { if (String(name).endsWith('.agent-board.lock') && args[0]?.bigint && ++checks === 2) throw Object.assign(new Error('synthetic denied lstat'), { code: 'EACCES' }); return lstat(name, ...args) }
+`)
+        const saved = writeScript(file, lockNext, 'missing', null, ['--require', preload])
+        assert.equal(saved.status, SETTINGS_LOCK_LEFT, saved.stderr)
+        assert.equal(saved.stdout, lock)
+      }
+      assert.equal(readFileSync(file, 'utf8'), lockNext)
+      assert.equal(existsSync(lock), true)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  }
+})
+
+test('#1339: settings page names a left lock locally and only its file name on the network', { timeout: 30_000 }, async () => {
+  const board = await serve({ leftLock: true, lan: true })
+  const lock = join(board.dir, 'progress-settings.json.agent-board.lock')
+  try {
+    const opened = await board.call('POST', '/api/lan', { body: { address: '192.168.42.2' } })
+    assert.equal(opened.status, 200, opened.body)
+    const phone = new URL(opened.json().url)
+    for (const [route, body] of [['/api/style', { style: 'blue' }], ['/api/language', { lang: 'en' }]]) {
+      const local = await board.call('POST', route, { body })
+      assert.equal(local.status, 200, local.body)
+      assert.ok(local.json().note.includes(EN.settingsLockLeft(lock)), local.body)
+      if (route === '/api/language') assert.equal(local.json().lockLeft, true)
+      unlinkSync(lock)
+      const remote = await post(Number(phone.port), phone.searchParams.get('t'), route, body, phone.hostname)
+      assert.equal(remote.status, 200, remote.body)
+      assert.ok(remote.json().note.includes(EN.settingsLockLeft(basename(lock))), remote.body)
+      assert.ok(!remote.body.includes(board.dir), remote.body)
+      unlinkSync(lock)
+    }
+  } finally { await board.close() }
+})
+
+test('#1339: the terminal style key shows the saved-but-left warning', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-left-terminal-'))
+  try {
+    const path = join(dir, 'progress.md')
+    const script = join(dir, 'board.mjs')
+    const preload = join(dir, 'left-lock.cjs')
+    const lock = join(dir, 'progress-settings.json.agent-board.lock')
+    writeFileSync(path, '# Progress\n\n## Demo\n- [ ] Task\n')
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${BOARD_SCRIPT}`)
+    writeFileSync(preload, `const fs = require('node:fs'), unlink = fs.unlinkSync
+fs.unlinkSync = (name, ...args) => { if (String(name).endsWith('.agent-board.lock')) throw Object.assign(new Error('synthetic denied unlink'), { code: 'EACCES' }); return unlink(name, ...args) }
+require('node:module').syncBuiltinESMExports()
+`)
+    const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, NO_COLOR: '1', LANG: 'en' }
+    const ran = spawnSync(process.execPath, ['--require', preload, script, '--keys', 's'], { cwd: dir, env, timeout: 10_000, encoding: 'utf8' })
+    assert.equal(ran.status, 0, ran.stderr || String(ran.error))
+    assert.match(ran.stdout.replace(/\s+/g, ' '), /Saved, but its lock file could not be removed/)
+    assert.ok(ran.stdout.replace(/\s/g, '').includes(lock.replace(/\s/g, '')), ran.stdout)
+    assert.equal(existsSync(lock), true)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('#1339: the settings page retains the warning after a language reload', async () => {
+  const lockNote = EN.settingsLockLeft('/synthetic/progress-settings.json.agent-board.lock')
+  const note = `${EN.settingsLanguageChanged} ${lockNote}`
+  const values = new Map()
+  const mount = isStorageDenied => {
+    const nodes = new Map()
+    class Element {
+      constructor(id) { this.id = id; this.events = {}; this.hidden = false; this.value = 'en'; nodes.set(id, this) }
+      getAttribute(name) { return name === 'data-lan' ? 'true' : null }
+      setAttribute() {}
+      addEventListener(name, callback) { this.events[name] = callback }
+      focus() {}
+    }
+    for (const id of ['settings', 'settings-toggle', 'settings-result', 'settings-lang', 'settings-notify', 'settings-notifications', 'settings-agent-list', 'settings-close', 'shell']) new Element(id)
+    nodes.get('settings').hidden = true
+    let reloaded = false
+    const sessionStorage = {
+      getItem: key => values.get(key) ?? null,
+      setItem: (key, value) => { if (isStorageDenied) throw new Error('storage unavailable'); values.set(key, value) },
+      removeItem: key => values.delete(key),
+    }
+    const document = { getElementById: id => nodes.get(id) ?? null, addEventListener() {}, querySelectorAll: () => [] }
+    const localStorage = { getItem: () => null, setItem() {} }
+    runInNewContext(settingsScript, {
+      document, sessionStorage, localStorage, window: { isSecureContext: false, location: { reload: () => { reloaded = true } } },
+      w: key => EN[key], call: path => Promise.resolve(path === '/api/language' ? { ok: true, note, lockLeft: true } : { ok: true, rows: [] }),
+    }, { timeout: 1000 })
+    return { nodes, reloaded: () => reloaded }
+  }
+  const before = mount(false)
+  before.nodes.get('settings-lang').events.change()
+  await delay(0)
+  assert.equal(before.reloaded(), true)
+  const after = mount(false)
+  await delay(0)
+  assert.equal(after.nodes.get('settings-result').textContent, note)
+  assert.equal(after.nodes.get('settings').hidden, false)
+  const withoutStorage = mount(true)
+  withoutStorage.nodes.get('settings-lang').events.change()
+  await delay(0)
+  assert.equal(withoutStorage.reloaded(), false)
+  assert.equal(withoutStorage.nodes.get('settings-result').textContent, note)
+})
+
+test('#1339: the page style button shows the saved-but-left warning', async () => {
+  const source = readFileSync(new URL('../hooks/serve.ts', import.meta.url), 'utf8')
+  const start = source.indexOf("  document.querySelectorAll('[data-bar-set]').forEach(function (node) {")
+  const end = source.indexOf('  // A page that is going away', start)
+  assert.ok(start >= 0 && end > start)
+  const node = { events: {}, getAttribute: () => 'blue', addEventListener(name, callback) { this.events[name] = callback } }
+  let shown = ''
+  const lockNote = EN.settingsLockLeft('/synthetic/lock')
+  runInNewContext(source.slice(start, end), {
+    document: { documentElement: { getAttribute: () => 'ink' }, querySelectorAll: () => [node] },
+    barStyleShown() {}, settingsSay: text => { shown = text },
+    w: (key, ...args) => typeof EN[key] === 'function' ? EN[key](...args) : EN[key],
+    call: () => Promise.resolve({ ok: true, note: lockNote }),
+  }, { timeout: 1000 })
+  node.events.click()
+  await delay(0)
+  assert.ok(shown.includes(lockNote), shown)
+})
+
 const cliLockScript = body => `import fs from 'node:fs'
 import { replaceSettings, withSettingsLock } from ${JSON.stringify(settingsModule)}
 const file = process.argv[1], lockPath = file + '.agent-board.lock'
@@ -660,7 +874,20 @@ require('node:module').syncBuiltinESMExports()
       const ran = await runLockChild(writer, file, { callback: "fs.unlinkSync(lockPath); fs.writeFileSync(lockPath, 'foreign lock'); return 0" })
       assert.equal(ran.timedOut, false, ran.stderr)
       assert.equal(ran.status, 0, ran.stderr)
+      assert.equal(ran.stdout, '')
       assert.equal(readFileSync(`${file}.agent-board.lock`, 'utf8'), 'foreign lock')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  test(`${writer} accepts a lock removed before release without reporting it left`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-lock-gone-'))
+    try {
+      const file = join(dir, 'progress-settings.json')
+      const ran = await runLockChild(writer, file, { callback: 'fs.unlinkSync(lockPath); return 0' })
+      assert.equal(ran.timedOut, false, ran.stderr)
+      assert.equal(ran.status, 0, ran.stderr)
+      assert.equal(ran.stdout, '')
+      assert.equal(existsSync(`${file}.agent-board.lock`), false)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 }
@@ -692,5 +919,6 @@ test('a path through a link and .. takes the same lock as the plain path (codex_
 test('each language names the lock path and tells the person when to delete it', () => {
   const lock = '/synthetic/progress-settings.json.agent-board.lock'
   for (const words of [EN, ZH_TW, ZH_CN]) assert.ok(words.settingsLocked(lock).includes(lock))
+  for (const words of [EN, ZH_TW, ZH_CN]) assert.ok(words.settingsLockLeft(lock).includes(lock))
   assert.match(EN.settingsLocked(lock), /in progress.*stopped.*If no save is running, delete/)
 })

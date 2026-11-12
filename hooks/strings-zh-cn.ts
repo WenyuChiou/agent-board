@@ -809,6 +809,7 @@ export const ZH_CN: Strings = {
   barStyleUnreadable: '看板的设置文件不是有效的 JSON，设置没有改，也没有覆盖它。请修好或删掉 progress-settings.json 再选一次。',
   barStyleUnsafe: '看板的设置文件是链接或不是普通文件，设置没有改，也没有覆盖它。请把 progress-settings.json 换成普通文件或删掉，再选一次。',
   settingsLocked: (file: string): string => `设置正在保存，或保存进程停止时留下了锁。如果目前没有保存进程，请删除 ${file}。`,
+  settingsLockLeft: (lock: string): string => `已保存，但锁文件无法删除，下次保存会被挡住。如果没有其他保存正在进行，请删除 ${lock}`,
   barStyleKey: (name: string): string => `s 换进度条样式（现在：${name}）`,
   pgBarLabel: (count: string, step: string): string => `${count} · ${step}`,
   serveLiveHint: '每 3 秒读一次看板',

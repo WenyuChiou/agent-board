@@ -1441,7 +1441,7 @@ const PAGE_SCRIPT = String.raw`
       node.disabled = true;
       call('/api/style', { style: style }).then(function (data) {
         if (!data.ok) { barStyleShown(before); settingsSay(data.note || w('pressFailed'), true); }
-        else settingsSay(w('settingsChanged', w('barStyleHead'), w(style === 'blue' ? 'barStyleBlue' : style === 'green' ? 'barStyleGreen' : 'barStyleInk')));
+        else settingsSay(w('settingsChanged', w('barStyleHead'), w(style === 'blue' ? 'barStyleBlue' : style === 'green' ? 'barStyleGreen' : 'barStyleInk')) + (data.note ? ' ' + data.note : ''));
       }, function () { barStyleShown(before); settingsSay(w('pressFailed'), true); }).finally(function () { node.disabled = false; });
     });
   });

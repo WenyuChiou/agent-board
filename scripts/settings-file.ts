@@ -49,7 +49,7 @@ const isTaken = (path: string): boolean => {
   try { lstatSync(path); return true } catch (error) { return !isCode(error, ['ENOENT']) }
 }
 
-export const withSettingsLock = <T>(file: string, run: () => T): T => {
+export const withSettingsLock = <T>(file: string, run: () => T, onLeft?: (lock: string) => void): T => {
   // The lock is opened beside the file as given, so the file system resolves both paths alike (a lexical resolve
   // turns `link/..` into another folder); the full path is only for the message.
   const lock = `${file}.agent-board.lock`
@@ -83,11 +83,13 @@ export const withSettingsLock = <T>(file: string, run: () => T): T => {
     writeFileSync(fd, `${pid} ${Date.now()}\n`)
     return run()
   } finally {
+    let isLeft = false
     try {
       const current = lstatSync(lock, { bigint: true })
       if (current.dev === own.dev && current.ino === own.ino) unlinkSync(lock)
-    } catch {}
+    } catch (error) { isLeft = !isCode(error, ['ENOENT']) }
     closeSync(fd)
+    if (isLeft) onLeft?.(resolve(lock))
   }
 }
 
@@ -103,8 +105,8 @@ export const withSettingsLock = <T>(file: string, run: () => T): T => {
 // change the path there.
 export type Replaced = 'ok' | 'unsafe' | 'changed'
 
-export const replaceSettings = (file: string, base: string | null, next: string, between?: () => void): Replaced =>
-  withSettingsLock(file, () => replaceLocked(file, base, next, between))
+export const replaceSettings = (file: string, base: string | null, next: string, between?: () => void, onLeft?: (lock: string) => void): Replaced =>
+  withSettingsLock(file, () => replaceLocked(file, base, next, between), onLeft)
 
 const replaceLocked = (file: string, base: string | null, next: string, between?: () => void): Replaced => {
   let mode = 0o600
@@ -147,16 +149,17 @@ const replaceLocked = (file: string, base: string | null, next: string, between?
 
 // Works the change out from the file's text as it is now and saves it, again from the fresh text when another
 // save got in between. `change` returns the new text, or null when the text is not something it can change.
-export const updateSettings = (file: string, change: (text: string | null) => string | null, between?: () => void): { result: 'ok' | 'invalid' | 'unsafe'; text?: string } => {
+export const updateSettings = (file: string, change: (text: string | null) => string | null, between?: () => void): { result: 'ok' | 'invalid' | 'unsafe'; text?: string; lockLeft?: string } => {
   for (let attempt = 0; attempt < 4; attempt++) {
     const found = readSettings(file)
     if (found.kind === 'unsafe') return { result: 'unsafe' }
     const base = found.kind === 'ok' ? found.text : null
     const next = change(base)
     if (next === null) return { result: 'invalid' }
-    const done = replaceSettings(file, base, next, attempt === 0 ? between : undefined)
+    let lockLeft: string | undefined
+    const done = replaceSettings(file, base, next, attempt === 0 ? between : undefined, lock => { lockLeft = lock })
     if (done === 'unsafe') return { result: 'unsafe' }
-    if (done === 'ok') return { result: 'ok', text: next }
+    if (done === 'ok') return { result: 'ok', text: next, ...(lockLeft === undefined ? {} : { lockLeft }) }
   }
   throw new Error('the settings file kept changing while it was saved')
 }

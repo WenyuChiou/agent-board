@@ -27,7 +27,7 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
-import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script'
+import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_LOCK_LEFT, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script'
 import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED, PENDING_COMMIT, PENDING_STAGE } from '../hooks/ledger-move'
 import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
@@ -132,6 +132,7 @@ type World = {
   // Settings files whose lock another save holds: the write script exits SETTINGS_LOCKED with the lock path on
   // stdout, or with that output cut short (#1339, codex_166 finding 5).
   lockedFiles?: Map<string, { stdout: string; isTruncated?: boolean }>
+  leftLocks?: Map<string, { stdout: string; isTruncated?: boolean }>
   // What each settings write was given: its arguments, and what it read on stdin.
   settingsWrites?: Array<{ argv: string[]; stdin: string | undefined }>
   // What the model answers asynchronously; a promise that never settles is a hung call.
@@ -342,6 +343,8 @@ const engineBeneath = (on: On, world: World): MockClock => {
       const held = world.files.get(file)
       if ((e.argv[5] === 'ok' ? held : undefined) !== (e.argv[5] === 'ok' ? given.base ?? undefined : undefined) || (e.argv[5] === 'missing' && held !== undefined)) return { value: { exitCode: SETTINGS_CHANGED, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
       world.files.set(file, given.next ?? '')
+      const left = world.leftLocks?.get(file)
+      if (left !== undefined) return { value: { exitCode: SETTINGS_LOCK_LEFT, stdout: left.stdout, stderr: '', isStdoutTruncated: left.isTruncated === true, isStderrTruncated: false } }
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv[0] === 'node' && e.argv[2] === LEDGER_LINK && e.argv[3] === '--') {

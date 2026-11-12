@@ -6,6 +6,7 @@
 export const SETTINGS_UNSAFE = 71
 export const SETTINGS_CHANGED = 72
 export const SETTINGS_LOCKED = 73
+export const SETTINGS_LOCK_LEFT = 74
 
 // Prints one JSON line: {kind:'missing'}, {kind:'unsafe'} or {kind:'ok',text}. Exit 1 on any other error.
 export const SETTINGS_READ = `
@@ -45,7 +46,7 @@ else say(found)
 // the swap and once after it: when it no longer holds <base>, nothing is written over it and the exit is
 // 72, so the caller reads and works the change out again and a save made meanwhile is not undone.
 // The new file gets the old one's permission bits (0600 when there was none).
-// Exit 0 when written, 71 for an unsafe settings path, 73 for a lock timeout, and 1 for another error.
+// Exit 0 when written, 71 for an unsafe path, 73 for a lock timeout, 74 when written but the lock remains, and 1 for another error.
 export const SETTINGS_WRITE = `
 const fs = require('node:fs')
 const path = require('node:path')
@@ -82,6 +83,7 @@ const held = () => {
 // Opened beside the file as given, so the file system resolves both alike; the full path is only for the message.
 const lockFile = file + '.agent-board.lock'
 const lockPath = path.resolve(lockFile)
+let lockLeft = false
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 // Windows creates the file a dangling link at the lock path points to, so there anything at the path counts as held;
 // only whether something is there is looked at.
@@ -119,7 +121,7 @@ const withSettingsLock = (run) => {
     try {
       const current = fs.lstatSync(lockFile, { bigint: true })
       if (current.dev === own.dev && current.ino === own.ino) fs.unlinkSync(lockFile)
-    } catch {}
+    } catch (error) { lockLeft = !error || error.code !== 'ENOENT' }
     fs.closeSync(fd)
   }
 }
@@ -161,6 +163,10 @@ const finish = () => {
 }
 try {
   process.exitCode = withSettingsLock(finish)
+  if (process.exitCode === 0 && lockLeft) {
+    process.stdout.write(lockPath)
+    process.exitCode = ${SETTINGS_LOCK_LEFT}
+  }
 } catch (error) {
   process.stderr.write(String(error && error.message || error) + '\\n')
   if (error && error.code === 'SETTINGS_LOCKED') process.stdout.write(lockPath)

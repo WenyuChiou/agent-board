@@ -748,8 +748,8 @@ const barStyleNow = (): BarStyle => barStyleOf(settingsNow())
 // The pick from the page or the `s` key: the settings file's other keys are kept. 'invalid' when the
 // file exists but does not read as a JSON object, 'unsafe' when it is a link or a non-regular file: it is
 // left as it is either way. A read or write error throws.
-type SaveResult = 'ok' | 'invalid' | 'unsafe'
-const saveSettings = (patch: Record<string, unknown>): { result: SaveResult; text?: string } => {
+type SaveResult = ReturnType<typeof updateSettings>
+const saveSettings = (patch: Record<string, unknown>): SaveResult => {
   const file = settingsPath(path)
   // The change is worked out from the file as it is when written, so a save made meanwhile is kept (#1276).
   // A failed read or write names the file on the page.
@@ -758,12 +758,12 @@ const saveSettings = (patch: Record<string, unknown>): { result: SaveResult; tex
   if (saved.result === 'ok') settingsKept = { text: saved.text ?? null, at: Date.now() }
   return saved
 }
-const saveBarStyle = (style: BarStyle): SaveResult => saveSettings({ style }).result
+const saveBarStyle = (style: BarStyle): SaveResult => saveSettings({ style })
 
 const saveLanguage = (lang: SettingsLang): SaveResult => {
   const saved = saveSettings({ lang })
   if (saved.result === 'ok') s = wordsNow()
-  return saved.result
+  return saved
 }
 
 // The answers queued for a session's next turn, which the page counts as handled: the terminal board, --status,
@@ -1713,11 +1713,12 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
     const style = nextBarStyle(barStyleNow())
     try {
       const saved = saveBarStyle(style)
-      if (saved !== 'ok') return { state: { ...next, note: saved === 'unsafe' ? s.barStyleUnsafe : s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+      if (saved.result !== 'ok') return { state: { ...next, note: saved.result === 'unsafe' ? s.barStyleUnsafe : s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+      const note = `${s.barStyleKey(barStyleName(style, s))}${saved.lockLeft === undefined ? '' : ` ${s.settingsLockLeft(saved.lockLeft)}`}`
+      return { state: { ...next, note, tone: 'done' }, isQuit: false, isHtml: false, isWrite: false }
     } catch (error) {
       return { state: { ...next, note: failureNote(error), tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
     }
-    return { state: { ...next, note: s.barStyleKey(barStyleName(style, s)), tone: 'done' }, isQuit: false, isHtml: false, isWrite: false }
   }
   if (action.type === 'tidy') {
     let note: string

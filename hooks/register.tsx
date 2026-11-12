@@ -4,7 +4,7 @@ import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiv
 import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
-import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from './settings-script'
+import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_LOCK_LEFT, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from './settings-script'
 import { LEDGER_LINK, LEDGER_RENAMES, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
 import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
@@ -4289,6 +4289,7 @@ export const register: Register = (on, options) => {
       // The host's own file calls follow a link and wait on a FIFO, so Node reads and writes it (#1276).
       // The change is worked out from the file as it is read just before the write; when another save got
       // in between, the write is refused and the change is worked out again, so that save is kept.
+      let lockLeft: string | undefined
       for (let attempt = 0; ; attempt++) {
         if (attempt >= 4) return { text: s.pressFailed }
         const found = await $.process.run(['node', '-e', SETTINGS_READ, '--', file], { timeoutMs: 10000 }).catch(() => null)
@@ -4306,12 +4307,13 @@ export const register: Register = (on, options) => {
         if (wrote?.exitCode === SETTINGS_UNSAFE) return { text: s.barStyleUnsafe }
         if (wrote?.exitCode === SETTINGS_CHANGED) continue
         if (wrote?.exitCode === SETTINGS_LOCKED && !wrote.isStdoutTruncated) return { text: s.settingsLocked(wrote.stdout) }
+        if (wrote?.exitCode === SETTINGS_LOCK_LEFT && !wrote.isStdoutTruncated) { lockLeft = wrote.stdout; break }
         if (wrote?.exitCode !== 0) return { text: s.pressFailed }
         break
       }
       await update($, barStyle, () => style)
       $.ui.invalidate('ui.render')
-      return { text: s.barStyleSet(barStyleName(style, s)) }
+      return { text: `${s.barStyleSet(barStyleName(style, s))}${lockLeft === undefined ? '' : ` ${s.settingsLockLeft(lockLeft)}`}` }
     }
     if (/^(整理|archive|tidy)$/i.test(arg)) {
       const moved = await enqueue(() => archiveOld($, true)).catch(() => null)

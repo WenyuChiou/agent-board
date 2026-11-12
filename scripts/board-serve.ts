@@ -53,9 +53,9 @@ export type ServeOptions = {
   // The progress bar's style (#1085): read from the board's settings file, and written there by
   // Settings so the pane and the terminal board show the same pick.
   barStyle?: () => BarStyle
-  setBarStyle?: (style: BarStyle) => 'ok' | 'invalid' | 'unsafe'
+  setBarStyle?: (style: BarStyle) => { result: 'ok' | 'invalid' | 'unsafe'; lockLeft?: string }
   language?: () => SettingsLang
-  setLanguage?: (lang: SettingsLang) => 'ok' | 'invalid' | 'unsafe'
+  setLanguage?: (lang: SettingsLang) => { result: 'ok' | 'invalid' | 'unsafe'; lockLeft?: string }
   isLangOverridden?: () => boolean
   agents?: SettingsAgentControl
   sweep: () => void
@@ -559,15 +559,19 @@ export const startServer = (o: ServeOptions): void => {
         const style = body.style
         if (!isBarStyle(style) || o.setBarStyle === undefined) return json(res, 400, { note: o.s.pressFailed })
         const saved = o.setBarStyle(style)
-        return saved === 'ok' ? json(res, 200, { style }) : json(res, 409, { note: saved === 'unsafe' ? o.s.barStyleUnsafe : o.s.barStyleUnreadable })
+        if (saved.result !== 'ok') return json(res, 409, { note: saved.result === 'unsafe' ? o.s.barStyleUnsafe : o.s.barStyleUnreadable })
+        const note = saved.lockLeft === undefined ? undefined : o.s.settingsLockLeft(isLan ? basename(saved.lockLeft) : saved.lockLeft)
+        return json(res, 200, { style, ...(note === undefined ? {} : { note }) })
       }
       if (url.pathname === '/api/language') {
         const lang = body.lang
         if (!isSettingsLang(lang) || o.setLanguage === undefined) return json(res, 400, { note: o.s.pressFailed })
         const saved = o.setLanguage(lang)
-        if (saved !== 'ok') return json(res, 409, { note: saved === 'unsafe' ? o.s.barStyleUnsafe : o.s.barStyleUnreadable })
+        if (saved.result !== 'ok') return json(res, 409, { note: saved.result === 'unsafe' ? o.s.barStyleUnsafe : o.s.barStyleUnreadable })
         const isOverridden = o.isLangOverridden?.() ?? false
-        return json(res, 200, { lang, isOverridden, note: isOverridden ? o.s.settingsLanguageOverridden : o.s.settingsLanguageChanged })
+        const note = isOverridden ? o.s.settingsLanguageOverridden : o.s.settingsLanguageChanged
+        const lockNote = saved.lockLeft === undefined ? '' : ` ${o.s.settingsLockLeft(isLan ? basename(saved.lockLeft) : saved.lockLeft)}`
+        return json(res, 200, { lang, isOverridden, note: note + lockNote, ...(saved.lockLeft === undefined ? {} : { lockLeft: true }) })
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()
