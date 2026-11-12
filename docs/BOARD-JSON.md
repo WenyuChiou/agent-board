@@ -18,7 +18,8 @@ Keys are English camelCase; values use the board's selected language. Every stri
 | `generatedAt` | Read time as an ISO 8601 UTC string, supplied to the pure function as `now`. |
 | `lang` | The selected language: `en`, `zh-TW` or `zh-CN`. |
 | `counts` | Counts of the arrays below, with question and stuck card subtotals. |
-| `needs` | Needs-you cards in the page's order, including questions and stuck tasks. |
+| `needs` | Needs-you cards in the page's order, including questions and stuck tasks, without the ones whose answer is queued. |
+| `queued` | Cards whose answer the person gave and the board queued for the session's next turn. The page counts them as handled and marks them queued; they have the same fields as `needs` cards and leave `counts.needs`. |
 | `working` | The page's Working now rows, using its existing 30-minute freshness rule. |
 | `waiting` | Other open rows from the page, excluding Working now and carded tasks. |
 | `stopped` | The page's stopped and idle rows, excluding tasks already on Done. |
@@ -32,6 +33,7 @@ Keys are English camelCase; values use the board's selected language. Every stri
 | Field | Meaning |
 |---|---|
 | `counts.needs` | Number of `needs` cards. |
+| `counts.queued` | Number of `queued` cards. `--status` and the terminal board show the same number beside the waiting one. |
 | `counts.questions` | Number of cards whose `kind` is `question`. |
 | `counts.stuck` | Number of cards whose `kind` is `stuck`. |
 | `counts.working` | Number of `working` rows. |

@@ -136,6 +136,8 @@ export const sendMode = (agent: string, target: AgentTarget | null): SendMode =>
 
 // One send at a time per session: the key the server holds while a reply is on its way.
 export const sendKey = (target: AgentTarget): string => `${target.agent}:${target.session}`
+// The card whose reply is being sent, kept beside the session's key: a session's other open question is not handed over by it (#1296).
+export const cardSendKey = (cardKey: string): string => `card:${cardKey}`
 
 export const idleTimeout = (value: string | undefined): number => {
   if (value === undefined) return 0
@@ -296,7 +298,9 @@ type PageView = {
   stuck: number
   versions: GroupOptions['versions']
   agents: Array<PageBucket & { agent: string; name: string; icon: string; last: number; isUnreadable: boolean }>
-  needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[] }
+  // handled: the cards whose answer is on its way (sent, or queued for the session's next turn). They stay on the
+  // sheet with their line and leave the count, on the page and on every other surface (#1296).
+  needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[]; handled: string[] }
   working: PageRef[]
   quiet: Quiet
   all: PageBucket & { isHidden: boolean }
@@ -409,6 +413,62 @@ const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): Ser
   ...(item.questionId === undefined ? {} : { questionId: item.questionId }),
 })
 
+// An answer that was sent, or queued for the session's next turn, no longer waits for the person (#1296). A message
+// that timed out or was refused waits again. The page, the terminal board, --status and --json all count from this.
+const isFailedReceipt = (receipt: Pick<Message, 'status' | 'error' | 'hasAccepted'> | undefined): boolean =>
+  receipt !== undefined && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
+// A question counts as handled by the message bound to it, not by any message to its session (#1296): with two
+// questions in one session, one queued answer hands over one. `holder` is true when a message still held for
+// the session's next turn answers this question. A message bound to no question answers one only when the session
+// has exactly one open question (`openInSession`); with two or more it answers none, and the card keeps waiting.
+const answersQuestion = (one: Omit<Message, 'nonce' | 'hash'>, to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
+  to !== undefined && one.from === 'board' && one.to === to && (one.answers === undefined ? openInSession === 1 : one.answers === questionId)
+const holdsAnswer = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
+  messages.some(one => answersQuestion(one, to, questionId, openInSession) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)))
+// Whether the board's latest message for this very question failed. A later message to the same session from
+// anyone else says nothing about the answer being counted.
+const answerFailed = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
+  isFailedReceipt(messages.filter(one => answersQuestion(one, to, questionId, openInSession)).at(-1))
+// What the page on the local network is given of the messaging state: enough to tell which answers are queued, and no
+// connection, text or reply (that page shows counts only).
+export const handledOnly = (messaging: Messaging): Messaging => ({
+  connections: [],
+  mailboxes: [],
+  messages: messaging.messages.map(one => ({
+    id: one.id,
+    target: one.target,
+    turn: '',
+    from: one.from === 'board' ? 'board' : 'other',
+    to: one.to,
+    text: '',
+    origin: one.origin,
+    status: one.status,
+    updated: one.updated,
+    reply: '',
+    error: /^(TIMEOUT|EXPIRED|DISMISSED)/.exec(one.error)?.[0] ?? '',
+    ...(one.hasAccepted === true ? { hasAccepted: true } : {}),
+    hops: 0,
+    claimed: 0,
+    ...(one.answers === undefined ? {} : { answers: one.answers }),
+  })),
+})
+const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: ReadonlyMap<string, boolean>, failed: ReadonlySet<string>): string[] => {
+  const sources = new Map<string, { isSending?: boolean; receipt?: Receipt }>()
+  for (const one of [...model.asks, ...model.reminder, ...model.older, ...model.idle, ...model.stopped, ...model.groups.flatMap(group => group.rows)]) {
+    const isSending = held.get(one.key) ?? ('isSending' in one ? one.isSending : undefined)
+    sources.set(one.key, { ...sources.get(one.key), ...(isSending === undefined ? {} : { isSending }), ...(one.receipt === undefined ? {} : { receipt: one.receipt }) })
+  }
+  return cards
+    .filter(card => {
+      const one = sources.get(card.sourceKey ?? card.key) ?? sources.get(card.key.replace(/^stuck:/, ''))
+      // A question card is judged by the board's message for that question; a row, by the receipt it shows.
+      const key = card.sourceKey ?? card.key
+      const isFailed = held.has(key) ? failed.has(key) : held.has(card.key.replace(/^stuck:/, '')) ? failed.has(card.key.replace(/^stuck:/, '')) : isFailedReceipt(one?.receipt)
+      return one?.isSending === true && !isFailed
+    })
+    .map(card => card.key)
+}
+
 // `routes`: the receivers' records, which say on each card when a message arrives and whether Send is offered.
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
@@ -419,6 +479,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
   const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId))
   const asks: ServeAsk[] = []
+  // Per ask card: whether an answer to this very question is held (the page's `isSending` is per session).
+  const held = new Map<string, boolean>()
+  const failed = new Set<string>()
   const groups = new Map<string, ServeRow[]>()
   const idle: ServeRow[] = []
   const idleKeys = new Set(view.idle.map(row => row.key))
@@ -426,12 +489,24 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const stoppedKeys = new Set(view.stopped.map(row => row.key))
   const turns: ServeTurn[] = []
   const items = boardItems(view, pending)
+  // The session an answer is held for, per ask: the live connection's address, else the ask's own session.
+  const holderOf = (ask: WaitingItem): { heldBy: string | undefined; connection: ReturnType<typeof reachable> | undefined } => {
+    const connection = ask.where === 'manual' || isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)
+    return { connection, heldBy: connection !== undefined ? address(connection.agent, connection.session) : ask.nativeSession === undefined ? undefined : address(ask.agent || 'claude', ask.nativeSession) }
+  }
+  // How many questions each session has open on the board, so a message bound to none can tell whether it can only mean one.
+  const openBy = new Map<string, number>()
+  for (const item of items) {
+    if (item.type !== 'ask') continue
+    const { heldBy } = holderOf(item.ask)
+    if (heldBy !== undefined) openBy.set(heldBy, (openBy.get(heldBy) ?? 0) + 1)
+  }
   for (const item of items) {
     if (item.type === 'ask') {
       const { ask } = item
       // A question gone from its agent's report is kept until it is answered; one the person answered
       // here, and its session took, needs nothing more from the person.
-      if (!isLan && ask.key.startsWith('retained::') && ask.questionId !== undefined && isAnswerHanded(messaging?.messages ?? [], ask.questionId)) continue
+      if (ask.key.startsWith('retained::') && ask.questionId !== undefined && isAnswerHanded(messaging?.messages ?? [], ask.questionId)) continue
       const isManual = ask.where === 'manual'
       const found = isManual || isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)
       const isContested = !isManual && !isLan && found === undefined && (messaging?.connections.some(one => one.agent === (ask.agent || 'claude') && one.session === ask.nativeSession) ?? false)
@@ -448,6 +523,10 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan, true)
       const label = ask.step === null ? undefined : clipped(ask.text, LABEL_ROOM)
+      const { heldBy } = holderOf(ask)
+      const openInSession = heldBy === undefined ? 0 : openBy.get(heldBy) ?? 0
+      held.set(item.key, sending.has(cardSendKey(item.key)) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, openInSession))
+      if (answerFailed(messaging?.messages ?? [], heldBy, ask.questionId, openInSession)) failed.add(item.key)
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
@@ -510,6 +589,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       // A Claude session still at work that this board cannot reach: its card says so and copies.
       const isOpenClaude = !isLan && send === 'claude' && row.auto !== 'ended'
       const nextLabel = row.next === null ? undefined : clipped(row.next.step, LABEL_ROOM)
+      // A row is handed over by the board's own message to its session, read from the messages alone (as a question
+      // is), so the network page, which has no connection, counts it as the local page does. A message bound to no
+      // question is the row's only when the session has no open question to take it.
+      const heldBy = connection !== undefined ? address(connection.agent, connection.session) : row.nativeSession === undefined ? undefined : address(row.agent || 'claude', row.nativeSession)
+      const rowTurn = heldBy !== undefined && (openBy.get(heldBy) ?? 0) === 0 ? 1 : 0
+      held.set(item.key, isSending(row.target) || holdsAnswer(messaging?.messages ?? [], heldBy, undefined, rowTurn))
+      if (answerFailed(messaging?.messages ?? [], heldBy, undefined, rowTurn)) failed.add(item.key)
       const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
       rows.push({
@@ -642,7 +728,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     stuck: grouped.needs.stuck,
     versions: group.versions,
     agents: grouped.agents.map(one => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),
-    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref) },
+    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref), held, failed) },
     working: grouped.working.map(ref),
     quiet: grouped.quiet,
     all: { ...bucket(grouped.all), isHidden: grouped.all.isHidden },
@@ -1471,7 +1557,7 @@ const PAGE_SCRIPT = String.raw`
       node.disabled = true;
       call('/api/style', { style: style }).then(function (data) {
         if (!data.ok) { barStyleShown(before); settingsSay(data.note || w('pressFailed'), true); }
-        else settingsSay(w('settingsChanged', w('barStyleHead'), w(style === 'blue' ? 'barStyleBlue' : style === 'green' ? 'barStyleGreen' : 'barStyleInk')));
+        else settingsSay(w('settingsChanged', w('barStyleHead'), w(style === 'blue' ? 'barStyleBlue' : style === 'green' ? 'barStyleGreen' : 'barStyleInk')) + (data.note ? ' ' + data.note : ''));
       }, function () { barStyleShown(before); settingsSay(w('pressFailed'), true); }).finally(function () { node.disabled = false; });
     });
   });
@@ -1777,7 +1863,14 @@ const PAGE_SCRIPT = String.raw`
   }
   // An agent that waits on the person, or stopped a moment ago, is not "nothing" (#612).
   function quietLine(quiet, now) {
-    if (quiet && quiet.kind === 'asking') return w('pgQuietAsking', quiet.n);
+    // The questions whose answer is on its way are not asked of the person any more (#1296).
+    if (quiet && quiet.kind === 'asking') {
+      var left = Math.max(0, quiet.n - (pg.sentTotal - (pg.sentBy.own || 0)));
+      if (left > 0) return w('pgQuietAsking', left);
+      // Every question has its answer on the way: an agent that stopped a moment ago is still said to have stopped.
+      if (quiet.stopped) return w('pgQuietStopped', agentName(quiet.stopped.agent), Math.max(1, Math.round((now - quiet.stopped.at) / 60000)));
+      return w('pgNoWorking');
+    }
     if (quiet && quiet.kind === 'stopped') return w('pgQuietStopped', agentName(quiet.agent), Math.max(1, Math.round((now - quiet.at) / 60000)));
     return w('pgNoWorking');
   }
@@ -1793,10 +1886,8 @@ const PAGE_SCRIPT = String.raw`
   // A sent answer is on its way: its card stays on the sheet with its line, but it no longer waits for the person.
   // A message that timed out or was refused waits for the person again.
   function isSent(ref) {
-    var one = source(ref);
-    var receipt = one.receipt;
-    var isFailed = receiptFailed(receipt);
-    return one.isSending === true && !isFailed;
+    var handled = pg.model && pg.model.view && pg.model.view.needs.handled;
+    return !!handled && handled.indexOf(ref.key) !== -1;
   }
   function byTime(a, b) { return (b.at || 0) - (a.at || 0); }
   function keepCopyFocus(redraw) {

@@ -52,7 +52,7 @@ test('the board document has a schema version, the questions that need the perso
   assert.equal(document.schemaVersion, 1)
   assert.equal(document.generatedAt, new Date(NOW).toISOString())
   assert.equal(document.lang, 'en')
-  assert.deepEqual(document.counts, { needs: 2, questions: 1, stuck: 1, working: 1, waiting: 2, stopped: 1, doneRecently: 2 })
+  assert.deepEqual(document.counts, { needs: 2, questions: 1, stuck: 1, queued: 0, working: 1, waiting: 2, stopped: 1, doneRecently: 2 })
   assert.deepEqual(document.needs.map(one => one.kind), ['question', 'stuck'])
   assert.deepEqual(document.needs[0].options, ['100', '300 a minute'])
   assert.equal(document.needs[0].askedAt, new Date(NOW - MINUTE).toISOString())
