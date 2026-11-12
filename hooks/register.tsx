@@ -4,7 +4,7 @@ import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiv
 import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
-import { SETTINGS_CHANGED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from './settings-script'
+import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from './settings-script'
 import { LEDGER_LINK, LEDGER_RENAMES, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
 import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
@@ -4305,6 +4305,7 @@ export const register: Register = (on, options) => {
         const wrote = await $.process.run(['node', '-e', SETTINGS_WRITE, '--', file, base === null ? 'missing' : 'ok'], { timeoutMs: 10000, stdin: JSON.stringify({ next, base }) }).catch(() => null)
         if (wrote?.exitCode === SETTINGS_UNSAFE) return { text: s.barStyleUnsafe }
         if (wrote?.exitCode === SETTINGS_CHANGED) continue
+        if (wrote?.exitCode === SETTINGS_LOCKED && !wrote.isStdoutTruncated) return { text: s.settingsLocked(wrote.stdout) }
         if (wrote?.exitCode !== 0) return { text: s.pressFailed }
         break
       }

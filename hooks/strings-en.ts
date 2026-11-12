@@ -814,6 +814,7 @@ export const EN: Strings = {
   barStyleUnknown: 'Progress bar styles: ink, blue, green.',
   barStyleUnreadable: 'The board’s settings file is not valid JSON, so settings were not changed and the file was not overwritten. Fix or delete progress-settings.json, then pick again.',
   barStyleUnsafe: 'The board’s settings file is a link or not a plain file, so settings were not changed and the file was not overwritten. Replace progress-settings.json with a plain file or delete it, then pick again.',
+  settingsLocked: (file: string): string => `A settings save is in progress or stopped while holding its lock. If no save is running, delete ${file}.`,
   barStyleKey: (name: string): string => `s changes the progress bar style (now: ${name})`,
   pgBarLabel: (count: string, step: string): string => `${count} · ${step}`,
   serveLiveHint: 'Reads the board every 3 seconds',

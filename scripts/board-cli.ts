@@ -133,8 +133,9 @@ const plainFile = (file: string): string => {
 }
 
 // The terminal board and the page say the same about a file they could not read or write.
-const storageNote = (error: BoardFileError): string =>
-  error.isLocked ? s.boardLocked(plainFile(error.file))
+const storageNote = (error: BoardFileError, isLan = false): string =>
+  error.code === 'SETTINGS_LOCKED' ? s.settingsLocked(isLan ? basename(`${error.file}.agent-board.lock`) : resolve(`${error.file}.agent-board.lock`))
+    : error.isLocked ? s.boardLocked(plainFile(error.file))
     : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code))
     : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
 
@@ -2043,7 +2044,7 @@ const serveChild = (): void => {
       // The page names a file it could not read or write the way the terminal board does, for a
       // press and for the board it shows. The page is answered, so the exit code and stderr are
       // left alone. File labels and reasons stay the same on local and network pages.
-      failure: error => (error instanceof BoardFileError ? storageNote(error) : null),
+      failure: (error, isLan) => (error instanceof BoardFileError ? storageNote(error, isLan) : null),
       idleMs: idleMs(),
       onReady: (url, port) => {
         // Without its address file no later `--serve` finds this page, and each would start one

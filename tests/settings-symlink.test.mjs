@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import fs, { chmodSync, existsSync, lstatSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import fs, { chmodSync, existsSync, lstatSync, lutimesSync, statSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmdirSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { request } from 'node:http'
@@ -10,7 +10,9 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { EN } from '../hooks/strings-en.ts'
-import { SETTINGS_CHANGED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script.ts'
+import { ZH_TW } from '../hooks/i18n.ts'
+import { ZH_CN } from '../hooks/strings-zh-cn.ts'
+import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script.ts'
 import { readSettings, replaceSettings, updateSettings } from '../scripts/settings-file.ts'
 
 // The plugin's write script: the file and the kind on its command line, the two texts as JSON on stdin (never in the arguments).
@@ -488,66 +490,152 @@ fs.renameSync = (from, to) => {
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('a lock older than ten seconds belongs to a dead writer: the save takes it over and removes it', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'settings-lock-stale-'))
+// Every lock case runs in a child: a synchronous FIFO read must not hang the test process.
+const lockBase = '{"lang":"en"}\n'
+const lockNext = '{"lang":"zh-TW"}\n'
+const cliLockScript = body => `import fs from 'node:fs'
+import { replaceSettings, withSettingsLock } from ${JSON.stringify(settingsModule)}
+const file = process.argv[1], lockPath = file + '.agent-board.lock'
+try { ${body} } catch (error) { console.error(error.message); process.exitCode = 1 }
+`
+const runLockChild = (writer, file, { callback, preload, onWaiting } = {}) => new Promise((resolve, reject) => {
+  const body = callback === undefined
+    ? `if (replaceSettings(file, ${JSON.stringify(lockBase)}, ${JSON.stringify(lockNext)}) !== 'ok') throw new Error('save failed')`
+    : `withSettingsLock(file, () => { ${callback} })`
+  const plugin = callback === undefined ? SETTINGS_WRITE : SETTINGS_WRITE.replace('withSettingsLock(finish)', `withSettingsLock(() => { ${callback} })`)
+  const source = writer === 'plugin' ? plugin : cliLockScript(body)
+  const args = [...(preload ? ['--require', preload] : []), ...(writer === 'cli' ? ['--input-type=module'] : []), '-e', source, '--', file, 'ok']
+  const started = performance.now()
+  const child = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  let stdout = '', stderr = '', timedOut = false, waiting = false
+  const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, 5000)
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', chunk => {
+    stdout += chunk
+    if (!waiting && stdout.includes('WAITING\n')) { waiting = true; onWaiting?.() }
+  })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  child.once('error', error => { clearTimeout(timer); reject(error) })
+  child.once('close', status => {
+    clearTimeout(timer)
+    resolve({ status, stdout, stderr, timedOut, waiting, elapsed: performance.now() - started })
+  })
+  child.stdin.end(JSON.stringify({ next: lockNext, base: lockBase }))
+})
+
+const lockSnapshot = file => {
+  const info = lstatSync(file, { bigint: true })
+  return {
+    dev: info.dev, ino: info.ino, mode: info.mode, size: info.size, mtime: info.mtimeNs, ctime: info.ctimeNs,
+    content: info.isFile() ? readFileSync(file) : info.isSymbolicLink() ? readlinkSync(file) : info.isDirectory() ? readdirSync(file) : null,
+  }
+}
+const oldLock = (dir, shape) => {
   const file = join(dir, 'progress-settings.json')
   const lock = `${file}.agent-board.lock`
-  try {
-    writeFileSync(file, '{"a":true}')
-    writeFileSync(lock, '999999 0')
-    const old = new Date(Date.now() - 20_000)
-    utimesSync(lock, old, old)
-    const done = updateSettings(file, text => JSON.stringify({ ...JSON.parse(text ?? '{}'), b: true }))
-    assert.equal(done.result, 'ok')
-    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { a: true, b: true })
-    assert.equal(existsSync(lock), false)
-  } finally { rmSync(dir, { recursive: true, force: true }) }
-})
-
-// Review of #1339 (codex_128, finding 1): a lock older than 10 s was taken over whatever its owner was doing, so a
-// writer that was merely slow (paused, or waiting on a busy disk) lost its lock and two saves both reported success.
-// A lock is now taken over only when the pid in it is no longer a running process.
-const OLD = 60
-const lockedSettings = (owner, ageSeconds = OLD) => {
-  const dir = mkdtempSync(join(tmpdir(), 'settings-lock-'))
-  const settings = join(dir, 'progress-settings.json')
-  const lock = `${settings}.agent-board.lock`
-  writeFileSync(settings, '{"lang":"en"}\n')
-  writeFileSync(lock, `${owner} ${Date.now() - ageSeconds * 1000}\n`)
-  const when = new Date(Date.now() - ageSeconds * 1000)
-  utimesSync(lock, when, when)
-  return { dir, settings, lock }
-}
-const finishedPid = () => spawnSync(process.execPath, ['-e', '0']).pid
-const scriptWrite = (settings, next, base) => spawnSync(process.execPath, ['-e', SETTINGS_WRITE, '--', settings, 'ok'], { input: JSON.stringify({ next, base }), timeout: 15000, encoding: 'utf8' })
-
-test('a lock held for over 10 s by a process that still runs is not taken over: the save stops and says why (#1276)', { timeout: 30_000 }, () => {
-  const held = lockedSettings(process.pid)
-  try {
-    assert.throws(() => replaceSettings(held.settings, '{"lang":"en"}\n', '{"lang":"zh-TW"}\n'), /another save of the settings file is in progress.*delete .*agent-board\.lock/)
-    assert.equal(readFileSync(held.settings, 'utf8'), '{"lang":"en"}\n')
-    assert.equal(existsSync(held.lock), true, 'the live owner keeps its lock')
-    const ran = scriptWrite(held.settings, '{"lang":"zh-TW"}\n', '{"lang":"en"}\n')
-    assert.equal(ran.status, 1)
-    assert.equal(readFileSync(held.settings, 'utf8'), '{"lang":"en"}\n')
-    assert.equal(existsSync(held.lock), true)
-  } finally {
-    rmSync(held.dir, { recursive: true, force: true })
+  const target = join(dir, 'lock-target')
+  writeFileSync(file, lockBase)
+  if (shape === 'folder') mkdirSync(lock)
+  else if (shape === 'FIFO') execFileSync('mkfifo', [lock])
+  else if (shape === 'dangling link' || shape === 'link to a FIFO' || shape === 'link to a regular file') {
+    if (shape === 'link to a FIFO') execFileSync('mkfifo', [target])
+    if (shape === 'link to a regular file') writeFileSync(target, 'synthetic target\n')
+    symlinkSync(target, lock, 'file')
+  } else {
+    const content = shape === 'dead pid' ? '999999 0\n' : shape === 'live pid' ? `${process.pid} 0\n` : shape === 'garbage' ? 'synthetic garbage\n' : ''
+    writeFileSync(lock, content)
   }
-})
+  const old = new Date(Date.now() - 60_000)
+  if (lstatSync(lock).isSymbolicLink()) {
+    lutimesSync(lock, old, old)
+    if (shape !== 'dangling link') utimesSync(target, old, old)
+  } else utimesSync(lock, old, old)
+  return { file, lock, target }
+}
 
-test('a lock left by a process that has ended is taken over by both writers (#1276)', { timeout: 30_000 }, () => {
-  const dead = finishedPid()
-  const a = lockedSettings(dead)
-  try {
-    assert.equal(replaceSettings(a.settings, '{"lang":"en"}\n', '{"lang":"zh-TW"}\n'), 'ok')
-    assert.equal(readFileSync(a.settings, 'utf8'), '{"lang":"zh-TW"}\n')
-    assert.equal(existsSync(a.lock), false)
-  } finally { rmSync(a.dir, { recursive: true, force: true }) }
-  const b = lockedSettings(dead)
-  try {
-    assert.equal(scriptWrite(b.settings, '{"lang":"zh-TW"}\n', '{"lang":"en"}\n').status, 0)
-    assert.equal(readFileSync(b.settings, 'utf8'), '{"lang":"zh-TW"}\n')
-    assert.equal(existsSync(b.lock), false)
-  } finally { rmSync(b.dir, { recursive: true, force: true }) }
+for (const writer of ['cli', 'plugin']) {
+  for (const [shape, skip] of [
+    ['dead pid', false], ['live pid', false], ['empty', false], ['garbage', false],
+    ['FIFO', noFifo], ['folder', false], ['dangling link', noLinks],
+    ['link to a FIFO', noFifo || noLinks], ['link to a regular file', noLinks],
+  ]) {
+    test(`${writer} leaves a 60-second-old ${shape} lock untouched and reports its path`, { skip }, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'settings-lock-shape-'))
+      try {
+        const { file, lock, target } = oldLock(dir, shape)
+        const before = lockSnapshot(lock)
+        const targetBefore = existsSync(target) ? lockSnapshot(target) : null
+        const ran = await runLockChild(writer, file)
+        assert.equal(ran.timedOut, false, ran.stderr)
+        assert.ok(ran.elapsed < 3000, `save took ${ran.elapsed} ms`)
+        assert.notEqual(ran.status, 0)
+        if (!(process.platform === 'win32' && shape === 'folder')) {
+          assert.match(ran.stderr, /another save of the settings file is in progress.*if none is running, delete/)
+          if (writer === 'plugin') assert.equal(ran.status, SETTINGS_LOCKED)
+        }
+        assert.ok(ran.stderr.includes(lock), ran.stderr)
+        assert.deepEqual(readFileSync(file), Buffer.from(lockBase))
+        assert.deepEqual(lockSnapshot(lock), before)
+        if (targetBefore !== null) assert.deepEqual(lockSnapshot(target), targetBefore)
+      } finally { rmSync(dir, { recursive: true, force: true }) }
+    })
+  }
+
+  test(`${writer} saves after a lock is removed while it waits`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-lock-release-'))
+    try {
+      const { file, lock } = oldLock(dir, 'empty')
+      const preload = join(dir, 'waiting.cjs')
+      writeFileSync(preload, `const fs = require('node:fs')
+const open = fs.openSync
+let said = false
+fs.openSync = (...args) => {
+  try { return open(...args) } catch (error) {
+    if (!said && String(args[0]) === ${JSON.stringify(lock)} && error.code === 'EEXIST') { said = true; process.stdout.write('WAITING\\n') }
+    throw error
+  }
+}
+require('node:module').syncBuiltinESMExports()
+`)
+      let removal
+      const ran = await runLockChild(writer, file, { preload, onWaiting: () => { removal = setTimeout(() => unlinkSync(lock), 500) } })
+      clearTimeout(removal)
+      assert.equal(ran.timedOut, false, ran.stderr)
+      assert.equal(ran.waiting, true, 'the child encountered the existing lock')
+      assert.ok(ran.elapsed < 3000, `save took ${ran.elapsed} ms`)
+      assert.equal(ran.status, 0, ran.stderr)
+      assert.equal(readFileSync(file, 'utf8'), lockNext)
+      assert.equal(existsSync(lock), false)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  test(`${writer} removes its lock and passes through a callback error`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-lock-throw-'))
+    try {
+      const file = join(dir, 'progress-settings.json')
+      const ran = await runLockChild(writer, file, { callback: "throw new Error('synthetic callback failure')" })
+      assert.equal(ran.timedOut, false)
+      assert.equal(ran.status, 1)
+      assert.match(ran.stderr, /synthetic callback failure/)
+      assert.equal(existsSync(`${file}.agent-board.lock`), false)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  test(`${writer} leaves a foreign lock swapped in during the callback`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-lock-swap-'))
+    try {
+      const file = join(dir, 'progress-settings.json')
+      const ran = await runLockChild(writer, file, { callback: "fs.unlinkSync(lockPath); fs.writeFileSync(lockPath, 'foreign lock'); return 0" })
+      assert.equal(ran.timedOut, false, ran.stderr)
+      assert.equal(ran.status, 0, ran.stderr)
+      assert.equal(readFileSync(`${file}.agent-board.lock`, 'utf8'), 'foreign lock')
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+}
+
+test('each language names the lock path and tells the person when to delete it', () => {
+  const lock = '/synthetic/progress-settings.json.agent-board.lock'
+  for (const words of [EN, ZH_TW, ZH_CN]) assert.ok(words.settingsLocked(lock).includes(lock))
+  assert.match(EN.settingsLocked(lock), /in progress.*stopped.*If no save is running, delete/)
 })

@@ -5,6 +5,7 @@
 // it never goes through what the path points to. Run as `node -e SCRIPT -- <file> [<text>]`.
 export const SETTINGS_UNSAFE = 71
 export const SETTINGS_CHANGED = 72
+export const SETTINGS_LOCKED = 73
 
 // Prints one JSON line: {kind:'missing'}, {kind:'unsafe'} or {kind:'ok',text}. Exit 1 on any other error.
 export const SETTINGS_READ = `
@@ -44,9 +45,10 @@ else say(found)
 // the swap and once after it: when it no longer holds <base>, nothing is written over it and the exit is
 // 72, so the caller reads and works the change out again and a save made meanwhile is not undone.
 // The new file gets the old one's permission bits (0600 when there was none).
-// Exit 0 when written, 71 when the path is a link or not a regular file (nothing written), 1 otherwise.
+// Exit 0 when written, 71 for an unsafe settings path, 73 for a lock timeout, and 1 for another error.
 export const SETTINGS_WRITE = `
 const fs = require('node:fs')
+const path = require('node:path')
 const [file, kind] = process.argv.slice(1)
 let next, base
 try {
@@ -75,42 +77,34 @@ const held = () => {
   if (now.kind === 'unsafe') return 'unsafe'
   return now.kind === kind && (kind === 'missing' || now.text === base) ? 'same' : 'changed'
 }
-// The same lock as scripts/settings-file.ts: <file>.agent-board.lock, created exclusively with the pid and the time, held
-// from the re-read to the read-back, waited for up to 2 s, removed at the end. Taken over only when older than 10 s and its
-// pid is no longer a running process: a lock whose owner may still be writing is never taken.
-const lockPath = file + '.agent-board.lock'
+// The same lock as scripts/settings-file.ts: exclusive creation, a 2 s wait, and release by its creator.
+// Never take over another lock: its owner may still be writing, and inspecting it can block or race a fresh save.
+const lockPath = path.resolve(file) + '.agent-board.lock'
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-const ownerGone = () => {
-  try {
-    const owner = Number(/^([1-9][0-9]*) /.exec(fs.readFileSync(lockPath, 'utf8'))?.[1])
-    if (!Number.isInteger(owner) || owner > 2147483647) return false
-    try { process.kill(owner, 0) } catch (error) { return !!error && error.code === 'ESRCH' }
-    return false
-  } catch { return false }
-}
-const lock = () => {
-  const deadline = Date.now() + 2000
+const withSettingsLock = (run) => {
+  const deadline = performance.now() + 2000
+  let fd
   for (;;) {
+    if (performance.now() >= deadline) throw Object.assign(new Error('another save of the settings file is in progress, or died holding its lock; if none is running, delete ' + lockPath), { code: 'SETTINGS_LOCKED' })
     try {
-      const fd = fs.openSync(lockPath, 'wx', 0o600)
-      try { fs.writeFileSync(fd, process.pid + ' ' + Date.now() + '\\n') } finally { fs.closeSync(fd) }
-      return
+      fd = fs.openSync(lockPath, 'wx', 0o600)
+      break
     } catch (error) {
       if (!error || error.code !== 'EEXIST') throw error
-      try {
-        const held = fs.lstatSync(lockPath)
-        if (Date.now() - held.mtimeMs > 10000 && ownerGone()) {
-          const again = fs.lstatSync(lockPath)
-          if (again.mtimeMs === held.mtimeMs && again.ino === held.ino) fs.unlinkSync(lockPath)
-          continue
-        }
-      } catch (gone) {
-        if (gone && gone.code === 'ENOENT') continue
-        throw gone
-      }
-      if (Date.now() >= deadline) throw new Error('locked')
       sleep(25)
     }
+  }
+  let own
+  try {
+    own = fs.fstatSync(fd)
+    fs.writeFileSync(fd, process.pid + ' ' + Date.now() + '\\n')
+    return run()
+  } finally {
+    if (own) try {
+      const current = fs.lstatSync(lockPath)
+      if (current.dev === own.dev && current.ino === own.ino) fs.unlinkSync(lockPath)
+    } catch {}
+    fs.closeSync(fd)
   }
 }
 const finish = () => {
@@ -149,14 +143,11 @@ const finish = () => {
     return 1
   }
 }
-let locked = false
 try {
-  lock()
-  locked = true
-  process.exitCode = finish()
-} catch {
-  process.exitCode = 1
-} finally {
-  if (locked) try { fs.unlinkSync(lockPath) } catch {}
+  process.exitCode = withSettingsLock(finish)
+} catch (error) {
+  process.stderr.write(String(error && error.message || error) + '\\n')
+  if (error && error.code === 'SETTINGS_LOCKED') process.stdout.write(lockPath)
+  process.exitCode = error && error.code === 'SETTINGS_LOCKED' ? ${SETTINGS_LOCKED} : 1
 }
 `

@@ -1,4 +1,5 @@
-import { chmodSync, closeSync, constants, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { pid } from 'node:process'
 
 // The board's settings file (progress-settings.json) is one the person may have replaced with a link
@@ -32,54 +33,38 @@ export const readSettings = (file: string): SettingsRead => {
 // A save by our other writer (the plugin's `/progress style` script) between the last re-read and the rename would be
 // overwritten while both report success. Both writers therefore take `<settings file>.agent-board.lock`, created
 // exclusively (`wx`) and holding the pid and the time, around the re-read, the new file, the rename and the read-back.
-// A writer that finds it waits and tries again for up to LOCK_WAIT_MS, then gives up with an error that names the file
-// (never a silent overwrite). A lock is taken over only when it is older than LOCK_STALE_MS and the pid it holds is no
-// longer a running process; a lock whose owner may still be writing is never taken, however old it is. It is removed in `finally`.
+// A writer that finds it waits for up to LOCK_WAIT_MS and then names the lock. It never takes over an existing lock:
+// its owner may still be writing, and inspecting or deleting another writer's lock can block or race a fresh save.
+// The creator removes its own lock in `finally`.
 // hooks/settings-script.ts carries the same rules for the plugin's script.
 const LOCK_WAIT_MS = 2000
-const LOCK_STALE_MS = 10_000
-// Whether the lock names a process that has ended. A lock without a readable pid, or one whose process still runs
-// (or cannot be told), is not gone.
-const isOwnerGone = (lock: string): boolean => {
-  try {
-    const owner = Number(/^([1-9][0-9]*) /.exec(readFileSync(lock, 'utf8'))?.[1])
-    if (!Number.isInteger(owner) || owner > 2147483647) return false
-    try { process.kill(owner, 0) } catch (error) { return isCode(error, ['ESRCH']) }
-    return false
-  } catch { return false }
-}
 const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
 
 export const withSettingsLock = <T>(file: string, run: () => T): T => {
-  const lock = `${file}.agent-board.lock`
-  const deadline = Date.now() + LOCK_WAIT_MS
+  const lock = `${resolve(file)}.agent-board.lock`
+  const deadline = performance.now() + LOCK_WAIT_MS
+  let fd: number
   for (;;) {
+    if (performance.now() >= deadline) throw Object.assign(new Error('another save of the settings file is in progress, or died holding its lock; if none is running, delete ' + lock), { code: 'SETTINGS_LOCKED' })
     try {
-      const fd = openSync(lock, 'wx', 0o600)
-      try { writeFileSync(fd, `${pid} ${Date.now()}\n`) } finally { closeSync(fd) }
+      fd = openSync(lock, 'wx', 0o600)
       break
     } catch (error) {
       if (!isCode(error, ['EEXIST'])) throw error
-      try {
-        const held = lstatSync(lock)
-        if (Date.now() - held.mtimeMs > LOCK_STALE_MS && isOwnerGone(lock)) {
-          // Taken over only when it is still the very file that looked stale.
-          const again = lstatSync(lock)
-          if (again.mtimeMs === held.mtimeMs && again.ino === held.ino) unlinkSync(lock)
-          continue
-        }
-      } catch (gone) {
-        if (isCode(gone, ['ENOENT'])) continue
-        throw gone
-      }
-      if (Date.now() >= deadline) throw new Error('another save of the settings file is in progress, or died holding its lock; if none is running, delete ' + lock)
       pause(25)
     }
   }
+  let own: ReturnType<typeof fstatSync> | undefined
   try {
+    own = fstatSync(fd)
+    writeFileSync(fd, `${pid} ${Date.now()}\n`)
     return run()
   } finally {
-    try { unlinkSync(lock) } catch {}
+    if (own !== undefined) try {
+      const current = lstatSync(lock)
+      if (current.dev === own.dev && current.ino === own.ino) unlinkSync(lock)
+    } catch {}
+    closeSync(fd)
   }
 }
 
