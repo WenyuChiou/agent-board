@@ -27,7 +27,7 @@ import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
-import { readSettings, updateSettings } from './settings-file'
+import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
@@ -132,9 +132,10 @@ const plainFile = (file: string): string => {
     : full === resolve(questionsPath(path)) ? s.fileQuestions : s.fileNamed(basename(file))
 }
 
-// The terminal board and the page say the same about a file they could not read or write.
+// The terminal board and the page say the same about a file they could not read or write. A held settings lock is
+// named as the writer names it (the folder's real path), so the note names the lock that blocks.
 const storageNote = (error: BoardFileError, isLan = false): string =>
-  error.code === 'SETTINGS_LOCKED' ? s.settingsLocked(isLan ? basename(`${error.file}.agent-board.lock`) : resolve(`${error.file}.agent-board.lock`))
+  error.code === 'SETTINGS_LOCKED' ? s.settingsLocked(isLan ? basename(settingsLockName(error.file)) : settingsLockName(error.file))
     : error.isLocked ? s.boardLocked(plainFile(error.file))
     : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code))
     : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))

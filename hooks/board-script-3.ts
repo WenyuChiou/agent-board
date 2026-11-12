@@ -10141,7 +10141,7 @@ export const LINES = [
 "  const full = resolve14(file);",
 "  return full === resolve14(path) ? s.fileProgress : full === resolve14(questionsPath(path)) ? s.fileQuestions : s.fileNamed(basename6(file));",
 "};",
-"var storageNote = (error, isLan = false) => error.code === \"SETTINGS_LOCKED\" ? s.settingsLocked(isLan ? basename6(`${error.file}.agent-board.lock`) : resolve14(`${error.file}.agent-board.lock`)) : error.isLocked ? s.boardLocked(plainFile(error.file)) : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code)) : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code));",
+"var storageNote = (error, isLan = false) => error.code === \"SETTINGS_LOCKED\" ? s.settingsLocked(isLan ? basename6(settingsLockName(error.file)) : settingsLockName(error.file)) : error.isLocked ? s.boardLocked(plainFile(error.file)) : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code)) : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code));",
 "var read = (file) => {",
 "  try {",
 "    return readFileSync16(file, \"utf8\");",

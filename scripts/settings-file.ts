@@ -46,6 +46,8 @@ const LOCK_BUSY = platform === 'win32' ? ['EEXIST', 'EPERM', 'EACCES'] : ['EEXIS
 const nameOf = (lock: string): string => {
   try { return join(realpathSync.native(dirname(lock)), basename(lock)) } catch { return resolve(lock) }
 }
+// The name every message gives the lock of a settings file: the page, the terminal and both writers name one path.
+export const settingsLockName = (file: string): string => nameOf(`${file}.agent-board.lock`)
 const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
 // Windows creates the file a dangling link at the lock path points to, so there anything already at the path counts as
 // held. Only whether something is there is looked at, never what it is or who made it.

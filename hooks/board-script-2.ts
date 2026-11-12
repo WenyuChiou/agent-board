@@ -2880,6 +2880,7 @@ export const LINES = [
 "    return resolve7(lock);",
 "  }",
 "};",
+"var settingsLockName = (file) => nameOf(`${file}.agent-board.lock`);",
 "var pause3 = (ms) => {",
 "  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);",
 "};",

@@ -517,7 +517,9 @@ fs.renameSync = (from, to) => {
 // Every lock case runs in a child: a synchronous FIFO read must not hang the test process.
 const lockBase = '{"lang":"en"}\n'
 // A process that has ended: the old takeover read this pid and took the lock over (codex_166 finding 8).
-// The lock a writer names is under the folder's real path (Windows short names, macOS /var, Linux alike).
+// One lock, two spellings: a writer opens it beside the file as given, and every message names it under the folder's
+// real path (Windows short names, macOS /var). File checks and intercepts use the first, message checks the second.
+const openedLock = file => `${file}.agent-board.lock`
 const realLock = file => join(realpathSync.native(dirname(file)), `${basename(file)}.agent-board.lock`)
 const exitedPid = spawnSync(process.execPath, ['-e', '0']).pid
 const lockNext = '{"lang":"zh-TW"}\n'
@@ -751,7 +753,7 @@ const lockSnapshot = file => {
 }
 const oldLock = (dir, shape) => {
   const file = join(dir, 'progress-settings.json')
-  const lock = realLock(file)
+  const lock = openedLock(file)
   const target = join(dir, 'lock-target')
   writeFileSync(file, lockBase)
   if (shape === 'folder') mkdirSync(lock)
@@ -769,7 +771,7 @@ const oldLock = (dir, shape) => {
     lutimesSync(lock, old, old)
     if (shape !== 'dangling link') utimesSync(target, old, old)
   } else utimesSync(lock, old, old)
-  return { file, lock, target }
+  return { file, lock, named: realLock(file), target }
 }
 
 // Any read of an existing lock fails loudly: a writer never reads or judges a lock it did not create (codex_166 finding 8).
@@ -797,7 +799,7 @@ for (const writer of ['cli', 'plugin']) {
     test(`${writer} leaves a 60-second-old ${shape} lock untouched and reports its path`, { skip }, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'settings-lock-shape-'))
       try {
-        const { file, lock, target } = oldLock(dir, shape)
+        const { file, lock, named, target } = oldLock(dir, shape)
         const before = lockSnapshot(lock)
         const targetBefore = existsSync(target) ? lockSnapshot(target) : null
         const ran = await runLockChild(writer, file, { preload: noLockReads(dir) })
@@ -810,10 +812,10 @@ for (const writer of ['cli', 'plugin']) {
           if (writer === 'plugin') {
             assert.equal(ran.status, SETTINGS_LOCKED)
             // /progress style names this path: exactly the lock, with no line end (codex_166 finding 5).
-            assert.equal(ran.stdout, lock)
+            assert.equal(ran.stdout, named)
           }
         }
-        assert.ok(ran.stderr.includes(lock), ran.stderr)
+        assert.ok(ran.stderr.includes(named), ran.stderr)
         assert.deepEqual(readFileSync(file), Buffer.from(lockBase))
         assert.deepEqual(lockSnapshot(lock), before)
         if (targetBefore !== null) assert.deepEqual(lockSnapshot(target), targetBefore)
