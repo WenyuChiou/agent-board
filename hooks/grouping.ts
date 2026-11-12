@@ -136,7 +136,8 @@ export type NeedsYou = {
   older: GroupedQuestion[]
 }
 
-export type Quiet = { kind: 'asking'; n: number } | { kind: 'stopped'; agent: string; at: number } | { kind: 'none' }
+// `stopped` on an asking line: the agent that stopped last inside the window, for when every question is answered (#1296).
+export type Quiet = { kind: 'asking'; n: number; stopped?: { agent: string; at: number } } | { kind: 'stopped'; agent: string; at: number } | { kind: 'none' }
 
 export type Grouping = {
   // Most recent activity first, worked out once from the input.
@@ -210,10 +211,10 @@ const isHers = (item: GroupingDone, row: GroupingRow): boolean =>
 // finished task counts only inside the Working now window.
 const quietOf = (cards: readonly Card[], tasks: readonly GroupedTask[], now: number): Quiet => {
   const asking = cards.filter(card => !card.isOwn).length
-  if (asking > 0) return { kind: 'asking', n: asking }
   const last = tasks
     .filter(task => !task.isOwn && task.shelf !== 'open' && !task.isIdle && task.at > 0 && now - task.at <= WORKING_MS)
     .reduce<GroupedTask | null>((best, task) => best === null || task.at > best.at ? task : best, null)
+  if (asking > 0) return { kind: 'asking', n: asking, ...(last === null ? {} : { stopped: { agent: last.agent, at: last.at } }) }
 
   return last === null ? { kind: 'none' } : { kind: 'stopped', agent: last.agent, at: last.at }
 }

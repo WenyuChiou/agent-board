@@ -5,6 +5,7 @@ import type { Lang, Strings } from './i18n'
 import { localDay, parseJournal } from './journal'
 import { isTaskComplete, parseProgress } from './parse'
 import { serveModel } from './serve'
+import type { QueuedMessaging } from './board-status'
 import type { GroupOptions, ServeAsk, ServeModel, ServeRow, ServeTurn } from './serve'
 import type { View } from './view'
 
@@ -51,8 +52,9 @@ export type BoardDocument = {
   schemaVersion: typeof BOARD_JSON_SCHEMA
   generatedAt: string
   lang: Lang
-  counts: { needs: number; questions: number; stuck: number; working: number; waiting: number; stopped: number; doneRecently: number }
+  counts: { needs: number; questions: number; stuck: number; queued: number; working: number; waiting: number; stopped: number; doneRecently: number }
   needs: BoardNeed[]
+  queued: BoardNeed[]
   working: BoardRow[]
   waiting: BoardRow[]
   stopped: BoardRow[]
@@ -262,10 +264,11 @@ export const boardDocument = (
   now: number,
   group?: GroupOptions,
   finished?: readonly FinishedTask[],
+  messaging?: QueuedMessaging,
 ): BoardDocument => {
-  const model = serveModel(view, pending, s, new Set(), false, undefined, false, group)
+  const model = serveModel(view, pending, s, new Set(), false, messaging, false, group)
   // Callers without filesystem metadata still use the page's pure row grouping.
-  const grouped = model.view === undefined ? serveModel(view, pending, s, new Set(), false, undefined, false, {
+  const grouped = model.view === undefined ? serveModel(view, pending, s, new Set(), false, messaging, false, {
     now, repoOf: () => null, versions: { board: '', package: null }, unreadable: view.unreadable ?? [],
   }) : model
   const page = grouped.view!
@@ -307,7 +310,10 @@ export const boardDocument = (
   const needsRefs: Ref[] = group === undefined ? grouped.asks.map(ask => page.needs.cards.find(ref => ref.key === ask.key) ?? {
     key: ask.key, kind: 'question', agent: ask.agent, project: ask.project, repo: ask.project, at: ask.at ?? 0,
   }) : page.needs.cards
-  const needs = needsRefs.map((ref): BoardNeed => {
+  // An answer queued for the session's next turn is handled for the person, as on the page: it is listed under
+  // `queued`, not under `needs`, and `counts.needs` leaves it out (#1296).
+  const handled = new Set(page.needs.handled)
+  const asNeed = (ref: Ref): BoardNeed => {
     const one = source(ref)
     const isStuck = ref.kind === 'stuck'
     const note = isStuck ? one.stuck?.reason : one.note || one.context
@@ -323,7 +329,9 @@ export const boardDocument = (
       askedAt: iso(one.at ?? ref.at),
       age: age(ref),
     }
-  })
+  }
+  const needs = needsRefs.filter(ref => !handled.has(ref.key)).map(asNeed)
+  const queued = needsRefs.filter(ref => handled.has(ref.key)).map(asNeed)
   const byTime = (left: Ref, right: Ref): number => right.at - left.at
   const workingKeys = new Set(page.working.map(ref => ref.key))
   const working = page.working.map(row)
@@ -344,12 +352,14 @@ export const boardDocument = (
       needs: needs.length,
       questions: needs.filter(one => one.kind === 'question').length,
       stuck: needs.filter(one => one.kind === 'stuck').length,
+      queued: queued.length,
       working: working.length,
       waiting: waiting.length,
       stopped: stopped.length,
       doneRecently: doneRecently.length,
     },
     needs,
+    queued,
     working,
     waiting,
     stopped,
