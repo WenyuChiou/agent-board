@@ -1,5 +1,6 @@
 import { boardPromptHelper, boardRequestWords } from './board-commands'
 import { STRINGS } from './strings'
+import { opencodeReceiverSource } from './receivers/opencode'
 import { HOOK_VERSION, HOOK_WORKER_GRACE, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookTimeout, hostHookTimeout } from './hook-safety'
 
 const BOARD_PROMPT_HELPER = boardPromptHelper(boardRequestWords(Object.values(STRINGS)))
@@ -160,7 +161,7 @@ export const cursorEvent = (input: Record<string, unknown>): Record<string, unkn
 
 // OpenCode supplies no stable turn id on status events. At idle, its last reply goes only
 // to the board script's stdin, which keeps just its closing question.
-export const opencodePlugin = (node: string, script: string, progress: string, description: string, home: string, stepFormat = STRINGS.en.localAgentStepFormat): string => `import { spawnSync } from 'node:child_process'
+export const opencodePlugin = (node: string, script: string, progress: string, description: string, home: string, stepFormat = STRINGS.en.localAgentStepFormat, board?: string): string => `import { spawnSync } from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
 ${hookGuardSource(home, 'opencode')}
 ${BOARD_PROMPT_HELPER}
@@ -187,6 +188,8 @@ const run = (mode, payload, session, deadline) => {
   return result.stdout
 }
 ${REPORT_TOOL_REPLY}
+${board === undefined ? 'const receiver = null' : `let receiver = null
+${opencodeReceiverSource(node, board, progress, home)}`}
 // A one-shot \`opencode run\` exits without session.deleted (#217). As OpenCode exits, the
 // top-level sessions reported here and not seen to end are ended, all within one hook limit;
 // a board that is too slow gets them queued or logged, and OpenCode's exit never waits longer.
@@ -229,7 +232,7 @@ const withStatusEvent = (event, action) => {
   })
 }
 
-export const AgentBoardLocal = async ({ client, directory }) => ({
+export const AgentBoardLocal = async ({ client, directory }) => (${board === undefined ? '' : 'receiver ??= boardReceiver(client, directory), '}{
   'chat.message': async ({ sessionID }, output) => withHook(async (current, deadline) => {
       pendingIdle.delete(sessionID)
       // A known session notes the new reply at once, as events do before their lookup.
@@ -237,6 +240,7 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
       const info = current(await client.session.get({ path: { id: sessionID } }))
       if (info.error) throw Error('HOST_METADATA_FAILED')
       if (!info.data || info.data.id !== sessionID || info.data.parentID) return
+      receiver?.note(sessionID, 'working')
       const where = folderOf(info.data, directory)
       // The reply may have ended while the lookup ran: a known session keeps what was noted since.
       const known = open.get(sessionID)
@@ -276,6 +280,7 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
     } else if (known) known.where = where
     else open.set(session, { isReplying: state === 'working', where })
     let reply
+    if (state !== 'waiting') receiver?.note(session, state)
     if (isIdle) {
       // Leave time for the status even if the messages request never settles.
       const wait = deadline - Date.now() - 1000
@@ -297,7 +302,11 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
         } catch {} finally { clearTimeout(timer) }
       }
     }
-    if (isLatest()) run('--agent-status', { session_id: session, state, ...where, ...(reply === undefined ? {} : { last_assistant_message: reply }) }, undefined, deadline)
+    if (isLatest()) {
+      // The board's status goes first; a message waiting for this idle session is handed over after it.
+      try { run('--agent-status', { session_id: session, state, ...where, ...(reply === undefined ? {} : { last_assistant_message: reply }) }, undefined, deadline) }
+      finally { if (state === 'waiting') receiver?.note(session, state) }
+    }
   }),
   tool: {
     agent_board_progress: tool({
@@ -312,6 +321,7 @@ export const AgentBoardLocal = async ({ client, directory }) => ({
         }
       },
     }),
+    ...(receiver?.tools ?? {}),
   },
 })
 `

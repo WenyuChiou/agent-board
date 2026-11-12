@@ -554,7 +554,10 @@ export const hookMailbox = (directory: string, budget: number) => {
         return null
       }
     },
-    accept: (agent: string, session: string, id: string, nonce: string, now: number) => call('mailbox-accept', { agent, session, id, nonce }, now),
+    accept: (agent: string, session: string, id: string, nonce: string, now: number, awaitsAck = false) => call('mailbox-accept', { agent, session, id, nonce, ...(awaitsAck ? { awaitsAck: true } : {}) }, now),
+    // An in-process plugin's explicit acknowledgement and its send; a refusal keeps its code for the caller.
+    ack: async (agent: string, session: string, id: string, nonce: string, reply: string, now: number): Promise<void> => { await access.call('mailbox-ack', { agent, session, id, nonce, reply }, now) },
+    send: async (body: { agent: string; session: string; text: string; id: string; from: string; folderDigest: string }, now: number): Promise<void> => { await access.call('peer-send', body, now) },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
   }
 }

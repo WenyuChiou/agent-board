@@ -356,9 +356,9 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| OpenCode | CLI TUI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · no live note | stepEnd · no live note | none · no live note |
+| OpenCode | Desktop App | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · no live note | stepEnd · no live note | none · no live note |
+| OpenCode | Web UI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · no live note | stepEnd · no live note | none · no live note |
 
 <!-- messaging-matrix:end -->
 

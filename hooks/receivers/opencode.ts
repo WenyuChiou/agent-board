@@ -1,0 +1,228 @@
+import { SURFACE_IDS } from '../messaging.ts'
+
+// OpenCode receives a board message in its own process (#724). The agent-board-local plugin keeps each
+// top-level session's board mailbox open, so that session's card has a Send box. While the session is
+// busy the plugin holds the message; when the session goes idle (session.idle) it takes the message
+// through the board script and wakes the session with client.session.promptAsync, which returns at once
+// (OpenCode 1.19.3, docs/validation/2026-11-12-opencode-f9-wake.md). The message is then marked as
+// accepted by the transport only; it becomes acknowledged when the model calls agent_board_ack. A
+// subagent's session (it has a parent) is never registered, so it never receives one. Nothing here reads
+// the conversation.
+export const messagingReceiver = {
+  host: 'OpenCode',
+  agent: 'opencode',
+  kind: 'mailbox',
+  // The plugin cannot tell the terminal, the desktop app and the web page apart, so all three share the
+  // generic CLI surface id. No plugin run on any of them is recorded yet.
+  surfaces: [{ name: 'CLI TUI', id: SURFACE_IDS.cli, evidence: null }, { name: 'Desktop App', id: SURFACE_IDS.cli, evidence: null }, { name: 'Web UI', id: SURFACE_IDS.cli, evidence: null }],
+  tier: 1,
+  primitive: '[P1]',
+  isImplemented: true,
+  // Idle: promptAsync woke an idle headless session (F9), but no run of this plugin is recorded, so no
+  // record is named and the card keeps Copy. Working: the plugin holds the message until session.idle
+  // (tests only). Ended: no mailbox.
+  routes: {
+    idle: { line: 'now', record: null, surfaces: [SURFACE_IDS.cli] },
+    working: { line: 'stepEnd', record: null, surfaces: [SURFACE_IDS.cli] },
+    ended: { line: 'none', record: null, surfaces: [SURFACE_IDS.cli] },
+  },
+}
+
+// The receiver's part of the generated plugin: module-level code that the plugin's event and chat.message
+// handlers feed through note(session, 'working' | 'waiting' | 'ended'), and whose tools the plugin's tool
+// map spreads in. It uses the plugin's own hookError and tool. Only top-level sessions are ever noted.
+export const opencodeReceiverSource = (node: string, board: string, progress: string, home: string): string => `import { spawn as spawnBoard } from 'node:child_process'
+import { existsSync as boardFolderExists, readFileSync as readBoardStore, watch as watchBoard } from 'node:fs'
+import { join as joinBoard } from 'node:path'
+// One call to the board script's --mailbox; its one JSON line, or null when it failed or took too long.
+const boardCall = (action, session, directory, extra = []) => new Promise(resolve => {
+  let child, timer, output = ''
+  const finish = value => { clearTimeout(timer); resolve(value) }
+  try {
+    child = spawnBoard(${JSON.stringify(node)}, [${JSON.stringify(board)}, '--mailbox', action, '--agent', 'opencode', '--home', ${JSON.stringify(home)}, '--progress-file', ${JSON.stringify(progress)}, '--session', session, '--surface', 'CLI', ...(typeof directory === 'string' && directory !== '' ? ['--cwd', directory] : []), ...extra], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+  } catch { return resolve(null) }
+  timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} resolve(null) }, 15000)
+  child.on('error', () => finish(null))
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', chunk => { if (output.length < 262144) output += chunk })
+  child.on('close', code => {
+    try { finish(code === 0 ? JSON.parse(output.trim().split(/\\r?\\n/).pop()) : null) } catch { finish(null) }
+  })
+})
+const toB64 = text => Buffer.from(String(text), 'utf8').toString('base64')
+const boardReceiver = (client, directory) => {
+  // A session is known only after the plugin saw it report as a top-level session; idle or busy as of its last event.
+  const roots = new Map(), taking = new Set(), failing = new Set(), again = new Set(), stashed = new Map(), woken = new Map(), given = new Set()
+  let watcher = null, folder = null, pending = null, timer = null, ticks = 0
+  const isDeliverable = message => {
+    if (folder === null) return true
+    let store
+    try { store = JSON.parse(readBoardStore(joinBoard(folder, 'messages.json'), 'utf8')) } catch { return false }
+    const live = Array.isArray(store?.messages) && store.messages.find(one => one?.id === message.id)
+    return Boolean(live && live.status === 'uncertain' && live.nonce === message.nonce && (!live.error || live.error === ''))
+  }
+  const accept = (session, message) => boardCall('accept', session, directory, ['--id', message.id, '--nonce', message.nonce, '--awaits-ack'])
+  const deliver = async session => {
+    if (roots.get(session) !== 'idle') return
+    // A message the board writes while a take is under way is taken right after it, not at the next tick.
+    if (taking.has(session)) { again.add(session); return }
+    taking.add(session)
+    try {
+      let message = stashed.get(session)
+      if (message !== undefined) {
+        stashed.delete(session)
+        if (!isDeliverable(message)) return
+      } else {
+        const taken = await boardCall('take', session, directory)
+        // A board script that is missing, fails or does not answer keeps the card from offering Send. It is
+        // logged once, until a call works again, so a timer that keeps asking does not fill the log.
+        if (taken === null || typeof taken !== 'object') {
+          if (!failing.has(session)) { failing.add(session); hookError('MAILBOX_FAILED') }
+          return
+        }
+        failing.delete(session)
+        if (typeof taken.watch === 'string') follow(taken.watch)
+        message = taken.message
+      }
+      if (message == null) return
+      if (typeof message.text !== 'string' || typeof message.id !== 'string' || typeof message.nonce !== 'string') throw new Error('MAILBOX_FAILED')
+      // A session that closed meanwhile does not get it: the claim runs out and the board hands it out again.
+      if (!roots.has(session)) return
+      // It became busy while the message was being taken: hold it for the next session.idle.
+      if (roots.get(session) !== 'idle') { stashed.set(session, message); return }
+      // Given once: a message this process already handed over only has its acceptance retried.
+      if (given.has(message.id)) {
+        if ((await accept(session, message))?.ok !== true) throw new Error('MAILBOX_FAILED')
+        return
+      }
+      // The host's own view wins over the last event seen: a stale idle event must not wake a busy session.
+      if (typeof client?.session?.status === 'function') {
+        let live = null
+        try { live = await client.session.status({}) } catch {}
+        const entry = live?.data?.[session]
+        if (entry && entry.type !== 'idle') { roots.set(session, 'busy'); stashed.set(session, message); return }
+      }
+      roots.set(session, 'busy')
+      woken.set(session, Date.now())
+      given.add(message.id)
+      if (given.size > 200) given.delete(given.values().next().value)
+      try {
+        const woke = await client.session.promptAsync({ path: { id: session }, body: { parts: [{ type: 'text', text: message.text }] } })
+        if (woke?.error) throw new Error('MAILBOX_FAILED')
+      } catch (error) {
+        // Not handed over: the claim runs out and the board hands the message out again.
+        given.delete(message.id)
+        woken.delete(session)
+        if (roots.has(session)) roots.set(session, 'idle')
+        throw error
+      }
+      // Given first, then marked accepted: if the mark fails, the claim runs out and the session may get the
+      // same message again, which beats losing it. Accepted is only the transport; the model's ack upgrades it.
+      if ((await accept(session, message))?.ok !== true) throw new Error('MAILBOX_FAILED')
+    } catch { hookError('MAILBOX_FAILED') }
+    finally {
+      taking.delete(session)
+      if (again.delete(session)) deliver(session)
+    }
+  }
+  // The board rewrites messages.json whenever it queues a message: an idle session with one waiting takes it.
+  const check = () => {
+    let store
+    try { store = JSON.parse(readBoardStore(joinBoard(folder, 'messages.json'), 'utf8')) } catch { return }
+    const waiting = new Set((Array.isArray(store?.messages) ? store.messages : []).filter(one => one?.status === 'queued' && typeof one.to === 'string').map(one => one.to))
+    for (const session of roots.keys()) if (waiting.has('opencode:' + session) || stashed.has(session)) deliver(session)
+  }
+  const follow = directoryToWatch => {
+    if (watcher !== null && folder === directoryToWatch) return
+    try { watcher?.close() } catch {}
+    watcher = null
+    folder = directoryToWatch
+    try {
+      const current = watchBoard(directoryToWatch, { persistent: false }, (_event, name) => {
+        // On Windows the watcher of a removed folder reports it without end, about 80,000 times a second, and
+        // keeps OpenCode busy: stop watching, and the once-a-minute tick asks the board instead.
+        if (name !== 'messages.json' && !boardFolderExists(directoryToWatch)) {
+          try { current.close() } catch {}
+          if (watcher === current) watcher = null
+          return
+        }
+        if (name != null && name !== 'messages.json') return
+        clearTimeout(pending)
+        pending = setTimeout(check, 250)
+        pending.unref?.()
+      })
+      watcher = current
+      watcher.on('error', () => { try { current.close() } catch {} if (watcher === current) watcher = null })
+    } catch { watcher = null }
+  }
+  // With no folder to watch yet (no board has run), each idle session asks once a minute; with one, every
+  // ten minutes, which keeps its mailbox open and takes a message whose earlier claim ran out.
+  const tick = () => {
+    ticks += 1
+    if (watcher === null || ticks % 10 === 0) for (const session of roots.keys()) deliver(session)
+  }
+  const stop = () => {
+    clearInterval(timer)
+    timer = null
+    try { watcher?.close() } catch {}
+    watcher = null
+  }
+  const run = () => { if (timer === null) { timer = setInterval(tick, 60000); timer.unref?.() } }
+  return {
+    // The plugin reports a top-level session's state: 'working' (a turn runs), 'waiting' (session.idle) or 'ended'.
+    note: (session, state) => {
+      if (typeof session !== 'string' || session === '') return
+      if (state === 'ended') {
+        if (!roots.delete(session)) return
+        failing.delete(session)
+        again.delete(session)
+        stashed.delete(session)
+        woken.delete(session)
+        boardCall('end', session, directory)
+        if (roots.size === 0) stop()
+        return
+      }
+      if (state === 'working') {
+        woken.delete(session)
+        roots.set(session, 'busy')
+        run()
+        return
+      }
+      if (state !== 'waiting') return
+      // An idle event that trails the turn this plugin just started does not mean the turn is over.
+      if (woken.has(session) && Date.now() - woken.get(session) < 5000) return
+      woken.delete(session)
+      roots.set(session, 'idle')
+      run()
+      deliver(session)
+    },
+    // The two tools are bound to the session id the host gives each call, so a call cannot name another session.
+    tools: {
+      agent_board_send: tool({
+        description: 'Send a message to another agent session that is connected to the Agent Board. It arrives with your session as its sender.',
+        args: { agent: tool.schema.string(), session: tool.schema.string(), text: tool.schema.string() },
+        execute: async (args, context) => {
+          const own = context?.sessionID
+          if (typeof own !== 'string' || own === '' || !roots.has(own)) throw new Error('AGENT_BOARD_SEND_FAILED: NO_SESSION')
+          const answer = await boardCall('send', own, directory, ['--to-agent', String(args.agent), '--to-session', String(args.session), '--text-b64', toB64(args.text)])
+          if (answer?.ok !== true) throw new Error('AGENT_BOARD_SEND_FAILED' + (typeof answer?.code === 'string' ? ': ' + answer.code : ''))
+          return 'Sent.'
+        },
+      }),
+      agent_board_ack: tool({
+        description: 'Acknowledge a board message: pass the id and the 6-character code from its envelope, and optionally a one-line summary of your reply.',
+        args: { id: tool.schema.string(), nonce: tool.schema.string(), summary: tool.schema.string() },
+        execute: async (args, context) => {
+          const own = context?.sessionID
+          if (typeof own !== 'string' || own === '' || !roots.has(own)) throw new Error('AGENT_BOARD_ACK_FAILED: NO_SESSION')
+          if (typeof args.id !== 'string' || args.id === '' || typeof args.nonce !== 'string' || !/^[0-9a-f]{6}$/.test(args.nonce)) throw new Error('AGENT_BOARD_ACK_FAILED: INVALID_ARGUMENTS')
+          const summary = typeof args.summary === 'string' ? args.summary.replace(/[\\r\\n\\0]+/g, ' ').trim().slice(0, 150) : ''
+          const answer = await boardCall('ack', own, directory, ['--id', args.id, '--nonce', args.nonce, ...(summary === '' ? [] : ['--summary-b64', toB64(summary)])])
+          if (answer?.ok !== true) throw new Error('AGENT_BOARD_ACK_FAILED' + (typeof answer?.code === 'string' ? ': ' + answer.code : ''))
+          return 'Acknowledged.'
+        },
+      }),
+    },
+  }
+}
+`

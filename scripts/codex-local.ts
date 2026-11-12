@@ -29,7 +29,7 @@ import { windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
-import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
+import { address, deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { deliverTurnEvent } from './hook-delivery'
 import { hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
@@ -503,13 +503,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // messages.json changes when the board queues a message.
   if (mode === '--mailbox') {
     const action = flag('--mailbox'), session = flag('--session')
-    if (agent !== 'deepseek' || session === undefined || !['take', 'accept', 'end'].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
+    // OpenCode's plugin (#724) also acknowledges and sends for its own session: ack upgrades an accepted message, send goes through the board's peer route.
+    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'send'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
     const directory = defaultMessagesDirectory(progress, home, process.env, process.platform)
     const mailbox = hookMailbox(directory, 5000)
     const answer = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value)}\n`) }
     if (action === 'take') {
       const surface = flag('--surface')
-      const message = await mailbox.turn(agent, session, surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui ? surface : SURFACE_IDS.unknown, Date.now())
+      const message = await mailbox.turn(agent, session, surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui || agent === 'opencode' && surface === SURFACE_IDS.cli ? surface : SURFACE_IDS.unknown, Date.now())
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
@@ -517,8 +518,27 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     } else if (action === 'accept') {
       const id = flag('--id'), nonce = flag('--nonce')
       if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
-      await mailbox.accept(agent, session, id, nonce, Date.now())
+      await mailbox.accept(agent, session, id, nonce, Date.now(), args.includes('--awaits-ack'))
       answer({ ok: true })
+    } else if (action === 'ack' || action === 'send') {
+      // The plugin passes free text as base64, so a word that starts with two hyphens is not read as a flag.
+      const text = (name: string): string | undefined => { const value = flag(name); return value === undefined ? undefined : Buffer.from(value, 'base64').toString('utf8') }
+      try {
+        if (action === 'ack') {
+          const id = flag('--id'), nonce = flag('--nonce'), summary = text('--summary-b64')
+          if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
+          await mailbox.ack(agent, session, id, nonce, `ACK ${nonce}${summary ? ` ${summary}` : ''}`, Date.now())
+        } else {
+          const to = flag('--to-agent'), toSession = flag('--to-session'), body = text('--text-b64'), identity = folderIdentity(flag('--cwd'))
+          if (to === undefined || toSession === undefined || body === undefined) throw new Error('INVALID_MAILBOX_CALL')
+          const folderDigest = identity?.folderCanonicalDigest ?? identity?.folderDigest
+          if (folderDigest === undefined) throw new Error('WORKSPACE_UNKNOWN')
+          await mailbox.send({ agent: to, session: toSession, text: body, id: randomUUID().replaceAll('-', ''), from: address(agent, session), folderDigest }, Date.now())
+        }
+        answer({ ok: true })
+      } catch (error) {
+        answer({ ok: false, code: error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING' })
+      }
     } else {
       await mailbox.end(agent, session, Date.now())
       answer({ ok: true })
@@ -1298,7 +1318,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script)
   if (agent === 'openclaw') {
     files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
     files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
