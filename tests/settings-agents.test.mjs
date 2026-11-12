@@ -221,7 +221,7 @@ test('Settings keeps every agent when the Codex doctor itself throws', { timeout
 
 test('Settings keeps every agent row when an install record or the connect record cannot be read', { timeout: 35_000 }, async () => {
   const f = fixture()
-  f.setup('--agent', 'gemini', '--apply')
+  f.setup('--agent', 'muse', '--apply')
   writeFileSync(join(f.data, 'install-cursor.json'), '{')
   writeFileSync(join(f.data, 'install-opencode.json'), JSON.stringify({ files: [] }))
   // A folder where the record should be exists but cannot be read as a file.
@@ -239,7 +239,7 @@ test('Settings keeps every agent row when an install record or the connect recor
       assert.equal(row.note, EN.setupErrorRecord(`install-${agent}.json`), agent)
       assert.deepEqual({ state: row.state, button: row.button }, { state: EN.settingsAgentStart, button: 'remove' }, agent)
     }
-    assert.equal(rows.find(row => row.agent === 'gemini').note, undefined)
+    assert.equal(rows.find(row => row.agent === 'muse').note, undefined)
     // A press on a damaged row gets setup's own refusal for that record and changes nothing in the home.
     const before = files(f.home)
     for (const request of [() => board.call('GET', '/api/agents?agent=cursor&action=remove'), () => board.call('POST', '/api/agents/remove', { agent: 'cursor' })]) {
@@ -289,12 +289,12 @@ test('Settings sets up an agent in the home and data folder a normal --serve sta
 test('Settings directs connector-managed agent removal back to Claude Code', { timeout: 25_000 }, async () => {
   for (const hasOtherInstall of [false, true]) {
     const f = fixture()
-    if (hasOtherInstall) f.setup('--agent', 'gemini', '--apply')
+    if (hasOtherInstall) f.setup('--agent', 'muse', '--apply')
     writeFileSync(join(f.data, 'legacy-connect.json'), JSON.stringify({
       version: 1, revision: 1, disabled: false, owned: {}, notified: [], connectedProgress: f.progress,
       setup: { agents: [
         { agent: 'cursor', label: 'Cursor', hook: 'configured', board: 'ready' },
-        ...(hasOtherInstall ? [{ agent: 'gemini', label: 'Gemini', hook: 'configured', board: 'ready' }] : []),
+        ...(hasOtherInstall ? [{ agent: 'muse', label: 'Muse Code', hook: 'configured', board: 'ready' }] : []),
       ], problems: [], node: null },
     }))
     const board = await f.start()
@@ -304,7 +304,7 @@ test('Settings directs connector-managed agent removal back to Claude Code', { t
       const cursor = rows.json().rows.find(row => row.agent === 'cursor')
       assert.equal(cursor.state, EN.settingsAgentStart)
       assert.equal(cursor.note, EN.settingsAgentConnector('Cursor'))
-      if (hasOtherInstall) assert.equal(rows.json().rows.find(row => row.agent === 'gemini').note, undefined)
+      if (hasOtherInstall) assert.equal(rows.json().rows.find(row => row.agent === 'muse').note, undefined)
       const before = files(f.home)
       for (const request of [() => board.call('GET', '/api/agents?agent=cursor&action=remove'), () => board.call('POST', '/api/agents/remove', { agent: 'cursor' })]) {
         const result = await request()
@@ -325,7 +325,7 @@ test('Settings detects real synthetic installs once, trusts Codex and Hermes, re
   const output = "process.stdout.write(JSON.stringify({ id: message.id, result }) + '\\n')"
   assert.ok(script.includes(output))
   writeFileSync(codex, script.replace(output, `setTimeout(() => ${output}, Number(process.env.AGENT_BOARD_TEST_DELAY || 0))`), { mode: 0o755 })
-  for (const agent of ['codex', 'opencode', 'gemini']) f.local('--codex-setup', '--agent', agent, '--apply')
+  for (const agent of ['codex', 'opencode', 'muse']) f.local('--codex-setup', '--agent', agent, '--apply')
   mkdirSync(join(f.home, '.cursor'))
   claudePlugin(f, { installed: true, enabled: true })
   writeFileSync(f.progress, '# Progress\n\n## Synthetic project\n' + block('opencode'))
@@ -344,7 +344,7 @@ test('Settings detects real synthetic installs once, trusts Codex and Hermes, re
     assert.equal(row(first, 'antigravity').state, EN.settingsAgentNotInstalled)
     assert.equal(row(first, 'cursor').state, EN.settingsAgentNotSetUp)
     assert.equal(row(first, 'opencode').state, EN.settingsAgentOnBoard)
-    assert.equal(row(first, 'gemini').state, EN.settingsAgentStart)
+    assert.equal(row(first, 'muse').state, EN.settingsAgentStart)
     assert.equal(row(first, 'codex').state, EN.settingsAgentApproval)
     assert.equal(row(first, 'claude').state, EN.settingsAgentStart)
     const codexPreview = await board.call('GET', '/api/agents?agent=codex&action=setup')
@@ -410,7 +410,7 @@ test('Settings detects real synthetic installs once, trusts Codex and Hermes, re
 test('Settings setup and removal match terminal setup byte for byte and refuse the last running board without removing history', { timeout: 25_000 }, async () => {
   const f = fixture()
   mkdirSync(join(f.home, '.cursor'))
-  f.setup('--agent', 'gemini', '--apply')
+  f.setup('--agent', 'muse', '--apply')
   const history = join(f.data, 'progress-archive-2026-01.md')
   writeFileSync(history, '# Synthetic history\n')
   const baseline = join(f.root, 'baseline')
@@ -439,11 +439,11 @@ test('Settings setup and removal match terminal setup byte for byte and refuse t
     assert.equal(readFileSync(history, 'utf8'), '# Synthetic history\n')
     const rows = (await board.call('GET', '/api/agents')).json().rows
     assert.equal(rows.find(row => row.agent === 'cursor').state, EN.settingsAgentNotSetUp)
-    for (const request of [() => board.call('GET', '/api/agents?agent=gemini&action=remove'), () => board.call('POST', '/api/agents/remove', { agent: 'gemini' })]) {
+    for (const request of [() => board.call('GET', '/api/agents?agent=muse&action=remove'), () => board.call('POST', '/api/agents/remove', { agent: 'muse' })]) {
       const refused = await request()
       assert.equal(refused.status, 409, refused.text)
       assert.match(refused.json().note, /Close the board.*--codex-remove/)
-      assert.ok(refused.json().note.includes('gemini'))
+      assert.ok(refused.json().note.includes('muse'))
       assert.deepEqual(files(f.home), afterRemove, 'a last-agent refusal changes no file')
     }
     assert.ok(existsSync(join(f.data, 'agent-board.mjs')))

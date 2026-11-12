@@ -196,9 +196,10 @@ export const ZH_TW = {
     "directRemoved": "直接執行的 node 指令已無法使用；請改用 {command}。"
   },
   setupNoAgent: {
-    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
+    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "retired": "agent-board：Gemini CLI 已退役，setup 不再設定它。Google 現在的 CLI 是 Antigravity CLI：請用 --agent antigravity 執行 setup。"
   },
   setupErrorMissingValue: 'agent-board：setup 有個選項後面沒有接值。--agent、--home、--data-dir 這類選項都要接一個值；請在選項後面補上，再執行一次 setup。',
   setupErrorConfig: (host: string): string => `agent-board：setup 讀不懂或無法安全更新 ${host} 的設定，所以保持原樣。請修正或移開該 agent 的設定檔，再執行一次 setup。`,

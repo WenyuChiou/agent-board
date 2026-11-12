@@ -51,10 +51,10 @@ Storage and connection failures leave progress hooks running normally. Hooks nev
 the store and only find the default folder; a board using `--messages-dir` has no hook mailboxes.
 
 Supported turn starts: Codex `SessionStart` / `UserPromptSubmit`, Antigravity
-`SessionStart` / `PreInvocation`, Gemini CLI `SessionStart` / `BeforeAgent`, Muse Code
+`SessionStart` / `PreInvocation`, Muse Code
 `UserPromptSubmit`, and Cursor `sessionStart` (never `beforeSubmitPrompt`, which Cursor
 ignores, so a Cursor message waits until that chat opens again and its card says so). End events
-are `SessionEnd` for Codex, Gemini and Muse, and `sessionEnd` for Cursor.
+are `SessionEnd` for Codex and Muse, and `sessionEnd` for Cursor.
 
 The separate legacy `--allow-resume` option deliberately allows a local reply to
 start an ended Codex or Grok Build session. It is disabled by default, never enabled by
@@ -351,7 +351,6 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| Gemini CLI | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-gemini.ts](../hooks/receivers/hook-mailbox-gemini.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
 | Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
@@ -376,7 +375,7 @@ This table is written by hand and covers progress reporting too. Its runs have n
 | Codex | Independent setup and explicit reporter; isolated native app-server SessionStart, UserPromptSubmit and Stop observed | Authenticated owners forwarded two prompts each way with Antigravity and native ACKs; autonomous model tools, CLI TTY and desktop chat remain separate |
 | Antigravity CLI | Independent named hooks; all four native Windows events observed after the command-quoting fix | Same cross-host owner acceptance; native stream ACK, idle continuation, deduplication, conflict and offline rejection verified |
 | Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established |
-| Legacy Gemini CLI | Separate enterprise/API compatibility hooks and `/agent-board` integration | Generic client API only; no Gemini-native connector or bidirectional acceptance |
+| Gemini CLI (retired) | No longer offered by setup; Google's CLI is Antigravity CLI. An install from an earlier release still reports | The board no longer routes messages to it; its card offers Copy |
 | OpenCode | Independent setup, session-context progress tool and plugin events | Generic client API only; no native receiving adapter or real bidirectional acceptance yet |
 | OpenClaw | Independent metadata lifecycle plugin and native skill; separate optional Claude reporter | Its native session tools are not yet integrated into this hub; no real bidirectional acceptance |
 | Grok Build | Existing reporter hooks; optional legacy resume requires `--allow-resume` | No live receiving adapter acceptance |
@@ -438,7 +437,7 @@ await receiver.close()
 ```
 
 `host` above is the integrating application's API, not a built-in connector. The
-API is agent-neutral; Claude Code, legacy Gemini, Cursor and other UI adapters still need their
+API is agent-neutral; Claude Code, Cursor and other UI adapters still need their
 own supported transport and live acceptance. No shell typing, transcript scraping,
 credential discovery, automatic resume, or approval RPC is implemented by this client.
 The original host remains responsible for its normal permission checks. Board approvals

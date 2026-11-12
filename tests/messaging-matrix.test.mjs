@@ -273,3 +273,10 @@ test('shape 23 matrix: each displayed surface names its registered id and only i
   }
   assert.ok(checked > 0)
 })
+
+test('the messaging matrix has no Gemini CLI row (#1327)', async () => {
+  const records = await readReceiverRecords(root)
+  assert.ok(!records.some(one => one.agent === 'gemini' || one.host === 'Gemini CLI'))
+  assert.ok(!receiverRows(records).some(row => row.host === 'Gemini CLI'))
+  assert.ok(!/^\| Gemini CLI \|/m.test(read(join(root, 'docs/MESSAGING.md'))))
+})

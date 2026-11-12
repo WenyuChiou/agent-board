@@ -193,7 +193,7 @@ Question tags: [Confirm] yes or no · [Choose] pick an option · [Input] type a 
 
 Independent installations: update a clean checkout to the intended release, preview `node scripts/setup-agent.mjs`, then apply the approved plan. Edited files are conflicts, not overwritten. Existing host sessions may need reload. No unattended updater or startup service is installed.
 
-Preview and apply removal across all touched agents in a single run with `agent-board remove`, or specify `--agent` to remove only one (`codex`, `cursor`, `opencode`, `gemini`, `grok`, `muse`, `hermes`, `openclaw`, `antigravity`, `deepseek`):
+Preview and apply removal across all touched agents in a single run with `agent-board remove`, or specify `--agent` to remove only one (`codex`, `cursor`, `opencode`, `grok`, `muse`, `hermes`, `openclaw`, `antigravity`, `deepseek`):
 
 ```sh
 npx @wenyuchiou/agent-board remove

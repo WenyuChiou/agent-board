@@ -193,7 +193,7 @@ claude plugin install agent-board@agent-board
 
 独立安装：将干净 checkout 更新到指定版本，预览 `node scripts/setup-agent.mjs`，再应用已批准范围。修改过的文件列为冲突，不覆盖。host 可能要重新加载；不安装自动更新器或开机服务。
 
-通过 `@wenyuchiou/agent-board remove` 一次预览／应用所有设置过之 agent 的移除，或指定 `--agent` 只移除特定 agent（`codex`、`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
+通过 `@wenyuchiou/agent-board remove` 一次预览／应用所有设置过之 agent 的移除，或指定 `--agent` 只移除特定 agent（`codex`、`cursor`、`opencode`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
 
 ```sh
 npx @wenyuchiou/agent-board remove

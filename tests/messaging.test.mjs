@@ -4440,6 +4440,10 @@ test('the line and Send of a route come from its record: no record gives none an
   assert.deepEqual(routeOf(table, 'beta', 'mailbox', 'idle'), { line: 'none', canSend: false })
 })
 
+test('the routes the board ships have none for Gemini CLI, which is retired (#1327)', () => {
+  assert.ok(!RECEIVER_ROUTES.some(one => one.agent === 'gemini'))
+})
+
 test('each receiver record names a validation note that exists, and the table the board reads matches every record', async () => {
   const { readReceiverRecords } = await import('../scripts/messaging-matrix.mjs')
   const root = join(import.meta.dirname, '..')
