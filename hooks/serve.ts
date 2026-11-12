@@ -64,7 +64,8 @@ const stateOf = (auto: 'working' | 'waiting' | 'ended' | null | undefined, isClo
 const rowState = (row: { auto: 'working' | 'waiting' | 'ended' | null; target: AgentTarget | null; isRecordedEnded?: true }): RowState => stateOf(row.auto, row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true)
 // Conflicting rows cannot establish a session's state, even if one happens to appear first.
 export const sessionState = (view: View, agent: string, session: string): RowState | undefined => {
-  const rows = [...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped]
+  // Work due soon is listed only under view.due, so it is read too: a due date must not cost a session its route.
+  const rows = [...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped, ...view.due]
   const name = agent || 'claude'
   const states = [
     ...rows.filter(one => (one.agent || 'claude') === name && one.nativeSession === session).map(rowState),

@@ -4689,6 +4689,28 @@ test('shape 15: conflicting board states for one session cannot send', async () 
   shapeViewTransform = view => ({ ...view, groups: [...view.groups, ...other.groups], idle: [...view.idle, ...other.idle], stopped: [...view.stopped, ...other.stopped] })
   await shapeCopy(w)
 })
+test('shape 15b: a task due soon keeps its session\'s route, and a due row that disagrees with another row still cannot send', async () => {
+  const w = await shapeCase({ state: 'working' })
+  const soon = new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10)
+  shapeFile = stateFile('claude', 'working', w.session).replace('### Route table\n', `### Route table\n> due ${soon}\n`)
+  const due = buildView(parseProgress(shapeFile), [], null, Date.now(), 0, {}, EN)
+  assert.deepEqual([due.due.length, due.groups.flatMap(group => group.rows).length, due.idle.length, due.stopped.length], [1, 0, 0, 0])
+  await shapeSend(w, 'stepEnd')
+  // The pressed message is removed, so the presses below are new sends rather than retries of it.
+  assert.equal((await w.remove(`shape-card-${shapeSerial}`)).status, 200)
+  // An idle row of the same session alone would send now; beside the working due row the state is not known.
+  const otherFile = stateFile('claude', 'idle', w.session).replaceAll('abcdef01', 'abcdef02').replace('Route table', 'Other row')
+  const other = buildView(parseProgress(otherFile), [], null, Date.now(), 0, {}, EN)
+  assert.equal(other.waiting.length, 1)
+  shapeViewTransform = view => ({ ...view, waiting: [...view.waiting, ...other.waiting] })
+  assert.equal((await w.card()).delivery, undefined)
+  const refused = await w.direct('shape-due-conflict')
+  assert.deepEqual([refused.status, refused.body.error], [409, 'NO_RECORDED_ROUTE'])
+  const pressed = await w.press('shape-due-press')
+  assert.equal(pressed.body.receipt, undefined)
+  const messages = (await w.call('/api/board')).body.messaging.messages
+  assert.deepEqual(messages.filter(one => one.id === 'shape-due-conflict' || one.id === 'shape-due-press'), [])
+})
 test('shape 16: DeepSeek TUI and a custom Codex proxy surface keep Copy', async () => {
   await shapeCopy(await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'TUI' }))
   await shapeCopy(await shapeCase({ agent: 'codex', kind: 'turn', surface: 'custom-proxy', state: 'working' }))
