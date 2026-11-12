@@ -451,6 +451,17 @@ test('opencodePlugin tries a failed take again within seconds, with no board wri
   await f.until(() => f.calls.promptAsync.length === 1 && f.message('retake-message-1').status === 'accepted' && f.settled(), 'the take was tried again and the session woken')
 }))
 
+test('opencodePlugin gives up a host status lookup that never answers, so the session is not left locked and its message is woken later (#1366 review)', () => fixture(async f => {
+  f.queue('ses_hung', 'hung-message-1', 'Synthetic text while the host does not answer')
+  // The first lookup never settles; the ones after it answer.
+  f.calls.gate = new Promise(() => {})
+  await f.idle('ses_hung')
+  await f.until(() => f.calls.status.length >= 1, 'the host status was asked')
+  f.calls.gate = null
+  assert.equal(f.calls.promptAsync.length, 0)
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('hung-message-1').status === 'accepted' && f.settled(), 'the hung lookup was given up and the session woken on the retry clock')
+}))
+
 test('opencodePlugin looks again within seconds after a failed host status lookup, with no further event or board write', () => fixture(async f => {
   f.queue('ses_status_retry', 'status-retry-message-1', 'Synthetic text after a failed status lookup')
   f.calls.statusFails = true
