@@ -1397,9 +1397,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const missingHeld: string[] = []
   const keptFiles = new Set<string>()
   const staleBeside = new Set<string>()
-  // The release table omits the settings line. Use an install's full-file hash when one exists; otherwise
-  // only accept settings that a release or this setup could have written for this install.
-  const isSettingsLine = (line: string): boolean => {
+  // The release table omits the settings line. A file matching an install's recorded full-file hash is setup's own;
+  // otherwise only accept settings that a release or this setup could have written for this install.
+  const isSettingsLine = (line: string, paths: string[]): boolean => {
     const head = 'globalThis.AGENT_BOARD = '
     if (!line.startsWith(head)) return false
     let data: Json
@@ -1408,14 +1408,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (Object.keys(data).some(key => !known.has(key))) return false
     // 0.20.5 and earlier wrote no hookVersion.
     if (data.hookVersion !== undefined && typeof data.hookVersion !== 'number' || typeof data.path !== 'string' || typeof data.lang !== 'string') return false
-    if (!Object.hasOwn(STRINGS, data.lang) || ![progress, ...legacyProgress].includes(data.path)) return false
+    if (!Object.hasOwn(STRINGS, data.lang) || !paths.includes(data.path)) return false
     return data.codexRoot === undefined || data.codexRoot === root
   }
   const isReleasedBoard = (text: string): boolean => {
-    const recorded = [manifest.files[script], ...otherManifests.map(one => object(one.files ?? {})[script])]
-    if (recorded.some(value => typeof value === 'string')) return recorded.includes(hash(text))
+    const recorded = [manifest.files[script], ...otherManifests.map(one => object(one.files ?? {})[script])].filter(value => typeof value === 'string')
+    if (recorded.includes(hash(text))) return true
+    // A release installed over a recorded board still upgrades, but an install that recorded its board named this
+    // install's own path, so an older path on it is the person's edit and the board stays (review of #1328).
+    const paths = recorded.length > 0 ? [progress] : [progress, ...legacyProgress]
     const first = /^globalThis\.AGENT_BOARD[^\n]*\n/.exec(text)?.[0]
-    if (first !== undefined && !isSettingsLine(first.slice(0, -1).replace(/\r$/, ''))) return false
+    if (first !== undefined && !isSettingsLine(first.slice(0, -1).replace(/\r$/, ''), paths)) return false
     const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))
     return RELEASED.some(release => release.board.includes(bodyHash))
   }
