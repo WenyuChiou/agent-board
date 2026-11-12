@@ -1,6 +1,7 @@
 import { chmodSync, closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import type { BigIntStats } from 'node:fs'
 import { resolve } from 'node:path'
-import { pid } from 'node:process'
+import { pid, platform } from 'node:process'
 
 // The board's settings file (progress-settings.json) is one the person may have replaced with a link
 // or a folder. Every reader and writer here refuses those, and none of them can block (#1276).
@@ -38,30 +39,52 @@ export const readSettings = (file: string): SettingsRead => {
 // The creator removes its own lock in `finally`.
 // hooks/settings-script.ts carries the same rules for the plugin's script.
 const LOCK_WAIT_MS = 2000
+// Windows refuses to create a file at a path whose file is still being deleted (EPERM), and a folder there gives EPERM
+// or EACCES: each waits like a held lock, within the same 2 s.
+const LOCK_BUSY = platform === 'win32' ? ['EEXIST', 'EPERM', 'EACCES'] : ['EEXIST']
 const pause = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+// Windows creates the file a dangling link at the lock path points to, so there anything already at the path counts as
+// held. Only whether something is there is looked at, never what it is or who made it.
+const isTaken = (path: string): boolean => {
+  try { lstatSync(path); return true } catch (error) { return !isCode(error, ['ENOENT']) }
+}
 
 export const withSettingsLock = <T>(file: string, run: () => T): T => {
-  const lock = `${resolve(file)}.agent-board.lock`
+  // The lock is opened beside the file as given, so the file system resolves both paths alike (a lexical resolve
+  // turns `link/..` into another folder); the full path is only for the message.
+  const lock = `${file}.agent-board.lock`
   const deadline = performance.now() + LOCK_WAIT_MS
   let fd: number
+  // File ids are compared as bigints: 64-bit ids can round to one JavaScript number.
+  let own: BigIntStats
   for (;;) {
-    if (performance.now() >= deadline) throw Object.assign(new Error('another save of the settings file is in progress, or died holding its lock; if none is running, delete ' + lock), { code: 'SETTINGS_LOCKED' })
+    if (performance.now() >= deadline) throw Object.assign(new Error('another save of the settings file is in progress, or died holding its lock; if none is running, delete ' + resolve(lock)), { code: 'SETTINGS_LOCKED' })
+    if (platform === 'win32' && isTaken(lock)) { pause(25); continue }
     try {
       fd = openSync(lock, 'wx', 0o600)
-      break
     } catch (error) {
-      if (!isCode(error, ['EEXIST'])) throw error
+      if (!isCode(error, LOCK_BUSY)) throw error
       pause(25)
+      continue
     }
+    // The lock is this writer's only when the path names the file it just created: not when the open went through a
+    // link put there in between, and not when its identity cannot be read. Otherwise nothing is written and it waits.
+    let made: BigIntStats | undefined
+    try {
+      const opened = fstatSync(fd, { bigint: true })
+      const there = lstatSync(lock, { bigint: true })
+      if (opened.dev === there.dev && opened.ino === there.ino) made = opened
+    } catch {}
+    if (made !== undefined) { own = made; break }
+    closeSync(fd)
+    pause(25)
   }
-  let own: ReturnType<typeof fstatSync> | undefined
   try {
-    own = fstatSync(fd)
     writeFileSync(fd, `${pid} ${Date.now()}\n`)
     return run()
   } finally {
-    if (own !== undefined) try {
-      const current = lstatSync(lock)
+    try {
+      const current = lstatSync(lock, { bigint: true })
       if (current.dev === own.dev && current.ino === own.ino) unlinkSync(lock)
     } catch {}
     closeSync(fd)

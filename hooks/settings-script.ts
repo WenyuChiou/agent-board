@@ -79,30 +79,46 @@ const held = () => {
 }
 // The same lock as scripts/settings-file.ts: exclusive creation, a 2 s wait, and release by its creator.
 // Never take over another lock: its owner may still be writing, and inspecting it can block or race a fresh save.
-const lockPath = path.resolve(file) + '.agent-board.lock'
+// Opened beside the file as given, so the file system resolves both alike; the full path is only for the message.
+const lockFile = file + '.agent-board.lock'
+const lockPath = path.resolve(lockFile)
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+// Windows creates the file a dangling link at the lock path points to, so there anything at the path counts as held;
+// only whether something is there is looked at.
+const isTaken = () => { try { fs.lstatSync(lockFile); return true } catch (error) { return !error || error.code !== 'ENOENT' } }
 const withSettingsLock = (run) => {
   const deadline = performance.now() + 2000
   let fd
+  let own
   for (;;) {
     if (performance.now() >= deadline) throw Object.assign(new Error('another save of the settings file is in progress, or died holding its lock; if none is running, delete ' + lockPath), { code: 'SETTINGS_LOCKED' })
+    if (process.platform === 'win32' && isTaken()) { sleep(25); continue }
     try {
-      fd = fs.openSync(lockPath, 'wx', 0o600)
-      break
+      fd = fs.openSync(lockFile, 'wx', 0o600)
     } catch (error) {
-      if (!error || error.code !== 'EEXIST') throw error
+      // Windows gives EPERM or EACCES while a lock is being deleted, or for a folder there: wait as for EEXIST.
+      if (!error || !(error.code === 'EEXIST' || (process.platform === 'win32' && (error.code === 'EPERM' || error.code === 'EACCES')))) throw error
       sleep(25)
+      continue
     }
+    // Ours only when the path names the file just created (not a link put there in between, and readable): else wait.
+    let made
+    try {
+      const opened = fs.fstatSync(fd, { bigint: true })
+      const there = fs.lstatSync(lockFile, { bigint: true })
+      if (opened.dev === there.dev && opened.ino === there.ino) made = opened
+    } catch {}
+    if (made) { own = made; break }
+    fs.closeSync(fd)
+    sleep(25)
   }
-  let own
   try {
-    own = fs.fstatSync(fd)
     fs.writeFileSync(fd, process.pid + ' ' + Date.now() + '\\n')
     return run()
   } finally {
-    if (own) try {
-      const current = fs.lstatSync(lockPath)
-      if (current.dev === own.dev && current.ino === own.ino) fs.unlinkSync(lockPath)
+    try {
+      const current = fs.lstatSync(lockFile, { bigint: true })
+      if (current.dev === own.dev && current.ino === own.ino) fs.unlinkSync(lockFile)
     } catch {}
     fs.closeSync(fd)
   }

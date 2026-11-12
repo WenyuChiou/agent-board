@@ -62,6 +62,26 @@ test('#1276: /progress style refuses a settings file that is a link or a folder,
   expect(JSON.parse(world.files.get(SETTINGS) ?? '{}')).toEqual({ style: 'blue' })
 })
 
+// #1339 (codex_166 finding 5): a lock held by another save stops /progress style with the lock's full path,
+// as the write script printed it; output cut short gives the general failure, never a half path.
+test('#1339: /progress style names a held settings lock, and a cut-short path gives the general failure', async ($, on) => {
+  const lock = `${SETTINGS}.agent-board.lock`
+  const world: World = { files: new Map([[FILE, board(SEVEN)], [SETTINGS, '{"style":"green"}']]), lockedFiles: new Map([[SETTINGS, { stdout: lock }]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true, opened: ['others'] } }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  const held = JSON.stringify(await $.command.run({ ...TIDY, args: 'style blue' }))
+  expect(held).toContain(JSON.stringify(EN.settingsLocked(lock)).slice(1, -1))
+  expect(held).not.toContain(EN.barStyleSet(EN.barStyleBlue))
+  expect(world.files.get(SETTINGS)).toBe('{"style":"green"}')
+  world.lockedFiles = new Map([[SETTINGS, { stdout: lock.slice(0, 8), isTruncated: true }]])
+  const cut = JSON.stringify(await $.command.run({ ...TIDY, args: 'style blue' }))
+  expect(cut).toContain(EN.pressFailed)
+  expect(cut).not.toContain('If no save is running')
+  expect(world.files.get(SETTINGS)).toBe('{"style":"green"}')
+  world.lockedFiles = undefined
+  expect(JSON.stringify(await $.command.run({ ...TIDY, args: 'style blue' }))).toContain(EN.barStyleSet(EN.barStyleBlue))
+})
+
 // #1276, Codex on #1339: the style poll and the history-days read used the host's read, which waits on a FIFO.
 // They now read through the guarded script; the host never reads the settings file, and the pick still shows.
 test('#1276: the style poll reads the settings file through the guarded script, never the host read', async ($, on) => {

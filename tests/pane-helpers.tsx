@@ -27,7 +27,7 @@ import { sha256 } from '../hooks/sha256'
 import { RELEASE_0_18_1, RELEASE_0_20_5 } from './fixtures/released'
 import { memoryConnect } from './fixtures/connect-memory'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../hooks/connect-worker'
-import { SETTINGS_CHANGED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script'
+import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from '../hooks/settings-script'
 import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED, PENDING_COMMIT, PENDING_STAGE } from '../hooks/ledger-move'
 import { hasOwnConnectData, connectDataRoots } from '../hooks/connect-pure'
 import type { ConnectState, LegacyConnectRequest } from '../scripts/connect-transaction'
@@ -129,6 +129,9 @@ type World = {
   isRemoveRefused?: (path: string) => boolean
   // Paths that are a link or a folder, as the settings scripts see them (#1276).
   unsafeFiles?: Set<string>
+  // Settings files whose lock another save holds: the write script exits SETTINGS_LOCKED with the lock path on
+  // stdout, or with that output cut short (#1339, codex_166 finding 5).
+  lockedFiles?: Map<string, { stdout: string; isTruncated?: boolean }>
   // What each settings write was given: its arguments, and what it read on stdin.
   settingsWrites?: Array<{ argv: string[]; stdin: string | undefined }>
   // What the model answers asynchronously; a promise that never settles is a hung call.
@@ -330,6 +333,8 @@ const engineBeneath = (on: On, world: World): MockClock => {
       const file = posix(e.argv[4] ?? '')
       world.ran?.push([...e.argv])
       if (world.unsafeFiles?.has(file) === true) return { value: { exitCode: SETTINGS_UNSAFE, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      const locked = world.lockedFiles?.get(file)
+      if (locked !== undefined) return { value: { exitCode: SETTINGS_LOCKED, stdout: locked.stdout, stderr: 'another save of the settings file is in progress', isStdoutTruncated: locked.isTruncated === true, isStderrTruncated: false } }
       // Written only when the file still holds the text the change was worked out from.
       // The texts arrive on stdin, as the script reads them, never in the arguments.
       const given = JSON.parse(String((e as typeof e & { init?: { stdin?: string } }).init?.stdin ?? '{}')) as { next?: string; base?: string | null }

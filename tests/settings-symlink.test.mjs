@@ -492,6 +492,8 @@ fs.renameSync = (from, to) => {
 
 // Every lock case runs in a child: a synchronous FIFO read must not hang the test process.
 const lockBase = '{"lang":"en"}\n'
+// A process that has ended: the old takeover read this pid and took the lock over (codex_166 finding 8).
+const exitedPid = spawnSync(process.execPath, ['-e', '0']).pid
 const lockNext = '{"lang":"zh-TW"}\n'
 const cliLockScript = body => `import fs from 'node:fs'
 import { replaceSettings, withSettingsLock } from ${JSON.stringify(settingsModule)}
@@ -543,7 +545,7 @@ const oldLock = (dir, shape) => {
     if (shape === 'link to a regular file') writeFileSync(target, 'synthetic target\n')
     symlinkSync(target, lock, 'file')
   } else {
-    const content = shape === 'dead pid' ? '999999 0\n' : shape === 'live pid' ? `${process.pid} 0\n` : shape === 'garbage' ? 'synthetic garbage\n' : ''
+    const content = shape === 'dead pid' ? `${exitedPid} 0\n` : shape === 'live pid' ? `${process.pid} 0\n` : shape === 'garbage' ? 'synthetic garbage\n' : ''
     writeFileSync(lock, content)
   }
   const old = new Date(Date.now() - 60_000)
@@ -552,6 +554,22 @@ const oldLock = (dir, shape) => {
     if (shape !== 'dangling link') utimesSync(target, old, old)
   } else utimesSync(lock, old, old)
   return { file, lock, target }
+}
+
+// Any read of an existing lock fails loudly: a writer never reads or judges a lock it did not create (codex_166 finding 8).
+const noLockReads = dir => {
+  const preload = join(dir, 'no-lock-reads.cjs')
+  writeFileSync(preload, `const fs = require('node:fs')
+const isLock = file => String(file).endsWith('.agent-board.lock')
+const isRead = flags => flags === undefined || (typeof flags === 'string' ? !/^[wa]/.test(flags) : (flags & 3) !== 1)
+const forbid = () => { process.stderr.write('FORBIDDEN_LOCK_READ\\n'); throw Object.assign(new Error('FORBIDDEN_LOCK_READ'), { code: 'FORBIDDEN_LOCK_READ' }) }
+const read = fs.readFileSync, open = fs.openSync, stream = fs.createReadStream
+fs.readFileSync = (file, ...rest) => { if (isLock(file)) forbid(); return read(file, ...rest) }
+fs.openSync = (file, flags, ...rest) => { if (isLock(file) && isRead(flags)) forbid(); return open(file, flags, ...rest) }
+fs.createReadStream = (file, ...rest) => { if (isLock(file)) forbid(); return stream(file, ...rest) }
+require('node:module').syncBuiltinESMExports()
+`)
+  return preload
 }
 
 for (const writer of ['cli', 'plugin']) {
@@ -566,13 +584,18 @@ for (const writer of ['cli', 'plugin']) {
         const { file, lock, target } = oldLock(dir, shape)
         const before = lockSnapshot(lock)
         const targetBefore = existsSync(target) ? lockSnapshot(target) : null
-        const ran = await runLockChild(writer, file)
+        const ran = await runLockChild(writer, file, { preload: noLockReads(dir) })
+        assert.ok(!ran.stderr.includes('FORBIDDEN_LOCK_READ'), ran.stderr)
         assert.equal(ran.timedOut, false, ran.stderr)
         assert.ok(ran.elapsed < 3000, `save took ${ran.elapsed} ms`)
         assert.notEqual(ran.status, 0)
         if (!(process.platform === 'win32' && shape === 'folder')) {
           assert.match(ran.stderr, /another save of the settings file is in progress.*if none is running, delete/)
-          if (writer === 'plugin') assert.equal(ran.status, SETTINGS_LOCKED)
+          if (writer === 'plugin') {
+            assert.equal(ran.status, SETTINGS_LOCKED)
+            // /progress style names this path: exactly the lock, with no line end (codex_166 finding 5).
+            assert.equal(ran.stdout, lock)
+          }
         }
         assert.ok(ran.stderr.includes(lock), ran.stderr)
         assert.deepEqual(readFileSync(file), Buffer.from(lockBase))
@@ -633,6 +656,30 @@ require('node:module').syncBuiltinESMExports()
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 }
+
+test('a path through a link and .. takes the same lock as the plain path (codex_166 finding 1)', { skip: process.platform === 'win32' ? 'Windows resolves .. in a path by its text, so both spellings already name one lock' : noLinks }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'settings-lock-alias-'))
+  try {
+    const outside = join(dir, 'outside', 'inner')
+    const near = join(dir, 'near')
+    mkdirSync(outside, { recursive: true })
+    mkdirSync(near)
+    symlinkSync(outside, join(near, 'link'), 'dir')
+    // near/link/.. is dir/outside on the file system, but dir/near by its text.
+    const real = join(dir, 'outside', 'progress-settings.json')
+    const spelled = `${near}/link/../progress-settings.json`
+    writeFileSync(real, lockBase)
+    writeFileSync(`${real}.agent-board.lock`, '')
+    for (const writer of ['cli', 'plugin']) {
+      const ran = await runLockChild(writer, spelled)
+      assert.equal(ran.timedOut, false, ran.stderr)
+      assert.notEqual(ran.status, 0, `${writer} saved past a lock held on the same file`)
+      assert.match(ran.stderr, /another save of the settings file is in progress/)
+      assert.deepEqual(readFileSync(real), Buffer.from(lockBase))
+    }
+    assert.equal(existsSync(join(near, 'progress-settings.json.agent-board.lock')), false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
 
 test('each language names the lock path and tells the person when to delete it', () => {
   const lock = '/synthetic/progress-settings.json.agent-board.lock'
