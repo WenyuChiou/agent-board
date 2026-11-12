@@ -7818,6 +7818,8 @@ export const LINES = [
 "        if (!roots.has(session)) return",
 "        if (isStale()) return",
 "        if (state === 'busy') roots.set(session, 'busy')",
+"        // An unknown state claims nothing but is looked at again on the retry clock: no event may come for it.",
+"        if (state === 'unknown') retryLater(session)",
 "        if (state !== 'idle') return",
 "        ref = newRef()",
 "        const taken = await boardCall('take', session, directory, ['--ref', ref])",

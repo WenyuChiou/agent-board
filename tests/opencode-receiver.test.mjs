@@ -451,6 +451,18 @@ test('opencodePlugin tries a failed take again within seconds, with no board wri
   await f.until(() => f.calls.promptAsync.length === 1 && f.message('retake-message-1').status === 'accepted' && f.settled(), 'the take was tried again and the session woken')
 }))
 
+test('opencodePlugin looks again within seconds after a failed host status lookup, with no further event or board write', () => fixture(async f => {
+  f.queue('ses_status_retry', 'status-retry-message-1', 'Synthetic text after a failed status lookup')
+  f.calls.statusFails = true
+  await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_status_retry' } } } })
+  await f.idle('ses_status_retry')
+  await f.until(() => f.calls.status.length >= 1 && f.settled(), 'the host status was asked and failed')
+  f.calls.statusFails = false
+  assert.equal(f.calls.promptAsync.length, 0)
+  assert.equal(f.message('status-retry-message-1').status, 'queued')
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('status-retry-message-1').status === 'accepted' && f.settled(), 'the status was asked again on its own and the session woken')
+}))
+
 test('--mailbox take for OpenCode answers ok false with a code while the store is held, and plain message null for an empty mailbox', () => fixture(async f => {
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   f.queue('ses_take_cli', 'take-cli-message-1', 'Synthetic text for the take answers')
