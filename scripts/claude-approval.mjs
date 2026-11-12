@@ -79,6 +79,18 @@ const isOwn = (folder, file) => {
   }
 }
 
+// scripts/runtime-folder.ts isOwnFolder, the board's rule for XDG_RUNTIME_DIR: the folder itself (lstat, so
+// a link to one does not count), this account's, and closed to others. The board writes to its cache folder
+// otherwise, so the hook must not look in a linked runtime folder (#1368 review).
+const isOwnRuntime = dir => {
+  try {
+    const found = lstatSync(dir)
+    return found.isDirectory() && (process.getuid === undefined || (found.uid === process.getuid() && (found.mode & 0o077) === 0))
+  } catch {
+    return false
+  }
+}
+
 export const parseAddress = (text, key) => {
   try {
     const found = JSON.parse(text)
@@ -97,7 +109,7 @@ export const addressFile = (env = process.env, platform = process.platform) => {
   const isWindows = platform === 'win32'
   const home = (env.USERPROFILE ?? env.HOME ?? '').replace(/[\\/]+$/, '')
   const runtime = env.XDG_RUNTIME_DIR
-  const isRuntimeOwn = !isWindows && runtime !== undefined && runtime !== '' && isOwn(runtime)
+  const isRuntimeOwn = !isWindows && runtime !== undefined && runtime !== '' && isOwnRuntime(runtime)
   const folder = addressFolder(isWindows, home, runtime, isRuntimeOwn)
   if (folder === null) return null
   return { key, folder, home, file: [folder, addressFileName(key)].join(isWindows ? '\\' : '/') }

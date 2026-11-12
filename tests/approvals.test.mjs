@@ -3,7 +3,7 @@
 // would run it, with a synthetic request on its input. No model, no browser.
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerHooks } from 'node:module'
@@ -178,6 +178,24 @@ test('the hook finds the address file where hooks/receiver.ts names it and reads
   assert.equal(hook.parseAddress(JSON.stringify({ url: 'http://example.test:4100/?t=x', path: env.CLAUDE_PROGRESS_FILE }), key), null)
   assert.equal(hook.isRunning(process.pid), true)
   for (const pid of [0, -1, 1.5, '42', undefined]) assert.equal(hook.isRunning(pid), false)
+})
+
+test('the hook takes XDG_RUNTIME_DIR as the board does: its own folder, never a link to one (#1368 review)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'approvals-runtime-'))
+  try {
+    const home = join(root, 'home')
+    const own = join(root, 'run')
+    const link = join(root, 'run-link')
+    mkdirSync(home)
+    mkdirSync(own, { mode: 0o700 })
+    symlinkSync(own, link, 'junction')
+    const base = { CLAUDE_PROGRESS_FILE: join(root, 'board', 'progress.md'), HOME: home, USERPROFILE: home }
+    // POSIX rules (the only ones that read XDG_RUNTIME_DIR), checked on every system.
+    assert.equal(hook.addressFile({ ...base, XDG_RUNTIME_DIR: own }, 'linux').folder, own)
+    assert.equal(hook.addressFile({ ...base, XDG_RUNTIME_DIR: link }, 'linux').folder, `${home}/.cache/agent-board`, 'a linked runtime folder is not used, as the board does not use it')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('the hook only ever answers allow, or deny with a message, and never adds a standing rule', () => {
