@@ -12,6 +12,7 @@
 //   endStatus  the status the delivery turn ends with: 'completed' (default), 'failed', 'interrupted', 'none' (no status field) or any other word
 //   replay     false: resuming a thread with a running turn does not replay that turn's start to the new connection
 //   listed     'none': thread/turns/list names no turn in progress
+//   listDelay  milliseconds thread/turns/list waits before answering (the answer is the state when it was asked)
 //   approval   when true, the daemon asks its client for an approval during the turn
 //   endFlag    a file whose appearance ends the running turn
 //   pidFile    file that gets this process's id
@@ -45,7 +46,11 @@ serveWebSocketProxy({
       emit({ id: value.id, result: { thread: thread(threadId) } })
       if (running && config.replay !== false) emit({ method: 'turn/started', params: { threadId, turn: { id: running } } })
     }
-    if (value.method === 'thread/turns/list') emit({ id: value.id, result: { data: running && config.listed !== 'none' ? [{ id: running, status: 'inProgress' }] : [], nextCursor: null } })
+    if (value.method === 'thread/turns/list') {
+      const answer = { id: value.id, result: { data: running && config.listed !== 'none' ? [{ id: running, status: 'inProgress' }] : [], nextCursor: null } }
+      if (config.listDelay) setTimeout(() => emit(answer), config.listDelay)
+      else emit(answer)
+    }
     if (value.method === 'turn/start') {
       if (config.start === 'error') { emit({ id: value.id, error: { code: -32600, message: 'synthetic' } }); return }
       if (config.start === 'empty') { emit({ id: value.id, result: {} }); return }

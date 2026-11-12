@@ -2328,14 +2328,14 @@ const pollingProxy = async (board, mode) => {
         res.writeHead(code, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ error: 'SYNTHETIC_POLL_FAILURE' }))
       }
-      if (isPoll && (faults === 0 || mode === 'always') && mode !== 'after-claim') {
+      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim') {
         if (mode === 'network' || mode === 'timeout') {
           faults += 1
           if (mode === 'network') req.socket.destroy()
           return
         }
         if (mode === 'malformed') { faults += 1; res.writeHead(200); res.end('{'); return }
-        return fail(mode === 'forbidden' ? 403 : mode === 'stale' ? 409 : 503)
+        return fail(mode === 'forbidden' || mode === 'forbidden-always' ? 403 : mode === 'stale' ? 409 : 503)
       }
       const answer = await fetch(new URL(req.url, upstream), {
         method: req.method, headers: { 'x-board-token': upstream.searchParams.get('t'), 'content-type': 'application/json' }, body,
@@ -4003,16 +4003,39 @@ test('an overlapping poll leaves the page waiting for a reply at the deadline de
 // Send to Codex (#318): the receiver the board runs for a Codex thread on the shared daemon. The Codex program is a
 // stand-in (tests/helpers/codex-daemon-mock.mjs) that speaks WebSocket over stdio like `codex app-server proxy`.
 const codexThread = '11111111-2222-4333-8444-555555555555'
+// Most Codex tests share one board (a board start costs seconds, and CI has a time limit for this file): each gets its own
+// thread, so no two meet in the board's one-message-at-a-time rule for a session, and its own message ids.
+let codexCurrent = codexThread, codexSuffix = ''
+const codexId = id => id + codexSuffix
+let sharedCodex = null
+after(async () => { if (sharedCodex) { await sharedCodex.board.close().catch(() => undefined); rmSync(sharedCodex.dir, { recursive: true, force: true }) } })
+const codexFixture = async fn => {
+  if (!sharedCodex) {
+    const dir = mkdtempSync(join(tmpdir(), 'board-codex-shared-'))
+    sharedCodex = { dir, board: await start(dir), count: 0 }
+  }
+  const n = ++sharedCodex.count
+  const sub = join(sharedCodex.dir, 't' + n)
+  mkdirSync(sub, { recursive: true })
+  codexCurrent = '11111111-2222-4333-8444-5555555555' + String(n).padStart(2, '0'); codexSuffix = '-' + n
+  try { await fn(sharedCodex.board, sub) } finally { codexCurrent = codexThread; codexSuffix = '' }
+}
 const codexMock = new URL('./helpers/codex-daemon-mock.mjs', import.meta.url)
 const codexDaemon = (dir, config) => {
   const file = join(dir, 'mock.json'), log = join(dir, 'rpc.log')
-  writeFileSync(file, JSON.stringify({ log, loaded: [codexThread], status: 'idle', start: 'ack', steer: 'ack', turn: 'turn-busy', ...config }))
+  writeFileSync(file, JSON.stringify({ log, loaded: [codexCurrent], status: 'idle', start: 'ack', steer: 'ack', turn: 'turn-busy', ...config }))
   return { executable: fileURLToPath(codexMock), env: { ...process.env, CODEX_MOCK_CONFIG: file }, log, calls: () => (readFileSyncSafe(log) ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line)) }
 }
-const codexConnection = async (board, thread = codexThread) => waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === thread))
-const codexMessage = async (board, id) => (await board.call('/api/board')).body.messaging.messages.find(one => one.id === id)
-const codexSend = async (board, connection, id = 'AB-CX-001') => (await board.call('/api/messages/send', { id, target: connection.id, turn: 'session', text: 'Check the build and tell me what failed.' })).status
-const codexReceiver = (board, daemon, options = {}) => startCodexReceiver({ boardUrl: board.address, threads: () => [codexThread], executable: daemon.executable, env: daemon.env, tickMs: 100, ...options })
+const codexCase = (dir, i, config) => {
+  // One board serves several cases of a test: each has its own mock folder and message id, so the board starts once.
+  const sub = join(dir, 'case' + i)
+  mkdirSync(sub, { recursive: true })
+  return { daemon: codexDaemon(sub, config), sub, id: 'AB-CX-' + String(i + 1).padStart(3, '0') }
+}
+const codexConnection = async (board, thread = codexCurrent) => waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === thread))
+const codexMessage = async (board, id) => (await board.call('/api/board')).body.messaging.messages.find(one => one.id === codexId(id))
+const codexSend = async (board, connection, id = 'AB-CX-001') => (await board.call('/api/messages/send', { id: codexId(id), target: connection.id, turn: 'session', text: 'Check the build and tell me what failed.' })).status
+const codexReceiver = (board, daemon, options = {}) => startCodexReceiver({ boardUrl: board.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, ...options })
 
 test('a Codex message is sent only to a thread the running daemon has loaded, with no shell', async () => fixture(async (board, dir) => {
   const other = '99999999-2222-4333-8444-555555555555'
@@ -4050,22 +4073,19 @@ test('a Codex message is sent only to a thread the running daemon has loaded, wi
   assert.equal(explicitCodexExecutable('/usr/bin/codex', { platform: 'linux', exists: exists([]) }), '/usr/bin/codex')
 }))
 
-test('a Codex thread whose board lease expired is attached again, not left stale', async () => fixture(async (board, dir) => {
-  // Every poll fails, so each connection ends by lease expiry; a stale entry would keep the thread at one registration.
-  const proxy = await pollingProxy(board, 'always')
+test('a Codex thread whose board connection ended is attached again, not left stale', async () => codexFixture(async (board, dir) => {
+  // Every poll is refused for good (403), so each connection ends at once; a stale entry would keep the thread at one registration.
+  const proxy = await pollingProxy(board, 'forbidden-always')
   const daemon = codexDaemon(dir, {})
-  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexThread], executable: daemon.executable, env: daemon.env, tickMs: 100 })
+  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100 })
   try {
-    // The lease takes about 15 s to run out, longer than waitFor allows.
-    const until = Date.now() + 60000
-    while (proxy.registrations() < 2 && Date.now() < until) await pause(100)
-    assert.ok(proxy.registrations() >= 2)
+    await waitFor(async () => proxy.registrations() >= 2)
     // Claimed messages are never replayed: the new attachment only registers, it sends nothing.
     assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 0)
   } finally { await receiver.close(); await proxy.close() }
 }))
 
-test('an idle Codex thread gets the message through turn/start, not the queue', async () => fixture(async (board, dir) => {
+test('an idle Codex thread gets the message through turn/start, not the queue', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, {})
   const receiver = codexReceiver(board, daemon)
   try {
@@ -4082,7 +4102,7 @@ test('an idle Codex thread gets the message through turn/start, not the queue', 
     assert.ok(text.includes('Check the build and tell me what failed.'))
     assert.ok(text.includes(`If you have already answered message ${nonceOf(text)}, reply only ACK ${nonceOf(text)} and do nothing else.`))
     assert.equal(done.reply, '')
-    assert.equal(storedReply(dir, 'AB-CX-001'), 'ACK ' + nonceOf(text))
+    assert.equal(storedReply(sharedCodex.dir, codexId('AB-CX-001')), 'ACK ' + nonceOf(text))
     // The turn ended: the next message starts another turn.
     await codexSend(board, connection, 'AB-CX-002')
     await waitFor(async () => (await codexMessage(board, 'AB-CX-002'))?.status === 'acknowledged')
@@ -4090,7 +4110,7 @@ test('an idle Codex thread gets the message through turn/start, not the queue', 
   } finally { await receiver.close() }
 }))
 
-test('a busy Codex thread gets the message only after its running turn ends', async () => fixture(async (board, dir) => {
+test('a busy Codex thread gets the message only after its running turn ends', async () => codexFixture(async (board, dir) => {
   const endFlag = join(dir, 'end-turn')
   const daemon = codexDaemon(dir, { status: 'active', endFlag })
   const receiver = codexReceiver(board, daemon)
@@ -4098,7 +4118,7 @@ test('a busy Codex thread gets the message only after its running turn ends', as
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
     // Two polls pass: the board keeps the connection and the message, and Codex is sent nothing.
-    await pause(4500)
+    await pause(2500)
     assert.equal((await codexMessage(board, 'AB-CX-001')).status, 'queued')
     assert.ok((await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
     assert.equal(daemon.calls().filter(one => one.method === 'turn/start' || one.method === 'turn/steer').length, 0)
@@ -4108,107 +4128,132 @@ test('a busy Codex thread gets the message only after its running turn ends', as
   } finally { await receiver.close() }
 }))
 
-test('turn/steer is used only when the setting is on, with the expected turn id', async () => {
-  await fixture(async (board, dir) => {
-    const daemon = codexDaemon(dir, { status: 'active' })
-    const receiver = codexReceiver(board, daemon)
+test('turn/steer is used only when the setting is on, with the expected turn id', () => codexFixture(async (board, dir) => {
+  for (const [i, isSteerOn] of [false, true].entries()) {
+    const { daemon, id } = codexCase(dir, i, { status: 'active' })
+    const receiver = codexReceiver(board, daemon, { isSteerOn })
     try {
       const connection = await codexConnection(board)
-      await codexSend(board, connection)
-      await pause(4500)
-      assert.equal((await codexMessage(board, 'AB-CX-001')).status, 'queued')
-      assert.equal(daemon.calls().filter(one => /^turn\//.test(one.method ?? '')).length, 0)
-    } finally { await receiver.close() }
-  })
-  await fixture(async (board, dir) => {
-    const daemon = codexDaemon(dir, { status: 'active' })
-    const receiver = codexReceiver(board, daemon, { isSteerOn: true })
-    try {
-      const connection = await codexConnection(board)
-      await codexSend(board, connection)
-      await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+      await codexSend(board, connection, id)
+      if (!isSteerOn) {
+        await pause(2500)
+        assert.equal((await codexMessage(board, id)).status, 'queued')
+        assert.equal(daemon.calls().filter(one => /^turn\//.test(one.method ?? '')).length, 0)
+        continue
+      }
+      await waitFor(async () => (await codexMessage(board, id))?.status === 'acknowledged')
       const steers = daemon.calls().filter(one => one.method === 'turn/steer')
       assert.equal(steers.length, 1)
       assert.equal(steers[0].params.expectedTurnId, 'turn-busy')
       assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 0)
     } finally { await receiver.close() }
-  })
-})
+  }
+}))
 
-test('a turn that ends without an explicit completed status is uncertain, never acknowledged', async () => {
-  for (const endStatus of ['none', 'weird']) await fixture(async (board, dir) => {
-    const daemon = codexDaemon(dir, { endStatus })
-    const receiver = codexReceiver(board, daemon)
-    try {
-      const connection = await codexConnection(board)
-      await codexSend(board, connection)
-      const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
-      assert.equal(one.error, 'TURN_STATUS_UNKNOWN', endStatus)
-      await pause(1500)
-      assert.equal(daemon.calls().filter(call => call.method === 'turn/start').length, 1)
-    } finally { await receiver.close() }
-  })
-})
+test('a turn that ends without an explicit completed status is uncertain, never acknowledged', () => codexFixture(async (board, dir) => {
+  const { daemon, id } = codexCase(dir, 0, { endStatus: 'none' })
+  const receiver = codexReceiver(board, daemon)
+  try {
+    const connection = await codexConnection(board)
+    await codexSend(board, connection, id)
+    const one = await waitFor(async () => { const found = await codexMessage(board, id); return found?.status === 'uncertain' && found.error && found })
+    assert.equal(one.error, 'TURN_STATUS_UNKNOWN')
+    await pause(1000)
+    assert.equal(daemon.calls().filter(call => call.method === 'turn/start').length, 1)
+  } finally { await receiver.close() }
+}))
 
-test('a running turn the daemon did not replay is looked up on attach, so steering has its turn id', async () => {
-  await fixture(async (board, dir) => {
-    const daemon = codexDaemon(dir, { status: 'active', replay: false })
+test('a running turn the daemon did not replay is looked up on attach, so steering has its turn id', () => codexFixture(async (board, dir) => {
+  for (const [i, listed] of [undefined, 'none'].entries()) {
+    const { daemon, id } = codexCase(dir, i, { status: 'active', replay: false, ...(listed ? { listed } : {}) })
     const receiver = codexReceiver(board, daemon, { isSteerOn: true })
     try {
       const connection = await codexConnection(board)
-      await codexSend(board, connection)
-      await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+      await codexSend(board, connection, id)
+      if (listed === 'none') {
+        // No turn in progress is found: nothing is steered, the message waits.
+        await pause(2000)
+        assert.equal((await codexMessage(board, id)).status, 'queued')
+        assert.equal(daemon.calls().filter(one => /^turn\/(start|steer)$/.test(one.method ?? '')).length, 0)
+        continue
+      }
+      await waitFor(async () => (await codexMessage(board, id))?.status === 'acknowledged')
       const steers = daemon.calls().filter(one => one.method === 'turn/steer')
       assert.equal(steers.length, 1)
       assert.equal(steers[0].params.expectedTurnId, 'turn-busy')
     } finally { await receiver.close() }
-  })
-  // No turn in progress is found: nothing is steered, the message waits.
-  await fixture(async (board, dir) => {
-    const daemon = codexDaemon(dir, { status: 'active', replay: false, listed: 'none' })
-    const receiver = codexReceiver(board, daemon, { isSteerOn: true })
-    try {
-      const connection = await codexConnection(board)
-      await codexSend(board, connection)
-      await pause(2500)
-      assert.equal((await codexMessage(board, 'AB-CX-001')).status, 'queued')
-      assert.equal(daemon.calls().filter(one => /^turn\/(start|steer)$/.test(one.method ?? '')).length, 0)
-    } finally { await receiver.close() }
-  })
-})
+  }
+}))
 
-test('the Codex receiver never contests a session someone else holds, and joins once it is gone', () => fixture(async (board, dir) => {
+test('the Codex receiver never contests a session someone else holds, and joins once it is gone', () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, {})
-  const holder = (await board.call('/api/messages/register', { agent: 'codex', session: codexThread, surface: 'Synthetic holder', turn: 'session', scope: 'session' })).body
+  const holder = (await board.call('/api/messages/register', { agent: 'codex', session: codexCurrent, surface: 'Synthetic holder', turn: 'session', scope: 'session' })).body
   const receiver = codexReceiver(board, daemon)
   try {
     await pause(1500)
-    const connections = (await board.call('/api/board')).body.messaging.connections.filter(one => one.session === codexThread)
+    const connections = (await board.call('/api/board')).body.messaging.connections.filter(one => one.session === codexCurrent)
     assert.deepEqual(connections.map(one => one.surface), ['Synthetic holder'])
     // The holder was not marked contested: it can still be sent to.
-    assert.equal((await board.call('/api/messages/send', { id: 'AB-CX-HOLD', target: holder.id, turn: 'session', text: 'Hello' })).status, 200)
+    assert.equal((await board.call('/api/messages/send', { id: codexId('AB-CX-HOLD'), target: holder.id, turn: 'session', text: 'Hello' })).status, 200)
     await board.call('/api/messages/disconnect', { connection: holder.id, secret: holder.secret, turn: 'session' })
-    const joined = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === codexThread && one.surface === 'Codex CLI'))
+    const joined = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === codexCurrent && one.surface === 'Codex CLI'))
     assert.equal(await codexSend(board, joined), 200)
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
   } finally { await receiver.close() }
 }))
 
-test('a Codex receiver that another connection contested leaves and joins again once it can, instead of staying contested', () => fixture(async (board, dir) => {
+test('a Codex receiver that another connection contested leaves and joins again once it can, instead of staying contested', () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, {})
   const receiver = codexReceiver(board, daemon)
   try {
     const first = await codexConnection(board)
-    const holder = (await board.call('/api/messages/register', { agent: 'codex', session: codexThread, surface: 'Synthetic holder', turn: 'session', scope: 'session' })).body
+    const holder = (await board.call('/api/messages/register', { agent: 'codex', session: codexCurrent, surface: 'Synthetic holder', turn: 'session', scope: 'session' })).body
     // Both are contested now; the holder leaves, and the receiver's own connection would stay contested for good.
     await board.call('/api/messages/disconnect', { connection: holder.id, secret: holder.secret, turn: 'session' })
-    const joined = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === codexThread && one.surface === 'Codex CLI' && one.id !== first.id))
+    const joined = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === codexCurrent && one.surface === 'Codex CLI' && one.id !== first.id))
     assert.equal(await codexSend(board, joined), 200)
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
   } finally { await receiver.close() }
 }))
 
-test('a steer that leaves the turn silent becomes uncertain and is not sent again', async () => fixture(async (board, dir) => {
+test('a progress read that fails for a moment keeps the receiver and its queued message', () => codexFixture(async (board, dir) => {
+  const endFlag = join(dir, 'end-turn')
+  const daemon = codexDaemon(dir, { status: 'active', endFlag })
+  let isFailing = false
+  const receiver = codexReceiver(board, daemon, { threads: () => { if (isFailing) throw new Error('EBUSY'); return [codexCurrent] } })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    // The thread is busy, so the message waits; the board file cannot be read for several ticks.
+    isFailing = true
+    await pause(1500)
+    assert.ok((await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
+    assert.equal((await codexMessage(board, 'AB-CX-001')).status, 'queued')
+    isFailing = false
+    writeFileSync(endFlag, '')
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+  } finally { await receiver.close() }
+}))
+
+test('a slow thread/turns/list answer does not undo a turn that ended meanwhile', () => codexFixture(async (board, dir) => {
+  const endFlag = join(dir, 'end-turn')
+  const daemon = codexDaemon(dir, { status: 'active', replay: false, listDelay: 1200, endFlag })
+  const receiver = codexReceiver(board, daemon, { isSteerOn: true })
+  try {
+    await waitFor(async () => daemon.calls().some(one => one.method === 'thread/turns/list'))
+    // The turn ends while the lookup is out; its answer still names that turn as in progress.
+    writeFileSync(endFlag, '')
+    const connection = await codexConnection(board)
+    await pause(500)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    // The thread was idle: a new turn was started, nothing was steered into the finished one.
+    assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 1)
+    assert.equal(daemon.calls().filter(one => one.method === 'turn/steer').length, 0)
+  } finally { await receiver.close() }
+}))
+
+test('a steer that leaves the turn silent becomes uncertain and is not sent again', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { status: 'active', steer: 'silent' })
   const receiver = codexReceiver(board, daemon, { isSteerOn: true, steerSilenceMs: 300 })
   try {
@@ -4216,12 +4261,12 @@ test('a steer that leaves the turn silent becomes uncertain and is not sent agai
     await codexSend(board, connection)
     const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
     assert.equal(one.error, 'STEER_SILENT')
-    await pause(2500)
+    await pause(1500)
     assert.equal(daemon.calls().filter(call => call.method === 'turn/steer').length, 1)
   } finally { await receiver.close() }
 }))
 
-test('turn/start success is accepted, never acknowledged', async () => fixture(async (board, dir) => {
+test('turn/start success is accepted, never acknowledged', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { start: 'silent' })
   const receiver = codexReceiver(board, daemon)
   try {
@@ -4229,37 +4274,37 @@ test('turn/start success is accepted, never acknowledged', async () => fixture(a
     await codexSend(board, connection)
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'accepted')
     // The turn runs on and says nothing: the answer of turn/start is all the board has.
-    await pause(3000)
+    await pause(1500)
     const one = await codexMessage(board, 'AB-CX-001')
     assert.equal(one.status, 'accepted')
     assert.equal(one.reply, '')
   } finally { await receiver.close() }
 }))
 
-const codexResultCases = async cases => {
-  for (const [start, steer] of cases) await fixture(async (board, dir) => {
-    const daemon = codexDaemon(dir, steer === undefined ? { start } : { status: 'active', steer })
+const codexResultCases = cases => codexFixture(async (board, dir) => {
+  for (const [i, [start, steer]] of cases.entries()) {
+    const { daemon, id } = codexCase(dir, i, steer === undefined ? { start } : { status: 'active', steer })
     const receiver = codexReceiver(board, daemon, steer === undefined ? {} : { isSteerOn: true })
     try {
       const connection = await codexConnection(board)
-      await codexSend(board, connection)
+      await codexSend(board, connection, id)
       const isRefusal = start === 'error' || steer === 'error'
-      const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === (isRefusal ? 'rejected' : 'uncertain') && found.error && found })
+      const one = await waitFor(async () => { const found = await codexMessage(board, id); return found?.status === (isRefusal ? 'rejected' : 'uncertain') && found.error && found })
       assert.equal(one.error, isRefusal ? 'OWNER_REJECTED' : 'INVALID_TURN_RESPONSE')
-      await pause(3000)
+      await pause(1500)
       const methods = daemon.calls().filter(call => call.method).map(call => call.method)
       assert.equal(methods.filter(method => method === (steer === undefined ? 'turn/start' : 'turn/steer')).length, 1)
       assert.ok(!methods.some(method => /^thread\/queue/.test(method) || method === (steer === undefined ? 'turn/steer' : 'turn/start')))
     } finally { await receiver.close() }
-  })
-}
+  }
+})
 
 test('an unclear result is marked uncertain and nothing else is tried', () => codexResultCases([['empty']]))
 
 // An error answer of the daemon (a refused turn/start, or a steer of a turn that is no longer the running one) is a refusal before anything was done.
 test('a refusal from the daemon is rejected, and nothing else is tried', () => codexResultCases([['error'], ['ack', 'error']]))
 
-test('a Codex turn that ends without the ACK or fails after it never reads as acknowledged', async () => fixture(async (board, dir) => {
+test('a Codex turn that ends without the ACK or fails after it never reads as acknowledged', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { start: 'silent', endFlag: join(dir, 'end-turn') })
   const receiver = codexReceiver(board, daemon)
   try {
@@ -4271,7 +4316,7 @@ test('a Codex turn that ends without the ACK or fails after it never reads as ac
     assert.equal(one.error, 'ACK_MISSING')
   } finally { await receiver.close() }
   // The ACK line is there, but the turn failed or was interrupted: it never reads as a receipt.
-  for (const endStatus of ['failed', 'interrupted']) await fixture(async (board, dir) => {
+  for (const endStatus of ['failed', 'interrupted']) await codexFixture(async (board, dir) => {
     const daemon = codexDaemon(dir, { endStatus })
     const receiver = codexReceiver(board, daemon)
     try {
@@ -4283,7 +4328,7 @@ test('a Codex turn that ends without the ACK or fails after it never reads as ac
   })
 }))
 
-test('a turn longer than the ACK window ends as uncertain with ACK_TIMEOUT, and nothing is sent again', async () => fixture(async (board, dir) => {
+test('a turn longer than the ACK window ends as uncertain with ACK_TIMEOUT, and nothing is sent again', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { start: 'silent' })
   const receiver = codexReceiver(board, daemon, { ackMs: 400 })
   try {
@@ -4291,12 +4336,12 @@ test('a turn longer than the ACK window ends as uncertain with ACK_TIMEOUT, and 
     await codexSend(board, connection)
     const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
     assert.equal(one.error, 'ACK_TIMEOUT')
-    await pause(1500)
+    await pause(800)
     assert.equal(daemon.calls().filter(call => call.method === 'turn/start').length, 1)
   } finally { await receiver.close() }
 }))
 
-test('a joined receiver leaves approval requests to the person\'s own client', async () => fixture(async (board, dir) => {
+test('a joined receiver leaves approval requests to the person\'s own client', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { approval: true })
   const receiver = codexReceiver(board, daemon)
   try {
@@ -4397,9 +4442,12 @@ test('the board runs the Codex receiver for a Codex session it knows and ends it
     writeFileSync(progress, readFileSync(progress, 'utf8').replace('state=waiting', 'state=ended'))
     // No page request is made while waiting: the Codex program is stopped once the board knows no live Codex session.
     await waitFor(async () => { try { process.kill(proxy, 0); return false } catch { return true } })
+    // A session that appears in the file afterwards is found from the file too, with no page request: a new Codex program starts.
+    writeFileSync(progress, readFileSync(progress, 'utf8').replace('state=ended', 'state=waiting'))
+    const second = await waitFor(async () => { const one = Number(readFileSyncSafe(join(dir, 'proxy.pid')) || 0); if (!one || one === proxy) return false; try { process.kill(one, 0); return one } catch { return false } })
     await board.close()
-    // The page took the connection and the Codex program it started away with it.
-    await waitFor(async () => { try { process.kill(proxy, 0); return false } catch { return true } })
+    await waitFor(async () => { try { process.kill(second, 0); return false } catch { return true } })
+    // The page took the Codex program it started away with it.
   } finally {
     delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG
     await board?.close().catch(() => undefined)

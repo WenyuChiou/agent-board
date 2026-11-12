@@ -150,6 +150,7 @@ export const startCodexReceiver = ({
     if (!one) return
     const state = one.state
     state.heard = Date.now()
+    state.seen += 1
     if (value.method === 'thread/status/changed' && typeof p.status?.type === 'string') state.status = p.status.type
     else if (value.method === 'turn/started' && p.turn?.id) state.turn = p.turn.id
     else if (value.method === 'turn/completed' && p.turn?.id) {
@@ -175,7 +176,7 @@ export const startCodexReceiver = ({
   }
 
   const attach = async thread => {
-    const state = { status: 'unknown', turn: null, pending: null, heard: 0 }
+    const state = { status: 'unknown', turn: null, pending: null, heard: 0, seen: 0 }
     const one = { state, receiver: null, isLost: false, settle: () => undefined }
     attached.set(thread, one)
     // The delivery turn settles when its own turn has ended: an ACK seen in another turn, or none, or a
@@ -203,11 +204,17 @@ export const startCodexReceiver = ({
         return newest?.status === 'inProgress' && typeof newest.id === 'string' && newest.id ? newest.id : null
       } catch { return null }
     }
+    // The answer is used only if the thread said nothing meanwhile: a completion or idle notice that arrived first is newer.
+    const learnTurn = async () => {
+      const seen = state.seen
+      const id = await activeTurn()
+      if (id !== null && state.seen === seen && state.turn === null && state.status === 'active') state.turn = id
+    }
     try {
       // Resuming a loaded thread subscribes this connection to its events without starting a turn.
       const resumed = await daemon.request('thread/resume', { threadId: thread, excludeTurns: true })
       state.status = typeof resumed?.thread?.status?.type === 'string' ? resumed.thread.status.type : 'unknown'
-      if (isSteerOn && state.status === 'active' && state.turn === null) state.turn = await activeTurn()
+      if (isSteerOn && state.status === 'active' && state.turn === null) await learnTurn()
       const verify = async () => {
         let isLoaded = false
         try { isLoaded = daemon !== null && daemon.isOpen() && (await loadedThreads(daemon)).has(thread) } catch { isLoaded = false }
@@ -218,7 +225,7 @@ export const startCodexReceiver = ({
         agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: 'Codex CLI', unclaimed: true, verify, onError,
         // Busy is not a refusal: the lease stays alive and the message waits in the board until the turn ends.
         canReceive: async () => {
-          if (isSteerOn && !state.pending && state.status === 'active' && state.turn === null) state.turn = await activeTurn()
+          if (isSteerOn && !state.pending && state.status === 'active' && state.turn === null) await learnTurn()
           return !state.pending && (state.turn === null && state.status === 'idle' || isSteerOn && state.turn !== null && state.status === 'active')
         },
         deliver: async (message, accepted, begin) => {
@@ -269,7 +276,8 @@ export const startCodexReceiver = ({
     isTicking = true
     try {
       let wanted = []
-      try { wanted = [...new Set(threads())].filter(id => THREAD.test(id)) } catch { wanted = [] }
+      // A board that cannot be read for a moment (a writer replacing the file) keeps every receiver as it is: this tick does nothing.
+      try { wanted = [...new Set(threads())].filter(id => THREAD.test(id)) } catch (error) { onError(error); return }
       // The Codex program is not kept running for a board that knows no Codex session.
       if (wanted.length === 0 && attached.size === 0) {
         if (daemon !== null) { const old = daemon; daemon = null; await old.close() }
