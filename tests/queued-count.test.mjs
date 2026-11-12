@@ -43,7 +43,7 @@ const block = (session, text, id) => `## Synthetic project ${id}
 <!-- /auto session=${id} -->
 `
 const source = `${block(first, 'Blue or green?', 'abcdef01')}\n${block(second, 'Keep the draft?', 'abcdef02')}`
-const mailbox = session => ({ id: mailboxId('codex', session), agent: 'codex', session, surface: 'synthetic', turn: 'session', scope: 'mailbox', expires: now + 3_600_000 })
+const mailbox = session => ({ id: mailboxId('codex', session), agent: 'codex', session, surface: 'CLI', turn: 'session', scope: 'mailbox', expires: now + 3_600_000 })
 const stored = () => {
   const box = mailbox(first)
   const queued = queueMessage({ messages: [], mailboxes: [mailbox(first), mailbox(second)] }, { id: 'SYNTHETIC-QUEUED-1', text: 'Blue', target: box.id, turn: 'session' }, 'board', box, now)
