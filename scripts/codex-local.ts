@@ -504,11 +504,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (mode === '--mailbox') {
     const action = flag('--mailbox'), session = flag('--session')
     // OpenCode's plugin (#724) also acknowledges and sends for its own session: ack upgrades an accepted message, send goes through the board's peer route.
-    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'send', 'release'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
+    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'send', 'release', 'attempt'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
     const directory = defaultMessagesDirectory(progress, home, process.env, process.platform)
     // This path runs in the plugin's own process with seconds to spare, so it waits for a busy board or store (a turn-start hook cannot).
     const mailbox = hookMailbox(directory, 5000, 2000, 2000)
     const answer = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value)}\n`) }
+    // A failed call answers ok false with the board's own code, never a bare failure and never ok true.
+    const codeOf = (error: unknown): string => error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING'
     if (action === 'take') {
       const surface = flag('--surface'), ref = flag('--ref')
       // OpenCode's plugin names the claim (12 hex), so it can release it again.
@@ -525,14 +527,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
       answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary } })
-    } else if (action === 'release') {
+    } else if (action === 'release' || action === 'attempt') {
+      // OpenCode's plugin only. release hands a claim back (--unsent: the host was never called, so even a started wake goes back);
+      // attempt marks the wake it is about to start, and answers CLAIM_LOST when the ref is no longer the claim (#724).
       const ref = flag('--ref')
       if (ref === undefined || !/^[0-9a-f]{12}$/.test(ref)) throw new Error('INVALID_MAILBOX_CALL')
       try {
-        await mailbox.release(agent, session, ref, Date.now())
+        if (action === 'attempt') await mailbox.attempt(agent, session, ref, Date.now())
+        else await mailbox.release(agent, session, ref, Date.now(), args.includes('--unsent'))
         answer({ ok: true })
       } catch (error) {
-        answer({ ok: false, code: error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING' })
+        answer({ ok: false, code: codeOf(error) })
       }
     } else if (action === 'accept' && agent !== 'opencode') {
       const id = flag('--id'), nonce = flag('--nonce')
@@ -561,7 +566,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         }
         answer({ ok: true })
       } catch (error) {
-        answer({ ok: false, code: error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING' })
+        answer({ ok: false, code: codeOf(error) })
+      }
+    } else if (agent === 'opencode') {
+      // A write that failed is not an end: the plugin asks again. With no board folder at all there is no mailbox to end.
+      try {
+        await mailbox.endOrThrow(agent, session, Date.now())
+        answer({ ok: true })
+      } catch (error) {
+        answer(codeOf(error) === 'BOARD_NOT_RUNNING' && !existsSync(directory) ? { ok: true } : { ok: false, code: codeOf(error) })
       }
     } else {
       await mailbox.end(agent, session, Date.now())

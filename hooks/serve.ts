@@ -838,7 +838,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveQueueNextTurn', 'serveQueueNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'serveQueueNextTurn', 'serveQueueNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesSentUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1653,7 +1653,10 @@ const PAGE_SCRIPT = String.raw`
     if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
     var isFailed = receiptFailed(receipt);
     var isAcceptedUnconfirmed = receipt.status === 'uncertain' && receipt.hasAccepted === true;
-    var labelKey = isFailed && receipt.status === 'uncertain'
+    // A wake the board saw start and nothing confirmed after 30 minutes (OpenCode): it is not sent again, and its words stay to copy.
+    var isSentUnconfirmed = receipt.status === 'uncertain' && receipt.error === 'UNCONFIRMED';
+    var labelKey = isSentUnconfirmed ? 'messagesSentUnconfirmed'
+      : isFailed && receipt.status === 'uncertain'
       ? 'messagesTimeout'
       : isAcceptedUnconfirmed ? 'messagesAcceptedUnconfirmed'
       : receipt.status === 'accepted' && !receipt.isMailbox && receipt.error === 'DISCONNECTED'
@@ -1662,6 +1665,10 @@ const PAGE_SCRIPT = String.raw`
     var line = el('p', 'receipt' + (isFailed ? ' t-alert' : ''), w(labelKey) + (reply ? ' · ' + reply : ''));
     line.setAttribute('role', isFailed ? 'alert' : 'status');
     var last = key && sentLast[key];
+    if (isSentUnconfirmed) {
+      var kept = receipt.text || (last ? last.text : '');
+      return kept ? add(el('div', 'receipt-box'), line, add(el('div', 'acts'), button(w('serveCopyMessage'), function () { copy(kept, key); }, '', true))) : line;
+    }
     if (!isFailed || !last) return line;
     return add(el('div', 'receipt-box'), line, add(el('div', 'acts'), button(w('serveRetry'), function () { last.again(); }), button(w('serveCopyMessage'), function () { copy(last.text, key); }, '', true)));
   }
