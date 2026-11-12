@@ -15,7 +15,7 @@ export const messagingReceiver = {
 // The receiver's part of the generated plugin: module-level code that the plugin's apply wires to the
 // agent/created, agent/status and agent/disposed events. It uses the plugin's own hookError.
 export const deepseekReceiverSource = (node: string, board: string, progress: string, home: string): string => `import { randomUUID } from 'node:crypto'
-import { readFileSync, watch } from 'node:fs'
+import { existsSync, readFileSync, watch } from 'node:fs'
 import { join } from 'node:path'
 import { spawn as spawnMailbox } from 'node:child_process'
 // One call to the board script's --mailbox; its one JSON line, or null when it failed or took too long.
@@ -110,13 +110,20 @@ const mailboxReceiver = () => {
     watcher = null
     folder = directory
     try {
-      watcher = watch(directory, { persistent: false }, (_event, name) => {
+      const current = watch(directory, { persistent: false }, (_event, name) => {
+        // A removed folder can keep reporting itself indefinitely on Windows.
+        if (name !== 'messages.json' && !existsSync(directory)) {
+          try { current.close() } catch {}
+          if (watcher === current) watcher = null
+          return
+        }
         if (name != null && name !== 'messages.json') return
         clearTimeout(pending)
         pending = setTimeout(check, 250)
         pending.unref?.()
       })
-      watcher.on('error', () => { try { watcher?.close() } catch {} watcher = null })
+      watcher = current
+      current.on('error', () => { try { current.close() } catch {} if (watcher === current) watcher = null })
     } catch { watcher = null }
   }
   // With no folder to watch yet (no board has run), each idle session asks once a minute; with one, every
