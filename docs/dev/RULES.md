@@ -77,6 +77,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 ## R6. When something fails
 
 - When the cause is still unknown after two fix attempts, stop and write a `Question:` on the issue.
+- When two review rounds in a row find new cases of the same kind, the author stops patching after the second, and the maintainer gets a Fable diagnosis of the design ([team-process.md](team-process.md#from-claim-to-merge)).
 - A raised timeout, a skipped test or an added retry is never the fix for a flaky test.
 
 ## R7. Releases go out by themselves
