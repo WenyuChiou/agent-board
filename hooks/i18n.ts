@@ -161,7 +161,7 @@ export const ZH_TW = {
     "next": "接下來：",
     "apply": "套用這些變更：{command}",
     "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
-    "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系統用 command -v codex 找到它，再替換這個預覽指令中的 {codex}：{command} --codex-trust --codex-bin {codex}。",
+    "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系統用 command -v codex 找到它，再替換這個預覽指令中的 {codex}：{command} --codex-trust --codex-bin {codex}",
     "codexPath": "<Codex 的完整路徑>",
     "hermes": "Hermes Agent：Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} --hermes-trust 預覽，再加上 --apply 重新執行同一命令。",
     "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛。",

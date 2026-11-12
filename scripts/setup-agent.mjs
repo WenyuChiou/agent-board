@@ -66,7 +66,7 @@ const summaries = [
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
     "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works).",
-    "codexMissing": "Codex: setup could not find Codex. Find it with where.exe codex on Windows or command -v codex elsewhere, then replace {codex} in this preview command: {command} --codex-trust --codex-bin {codex}.",
+    "codexMissing": "Codex: setup could not find Codex. Find it with where.exe codex on Windows or command -v codex elsewhere, then replace {codex} in this preview command: {command} --codex-trust --codex-bin {codex}",
     "codexPath": "<full path to codex>",
     "hermes": "Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command} --hermes-trust, then run it again with --apply.",
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin.",
@@ -125,7 +125,7 @@ const summaries = [
     "next": "接下來：",
     "apply": "套用這些變更：{command}",
     "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
-    "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系統用 command -v codex 找到它，再替換這個預覽指令中的 {codex}：{command} --codex-trust --codex-bin {codex}。",
+    "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系統用 command -v codex 找到它，再替換這個預覽指令中的 {codex}：{command} --codex-trust --codex-bin {codex}",
     "codexPath": "<Codex 的完整路徑>",
     "hermes": "Hermes Agent：Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} --hermes-trust 預覽，再加上 --apply 重新執行同一命令。",
     "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛。",
@@ -184,7 +184,7 @@ const summaries = [
     "next": "接下来：",
     "apply": "应用这些更改：{command}",
     "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
-    "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系统用 command -v codex 找到它，再替换这个预览命令中的 {codex}：{command} --codex-trust --codex-bin {codex}。",
+    "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系统用 command -v codex 找到它，再替换这个预览命令中的 {codex}：{command} --codex-trust --codex-bin {codex}",
     "codexPath": "<Codex 的完整路径>",
     "hermes": "Hermes Agent：Hermes 会问一次是否信任看板的 hooks，请回答 y。在无法询问的聊天渠道中，先运行 {command} --hermes-trust 预览，再加上 --apply 重新运行同一命令。",
     "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件。",
@@ -559,10 +559,10 @@ const main = () => {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
     const approvals = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
       const plan = plans[selected.indexOf(agent)]
-      if (hasChanges && !changedAgents.includes(agent)) return false
+      if (isRepair && !changedAgents.includes(agent)) return false
       return plan.managedBy !== 'connector' && (plan.changes.length || !isTrusted(plan, agent, agent === 'codex' ? codex : undefined))
     })
-    // Only what a yes would do: no skipped agent and no agent whose own files are already current.
+    // Keep file work and explicit host approvals separate: current files can still need trust.
     const will = [
       ...(sharedChanges.length ? [sharedLine] : []),
       ...agentLines.filter((line, i) => !plans[i].conflicts.length && changesFor(plans[i], false).length).map(line => line.split('\n')[0]),
@@ -597,14 +597,17 @@ const main = () => {
       }
       for (const agent of approvals) {
         const extra = [`--${agent}-trust`, ...(agent === 'codex' && codex ? ['--codex-bin', codex] : []), '--apply', '--json']
-        const next = [boardCommand, ...common.map(quote), ...extra.filter(word => word !== '--json').map(quote), ...(agent === 'codex' && !codex ? ['--codex-bin <path-to-codex>'] : [])].join(' ')
-        // Hooks whose files were not written cannot be approved; say so instead of leaving the part out.
+        const next = [boardCommand, ...common.map(quote), ...extra.filter(word => word !== '--json').map(quote), ...(agent === 'codex' && !codex ? ['--codex-bin', quote(words('codexPath'))] : [])].join(' ')
+        // A failed file apply cannot proceed to trust; keep that promised part visible as failed.
         if (!completed.includes(agent)) {
           report(words('trustPart', { host: names[agent] }), false, next)
           continue
         }
         // A repair may restore the exact hooks the host already trusts; a yes need not trust them twice.
-        if (isRepair && isTrusted(plans[selected.indexOf(agent)], agent, agent === 'codex' ? codex : undefined)) continue
+        if (isRepair && isTrusted(plans[selected.indexOf(agent)], agent, agent === 'codex' ? codex : undefined)) {
+          report(words('trustPart', { host: names[agent] }), true, next)
+          continue
+        }
         const result = boardRun(plans[selected.indexOf(agent)], agent, extra)
         report(words('trustPart', { host: names[agent] }), !result.error && result.status === 0, next)
       }
@@ -674,7 +677,7 @@ const main = () => {
       const plan = results[selected.indexOf(agent)]
       if (plan.managedBy === 'connector') continue
       const hasAgentChanges = changedAgents.includes(agent)
-      if (hasChanges && !hasAgentChanges) continue
+      if (isRepair && !hasAgentChanges) continue
       // Narrower than detection: this path goes to --codex-bin, which cannot start a .bat or .com.
       const codex = agent === 'codex' ? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
       // A repeat run of an unchanged install asks Codex or Hermes itself whether the board's hooks are trusted,

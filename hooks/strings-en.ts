@@ -123,7 +123,7 @@ export const EN: Strings = {
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
     "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works).",
-    "codexMissing": "Codex: setup could not find Codex. Find it with where.exe codex on Windows or command -v codex elsewhere, then replace {codex} in this preview command: {command} --codex-trust --codex-bin {codex}.",
+    "codexMissing": "Codex: setup could not find Codex. Find it with where.exe codex on Windows or command -v codex elsewhere, then replace {codex} in this preview command: {command} --codex-trust --codex-bin {codex}",
     "codexPath": "<full path to codex>",
     "hermes": "Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command} --hermes-trust, then run it again with --apply.",
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin.",

@@ -1496,7 +1496,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // Name the Codex this check just reached: on Windows, command -v and where.exe's first line can be an npm shim that cannot start.
     else {
       // Keep the missing-program placeholder readable even when the install arguments need code-point quoting.
-      const trustCommand = executable ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable])
+      const trustCommand = host && executable ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable])
+        : executable ? undefined
         : `${boardRun(process.argv[1]!, args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json' && arg !== '--plain'))} --codex-trust --codex-bin ${quote(s.setupSummary.codexPath)}`
       process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup', ['--plain']), trustCommand, !executable))
     }

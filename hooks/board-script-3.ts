@@ -1764,7 +1764,7 @@ export const LINES = [
 "    if (args.includes(\"--json\"))",
 "      output(result);",
 "    else {",
-"      const trustCommand = executable ? nextCommand(\"--codex-trust\", explicitBin ? [] : [\"--codex-bin\", executable]) : `${boardRun(process.argv[1], args.filter((arg) => arg !== mode && arg !== \"--apply\" && arg !== \"--json\" && arg !== \"--plain\"))} --codex-trust --codex-bin ${quote(s.setupSummary.codexPath)}`;",
+"      const trustCommand = host && executable ? nextCommand(\"--codex-trust\", explicitBin ? [] : [\"--codex-bin\", executable]) : executable ? undefined : `${boardRun(process.argv[1], args.filter((arg) => arg !== mode && arg !== \"--apply\" && arg !== \"--json\" && arg !== \"--plain\"))} --codex-trust --codex-bin ${quote(s.setupSummary.codexPath)}`;",
 "      process.stdout.write(codexDoctorOutput(result, s, nextCommand(\"--codex-setup\", [\"--plain\"]), trustCommand, !executable));",
 "    }",
 "    return true;",
