@@ -108,7 +108,7 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
     if (!await verify()) throw new Error('TARGET_MISMATCH')
     await request('thread/resume', { threadId: thread, excludeTurns: true })
     session = await boardClient(boardUrl).attach({
-      agent: 'codex', session: thread, turn, surface, verify, onError,
+      agent: 'codex', session: thread, turn, surface, verify, onError, reclaim: true,
       deliver: async (message, accepted, begin) => {
         if (message.turn !== turn || !await verify()) throw new Error('TARGET_MISMATCH')
         let ackEntry

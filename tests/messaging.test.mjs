@@ -4343,6 +4343,30 @@ test('a Codex receiver that another connection contested leaves and joins again 
   } finally { await receiver.close() }
 }))
 
+test('a proxy connection that joined after the automatic receiver is not left contested once the receiver has left', () => codexFixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, {})
+  const receiver = codexReceiver(board, daemon)
+  const fake = join(dir, 'proxy.mjs')
+  const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
+  writeFileSync(fake, `import { serveWebSocketProxy } from ${JSON.stringify(mock)}
+serveWebSocketProxy({ onMessage: (value, emit) => {
+  if (value.method === 'initialize') emit({ id: value.id, result: {} })
+  if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: [${JSON.stringify(codexCurrent)}], nextCursor: null } })
+  if (value.method === 'thread/resume') emit({ id: value.id, result: { thread: { id: value.params.threadId } } })
+} })
+`)
+  let connector
+  try {
+    const first = await codexConnection(board)
+    connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread: codexCurrent, turn: 'turn1', surface: SURFACE_IDS.codexProxy })
+    // Both are contested; the automatic receiver leaves. The proxy connection asks again and the board no longer finds it contested.
+    await waitFor(async () => !(await board.call('/api/board')).body.messaging.connections.some(one => one.id === first.id))
+    const joined = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === codexCurrent && one.surface === SURFACE_IDS.codexProxy && !one.contested))
+    // Whatever else the board decides about this send, it no longer refuses it as contested.
+    assert.notEqual((await board.call('/api/messages/send', { id: codexId('AB-CX-001'), target: joined.id, turn: 'turn1', text: 'Check the build and tell me what failed.' })).body.error, 'CONTESTED')
+  } finally { await connector?.close(); await receiver.close() }
+}))
+
 test('a progress read that fails for a moment keeps the receiver and its queued message', () => codexFixture(async (board, dir) => {
   const endFlag = join(dir, 'end-turn')
   const daemon = codexDaemon(dir, { status: 'active', endFlag })
