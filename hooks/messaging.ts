@@ -33,8 +33,77 @@ export type Message = {
   redelivered?: number
   // The id of the question this message answers, set only by the board: a kept question finds its own receipt by it.
   answers?: string
+  // The route line the board showed when it sent this message (set only by the board), so a receipt is worded
+  // for the route the message took, not for whatever the card shows after its mailbox has expired.
+  line?: RouteLine
+  // The surface the board checked the route for (set only by the board). Another surface of the same session
+  // cannot claim the message, since the record shown for the first says nothing of it.
+  surface?: string
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
+// When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
+// now (goes in at once), stepEnd (when its current step ends), nextTurn (at its next turn; it does not
+// wake it), chatOpen (when this chat is opened again), reopen (the board reopens the session and sends),
+// none (cannot receive yet). `record` is the docs/validation note that showed the route live, or null.
+export type RouteLine = 'now' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none'
+export const ROUTE_LINES: readonly RouteLine[] = ['now', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
+export type RowState = 'idle' | 'working' | 'ended'
+export type RouteKind = 'live' | 'mailbox' | 'turn'
+export const SURFACE_IDS = {
+  claude: 'Claude Code', codexProxy: 'Codex local proxy', codexSession: 'Codex owned session', codexDaemon: 'Codex daemon',
+  antigravityStream: 'Antigravity owned CLI stream', antigravityTui: 'agy TUI', antigravityIde: 'IDE',
+  cursor: 'IDE (Composer)', cli: 'CLI', web: 'Web', tui: 'TUI', unknown: 'unknown',
+} as const
+// The surface of an agent's own MCP pull (board_inbox); it is not a route surface a note can cover.
+export const MCP_SURFACE = 'mcp'
+// A note covers only the surfaces on which its route was recorded.
+export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[] }
+export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route> }
+type SendRefusal = 'NO_TARGET' | 'SHADOWED' | 'CONTESTED' | 'OFFLINE' | 'STATE_UNKNOWN' | 'SURFACE_UNKNOWN' | 'NO_RECORD'
+export type SendDecision =
+  | { canSend: true; line: RouteLine; target: Connection; state: RowState }
+  | { canSend: false; line: RouteLine; reason: SendRefusal }
+
+const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteKind, state: RowState): Route | undefined =>
+  records.find(one => one.agent === (agent === '' ? 'claude' : agent) && one.kind === kind)?.routes[state]
+
+export const sendDecision = (
+  targetId: string, connections: readonly Connection[], mailboxes: readonly Connection[],
+  stateOfSession: (agent: string, session: string) => RowState | undefined,
+  routes: readonly ReceiverRoutes[], now: number,
+): SendDecision => {
+  const target = connections.find(one => one.id === targetId) ?? mailboxes.find(one => one.id === targetId)
+  if (target === undefined) return { canSend: false, line: 'none', reason: 'NO_TARGET' }
+  const live = connections.filter(one => address(one.agent, one.session) === address(target.agent, target.session) && one.expires > now)
+  if (mailboxes.includes(target) && live.length > 0) return { canSend: false, line: 'none', reason: 'SHADOWED' }
+  if (target.contested || live.length > 1) return { canSend: false, line: 'none', reason: 'CONTESTED' }
+  if (target.expires <= now) return { canSend: false, line: 'none', reason: 'OFFLINE' }
+  const state = stateOfSession(target.agent, target.session)
+  if (state === undefined) return { canSend: false, line: 'none', reason: 'STATE_UNKNOWN' }
+  const route = routeOf(routes, target.agent, routeKind(target.scope), state)
+  if (route === undefined) return { canSend: false, line: 'none', reason: 'NO_RECORD' }
+  if (route.line === 'none' || typeof route.record !== 'string' || route.record === '') return { canSend: false, line: route.line, reason: 'NO_RECORD' }
+  if (target.surface === SURFACE_IDS.unknown || !Object.values(SURFACE_IDS).some(surface => surface === target.surface) || !Array.isArray(route.surfaces) || !route.surfaces.includes(target.surface)) return { canSend: false, line: route.line, reason: 'SURFACE_UNKNOWN' }
+  return { canSend: true, line: route.line, target, state }
+}
+// Whether a list read from outside (the tests' stand-in file) holds well-formed receiver routes: every entry
+// names an agent and a kind, and every state has a known line and a record that is a string or null. Anything
+// else is refused whole, so a missing key cannot read as a record.
+export const isReceiverRoutes = (value: unknown): value is ReceiverRoutes[] => Array.isArray(value) && value.every(one => {
+  if (one === null || typeof one !== 'object') return false
+  const { agent, kind, routes } = one as Record<string, unknown>
+  if (typeof agent !== 'string' || agent === '' || kind !== 'live' && kind !== 'mailbox' && kind !== 'turn' || routes === null || typeof routes !== 'object') return false
+  return (['idle', 'working', 'ended'] as const).every(state => {
+    const route = (routes as Record<string, unknown>)[state]
+    if (route === null || typeof route !== 'object') return false
+    const { line, record, surfaces } = route as Record<string, unknown>
+    return ROUTE_LINES.includes(line as RouteLine) && (record === null || typeof record === 'string')
+      && Array.isArray(surfaces) && surfaces.every(name => typeof name === 'string')
+      && (!(typeof record === 'string' && record !== '') || surfaces.length > 0)
+  })
+})
+// A connection's scope names its kind of receiver: a session the host owns, a hook mailbox, or one turn.
+export const routeKind = (scope: Connection['scope']): RouteKind => scope === 'mailbox' ? 'mailbox' : scope === 'session' ? 'live' : 'turn'
 export const isMailboxTarget = (id: string): boolean => /^mailbox_[0-9a-f]{24}$/.test(id)
 const isHookDelivered = (one: Message): boolean => one.status === 'accepted' && isMailboxTarget(one.target) && !one.awaitsAck
 // A hook can stop waiting after the board has claimed a message for it, and then nobody accepts it. A
@@ -71,7 +140,7 @@ export const senderLabel = (from: string): string => {
 export const textHash = (text: string): string => sha256(JSON.stringify(text))
 // What anyone but the receiver is shown of a message: no nonce or hash, and a reply without the
 // nonce its ACK line carries.
-export const shownMessage = ({ nonce, hash: _hash, framingNonce: _framingNonce, ref: _ref, ...one }: Message): Omit<Message, 'nonce' | 'hash' | 'framingNonce' | 'ref'> => ({
+export const shownMessage = ({ nonce, hash: _hash, framingNonce: _framingNonce, ref: _ref, surface: _surface, ...one }: Message): Omit<Message, 'nonce' | 'hash' | 'framingNonce' | 'ref' | 'surface'> => ({
   ...one,
   reply: nonce !== '' && (one.reply === `ACK ${nonce}` || one.reply.startsWith(`ACK ${nonce} `)) ? one.reply.slice(`ACK ${nonce}`.length).trimStart() : one.reply,
 })
@@ -162,7 +231,7 @@ export const dismissMessage = (state: MessageState, id: string, now: number): Me
   }) : message) }
 }
 
-export const queueMessage = (state: MessageState, input: Record<string, unknown>, from: string, target: Connection | undefined, now: number, origin: Origin = 'local', framingNonce?: string): { state: MessageState; message: Message } => {
+export const queueMessage = (state: MessageState, input: Record<string, unknown>, from: string, target: Connection | undefined, now: number, origin: Origin = 'local', framingNonce?: string, line?: RouteLine, surface?: string): { state: MessageState; message: Message } => {
   messageFields(input, ['id', 'target', 'turn', 'text', 'answers'])
   if (input.answers !== undefined && !isAnswersId(input.answers)) throw new Error('INVALID_ID')
   const answers = from === 'board' ? input.answers : undefined
@@ -197,7 +266,7 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
   if (state.messages.filter(isOpen).length >= OPEN_CAP || state.messages.length >= OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('MESSAGE_LIMIT')
-  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
+  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
   return { state: { ...state, messages: [...state.messages, message] }, message }
 }
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string): { state: MessageState; messages: Message[] } => {
@@ -206,8 +275,10 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   // A lapsed claim stops blocking only the binding that takes it again; any other still waits behind it.
   const isRetaken = (one: Message): boolean => isLapsed(one, now) && one.target === target.id && one.turn === target.turn
   const busy = state.messages.some(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isRetaken(one))
-  const canClaim = (one: Message): boolean => one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))
-    || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === 'queued'
+  // A message the board checked a route for goes only to a claimant on that same surface; on any other it stays queued.
+  // The agent's own MCP pull is exempt: it asks for its messages itself, so nothing starts a turn on an unchecked surface.
+  const canClaim = (one: Message): boolean => (one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE) && (one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))
+    || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === 'queued')
   const messages = busy ? [] : state.messages.filter(canClaim).slice(0, 1)
   if (messages.length === 0) return { state, messages }
   // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.

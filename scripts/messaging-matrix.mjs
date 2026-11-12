@@ -1,6 +1,7 @@
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { SURFACE_IDS } from '../hooks/messaging.ts'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const start = '<!-- messaging-matrix:start -->'
@@ -28,30 +29,33 @@ const targets = [
 
 const words = {
   en: {
-    headers: ['Host', 'Surface', 'Tier', 'Primitive', 'Status', 'Live run', 'Receiver'],
-    intro: 'Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.',
+    headers: ['Host', 'Surface', 'Tier', 'Primitive', 'Status', 'Live run', 'Receiver', 'Idle', 'Working', 'Ended'],
+    intro: 'Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface. Idle, Working and Ended give the route for a session in that state: `now`, `stepEnd` (when its step ends), `nextTurn`, `chatOpen` (when the chat opens again), `reopen` or `none`, with the live note that showed it; the board offers Send only on a route with a note.',
     notTested: 'Not tested',
     earlier: 'Earlier run, not counted:',
     unknown: 'Unknown',
     none: 'None',
+    noRecord: 'no live note',
     statuses: { Verified: 'Verified', Implemented: 'Implemented', Proposed: 'Proposed' },
   },
   'zh-CN': {
-    headers: ['宿主', '运行界面', '层级', '原语', '状态', '现场运行', '接收器'],
-    intro: '由接收器记录生成：`node scripts/messaging-matrix.mjs --write`。进度报告与消息接收分别验证。Verified 需要该运行界面的 `<date>-<host>-live.md` 文件；合成测试只能证明 Implemented。未连接的目标使用 Tier 4 / [P5] 复制回退，不代表已有原生接收器。“未知”表示路线图没有为该运行界面指定原语。',
+    headers: ['宿主', '运行界面', '层级', '原语', '状态', '现场运行', '接收器', '空闲', '工作中', '已结束'],
+    intro: '由接收器记录生成：`node scripts/messaging-matrix.mjs --write`。进度报告与消息接收分别验证。Verified 需要该运行界面的 `<date>-<host>-live.md` 文件；合成测试只能证明 Implemented。未连接的目标使用 Tier 4 / [P5] 复制回退，不代表已有原生接收器。“未知”表示路线图没有为该运行界面指定原语。空闲、工作中、已结束列出接收器在该状态下的路线：`now`、`stepEnd`（这一步结束时）、`nextTurn`、`chatOpen`（会话再次打开时）、`reopen` 或 `none`，并附上证明它的现场记录；看板只在有记录的路线上提供发送。',
     notTested: '未测试',
     earlier: '早期运行（不计入）：',
     unknown: '未知',
     none: '无',
+    noRecord: '无现场记录',
     statuses: { Verified: 'Verified（已验证）', Implemented: 'Implemented（已实现）', Proposed: 'Proposed（规划中）' },
   },
   'zh-TW': {
-    headers: ['宿主', '執行介面', '層級', '原語', '狀態', '現場執行', '接收器'],
-    intro: '由接收器紀錄產生：`node scripts/messaging-matrix.mjs --write`。進度回報與訊息接收分別驗證。Verified 需要該執行介面的 `<date>-<host>-live.md` 檔案；合成測試只能證明 Implemented。未連線的目標使用 Tier 4 / [P5] 複製備援，不代表已有原生接收器。「未知」表示路線圖沒有為該執行介面指定原語。',
+    headers: ['宿主', '執行介面', '層級', '原語', '狀態', '現場執行', '接收器', '閒置', '工作中', '已結束'],
+    intro: '由接收器紀錄產生：`node scripts/messaging-matrix.mjs --write`。進度回報與訊息接收分別驗證。Verified 需要該執行介面的 `<date>-<host>-live.md` 檔案；合成測試只能證明 Implemented。未連線的目標使用 Tier 4 / [P5] 複製備援，不代表已有原生接收器。「未知」表示路線圖沒有為該執行介面指定原語。閒置、工作中、已結束列出接收器在該狀態下的路線：`now`、`stepEnd`（這一步結束時）、`nextTurn`、`chatOpen`（對話再次開啟時）、`reopen` 或 `none`，並附上證明它的現場紀錄；看板只在有紀錄的路線上提供傳送。',
     notTested: '未測試',
     earlier: '早期執行（不計入）：',
     unknown: '未知',
     none: '無',
+    noRecord: '無現場紀錄',
     statuses: { Verified: 'Verified（已驗證）', Implemented: 'Implemented（已實作）', Proposed: 'Proposed（規劃中）' },
   },
 }
@@ -71,7 +75,12 @@ const sourceFiles = directory => {
 
 export const hasReceiverRecord = text => /^export\s+const\s+messagingReceiver\b|^export\s*\{[^}]*\bmessagingReceiver\b/m.test(text)
 
+const lines = ['now', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
+const states = ['idle', 'working', 'ended']
+const isRoute = route => route && lines.includes(route.line) && (route.record === null || isText(route.record)) && Array.isArray(route.surfaces) && (route.record === null || route.surfaces.length > 0) && route.surfaces.every(isText)
+const isRoutes = record => record.routes === undefined || isText(record.agent) && ['live', 'mailbox', 'turn'].includes(record.kind) && record.routes !== null && typeof record.routes === 'object' && states.every(state => isRoute(record.routes[state]))
 const isText = value => typeof value === 'string' && value.trim() !== '' && !/[\r\n]/.test(value)
+const surfaceIds = new Set(Object.values(SURFACE_IDS))
 
 export const readReceiverRecords = async (directory = root) => {
   const records = []
@@ -79,8 +88,11 @@ export const readReceiverRecords = async (directory = root) => {
     if (!hasReceiverRecord(readFileSync(path, 'utf8'))) continue
     // Record modules must be safe to import: no host startup or model calls at load time.
     const { messagingReceiver: record } = await import(pathToFileURL(path).href)
-    if (!record || !isText(record.host) || ![1, 2, 3, 4].includes(record.tier) || !/^(?:\[P[1-5]\]|unknown)$/.test(record.primitive) || typeof record.isImplemented !== 'boolean' || !Array.isArray(record.surfaces) || !record.surfaces.length || record.surfaces.some(surface => !isText(surface?.name) || surface.evidence !== null && !isText(surface.evidence) || surface.earlier !== undefined && !isText(surface.earlier))) {
+    if (!record || !isText(record.host) || ![1, 2, 3, 4].includes(record.tier) || !/^(?:\[P[1-5]\]|unknown)$/.test(record.primitive) || typeof record.isImplemented !== 'boolean' || !Array.isArray(record.surfaces) || !record.surfaces.length || record.surfaces.some(surface => !isText(surface?.name) || surface.evidence !== null && !isText(surface.evidence) || surface.earlier !== undefined && !isText(surface.earlier) || record.routes !== undefined && !surfaceIds.has(surface.id)) || !isRoutes(record)) {
       throw new Error('Invalid messaging receiver record: ' + relative(directory, path))
+    }
+    if (record.routes !== undefined && states.some(state => record.routes[state].surfaces.some(id => !record.surfaces.some(surface => surface.id === id)))) {
+      throw new Error('A route names a surface its record does not list: ' + relative(directory, path))
     }
     records.push({ ...record, source: relative(directory, path).split('\\').join('/') })
   }
@@ -113,8 +125,9 @@ export const receiverRows = (records, directory = root) => records.flatMap(recor
   // Copy needs no receiver, so a tier 4 surface can be run with nothing implemented.
   const isVerified = (record.isImplemented || record.tier === 4) && hasLiveRun(directory, surface.evidence, record.host)
   return {
-    host: record.host, surface: surface.name, tier: record.tier, primitive: record.primitive,
+    host: record.host, surface: surface.name, surfaceId: surface.id, tier: record.tier, primitive: record.primitive,
     status: isVerified ? 'Verified' : record.isImplemented ? 'Implemented' : 'Proposed',
+    routes: record.routes ?? null,
     evidence: isVerified ? surface.evidence : null, earlier: !isVerified && hasEarlierRun(directory, surface.earlier) ? surface.earlier : null, source: record.source,
   }
 }))
@@ -122,11 +135,19 @@ export const receiverRows = (records, directory = root) => records.flatMap(recor
 const cell = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('|', '&#124;').replaceAll('[', '&#91;').replaceAll(']', '&#93;')
 const link = (path, file) => `[${cell(path)}](${file.startsWith('docs/') ? '../' : ''}${path.split('/').map(encodeURIComponent).join('/')})`
 
+// A route's line, and the note that showed it live when the file is there.
+// A route recorded for some surfaces only shows its note on those rows.
+const routeCell = (route, file, directory, s, surface) => {
+  if (!route) return s.none
+  if (route.record === null || !route.surfaces.includes(surface)) return `${route.line} · ${s.noRecord}`
+  return `${route.line} · ${hasEarlierRun(directory, route.record) ? link(route.record, file) : s.noRecord}`
+}
+
 export const renderMatrix = (records, file, directory = root) => {
   const s = words[file.includes('.zh-CN.') ? 'zh-CN' : file.includes('.zh-TW.') ? 'zh-TW' : 'en']
   const rows = receiverRows(records, directory)
   for (const [host, surfaces] of targets) for (const surface of surfaces) {
-    if (!rows.some(row => row.host === host && row.surface === surface)) rows.push({ host, surface, tier: 4, primitive: '[P5]', status: 'Proposed', evidence: null, source: null })
+    if (!rows.some(row => row.host === host && row.surface === surface)) rows.push({ host, surface, tier: 4, primitive: '[P5]', status: 'Proposed', evidence: null, routes: null, source: null })
   }
   rows.sort((a, b) => a.host.localeCompare(b.host, 'en') || a.surface.localeCompare(b.surface, 'en') || String(a.source).localeCompare(String(b.source), 'en'))
   return [
@@ -137,6 +158,7 @@ export const renderMatrix = (records, file, directory = root) => {
       cell(row.host), cell(row.surface), row.tier, row.primitive === 'unknown' ? s.unknown : cell(row.primitive), s.statuses[row.status],
       row.evidence ? link(row.evidence, file) : row.earlier ? s.earlier + ' ' + link(row.earlier, file) : s.notTested,
       row.source ? link(row.source, file) : s.none,
+      ...states.map(state => routeCell(row.routes?.[state], file, directory, s, row.surfaceId)),
     ].join(' | ') + ' |'),
     '', end,
   ].join('\n')

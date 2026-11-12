@@ -9,11 +9,14 @@ export const messagingReceiver = {
   host: 'Codex',
   // No `<date>-codex-live.md` yet: the synthetic tests only establish Implemented (docs/validation/2026-11-06-send-to-codex.md).
   surfaces: [{ name: 'Daemon', evidence: null }],
+  // No `routes` yet: the board offers Send only on a route a dated live note has shown (#1351), and none has for this receiver.
   tier: 1,
   primitive: '[P1]',
   isImplemented: true,
 }
 
+// SURFACE_IDS.codexDaemon in hooks/messaging.ts; a test pins the two together. This file runs under plain Node and cannot import the .ts table.
+const SURFACE = 'Codex daemon'
 const THREAD = /^[a-f0-9-]{36}$/i
 // A turn that never ends cannot hold a message for ever; the board's own limit on an unanswered message is 30 minutes.
 const ACK_LIMIT_MS = 30 * 60_000
@@ -225,7 +228,7 @@ export const startCodexReceiver = ({
         return isLoaded
       }
       one.receiver = await client.attach({
-        agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: 'Codex CLI', unclaimed: true, verify, onError,
+        agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: SURFACE, unclaimed: true, verify, onError,
         // Busy is not a refusal: the lease stays alive and the message waits in the board until the turn ends.
         canReceive: async () => {
           if (isSteerOn && !state.pending && state.status === 'active' && state.turn === null) await learnTurn()

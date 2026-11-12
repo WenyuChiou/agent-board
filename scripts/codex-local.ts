@@ -29,7 +29,7 @@ import { windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
-import { deliveryText } from '../hooks/messaging'
+import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { deliverTurnEvent } from './hook-delivery'
 import { hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
@@ -508,7 +508,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const mailbox = hookMailbox(directory, 5000)
     const answer = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value)}\n`) }
     if (action === 'take') {
-      const message = await mailbox.turn(agent, session, 'dsh', Date.now())
+      const surface = flag('--surface')
+      const message = await mailbox.turn(agent, session, surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui ? surface : SURFACE_IDS.unknown, Date.now())
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
@@ -637,6 +638,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const folder = filesByFolder(mode, agent) ? folderProject(rawCwd) : ''
       // Only metadata selected below is retained. Save no prompts, tool inputs,
       // or permission decisions from a hook payload, and nothing of a reply but its closing question.
+      // Board approvals (#1318) are a separate route, Claude Code's plugin hook: its journal line
+      // keeps the decision, the tool, the command's first words and its hash, never the command.
       // The plan mirror is the
       // one place a tool input is read (--plan-event, before this): only each step's text and status,
       // which a report carries. transcript_path is

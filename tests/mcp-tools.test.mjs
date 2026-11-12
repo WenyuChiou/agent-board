@@ -24,7 +24,7 @@ const { sha256 } = await import('../hooks/sha256.ts')
 const { BOARD_JSON_SCHEMA } = await import('../hooks/board-json.ts')
 const { createMessaging, parseMessageStore, mcpMailbox, hookMailbox } = await import('../scripts/board-messaging.ts')
 const { enrollMcp, takeMailboxMessage, mailboxId } = await import('../hooks/hook-messages.ts')
-const { queueMessage, deliveryText, shownMessage } = await import('../hooks/messaging.ts')
+const { queueMessage, deliveryText, shownMessage, SURFACE_IDS } = await import('../hooks/messaging.ts')
 const { folderIdentity } = await import('../scripts/folder-identity.ts')
 const cwdDigest = cwd => { const identity = folderIdentity(cwd); return identity.folderCanonicalDigest ?? identity.folderDigest }
 const { EN } = await import('../hooks/strings-en.ts')
@@ -38,12 +38,19 @@ const call = async (server, name, args = {}, now = 1000) => {
   return { ...response, level: response.frame.result?._meta?.level, data: response.frame.result ? JSON.parse(response.frame.result.content[0].text) : response.frame.error }
 }
 const options = (root, extra = {}) => ({ directory: join(root, 'messages'), document: () => ({ schemaVersion: 1 }), cwd: root, version: 'test', s: EN, env: binding, parentPid: 123, processStart: () => 'start', ...extra })
+const recordedRoutes = JSON.parse(readFileSync(new URL('./helpers/recorded-routes.json', import.meta.url), 'utf8'))
+const routeGate = (...sessions) => ({
+  routes: recordedRoutes,
+  stateOfSession: (agent, session) => sessions.includes(`${agent}:${session}`) ? 'working' : undefined,
+})
+// A hook supplies a recorded surface before a board send; it must not take a queued message.
+const showMailbox = (store, agent, session, surface, now) => assert.equal(store.act('mailbox-turn', { agent, session, surface }, now).message, null)
 const prepare = root => {
   mkdirSync(join(root, 'messages'))
   writeFileSync(join(root, 'progress.md'), `## ${basename(root)}\n<!-- auto session=synthetic agent=codex state=working updated=2026-11-03T12:00:00Z -->\n### Example\n- [ ] Next\n<!-- /auto session=synthetic -->\n`)
 }
-const hub = async root => {
-  const store = createMessaging(join(root, 'messages'))
+const hub = async (root, gate) => {
+  const store = createMessaging(join(root, 'messages'), false, gate)
   const server = createServer(async (req, res) => {
     let raw = ''
     for await (const chunk of req) raw += chunk
@@ -255,9 +262,9 @@ test('a failure to record acceptance leaves the message uncertain and keeps the 
   let store
   try {
     prepare(root)
-    store = createMessaging(join(root, 'messages'))
+    store = createMessaging(join(root, 'messages'), false, routeGate('codex:alpha'))
     const now = Date.now()
-    store.act('mailbox-turn', { agent: 'codex', session: 'alpha', surface: 'hook' }, now)
+    showMailbox(store, 'codex', 'alpha', SURFACE_IDS.cli, now)
     const target = store.snapshot(now).mailboxes[0].id
     store.act('send', { id: 'held', target, turn: 'session', text: 'hello' }, now)
     store.close()
@@ -288,7 +295,7 @@ test('peer board_send enforces same-workspace folderDigest, hop limit 2, pairwis
   let store
   try {
     prepare(root)
-    store = createMessaging(join(root, 'messages'))
+    store = createMessaging(join(root, 'messages'), false, routeGate('codex:alpha', 'cursor:beta'))
     const digest = cwdDigest(root)
     const enroll = (agent, session, folderDigest = digest) => store.act('mcp-enroll', { agent, session, surface: 'mcp', owner: '123:start', folderDigest, until: 61000 }, 1000)
     const send = (id, agent = 'cursor', session = 'beta', from = 'codex:alpha', folderDigest = digest) => store.act('peer-send', { id, agent, session, from, folderDigest, text: 'hello' }, 1000)
@@ -315,6 +322,7 @@ test('peer board_send enforces same-workspace folderDigest, hop limit 2, pairwis
     assert.equal(JSON.parse(readFileSync(join(root, 'messages', 'messages.json'))).pausePeerMessages, true)
     store.act('peer-pause', { isPaused: false }, 1004)
     enroll('codex', 'alpha')
+    showMailbox(store, 'cursor', 'beta', SURFACE_IDS.cursor, 1005)
     const target = mailboxId('cursor', 'beta')
     store.act('send', { id: 'human', target, turn: 'session', text: 'reset' }, 1005)
     receive('cursor', 'beta', 'human')
@@ -415,14 +423,17 @@ test('only a message taken by a lease holder holds its session', async () => {
   let board
   try {
     prepare(root)
-    board = await hub(root)
+    board = await hub(root, routeGate('codex:alpha'))
     const now = Date.now(), server = createMcpServer(options(root))
     await server.start(now)
     const target = board.store.snapshot(now).mailboxes[0].id
-    const page = id => board.store.act('send', { id, target, turn: 'session', text: 'hello' }, now)
+    const page = id => {
+      showMailbox(board.store, 'codex', 'alpha', SURFACE_IDS.cli, now)
+      return board.store.act('send', { id, target, turn: 'session', text: 'hello' }, now)
+    }
     page('by-hook')
     const access = mcpMailbox(join(root, 'messages'))
-    const taken = (await access('mailbox-turn', { agent: 'codex', session: 'alpha', surface: 'hook' }, now)).message
+    const taken = (await access('mailbox-turn', { agent: 'codex', session: 'alpha', surface: SURFACE_IDS.cli }, now)).message
     await access('mailbox-accept', { agent: 'codex', session: 'alpha', id: taken.id, nonce: taken.nonce }, now)
     page('by-mcp')
     const inbox = await call(server, 'board_inbox', {}, now)
@@ -443,10 +454,11 @@ test('a process without the lease cannot take a lease holder\'s message, and an 
   let board
   try {
     prepare(root)
-    board = await hub(root)
+    board = await hub(root, routeGate('codex:alpha'))
     const now = Date.now(), holder = createMcpServer(options(root))
     await holder.start(now)
     const restricted = createMcpServer(options(root, { env: { AGENT_BOARD_AGENT: 'codex', AGENT_BOARD_SESSION_ID: 'alpha' } }))
+    showMailbox(board.store, 'codex', 'alpha', SURFACE_IDS.cli, now)
     board.store.act('send', { id: 'kept', target: board.store.snapshot(now).mailboxes[0].id, turn: 'session', text: 'hello' }, now)
     assert.equal((await call(restricted, 'board_inbox', {}, now)).data.code, 'NO_LEASE')
     assert.equal(board.store.snapshot(now).messages[0].status, 'queued')
@@ -620,15 +632,17 @@ test('without a lease the next message comes on the next call and board_ack answ
   let board
   try {
     prepare(root)
-    board = await hub(root)
+    board = await hub(root, routeGate('codex:alpha'))
     const now = Date.now()
     const server = createMcpServer(options(root, { env: { AGENT_BOARD_AGENT: 'codex', AGENT_BOARD_SESSION_ID: 'alpha' } }))
     assert.deepEqual((await call(server, 'board_inbox', {}, now)).data, { message: null })
     const target = board.store.snapshot(now).mailboxes[0].id
+    showMailbox(board.store, 'codex', 'alpha', SURFACE_IDS.cli, now)
     board.store.act('send', { id: 'one', target, turn: 'session', text: 'first' }, now)
     const first = await call(server, 'board_inbox', {}, now)
     await first.accepted()
     assert.equal(first.data.message.id, 'one')
+    showMailbox(board.store, 'codex', 'alpha', SURFACE_IDS.cli, now)
     board.store.act('send', { id: 'two', target, turn: 'session', text: 'second' }, now)
     assert.equal((await call(server, 'board_ack', { id: 'one', nonce: first.data.message.nonce }, now)).data.code, 'NO_LEASE')
     assert.equal((await call(server, 'board_inbox', {}, now)).data.message.id, 'two')
