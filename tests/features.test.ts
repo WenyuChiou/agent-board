@@ -22,6 +22,7 @@ import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
+import { SURFACE_IDS } from '../hooks/messaging'
 import { boardLanguage, isLanguageOverridden, type SettingsLang } from '../hooks/board-settings'
 import { settingsPanel } from '../hooks/page-settings'
 import { qrModules, qrText } from '../hooks/qr'
@@ -520,8 +521,8 @@ test('a working row quiet past the Working now limit can be archived on the term
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
 
-// Every route of these hosts counts as shown live: this test is about which session a card binds to, not about the receivers' records.
-const LIVE_ROUTES = ['codex', 'cursor', 'opencode'].map(agent => ({ agent, kind: 'live' as const, routes: { idle: { line: 'now' as const, record: 'docs/validation/synthetic.md' }, working: { line: 'stepEnd' as const, record: 'docs/validation/synthetic.md' }, ended: { line: 'none' as const, record: null } } }))
+// Every route of these hosts counts as shown live on the CLI surface: this test is about which session a card binds to, not about the receivers' records.
+const LIVE_ROUTES = ['codex', 'cursor', 'opencode'].map(agent => ({ agent, kind: 'live' as const, routes: { idle: { line: 'now' as const, record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.cli] }, working: { line: 'stepEnd' as const, record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.cli] }, ended: { line: 'none' as const, record: null, surfaces: [] } } }))
 
 test('independent local progress cards match only their full native session receiver', () => {
   for (const agent of ['codex', 'cursor', 'opencode'] as const) {
@@ -529,7 +530,7 @@ test('independent local progress cards match only their full native session rece
     const report = { ...codexReport(null, SESSION, { title: 'Native card binding', state: 'waiting', steps: ['- [?] Reply to this session?'] }, new Date(NOW).toISOString(), STRINGS.en), agent }
     const text = putCodexBlock('', report, owner)
     const view = buildView(parseProgress(text), [], null, NOW, 0, {}, STRINGS.en)
-    const connection = { id: 'fixture-receiver', agent, session: SESSION, surface: 'Synthetic owner', turn: 'session', scope: 'session' as const, expires: NOW + 15000 }
+    const connection = { id: 'fixture-receiver', agent, session: SESSION, surface: SURFACE_IDS.cli, turn: 'session', scope: 'session' as const, expires: NOW + 15000 }
     const online = serveModel(view, [], STRINGS.en, new Set(), false, { connections: [connection], messages: [] }, false, undefined, LIVE_ROUTES).asks[0]
     expect(online?.send).toBe('connected')
     expect(online?.session).toBe(SESSION)

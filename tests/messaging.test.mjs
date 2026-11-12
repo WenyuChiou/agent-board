@@ -17,6 +17,7 @@ import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
 import { claimMessageStore } from '../scripts/message-store-claim.ts'
 import { classifyMessageStoreFiles, isMessageStoreClean, readMessageStoreFiles } from './e2e/lib/message-store-files.mjs'
+import { block as writeBlock } from './e2e/lib/writers.mjs'
 import { privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
 
 // The server store and page modules use the host's extensionless imports; resolve only those
@@ -712,7 +713,8 @@ test('an idle or already claimed poll preserves the exact durable state', () => 
 })
 
 test('receive=false renews an authenticated lease without claiming queued work', async () => fixture(async (board, dir) => {
-  const registered = (await board.call('/api/messages/register', { agent: 'fixture', session: 'busy-session', surface: 'Synthetic busy owner', turn: 'turn1' })).body
+  transportRow(dir, 'fixture', 'busy-session')
+  const registered = (await board.call('/api/messages/register', { agent: 'fixture', session: 'busy-session', surface: SURFACE_IDS.cli, turn: 'turn1' })).body
   const credentials = { connection: registered.id, secret: registered.secret, turn: 'turn1' }
   await board.call('/api/messages/send', { ...input, target: registered.id })
   const before = (await board.call('/api/board')).body.messaging.messages[0]
@@ -745,8 +747,10 @@ test('receive=false renews an authenticated lease without claiming queued work',
 Date.now = () => originalNow() + (fs.existsSync(path.join(directory, 'message-clock-offset')) ? Number(fs.readFileSync(path.join(directory, 'message-clock-offset'), 'utf8')) : 0)
 `))
 
-for (const agent of ['codex', 'antigravity']) test(`busy native owners remain connected and can send: ${agent}`, async () => fixture(async board => {
+for (const agent of ['codex', 'antigravity']) test(`busy native owners remain connected and can send: ${agent}`, async () => fixture(async (board, dir) => {
   const session = '11111111-2222-4333-8444-555555555555'
+  transportRow(dir, agent, session, 'working')
+  transportRow(dir, 'fixture', 'target')
   let current = agent === 'codex' ? { thread: session, status: 'idle', turn: null } : { session, status: 'idle', turns: 0, step: -1 }
   let listener, nativeCalls = 0, alive = true
   const transport = {
@@ -769,7 +773,7 @@ for (const agent of ['codex', 'antigravity']) test(`busy native owners remain co
   }
   const options = { boardUrl: board.address, transport, state: () => current, verifyOwner: () => alive }
   const source = agent === 'codex' ? await attachCodexSession({ ...options, thread: session }) : await attachAntigravitySession({ ...options, session })
-  const other = await boardClient(board.address).attach({ agent: 'fixture', session: 'target', surface: 'Synthetic receiver', turn: 'turn1', verify: async () => true, deliver: async message => 'ACK ' + message.nonce })
+  const other = await boardClient(board.address).attach({ agent: 'fixture', session: 'target', surface: SURFACE_IDS.cli, turn: 'turn1', verify: async () => true, deliver: async message => 'ACK ' + message.nonce })
   try {
     current = agent === 'codex' ? { ...current, status: 'active', turn: 'native-user-turn' } : { ...current, status: 'active', step: 0 }
     await pause(2300) // An ordinary native turn crosses a real adapter poll.
@@ -864,7 +868,7 @@ const startTrace = file => {
   const read = line => { try { return JSON.parse(line) } catch { return { phase: 'unreadable line' } } }
   return text.split('\n').map(read).map(one => one.ms === undefined ? `${one.phase}@${one.at}` : `${one.phase} ${one.ms}ms@${one.at}`).join(', ')
 }
-const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messages')], routes = recorded) => {
+const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messages')], routes = testUnitRoutes) => {
   // The board uses XDG_RUNTIME_DIR only when no other account can open it.
   const runtime = join(dir, 'runtime'); mkdirSync(runtime, { recursive: true, mode: 0o700 })
   // `--serve` makes this folder private before it starts the page (runningPage reads its address
@@ -931,6 +935,17 @@ const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messa
   return { address, call, close, exited }
 }
 const readFileSyncSafe = file => { try { return readFileSync(file, 'utf8') } catch { return null } }
+// Transport sends need an exact progress row so the board can establish the receiver's state.
+const transportRow = (dir, agent, session, state = 'waiting') => {
+  const world = {
+    now: Date.now(),
+    exists: file => existsSync(join(dir, file)),
+    read: file => readFileSync(join(dir, file), 'utf8'),
+    write: (file, text) => writeFileSync(join(dir, file), text),
+  }
+  const id = createHash('sha256').update(agent + ':' + session).digest('hex').slice(0, 8)
+  writeBlock(world, { agent, session: id, resume: session, state, title: 'Transport receiver', steps: ['- [ ] Receive a message'] })
+}
 // On Windows a page killed a moment ago can still hold its folder, and rmSync does not retry that
 // error, so a failed assertion would be hidden behind it.
 const removeKilledPageFolder = async dir => {
@@ -1733,7 +1748,8 @@ test('the person can dismiss an uncertain message and the next message is handed
 })
 
 test('a queued message dismissed from the page is never handed out', async () => fixture(async (board, dir) => {
-  const registration = { agent: 'codex', session: 'dismiss-session', turn: 'turn1', surface: 'Synthetic' }
+  transportRow(dir, 'codex', 'dismiss-session')
+  const registration = { agent: 'codex', session: 'dismiss-session', turn: 'turn1', surface: SURFACE_IDS.cli }
   const registered = (await board.call('/api/messages/register', registration)).body
   const credentials = { connection: registered.id, secret: registered.secret, turn: registered.turn }
   await board.call('/api/messages/send', { ...input, target: registered.id })
@@ -1777,9 +1793,12 @@ test("a send without a source counts toward the target's cap and is never shown 
   assert.throws(() => deliveryPrompt(message), /PROMPT_REQUIRED/)
 })
 
-test('a sender that omits hops gets them from the hub, and a third hop is refused', async () => fixture(async board => {
-  const register = async session => (await board.call('/api/messages/register', { agent: 'codex', session, turn: 'turn1', surface: 'Synthetic' })).body
-  const a = await register('a'), b = await register('b'), c = await register('c')
+test('a sender that omits hops gets them from the hub, and a third hop is refused', async () => fixture(async (board, dir) => {
+  const register = async session => {
+    transportRow(dir, 'codex', session)
+    return (await board.call('/api/messages/register', { agent: 'codex', session, turn: 'turn1', surface: SURFACE_IDS.cli })).body
+  }
+  const a = await register('hop-a-session'), b = await register('hop-b-session'), c = await register('hop-c-session')
   const send = (id, to, from) => board.call('/api/messages/send', { ...input, id, target: to.id, ...(from ? { source: from.id, secret: from.secret } : {}) })
   const poll = one => board.call('/api/messages/poll', { connection: one.id, secret: one.secret, turn: 'turn1' })
   assert.equal((await send('hop1', a)).body.hops, 1)
@@ -1815,8 +1834,9 @@ test('a multi-line reply after ACK is refused and nothing past the ACK line is s
   assert.equal(accepted.messages[0].reply, 'ACK abcdef')
 })
 
-test('a contested connection cannot acknowledge a claimed message, and the board JSON never shows a nonce', async () => fixture(async board => {
-  const registration = { agent: 'codex', session: 'native1', turn: 'turn1', surface: 'Synthetic' }
+test('a contested connection cannot acknowledge a claimed message, and the board JSON never shows a nonce', async () => fixture(async (board, dir) => {
+  transportRow(dir, 'codex', 'native1')
+  const registration = { agent: 'codex', session: 'native1', turn: 'turn1', surface: SURFACE_IDS.cli }
   const a = (await board.call('/api/messages/register', registration)).body
   await board.call('/api/messages/send', { ...input, target: a.id })
   const claimed = (await board.call('/api/messages/poll', { connection: a.id, secret: a.secret, turn: a.turn })).body.messages[0]
@@ -1903,9 +1923,12 @@ test('a second registration for the same agent and session leaves the card on Co
     }
     writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=11111111-2222-4333-8444-555555555555 dir=${encodeURIComponent(dir)} state=ended updated=${new Date().toISOString()} -->\n### Contested\n- [?] Continue, OK?\n<!-- /auto session=abcdef01 -->\n`)
     assert.equal((await readBoard('initial ended card')).model.stopped[0].send, extra.length ? 'send' : 'open')
-    const registration = { agent: 'codex', session: '11111111-2222-4333-8444-555555555555', turn: 'turn1', surface: 'Synthetic' }
+    // The session waits while the first receiver registers, so a message is really queued for it and the contested
+    // polls below have something to withhold (#1351: a send to an ended session is refused before it is queued).
+    writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=11111111-2222-4333-8444-555555555555 dir=${encodeURIComponent(dir)} state=waiting updated=${new Date().toISOString()} -->\n### Contested\n- [?] Continue, OK?\n<!-- /auto session=abcdef01 -->\n`)
+    const registration = { agent: 'codex', session: '11111111-2222-4333-8444-555555555555', turn: 'turn1', surface: SURFACE_IDS.cli }
     const a = (await board.call('/api/messages/register', registration)).body
-    await board.call('/api/messages/send', { ...input, target: a.id })
+    assert.equal((await board.call('/api/messages/send', { ...input, target: a.id })).body.status, 'queued')
     const b = (await board.call('/api/messages/register', registration)).body
     assert.equal(b.contested, true)
     assert.ok((await readBoard('contested registrations')).messaging.connections.every(one => one.contested))
@@ -1936,7 +1959,7 @@ test('a second registration for the same agent and session leaves the card on Co
 test('a receiver that restarts with its old connection and secret replaces it instead of contesting it', async () => fixture(async (board, dir) => {
   const session = 'aaaaaaaa-2222-4333-8444-555555555555'
   writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef02 agent=codex resume=${session} dir=${encodeURIComponent(dir)} state=waiting updated=${new Date().toISOString()} -->\n### Restarted receiver\n- [?] Continue, OK?\n<!-- /auto session=abcdef02 -->\n`)
-  const register = async body => board.call('/api/messages/register', { agent: 'codex', session, turn: 'turn1', surface: 'Synthetic', ...body })
+  const register = async body => board.call('/api/messages/register', { agent: 'codex', session, turn: 'turn1', surface: SURFACE_IDS.cli, ...body })
   const card = async () => (await board.call('/api/board')).body.model.asks.find(one => one.session !== '')
   const a = (await register({})).body
   await board.call('/api/messages/send', { ...input, id: 'before-restart', target: a.id })
@@ -1970,7 +1993,8 @@ test('a receiver that restarts with its old connection and secret replaces it in
 }))
 
 test('registration reserves origin: only local is accepted, and each message records the origin of its sender', async () => fixture(async (board, dir) => {
-  const base = { agent: 'codex', session: 'origin', turn: 'turn1', surface: 'Synthetic' }
+  transportRow(dir, 'codex', 'origin')
+  const base = { agent: 'codex', session: 'origin', turn: 'turn1', surface: SURFACE_IDS.cli }
   for (const origin of ['cloud', 'remote', '', 1, null]) assert.equal((await board.call('/api/messages/register', { ...base, origin })).body.error, 'ORIGIN_UNSUPPORTED')
   const receiver = (await board.call('/api/messages/register', { ...base, origin: 'local' })).body
   const sender = (await board.call('/api/messages/register', { ...base, session: 'sender' })).body
@@ -1986,10 +2010,11 @@ test('registration reserves origin: only local is accepted, and each message rec
   assert.equal(queueMessage({ messages: [] }, input, 'board', { ...target, expires: 5000 }, 1000, 'bridge').message.origin, 'bridge')
 }))
 
-test('a connector restarted with credentials() from its earlier attach replaces that connection, and only the new one receives', async () => fixture(async board => {
+test('a connector restarted with credentials() from its earlier attach replaces that connection, and only the new one receives', async () => fixture(async (board, dir) => {
+  transportRow(dir, 'codex', 'restarting')
   const client = boardClient(board.address)
   const deliveries = []
-  const options = { agent: 'codex', session: 'restarting', turn: 'turn1', surface: 'Synthetic restart', verify: async () => true }
+  const options = { agent: 'codex', session: 'restarting', turn: 'turn1', surface: SURFACE_IDS.cli, verify: async () => true }
   const before = await client.attach({ ...options, deliver: async message => { deliveries.push(['before', message.id]); return 'ACK ' + message.nonce } })
   const saved = before.credentials()
   assert.deepEqual(Object.keys(saved).sort(), ['connection', 'secret'])
@@ -2158,8 +2183,9 @@ test('a hub that finds a dead pid in the lock after another hub took it puts tha
   }
 })
 
-test('a retried send never returns the nonce of a message already handed out', async () => fixture(async board => {
-  const receiver = (await board.call('/api/messages/register', { agent: 'codex', session: 'retry', turn: 'turn1', surface: 'Synthetic' })).body
+test('a retried send never returns the nonce of a message already handed out', async () => fixture(async (board, dir) => {
+  transportRow(dir, 'codex', 'retry-session')
+  const receiver = (await board.call('/api/messages/register', { agent: 'codex', session: 'retry-session', turn: 'turn1', surface: SURFACE_IDS.cli })).body
   const message = { ...input, id: 'retry-after-claim', target: receiver.id }
   assert.equal((await board.call('/api/messages/send', message)).body.status, 'queued')
   const claimed = (await board.call('/api/messages/poll', { connection: receiver.id, secret: receiver.secret, turn: 'turn1' })).body.messages[0]
@@ -2221,7 +2247,8 @@ test('one helper joins and splits a session address', () => {
 })
 
 test('a receipt for a claimed message is accepted after a board restart from its original receiver', async () => fixture(async (board, dir) => {
-  const register = async (session = 'original', turn = 'turn1') => (await board.call('/api/messages/register', { agent: 'codex', session, turn, surface: 'Synthetic' })).body
+  transportRow(dir, 'codex', 'original')
+  const register = async (session = 'original', turn = 'turn1') => (await board.call('/api/messages/register', { agent: 'codex', session, turn, surface: SURFACE_IDS.cli })).body
   const original = await register()
   await board.call('/api/messages/send', { ...input, target: original.id })
   const claimed = (await board.call('/api/messages/poll', { connection: original.id, secret: original.secret, turn: original.turn })).body.messages[0]
@@ -2236,9 +2263,10 @@ test('a receipt for a claimed message is accepted after a board restart from its
   assert.equal(JSON.parse(readFileSync(join(dir, 'messages', 'messages.json'), 'utf8')).version, 2)
 }))
 
-test('LAN board JSON never contains message text or receipts', async () => fixture(async board => {
-  const one = (await board.call('/api/messages/register', { agent: 'codex', session: 'private', turn: 'turn1', surface: 'Synthetic' })).body
-  await board.call('/api/messages/send', { ...input, target: one.id, text: 'PRIVATE MESSAGE TEXT' })
+test('LAN board JSON never contains message text or receipts', async () => fixture(async (board, dir) => {
+  transportRow(dir, 'codex', 'private')
+  const one = (await board.call('/api/messages/register', { agent: 'codex', session: 'private', turn: 'turn1', surface: SURFACE_IDS.cli })).body
+  assert.equal((await board.call('/api/messages/send', { ...input, target: one.id, text: 'PRIVATE MESSAGE TEXT' })).status, 200)
   const lan = (await board.call('/api/lan', { address: '192.168.50.2' })).body.url
   const response = await lanCall(lan, '/api/board')
   assert.equal(response.status, 200)
@@ -2271,8 +2299,9 @@ fs.renameSync = (from, to) => {
 test('a transient message-store rename failure recovers polling without replaying delivery', async () => {
   for (const code of ['EPERM', 'EBUSY', 'EAGAIN']) await fixture(async (board, dir) => {
     const errors = [], deliveries = []
+    transportRow(dir, 'fixture', 'storage-recovery')
     const receiver = await boardClient(board.address).attach({
-      agent: 'fixture', session: 'storage-recovery', turn: 'turn1', surface: 'Synthetic storage recovery', verify: async () => true,
+      agent: 'fixture', session: 'storage-recovery', turn: 'turn1', surface: SURFACE_IDS.cli, verify: async () => true,
       onError: error => errors.push(error), deliver: async message => { deliveries.push(message.id); return 'ACK ' + message.nonce },
     })
     try {
@@ -2312,8 +2341,9 @@ test('a receiver whose claim meets a busy message store polls again within a sec
       callback(...args)
     }, ms)
   })
+  transportRow(dir, 'fixture', 'busy-retry')
   const receiver = await boardClient(board.address).attach({
-    agent: 'fixture', session: 'busy-retry', turn: 'turn1', surface: 'Synthetic busy retry', verify: async () => true,
+    agent: 'fixture', session: 'busy-retry', turn: 'turn1', surface: SURFACE_IDS.cli, verify: async () => true,
     onError: error => { if (error.message === 'MESSAGE_STORE_BUSY') busyRetry ??= scheduled.at(-1) },
     deliver: async message => {
       isDelivered = true
@@ -2334,8 +2364,9 @@ test('a receiver whose claim meets a busy message store polls again within a sec
 test('a store held for a moment by another program is written on a retry, and the receiver never sees it busy', async () => {
   for (const code of ['EPERM', 'EBUSY', 'EAGAIN']) await fixture(async (board, dir) => {
     const errors = [], deliveries = []
+    transportRow(dir, 'fixture', 'storage-moment')
     const receiver = await boardClient(board.address).attach({
-      agent: 'fixture', session: 'storage-moment', turn: 'turn1', surface: 'Synthetic storage moment', verify: async () => true,
+      agent: 'fixture', session: 'storage-moment', turn: 'turn1', surface: SURFACE_IDS.cli, verify: async () => true,
       onError: error => errors.push(error), deliver: async message => { deliveries.push(message.id); return 'ACK ' + message.nonce },
     })
     try {
@@ -2351,8 +2382,9 @@ test('a store held for a moment by another program is written on a retry, and th
 
 test('a store rename refused for another reason is not retried, and the receiver hears of it', async () => fixture(async (board, dir) => {
   const errors = [], deliveries = []
+  transportRow(dir, 'fixture', 'storage-denied')
   const receiver = await boardClient(board.address).attach({
-    agent: 'fixture', session: 'storage-denied', turn: 'turn1', surface: 'Synthetic storage denied', verify: async () => true,
+    agent: 'fixture', session: 'storage-denied', turn: 'turn1', surface: SURFACE_IDS.cli, verify: async () => true,
     onError: error => errors.push(error), deliver: async message => { deliveries.push(message.id); return 'ACK ' + message.nonce },
   })
   try {
@@ -2412,11 +2444,12 @@ const pollingProxy = async (board, mode) => {
 }
 
 test('a temporary poll failure preserves a verified connection and delivers a queued message once', async () => {
-  for (const mode of ['before-claim', 'network', 'timeout']) await fixture(async board => {
+  for (const mode of ['before-claim', 'network', 'timeout']) await fixture(async (board, dir) => {
+    transportRow(dir, 'fixture', 'recovery')
     const proxy = await pollingProxy(board, mode)
     const errors = [], delivered = []
     const receiver = await boardClient(proxy.address).attach({
-      agent: 'fixture', session: 'recovery', turn: 'turn1', surface: 'Synthetic recovery adapter', verify: async () => true,
+      agent: 'fixture', session: 'recovery', turn: 'turn1', surface: SURFACE_IDS.cli, verify: async () => true,
       onError: error => errors.push(error), deliver: async one => { delivered.push(one.id); return 'ACK ' + one.nonce },
     })
     try {
@@ -2435,12 +2468,13 @@ test('a temporary poll failure preserves a verified connection and delivers a qu
   })
 })
 
-test('a lost poll response after durable claiming is never replayed or turned into an ACK', async () => fixture(async board => {
+test('a lost poll response after durable claiming is never replayed or turned into an ACK', async () => fixture(async (board, dir) => {
+  transportRow(dir, 'fixture', 'lost-claim')
   const proxy = await pollingProxy(board, 'after-claim')
   const errors = []
   let deliveries = 0
   const receiver = await boardClient(proxy.address).attach({
-    agent: 'fixture', session: 'lost-claim', turn: 'turn1', surface: 'Synthetic lost-response adapter', verify: async () => true,
+    agent: 'fixture', session: 'lost-claim', turn: 'turn1', surface: SURFACE_IDS.cli, verify: async () => true,
     onError: error => errors.push(error), deliver: async one => { deliveries += 1; return 'ACK ' + one.nonce },
   })
   try {
@@ -2545,7 +2579,7 @@ Date.now = () => originalNow() + (fs.existsSync(path.join(directory, 'message-cl
 
 const handoffDeadlineCase = async () => fixture(async (board, dir) => {
   const client = boardClient(board.address)
-  const request = { id: 'link1', agent: 'antigravity', session: 'native1', surface: 'Synthetic CLI', timeoutMs: 1000 }
+  const request = { id: 'link1', agent: 'antigravity', session: 'native1', surface: SURFACE_IDS.antigravityStream, timeoutMs: 1000 }
   const progress = updated => `## Synthetic\n<!-- auto session=12345678 agent=antigravity state=working updated=${new Date(updated).toISOString()} resume=native1 -->\n### Fixture\n- [~] Explicit report\n<!-- /auto session=12345678 -->\n`
   const old = Date.now() - 60000
   writeFileSync(join(dir, 'progress.md'), progress(old))
@@ -2556,7 +2590,7 @@ const handoffDeadlineCase = async () => fixture(async (board, dir) => {
   assert.equal((await board.call('/api/messages/expect', { ...request, session: 'native2' })).body.error, 'ID_CONFLICT')
   let row = (await board.call('/api/board')).body.messaging.sessions[0]
   assert.equal(row.status, 'waiting'); assert.equal(row.progress, true); assert.equal(row.receiving, false)
-  const receiver = await client.attach({ agent: request.agent, session: request.session, surface: 'Synthetic CLI', scope: 'session', turn: 'session', verify: async () => true, deliver: async message => 'ACK ' + message.nonce })
+  const receiver = await client.attach({ agent: request.agent, session: request.session, surface: SURFACE_IDS.antigravityStream, scope: 'session', turn: 'session', verify: async () => true, deliver: async message => 'ACK ' + message.nonce })
   try {
     await client.send({ id: 'setup1', target: receiver.id, turn: 'session', text: 'Synthetic setup request' })
     await waitFor(async () => (await board.call('/api/board')).body.messaging.messages[0]?.status === 'acknowledged')
@@ -2597,7 +2631,8 @@ test('a live receiver without a progress card is visible and disappears on disco
 }))
 
 test('the served message API authenticates connectors and persists claims across a server restart', async () => fixture(async (board, dir) => {
-  const registration = { agent: 'codex', session: 'synthetic-session', turn: 'turn1', surface: 'Synthetic adapter' }
+  transportRow(dir, 'codex', 'synthetic-session')
+  const registration = { agent: 'codex', session: 'synthetic-session', turn: 'turn1', surface: SURFACE_IDS.cli }
   assert.equal((await board.call('/api/messages/register', registration, { origin: new URL(board.address).origin })).status, 403)
   const connected = (await board.call('/api/messages/register', registration)).body
   assert.equal((await board.call('/api/messages/register', { ...registration, session: 'another-session' })).status, 200)
@@ -2702,8 +2737,9 @@ test('portable agents share one durable synthetic hub without implicit native de
   assert.throws(() => queueMessage(store, { ...retry, text: 'Conflict' }, original.from, undefined, Date.now() + 1000), /ID_CONFLICT/)
 }))
 
-test('an expired connector disappears and cannot take a queued message', { timeout: 40000 }, async () => fixture(async board => {
-  const connected = (await board.call('/api/messages/register', { agent: 'fixture', session: 'fixture', turn: 'turn1', surface: 'Synthetic adapter' })).body
+test('an expired connector disappears and cannot take a queued message', { timeout: 40000 }, async () => fixture(async (board, dir) => {
+  transportRow(dir, 'fixture', 'fixture')
+  const connected = (await board.call('/api/messages/register', { agent: 'fixture', session: 'fixture', turn: 'turn1', surface: SURFACE_IDS.cli })).body
   await board.call('/api/messages/send', { ...input, target: connected.id })
   await pause(15100)
   const model = (await board.call('/api/board')).body.messaging
@@ -2712,7 +2748,7 @@ test('an expired connector disappears and cannot take a queued message', { timeo
   assert.equal((await board.call('/api/messages/poll', { connection: connected.id, secret: connected.secret, turn: 'turn1' })).status, 409)
 }))
 
-test('an adapter that fails before it begins delivery reports rejected, and after it begins reports uncertain', async () => fixture(async board => {
+test('an adapter that fails before it begins delivery reports rejected, and after it begins reports uncertain', async () => fixture(async (board, dir) => {
   const cases = [
     { name: 'before', deliver: async (_message, _accept, _begin) => { throw new Error('SESSION_BUSY') }, status: 'rejected', error: 'SESSION_BUSY' },
     { name: 'after', deliver: async (_message, _accept, begin) => { begin(); throw new Error('OWNER_TIMEOUT') }, status: 'uncertain', error: 'OWNER_TIMEOUT' },
@@ -2722,11 +2758,13 @@ test('an adapter that fails before it begins delivery reports rejected, and afte
     { name: 'unsafe-after', deliver: async (_message, _accept, begin) => { begin(); throw new Error('private details\nnot a code') }, status: 'uncertain', error: 'DELIVERY_UNCERTAIN' },
   ]
   for (const one of cases) {
+    const session = 'fixture-' + one.name
+    transportRow(dir, 'fixture', session)
     const errors = []
     let deliveries = 0
     const deliver = one.deliver
     const receiver = await boardClient(board.address).attach({
-      agent: 'fixture', session: one.name, turn: 'turn1', surface: 'Synthetic delivery boundary', verify: async () => true,
+      agent: 'fixture', session, turn: 'turn1', surface: SURFACE_IDS.cli, verify: async () => true,
       deliver: deliver.length >= 3 ? async (message, accept, begin) => { deliveries++; return deliver(message, accept, begin) } : async (message, accept) => { deliveries++; return deliver(message, accept) },
       onError: error => errors.push(error),
     })
@@ -2744,10 +2782,11 @@ test('an adapter that fails before it begins delivery reports rejected, and afte
   }
 }))
 
-test('an adapter that gives up after acceptance reads as delivered and never triggers another delivery', async () => fixture(async board => {
+test('an adapter that gives up after acceptance reads as delivered and never triggers another delivery', async () => fixture(async (board, dir) => {
+  transportRow(dir, 'fixture', 'timeout-session')
   let deliveries = 0
   const receiver = await boardClient(board.address).attach({
-    agent: 'fixture', session: 'timeout-session', turn: 'turn1', surface: 'Synthetic timeout adapter', verify: async () => true,
+    agent: 'fixture', session: 'timeout-session', turn: 'turn1', surface: SURFACE_IDS.cli, verify: async () => true,
     deliver: async (_message, accepted) => { deliveries += 1; await accepted(); throw new Error('ACK_TIMEOUT') },
   })
   try {
@@ -2766,6 +2805,7 @@ test('an adapter that gives up after acceptance reads as delivered and never tri
 
 test('a mock Codex proxy keeps steering and native ACK separate and never answers approval RPCs', async () => fixture(async (board, dir) => {
   const thread = '11111111-2222-4333-8444-555555555555'
+  transportRow(dir, 'codex', thread, 'working')
   const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log')
   const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
   writeFileSync(fake, `import { serveWebSocketProxy } from ${JSON.stringify(mock)}
@@ -2782,7 +2822,7 @@ serveWebSocketProxy({ onMessage: (value, emit) => {
   }
 } })
 `)
-  const connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1', surface: 'Mock proxy' })
+  const connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread, turn: 'turn1', surface: SURFACE_IDS.codexProxy })
   try {
     await board.call('/api/messages/send', { ...input, target: connector.id })
     let receipt
@@ -2809,6 +2849,7 @@ serveWebSocketProxy({ onMessage: (value, emit) => {
 
 test('the connector initializes, steers and reads the ACK through a WebSocket-only mock proxy', async () => fixture(async (board, dir) => {
   const thread = '11111111-2222-4333-8444-555555555555'
+  transportRow(dir, 'codex', thread, 'working')
   const fake = join(dir, 'proxy.mjs'), log = join(dir, 'rpc.log'), handshake = join(dir, 'handshake.txt')
   const mock = new URL('./helpers/ws-proxy-mock.mjs', import.meta.url).href
   writeFileSync(fake, `import assert from 'node:assert/strict'
@@ -3011,7 +3052,7 @@ test('an existing card sends only to its exact live receiver and preserves mark 
   const before = (await board.call('/api/board')).body.model
   const offline = before.asks.find(one => one.agent === 'codex')
   assert.ok(!['send', 'connected'].includes(offline.send)); assert.equal(offline.delivery, undefined)
-  const connected = (await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: 'Synthetic Codex CLI' })).body
+  const connected = (await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli })).body
   const ask = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
   assert.equal(ask.send, 'connected'); assert.equal(ask.canHide, offline.canHide)
   assert.equal(ask.session, thread); assert.equal(ask.delivery.id, connected.id)
@@ -3050,7 +3091,7 @@ test('after an answer reaches its session, that question leaves Needs you when t
   const thread = '11111111-2222-4333-8444-555555555555'
   const block = steps => `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Answer fixture\n${steps}\n<!-- /auto session=abcdef01 -->\n`
   writeFileSync(join(dir, 'progress.md'), block('- [?] Blue or green?'))
-  const connected = (await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: 'Synthetic Codex CLI' })).body
+  const connected = (await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli })).body
   const ask = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
   assert.ok(ask.questionId)
   assert.equal((await board.call('/api/act', { key: ask.key, type: 'message', id: 'AB-TEST-003', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn })).status, 200)

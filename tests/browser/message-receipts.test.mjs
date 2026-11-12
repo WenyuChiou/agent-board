@@ -24,7 +24,7 @@ const withQuestion = async (name, run) => browserFixture(name, async fixture => 
   let canReceive = false
   const deliveries = [], errors = []
   const receiver = await boardClient(url).attach({
-    agent: 'codex', session, turn: 'synthetic-turn', surface: 'Synthetic browser receiver',
+    agent: 'codex', session, turn: 'synthetic-turn', surface: 'Codex local proxy',
     verify: async () => true, canReceive: () => canReceive,
     deliver: async message => {
       deliveries.push(message)
