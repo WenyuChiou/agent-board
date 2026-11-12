@@ -127,8 +127,8 @@ export const checkResults = (plan, results) => {
   return { ok: errors.length === 0, errors }
 }
 
-// The time check (#902 step 4): a board part that takes longer than its budget, or one of its files
-// longer than its own budget, fails the plan check and names the slow files. The file budgets come
+// The time check (#902 step 4): a board part over its budget fails the check. A file over 70% of
+// its budget fails a pull request and is reported on other events (#1323). The file budgets come
 // from step 1's Windows board job logs (run 41985005370, main 63c29bb, then four parts): a file's total
 // there is summed across the eight board jobs, so one job's share is the total / 8 for a self-parted file (a quarter
 // of its tests in every job) and / 2 for a file that runs in one part per Node version. Each budget
@@ -158,20 +158,26 @@ export const BOARD_PART_BUDGET_MS = 480_000
 
 const seconds = ms => (ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)
 
-export const checkBoardTimes = timings => {
+export const checkBoardTimes = (timings, { isPullRequest = true } = {}) => {
   const errors = []
-  if (!timings || typeof timings !== 'object' || !Array.isArray(timings.files) || typeof timings.totalMs !== 'number') return { ok: false, errors: ['missing or invalid board timings'] }
+  const warnings = []
+  if (!timings || typeof timings !== 'object' || !Array.isArray(timings.files) || typeof timings.totalMs !== 'number') return { ok: false, errors: ['missing or invalid board timings'], warnings }
   const boardFiles = timings.files.filter(file => groupForTest(file.path) === 'board')
   const timed = boardFiles.filter(file => typeof file.ms === 'number')
   for (const file of timed) {
     const budget = BOARD_FILE_BUDGETS_MS[file.path] ?? BOARD_FILE_BUDGET_DEFAULT_MS
-    if (file.ms > budget) errors.push(file.path + ' took ' + seconds(file.ms) + 's, over its ' + seconds(budget) + 's budget')
+    const limit = budget * 7 / 10
+    if (file.ms > limit) {
+      const message = file.path + ' took ' + seconds(file.ms) + 's, over 70% of its ' + seconds(budget) + 's budget (' + seconds(limit) + 's)'
+      if (isPullRequest) errors.push(message)
+      else warnings.push(message)
+    }
   }
   if (boardFiles.length && timings.totalMs > BOARD_PART_BUDGET_MS) {
     const slowest = [...timed].sort((a, b) => b.ms - a.ms).slice(0, 5)
     errors.push('board part ' + (timings.part || '1/1') + ' took ' + seconds(timings.totalMs) + 's, over its ' + seconds(BOARD_PART_BUDGET_MS) + 's budget' + (slowest.length ? '; slowest files: ' + slowest.map(file => file.path + ' ' + seconds(file.ms) + 's').join(', ') : ''))
   }
-  return { ok: errors.length === 0, errors }
+  return { ok: errors.length === 0, errors, warnings }
 }
 
 // Where one run leaves its per-file times for the time check step below: the runner's temp folder
@@ -458,10 +464,11 @@ const main = async () => {
       }
       throw error
     }
-    const result = checkBoardTimes(timings)
+    const result = checkBoardTimes(timings, { isPullRequest: process.env.GITHUB_EVENT_NAME === 'pull_request' })
     const slowest = (timings.files ?? []).filter(file => typeof file.ms === 'number').sort((a, b) => b.ms - a.ms).slice(0, 3)
     console.log('board part ' + (timings.part || '1/1') + ': total ' + seconds(timings.totalMs) + 's of ' + seconds(BOARD_PART_BUDGET_MS) + 's budget' + (slowest.length ? '; slowest files: ' + slowest.map(file => file.path + ' ' + seconds(file.ms) + 's').join(', ') : '; per-file times are recorded on serial runs only'))
     for (const error of result.errors) console.log('time budget: ' + error)
+    for (const warning of result.warnings) console.log('time budget (reported only): ' + warning)
     if (!result.ok) process.exitCode = 1
     return
   }
