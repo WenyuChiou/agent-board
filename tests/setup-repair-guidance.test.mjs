@@ -8,6 +8,7 @@ import { setupPrograms } from './helpers/setup-programs.mjs'
 
 // Keep these repair/error contracts apart from the already full setup output file.
 const boardCheck = (f, args) => spawnSync(process.execPath, [join(f.root, 'data', 'agent-board.mjs'), '--home', f.env.HOME, '--data-dir', join(f.root, 'data'), '--progress-file', f.env.CLAUDE_PROGRESS_FILE, ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
+const codexPaths = ['<full path to codex>', '<Codex 的完整路徑>', '<Codex 的完整路径>']
 
 test('setup prints the whole missing-Codex trust command in every language (#1272)', () => {
   for (const [index, lang] of locales.entries()) fixture((setup, f) => {
@@ -17,7 +18,7 @@ test('setup prints the whole missing-Codex trust command in every language (#127
     const said = setup('--agent', 'codex', '--lang', lang)
     assert.match(said, /npx @wenyuchiou\/agent-board .*--codex-trust --codex-bin /)
     const command = said.split(/\r?\n/).find(line => line.includes('--codex-trust')) ?? ''
-    assert.ok(command.endsWith(`--codex-bin '${bootstrap[index].codexPath}'`), 'the nonempty translated placeholder has quotes and no copied trailing punctuation')
+    assert.ok(command.endsWith(`--codex-bin '${codexPaths[index]}'`), 'the nonempty translated placeholder has quotes and no copied trailing punctuation')
     assert.ok(said.includes(join(f.root, 'data')), 'the command keeps this install data folder')
   })
 })
@@ -32,10 +33,10 @@ test('the installed doctor prints a full trust command without Codex on PATH in 
     assert.ok(next.includes('--codex-bin'), 'the doctor supplies the complete trust entry')
     assert.ok(next.includes('agent-board.mjs') || next.includes('String.fromCodePoint'), 'the doctor names the installed command, with safe path quoting when needed')
     assert.doesNotMatch(next, /--apply/)
-    assert.ok(next.endsWith(`--codex-bin "${bootstrap[index].codexPath}"`), 'each language keeps a visible, nonempty quoted placeholder')
+    assert.ok(next.endsWith(`--codex-bin "${codexPaths[index]}"`), 'each language keeps a visible, nonempty quoted placeholder')
     const commands = setupPrograms(f.root, f.env, ['codex'])
     const bin = join(f.root, 'synthetic bin', process.platform === 'win32' ? 'codex.cmd' : 'codex')
-    const command = next.slice(next.indexOf('node ')).replace(bootstrap[index].codexPath, bin.replaceAll('\\', '/'))
+    const command = next.slice(next.indexOf('node ')).replace(codexPaths[index], bin.replaceAll('\\', '/'))
     const preview = spawnSync(command + ' --json', { shell: true, cwd: f.env.HOME, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
     assert.equal(preview.status, 0, preview.stderr)
     assert.ok(JSON.parse(preview.stdout).changes > 0, 'the actual printed command, including its -- boundary, previews synthetic trust')
