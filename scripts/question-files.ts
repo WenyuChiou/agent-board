@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync, watch } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, watch } from 'node:fs'
 import { join } from 'node:path'
 
 type FileWatcher = {
@@ -55,11 +55,18 @@ export const immutableQuestionFiles = <T>(options: {
     if (!options.isPersistent || isClosed || hasFailed || watcher !== null) return
     try {
       const current = (options.watchFiles ?? ((directory, listener) => watch(directory, listener)))(options.directory, (_event, name) => {
+        const isAccepted = name !== null && accepts(String(name))
+        // Windows can keep reporting a removed folder until its own watcher is closed.
+        if (!isAccepted && !existsSync(options.directory)) {
+          if (watcher === current) { watcher = null; isUncertain = true }
+          current.close()
+          return
+        }
         if (name === null) isUncertain = true
-        else if (accepts(String(name))) dirty.add(String(name))
+        else if (isAccepted) dirty.add(String(name))
       })
       watcher = current
-      current.on('error', fail)
+      current.on('error', () => { if (watcher === current) fail() })
       current.on('close', () => { if (watcher === current) fail() })
       current.unref()
     } catch {
