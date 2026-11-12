@@ -1,4 +1,5 @@
 import { sha256 } from './sha256'
+import type { ProgressProject } from '../types'
 
 // The liveness of an agent session, as pure data (#1092): whether the agent process
 // that wrote a block is gone, from the pid, start time and host hash the block
@@ -43,6 +44,57 @@ export const AGENT_START_DRIFT_MS = 3000
 // with a live pid, and any unreadable start time all mean alive. A dead pid needs no
 // start-time check; a live pid with a start time far from the recorded one is a
 // reused pid, so it counts as dead.
+// The key death is recorded under: the agent and the full session id (the
+// resume id when the block carries one, else the block id). A short id alone
+// is not an identity: two sessions can share its 8 hex, and a stale duplicate
+// shares it with the live winner, so the dead copy would hide the live row
+// (finding 3). The record scope in the ledger is a different key — how a
+// record is addressed — and is not re-keyed.
+export const deadSessionKey = (auto: { agent: string; session: string; resume: string | null }): string => `${auto.agent}\u0000${auto.resume ?? auto.session}`
+
+// The one claim per session that decides liveness: the newest block of the
+// identity (agent + full id). Older duplicates — a resumed session's earlier
+// block, a run's copy — never decide it (finding 3). Runs are not sessions:
+// their pid is their starter's, so they never contribute a claim. Done and
+// ended blocks are finished, and only Claude records a pid (PM Q4).
+export const sessionClaimsOf = (projects: readonly ProgressProject[]): Array<{ key: string; claim: AgentClaim }> => {
+  const winners = new Map<string, { claim: AgentClaim; updated: number; order: number }>()
+  let order = 0
+  for (const project of projects) for (const task of project.tasks) {
+    order += 1
+    const auto = task.auto
+    if (auto === null || auto.state === 'done' || auto.state === 'ended' || auto.agent !== 'claude' || auto.isRun === true) continue
+    const claim = agentClaimOf(auto)
+    if (claim === null) continue
+    const key = deadSessionKey(auto)
+    const held = winners.get(key)
+    if (held === undefined || auto.updated > held.updated || auto.updated === held.updated && order > held.order) winners.set(key, { claim, updated: auto.updated, order })
+  }
+  return [...winners].map(([key, one]) => ({ key, claim: one.claim }))
+}
+
+// The dead keys from a kill-only probe: the evidence the plugin can share
+// without a spawn (finding 6). A pid the probe says is gone is dead; any
+// other answer keeps the card — without a start-time check a reused pid
+// reads alive, which is the safe direction (PM Q5 forbids a spawn in the
+// hook hot path).
+export const deadKeysForClaims = (claims: ReadonlyArray<{ key: string; claim: AgentClaim }>, isGone: (pid: number) => boolean, hostHash: string | null): ReadonlySet<string> => {
+  const dead = new Set<string>()
+  if (hostHash === null) return dead
+  for (const { key, claim } of claims) if (isDeadAgent(claim, hostHash, !isGone(claim.pid), null)) dead.add(key)
+  return dead
+}
+
+// Process identity (pid, start time, host hash) belongs only in the person's
+// own progress file (#1092, PM Q3): every stored or transmitted copy drops
+// it — the question ledger, the plugin's stored mirror, the completion
+// overlay (finding 5). The in-memory mirror keeps it; only the stored copy
+// is stripped.
+export const withoutProcessIdentity = <T extends { agentPid?: number; agentStarted?: number; host?: string }>(value: T): Omit<T, 'agentPid' | 'agentStarted' | 'host'> => {
+  const { agentPid: _agentPid, agentStarted: _agentStarted, host: _host, ...rest } = value
+  return rest
+}
+
 export const isDeadAgent = (claim: AgentClaim, hostHash: string, alive: boolean, actual: number | 'inaccessible' | null): boolean => {
   if (claim.host !== hostHash) return false
   if (!alive) return true

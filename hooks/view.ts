@@ -22,6 +22,7 @@ import { identity, isSilenceTask, isWorkingTask } from './grouping'
 import { closedCopies, mergeCopies, recordFolder } from './question-merge'
 import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
 import type { RunGroup } from './runs'
+import { deadSessionKey } from './session-liveness'
 import type { PendingTurn } from './board'
 
 // What the pane shows, worked out from the file and this session's own list, so the
@@ -898,8 +899,9 @@ export const buildView = (
   staleMs: number = STALE_MS,
   counts?: ViewIndexCounts,
   // Sessions whose agent process is gone on this machine (#1092): their rows are
-  // treated as ended, like stale ones. The set holds question scopes, as `frozen`
-  // does; the shell works it out per read and passes it in as data.
+  // treated as ended, like stale ones. The set holds identity keys (the agent and
+  // the full session id, as deadSessionKey builds them), not question scopes; the
+  // shell works it out per read and passes it in as data.
   deadSessions: ReadonlySet<string> = new Set(),
 ): View => {
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
@@ -1011,9 +1013,10 @@ export const buildView = (
       // Questions travel with an inactive session rather than asking for a live reply.
       const stale = isStale(task.auto, now, updated, staleMs)
       // A session whose agent process is gone is ended too, without waiting 12 h
-      // (#1092). The scope is checked both ways, as `frozen` is: the dead set holds
-      // plain scopes, while a resumed session's scope may resolve to its full id.
-      const isDead = task.auto !== null && deadSessions.size > 0 && (deadSessions.has(scope) || deadSessions.has(questionScope(project.name, task.auto.agent, task.auto.session)))
+      // (#1092). The dead set is keyed on the full session identity (finding 3):
+      // the agent and the resume id, or the block id when the block carries no
+      // resume — a short id alone would fold a live row whose dead twin shares it.
+      const isDead = task.auto !== null && deadSessions.size > 0 && deadSessions.has(deadSessionKey(task.auto))
       const isGone = stale || isDead
       const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || isGone || isSilence || task.auto?.state === 'ended')

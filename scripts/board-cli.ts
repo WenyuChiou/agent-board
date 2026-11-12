@@ -12,6 +12,7 @@ import type { ChildProcess } from 'node:child_process'
 import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
 import { withLocalLock } from './local-lock'
 import { deadSessionsOf } from './session-liveness'
+import { deadSessionKey } from '../hooks/session-liveness'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
 import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -55,7 +56,7 @@ import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionScope, questionsPath, resolvedQuestionsToRetire, runQuestionsClosed } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire, runQuestionsClosed } from '../hooks/questions'
 import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 import { currentTidyCandidate, previewTidy, tidySelector, type TidyCandidate, type TidyPreview, type TidySelector } from '../hooks/tidy'
@@ -1233,7 +1234,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         // The dead set comes from the text this retry reads, so a session that
         // resumed since the press was drawn is never confirmed as dead (#1092).
         const dead = deadSessionsOf(parseProgress(text))
-        const next = confirmTask(text, action.ref, now, s, lastSeen, staleTimeoutMs(), (project, agent, session) => dead.has(questionScope(project, agent, session)))
+        const next = confirmTask(text, action.ref, now, s, lastSeen, staleTimeoutMs(), (_project, auto) => dead.has(deadSessionKey(auto)))
         if (next === null) return null
         const lines = next.entries.map(entry => journalLine(entry, now, s))
         rewrite(journal, past => {
@@ -1316,7 +1317,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         return { text, entries: [] }
       }
       const dead = deadSessionsOf(current)
-      return takeTask(text, action.ref, now, s, lastSeen, staleTimeoutMs(), (project, agent, session) => dead.has(questionScope(project, agent, session)))
+      return takeTask(text, action.ref, now, s, lastSeen, staleTimeoutMs(), (_project, auto) => dead.has(deadSessionKey(auto)))
     }, now)
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
@@ -1576,7 +1577,7 @@ const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind:
       if (fresh.asks && !keepAskedQuestions(freshProjects, fresh.ref, now, cutOffScopes(freshProjects, cutOffSpans(text, isCutSettledAt(now))))) return null
       // The dead set comes from the text this retry reads, as in the archive press.
       const dead = deadSessionsOf(freshProjects)
-      const again = takeTask(text, fresh.ref, now, s, {}, staleMs, (project, agent, session) => dead.has(questionScope(project, agent, session)))
+      const again = takeTask(text, fresh.ref, now, s, {}, staleMs, (_project, auto) => dead.has(deadSessionKey(auto)))
       if (again === null) return null
       if (isLast) return { text: again.text, entries: again.entries }
       if (read(path) !== text) return AGAIN

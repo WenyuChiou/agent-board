@@ -3,6 +3,7 @@ import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
 import { cutOffTest, matchesSpan, scanBlocks, shortId, stepWords } from './blocks'
 import { questionToken, waitsOnYou } from './mirror'
+import { deadSessionKey, withoutProcessIdentity } from './session-liveness'
 import { sha256 } from './sha256'
 import type { TaskRef } from './view'
 
@@ -185,8 +186,11 @@ export const cutOffScopes = (projects: readonly ProgressProject[], cut: readonly
 // A question's copy of its block or hand-kept task: the marker fields and each step's mark, which
 // are all its readers need. The whole task held every step's words and line once per waiting
 // step, so a real board's ledger grew past the host's 4 MiB write limit, and every edit above a
-// block wrote a new copy of each of its questions (#419).
-export const sourceData = (task: ProgressTask): string => JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status) })
+// block wrote a new copy of each of its questions (#419). The process identity is stripped
+// (finding 5): the pid, start time and host belong only in the progress file itself (PM Q3),
+// never in the ledger — a record written before this change still carries them until its next
+// observation refreshes its source.
+export const sourceData = (task: ProgressTask): string => JSON.stringify({ auto: task.auto === null ? null : withoutProcessIdentity(task.auto), steps: task.steps.map(step => step.status) })
 
 type SourceSnapshot = { auto: ProgressAuto | null; steps: ProgressStepStatus[] }
 const parsedJson = (text: string): unknown => {
@@ -643,7 +647,8 @@ const observations = (projects: readonly ProgressProject[], mine: ProgressMirror
       if (frozen.size > 0 && (frozen.has(scope) || frozen.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)))) continue
       // A session whose agent process is gone asks nobody: its steps are skipped
       // exactly like a frozen block's, so the record is retained, not answered (#1092).
-      if (deadSessions.size > 0 && (deadSessions.has(scope) || deadSessions.has(questionScope(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title)))) continue
+      // The dead set is keyed on the full session identity (finding 3).
+      if (task.auto !== null && deadSessions.size > 0 && deadSessions.has(deadSessionKey(task.auto))) continue
       if (scopes.has(scope)) ambiguous.add(scope)
       scopes.add(scope)
       // The task's background and its copy as data are the same for each of its steps, so they
@@ -875,7 +880,7 @@ export const observeQuestions = (
   for (const project of projects) for (const task of project.tasks) {
     if (task.auto === null) continue
     const deadScope = scopeOf(project.name, task.auto.agent, task.auto.session, task.auto.resume)
-    if (!(deadSessions.has(deadScope) || deadSessions.has(questionScope(project.name, task.auto.agent, task.auto.session)))) continue
+    if (!deadSessions.has(deadSessionKey(task.auto))) continue
     const context = task.notes.find(note => /^(?:背景|Context|Background)\s*[:：]/i.test(note))?.replace(/^(?:背景|Context|Background)\s*[:：]\s*/i, '') ?? ''
     const data = sourceData(task)
     const steps = task.steps.map((step, index) => ({ step, index, words: questionWords(step.text) }))
@@ -886,11 +891,17 @@ export const observeQuestions = (
       // The retained record is not among the present candidates, so it is found
       // without that filter: a second read of the same dead question reuses it
       // instead of recording it twice. Its copies must still match the block's
-      // shape, or it belongs to an older incarnation.
+      // shape, or it belongs to an older incarnation. The record picked is the
+      // current one, not the oldest (finding 4): after close, resume and close
+      // again the latest unresolved record is the incarnation that still waits.
+      // When none is unresolved the question was answered before the window
+      // closed, so the latest record is reused and the step asks nothing again.
       const kept = byScopeWords.get(partsKey2(deadScope, words)) ?? []
+      const pickRetained = (candidates: QuestionRecord[]): QuestionRecord | undefined =>
+        candidates.filter(old => old.isUnresolved).at(-1) ?? candidates.at(-1)
       let record = producer === ''
-        ? kept.find(old => !old.producer && old.occurrence === occurrence && old.copies === copies.length)
-        : kept.find(old => old.producer === producer)
+        ? pickRetained(kept.filter(old => !old.producer && old.occurrence === occurrence && old.copies === copies.length))
+        : pickRetained(kept.filter(old => old.producer === producer))
       if (record !== undefined && assigned.has(record.id)) continue
       if (record === undefined && step.status === 'waiting') {
         const binding = sha256(JSON.stringify([deadScope, words, occurrence, copies.length, incarnation]))
@@ -911,7 +922,7 @@ export const observeQuestions = (
     }
   }
   const blockKey = (auto: ProgressAuto): string => JSON.stringify([auto.agent.toLowerCase(), auto.session, auto.resume])
-  const locations = new Map<string, { project: string; scope: string; alias: string }[]>()
+  const locations = new Map<string, { project: string; scope: string; alias: string; deadKey: string }[]>()
   const scopeCounts = new Map<string, number>()
   for (const project of projects) for (const task of project.tasks) {
     if (task.auto === null) continue
@@ -919,8 +930,10 @@ export const observeQuestions = (
     const places = locations.get(key) ?? []
     const scope = scopeOf(project.name, task.auto.agent, task.auto.session, task.auto.resume)
     // The alias is read only through a frozen or dead lookup below, so with neither
-    // set it is never built; an empty alias can never match either scope.
-    places.push({ project: project.name, scope, alias: frozen.size === 0 && deadSessions.size === 0 ? '' : questionScope(project.name, task.auto.agent, task.auto.session) })
+    // set it is never built; an empty alias can never match either scope. The dead
+    // key is built the same way: it is the full session identity (finding 3), not
+    // the scope or its alias.
+    places.push({ project: project.name, scope, alias: frozen.size === 0 && deadSessions.size === 0 ? '' : questionScope(project.name, task.auto.agent, task.auto.session), deadKey: deadSessions.size === 0 ? '' : deadSessionKey(task.auto) })
     locations.set(key, places)
     scopeCounts.set(scope, (scopeCounts.get(scope) ?? 0) + 1)
   }
@@ -931,7 +944,7 @@ export const observeQuestions = (
     if (auto === undefined || auto === null || auto.agent.toLowerCase() !== source.agent.toLowerCase() || auto.session !== source.session) continue
     const places = locations.get(blockKey(auto))
     const destination = places?.length === 1 ? places[0] : undefined
-    if (destination === undefined || destination.project === source.project || frozen.has(destination.scope) || frozen.has(destination.alias) || deadSessions.has(destination.scope) || deadSessions.has(destination.alias) || scopeCounts.get(destination.scope) !== 1) continue
+    if (destination === undefined || destination.project === source.project || frozen.has(destination.scope) || frozen.has(destination.alias) || deadSessions.has(destination.deadKey) || scopeCounts.get(destination.scope) !== 1) continue
     // A unique live block with the saved full identity proves a project move. Keep the
     // former question's evidence, without treating a missing or colliding block as an answer.
     record.isUnresolved = false

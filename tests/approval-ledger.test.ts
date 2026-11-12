@@ -5,7 +5,7 @@ import type { CodexReport } from '../hooks/codex'
 import { clearApproval, closeApproval, markApproval, retainApproval } from '../hooks/digest'
 import { applyTaskCreate, emptyMirror, withAgentIdentity } from '../hooks/mirror'
 import { parseProgress, STALE_MS } from '../hooks/parse'
-import { emptyQuestions, observeQuestions, questionScope, resolveQuestion } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, resolveQuestion } from '../hooks/questions'
 import { hostHashOf } from '../hooks/session-liveness'
 import { STRINGS } from '../hooks/strings'
 import { buildView } from '../hooks/view'
@@ -286,19 +286,20 @@ test('a waiting approval whose agent window is closed keeps its ledger record fo
   const claimed = withAgentIdentity(waiting, { pid: 12345, started: NOW - 1000, host })
   const projects = projectsOf(claimed)
   expect(projects[0]!.tasks[0]!.auto.agentPid).toBe(12345)
-  // The shell would derive this scope as dead from the claim; the ledger only sees the set.
-  // The marker carries the short session id (`session=a1b2c3d4`, `resume=` holds the full
-  // id), so the scope uses the short id, exactly as deadSessionsOf builds it.
+  // The shell would derive this identity key as dead from the claim; the ledger only sees the set.
+  // The marker carries the session id (`resume=a1b2c3d4-claude-session`, the full id the
+  // resume command needs), so the key is the agent and the resume, exactly as
+  // deadSessionKey builds it.
   // The reader is not the dead session, so `mine` is null here, as in the board script's read.
-  const scope = questionScope('demo', 'claude', 'a1b2c3d4')
+  const dead = new Set(['claude\u0000a1b2c3d4-claude-session'])
   const open = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
   expect(open.records.filter(record => record.isUnresolved)).toHaveLength(1)
-  const retained = observeQuestions(open, projects, null, [], NOW + 1, true, 'preview', undefined, [], [], new Set(), new Set([scope])).ledger
+  const retained = observeQuestions(open, projects, null, [], NOW + 1, true, 'preview', undefined, [], [], new Set(), dead).ledger
   const record = retained.records.find(one => one.isUnresolved)!
   expect(record.isPresent).toBe(false)
   expect(record.isWaiting).toBe(false)
   expect(record.isUnresolved).toBe(true)
-  const view = buildView(projects, [], null, NOW + 1, 0, {}, words, [], {}, retained, undefined, [], new Set(), undefined, STALE_MS, undefined, new Set([scope]))
+  const view = buildView(projects, [], null, NOW + 1, 0, {}, words, [], {}, retained, undefined, [], new Set(), undefined, STALE_MS, undefined, dead)
   expect(view.waiting).toEqual([])
   expect(view.older.map(item => item.text)).toEqual(['Approve the tool?'])
   const row = view.stopped.find(one => one.title === 'Real task')

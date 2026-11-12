@@ -88,7 +88,7 @@ import type { ListedTask } from './mirror'
 import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
 import { othersNote, sessionPushNote } from './others'
 import type { AgentClaim } from './session-liveness'
-import { hostHashOf } from './session-liveness'
+import { deadKeysForClaims, deadSessionKey, hostHashOf, sessionClaimsOf, withoutProcessIdentity } from './session-liveness'
 import type { ProgressProject } from '../types'
 import { boardRun } from './board-commands'
 import { peekInbox, redact, turnsFor } from './board'
@@ -746,6 +746,8 @@ const passQuestions = async ($: EngineInterface, path: string, projects: readonl
     const mirror = await read($, mine)
     const answered = await read($, hiddenAsks)
     const pending = [...(await pendingTurns($)), ...captured]
+    // The dead sessions for this pass, worked out once from the projects in hand.
+    const deadSessions = await pluginDeadSessions($, projects)
     // A delayed save keeps the turn's age, including when a normal poll saw its block first. Each
     // turn is serialised once, not once for every record (#416).
     const capturedAt = new Map<string, number>()
@@ -756,7 +758,10 @@ const passQuestions = async ($: EngineInterface, path: string, projects: readonl
       capturedAt.set(json, Math.min(capturedAt.get(json) ?? time, time))
     }
     const observe = (current: ReturnType<typeof emptyQuestions>, proofs: QuestionProofs | undefined): ReturnType<typeof emptyQuestions> => {
-      const observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending, answeredTurns, frozen).ledger
+      // The same dead evidence the board script uses (finding 6): without it an
+      // open pane re-marks a closed session's question as waiting, and the ledger
+      // flips between the plugin and the board script.
+      const observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending, answeredTurns, frozen, deadSessions).ledger
       return { ...observed, records: observed.records.map(record => {
         // A running minimum: a record can hold more sources than a call takes arguments.
         let first = record.firstObserved
@@ -999,7 +1004,8 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
   }
   if (!(await pollQuestions($, snap.path || (await progressPath($)), snap.projects))) return { isDone: false, reason: 'ledgerUnreadable' }
   const ledger = await read($, questionLedger)
-  const currentView = buildView(snap.projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, ledger, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), cutOffScopes(snap.projects, snap.cutSpans ?? []))
+  const deadSessions = await pluginDeadSessions($, snap.projects)
+  const currentView = buildView(snap.projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, ledger, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), cutOffScopes(snap.projects, snap.cutSpans ?? []), undefined, undefined, undefined, deadSessions)
   if (![...currentView.waiting, ...(currentView.reminder ?? []), ...(currentView.older ?? []), ...currentView.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) return { isDone: false, reason: 'notFound' }
   const file = answeredPath(snap.path || (await progressPath($)))
   let reason: 'notFound' | 'progressUnreadable' | 'ledgerUnreadable' | 'writeFailed' = 'writeFailed'
@@ -1020,7 +1026,8 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
     const latest = await read($, questionLedger)
     const at = await $.clock.now()
     const frozen = cutOffScopes(fresh, cutOffSpans(source, progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS))
-    const current = buildView(fresh, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, latest, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), frozen)
+    const deadSessions = await pluginDeadSessions($, fresh)
+    const current = buildView(fresh, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, latest, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), frozen, undefined, undefined, undefined, deadSessions)
     if (![...current.waiting, ...(current.reminder ?? []), ...(current.older ?? []), ...current.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) { reason = 'notFound'; return null }
     await rewrite(
       $,
@@ -1031,7 +1038,7 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
         const proofs = await questionProofsFor($, snap.path || (await progressPath($)))
         // A question kept from an archived block has a retired identity by then, and can still be hidden (#400).
         if (proofs === null || (isHidden && proofs.retired.includes(sha256(item.hideKey)) && !isKeptQuestion(latest, item.hideKey))) return AGAIN
-        return now === null ? AGAIN : answeredJson(withAnswered(now, isHidden ? [item.hideKey] : acknowledgementKeys(observeQuestions(latest, fresh, await read($, mine), now, await $.clock.now(), true, 'preview', undefined, [], [], frozen).ledger, item.hideKey), isHidden))
+        return now === null ? AGAIN : answeredJson(withAnswered(now, isHidden ? [item.hideKey] : acknowledgementKeys(observeQuestions(latest, fresh, await read($, mine), now, await $.clock.now(), true, 'preview', undefined, [], [], frozen, deadSessions).ledger, item.hideKey), isHidden))
       },
       check => parseAnswered(check)?.includes(item.hideKey) === isHidden,
     )
@@ -1265,7 +1272,8 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       if (result !== null) {
         const at = await $.clock.now()
         const frozen = cutOffScopes(projects, cutOffSpans(source, at - changedAt >= CUT_SETTLE_MS))
-        const view = buildView(projects, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen)
+        const deadSessions = await pluginDeadSessions($, projects)
+        const view = buildView(projects, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen, undefined, undefined, undefined, deadSessions)
         const rows = [...view.stopped, ...view.recent]
         const isDrawn = result.kind === 'changed'
           ? rows.some(row => result.key.startsWith(`${row.key}::`))
@@ -1944,7 +1952,10 @@ const saveMine = async (
     return ready === undefined ? kept : raiseApproval(kept, ready[1])
   })
   if (next === null || current === null) return
-  await $.store.set(`mirror:${next.sessionId}`, { ...next, board: boardTag(await progressPath($)) })
+  // The stored mirror drops the process identity (finding 5): only the progress
+  // file may carry it. The in-memory mirror keeps it, and the next load stamps
+  // the current process's identity again.
+  await $.store.set(`mirror:${next.sessionId}`, { ...withoutProcessIdentity(next), board: boardTag(await progressPath($)) })
   if (!quiet) {
     const finished = completedSince(current, next)
     const title = next.title || fallbackTitle(next)
@@ -2003,21 +2014,49 @@ const detectHere = async ($: EngineInterface): Promise<void> => {
   await update($, here, () => [...names].filter(name => name !== ''))
 }
 
-// The agent process identity for liveness (#1092): the plugin runs in-process, so
-// `process.pid` is Claude Code's own pid and `performance.timeOrigin` is when it
-// started. The host hash comes from the environment (COMPUTERNAME on Windows,
-// HOSTNAME elsewhere). A missing global or name leaves the session without an
-// identity, so it keeps the 12 h backstop; nothing here throws.
-const agentIdentity = async ($: EngineInterface): Promise<AgentClaim | null> => {
-  const pid = typeof process !== 'undefined' && typeof process.pid === 'number' && Number.isSafeInteger(process.pid) && process.pid > 0 ? process.pid : null
-  if (pid === null) return null
+// The reading machine's host hash, from the environment, as agentIdentity reads
+// it (COMPUTERNAME on Windows, HOSTNAME elsewhere). A missing name leaves the
+// session without an identity, so it keeps the 12 h backstop.
+const readingHostHash = async ($: EngineInterface): Promise<string | null> => {
   const platform = typeof process !== 'undefined' && typeof process.platform === 'string' ? process.platform : ''
   const computer = await $.env.get('COMPUTERNAME').catch(() => undefined)
   const hostnameEnv = await $.env.get('HOSTNAME').catch(() => undefined)
-  const host = hostHashOf(platform, platform === 'win32' ? computer : hostnameEnv)
+  return hostHashOf(platform, platform === 'win32' ? computer : hostnameEnv)
+}
+
+// The agent process identity for liveness (#1092): the plugin runs in-process, so
+// `process.pid` is Claude Code's own pid and `performance.timeOrigin` is when it
+// started. A missing global or name leaves the session without an identity, so it
+// keeps the 12 h backstop; nothing here throws.
+const agentIdentity = async ($: EngineInterface): Promise<AgentClaim | null> => {
+  const pid = typeof process !== 'undefined' && typeof process.pid === 'number' && Number.isSafeInteger(process.pid) && process.pid > 0 ? process.pid : null
+  if (pid === null) return null
+  const host = await readingHostHash($)
   if (host === null) return null
   const started = typeof performance !== 'undefined' && typeof performance.timeOrigin === 'number' && Number.isFinite(performance.timeOrigin) && performance.timeOrigin > 0 ? Math.round(performance.timeOrigin) : undefined
   return { pid, ...(started === undefined ? {} : { started }), host }
+}
+
+// The dead sessions this plugin can prove from its own process (finding 6): a pid
+// process.kill says is gone, on this host. No start-time check — the plugin cannot
+// read one without a spawn (PM Q5) — so a reused pid keeps the card, and only a
+// gone pid folds. The plugin's process may not expose kill at all (unproven in a
+// live plugin: register.tsx has no process.kill today); then nothing is dead, which
+// is the old behaviour. A kill that refuses for any reason other than ESRCH is a
+// live or uncertain process, so the card is kept.
+const pluginDeadSessions = async ($: EngineInterface, projects: readonly ProgressProject[]): Promise<ReadonlySet<string>> => {
+  const hostHash = await readingHostHash($)
+  if (hostHash === null) return new Set()
+  const isGone = (pid: number): boolean => {
+    if (typeof process === 'undefined' || typeof process.kill !== 'function') return false
+    try {
+      process.kill(pid, 0)
+      return false
+    } catch (error) {
+      return (error as { code?: string }).code === 'ESRCH'
+    }
+  }
+  return deadKeysForClaims(sessionClaimsOf(projects), isGone, hostHash)
 }
 
 // The mirror outlives a reload in $.state and a restart in $.store. A mirror stored by an
@@ -3442,7 +3481,12 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
       // Another agent's write while the question check ran is not written over with the older text.
       if (await readText($, path) !== text) return AGAIN
     }
-    const taken = takeTask(text, ref, at, s, observed)
+    // A session whose agent process is gone has certainly stopped, so its archive
+    // goes through even when the silence check would keep the row for review
+    // (#1092): the row offers the press, and the guard reads the same kill-only
+    // evidence as the pane (finding 6).
+    const dead = await pluginDeadSessions($, projects)
+    const taken = takeTask(text, ref, at, s, observed, undefined, (_project, auto) => dead.has(deadSessionKey(auto)))
     if (taken === null) return null
     pendingEntries = taken.entries
     return taken.text
@@ -3471,7 +3515,11 @@ const confirmOne = async ($: EngineInterface, ref: ConfirmRef): Promise<(Confirm
   const s = await wordsOf($)
   const original = await readText($, path)
   const observed = await read($, firstSeen)
-  const candidate = confirmTask(original, ref, at, s, observed)
+  // A session whose agent process is gone has certainly stopped, like one whose
+  // marker says ended: the row offers the press, so the write guard accepts it
+  // (#1092), on the same kill-only evidence as the pane (finding 6).
+  const dead = await pluginDeadSessions($, parseProgress(original))
+  const candidate = confirmTask(original, ref, at, s, observed, undefined, (_project, auto) => dead.has(deadSessionKey(auto)))
   if (candidate === null) return null
   const selected = confirmedTarget(original, ref, s)
   const mirrors = new Map<string, { stored: ProgressMirror | undefined; seen: string }>()
@@ -3485,9 +3533,12 @@ const confirmOne = async ($: EngineInterface, ref: ConfirmRef): Promise<(Confirm
     }
   }
   let confirmed: ConfirmedTask | null = null
-  await rewrite($, path, text => {
+  await rewrite($, path, async text => {
     if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-    const next = confirmTask(text, ref, at, s, observed)
+    // The dead set comes from the text this retry reads, so a session that
+    // resumed since the press was drawn is never confirmed as dead (#1092).
+    const retryDead = await pluginDeadSessions($, parseProgress(text))
+    const next = confirmTask(text, ref, at, s, observed, undefined, (_project, auto) => retryDead.has(deadSessionKey(auto)))
     if (next === null) return null
     confirmed = next
     return next.text
@@ -4936,7 +4987,8 @@ export const register: Register = (on, options) => {
           if (!(await pollQuestions($, path, projects))) return result(await savedResolution() ? 'resolved' : 'failed')
           const at = await $.clock.now()
           const frozen = cutOffScopes(projects, cutOffSpans(source, progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS))
-          const view = buildView(projects, [], await read($, mine), at, 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen)
+          const deadSessions = await pluginDeadSessions($, projects)
+          const view = buildView(projects, [], await read($, mine), at, 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen, undefined, undefined, undefined, deadSessions)
           const items = [...(view.provisional ?? []), ...view.stopped.flatMap(row => row.questions ?? []), ...view.recent.flatMap(row => row.questions ?? [])]
           if (item.questionId === undefined || !items.some(question => question.questionId === item.questionId && question.text === item.text && question.note === item.note)) return result('changed')
           if (!(await pollQuestions($, path, projects, false, [], [], questionId))) return result(await savedResolution() ? 'resolved' : 'failed')

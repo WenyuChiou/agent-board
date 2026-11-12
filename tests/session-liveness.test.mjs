@@ -31,15 +31,14 @@ const deadPid = () => {
 const alivePid = process.pid
 const aliveStarted = Math.round(performance.timeOrigin)
 
-const block = (id, agent, state, steps, claim, host) => {
+const block = (id, agent, state, steps, claim, minutes = 5, resume = null) => {
   const attrs = claim === null ? '' : ` agentpid=${claim.pid}${claim.started === undefined ? '' : ` agentstarted=${claim.started}`}${claim.host === undefined ? '' : ` host=${claim.host}`}`
-  return `<!-- auto session=${id} agent=${agent} state=${state} updated=${new Date(NOW - 5 * 60_000).toISOString()}${attrs} -->\n### Ship ${id}\n${steps}\n<!-- /auto session=${id} -->\n`
+  return `<!-- auto session=${id} agent=${agent} state=${state} updated=${new Date(NOW - minutes * 60_000).toISOString()}${resume === null ? '' : ` resume=${resume}`}${attrs} -->\n### Ship ${id}\n${steps}\n<!-- /auto session=${id} -->\n`
 }
 const file = (...blocks) => `## demo\n${blocks.join('')}`
 
 test('a waiting approval whose agent process is dead is in the dead set, and a live one is not', async () => {
   const { parseProgress } = await import('../hooks/parse.ts')
-  const { questionScope } = await import('../hooks/questions.ts')
   const { deadSessionsOf, readingHostHash } = await import('../scripts/session-liveness.ts')
   const host = readingHostHash()
   assert.notEqual(host, null, 'this machine has a host hash')
@@ -49,7 +48,8 @@ test('a waiting approval whose agent process is dead is in the dead set, and a l
     block('b2c3d4e5', 'claude', 'waiting', '- [?] Continue with the synthetic plan, OK?', { pid: alivePid, started: aliveStarted, host }),
   )
   const dead = deadSessionsOf(parseProgress(text))
-  assert.deepEqual([...dead], [questionScope('demo', 'claude', 'a1b2c3d4')])
+  // The set holds the full session identity (agent + session id), not the scope.
+  assert.deepEqual([...dead], ['claude\u0000a1b2c3d4'])
 })
 
 test('a batched start-time lookup returns each live pid start time and null for a dead pid', async () => {
@@ -86,4 +86,62 @@ test('a non-Claude session is never in the dead set, even when its block carries
   const pid = deadPid()
   const text = file(block('b8c9d0e1', 'codex', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid, started: aliveStarted, host }))
   assert.deepEqual([...deadSessionsOf(parseProgress(text))], [])
+})
+
+// Round 3: the start-time cache is never evicted (finding 2). A stale start, or
+// a cached failure, must be looked up again — a live pid judged dead by an old
+// entry keeps a dead card, and a later session reusing the pid inherits it.
+test('a stale cached start is dropped and looked up again, so a live pid is not judged dead', async () => {
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { deadSessionsOf, isDeadSession, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const host = readingHostHash()
+  const text = file(block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: alivePid, started: aliveStarted, host }))
+  const projects = parseProgress(text)
+  // A start 60 s before this process's own: another process that held the pid.
+  const stale = new Map([[alivePid, aliveStarted - 60_000]])
+  assert.deepEqual([...deadSessionsOf(projects, host, stale)], [])
+  assert.equal(stale.get(alivePid), aliveStarted)
+  // A cached failure is dropped the same way, not kept as an answer.
+  const failed = new Map([[alivePid, null]])
+  assert.deepEqual([...deadSessionsOf(projects, host, failed)], [])
+  assert.equal(failed.get(alivePid), aliveStarted)
+  // The single-session probe evicts a stale start too.
+  const single = new Map([[alivePid, aliveStarted - 60_000]])
+  assert.equal(isDeadSession(projects[0].tasks[0].auto, host, single), false)
+  assert.equal(single.get(alivePid), aliveStarted)
+})
+
+test('a dead pid deletes its cached start, so a later session reusing the pid is looked up again', async () => {
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { deadSessionsOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const host = readingHostHash()
+  const pid = deadPid()
+  const text = file(block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid, started: aliveStarted, host }))
+  const cache = new Map([[pid, aliveStarted]])
+  assert.deepEqual([...deadSessionsOf(parseProgress(text), host, cache)], ['claude\u0000a1b2c3d4'])
+  assert.equal(cache.has(pid), false)
+})
+
+// Round 3: the dead set keys on the short id before the fold (finding 3). A dead
+// duplicate must never decide the live winner, and another session sharing the
+// short id must never fold the live one.
+test('a dead duplicate never decides the live winner, and a session sharing the short id never folds the live one', async () => {
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { deadSessionsOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const host = readingHostHash()
+  const resume = '1111111111111111111111111111111111111111111111111111111111111111'
+  const dead = deadPid()
+  // The same full session id twice: the older block's dead pid, the newer block's live one.
+  const twin = file(
+    block('c3d4e5f6', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: dead, started: aliveStarted, host }, 9, resume),
+    block('c3d4e5f6', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: alivePid, started: aliveStarted, host }, 5, resume),
+  )
+  assert.deepEqual([...deadSessionsOf(parseProgress(twin))], [])
+  // Two sessions share the short id a1b2c3d4 with different full ids: only the dead one is in the set.
+  const otherResume = '2222222222222222222222222222222222222222222222222222222222222222'
+  const collision = file(
+    block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: alivePid, started: aliveStarted, host }, 5, resume),
+    block('a1b2c3d4', 'claude', 'waiting', '- [?] Which plan, A or B?', { pid: dead, started: aliveStarted, host }, 5, otherResume),
+  )
+  assert.deepEqual([...deadSessionsOf(parseProgress(collision))], [`claude\u0000${otherResume}`])
 })
