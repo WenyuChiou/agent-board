@@ -133,7 +133,8 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
         }
       },
     })
-    return { ...session, close: async () => {
+    // id is read through the session: a reclaimed connection has a new one.
+    return { ...session, get id() { return session.id }, close: async () => {
       try { await session.close() }
       finally { websocket.close(); lost(); child.kill(); await exited }
     } }

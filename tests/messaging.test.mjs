@@ -4362,10 +4362,42 @@ serveWebSocketProxy({ onMessage: (value, emit) => {
     // Both are contested; the automatic receiver leaves. The proxy connection asks again and the board no longer finds it contested.
     await waitFor(async () => !(await board.call('/api/board')).body.messaging.connections.some(one => one.id === first.id))
     const joined = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === codexCurrent && one.surface === SURFACE_IDS.codexProxy && !one.contested))
+    // The object the caller holds names the new connection, not the one that was replaced.
+    assert.equal(connector.id, joined.id)
     // Whatever else the board decides about this send, it no longer refuses it as contested.
     assert.notEqual((await board.call('/api/messages/send', { id: codexId('AB-CX-001'), target: joined.id, turn: 'turn1', text: 'Check the build and tell me what failed.' })).body.error, 'CONTESTED')
   } finally { await connector?.close(); await receiver.close() }
 }))
+
+test('a receiver closed while its contested registration is in flight ends the new connection too', async () => {
+  const calls = []
+  let registers = 0
+  const server = createServer((req, res) => {
+    let body = ''
+    req.on('data', chunk => { body += chunk })
+    req.on('end', () => {
+      const action = req.url.split('/').pop(), value = JSON.parse(body || '{}')
+      calls.push([action, value.connection])
+      const answer = result => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(result)) }
+      if (action === 'register') {
+        const id = 'conn' + (++registers)
+        if (registers === 1) answer({ id, secret: 's' + registers, expires: Date.now() + 15000, leaseMs: 15000 })
+        // The second registration is answered only after the client has been closed.
+        else setTimeout(() => answer({ id, secret: 's' + registers, expires: Date.now() + 15000, leaseMs: 15000, contested: false }), 600)
+      } else if (action === 'poll') answer({ messages: [], leaseMs: 15000, contested: true })
+      else answer({ ok: true })
+    })
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  try {
+    const client = boardClient(`http://127.0.0.1:${server.address().port}/?t=synthetic`)
+    const connection = await client.attach({ agent: 'codex', session: '11111111-2222-4333-8444-555555555555', surface: SURFACE_IDS.cli, turn: 'turn1', reclaim: true, verify: async () => true, deliver: async () => undefined })
+    await waitFor(async () => registers === 2)
+    await connection.close()
+    await waitFor(async () => calls.some(one => one[0] === 'disconnect' && one[1] === 'conn2'))
+    assert.deepEqual(calls.filter(one => one[0] === 'disconnect').map(one => one[1]).sort(), ['conn1', 'conn2'])
+  } finally { await new Promise(done => server.close(done)) }
+})
 
 test('a progress read that fails for a moment keeps the receiver and its queued message', () => codexFixture(async (board, dir) => {
   const endFlag = join(dir, 'end-turn')
