@@ -3707,7 +3707,8 @@ const viewed = model => {
     recent,
     view: {
       now: 0, n: cards.length, questions: cards.length, stuck: 0, versions: { board: '0.0.0', package: null }, agents,
-      needs: { n: cards.length, questions: cards.length, stuck: 0, cards, older: older.map(one => one.ref) },
+      // The server lists the cards whose answer is on its way (sent, or queued) and not refused or timed out (#1296).
+      needs: { n: cards.length, questions: cards.length, stuck: 0, cards, older: older.map(one => one.ref), handled: asks.filter(one => one.item.isSending === true && !(one.item.receipt && (one.item.receipt.status === 'rejected' || one.item.receipt.status === 'uncertain' && one.item.receipt.hasAccepted !== true && /TIMEOUT/.test(one.item.receipt.error || '')))).map(one => one.ref.key) },
       working: [], all: { ...all, isHidden: agents.length < 2 }, own, projects: [],
     },
   }
@@ -11021,6 +11022,18 @@ test('Working now says an agent waits on you or just stopped, and that no agent 
       if (label !== 'none') assert.ok(!working.includes(EN.pgNoWorking), `${label}: ${working}`)
     } finally { await board.close() }
   }
+})
+
+// Review of #1339 (codex_128, finding 10): with every question's answer on its way, Working now said that no agent did
+// anything in 30 minutes although another agent had stopped two minutes ago.
+test('Working now names the agent that just stopped when every question has its answer on the way', async () => {
+  const { board, model, html } = await groupedPage([quietAsking(), quietStopped()].join('\n'))
+  try {
+    model.view.needs.handled = model.view.needs.cards.map(card => card.key)
+    const working = sectionWords(await pageDom(html, model), 'working')
+    assert.ok(working.includes(EN.pgQuietStopped(EN.agentNames.gemini, 2)), working)
+    assert.ok(!working.includes(EN.pgNoWorking), working)
+  } finally { await board.close() }
 })
 
 test('a working Codex session with no block of its own names its project once and does not say it waits', async () => {

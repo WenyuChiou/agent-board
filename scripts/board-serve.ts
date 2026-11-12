@@ -20,7 +20,7 @@ import { agentLabel } from '../hooks/strings'
 import type { ReceiverRoutes } from '../hooks/messaging'
 import type { SendDecision } from '../hooks/messaging'
 import { RECEIVER_ROUTES } from '../hooks/receiver-routes'
-import { lanAddress, localHosts, pagePolicy, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
+import { cardSendKey, handledOnly, lanAddress, localHosts, pagePolicy, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
@@ -64,9 +64,9 @@ export type ServeOptions = {
   // The progress bar's style (#1085): read from the board's settings file, and written there by
   // Settings so the pane and the terminal board show the same pick.
   barStyle?: () => BarStyle
-  setBarStyle?: (style: BarStyle) => boolean
+  setBarStyle?: (style: BarStyle) => { result: 'ok' | 'invalid' | 'unsafe'; lockLeft?: string }
   language?: () => SettingsLang
-  setLanguage?: (lang: SettingsLang) => boolean
+  setLanguage?: (lang: SettingsLang) => { result: 'ok' | 'invalid' | 'unsafe'; lockLeft?: string }
   isLangOverridden?: () => boolean
   agents?: SettingsAgentControl
   sweep: () => void
@@ -473,11 +473,12 @@ export const startServer = (o: ServeOptions): void => {
     const key = sendKey(target)
     if (sending.has(key)) return { status: 409, note: o.s.serveSendBusy(agentLabel(target.agent, o.s)) }
     sending.add(key)
+    sending.add(cardSendKey(cardKey))
     replies.delete(key)
     run(plan, o.s, label)
       .then(result => replies.set(key, { ...result, at: Date.now(), key: cardKey }))
       .catch((error: unknown) => replies.set(key, { ok: false, note: o.s.serveSendFailed(label, String(error)), at: Date.now(), key: cardKey }))
-      .finally(() => sending.delete(key))
+      .finally(() => { sending.delete(key); sending.delete(cardSendKey(cardKey)) })
     return { status: 202, note: o.s.serveQueued(label) }
   }
 
@@ -553,11 +554,11 @@ export const startServer = (o: ServeOptions): void => {
         try {
           const now = Date.now()
           const view = o.view()
-          const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
+          const state = messaging.snapshot(now, o.reports?.(false))
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
           // The page on the network learns only that an approval waits: no command, no button.
           const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, isApprovalOff)
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now, ...(approvalsShown === undefined ? {} : { approvals: approvalsShown }) }
+          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, isLan ? handledOnly(state) : state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now, ...(approvalsShown === undefined ? {} : { approvals: approvalsShown }) }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.
           const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
@@ -584,7 +585,7 @@ export const startServer = (o: ServeOptions): void => {
       // wantsKeyedPage: approvals are in use and no open page can answer them, so the board script
       // opens one with a key rather than pointing at a page that cannot. A paired page that is only
       // hidden still can; before any host asked, the page that is open is enough.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: sending.size, pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && hasAsked && !hasLiveSecret(Date.now()) })
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length, pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && hasAsked && !hasLiveSecret(Date.now()) })
       return json(res, 404, {})
     }
     const body = await readBody(req)
@@ -812,14 +813,20 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/style') {
         const style = body.style
         if (!isBarStyle(style) || o.setBarStyle === undefined) return json(res, 400, { note: o.s.pressFailed })
-        return o.setBarStyle(style) ? json(res, 200, { style }) : json(res, 409, { note: o.s.barStyleUnreadable })
+        const saved = o.setBarStyle(style)
+        if (saved.result !== 'ok') return json(res, 409, { note: saved.result === 'unsafe' ? o.s.barStyleUnsafe : o.s.barStyleUnreadable })
+        const note = saved.lockLeft === undefined ? undefined : o.s.settingsLockLeft(isLan ? basename(saved.lockLeft) : saved.lockLeft)
+        return json(res, 200, { style, ...(note === undefined ? {} : { note }) })
       }
       if (url.pathname === '/api/language') {
         const lang = body.lang
         if (!isSettingsLang(lang) || o.setLanguage === undefined) return json(res, 400, { note: o.s.pressFailed })
-        if (!o.setLanguage(lang)) return json(res, 409, { note: o.s.barStyleUnreadable })
+        const saved = o.setLanguage(lang)
+        if (saved.result !== 'ok') return json(res, 409, { note: saved.result === 'unsafe' ? o.s.barStyleUnsafe : o.s.barStyleUnreadable })
         const isOverridden = o.isLangOverridden?.() ?? false
-        return json(res, 200, { lang, isOverridden, note: isOverridden ? o.s.settingsLanguageOverridden : o.s.settingsLanguageChanged })
+        const note = isOverridden ? o.s.settingsLanguageOverridden : o.s.settingsLanguageChanged
+        const lockNote = saved.lockLeft === undefined ? '' : ` ${o.s.settingsLockLeft(isLan ? basename(saved.lockLeft) : saved.lockLeft)}`
+        return json(res, 200, { lang, isOverridden, note: note + lockNote, ...(saved.lockLeft === undefined ? {} : { lockLeft: true }) })
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()

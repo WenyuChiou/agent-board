@@ -20,14 +20,15 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
 import { boardLanguage, isLanguageOverridden, settingsLangOf, withBoardSettings } from '../hooks/board-settings'
 import type { SettingsLang } from '../hooks/board-settings'
-import { barStyleName, barStyleOf, nextBarStyle, withBarStyle } from '../hooks/progress-bar'
+import { barStyleName, barStyleOf, nextBarStyle } from '../hooks/progress-bar'
 import type { BarStyle } from '../hooks/progress-bar'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, manualStepRef, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
-import { moveLockAside } from './board-messaging'
+import { moveLockAside, readQueuedMessaging } from './board-messaging'
 import { explicitCodexExecutable, resolveCodexExecutable } from './codex-receiver.mjs'
+import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
@@ -100,7 +101,10 @@ const systemLang = (env: unknown) => {
 
 const path = progressFile()
 const savedLanguage = (): SettingsLang | null => {
-  try { return settingsLangOf(readFileSync(settingsPath(path), 'utf8')) } catch { return null }
+  try {
+    const found = readSettings(settingsPath(path))
+    return found.kind === 'ok' ? settingsLangOf(found.text) : null
+  } catch { return null }
 }
 const langFlag = flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang'))
 const wordsNow = () => STRINGS[boardLanguage(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))]
@@ -131,9 +135,11 @@ const plainFile = (file: string): string => {
     : full === resolve(questionsPath(path)) ? s.fileQuestions : s.fileNamed(basename(file))
 }
 
-// The terminal board and the page say the same about a file they could not read or write.
-const storageNote = (error: BoardFileError): string =>
-  error.isLocked ? s.boardLocked(plainFile(error.file))
+// The terminal board and the page say the same about a file they could not read or write. A held settings lock is
+// named as the writer names it (the folder's real path), so the note names the lock that blocks.
+const storageNote = (error: BoardFileError, isLan = false): string =>
+  error.code === 'SETTINGS_LOCKED' ? s.settingsLocked(isLan ? basename(settingsLockName(error.file)) : settingsLockName(error.file))
+    : error.isLocked ? s.boardLocked(plainFile(error.file))
     : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code))
     : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
 
@@ -735,34 +741,44 @@ const settingsNow = (): string | null => {
   const now = Date.now()
   if (settingsKept !== null && now - settingsKept.at < SETTINGS_MS) return settingsKept.text
   let text: string | null
-  try { text = read(settingsPath(path)) } catch { text = null }
+  try {
+    const found = readSettings(settingsPath(path))
+    text = found.kind === 'ok' ? found.text : null
+  } catch { text = null }
   settingsKept = { text, at: now }
   return text
 }
 const barStyleNow = (): BarStyle => barStyleOf(settingsNow())
-// The pick from the page or the `s` key: the settings file's other keys are kept. False when the
-// file exists but does not read as a JSON object, or is a symlinked or non-regular file: it is left
-// as it is. A read or write error throws.
-const saveBarStyle = (style: BarStyle): boolean => {
+// The pick from the page or the `s` key: the settings file's other keys are kept. 'invalid' when the
+// file exists but does not read as a JSON object, 'unsafe' when it is a link or a non-regular file: it is
+// left as it is either way. A read or write error throws.
+type SaveResult = ReturnType<typeof updateSettings>
+const saveSettings = (patch: Record<string, unknown>): SaveResult => {
   const file = settingsPath(path)
-  if (isSymlinkOrNonRegular(file)) return false
-  const next = withBarStyle(read(file), style)
-  if (next === null) return false
-  try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
-  settingsKept = { text: next, at: Date.now() }
-  return true
+  // The change is worked out from the file as it is when written, so a save made meanwhile is kept (#1276).
+  // A failed read or write names the file on the page.
+  let saved: ReturnType<typeof updateSettings>
+  try { saved = updateSettings(file, text => withBoardSettings(text, patch)) } catch (error) { throw fileError(file, error) }
+  if (saved.result === 'ok') settingsKept = { text: saved.text ?? null, at: Date.now() }
+  return saved
+}
+const saveBarStyle = (style: BarStyle): SaveResult => saveSettings({ style })
+
+const saveLanguage = (lang: SettingsLang): SaveResult => {
+  const saved = saveSettings({ lang })
+  if (saved.result === 'ok') s = wordsNow()
+  return saved
 }
 
-const saveLanguage = (lang: SettingsLang): boolean => {
-  const file = settingsPath(path)
-  if (isSymlinkOrNonRegular(file)) return false
-  const next = withBoardSettings(read(file), { lang })
-  if (next === null) return false
-  // A failed write names the file on the page, as a failed read does.
-  try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
-  settingsKept = { text: next, at: Date.now() }
-  s = wordsNow()
-  return true
+// The answers queued for a session's next turn, which the page counts as handled: the terminal board, --status,
+// --json and the chat view read them from the store's file so every surface shows one count (#1296).
+// It names the folder without making it, as a plain print makes no folder (the page's own default, worked out
+// by the same rule); a folder that is not there holds no queued answer.
+const queuedMessaging = () => {
+  try {
+    const flagged = flag('--messages-dir')
+    return readQueuedMessaging(flagged !== undefined ? resolve(flagged) : defaultMessagesDirectory(path, homedir(), process.env, process.platform), Date.now())
+  } catch { return undefined }
 }
 
 const options = () => ({
@@ -771,6 +787,7 @@ const options = () => ({
   barStyle: barStyleNow(),
   isIdleOpen: args.includes('--all'),
   routes,
+  messaging: queuedMessaging(),
 })
 
 // How many times `rewrite` makes a change; it tells the change which try is the last.
@@ -1418,7 +1435,8 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
   let historyDays = HISTORY_DAYS
   if (!isNow && !isCleanUp) {
     try {
-      historyDays = historyDaysOf(read(settingsPath(path)))
+      const found = readSettings(settingsPath(path))
+      historyDays = historyDaysOf(found.kind === 'ok' ? found.text : '')
     } catch {}
   }
   const count = archiveOut((text, isLast) => {
@@ -1701,11 +1719,13 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
     settingsKept = null
     const style = nextBarStyle(barStyleNow())
     try {
-      if (!saveBarStyle(style)) return { state: { ...next, note: s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+      const saved = saveBarStyle(style)
+      if (saved.result !== 'ok') return { state: { ...next, note: saved.result === 'unsafe' ? s.barStyleUnsafe : s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+      const note = `${s.barStyleKey(barStyleName(style, s))}${saved.lockLeft === undefined ? '' : ` ${s.settingsLockLeft(saved.lockLeft)}`}`
+      return { state: { ...next, note, tone: 'done' }, isQuit: false, isHtml: false, isWrite: false }
     } catch (error) {
       return { state: { ...next, note: failureNote(error), tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
     }
-    return { state: { ...next, note: s.barStyleKey(barStyleName(style, s)), tone: 'done' }, isQuit: false, isHtml: false, isWrite: false }
   }
   if (action.type === 'tidy') {
     let note: string
@@ -2089,7 +2109,7 @@ const serveChild = (): void => {
       // The page names a file it could not read or write the way the terminal board does, for a
       // press and for the board it shows. The page is answered, so the exit code and stderr are
       // left alone. File labels and reasons stay the same on local and network pages.
-      failure: error => (error instanceof BoardFileError ? storageNote(error) : null),
+      failure: (error, isLan) => (error instanceof BoardFileError ? storageNote(error, isLan) : null),
       idleMs: idleMs(),
       // The page that can answer approvals is the one the board opens itself (D3, #1318).
       // A board that opens no window where it runs says it tried nothing, so the caller opens the page.
@@ -2580,7 +2600,7 @@ const chat = (): void => {
     // A reply is hidden whole, before its question is picked and cut to length.
     const source = read(path)
     const updates = pending(text => redact(text, home, isWin))
-    process.stdout.write(chatText(view(source, now), updates, doneToday(journalToday(now), now, s), s, home, isWin, CHAT_MAX, now))
+    process.stdout.write(chatText(view(source, now), updates, doneToday(journalToday(now), now, s), s, home, isWin, CHAT_MAX, now, queuedMessaging()))
   } catch (error) {
     process.exitCode = 1
     const code = (error as { code?: unknown } | null)?.code
@@ -2674,7 +2694,7 @@ const boardJson = (days?: number, projectFilter?: string) => {
     }
     finished = collectFinished(source, journalTexts, archiveTexts, days, now, projectFilter, home, isWin)
   }
-  return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group, finished)
+  return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group, finished, queuedMessaging())
 }
 const json = (): void => {
   try {
@@ -2831,7 +2851,7 @@ const run = async (): Promise<void> => {
     } catch {
       turns = []
     }
-    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), answeredText, questionsText, turns)}\n`)
+    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), answeredText, questionsText, turns, queuedMessaging())}\n`)
     return
   }
   const request = flag('--legacy-connect-request')

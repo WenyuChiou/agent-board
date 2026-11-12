@@ -9,6 +9,7 @@ import type { Connection, Message, MessageState, ProgressBinding, SessionExpecta
 import { STALE_MS } from '../hooks/parse'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
 import { claimMessageStore } from './message-store-claim'
+import { readSettings } from './settings-file'
 import type { MessageStoreClaim } from './message-store-claim'
 
 // The name a hook gives its mailbox claim, so it can hand back a claim it stopped waiting for (#990).
@@ -168,6 +169,21 @@ const openMessaging = (directory: string, isDefault = false, gate?: MessageGate)
     if (isFreshDefault) try { rmdirSync(root) } catch {}
     throw error
   }
+}
+
+// The answers waiting for a session's next turn, read from the store's file without a lock and without writing,
+// for the terminal board, --status and --json to count what the page counts (#1296). The file is replaced whole,
+// never edited in place, so a read sees one complete save. Nothing (undefined) when the folder holds no store or
+// the file cannot be read as one: those surfaces then count every question as waiting, as they did before.
+export const readQueuedMessaging = (directory: string, now: number) => {
+  try {
+    // The server refuses a store folder that is a link; so does this read, and every question then waits (#1276 review).
+    if (lstatSync(resolve(directory)).isSymbolicLink()) return undefined
+    const found = readSettings(join(resolve(directory), 'messages.json'))
+    if (found.kind !== 'ok') return undefined
+    const state = expireMailboxes(parseMessageStore(found.text, now), now)
+    return { connections: [] as Connection[], mailboxes: state.mailboxes ?? [], messages: state.messages.map(shownMessage) }
+  } catch { return undefined }
 }
 
 const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDefault = false, gate?: MessageGate) => {
