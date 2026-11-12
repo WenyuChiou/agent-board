@@ -253,6 +253,19 @@ test('an approval named for the pull request author does not count as approved',
   assert.deepEqual(other.waitingForAuthor, [])
 })
 
+test('a reviewer the author\'s lane started new for this review counts as an approval on the light and normal tiers only, as the PR check reads it (#1375)', () => {
+  // The queue reads a one-note lane as the author's own lane, so this shape is the one it would hold as self-approval.
+  const fresh = by('WenyuChiou', answered('codex (started new for this review), lane codex'))
+  const queue = tier => classify([pull(1, { body: `Author: codex, branch\nTier: ${tier}`, files: [] })], { 1: [ready(head, '2026-10-20T08:00:00Z'), fresh] }, now)
+  for (const tier of ['light', 'normal']) {
+    assert.deepEqual(queue(tier).approvedNow.map(item => item.number), [1], tier)
+    assert.deepEqual(queue(tier).waitingForAuthor, [], tier)
+  }
+  assert.deepEqual(queue('risk').waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approval is by the author']])
+  const plain = classify([pull(1, { body: 'Author: codex, branch\nTier: normal', files: [] })], { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('codex'))] }, now)
+  assert.deepEqual(plain.waitingForAuthor.map(item => item.detail), ['approval is by the author'])
+})
+
 test('a different lane of the same base name is a different agent, not the author', () => {
   const prs = [pull(1, { body: 'Author: codex (phase1), branch', files: [] })]
   const other = classify(prs, { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('codex (e2e)'))] }, now)

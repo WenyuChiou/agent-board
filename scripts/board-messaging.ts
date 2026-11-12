@@ -3,7 +3,8 @@ import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, 
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { acceptMailboxMessage, endMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
-import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, shownMessage, textHash } from '../hooks/messaging'
+import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
+import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
@@ -26,6 +27,8 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
+    if (one.line !== undefined && !ROUTE_LINES.includes(one.line)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.surface !== undefined && (typeof one.surface !== 'string' || one.surface === '' || /[\r\n]/.test(one.surface))) throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
     messageId(one.turn)
     messageText(one.from, 300)
@@ -136,7 +139,9 @@ export const moveLockAside = (lock: string, recorded: string, claim: MessageStor
 
 // Only a host adapter can register a receiving session. Registrations and secrets die with
 // this server; message ids and receipts survive restart so uncertainty is never auto-retried.
-const openMessaging = (directory: string, isDefault = false) => {
+export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined }
+
+const openMessaging = (directory: string, isDefault = false, gate?: MessageGate) => {
   const root = resolve(directory)
   const isMade = mkdirSync(root, { recursive: true, mode: 0o700 }) !== undefined
   // The default folder the command that started this server has just checked is not checked
@@ -156,7 +161,7 @@ const openMessaging = (directory: string, isDefault = false) => {
       } catch (error) { throw new Error(isTimeout(error) ? 'ACL_CHECK_TIMEOUT' : 'MESSAGE_STORE_ACL', { cause: error }) }
     }
     const claim = claimMessageStore(root)
-    try { return openClaimedMessaging(root, claim, isFreshDefault) } catch (error) {
+    try { return openClaimedMessaging(root, claim, isFreshDefault, gate) } catch (error) {
       try { claim.release() } catch (cleanup) { throw new AggregateError([error, cleanup], 'MESSAGE_STORE_CLAIM_BLOCKED') }
       throw error
     }
@@ -181,7 +186,7 @@ export const readQueuedMessaging = (directory: string, now: number) => {
   } catch { return undefined }
 }
 
-const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDefault = false) => {
+const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDefault = false, gate?: MessageGate) => {
   let isClosed = false
   let isPublished = false
   const requireOpen = (): void => { if (isClosed) throw new Error('MESSAGE_STORE_CLOSED') }
@@ -388,7 +393,20 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         if (source === undefined && secret !== undefined) throw new Error('UNKNOWN_FIELD')
         const sender = source === undefined ? undefined : authenticated(source, secret, now)
         const from = sender === undefined ? 'board' : address(sender.agent, sender.session)
-        const queued = queueMessage(state, input, from, connections.get(String(input.target)) ?? state.mailboxes?.find(one => one.id === input.target), now, sender?.origin ?? 'local')
+        messageFields(input, ['id', 'target', 'turn', 'text', 'answers'])
+        let target = connections.get(String(input.target)) ?? state.mailboxes?.find(one => one.id === input.target)
+        let line: RouteLine | undefined, surface: string | undefined
+        if (from === 'board' && !state.messages.some(one => one.id === input.id)) {
+          const decision = sendDecision(String(input.target), [...connections.values()], state.mailboxes ?? [], gate?.stateOfSession ?? (() => undefined), gate?.routes ?? [], now)
+          if (!decision.canSend) {
+            const code = decision.reason === 'CONTESTED' ? 'CONTESTED' : decision.reason === 'OFFLINE' || decision.reason === 'NO_TARGET' ? 'OFFLINE' : 'NO_RECORDED_ROUTE'
+            throw Object.assign(new Error(code), { decision })
+          }
+          target = decision.target
+          line = decision.line
+          surface = decision.target.surface
+        }
+        const queued = queueMessage(state, input, from, target, now, sender?.origin ?? 'local', undefined, line, surface)
         save(queued.state, now)
         // The nonce is the receiver's alone; a retried send never learns it.
         return shownMessage(queued.message)
@@ -428,8 +446,8 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
 }
 
 // The server's startup boundary retains the message alone, so preserve a safe errno there.
-export const createMessaging = (directory: string, isDefault = false) => {
-  try { return openMessaging(directory, isDefault) }
+export const createMessaging = (directory: string, isDefault = false, gate?: MessageGate) => {
+  try { return openMessaging(directory, isDefault, gate) }
   catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code
     if (error instanceof Error && !/^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) && typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) {

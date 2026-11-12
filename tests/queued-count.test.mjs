@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { request } from 'node:http'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -61,8 +61,12 @@ const folderWithStore = () => {
   return { dir, messages }
 }
 
+// The receivers' records as tests/messaging.test.mjs reads them: since #1354 a card offers Send, and so shows its
+// answer as being sent, only on a route a record has shown live.
+const recorded = JSON.parse(readFileSync(new URL('./helpers/recorded-routes.json', import.meta.url), 'utf8'))
+
 test('the page model lists the queued question as handled and keeps it on the sheet', () => {
-  const model = serveModel(view(), [], EN, new Set(), false, shown(stored()), false, group)
+  const model = serveModel(view(), [], EN, new Set(), false, shown(stored()), false, group, recorded)
   assert.equal(model.view.needs.n, 2)
   assert.equal(model.view.needs.cards.length, 2)
   assert.equal(model.view.needs.handled.length, 1)

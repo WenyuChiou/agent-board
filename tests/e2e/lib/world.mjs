@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { rm } from 'node:fs/promises'
 import { BOARD_SCRIPT } from '../../../hooks/board-script.ts'
 import { clockPreload, clockText, jump } from './clock.mjs'
@@ -46,7 +46,7 @@ export const makeWorld = ({ lang = 'en' } = {}) => {
   const modules = process.platform === 'win32' && modulePath()
   if (modules) env.PSModulePath = modules
   // AGENT_BOARD_TEST_PID: a board this world starts opens no window and stops once this test process is gone (#959).
-  Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid) })
+  Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid), AGENT_BOARD_ROUTES: fileURLToPath(new URL('../../helpers/recorded-routes.json', import.meta.url)) })
   const inside = file => {
     const rel = relative(root, resolve(file))
     assert.ok(rel && rel !== '..' && !rel.startsWith('..\\') && !rel.startsWith('../') && !isAbsolute(rel), `Outside world: ${file}`)

@@ -710,3 +710,13 @@ test('a reply typed in chat changes every board surface while its durable questi
     expect(viewClaudeAskAgain.waiting.length).toBe(1)
   }
 })
+
+test('the terminal board answers a mailbox card the way the page does, and copies a card the page only copies (#1351)', () => {
+  const delivery = { id: 'mailbox_0123456789abcdef01234567', turn: 'session', agent: 'deepseek' }
+  const routes = routesOf({ asks: [
+    { key: 'ask:mailbox', send: 'mailbox', agent: 'deepseek', session: 's', text: 'Blue or green?', fp: 'f', delivery },
+    { key: 'ask:copy', send: 'none', agent: 'deepseek', session: 's2', text: 'Blue or green?', fp: 'g' },
+    { key: 'ask:nodelivery', send: 'mailbox', agent: 'deepseek', session: 's3', text: 'Q?', fp: 'h' },
+  ] })
+  expect(routes).toEqual({ 'ask:mailbox': { mode: 'connected', agent: 'deepseek', session: 's', asked: 'Blue or green?', fp: 'f', delivery } })
+})

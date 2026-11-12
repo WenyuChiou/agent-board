@@ -23,6 +23,7 @@ import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
 import { keepRecent, remindersOf } from '../hooks/remind'
 import { lanAddress, localHosts, pagePolicy, pageWords, replyText, requestProblem, sendKey, sendMode, sendPlan, serveAction, serveModel, servePage } from '../hooks/serve'
+import { SURFACE_IDS } from '../hooks/messaging'
 import { boardLanguage, isLanguageOverridden, type SettingsLang } from '../hooks/board-settings'
 import { settingsPanel } from '../hooks/page-settings'
 import { qrModules, qrText } from '../hooks/qr'
@@ -521,18 +522,21 @@ test('a working row quiet past the Working now limit can be archived on the term
 const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const SESSION = '2be48af2-6193-5040-aacc-e0546d6784f1'
 
+// Every route of these hosts counts as shown live on the CLI surface: this test is about which session a card binds to, not about the receivers' records.
+const LIVE_ROUTES = ['codex', 'cursor', 'opencode'].map(agent => ({ agent, kind: 'live' as const, routes: { idle: { line: 'now' as const, record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.cli] }, working: { line: 'stepEnd' as const, record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.cli] }, ended: { line: 'none' as const, record: null, surfaces: [] } } }))
+
 test('independent local progress cards match only their full native session receiver', () => {
   for (const agent of ['codex', 'cursor', 'opencode'] as const) {
     const owner = sha256(`${agent}:${SESSION}`)
     const report = { ...codexReport(null, SESSION, { title: 'Native card binding', state: 'waiting', steps: ['- [?] Reply to this session?'] }, new Date(NOW).toISOString(), STRINGS.en), agent }
     const text = putCodexBlock('', report, owner)
     const view = buildView(parseProgress(text), [], null, NOW, 0, {}, STRINGS.en)
-    const connection = { id: 'fixture-receiver', agent, session: SESSION, surface: 'Synthetic owner', turn: 'session', scope: 'session' as const, expires: NOW + 15000 }
-    const online = serveModel(view, [], STRINGS.en, new Set(), false, { connections: [connection], messages: [] }).asks[0]
+    const connection = { id: 'fixture-receiver', agent, session: SESSION, surface: SURFACE_IDS.cli, turn: 'session', scope: 'session' as const, expires: NOW + 15000 }
+    const online = serveModel(view, [], STRINGS.en, new Set(), false, { connections: [connection], messages: [] }, false, undefined, LIVE_ROUTES).asks[0]
     expect(online?.send).toBe('connected')
     expect(online?.session).toBe(SESSION)
     expect(online?.delivery?.id).toBe(connection.id)
-    const offline = serveModel(view, [], STRINGS.en, new Set(), false, { connections: [{ ...connection, session: owner.slice(0, 8) }], messages: [] }).asks[0]
+    const offline = serveModel(view, [], STRINGS.en, new Set(), false, { connections: [{ ...connection, session: owner.slice(0, 8) }], messages: [] }, false, undefined, LIVE_ROUTES).asks[0]
     expect(offline?.delivery).toBeUndefined()
     expect(offline?.send).not.toBe('send')
     expect(putCodexBlock(text, report, owner)).toBe(text)
@@ -3994,7 +3998,7 @@ test("on the local network every agent's task shows as on the computer, except t
     const here = computer.find(row => who(row) === agent)
     const there = lan.find(row => who(row) === agent)
     if (here === undefined || there === undefined) throw new Error(`no row for ${agent}`)
-    if (here.send === 'send') expect(there).toEqual({ ...here, send: 'open', where: '', info: STRINGS.en.serveLanSend(agentLabel(agent, STRINGS.en)), hasCopyBox: true, resume: null })
+    if (here.send === 'send') expect(there).toEqual({ ...here, send: 'open', where: '', info: STRINGS.en.serveLanSend(agentLabel(agent, STRINGS.en)), hasCopyBox: true, resume: null, line: 'none', canSend: false, lineText: '' })
     else expect(there).toEqual({ ...here, resume: null })
   }
   // Claude's row has a command to resume it on the computer, which stays there.
@@ -4850,7 +4854,7 @@ test('a reply on the line of a task whose question was marked answered goes as i
   const stale = { key: grok, type: 'send', text: 'Use Redis', session: 'b2c3d4e5', asked: 'Redis or Memcached?' }
   expect(resumeAction(items, stale, STRINGS.en)).toEqual({ type: 'refuse', note: STRINGS.en.boardLineChanged })
   // A row's message box is drawn with the question the row names, which the reply carries back.
-  expect(servePage(STRINGS.en, 'n')).toContain("replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery)")
+  expect(servePage(STRINGS.en, 'n')).toContain("replyBox(row.key, w('serveMessagePlaceholder', agentName(row.agent)), row.send, row.agent, row.where, row.isSending, row.session, row.question, row.fp, row.delivery, { line: row.line }))")
   // Still asked, it opens by itself and a reply goes as its answer.
   expect([row(resumeModel(serveView(), [], STRINGS.en))?.isAsking, row(resumeModel(serveView(), [], STRINGS.en))?.question]).toEqual([true, 'Redis or Memcached?'])
   const asking = boardItems(serveView(), [])
