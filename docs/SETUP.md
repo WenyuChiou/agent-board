@@ -184,13 +184,15 @@ files: the board script lands at `~/.agent-board/agent-board.mjs`, and no hook p
 npm's cache, so clearing that cache breaks nothing. `npm install -g @wenyuchiou/agent-board` gives a
 lasting `agent-board` command in place of `npx`.
 
-In a terminal, setup prints its preview and asks once: `Set these up? [Y/n]` (Enter means yes). A yes writes the files, approves the board's hooks in Codex and Hermes Agent for the agents it set up, and, when `claude` is on the PATH and the plugin is not installed, runs `claude plugin marketplace add WenyuChiou/agent-board` (left out when Claude Code already knows that marketplace) and `claude plugin install agent-board@agent-board`. Each part prints done, or failed with the command to run by hand, and a failed part does not stop the others. A no writes nothing. Without a terminal (piped input, `--json`, an agent's shell tool that is not a terminal) setup only previews. `setup --apply` writes the files only, in a terminal too, and lists the approval and plugin commands: only a yes typed at the question approves hooks or installs the plugin. On a first plain `agent-board` run with nothing set up, the launcher hands over to the same question and opens the board after a yes. OpenCode and Gemini CLI use `/agent-board`; setup removes an unchanged old `/board` file and keeps one you edited.
+In a terminal, setup prints its preview and, when there is something to set up, asks once: `Set these up? [Y/n]` (`要設定這些嗎？[Y/n]` on a Traditional Chinese system, `要设置这些吗？[Y/n]` on a Simplified Chinese one; Enter means yes). A yes writes the files, approves the board's hooks in Codex and Hermes Agent for the agents it set up, and, when `claude` is on the PATH and the plugin is not installed, runs `claude plugin marketplace add WenyuChiou/agent-board` (left out when Claude Code already knows that marketplace) and `claude plugin install agent-board@agent-board`. Each part prints done, or failed with the command to run by hand, and a failed part does not stop the others. A no writes nothing. Without a terminal (piped input, `--json`, an agent's shell tool that is not a terminal) setup only previews. `setup --apply` writes the files only, in a terminal too, and lists the approval and plugin commands: only a yes typed at the question approves hooks or installs the plugin. On a first plain `agent-board` run with nothing set up, the launcher hands over to the same question and opens the board after a yes. OpenCode and Gemini CLI use `/agent-board`; setup removes an unchanged old `/board` file and keeps one you edited.
 
 A plain `agent-board` call opens the interactive local page on a desktop, from an agent or
 in a non-interactive call. An interactive terminal over SSH or without a display opens the
 terminal board; CI prints text. `--html` and the old spelling `--serve` start or reuse the local service and
 open the page (`--serve` prints only the address, with no text board); `--lan` opens it and shows the phone address; `--watch` selects the terminal board, `--print` prints text, and `--json`
 returns the board for agents.
+
+Without `--lang` or a language it saved, the board follows the system language when it is Traditional or Simplified Chinese, and English otherwise; `--lang en`, `--lang zh-TW` or `--lang zh-CN` on the board command (as on `setup`) chooses. `--html --no-open` starts the page without opening a browser window (`--no-open` alone does not: in an interactive terminal over SSH or without a display it still gives the terminal board).
 
 These board calls run the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
 the board the Claude Code plugin's connector last connected, else
@@ -203,6 +205,53 @@ it, which still leaves files you edited alone. For the Claude Code plugin's copy
 updating the plugin, then `/progress connect`. Installing runs nothing: the package has no
 dependencies and no install scripts. Pre-releases are on the `next` tag
 (`npx @wenyuchiou/agent-board@next setup`); what makes a release stable is in [RELEASING.md](RELEASING.md).
+
+## Install from a clone
+
+Without npm, from a clone of this repository, with Node.js 22 or later:
+
+```sh
+git clone https://github.com/WenyuChiou/agent-board.git
+cd agent-board
+node scripts/setup-agent.mjs
+```
+
+In a terminal, `setup-agent.mjs` shows what it would change and,
+when there is something to set up, asks once (`Set these up? [Y/n]`, or `要設定這些嗎？[Y/n]` and `要设置这些吗？[Y/n]` on a
+Chinese system); a no writes nothing. Without a terminal to answer in, such as an agent's chat,
+it only previews, and `node scripts/setup-agent.mjs --apply` writes. It takes the same options as
+`npx @wenyuchiou/agent-board@next setup`, such as `--agent codex` or `--data-dir <folder>`. On
+Windows, use the exact paths it prints. Then finish [the steps your agent needs](#after-setup-per-agent),
+and open the board from this folder with `node bin/agent-board.mjs`; add `--data-dir <folder>`
+when setup wrote the board there. A board the Claude Code plugin manages opens with
+`/agent-board` in Claude Code, or from this folder with `--progress-file <path to its progress.md>`
+(`~/.claude/progress.md` unless you moved it).
+
+## Let an agent install it
+
+Paste this into the agent you already use:
+
+```text
+Install Agent Board from https://github.com/WenyuChiou/agent-board on this computer.
+Read its AGENTS.md, README and setup guide. Identify my current host and the other installed coding agents, then preview the common installer: node scripts/setup-agent.mjs.
+Preserve existing settings and the shared progress path. Follow my approval requirements for persistent changes, then apply the applicable hooks, plugins and board command. Do not require or call another AI product to bootstrap this one.
+Complete any required scoped host trust, read the settings back, and have this session report its own real task progress. Open the interactive board.
+Verify actual hook events separately for CLI, desktop App and IDE. Installed files, transport acceptance and an ACK are different from a working progress connection.
+Tell me which existing sessions need reload and which adapters remain unsupported or unverified. Never scan private conversations or silently skip a blocker.
+```
+
+## After setup, per agent
+
+Start a new session of each agent: a session that was already open is not connected.
+
+Open the board in the new session with `/agent-board`, or `$agent-board` in Codex. Cursor has no such command: use `npx @wenyuchiou/agent-board@next` in a terminal. In Hermes Agent, ask it for the Agent Board skill.
+
+- **Claude Code** connects through its plugin, which a yes to setup installs. If you did not answer yes (setup only previewed, or ran `--apply` without a terminal): `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
+- **Codex:** a yes to setup trusts its hooks. If you did not answer yes, trust them in `/hooks` ([how](CODEX.md)).
+- **OpenCode, OpenClaw:** reload their plugins.
+- **dot and other web chats:** paste [the last section of AGENTS.md](../AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then save each block it writes and merge it into the progress file as [Remote reporters](REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) shows.
+
+To add a task of your own, write a `### title` with `- [ ] step` lines in `progress.md` ([the format](FORMAT.md)).
 
 ## Native status adapters
 

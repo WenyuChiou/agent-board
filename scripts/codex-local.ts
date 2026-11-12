@@ -12,7 +12,7 @@ import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { parseProgress, STALE_MS } from '../hooks/parse'
 import { reporterTail } from './reporter-tail'
-import { othersNote, sessionPushNote } from '../hooks/others'
+import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, planEvents, planPlugins, statusEvents, windowsHookCommand } from '../hooks/local-agents'
@@ -30,7 +30,7 @@ import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText } from '../hooks/messaging'
-import { isSessionEnd, isTurnStart, turnStartEnvelope } from '../hooks/hook-messages'
+import { deliverTurnEvent } from './hook-delivery'
 import { hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
@@ -1069,59 +1069,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       '--codex-report', '--agent', 'antigravity', '--session', session,
       '--progress-file', progress, '--home', home, '--data-dir', root,
     ])) : null
-    // Only the live event has a host reading stdout. A queued event and recovery never claim.
-    if (mode !== '--codex-report' && report !== undefined && hookDeadline - Date.now() >= 300) {
-      let mailbox: ReturnType<typeof hookMailbox> | undefined
-      try { mailbox = hookMailbox(defaultMessagesDirectory(progress, home, process.env, process.platform), hookDeadline - Date.now()) } catch {}
-      if (isSessionEnd(agent, event)) {
-        try { await mailbox?.end(agent, session, Date.now()) } catch {}
-      } else if (isTurnStart(agent, event)) {
-        let message = null
-        try { message = await mailbox?.turn(agent, session, agent === 'cursor' ? 'IDE (Composer)' : agent === 'antigravity' ? 'IDE' : 'CLI', Date.now()) ?? null } catch {}
-        const owner = hash(`${agent}:${session}`)
-        const recordFile = join(root, 'sessions', `${owner}.json`)
-        let pushed: string[] = []
-        try {
-          const saved = readLocal(recordFile)
-          const parsed = saved === null ? null : JSON.parse(saved) as { pushed?: unknown }
-          if (Array.isArray(parsed?.pushed)) pushed = parsed.pushed.filter((one): one is string => typeof one === 'string')
-        } catch {}
-        let pushResult: { note: string | null; keys: string[] } = { note: null, keys: [] }
-        try {
-          const text = readLocal(progress)
-          if (text !== null) {
-            const here = [...hereNames(raw.cwd ?? current.folder), report.project].filter(name => name !== '')
-            const isGeneric = Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(report!.title))
-            pushResult = sessionPushNote(parseProgress(text), here, {
-              sessionId: owner.slice(0, 8), agent, resume: session,
-              ...(isGeneric ? {} : { title: report.title }), steps: report.steps,
-            }, new Set(pushed), Date.now(), s)
-          }
-        } catch {}
-        if (message !== null || pushResult.note !== null) {
-          let hasWritten = false
-          try {
-            const combined = [message === null ? '' : deliveryText(message, s), pushResult.note ?? ''].filter(Boolean).join('\n\n')
-            const envelope = turnStartEnvelope(agent, event, combined, base, session)
-            await new Promise<void>((done, fail) => process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`, error => error ? fail(error) : done()))
-            hasWritten = true
-          } catch {}
-          if (hasWritten && message !== null) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
-          if (hasWritten && pushResult.keys.length > 0) {
-            try {
-              const saved = readLocal(recordFile)
-              if (saved !== null) {
-                const record = JSON.parse(saved) as Json
-                const nextPushed = [...new Set([...pushed, ...pushResult.keys])].slice(-64)
-                atomic(recordFile, `${JSON.stringify({ ...record, pushed: nextPushed }, null, 2)}\n`, checkDeadline, true)
-              }
-            } catch {}
-          }
-          return true
-        }
-        if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
-      }
-    }
+    if (await deliverTurnEvent({
+      mode, agent, event, session, report, raw, folder: current.folder, base, progress, home, root, hookDeadline, s,
+      hash, readLocal, atomic, checkDeadline, hereNames,
+    })) return true
     if (mode === '--codex-report' && planInput !== undefined) return true
     if (mode === '--codex-report') output({ session, block: hash(`${agent}:${session}`).slice(0, 8), state: report!.state, updated: report!.updated, progress, cut: reportCut, dropped: reportDropped })
     else if (agent === 'cursor') output(raw.hook_event_name === 'sessionStart' ? { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: agent } } : {})

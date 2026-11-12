@@ -15,6 +15,14 @@ const NOW = Date.parse('2026-10-16T12:00:00.000Z')
 const START = { cwd: '/work/persona_framework', surface: 'terminal' as const, isInteractive: true }
 
 test('a question pass over 1,000 open questions and 5,600 copies works out the copies to keep and the questions to retire well within a second', () => {
+  let visits = 0
+  const counted = (record: QuestionRecord): QuestionRecord => Object.defineProperty({ ...record }, 'id', {
+    enumerable: true,
+    get: () => {
+      visits += 1
+      return record.id
+    },
+  })
   const open = Array.from({ length: 1000 }, (_, n) => question(n + 1))
   const answered = Array.from({ length: 2700 }, (_, n) => finished(n + 1001))
   // A copy from when each answered question was open and from when it was answered, and the
@@ -22,10 +30,10 @@ test('a question pass over 1,000 open questions and 5,600 copies works out the c
   const captures = [
     ...answered.flatMap(record => [held(reopened(record), 'unresolved', 0).capture, held(record, 'resolved', 0).capture]),
     ...open.slice(0, 200).map(record => held(record, 'unresolved', 0).capture),
-  ]
+  ].map(capture => ({ ...capture, record: counted(capture.record) }))
   expect(captures.length).toBe(5600)
-  const started = Date.now()
-  const current = withCaptures(ledgerOf(...open, ...answered), captures)
+  const loaded = withCaptures(ledgerOf(...open, ...answered), captures)
+  const current = { ...loaded, records: loaded.records.map(counted) }
   // Since the ledger was read, every other open question was answered and every tenth left the board.
   const observed = { ...current, records: current.records.map((record, n) => {
     if (n >= 1000) return record
@@ -34,9 +42,8 @@ test('a question pass over 1,000 open questions and 5,600 copies works out the c
   }) }
   const copies = copiesToKeep(current, observed, captures)
   const retired = identitiesToRetire(current, observed, [])
-  const took = Date.now() - started
-  // Comparing every copy with every question took seconds here and kept the mod from the host.
-  expect(took).toBeLessThan(1000)
+  // Pairwise searches revisit ids millions of times; a few linear passes remain independent of CI pauses (#1323).
+  expect(visits).toBeLessThan(4 * (captures.length + current.records.length + observed.records.length))
   // Each still-open question gets a copy of what it holds now unless it has one (one that left
   // the board holds something new), and each one answered since gets its answered copy.
   const ids = (disposition: QuestionCapture['disposition']): string[] => copies.filter(copy => copy.disposition === disposition).map(copy => copy.record.id)

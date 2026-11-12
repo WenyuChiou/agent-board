@@ -94,7 +94,7 @@ test('the messaging matrix is generated from each receiver record and CI fails w
       assert.equal(run(directory, '--write', outside).status, 0)
       for (const file of matrixFiles) assert.match(read(join(directory, file)), /Named Host \| CLI[^]*Typed Host \| CLI/)
 
-      const path = join(directory, 'README.md')
+      const path = join(directory, 'docs/MESSAGING.md')
       writeFileSync(path, read(path).replace(end, ''))
       const bad = run(directory, '--write', outside)
       assert.equal(bad.status, 1)

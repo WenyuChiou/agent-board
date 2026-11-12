@@ -11,7 +11,6 @@ import { block } from './writers.mjs'
 import { readStore } from './hub-wire.mjs'
 import { pageDom, serve } from './surfaces.mjs'
 import { noMachineIds, noSilentPress, seenWithin } from './expect.mjs'
-import { knownFailure } from './known.mjs'
 import { PAGE_MS, RECEIPT_SLACK_MS } from './budget.mjs'
 import { receiptTrace } from './receipt-trace.mjs'
 import { EN } from '../../../hooks/strings-en.ts'
@@ -190,7 +189,7 @@ export const receiptBudget = async hub => {
   const pagePollMs = (await hub.page()).pollMs
   assert.ok(Number.isFinite(pagePollMs) && pagePollMs > 0, 'Read the page poll interval from its shipped setTimeout')
   const combined = CONNECTOR_POLL_MS + pagePollMs
-  await knownFailure('hold:page-poll-budget', () => assert.ok(combined <= PAGE_MS, `Connector poll ${CONNECTOR_POLL_MS} + page poll ${pagePollMs} exceeds PAGE_MS ${PAGE_MS}`))
+  assert.ok(combined <= PAGE_MS, `Connector poll ${CONNECTOR_POLL_MS} + page poll ${pagePollMs} exceeds PAGE_MS ${PAGE_MS}`)
   return { pagePollMs, measuredMs: combined + RECEIPT_SLACK_MS }
 }
 

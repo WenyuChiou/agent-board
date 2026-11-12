@@ -1,5 +1,6 @@
 import { emptyQuestions, observeQuestions, resolveQuestion, withCaptures } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
+import { countedText } from './fixtures/counted-work'
 
 import type { ProgressMirror, ProgressPr } from '../types'
 import { askOf } from '../hooks/ask'
@@ -1310,7 +1311,7 @@ test('the board page shows the whole file: counts, questions, folded work, steps
   expect(html).toContain('textContent')
   expect(html).not.toContain('<script>alert(1)')
   expect(html).toContain("call('/api/board')")
-  expect(html).toContain('timer = setTimeout(refresh, 3000)')
+  expect(html).toContain('timer = setTimeout(refresh, 2000)')
   expect(servePage(STRINGS.en, 'synthetic')).toContain('<html lang="en">')
 })
 
@@ -2753,7 +2754,7 @@ test('a status or summary line that leads into the board is a look, while a lead
   expect(isBoardTurn(said(`現在跑了測試看板如下：\n\`\`\`\n${zh}\`\`\`\n先回限流。`)!)).toBe(false)
 })
 
-test('a reply full of board marks with no count line is read at once, not tried for seconds', () => {
+test('a reply full of board marks tries each bounded count line once and scans blank lines in linear work', () => {
   const said = (answer: string) => readTurn('grok-turn-1-1.json', JSON.stringify({ session_id: 's', cwd: '/w/app', prompt: '', last_assistant_message: answer }))
   // One long line, and many lines just short enough to be tried: each has every mark but the ✓,
   // some with long runs of digits. Then many blank lines before a board.
@@ -2761,12 +2762,17 @@ test('a reply full of board marks with no count line is read at once, not tried 
   const many = Array.from({ length: 50 }, () => `${'●1▸1⚑1'.repeat(66)} x`).join('\n')
   const digits = Array.from({ length: 100 }, () => `●${'1'.repeat(133)}▸${'1'.repeat(132)}⚑${'1'.repeat(132)}`).join('\n')
   const blank = `Here:${'\n'.repeat(40000)}Progress  ● 1 waiting  ▸ 1 in progress  ⚑ 0 due soon  ✓ 0 done today\n`
-  const started = performance.now()
-  expect(isBoardTurn(said(long)!)).toBe(false)
-  expect(isBoardTurn(said(many)!)).toBe(false)
-  expect(isBoardTurn(said(digits)!)).toBe(false)
-  expect(isBoardTurn(said(blank)!)).toBe(true)
-  expect(performance.now() - started).toBeLessThan(500)
+  for (const [answer, expected] of [[long, false], [many, false], [digits, false], [blank, true]] as const) {
+    const counted = countedText(answer)
+    expect(isBoardAnswer(counted.text)).toBe(expected)
+    expect(isBoardTurn(said(answer)!)).toBe(expected)
+    expect(counted.work.splits).toBe(1)
+    expect(counted.work.countTries === 0).toBe(answer === long)
+    expect(counted.work.longestCount).toBeLessThanOrEqual(400)
+    expect(counted.work.countTries).toBeLessThanOrEqual(answer.split('\n').length)
+    expect(counted.work.countUnits).toBeLessThanOrEqual(answer.length)
+    expect(counted.work.lineReads).toBeLessThan(6 * answer.split('\n').length)
+  }
 })
 
 // --chat: the board as plain text for an agent that answers in a chat app (Telegram), sent as it is.
@@ -4153,7 +4159,8 @@ test('a pasted block never takes the place of Claude’s, another agent’s or a
   expect(problem(SERVE_FILE, pasted('b2c3d4e5', 'dot'))).toBe('notYours')
   const unclosed = '## launch\n<!-- auto session=c0ffee12 agent=muse state=working updated=2026-10-17T08:00:00Z -->\n### Draft\n- [ ] Outline\n'
   expect(problem(unclosed, pasted('c0ffee12', 'muse'))).toBe('notYours')
-  expect(problem(SERVE_FILE, pasted('c0ffee12', 'claude'))).toBe('badBlock')
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'claude'))).toBe('reservedAgent')
+  expect(problem(SERVE_FILE, pasted('c0ffee12', 'claude', '- [ ] No title first'))).toBe('badBlock')
   expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse').replace(' agent=muse', ''))).toBe('badBlock')
   expect(problem(SERVE_FILE, pasted('C0FFEE12', 'muse'))).toBe('badBlock')
   expect(problem(SERVE_FILE, pasted('c0ffee12', 'muse', '- [ ] No title first'))).toBe('badBlock')

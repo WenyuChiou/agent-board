@@ -2017,14 +2017,28 @@ test('the page keeps a source copy for the archived same-title peer alone', { ti
 
 // #921: the first view of a big board queues its question captures instead of
 // writing all 500 inside the request, and the server answers a mailbox poll
-// while they drain. The 150 ms poll budget is the hook's own (a mailbox turn
-// gives up after 150 ms); it is asserted only while the flush drains, where
-// one tick writes 5 files and the event loop is free between ticks. A poll
-// issued while the first view itself still computes is printed, not asserted:
+// while they drain. Holding the continuation after its first batch shows
+// that a poll can answer before the flush finishes, even if CI pauses (#1323).
+// A poll issued while the first view itself still computes is printed, not asserted:
 // the view computation alone is ~120-180 ms on this VM (T0), so that number
 // is machine-dependent and not something the queue changes.
 test('the first view of the synthetic big board queues its captures and the server answers a mailbox poll while they drain', { timeout: 60_000 }, async () => {
-  const board = await page()
+  const board = await page('', {}, [], undefined, `
+import { existsSync as isCaptureFlushHeld, readdirSync as captureFlushFiles } from 'node:fs'
+import { dirname as captureFlushDirectory } from 'node:path'
+const captureImmediate = globalThis.setImmediate
+globalThis.setImmediate = (callback, ...args) => captureImmediate(() => {
+  const path = globalThis.AGENT_BOARD.path
+  const isHeld = () => isCaptureFlushHeld(path + '.hold-captures')
+  const count = captureFlushFiles(captureFlushDirectory(path)).filter(name => name.includes('-questions-source-')).length
+  if (!isHeld() || count === 0) return callback(...args)
+  const timer = setInterval(() => {
+    if (isHeld()) return
+    clearInterval(timer)
+    callback(...args)
+  }, 10)
+})
+${BOARD_SCRIPT}`, (_dir, path) => writeFileSync(path + '.hold-captures', ''))
   try {
     writeFileSync(board.path, bigBoard(460))
     const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'a1b2c3d4', surface: '921 T1', turn: 'turn1' } })).json()
@@ -2049,14 +2063,19 @@ test('the first view of the synthetic big board queues its captures and the serv
     assert.ok(queued < 500, `the first view must queue the captures instead of writing them all, got ${queued} on disk at once`)
     const drainPoll = await poll()
     assert.equal(drainPoll.status, 200, JSON.stringify(drainPoll))
-    assert.ok(drainPoll.ms < 150, `a poll while the flush drains must answer inside the 150 ms hook budget, took ${drainPoll.ms.toFixed(1)} ms`)
+    const heldCaptures = captures()
+    assert.ok(heldCaptures > 0 && heldCaptures < 500, `the poll must answer after the flush starts and before it finishes, got ${heldCaptures} captures`)
+    rmSync(board.path + '.hold-captures')
     for (let tries = 0; tries < 1200; tries++) {
       if (captures() >= 500) break
       await delay(25)
     }
     assert.equal(captures(), 500, 'the flush must land every queued capture')
     console.log(`first view of the big board: ${firstMs.toFixed(1)} ms; poll during the first view: ${during.ms.toFixed(1)} ms (printed, not asserted — the view computation alone is ~120-180 ms here); poll while the flush drains: ${drainPoll.ms.toFixed(1)} ms`)
-  } finally { await board.close() }
+  } finally {
+    rmSync(board.path + '.hold-captures', { force: true })
+    await board.close()
+  }
 })
 
 test('the first view of the synthetic big board shows the same model as the view after its captures drain, and every capture lands as a valid content-addressed file', { timeout: 60_000 }, async () => {
@@ -3152,6 +3171,44 @@ await import(${JSON.stringify(new URL('../scripts/board-cli.ts', import.meta.url
   } finally { await board.close() }
 })
 
+test('a pasted block naming itself claude is refused with a line that says so', { timeout: 30_000 }, async () => {
+  const words = {
+    en: 'The agent name "claude" is reserved for Claude Code. Ask the web chat to use "claude-web", then paste again.',
+    'zh-TW': '代理名稱「claude」保留給 Claude Code 使用。請網頁聊天改用「claude-web」，再貼一次。',
+    'zh-CN': '代理名称“claude”保留给 Claude Code 使用。请网页聊天改用“claude-web”，再粘贴一次。',
+  }
+  for (const [lang, reason] of Object.entries(words)) {
+    const board = await page('', {}, ['--lang', lang])
+    try {
+      const before = '# Progress\n\n## launch\n'
+      writeFileSync(board.path, before)
+      await board.call('GET', '/api/board')
+      const files = readdirSync(board.dir).sort()
+      const mtime = statSync(board.path).mtimeMs
+      const text = relayFragment(ago(60_000)).replace('agent=muse', 'agent=claude')
+      const refused = await board.call('POST', '/api/paste', { body: { text } })
+      assert.equal(refused.status, 409, refused.body)
+      assert.ok(refused.json().note.includes(reason), refused.json().note)
+      assert.equal(readFileSync(board.path, 'utf8'), before)
+      assert.equal(statSync(board.path).mtimeMs, mtime)
+      assert.deepEqual(readdirSync(board.dir).sort(), files)
+      const model = (await board.call('GET', '/api/board')).json().model
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      const dom = await pageDom(html, model, { post: async request => {
+        const result = await board.call('POST', request.path, { body: request.body })
+        return { ok: result.status === 200, json: async () => result.json() }
+      } })
+      dom.paste(text)
+      await dom.settle()
+      assert.ok(dom.node('note').textContent.includes(reason), dom.node('note').textContent)
+      assert.equal(readFileSync(board.path, 'utf8'), before)
+      const accepted = await board.call('POST', '/api/paste', { body: { text: text.replace('agent=claude', 'agent=claude-web') } })
+      assert.equal(accepted.status, 200, accepted.body)
+      assert.match(readFileSync(board.path, 'utf8'), /agent=claude-web/)
+    } finally { await board.close() }
+  }
+})
+
 test('the board script refuses a pasted working block with a weeks-old clock in every language and writes nothing', { timeout: 30_000 }, async () => {
   const notes = { en: /21 days behind.*nothing was written/i, 'zh-TW': /慢了 21 天.*未寫入/, 'zh-CN': /慢了 21 天.*未写入/ }
   for (const [lang, note] of Object.entries(notes)) {
@@ -3831,7 +3888,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   }
   let model = viewed(first)
   let clockNow = now === undefined ? Date.now() : now
-  let scheduled
+  let scheduled, pollMs
   const delays = []
   const windowEvents = {}
   const win = {
@@ -3860,8 +3917,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     Date: { now: () => clockNow },
     setTimeout: (run, delay) => {
       delays.push(delay)
-      // Only the board's own poll (every 3 seconds) is the next redraw; the short waits of a moving page are not.
-      if (delay === 3000 || delay === undefined) scheduled = run
+      // Identify the shipped refresh callback, independently of its delay or motion timers.
+      if (run.name === 'refresh') { scheduled = run; pollMs = delay }
       return 1
     },
     clearTimeout: () => {},
@@ -3916,6 +3973,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     active: () => document.activeElement,
     title: () => document.title,
     delays,
+    get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: () => windowEvents.pagehide?.(),
     restore: persisted => windowEvents.pageshow?.({ persisted }),
@@ -10741,10 +10799,14 @@ test('official agent marks retain their source viewport on every board surface',
         assert.ok(image.includes('fill="#0082FB"'))
         assert.ok(image.includes(`<path d="${icon.paths[0]}"/>`))
       }
-      for (const lang of ['en', 'zh-TW', 'zh-CN']) for (const theme of ['light', 'dark']) {
-        const cover = readFileSync(new URL(`../docs/images/cover-${lang}-${theme}.svg`, import.meta.url), 'utf8')
-        assert.ok(cover.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/${theme}`)
-        assert.ok(cover.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/${theme}`)
+      // The new dark covers show only agents with a live record, and Muse Code has none yet; the old
+      // light covers keep its mark until they retire.
+      for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+        const light = readFileSync(new URL(`../docs/images/cover-${lang}-light.svg`, import.meta.url), 'utf8')
+        assert.ok(light.includes(`<path d="${icon.paths[0]}"/>`), `Muse cover parity: ${lang}/light`)
+        assert.ok(light.includes('fill="#0082FB"'), `Muse cover ink: ${lang}/light`)
+        const dark = readFileSync(new URL(`../docs/images/cover-${lang}-dark.svg`, import.meta.url), 'utf8')
+        assert.ok(!dark.includes(`<path d="${icon.paths[0]}"/>`), `Muse is off the dark cover until it has a live record: ${lang}`)
       }
     } else assert.equal(icon.ink, undefined, 'existing marks retain their white foreground')
     if (official[icon.file]) {
@@ -11045,7 +11107,7 @@ test("the page's motion stops under reduced motion and every change still lands"
     const needs = shownWords(dom.node('needs'))
     assert.ok(needs.includes('Gamma question') && needs.includes('Beta question') && !needs.includes('Alpha question'), `${motion}: ${needs}`)
     assert.equal(dom.node('count-needs').textContent, '2', motion)
-    if (motion === 'reduce') assert.deepEqual(dom.delays.filter(delay => delay !== 3000), [], 'nothing waits for a transition')
+    if (motion === 'reduce') assert.deepEqual(dom.delays.filter(delay => delay !== dom.pollMs), [], 'nothing waits for a transition')
   }
 })
 
@@ -13210,12 +13272,12 @@ test('a Hidden notice restores that exact question directly, including after a r
   }
 })
 
-test('after Send the hide button named by each README is visible without More', async () => {
+test('after Send the hide button named by each README and guide is visible without More', async () => {
   const isVisible = node => {
     for (let one = node; one; one = one.parentNode) if (one.hidden || one.inert || String(one.className || '').split(' ').includes('gone')) return false
     return true
   }
-  for (const [lang, readme] of [['en', 'README.md'], ['zh-TW', 'README.zh-TW.md'], ['zh-CN', 'README.zh-CN.md']]) {
+  for (const [lang, readme, guide] of [['en', 'README.md', 'docs/GUIDE.md'], ['zh-TW', 'README.zh-TW.md', 'docs/GUIDE.zh-TW.md'], ['zh-CN', 'README.zh-CN.md', 'docs/GUIDE.zh-CN.md']]) {
     const html = await sourcePage(lang)
     const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
     const model = cardsModel()
@@ -13230,7 +13292,7 @@ test('after Send the hide button named by each README is visible without More', 
     await dom.flush()
     const hide = pressWalk(card).find(node => node.tag === 'button' && node.textContent === words.answeredHide && isVisible(node))
     assert.ok(hide, 'the documented hide button is visible after sending')
-    assert.ok(readFileSync(new URL('../' + readme, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), readme)
+    for (const file of [readme, guide]) assert.ok(readFileSync(new URL('../' + file, import.meta.url), 'utf8').includes('**' + words.answeredHide + '**'), file)
     hide.click()
     await dom.flush()
     assert.equal(dom.requests.at(-1).body.type, 'hide')

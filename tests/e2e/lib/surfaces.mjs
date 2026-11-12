@@ -51,7 +51,7 @@ export const visibleHtml = source => source.replace(/<(script|style)\b[^>]*>[\s\
 export const terminal = {
   screen: async (world, args = []) => successful(await run(world, ['--print', ...args])),
   keys: async (world, keys, args = []) => successful(await run(world, ['--keys', keys, ...args])),
-  watch: world => {
+  watch: (world, { onFrame } = {}) => {
     const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
     const child = spawnIsolated(process.execPath, ['--import', pathToFileURL(preload).href, world.script, '--watch'], { env: world.env, cwd: world.root, stdio: ['pipe', 'pipe', 'pipe'] })
     ownedChildren.add(child)
@@ -65,7 +65,9 @@ export const terminal = {
       const current = output.split('\x1b[H').at(-1)
       const heading = world.lang === 'zh-TW' ? '進度' : world.lang === 'zh-CN' ? '进度' : 'Progress'
       if (!current.includes(heading)) return
-      frames.push({ sequence: ++sequence, text: plain(current), at: performance.now() })
+      const frame = { sequence: ++sequence, text: plain(current), at: performance.now() }
+      frames.push(frame)
+      onFrame?.(frame)
     })
     child.stderr.setEncoding('utf8').on('data', chunk => { errors += chunk })
     const exited = new Promise(done => child.once('close', () => { ownedChildren.delete(child); done() }))
@@ -86,14 +88,19 @@ export const terminal = {
       next: async (predicate, ms = PANE_MS) => {
         const first = sequence
         const start = performance.now()
-        let found
-        await seenWithin(() => {
+        const deadline = start + ms
+        while (true) {
           if (failure) throw failure
           if (child.exitCode !== null) throw new Error(`Watch exited: ${errors}`)
-          found = frames.find(frame => frame.sequence > first && predicate(frame.text))
-          return found?.text ?? frames.at(-1)?.text ?? ''
-        }, () => found !== undefined, ms)
-        return { text: found.text, elapsed: Math.max(0, found.at - start) }
+          const found = frames.find(frame => frame.sequence > first && predicate(frame.text))
+          // The stdout listener already timed the frame. A delayed observation poll must
+          // not discard an in-budget record, or accept a frame recorded after the deadline.
+          if (found && found.at <= deadline) return { text: found.text, elapsed: Math.max(0, found.at - start) }
+          const remaining = deadline - performance.now()
+          if (remaining <= 0) break
+          await pause(Math.min(40, remaining))
+        }
+        assert.fail(`Not seen within ${ms} ms. Last text: ${frames.at(-1)?.text ?? ''}`)
       },
       stop,
       pid: child.pid,
@@ -256,8 +263,8 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
     setTimeout: (callback, ms) => {
       assert.ok(ms === undefined || Number.isFinite(ms) && ms > 0, 'The shipped page must schedule a poll interval')
       // Only the board's own poll is the next redraw; a short wait of a moving page is not.
-      if (ms === 3000 || ms === undefined) {
-        pollMs = ms ?? 3000
+      if (callback.name === 'refresh') {
+        pollMs = ms
         scheduled = callback
       }
       return 1

@@ -154,7 +154,8 @@ export const EN: Strings = {
     "keptData": "Keeps your data and history beside {progress} (answers, questions, journal, archive, sessions):",
     "applyRemove": "Apply this removal: {command}",
     "restartRemove": "Restart each of: {agents} to unload their removed reporting hooks.",
-    "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks."
+    "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks.",
+    "directRemoved": "The direct node command stops working; use {command} instead."
   },
   setupNoAgent: {
     "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
@@ -863,6 +864,7 @@ export const EN: Strings = {
   pasteNoBlock: 'No block with both a <!-- auto … --> start and a <!-- /auto … --> end.',
   pasteMixed: 'The start and end markers name different session ids.',
   pasteBadBlock: 'The line after the start marker must be a "### title", and the block cannot hold ```, <!-- -->, # headings or a second block.',
+  pasteReservedAgent: 'The agent name "claude" is reserved for Claude Code. Ask the web chat to use "claude-web", then paste again.',
   pasteNoProject: 'A new block needs a "## project" line first.',
   pasteNotYours: "That id belongs to a local reporter, a session with a resume binding, another agent, or an unclosed block; it can't be replaced.",
   pasteBadTime: 'Source time is missing or invalid. Ask the reporter for its current full report with a real UTC updated= time ending in Z, then paste again.',

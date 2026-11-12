@@ -3007,7 +3007,8 @@ const PAGE_SCRIPT = String.raw`
     }, function () {
       unreachable();
     }).then(function () {
-      if (!isClosed) timer = setTimeout(refresh, 3000);
+      // Leave room for the response and paint inside the three-second ask deadline.
+      if (!isClosed) timer = setTimeout(refresh, 2000);
     });
   }
   // Wider than the parser's start marker, so a block it would take is never dropped here.

@@ -97,7 +97,8 @@ const summaries = [
     "keptData": "Keeps your data and history beside {progress} (answers, questions, journal, archive, sessions):",
     "applyRemove": "Apply this removal: {command}",
     "restartRemove": "Restart each of: {agents} to unload their removed reporting hooks.",
-    "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks."
+    "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks.",
+    "directRemoved": "The direct node command stops working; use {command} instead."
   },
   {
     "previewCreate": "將建立 {count} 個設定檔案",
@@ -154,7 +155,8 @@ const summaries = [
     "keptData": "保留 {progress} 旁邊的資料與歷史紀錄（回答、提問、日誌、歸檔、工作階段）：",
     "applyRemove": "套用此移除變更：{command}",
     "restartRemove": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
-    "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。"
+    "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
+    "directRemoved": "直接執行的 node 指令已無法使用；請改用 {command}。"
   },
   {
     "previewCreate": "将创建 {count} 个设置文件",
@@ -211,7 +213,8 @@ const summaries = [
     "keptData": "保留 {progress} 旁的数据与历史记录（回答、提问、日志、归档、会话）：",
     "applyRemove": "应用此移除更改：{command}",
     "restartRemove": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
-    "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。"
+    "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
+    "directRemoved": "直接运行的 node 命令已无法使用；请改用 {command}。"
   }
 ]
 const summary = summaries[['en', 'zh-TW', 'zh-CN'].indexOf(language)]
@@ -539,7 +542,7 @@ const main = () => {
   // The package launcher cannot discover a custom install from the account's default locations.
   const boardDirectory = boardFile ? dirname(resolve(boardFile)) : ''
   const boardCommand = boardFile ? command
-    ? [command.replace(/\s+setup\s*$/, ''), ...(boardDirectory !== resolve(homedir(), '.agent-board') ? ['--data-dir', quote(boardDirectory)] : [])].join(' ')
+    ? [command.replace(/\s+(?:setup|remove)\s*$/, ''), ...(boardDirectory !== resolve(homedir(), '.agent-board') ? ['--data-dir', quote(boardDirectory)] : [])].join(' ')
     : nodeCommand(boardFile) : ''
   if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
@@ -643,6 +646,12 @@ const main = () => {
     } else if (apply && available.length) {
       const sessionAgents = available.map(agent => names[agent])
       steps.push(words(sessionAgents.length === 1 ? 'restartRemoveOne' : 'restartRemove', { agents: sessionAgents.join(message(', ', '、', '、')) }))
+      // A plan skipped for a conflict removed nothing, so its listed removal of the board script does not count (#1291).
+      const removedBoard = results.filter(plan => !plan.conflicts.length).flatMap(plan => plan.changes).some(change => change.action === 'remove' && change.file.endsWith('agent-board.mjs'))
+      if (removedBoard) {
+        const launcherCommand = command ? command.replace(/\s+(?:setup|remove)\s*$/, '') : 'npx @wenyuchiou/agent-board'
+        steps.push(words('directRemoved', { command: launcherCommand }))
+      }
     }
   } else {
     const hasChanges = available.some(agent => plans[selected.indexOf(agent)].changes.length > 0)
