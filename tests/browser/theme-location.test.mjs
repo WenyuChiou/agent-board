@@ -5,14 +5,14 @@ import { test } from 'node:test'
 import { BoardPage } from './board-page.mjs'
 import { browserFixture, writeProgress } from './fixture.mjs'
 
-const readmeLocations = [
-  ['README.md', ['next to **Close the board**', 'bottom of the expanded sidebar', 'below the tasks on a narrow screen or when the sidebar is collapsed']],
-  ['README.zh-TW.md', ['**關閉看板**旁邊', '展開的側欄底部', '窄螢幕或側欄收起時，則在工作清單下方']],
-  ['README.zh-CN.md', ['**关闭看板**旁边', '展开的侧栏底部', '窄屏幕或侧栏收起时，则在任务列表下方']],
+const guideLocations = [
+  ['docs/GUIDE.md', ['next to **Close the board**', 'bottom of the expanded sidebar', 'below the tasks on a narrow screen or when the sidebar is collapsed']],
+  ['docs/GUIDE.zh-TW.md', ['**關閉看板**旁邊', '展開的側欄底部', '窄螢幕或側欄收起時，則在工作清單下方']],
+  ['docs/GUIDE.zh-CN.md', ['**关闭看板**旁边', '展开的侧栏底部', '窄屏幕或侧栏收起时，则在任务列表下方']],
 ]
 
 test('at 375 px Settings is beside Close the board, traps focus, and fits every language without sideways scrolling', { timeout: 60_000 }, async () => {
-  for (const [file, locations] of readmeLocations) {
+  for (const [file, locations] of guideLocations) {
     const text = readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8')
     for (const location of locations) assert.ok(text.includes(location), `${file}: missing theme location ${location}`)
   }

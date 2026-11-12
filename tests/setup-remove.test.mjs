@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const installer = fileURLToPath(new URL('../scripts/setup-agent.mjs', import.meta.url))
+const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
 
 const makeEnv = home => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
@@ -98,6 +99,7 @@ test('setup-agent --remove previews and applies across all touched agents with s
     const apply = run('--remove', '--lang', 'en', '--apply')
     assert.equal(apply.status, 0, apply.stderr)
     assert.ok(apply.stdout.includes('Shared: removed'), apply.stdout)
+    assert.ok(apply.stdout.includes('The direct node command stops working; use npx @wenyuchiou/agent-board instead.'), apply.stdout)
 
     // install records should be gone
     assert.ok(!existsSync(join(dataDir, 'install-codex.json')), 'install-codex.json should be removed')
@@ -185,5 +187,83 @@ test('installed agent-board.mjs supports --remove with --agent', () => {
     assert.ok(standalone.stdout.includes('antigravity') || standalone.stdout.includes('Antigravity') || standalone.stdout.includes('progress.md'), standalone.stdout)
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+})
+
+test('after removal, the commands the README and remove output point to print plain words (#1271)', () => {
+  // 1. All three READMEs point to npx @wenyuchiou/agent-board rather than the direct node script
+  for (const [name, expectedLang] of [['README.md', 'en'], ['README.zh-TW.md', 'zh-TW'], ['README.zh-CN.md', 'zh-CN']]) {
+    const text = readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
+    assert.ok(!text.includes('agent-board.mjs'), `${name} must not point to the board script that remove deletes`)
+    for (const flags of ['', ' --lan', ' --json']) {
+      assert.ok(text.includes(`\`npx @wenyuchiou/agent-board${flags}\``), `${name} must point to the npx launcher: npx @wenyuchiou/agent-board${flags}`)
+    }
+  }
+
+  // 2. After remove --apply, remove's output names the npx command and explains the direct command stops working
+  const messages = {
+    en: 'The direct node command stops working; use npx @wenyuchiou/agent-board instead.',
+    'zh-TW': '直接執行的 node 指令已無法使用；請改用 npx @wenyuchiou/agent-board。',
+    'zh-CN': '直接运行的 node 命令已无法使用；请改用 npx @wenyuchiou/agent-board。',
+  }
+
+  for (const [lang, expectedMessage] of Object.entries(messages)) {
+    const home = mkdtempSync(join(tmpdir(), `setup-remove-words-${lang}-`))
+    try {
+      const env = makeEnv(home)
+      const run = (...args) => spawnSync(process.execPath, [installer, '--home', home, ...args], {
+        cwd: home,
+        env,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 30000,
+      })
+
+      // Install codex
+      const install = run('--agent', 'codex', '--lang', lang, '--apply')
+      assert.equal(install.status, 0, install.stderr)
+
+      // Apply remove with launcher environment simulating `npx @wenyuchiou/agent-board remove --apply`
+      const applyWithLauncher = run('--remove', '--lang', lang, '--apply')
+      assert.equal(applyWithLauncher.status, 0, applyWithLauncher.stderr)
+      assert.ok(applyWithLauncher.stdout.includes(expectedMessage), `${lang} remove output must include: ${expectedMessage}, got: ${applyWithLauncher.stdout}`)
+      assert.ok(!applyWithLauncher.stdout.includes('npx @wenyuchiou/agent-board remove'), `must not append remove to suggested launcher command: ${applyWithLauncher.stdout}`)
+
+      // Also verify when AGENT_BOARD_SETUP_COMMAND is explicitly passed with remove
+      const installAgain = run('--agent', 'codex', '--lang', lang, '--apply')
+      assert.equal(installAgain.status, 0, installAgain.stderr)
+      const launcherEnv = { ...env, AGENT_BOARD_SETUP_COMMAND: 'npx @wenyuchiou/agent-board remove' }
+      const applyEnv = spawnSync(process.execPath, [installer, '--home', home, '--remove', '--lang', lang, '--apply'], {
+        cwd: home,
+        env: launcherEnv,
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 30000,
+      })
+      assert.equal(applyEnv.status, 0, applyEnv.stderr)
+      assert.ok(applyEnv.stdout.includes(expectedMessage), `${lang} remove with AGENT_BOARD_SETUP_COMMAND must include: ${expectedMessage}, got: ${applyEnv.stdout}`)
+      assert.ok(!applyEnv.stdout.includes('npx @wenyuchiou/agent-board remove'), `must not append remove to launcher command: ${applyEnv.stdout}`)
+
+      // 3. Running the launcher (bin/agent-board.mjs) with commands from the README prints plain words, no stack trace
+      const runLauncher = (...args) => spawnSync(process.execPath, [launcher, ...args], {
+        cwd: home,
+        env: { ...env, LANG: lang },
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 10000,
+      })
+
+      for (const flags of [['--lan'], ['--json'], ['--codex-doctor', '--agent', 'codex']]) {
+        const result = runLauncher(...flags)
+        assert.equal(result.status, 1, `launcher with ${flags.join(' ')} should exit 1 when not installed`)
+        const combined = `${result.stdout}\n${result.stderr}`
+        assert.ok(!combined.includes('MODULE_NOT_FOUND'), `must not contain MODULE_NOT_FOUND: ${combined}`)
+        assert.ok(!combined.includes('Cannot find module'), `must not contain Cannot find module: ${combined}`)
+        assert.ok(!combined.includes('at Module.'), `must not contain stack trace: ${combined}`)
+        assert.ok(result.stderr.includes('npx @wenyuchiou/agent-board setup'), `must contain plain words setup hint: ${result.stderr}`)
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+    }
   }
 })

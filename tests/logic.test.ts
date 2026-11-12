@@ -992,12 +992,14 @@ test('a sweep over the synthetic big board counts in under a second and moves no
   const projects = parseProgress(text)
   const seen = { ...withSeen({}, projects, BIG_AT - 30 * day), [SWEEP_ARMED_KEY]: BIG_AT - 4 * day }
   const age = (_key: string, project: string, task: typeof projects[number]['tasks'][number]) => handKeptSeenAt(seen, project, task, BIG_AT)
-  const countStart = Date.now()
-  const count = countManualDone(projects, BIG_AT, age)
-  expect(Date.now() - countStart).toBeLessThan(1000)
-  const takeStart = Date.now()
-  const out = takeManualDone(text, BIG_AT, age)
-  expect(Date.now() - takeStart).toBeLessThan(1000)
+  const counts = Array.from({ length: 3 }, () => timed(() => countManualDone(projects, BIG_AT, age)))
+  const count = counts[0]![0]
+  // #1323: the pure scans expose no work counter, so the fastest of three runs stands for their cost: a CI
+  // pause would have to hit all three. The plugin runtime has no process.env to widen the limit on CI.
+  expect(Math.min(...counts.map(([, ms]) => ms))).toBeLessThan(1000)
+  const taken = Array.from({ length: 3 }, () => timed(() => takeManualDone(text, BIG_AT, age)))
+  const out = taken[0]![0]
+  expect(Math.min(...taken.map(([, ms]) => ms))).toBeLessThan(1000)
   expect(count).toBe(30)
   expect(out.entries).toHaveLength(count)
   for (const entry of out.entries) expect(entry).not.toMatch(/- \[[ ~?>!]\]/)
