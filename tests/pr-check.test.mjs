@@ -1344,19 +1344,19 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
   })
   assert.deepEqual(selfPr.problems, [])
 
-  // 4. Lane finding must link the PR it came from; normal reports and linked findings pass.
+  // 4. A lane finding (a Finding: title) must link the PR it came from; normal reports and linked findings pass.
   const missingLink = findingLink({
-    title: 'fix(board): button flickers on resize',
+    title: 'Finding: button flickers on resize',
     body: 'Found while reviewing the board resize change.\n\nPart of #209\nAuthor: antigravity, lane check\n',
   })
   assert.equal(missingLink.problems.length, 1)
   assert.equal(missingLink.problems[0].check, 'finding-link')
   assert.deepEqual(findingLink({
-    title: 'fix(board): button flickers on resize',
-    body: 'Found in #1299 while reviewing the board resize change.\n\nAuthor: antigravity, lane check\n',
+    title: 'Finding: button flickers on resize',
+    body: 'Found in PR #1299 while reviewing the board resize change.\n\nAuthor: antigravity, lane check\n',
   }).problems, [])
   assert.deepEqual(findingLink({
-    title: 'fix(board): button flickers on resize',
+    title: 'Finding: button flickers on resize',
     body: '### Pull request it came from\n\nhttps://github.com/WenyuChiou/agent-board/pull/1306\n\nAuthor: claude\n',
   }).problems, [])
   assert.deepEqual(findingLink({
@@ -1385,27 +1385,27 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
     association: 'OWNER',
   }).problems, [])
   assert.equal(findingLink({ title: 'docs: small check', body: 'Broken link in README.', isFinding: true }).problems.length, 1)
-  // Bug-form Agent name field and issue author_association identify lane findings even without an Author line.
-  assert.equal(findingLink({
+  // Neither the form's Agent name field, an author association nor review prose makes a report a lane finding (#1348).
+  assert.deepEqual(findingLink({
     title: 'fix(board): resize glitch',
     body: '### What happened, and what you expected\n\nFound while reviewing the resize change.\n\n### Agent name\n\nantigravity\n\n### Pull request it came from\n\n_No response_\n',
-  }).problems.length, 1)
-  assert.equal(findingLink({
+  }).problems, [])
+  assert.deepEqual(findingLink({
     title: 'fix(board): resize glitch',
     body: 'Found during a review of the resize layout.',
     association: 'COLLABORATOR',
-  }).problems.length, 1)
+  }).problems, [])
   // Unrelated issue references, hex colors ("from #123456 to #abcdef", #000000) do not count as a source PR link.
   assert.equal(findingLink({
-    title: 'fix(board): resize glitch',
+    title: 'Finding: resize glitch',
     body: 'Found during a review of the resize layout.\nAuthor: codex\nRelated roadmap: #209\nColor: #000000\n',
   }).problems.length, 1)
   assert.equal(findingLink({
-    title: 'fix(board): theme glitch',
+    title: 'fix(board): Finding: theme glitch',
     body: 'Found during a review of the board theme.\nAuthor: codex\nThe color changes from #123456 to #abcdef.\n',
   }).problems.length, 1)
   assert.deepEqual(findingLink({
-    title: 'fix(board): resize glitch',
+    title: 'Finding: resize glitch',
     body: '### Pull request it came from\n\n#1299\n\n### What happened, and what you expected\n\nFound during a review of the resize layout.\n',
     association: 'COLLABORATOR',
   }).problems, [])
@@ -1425,7 +1425,8 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
   const dupIssueRun = await runMain(['--event', join(setup.directory, 'issue-dup.json')], apiEnv)
   assert.equal(dupIssueRun.status, 1, dupIssueRun.stdout + dupIssueRun.stderr)
   assert.match(dupIssueRun.stdout, /FAIL duplicate-issue: open issue #88/)
-  assert.match(dupIssueRun.stdout, /FAIL finding-link:/)
+  // A "Finding:" line in the body does not make the issue a lane finding; only its title does (#1348).
+  assert.doesNotMatch(dupIssueRun.stdout, /FAIL finding-link:/)
 
   setup.put('issue-form.json', JSON.stringify({
     repository: { full_name: 'synthetic/example' },
@@ -1433,7 +1434,7 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
       number: 201,
       state: 'open',
       author_association: 'NONE',
-      title: 'fix(board): form finding without link',
+      title: 'Finding: form finding without link',
       body: '### What happened, and what you expected\n\nFound while reviewing the resize change.\n\n### Agent name\n\nantigravity\n\n### Pull request it came from\n\n_No response_\n',
     },
   }))
@@ -1514,4 +1515,50 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
   const dupPrRun = await runMain(eventArgs(setup, 'OWNER', 'WenyuChiou'), apiEnv)
   assert.equal(dupPrRun.status, 1, dupPrRun.stdout + dupPrRun.stderr)
   assert.match(dupPrRun.stdout, /FAIL duplicate-pr: issue #42 already has an open pull request #12/)
+})
+
+test('a lane finding is recognised only by its Finding: title or --finding, and its source only by a pull request link (#1348 shape set)', () => {
+  const finding = 'Finding: badge stays after exit'
+  const shapes = [
+    // [what, input, flagged]
+    ['an owner report with the word review', { title: 'bug: review button disappears', body: 'The review button disappears when I open the app.', association: 'OWNER' }, false],
+    ['a title starting Finding the (outside author)', { title: 'Bug: Finding the right config path fails', body: 'Steps to reproduce.', association: 'NONE' }, false],
+    ['a title starting Finding the (owner)', { title: 'Bug: Finding the right config path fails', body: 'Steps to reproduce.', association: 'OWNER' }, false],
+    ['generic review prose from a collaborator', { title: 'fix(board): resize glitch', body: 'Found during a review of the resize layout.', association: 'COLLABORATOR' }, false],
+    ['an Author line with review prose and no Finding title', { title: 'fix(board): button flickers on resize', body: 'Found while reviewing the board resize change.\nAuthor: antigravity, lane check\n' }, false],
+    ['the form with an agent name and no pull request', { title: 'fix(board): resize glitch', body: '### Agent name\n\nantigravity\n\n### Pull request it came from\n\n_No response_\n' }, false],
+    ['the form with "no" in the pull request section', { title: 'bug: window opens off screen', body: '### Pull request it came from\n\nno\n' }, false],
+    ['a colour after came from', { title: finding, body: 'Found during a PR review.\nThe colour came from #123456.\n' }, true],
+    ['colours from and to', { title: finding, body: 'The color changes from #123456 to #abcdef.\n' }, true],
+    ['only roadmap issue links', { title: finding, body: 'Part of #209\nRelated roadmap: #209\n' }, true],
+    ['PR #N in the body', { title: finding, body: 'Found in PR #1299.\n' }, false],
+    ['a pull request URL', { title: finding, body: 'Seen in https://github.com/synthetic/example/pull/1306\n' }, false],
+    ['#N in the form section', { title: finding, body: '### Pull request it came from\n\n#1299\n' }, false],
+    ['the issue itself in the form section', { title: finding, number: 1299, body: '### Pull request it came from\n\n#1299\n' }, true],
+    ['a [finding] title after a type prefix', { title: 'fix(board): [finding] badge stays after exit', body: 'No link here.' }, true],
+    ['--finding with no link', { title: 'docs: small check', body: 'Broken link in README.', isFinding: true }, true],
+  ]
+  for (const [what, input, flagged] of shapes) {
+    const problems = findingLink(input).problems
+    assert.equal(problems.length, flagged ? 1 : 0, what)
+    if (flagged) assert.equal(problems[0].check, 'finding-link', what)
+  }
+})
+
+test('a local preflight run with no pull request number finds its own pull request by head or branch, so only the later of two is flagged (#1348)', () => {
+  const open = [
+    { number: 1213, createdAt: '2026-11-01T00:00:00Z', body: 'Fixes #1203', headRef: 'fix/1203-first', headSha: 'a'.repeat(40) },
+    { number: 1240, createdAt: '2026-11-02T00:00:00Z', body: 'Fixes #1203', headRef: 'fix/1203-second', headSha: 'b'.repeat(40) },
+  ]
+  const local = branch => ({ number: null, title: 'fix: x', body: 'Fixes #1203', branch, open })
+  // The original's branch is not flagged for the later pull request.
+  assert.deepEqual(duplicatePr(local('fix/1203-first')).problems, [])
+  // The later one's branch is flagged, naming the original.
+  const later = duplicatePr(local('fix/1203-second'))
+  assert.equal(later.problems.length, 1)
+  assert.match(later.problems[0].message, /#1203.*#1213/)
+  // The head commit wins over a branch name another fork may reuse.
+  assert.deepEqual(duplicatePr({ ...local('fix/1203-second'), head: 'a'.repeat(40) }).problems, [])
+  // A branch with no pull request yet is later than every open one.
+  assert.equal(duplicatePr(local('fix/1203-third')).problems.length, 2)
 })

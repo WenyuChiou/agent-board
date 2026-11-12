@@ -145,21 +145,27 @@ const linkedIssues = body => {
 // Two open pull requests must not both claim to fix the same issue (#1240 and #1213 on #1203).
 // Only the later pull request (later createdAt, or higher PR number) is flagged; the original stays unflagged.
 // "Part of #N" marks split steps that share a parent issue (#209), so those are left alone.
-export const duplicatePr = ({ body = '', title = '', number = null, branch = null, createdAt = null, open = [] } = {}) => {
+export const duplicatePr = ({ body = '', title = '', number = null, branch = null, head = null, createdAt = null, open = [] } = {}) => {
   const output = result()
   if (isReleaseTitle(title) || open === null || open === undefined) return output
   const fixing = [...new Set(issueLine(body, title).items.filter(item => item.kind === 'fixes').map(item => item.number))]
   if (!fixing.length) return output
-  const selfTime = createdAt ? Date.parse(createdAt) : NaN
+  // A local run (--body-file) has no number: its own open pull request is found by head commit, else by branch (a fork may
+  // reuse a branch name), so the original of two is not flagged from its own branch (#1348). With none yet, every open one is earlier.
+  const own = number !== null ? null
+    : (head ? open.find(other => other?.headSha === head) : undefined) ?? (branch ? open.find(other => other?.headRef === branch) : undefined) ?? null
+  const selfNumber = number ?? own?.number ?? null
+  const selfCreated = createdAt ?? own?.createdAt ?? null
+  const selfTime = selfCreated ? Date.parse(selfCreated) : NaN
   const reported = new Set()
   for (const other of open) {
-    if (!other || other.number === number) continue
+    if (!other || other === own || (selfNumber !== null && other.number === selfNumber)) continue
     if (number === null && branch && other.headRef && other.headRef === branch) continue
-    if (number !== null) {
+    if (selfNumber !== null) {
       const otherTime = other.createdAt ? Date.parse(other.createdAt) : NaN
       const isOtherEarlier = Number.isFinite(selfTime) && Number.isFinite(otherTime) && selfTime !== otherTime
         ? otherTime < selfTime
-        : typeof other.number === 'number' && other.number < number
+        : typeof other.number === 'number' && other.number < selfNumber
       if (!isOtherEarlier) continue
     }
     const otherFixing = new Set(linkedIssues(other.body ?? '').filter(item => item.kind === 'fixes').map(item => item.number))
@@ -218,44 +224,29 @@ export const duplicateIssue = ({ title = '', number = null, openIssues = [] } = 
   return output
 }
 
-// A lane that files a finding links the pull request it came from (#1325).
-export const findingLink = ({ title = '', body = '', number = null, association = null, isFinding = false } = {}) => {
+// A lane that files a finding marks it, with a title starting `Finding:` or `[finding]` (after an optional `type(scope):`) or
+// with --finding, and links the pull request it came from (#1325). Only that structure counts, never the body's wording: two
+// review rounds of #1348 showed prose cues reading ordinary reports as findings and colours as pull request links.
+export const findingLink = ({ title = '', body = '', number = null, isFinding = false } = {}) => {
   const output = result()
+  const hasFindingTitle = /^\s*(?:[a-z]+(?:\([^)]*\))?!?:\s*)?(?:\[\s*finding\s*\]|finding\s*:)/i.test(String(title ?? ''))
+  if (!isFinding && !hasFindingTitle) return output
   const clean = stripComments(body ?? '')
-  const hasAuthor = /^[ \t]*Author:[ \t]*\S/im.test(clean)
-  const isTeamAuthor = isKnownAssociation(association) && !isOutsideAssociation(association)
-  const agentSection = clean.match(/^#{2,3}[ \t]*Agent name[ \t]*\r?\n+([^\r\n#][^\r\n]*)/im)?.[1]?.trim() ?? ''
-  const hasFormAgent = Boolean(agentSection && !/^(?:none|n\/a|manual|_no response_)$/i.test(agentSection))
-  const hasLaneMarker = hasAuthor || isTeamAuthor || hasFormAgent
-  const hasFindingTitle = /\b(?:review|audit|user-?sim|outside[- ]review|lane|pr)\s+findings?\b|^\s*(?:\[\s*finding\s*\]|finding\s*:)|:\s*finding\s*:/i.test(String(title ?? ''))
-  // Match explicit PR/review/finding cues so plain UI words ("The review button disappears", "Finding a file") pass for ordinary reports.
-  const hasPrOrReviewCue = [
-    /(?:^|\n)[ \t]*finding\s*:/i,
-    /\b(?:(?:outside|code|pr|security|greptile|codex)\s+review|(?:review|audit|user-?sim|outside[- ]review)\s+findings?|split\s+from|source\s+pr|follow-?up\s+(?:to|from)\s+(?:the\s+)?(?:pr\b|pull\s+request|review|outside\s+review))\b/i,
-    /\bfound\s+(?:by\s+(?:the\s+|an?\s+)?(?:(?:(?:outside|code|pr|security)\s+)?review(?:er)?|audit|codex|greptile|claude|antigravity)|(?:while|when|during)\s+(?:reviewing|a\s+review(?:\s+of)?|an?\s+outside\s+review|auditing|user-?sim|pr\s+review)|in\s+(?:a\s+|an?\s+)?(?:pr\b|pull\s+request|review\s+of))\b/i,
-    /\b(?:came|from)\s+(?:the\s+|an?\s+)?(?:(?:outside|code|pr)\s+review|audit|user-?sim|pull\s+request|pr\b)\b/i,
-  ].some(pattern => pattern.test(clean))
-  const fromPrSection = clean.match(/^#{2,3}[ \t]*Pull request it came from[ \t]*\r?\n+([^\r\n#][^\r\n]*)/im)?.[1]?.trim() ?? ''
-  const hasSectionAnswer = Boolean(fromPrSection && !/^(?:none|n\/a|_no response_)$/i.test(fromPrSection))
-  const isLaneFinding = isFinding || (hasLaneMarker && (hasFindingTitle || hasPrOrReviewCue || hasSectionAnswer))
-  if (!isLaneFinding) return output
-
-  // Strip standalone Fixes/Part of lines so a roadmap or issue link such as "Part of #209" does not mask a missing source PR link.
+  // The answer may itself start with #, as the form's placeholder `#1299` does; only the next heading ends the section.
+  const fromPrSection = clean.match(/^#{2,3}[ \t]*Pull request it came from[ \t]*\r?\n+(?!#{1,6}[ \t])([^\r\n]+)/im)?.[1]?.trim() ?? ''
+  // Standalone Fixes/Part of lines are left out, so "Part of #209" does not stand in for the source pull request.
   const withoutLeadingIssues = linesOf(clean).filter(line => !/^\s*(?:Fixes|Part of|Closes|Resolves)\s+#\d+\b/i.test(line)).join('\n')
-
-  // Require an explicit PR URL, the Pull request it came from section, "PR #N" / "pull request #N", or origin/review wording before #N,
-  // so hex colors ("from #123456 to #abcdef", #000000) or unrelated issue mentions ("Related roadmap: #209") do not satisfy the check.
+  // A source is a pull request URL, #N in the form's section, or "PR #N" / "pull request #N": a bare #N may be a colour or an issue.
   const validRef = pattern => [...withoutLeadingIssues.matchAll(pattern)].some(match => Number(match[1]) !== number)
   const hasPullUrl = validRef(/github\.com\/[^/\s]+\/[^/\s]+\/pull\/([1-9]\d*)\b/gi)
-  const hasSectionNumber = [...fromPrSection.matchAll(/#([1-9]\d*)\b/g)].some(match => Number(match[1]) !== number)
+  const hasSectionNumber = [...fromPrSection.matchAll(/(?:^|[^\w#])#([1-9]\d*)\b/g)].some(match => Number(match[1]) !== number)
   const hasExplicitPr = validRef(/\b(?:pull\s*request|pr)\s*#([1-9]\d*)\b/gi)
-  const hasSourceWording = validRef(/\b(?:(?:came|split|follow-?up|originated|filed)\s+from|from\s+(?:the\s+|an?\s+)?(?:(?:outside|code|pr)\s+)?review(?:\s+of)?|source\s+(?:pr|pull\s*request)|found\s+(?:in|on|during\s+(?:(?:a|the)\s+)?(?:review\s+of\s+)?|by\s+(?:the\s+)?(?:outside\s+review\s+of|review\s+of|\S+\s+on))|(?:outside\s+)?review(?:ing)?\s+(?:of\s+)?)\s*:?\s*(?:(?:the\s+)?(?:pr|pull\s*request)\s*)?#([1-9]\d*)\b/gi)
-  if (hasPullUrl || hasSectionNumber || hasExplicitPr || hasSourceWording) return output
+  if (hasPullUrl || hasSectionNumber || hasExplicitPr) return output
 
   output.problems.push(problem(
     'finding-link',
     'a finding filed by a lane must link the pull request it came from.',
-    'name or link the source pull request in the issue body, for example "Found in #1299".',
+    'link the source pull request in the issue body, for example "Found in PR #1299" or the pull request\'s address.',
   ))
   return output
 }
@@ -860,7 +851,7 @@ export const checkPr = data => {
   // The team has no limit on open pull requests (#607); only an outside author's are counted.
   if (issue.items.some(item => item.kind === 'fixes')) {
     if (data.open === null) output.info.push('duplicate-pr: skipped (offline).')
-    else add(duplicatePr({ body: data.body, title: data.title, number: data.number, branch: data.branch, createdAt: data.createdAt, open: data.open }))
+    else add(duplicatePr({ body: data.body, title: data.title, number: data.number, branch: data.branch, head: data.head, createdAt: data.createdAt, open: data.open }))
   }
   if (isOutside) {
     if (data.open === null) output.info.push('cap: skipped (offline).')
@@ -1235,7 +1226,7 @@ export const main = async (argv = process.argv.slice(2)) => {
       if (!isTeam() || parsedIssue.items.some(item => item.kind === 'fixes')) {
         const open = []
         for (const pr of await api('pulls?state=open', { isList: true })) {
-          open.push({ number: pr.number, title: pr.title, body: pr.body ?? '', createdAt: pr.created_at, labels: pr.labels, isOutside: isOutsideAssociation(pr.author_association), association: pr.author_association, login: pr.user?.login ?? null, headRef: pr.head?.ref ?? null })
+          open.push({ number: pr.number, title: pr.title, body: pr.body ?? '', createdAt: pr.created_at, labels: pr.labels, isOutside: isOutsideAssociation(pr.author_association), association: pr.author_association, login: pr.user?.login ?? null, headRef: pr.head?.ref ?? null, headSha: pr.head?.sha ?? null })
         }
         data.open = open
         const own = open.find(pr => pr.number === data.number)
