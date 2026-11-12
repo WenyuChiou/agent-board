@@ -454,9 +454,9 @@ describe('L0 discover and install from the README', () => {
       'zh-CN': { pane: '`/agent-board`（看板网页）', page: '看板网页', notYet: '暂不支持', untested: '尚未测试', second: '快速开始的第二个命令' },
     }
     // Agents with a desktop app or IDE in docs/MESSAGING.md "Agent and surface support", and what that table says of each.
-    const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'untested'], Cursor: ['page', 'untested'], OpenCode: ['page', 'notYet'] }
+    const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'untested'], Cursor: ['page', 'untested'], OpenCode: ['page', 'untested'] }
     const messaging = read('docs/MESSAGING.md')
-    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Proposed', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Implemented', 'Not tested'], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Proposed', 'Not tested']]) {
+    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Proposed', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Implemented', 'Not tested'], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Implemented', 'Not tested']]) {
       assert.ok(messaging.split('\n').some(line => line.startsWith(`| ${host} | ${surface} | `) && line.includes(`| ${status} | ${live} |`)), `docs/MESSAGING.md: ${host} ${surface} is ${status}, ${live}`)
     }
     for (const [name, lang] of READMES) {
