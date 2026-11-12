@@ -48,6 +48,14 @@ body:
       placeholder: <version>
     validations:
       required: false
+  - type: input
+    id: from_pr
+    attributes:
+      label: Pull request it came from
+      description: Optional. If a lane files this as a finding from a pull request or its review, start the title with `Finding:` and link that pull request here (for example `#1299`).
+      placeholder: '#1299, or none'
+    validations:
+      required: false
   - type: textarea
     id: acceptance
     attributes:
