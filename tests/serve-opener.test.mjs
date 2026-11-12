@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -106,6 +106,41 @@ test('opener failure in --serve outputs manual-open instruction to stderr and pr
     assert.ok(parsed, `liveBoardPage can parse stdout:\n${result.stdout}`)
     assert.ok(parsed.url.startsWith('http://127.0.0.1:'), 'address is usable and valid')
     url = parsed.url
+  } finally {
+    await cleanup(root, url)
+  }
+})
+
+test('a board that tried the browsers and opened none is not followed by a second try from the command that asked it (#1318)', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'board-opener-once-'))
+  let url = null
+  try {
+    const progress = join(root, 'progress.md')
+    const script = join(root, 'agent-board.mjs')
+    const log = join(root, 'tried.log')
+    writeFileSync(progress, '# Progress\n## Demo\n### Synthetic task\n- [ ] Task 1\n')
+
+    const opening = BOARD_SCRIPT.indexOf('var openInBrowser =')
+    const opened = BOARD_SCRIPT.indexOf('var isRegularFile =', opening)
+    assert.ok(opening > 0 && opened > opening, 'locates openInBrowser')
+    // Every try at a browser, by the board or by the command, leaves a line.
+    const mockedScript = `${BOARD_SCRIPT.slice(0, opening)}var openInBrowser = (target, done) => { process.getBuiltinModule('node:fs').appendFileSync(${JSON.stringify(log)}, 'tried\\n'); done(false) }\n${BOARD_SCRIPT.slice(opened)}`
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${mockedScript}`)
+
+    const result = spawnSync(process.execPath, [script, '--html'], {
+      encoding: 'utf8',
+      timeout: 20000,
+      windowsHide: true,
+      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+    })
+
+    assert.equal(result.status, 0, result.stderr)
+    url = /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/.exec(result.stdout)?.[0] ?? null
+    assert.ok(url, result.stdout)
+    assert.match(result.stdout, /No browser found\. Open this address in your browser:/)
+    // One try, by the board: the same browsers tried again from here fail the same way, or open a
+    // second window when one came up but its launcher reported an error.
+    assert.equal(readFileSync(log, 'utf8'), 'tried\n')
   } finally {
     await cleanup(root, url)
   }

@@ -246,7 +246,7 @@ Start a new session of each agent: a session that was already open is not connec
 
 Open the board in the new session with `/agent-board`, or `$agent-board` in Codex. Cursor has no such command: use `npx @wenyuchiou/agent-board@next` in a terminal. In Hermes Agent, ask it for the Agent Board skill.
 
-- **Claude Code** connects through its plugin, which a yes to setup installs. If you did not answer yes (setup only previewed, or ran `--apply` without a terminal): `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
+- **Claude Code** connects through its plugin, which a yes to setup installs. If you did not answer yes (setup only previewed, or ran `--apply` without a terminal): `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`. The plugin adds a `PermissionRequest` hook: when the page the board opened is in front of you and has drawn a request, Claude Code waits up to 30 seconds for Allow once or Deny there; otherwise, and in `bypassPermissions` or `dontAsk` mode, it asks in its own window as before. The page shows the command in full while it waits; the journal keeps only the decision, the tool, the command's first three words and a 12-character hash.
 - **Codex:** a yes to setup trusts its hooks. If you did not answer yes, trust them in `/hooks` ([how](CODEX.md)).
 - **OpenCode, OpenClaw:** reload their plugins.
 - **dot and other web chats:** paste [the last section of AGENTS.md](../AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then save each block it writes and merge it into the progress file as [Remote reporters](REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) shows.

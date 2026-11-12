@@ -124,7 +124,8 @@ syncBuiltinESMExports()
     // Serve and desktop launch paths must stay inside the test process.
     const browserCalls = [...BOARD_SCRIPT.matchAll(/openInBrowser\(([^,]+),/g)]
     assert.equal(browserCalls.length, 2, 'Review every browser launch when the bundle changes')
-    assert.deepEqual(browserCalls.map(match => match[1]).sort(), ['address', 'url'])
+    // Both open through openThroughBoard or the serve options' open (D3, #1318): the board's own page and the shape page.
+    assert.deepEqual(browserCalls.map(match => match[1]).sort(), ['url', 'url'])
     // The bytes stay identical across worlds; only the isolated environment
     // supplies this instance's baked configuration.
     world.write('agent-board.mjs', `globalThis.AGENT_BOARD = { path: process.env.E2E_BOARD_PATH, lang: process.env.E2E_BOARD_LANG }\n${BOARD_SCRIPT.replace(/openInBrowser\(([^,]+),/g, '((target, done) => done(false))($1,')}`)
