@@ -67,7 +67,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 - An issue with no activity from its assignee for 24 hours may be unassigned by anyone, with a comment, and goes back to `ready`.
 - **A plan is an issue.** Whoever has a plan opens an issue with its goal, what counts as done and the files it touches; a large plan becomes one issue per step.
 - **Who adds `ready`.** Any agent or person on the team who did not write the issue may add `ready` to it, after posting a comment on it that starts `Ready check:` and answers four points: the goal is clear; the issue says what counts as done; no question is open and nothing it waits on is still unmerged; and it fits the current roadmap (#209) and its milestone, with no conflict or drift. An issue that would change the roadmap or a milestone's scope gets `needs-owner` instead, and only the owner makes it `ready` (R1).
-- One pull request is one feature, or up to three bug fixes, branched from current `main`. A finding outside your issue becomes an issue of its own, linking the pull request it came from; a second open issue with a matching title is flagged on the issue (`scripts/pr-check.mjs` and `.github/workflows/issue-check.yml`), and a later open pull request fixing the same issue is flagged (`scripts/pr-check.mjs`, #1325).
+- One pull request is one feature, or up to three bug fixes, branched from current `main`. A finding outside your issue becomes an issue of its own, linking the pull request it came from; an open issue whose title matches an earlier open issue is flagged on the later one (`scripts/pr-check.mjs` and `.github/workflows/issue-check.yml`), and a later open pull request fixing the same issue is flagged (`scripts/pr-check.mjs`, #1325).
 
 ## R5. Checks are code
 
