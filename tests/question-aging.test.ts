@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { ageQuestions, questionAge, QUESTION_DAY } from '../hooks/question-aging'
 import { archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionsJson, withCaptures } from '../hooks/questions'
-import { deadSessionKey } from '../hooks/session-liveness'
+import { blockKey } from '../hooks/session-liveness'
 import { parseProgress } from '../hooks/parse'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../hooks/mirror'
 import { archivableAsking, renderAutoBlock, takeArchivable } from '../hooks/blocks'
@@ -487,22 +487,22 @@ test('folding a question whose agent window is closed keeps its first observatio
   const projects = parseProgress(file)
   const open = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'writer:1').ledger
   expect(open.records[0]!.firstObserved).toBe(START)
-  // Six days later the window is closed: the record is retained, not re-observed.
-  // The dead set is keyed on the full session identity (finding 3), not the scope.
-  const dead = new Set([deadSessionKey({ agent: 'claude', session: 'a1b2c3d4', resume: null })])
-  const folded = observeQuestions(open, projects, null, [], START + 6 * QUESTION_DAY, true, 'writer:2', undefined, [], [], new Set(), dead).ledger
+  // Six days later the window is closed: the ledger stays untouched (same presence
+  // and first observation), and only the view treats the gone process as stopped.
+  const gone = new Set([blockKey(projects[0]!.tasks[0]!.auto!)])
+  const folded = observeQuestions(open, projects, null, [], START + 6 * QUESTION_DAY, true, 'writer:2').ledger
   const record = folded.records.find(one => one.isUnresolved)!
-  expect(record.isPresent).toBe(false)
-  expect(record.isWaiting).toBe(false)
+  expect(record.isPresent).toBe(true)
+  expect(record.isWaiting).toBe(true)
   expect(record.isUnresolved).toBe(true)
   expect(record.firstObserved).toBe(START)
   // The age stages still read from the original first observation, not from the fold.
   expect(questionAge(record.firstObserved, START + 3 * QUESTION_DAY)).toEqual({ stage: 'pending', age: 3 * QUESTION_DAY })
   expect(questionAge(record.firstObserved, START + 6 * QUESTION_DAY)).toEqual({ stage: 'reminder', age: 6 * QUESTION_DAY })
   expect(questionAge(record.firstObserved, START + 7 * QUESTION_DAY + 1)).toEqual({ stage: 'older', age: 7 * QUESTION_DAY + 1 })
-  // The fold itself is the death, not the age: at six days the question is under Older
-  // because its session is dead, while its age stage is still only a reminder.
-  const view = buildView(projects, [], null, START + 6 * QUESTION_DAY, 0, {}, STRINGS.en, [], {}, folded, undefined, [], new Set(), undefined, 12 * 60 * 60 * 1000, undefined, dead)
+  // The fold itself is the gone process, not the age: at six days the question is under Older
+  // because its process is gone, while its age stage is still only a reminder.
+  const view = buildView(projects, [], null, START + 6 * QUESTION_DAY, 0, {}, STRINGS.en, [], {}, folded, undefined, [], new Set(), undefined, 12 * 60 * 60 * 1000, undefined, gone)
   expect(view.waiting).toEqual([])
   expect(view.older.map(item => item.text)).toEqual(['Publish the synthetic plan, OK?'])
 })

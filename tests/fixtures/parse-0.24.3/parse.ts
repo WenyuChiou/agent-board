@@ -3,7 +3,7 @@
 // a 0.24.3-era board reads a block with the new (#1092) fields, and the new board
 // reads an old block unchanged (PM Q2). Do not edit: re-copy from the tag instead.
 // Source: hooks/parse.ts, blob 1c99a806b07e937c7cb22a2f6b732151978211ae.
-// One import adjusted for the new home: '../types' -> '../../types'; the './sha256.ts'
+// One import adjusted for the new home: '../types' -> '../../../types'; the './sha256.ts'
 // and './lines.ts' imports resolve to the vendored copies beside this file.
 
 import type {
@@ -16,7 +16,7 @@ import type {
   ProgressStepStatus,
   ProgressTask,
   ProgressTail,
-} from '../../types'
+} from '../../../types'
 import { sha256 } from './sha256.ts'
 import { splitLines } from './lines.ts'
 

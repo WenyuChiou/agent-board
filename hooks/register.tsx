@@ -88,7 +88,7 @@ import type { ListedTask } from './mirror'
 import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
 import { othersNote, sessionPushNote } from './others'
 import type { AgentClaim } from './session-liveness'
-import { deadKeysForClaims, deadSessionKey, hostHashOf, sessionClaimsOf, withoutProcessIdentity } from './session-liveness'
+import { goneBlocks, hostHashOf, withoutProcessIdentity } from './session-liveness'
 import type { ProgressProject } from '../types'
 import { boardRun } from './board-commands'
 import { peekInbox, redact, turnsFor } from './board'
@@ -148,7 +148,7 @@ import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
-import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
+import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
 const POLL_MS = 2000
@@ -202,6 +202,7 @@ const doneSeen = atom({ plugin: 'agent-board', key: 'doneSeen' } as const, {} as
 // beside progress.md, which every session on this machine and the board script share.
 const hiddenAsks = atom({ plugin: 'agent-board', key: 'hiddenAsks' } as const, [] as string[])
 const questionLedger = atom({ plugin: 'agent-board', key: 'questionLedger' } as const, emptyQuestions())
+const goneSessions = atom({ plugin: 'agent-board', key: 'goneSessions' } as const, [] as string[])
 const hasQuestionsProblem = atom({ plugin: 'agent-board', key: 'hasQuestionsProblem' } as const, false)
 const hasPendingQuestionsProblem = atom({ plugin: 'agent-board', key: 'hasPendingQuestionsProblem' } as const, false)
 const firstSeen = atom({ plugin: 'agent-board', key: 'firstSeen' } as const, {} as Record<string, number>)
@@ -746,8 +747,6 @@ const passQuestions = async ($: EngineInterface, path: string, projects: readonl
     const mirror = await read($, mine)
     const answered = await read($, hiddenAsks)
     const pending = [...(await pendingTurns($)), ...captured]
-    // The dead sessions for this pass, worked out once from the projects in hand.
-    const deadSessions = await pluginDeadSessions($, projects)
     // A delayed save keeps the turn's age, including when a normal poll saw its block first. Each
     // turn is serialised once, not once for every record (#416).
     const capturedAt = new Map<string, number>()
@@ -758,10 +757,7 @@ const passQuestions = async ($: EngineInterface, path: string, projects: readonl
       capturedAt.set(json, Math.min(capturedAt.get(json) ?? time, time))
     }
     const observe = (current: ReturnType<typeof emptyQuestions>, proofs: QuestionProofs | undefined): ReturnType<typeof emptyQuestions> => {
-      // The same dead evidence the board script uses (finding 6): without it an
-      // open pane re-marks a closed session's question as waiting, and the ledger
-      // flips between the plugin and the board script.
-      const observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending, answeredTurns, frozen, deadSessions).ledger
+      const observed = observeQuestions(current, projects, mirror, answered, at, isSettled, incarnation, proofs, pending, answeredTurns, frozen).ledger
       return { ...observed, records: observed.records.map(record => {
         // A running minimum: a record can hold more sources than a call takes arguments.
         let first = record.firstObserved
@@ -1004,8 +1000,8 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
   }
   if (!(await pollQuestions($, snap.path || (await progressPath($)), snap.projects))) return { isDone: false, reason: 'ledgerUnreadable' }
   const ledger = await read($, questionLedger)
-  const deadSessions = await pluginDeadSessions($, snap.projects)
-  const currentView = buildView(snap.projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, ledger, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), cutOffScopes(snap.projects, snap.cutSpans ?? []), undefined, undefined, undefined, deadSessions)
+  const gone = await pluginGoneBlocks($, snap.projects)
+  const currentView = boardView(snap.projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, ledger, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), cutOffScopes(snap.projects, snap.cutSpans ?? []), gone)
   if (![...currentView.waiting, ...(currentView.reminder ?? []), ...(currentView.older ?? []), ...currentView.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) return { isDone: false, reason: 'notFound' }
   const file = answeredPath(snap.path || (await progressPath($)))
   let reason: 'notFound' | 'progressUnreadable' | 'ledgerUnreadable' | 'writeFailed' = 'writeFailed'
@@ -1026,8 +1022,8 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
     const latest = await read($, questionLedger)
     const at = await $.clock.now()
     const frozen = cutOffScopes(fresh, cutOffSpans(source, progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS))
-    const deadSessions = await pluginDeadSessions($, fresh)
-    const current = buildView(fresh, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, latest, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), frozen, undefined, undefined, undefined, deadSessions)
+    const retryGone = await pluginGoneBlocks($, fresh)
+    const current = boardView(fresh, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, latest, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), frozen, retryGone)
     if (![...current.waiting, ...(current.reminder ?? []), ...(current.older ?? []), ...current.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) { reason = 'notFound'; return null }
     await rewrite(
       $,
@@ -1038,7 +1034,7 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
         const proofs = await questionProofsFor($, snap.path || (await progressPath($)))
         // A question kept from an archived block has a retired identity by then, and can still be hidden (#400).
         if (proofs === null || (isHidden && proofs.retired.includes(sha256(item.hideKey)) && !isKeptQuestion(latest, item.hideKey))) return AGAIN
-        return now === null ? AGAIN : answeredJson(withAnswered(now, isHidden ? [item.hideKey] : acknowledgementKeys(observeQuestions(latest, fresh, await read($, mine), now, await $.clock.now(), true, 'preview', undefined, [], [], frozen, deadSessions).ledger, item.hideKey), isHidden))
+        return now === null ? AGAIN : answeredJson(withAnswered(now, isHidden ? [item.hideKey] : acknowledgementKeys(observeQuestions(latest, fresh, await read($, mine), now, await $.clock.now(), true, 'preview', undefined, [], [], frozen).ledger, item.hideKey), isHidden))
       },
       check => parseAnswered(check)?.includes(item.hideKey) === isHidden,
     )
@@ -1236,6 +1232,14 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       if (!isCurrent()) return
       await questionPass($, path, previous.projects)
       if (!isCurrent()) return
+      const gone = [...(await pluginGoneBlocks($, previous.projects))].sort()
+      if (!isCurrent()) return
+      if (JSON.stringify(gone) !== JSON.stringify(await read($, goneSessions))) {
+        await update($, goneSessions, () => gone)
+        await refreshStatus($)
+        await remind($)
+      }
+      if (!isCurrent()) return
       if (isPrunePending) {
         isPrunePending = false
         // Not waited on: poll also runs inside queued jobs, which the prune would queue behind.
@@ -1268,12 +1272,14 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       if (!isCurrent()) return
       await questionPass($, path, projects)
       if (!isCurrent()) return
+      const gone = [...(await pluginGoneBlocks($, projects))].sort()
+      if (!isCurrent()) return
+      if (JSON.stringify(gone) !== JSON.stringify(await read($, goneSessions))) await update($, goneSessions, () => gone)
       const result = await read($, resolveResult)
       if (result !== null) {
         const at = await $.clock.now()
         const frozen = cutOffScopes(projects, cutOffSpans(source, at - changedAt >= CUT_SETTLE_MS))
-        const deadSessions = await pluginDeadSessions($, projects)
-        const view = buildView(projects, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen, undefined, undefined, undefined, deadSessions)
+        const view = boardView(projects, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen, new Set(gone))
         const rows = [...view.stopped, ...view.recent]
         const isDrawn = result.kind === 'changed'
           ? rows.some(row => result.key.startsWith(`${row.key}::`))
@@ -1341,6 +1347,27 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
 }
 
 const views = viewCache()
+// Sole `buildView` / `views.view` caller in `register.tsx` (#1092), so every view reads `gone`.
+const boardView = (
+  projects: readonly ProgressProject[],
+  hereProjects: readonly string[],
+  own: ProgressMirror | null,
+  at: number,
+  todayCount: number,
+  doneSeenMap: Readonly<Record<string, number>>,
+  s: Strings,
+  answeredList: readonly string[],
+  seenMap: Readonly<Record<string, number>>,
+  questions: QuestionLedger | undefined,
+  proofs: QuestionProofs | null,
+  turns: readonly PendingTurn[],
+  frozen: ReadonlySet<string>,
+  gone: ReadonlySet<string>,
+  cached = false,
+): View => {
+  const args: Parameters<typeof buildView> = [projects, hereProjects, own, at, todayCount, doneSeenMap, s, answeredList, seenMap, questions, proofs, turns, frozen, undefined, undefined, undefined, gone]
+  return cached ? views.view(...args) : buildView(...args)
+}
 // The store file's size at the last sweep (sweepFiles), for the warning above the board.
 let measuredStore = 0
 // What the board cleared in the last 7 days, read at the last sweep and after each prune (refreshPruned).
@@ -1622,7 +1649,7 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
   let text = isPaneOpen
     ? undefined
     : statusLine(
-        views.view(
+        boardView(
           snap.projects,
           await read($, here),
           await read($, mine),
@@ -1636,6 +1663,8 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
           await questionProofsFor($, await progressPath($)),
           await pendingTurns($),
           cutOffScopes(snap.projects, snap.cutSpans ?? []),
+          new Set(await read($, goneSessions)),
+          true,
         ),
         s,
       )
@@ -2037,26 +2066,25 @@ const agentIdentity = async ($: EngineInterface): Promise<AgentClaim | null> => 
   return { pid, ...(started === undefined ? {} : { started }), host }
 }
 
-// The dead sessions this plugin can prove from its own process (finding 6): a pid
-// process.kill says is gone, on this host. No start-time check — the plugin cannot
-// read one without a spawn (PM Q5) — so a reused pid keeps the card, and only a
-// gone pid folds. The plugin's process may not expose kill at all (unproven in a
-// live plugin: register.tsx has no process.kill today); then nothing is dead, which
-// is the old behaviour. A kill that refuses for any reason other than ESRCH is a
-// live or uncertain process, so the card is kept.
-const pluginDeadSessions = async ($: EngineInterface, projects: readonly ProgressProject[]): Promise<ReadonlySet<string>> => {
+// The gone blocks this plugin can prove from its own process (#1092): a pid
+// `process.kill` says is gone, on this host. No start-time check — the plugin
+// cannot read one without a spawn (PM Q5) — so a reused pid keeps the card, and
+// only a gone pid folds. Inside hosts where `process` is unavailable, nothing
+// is proven gone and the 12 h backstop remains. A kill that refuses for any reason
+// other than ESRCH is a live or uncertain process, so the card is kept.
+const pluginGoneBlocks = async ($: EngineInterface, projects: readonly ProgressProject[]): Promise<ReadonlySet<string>> => {
   const hostHash = await readingHostHash($)
   if (hostHash === null) return new Set()
-  const isGone = (pid: number): boolean => {
-    if (typeof process === 'undefined' || typeof process.kill !== 'function') return false
+  const probe = (claim: AgentClaim) => {
+    if (typeof process === 'undefined' || typeof process.kill !== 'function') return { alive: true, actual: null }
     try {
-      process.kill(pid, 0)
-      return false
+      process.kill(claim.pid, 0)
+      return { alive: true, actual: null }
     } catch (error) {
-      return (error as { code?: string }).code === 'ESRCH'
+      return { alive: (error as { code?: string }).code !== 'ESRCH', actual: null }
     }
   }
-  return deadKeysForClaims(sessionClaimsOf(projects), isGone, hostHash)
+  return goneBlocks(projects, probe, hostHash)
 }
 
 // The mirror outlives a reload in $.state and a restart in $.store. A mirror stored by an
@@ -3481,12 +3509,10 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
       // Another agent's write while the question check ran is not written over with the older text.
       if (await readText($, path) !== text) return AGAIN
     }
-    // A session whose agent process is gone has certainly stopped, so its archive
-    // goes through even when the silence check would keep the row for review
-    // (#1092): the row offers the press, and the guard reads the same kill-only
-    // evidence as the pane (finding 6).
-    const dead = await pluginDeadSessions($, projects)
-    const taken = takeTask(text, ref, at, s, observed, undefined, (_project, auto) => dead.has(deadSessionKey(auto)))
+    // A session whose agent process is gone has stopped (#1092): the row offers
+    // the press, and the write guard checks the same gone set on this text.
+    const gone = await pluginGoneBlocks($, projects)
+    const taken = takeTask(text, ref, at, s, observed, undefined, gone)
     if (taken === null) return null
     pendingEntries = taken.entries
     return taken.text
@@ -3515,11 +3541,10 @@ const confirmOne = async ($: EngineInterface, ref: ConfirmRef): Promise<(Confirm
   const s = await wordsOf($)
   const original = await readText($, path)
   const observed = await read($, firstSeen)
-  // A session whose agent process is gone has certainly stopped, like one whose
-  // marker says ended: the row offers the press, so the write guard accepts it
-  // (#1092), on the same kill-only evidence as the pane (finding 6).
-  const dead = await pluginDeadSessions($, parseProgress(original))
-  const candidate = confirmTask(original, ref, at, s, observed, undefined, (_project, auto) => dead.has(deadSessionKey(auto)))
+  // A session whose agent process is gone has stopped (#1092): the row offers the
+  // press, and the write guard checks the same gone set on the read text.
+  const gone = await pluginGoneBlocks($, parseProgress(original))
+  const candidate = confirmTask(original, ref, at, s, observed, undefined, gone)
   if (candidate === null) return null
   const selected = confirmedTarget(original, ref, s)
   const mirrors = new Map<string, { stored: ProgressMirror | undefined; seen: string }>()
@@ -3535,10 +3560,10 @@ const confirmOne = async ($: EngineInterface, ref: ConfirmRef): Promise<(Confirm
   let confirmed: ConfirmedTask | null = null
   await rewrite($, path, async text => {
     if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-    // The dead set comes from the text this retry reads, so a session that
-    // resumed since the press was drawn is never confirmed as dead (#1092).
-    const retryDead = await pluginDeadSessions($, parseProgress(text))
-    const next = confirmTask(text, ref, at, s, observed, undefined, (_project, auto) => retryDead.has(deadSessionKey(auto)))
+    // The gone set comes from the text this retry reads, so a session that
+    // resumed since the press was drawn is never confirmed as gone (#1092).
+    const retryGone = await pluginGoneBlocks($, parseProgress(text))
+    const next = confirmTask(text, ref, at, s, observed, undefined, retryGone)
     if (next === null) return null
     confirmed = next
     return next.text
@@ -3584,7 +3609,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
   const at = await $.clock.now()
   const s = await wordsOf($)
   const snap = await read($, snapshot)
-  const view = views.view(
+  const view = boardView(
     snap.projects,
     await read($, here),
     await read($, mine),
@@ -3598,6 +3623,8 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
     await questionProofsFor($, await progressPath($)),
     await pendingTurns($),
     cutOffScopes(snap.projects, snap.cutSpans ?? []),
+    new Set(await read($, goneSessions)),
+    true,
   )
   await breathe($)
   const stored = await $.store.get('told')
@@ -4772,7 +4799,7 @@ export const register: Register = (on, options) => {
       const currentAt = (await read($, now)) || (await $.clock.now())
       const seen = await read($, firstSeen)
       return {
-        ...views.view(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), seen, await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($), cutOffScopes(latest.projects, latest.cutSpans ?? [])),
+        ...boardView(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), seen, await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($), cutOffScopes(latest.projects, latest.cutSpans ?? []), new Set(await read($, goneSessions)), true),
         ...warningOf(latest, s, seen, currentAt),
       }
     }
@@ -4954,7 +4981,7 @@ export const register: Register = (on, options) => {
           const source = JSON.stringify({ session: before.sessionId, project: before.project, title: before.title, context: before.context, task })
           const matches = (one: ProgressMirror): boolean => source === JSON.stringify({ session: one.sessionId, project: one.project, title: one.title, context: one.context, task: one.tasks.find(row => row.id === id) })
           const isSameAsk = async (one: ProgressMirror): Promise<boolean> => {
-            const view = buildView([], [], one, await $.clock.now(), 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, await progressPath($)))
+            const view = boardView([], [], one, await $.clock.now(), 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, await progressPath($)), [], new Set(), new Set())
             return [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].some(ask => ask.key === item.key && ask.questionId === item.questionId && ask.text === item.text && ask.note === item.note)
           }
           if (!(await isSameAsk(before))) return failure(s.boardLineChanged)
@@ -4987,8 +5014,8 @@ export const register: Register = (on, options) => {
           if (!(await pollQuestions($, path, projects))) return result(await savedResolution() ? 'resolved' : 'failed')
           const at = await $.clock.now()
           const frozen = cutOffScopes(projects, cutOffSpans(source, progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS))
-          const deadSessions = await pluginDeadSessions($, projects)
-          const view = buildView(projects, [], await read($, mine), at, 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen, undefined, undefined, undefined, deadSessions)
+          const gone = await pluginGoneBlocks($, projects)
+          const view = boardView(projects, [], await read($, mine), at, 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen, gone)
           const items = [...(view.provisional ?? []), ...view.stopped.flatMap(row => row.questions ?? []), ...view.recent.flatMap(row => row.questions ?? [])]
           if (item.questionId === undefined || !items.some(question => question.questionId === item.questionId && question.text === item.text && question.note === item.note)) return result('changed')
           if (!(await pollQuestions($, path, projects, false, [], [], questionId))) return result(await savedResolution() ? 'resolved' : 'failed')

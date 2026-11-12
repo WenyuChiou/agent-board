@@ -90,6 +90,7 @@ import {
   type World,
 } from './pane-helpers'
 import { parsePendingArchive } from '../hooks/journal'
+import { hostHashOf } from '../hooks/session-liveness'
 
 
 test('the task gets a line of background with its name, and a step that needs you says why', async ($, on) => {
@@ -473,6 +474,80 @@ for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) for (const days of [4, 8])
   expect(world.files.get(FILE)).toBe(board)
   expect(JSON.parse(world.files.get(QUESTIONS) ?? '{}').records.find((row: { id: string }) => row.id === ledger.records[0]!.id)?.firstObserved).toBe(firstAt)
   await ui.unmount()
+})
+
+test('a closed Claude session question folds into Older unanswered when its process dies with file unchanged, updates status and reminders, and can be hidden (#1092)', async ($, on) => {
+  const hostDesc = Object.getOwnPropertyDescriptor(globalThis, 'process')
+  const prevProcess = (globalThis as { process?: unknown }).process
+  const prevKillDesc = prevProcess !== undefined && typeof prevProcess === 'object' && prevProcess !== null
+    ? Object.getOwnPropertyDescriptor(prevProcess, 'kill')
+    : undefined
+  let pidAlive = true
+  const fakeProcess = {
+    platform: 'linux',
+    pid: 12345,
+    kill(pid: number) {
+      if (pid === 999999999 && !pidAlive) {
+        const err = new Error('ESRCH') as Error & { code: string }
+        err.code = 'ESRCH'
+        throw err
+      }
+    },
+  }
+  if (prevProcess === undefined) (globalThis as { process?: unknown }).process = fakeProcess
+  else if (typeof prevProcess === 'object' && prevProcess !== null) {
+    Object.defineProperty(prevProcess, 'kill', { value: fakeProcess.kill, configurable: true, writable: true })
+  }
+  try {
+    const plat = (fakeProcess as { platform: string }).platform
+    const activeProcess = (globalThis as { process: typeof fakeProcess }).process
+    const host = hostHashOf(activeProcess.platform ?? plat, 'testhost')
+    expect(host).not.toBeNull()
+    const recentAt = Date.parse('2026-10-16T11:55:00Z')
+    const board = `## demo\n<!-- auto session=a1b2c3d4 agent=claude state=waiting updated=2026-10-16T11:55:00Z agentpid=999999999 agentstarted=${recentAt - 1000} host=${host} -->\n### Release\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
+    const statuses: Array<string | undefined> = []
+    on('ui.status', (_$, event) => {
+      statuses.push(event.text)
+      return undefined
+    })
+    const world: World = {
+      files: new Map([[FILE, board]]),
+      mtime: 1,
+      hasTasks: true,
+      at: recentAt + 5 * 60_000,
+      env: { HOME: '/home/me', LANG: 'en_US.UTF-8', COMPUTERNAME: 'testhost', HOSTNAME: 'testhost' },
+      store: { lang: 'en', inboxDone: {}, opened: ['older', 'hidden'], told: { seed: recentAt - 10_000 } },
+    }
+    const clock = engineBeneath(on, world)
+    const seen = outside(on, world)
+    await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+    await clock.advance(6100)
+    const id = storedQuestion(world, 'Publish, OK?')
+    expect(id.startsWith('question:')).toBe(true)
+    expect(statuses.at(-1) ?? '').toContain('1 need you')
+    const notifiedBefore = seen.notified.length
+    // Kill the process while leaving progress.md (and its mtime) untouched: the next
+    // unchanged-file poll updates goneSessions, status line, reminders, and pane view.
+    pidAlive = false
+    await clock.advance(6100)
+    expect(statuses.at(-1) ?? '').not.toContain('1 need you')
+    expect(seen.notified.slice(notifiedBefore)).toEqual([])
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    expect(await ui.find({ type: 'Button', key: 'waiting::' })).toBeUndefined()
+    await ui.press({ key: 'ask::demo::Release::0' })
+    expect(await ui.find({ type: 'Button', key: 'demo::Release::0::hide' })).toBeDefined()
+    await ui.press({ key: 'demo::Release::0::hide' })
+    expect(JSON.parse(world.files.get(ANSWERED) ?? '{}').answered).toEqual([id])
+    expect(await ui.find({ type: 'Button', key: 'demo::Release::0::unhide' })).toBeDefined()
+    await ui.unmount()
+  } finally {
+    if (prevProcess !== undefined && typeof prevProcess === 'object' && prevProcess !== null) {
+      if (prevKillDesc === undefined) delete (prevProcess as { kill?: unknown }).kill
+      else Object.defineProperty(prevProcess, 'kill', prevKillDesc)
+    }
+    if (hostDesc === undefined) delete (globalThis as { process?: unknown }).process
+    else Object.defineProperty(globalThis, 'process', hostDesc)
+  }
 })
 
 test('a pane hide survives step movement and whitespace and a corrupt identity file refuses a new hide', async ($, on) => {

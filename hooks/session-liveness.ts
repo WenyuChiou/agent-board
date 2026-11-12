@@ -44,45 +44,47 @@ export const AGENT_START_DRIFT_MS = 3000
 // with a live pid, and any unreadable start time all mean alive. A dead pid needs no
 // start-time check; a live pid with a start time far from the recorded one is a
 // reused pid, so it counts as dead.
-// The key death is recorded under: the agent and the full session id (the
-// resume id when the block carries one, else the block id). A short id alone
-// is not an identity: two sessions can share its 8 hex, and a stale duplicate
-// shares it with the live winner, so the dead copy would hide the live row
-// (finding 3). The record scope in the ledger is a different key — how a
-// record is addressed — and is not re-keyed.
-export const deadSessionKey = (auto: { agent: string; session: string; resume: string | null }): string => `${auto.agent}\u0000${auto.resume ?? auto.session}`
+// The unique key of a claimed block for `goneBlocks` (#1092): agent, full session
+// id, pid and start time. Including the pid and start time ties liveness to that
+// specific process incarnation so there is no winner-selection step inside
+// session-liveness: a resumed session with a new pid or start time, a claim-less
+// newest duplicate, and another session sharing an 8-hex short id each have a
+// different key or none, while `foldRuns` keeps its single choice of row.
+export const blockKey = (auto: { agent: string; session: string; resume: string | null; agentPid?: number; agentStarted?: number }): string =>
+  `${auto.agent}\u0000${auto.resume ?? auto.session}\u0000${auto.agentPid ?? ''}\u0000${auto.agentStarted ?? ''}`
 
-// The one claim per session that decides liveness: the newest block of the
-// identity (agent + full id). Older duplicates — a resumed session's earlier
-// block, a run's copy — never decide it (finding 3). Runs are not sessions:
-// their pid is their starter's, so they never contribute a claim. Done and
-// ended blocks are finished, and only Claude records a pid (PM Q4).
-export const sessionClaimsOf = (projects: readonly ProgressProject[]): Array<{ key: string; claim: AgentClaim }> => {
-  const winners = new Map<string, { claim: AgentClaim; updated: number; order: number }>()
-  let order = 0
+export type LivenessProbe = (claim: AgentClaim) => { alive: boolean; actual: number | 'inaccessible' | null }
+
+// Every working/waiting Claude session block (excluding runs) that carries a
+// valid liveness claim for `hostHash`, with its blockKey and validated claim.
+export const claimedBlocksOf = (projects: readonly ProgressProject[], hostHash: string | null): Array<{ key: string; claim: AgentClaim }> => {
+  if (hostHash === null) return []
+  const seen = new Set<string>()
+  const out: Array<{ key: string; claim: AgentClaim }> = []
   for (const project of projects) for (const task of project.tasks) {
-    order += 1
     const auto = task.auto
-    if (auto === null || auto.state === 'done' || auto.state === 'ended' || auto.agent !== 'claude' || auto.isRun === true) continue
+    if (auto === null || (auto.state !== 'working' && auto.state !== 'waiting') || auto.agent !== 'claude' || auto.isRun === true) continue
     const claim = agentClaimOf(auto)
-    if (claim === null) continue
-    const key = deadSessionKey(auto)
-    const held = winners.get(key)
-    if (held === undefined || auto.updated > held.updated || auto.updated === held.updated && order > held.order) winners.set(key, { claim, updated: auto.updated, order })
+    if (claim === null || claim.host !== hostHash) continue
+    const key = blockKey(auto)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ key, claim })
   }
-  return [...winners].map(([key, one]) => ({ key, claim: one.claim }))
+  return out
 }
 
-// The dead keys from a kill-only probe: the evidence the plugin can share
-// without a spawn (finding 6). A pid the probe says is gone is dead; any
-// other answer keeps the card — without a start-time check a reused pid
-// reads alive, which is the safe direction (PM Q5 forbids a spawn in the
-// hook hot path).
-export const deadKeysForClaims = (claims: ReadonlyArray<{ key: string; claim: AgentClaim }>, isGone: (pid: number) => boolean, hostHash: string | null): ReadonlySet<string> => {
-  const dead = new Set<string>()
-  if (hostHash === null) return dead
-  for (const { key, claim } of claims) if (isDeadAgent(claim, hostHash, !isGone(claim.pid), null)) dead.add(key)
-  return dead
+// Block keys whose agent process is gone on this machine (#1092). Pure: callers
+// supply `probe` (kill + cached start time in the board script; kill-only in
+// the plugin). Only claimed blocks on `hostHash` are probed; everything else
+// keeps the 12 h backstop.
+export const goneBlocks = (projects: readonly ProgressProject[], probe: LivenessProbe, hostHash: string | null): ReadonlySet<string> => {
+  const gone = new Set<string>()
+  for (const { key, claim } of claimedBlocksOf(projects, hostHash)) {
+    const { alive, actual } = probe(claim)
+    if (isDeadAgent(claim, hostHash!, alive, actual)) gone.add(key)
+  }
+  return gone
 }
 
 // Process identity (pid, start time, host hash) belongs only in the person's

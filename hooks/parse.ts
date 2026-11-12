@@ -11,6 +11,7 @@ import type {
 } from '../types'
 import { sha256 } from './sha256.ts'
 import { splitLines } from './lines.ts'
+import { blockKey } from './session-liveness.ts'
 
 // `## project` / `### task` / `> note` / `- [x] step`, plus the auto markers a session's
 // mod writes around its own block. Everything else is ignored, so free text never breaks
@@ -414,6 +415,9 @@ export const observedTime = (auto: ProgressAuto | null, now: number, seen: Reado
 
 export const isStale = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0, staleMs: number = STALE_MS): boolean =>
   auto !== null && (auto.state === 'working' || auto.state === 'waiting') && updated > 0 && now - updated > staleMs
+
+export const isStopped = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): boolean =>
+  isStale(auto, now, updated, staleMs) || (auto !== null && (auto.state === 'working' || auto.state === 'waiting') && gone.has(blockKey(auto)))
 
 // The key a finished hand-kept task is remembered by, to archive it a day later.
 export const doneKey = (project: string, title: string): string => `done:${project}::${title}`

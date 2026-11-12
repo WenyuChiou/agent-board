@@ -6,7 +6,7 @@ import { clearApproval, closeApproval, markApproval, retainApproval } from '../h
 import { applyTaskCreate, emptyMirror, withAgentIdentity } from '../hooks/mirror'
 import { parseProgress, STALE_MS } from '../hooks/parse'
 import { emptyQuestions, observeQuestions, resolveQuestion } from '../hooks/questions'
-import { hostHashOf } from '../hooks/session-liveness'
+import { blockKey, hostHashOf } from '../hooks/session-liveness'
 import { STRINGS } from '../hooks/strings'
 import { buildView } from '../hooks/view'
 import type { ProgressMirror } from '../types'
@@ -286,27 +286,25 @@ test('a waiting approval whose agent window is closed keeps its ledger record fo
   const claimed = withAgentIdentity(waiting, { pid: 12345, started: NOW - 1000, host })
   const projects = projectsOf(claimed)
   expect(projects[0]!.tasks[0]!.auto.agentPid).toBe(12345)
-  // The shell would derive this identity key as dead from the claim; the ledger only sees the set.
-  // The marker carries the session id (`resume=a1b2c3d4-claude-session`, the full id the
-  // resume command needs), so the key is the agent and the resume, exactly as
-  // deadSessionKey builds it.
-  // The reader is not the dead session, so `mine` is null here, as in the board script's read.
-  const dead = new Set(['claude\u0000a1b2c3d4-claude-session'])
+  // The shell derives `blockKey(auto)` into `gone` from the claim; `observeQuestions`
+  // is unaffected by process liveness (byte-equal), and `buildView` folds the row.
+  const gone = new Set([blockKey(projects[0]!.tasks[0]!.auto)])
   const open = observeQuestions(emptyQuestions(), projects, null, [], NOW, true).ledger
   expect(open.records.filter(record => record.isUnresolved)).toHaveLength(1)
-  const retained = observeQuestions(open, projects, null, [], NOW + 1, true, 'preview', undefined, [], [], new Set(), dead).ledger
-  const record = retained.records.find(one => one.isUnresolved)!
-  expect(record.isPresent).toBe(false)
-  expect(record.isWaiting).toBe(false)
+  const rerun = observeQuestions(open, projects, null, [], NOW + 1, true).ledger
+  expect(JSON.stringify(rerun)).toBe(JSON.stringify(open))
+  const record = rerun.records.find(one => one.isUnresolved)!
+  expect(record.isPresent).toBe(true)
+  expect(record.isWaiting).toBe(true)
   expect(record.isUnresolved).toBe(true)
-  const view = buildView(projects, [], null, NOW + 1, 0, {}, words, [], {}, retained, undefined, [], new Set(), undefined, STALE_MS, undefined, dead)
+  const view = buildView(projects, [], null, NOW + 1, 0, {}, words, [], {}, rerun, undefined, [], new Set(), undefined, STALE_MS, undefined, gone)
   expect(view.waiting).toEqual([])
   expect(view.older.map(item => item.text)).toEqual(['Approve the tool?'])
   const row = view.stopped.find(one => one.title === 'Real task')
   expect(row).toBeDefined()
   expect(row!.archive).not.toBe(null)
   // Answering the folded question keeps the record in the ledger for review.
-  const resolved = resolveQuestion(retained, record.id, NOW + 2)
+  const resolved = resolveQuestion(rerun, record.id, NOW + 2)
   expect(resolved.records.find(one => one.id === record.id)).toBeDefined()
   expect(resolved.records.filter(one => one.isUnresolved)).toHaveLength(0)
 })

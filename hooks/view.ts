@@ -11,7 +11,7 @@ import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
 import { cellsOf, plainBar } from './progress-bar'
 import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
@@ -22,7 +22,6 @@ import { identity, isSilenceTask, isWorkingTask } from './grouping'
 import { closedCopies, mergeCopies, recordFolder } from './question-merge'
 import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
 import type { RunGroup } from './runs'
-import { deadSessionKey } from './session-liveness'
 import type { PendingTurn } from './board'
 
 // What the pane shows, worked out from the file and this session's own list, so the
@@ -898,16 +897,16 @@ export const buildView = (
   observe: typeof observeQuestions = observeQuestions,
   staleMs: number = STALE_MS,
   counts?: ViewIndexCounts,
-  // Sessions whose agent process is gone on this machine (#1092): their rows are
-  // treated as ended, like stale ones. The set holds identity keys (the agent and
-  // the full session id, as deadSessionKey builds them), not question scopes; the
-  // shell works it out per read and passes it in as data.
-  deadSessions: ReadonlySet<string> = new Set(),
+  // Blocks whose claimed live process is gone on this machine (#1092): their
+  // rows are treated as stopped/ended, like stale ones. The set holds block
+  // keys built by blockKey(auto), worked out per read by the shell and passed
+  // in as data.
+  gone: ReadonlySet<string> = new Set(),
 ): View => {
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
   // pair is no second row. What is left is what the rows, the questions and the counts read.
   const folded = foldRuns(projects)
-  const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen, deadSessions)
+  const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const records = observed?.ledger.records ?? []
@@ -1010,14 +1009,8 @@ export const buildView = (
       const isDue = task.due !== null && days !== null && days <= 14
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
-      // Questions travel with an inactive session rather than asking for a live reply.
-      const stale = isStale(task.auto, now, updated, staleMs)
-      // A session whose agent process is gone is ended too, without waiting 12 h
-      // (#1092). The dead set is keyed on the full session identity (finding 3):
-      // the agent and the resume id, or the block id when the block carries no
-      // resume — a short id alone would fold a live row whose dead twin shares it.
-      const isDead = task.auto !== null && deadSessions.size > 0 && deadSessions.has(deadSessionKey(task.auto))
-      const isGone = stale || isDead
+      // Questions travel with an inactive or gone session rather than asking for a live reply.
+      const isGone = isStopped(task.auto, now, updated, staleMs, gone)
       const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || isGone || isSilence || task.auto?.state === 'ended')
       const repliedAt = task.auto?.replied
@@ -1451,14 +1444,14 @@ export const buildView = (
     let isInactiveSource = false
     if (source.kind === 'block' && !liveScopes.has(record.scope)) {
       // Unknown historical source shapes retain the existing review behavior.
-      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated, staleMs) || isMarksComplete(saved.steps))
+      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStopped(saved.auto, now, observedTime(saved.auto, now, seen).updated, staleMs, gone) || isMarksComplete(saved.steps))
     }
-    const isStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
-    const stage = isStopped ? 'older' : age.stage
+    const rowStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
+    const stage = rowStopped ? 'older' : age.stage
     const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, dir: recordFolder(record) ?? saved?.auto?.dir ?? null, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), at: record.firstObserved, ...askOf(parts.text, parts.note), where: 'other', agent: agent === 'claude' ? '' : agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
     // The inbox file can be gone while its ledger copy still waits for the report.
     // Require the full binding and a newer source clock before moving its Resolve action.
-    const origin = replyRows.size > 0 && !isStopped ? inboxQuestionOrigin(source) : null
+    const origin = replyRows.size > 0 && !rowStopped ? inboxQuestionOrigin(source) : null
     const reply = origin === null ? undefined : replyFor(source.agent, source.session, origin.session, origin.at)
     if (reply !== undefined && !marked.has(record.id)) {
       provisional.push({ ...item, key: `${reply.key}::inbox-${sha256(record.id)}` })
