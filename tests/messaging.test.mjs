@@ -2242,20 +2242,35 @@ test('a transient message-store rename failure recovers polling without replayin
 })
 
 // #914: one busy moment cost a whole 2 s poll period, the slack a delivery has on a slow runner.
-test('a receiver whose claim meets a busy message store polls again within a second, not a poll period later', async () => fixture(async (board, dir) => {
-  let busyAt, deliveredAt
+test('a receiver whose claim meets a busy message store polls again within a second, not a poll period later', async t => fixture(async (board, dir) => {
+  let busyRetry, isDelivered = false
+  const scheduled = [], timeout = globalThis.setTimeout
+  // #1323: observe the retry's scheduled delay and firing, independently of pauses in CI. Only the
+  // client's own timers count, so waitFor's pauses cannot stand in for a missing retry.
+  t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+    const timer = { ms, hasFired: false }
+    if ((new Error().stack ?? '').includes('message-client')) scheduled.push(timer)
+    return timeout(() => {
+      timer.hasFired = true
+      callback(...args)
+    }, ms)
+  })
   const receiver = await boardClient(board.address).attach({
     agent: 'fixture', session: 'busy-retry', turn: 'turn1', surface: 'Synthetic busy retry', verify: async () => true,
-    onError: error => { if (error.message === 'MESSAGE_STORE_BUSY') busyAt ??= Date.now() },
-    deliver: async message => { deliveredAt ??= Date.now(); return 'ACK ' + message.nonce },
+    onError: error => { if (error.message === 'MESSAGE_STORE_BUSY') busyRetry ??= scheduled.at(-1) },
+    deliver: async message => {
+      isDelivered = true
+      return 'ACK ' + message.nonce
+    },
   })
   try {
     // Five failing renames use up one claim's own waits, so the store answers busy once, then clears.
     writeFileSync(join(dir, 'fail-message-rename'), 'EBUSY 5')
     await board.call('/api/messages/send', { ...input, target: receiver.id })
-    await waitFor(() => deliveredAt !== undefined)
-    assert.ok(busyAt !== undefined, 'the claim never met the busy store')
-    assert.ok(deliveredAt - busyAt < 1000, `delivered ${deliveredAt - busyAt} ms after the busy answer`)
+    await waitFor(() => isDelivered)
+    assert.ok(busyRetry !== undefined, 'the claim never met the busy store')
+    assert.ok(busyRetry.ms < 1000, `a busy claim schedules a retry within a second instead of waiting for the poll period, got ${busyRetry.ms} ms`)
+    assert.equal(busyRetry.hasFired, true, 'the short retry fires before delivery')
   } finally { await receiver.close() }
 }, failingRename))
 

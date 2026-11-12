@@ -121,13 +121,36 @@ test('a repeat preview when every agent is already set up omits first-time steps
   assert.match(repeat, /Claude Code: run claude plugin/i)
 }))
 
-test('README quick start and troubleshooting document --no-open (#1246)', () => {
-  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
-  assert.match(readme, /--no-open/)
-  const zhTw = readFileSync(new URL('../README.zh-TW.md', import.meta.url), 'utf8')
-  assert.match(zhTw, /--no-open/)
-  const zhCn = readFileSync(new URL('../README.zh-CN.md', import.meta.url), 'utf8')
-  assert.match(zhCn, /--no-open/)
+// The READMEs' Quick start is two command blocks and three bullets; the option itself is in the setup guide.
+// A README may give --no-open only inside the complete command that also has --html: with --no-open alone, an
+// interactive terminal over SSH or without a display gets the terminal board, not a page.
+test('the setup guide documents --html --no-open, and no README gives a command with --no-open but not --html (#1246)', () => {
+  const setup = readFileSync(new URL('../docs/SETUP.md', import.meta.url), 'utf8')
+  assert.match(setup, /`--html --no-open`/)
+  assert.match(setup, /`--no-open` alone does not/)
+  for (const file of ['README.md', 'README.zh-TW.md', 'README.zh-CN.md']) {
+    const text = readFileSync(new URL('../' + file, import.meta.url), 'utf8')
+    // Every code span and every shell line holds commands or a flag list; a span may join several commands
+    // (`a && b`, `a; b`, `a | b`, `a & b`), so look at each command that holds the flag on its own.
+    const pieces = [...text.matchAll(/`([^`\n]+)`/g)].map(match => match[1]).concat(text.split(/\r?\n/).filter(line => /^\s*(?:npx|agent-board|node)\b/.test(line)))
+    const lacking = piece => piece.split(/&&|\|\||[;|&]/).filter(command => command.includes('--no-open') && !command.includes('--html'))
+    for (const piece of pieces) assert.deepEqual(lacking(piece), [], `${file}: ${piece} gives --no-open without --html`)
+    // A joined pair where only the first command has --html is caught, not passed as one span.
+    assert.deepEqual(lacking('npx a --html && npx a --no-open'), [' npx a --no-open'])
+    assert.deepEqual(lacking('npx a --html & npx a --no-open'), [' npx a --no-open'])
+  }
+})
+
+// A pasted block cannot wait for a new session, so setup and the board command are separate blocks with the
+// session step as one plain line between them (a Claude-only setup has no board script until that session starts).
+test('every Quick start is the setup block, the new-session line, then the board block (no comment line)', () => {
+  const lines = { 'README.md': 'Then open a new session of your agent and run:', 'README.zh-TW.md': '然後開一個 agent 的新對話，執行：', 'README.zh-CN.md': '然后开一个 agent 的新对话，运行：' }
+  for (const [file, line] of Object.entries(lines)) {
+    const text = readFileSync(new URL('../' + file, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+    const expected = '```sh\nnpx @wenyuchiou/agent-board@next setup\n```\n\n' + line + '\n\n```sh\nnpx @wenyuchiou/agent-board@next\n```\n'
+    assert.ok(text.includes(expected), file)
+    assert.doesNotMatch(text, /^# .*(?:session|對話|对话)/m, file)
+  }
 })
 
 test('the Antigravity apply summary accounts for every file counted by its preview', () => {

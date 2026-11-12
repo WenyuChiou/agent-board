@@ -184,13 +184,15 @@ files: the board script lands at `~/.agent-board/agent-board.mjs`, and no hook p
 npm's cache, so clearing that cache breaks nothing. `npm install -g @wenyuchiou/agent-board` gives a
 lasting `agent-board` command in place of `npx`.
 
-In a terminal, setup prints its preview and asks once: `Set these up? [Y/n]` (Enter means yes). A yes writes the files, approves the board's hooks in Codex and Hermes Agent for the agents it set up, and, when `claude` is on the PATH and the plugin is not installed, runs `claude plugin marketplace add WenyuChiou/agent-board` (left out when Claude Code already knows that marketplace) and `claude plugin install agent-board@agent-board`. Each part prints done, or failed with the command to run by hand, and a failed part does not stop the others. A no writes nothing. Without a terminal (piped input, `--json`, an agent's shell tool that is not a terminal) setup only previews. `setup --apply` writes the files only, in a terminal too, and lists the approval and plugin commands: only a yes typed at the question approves hooks or installs the plugin. On a first plain `agent-board` run with nothing set up, the launcher hands over to the same question and opens the board after a yes. OpenCode and Gemini CLI use `/agent-board`; setup removes an unchanged old `/board` file and keeps one you edited.
+In a terminal, setup prints its preview and, when there is something to set up, asks once: `Set these up? [Y/n]` (`要設定這些嗎？[Y/n]` on a Traditional Chinese system, `要设置这些吗？[Y/n]` on a Simplified Chinese one; Enter means yes). A yes writes the files, approves the board's hooks in Codex and Hermes Agent for the agents it set up, and, when `claude` is on the PATH and the plugin is not installed, runs `claude plugin marketplace add WenyuChiou/agent-board` (left out when Claude Code already knows that marketplace) and `claude plugin install agent-board@agent-board`. Each part prints done, or failed with the command to run by hand, and a failed part does not stop the others. A no writes nothing. Without a terminal (piped input, `--json`, an agent's shell tool that is not a terminal) setup only previews. `setup --apply` writes the files only, in a terminal too, and lists the approval and plugin commands: only a yes typed at the question approves hooks or installs the plugin. On a first plain `agent-board` run with nothing set up, the launcher hands over to the same question and opens the board after a yes. OpenCode and Gemini CLI use `/agent-board`; setup removes an unchanged old `/board` file and keeps one you edited.
 
 A plain `agent-board` call opens the interactive local page on a desktop, from an agent or
 in a non-interactive call. An interactive terminal over SSH or without a display opens the
 terminal board; CI prints text. `--html` and the old spelling `--serve` start or reuse the local service and
 open the page (`--serve` prints only the address, with no text board); `--lan` opens it and shows the phone address; `--watch` selects the terminal board, `--print` prints text, and `--json`
 returns the board for agents.
+
+Without `--lang` or a language it saved, the board follows the system language when it is Traditional or Simplified Chinese, and English otherwise; `--lang en`, `--lang zh-TW` or `--lang zh-CN` on the board command (as on `setup`) chooses. `--html --no-open` starts the page without opening a browser window (`--no-open` alone does not: in an interactive terminal over SSH or without a display it still gives the terminal board).
 
 These board calls run the board script setup installed: the one beside `$CLAUDE_PROGRESS_FILE`, else
 the board the Claude Code plugin's connector last connected, else
@@ -241,6 +243,8 @@ Tell me which existing sessions need reload and which adapters remain unsupporte
 ## After setup, per agent
 
 Start a new session of each agent: a session that was already open is not connected.
+
+Open the board in the new session with `/agent-board`, or `$agent-board` in Codex. Cursor has no such command: use `npx @wenyuchiou/agent-board@next` in a terminal. In Hermes Agent, ask it for the Agent Board skill.
 
 - **Claude Code** connects through its plugin, which a yes to setup installs. If you did not answer yes (setup only previewed, or ran `--apply` without a terminal): `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
 - **Codex:** a yes to setup trusts its hooks. If you did not answer yes, trust them in `/hooks` ([how](CODEX.md)).

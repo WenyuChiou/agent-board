@@ -155,7 +155,8 @@ export const ZH_CN: Strings = {
     "keptData": "保留 {progress} 旁的数据与历史记录（回答、提问、日志、归档、会话）：",
     "applyRemove": "应用此移除更改：{command}",
     "restartRemove": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
-    "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。"
+    "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
+    "directRemoved": "直接运行的 node 命令已无法使用；请改用 {command}。"
   },
   setupNoAgent: {
     "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
@@ -858,6 +859,7 @@ export const ZH_CN: Strings = {
   pasteNoBlock: '找不到开头 <!-- auto … --> 和结尾 <!-- /auto … --> 都在的区块。',
   pasteMixed: '开头和结尾标记的 session id 不一样。',
   pasteBadBlock: '开头标记的下一行要是“### 标题”；区块里不能有 ```、<!-- -->、# 标题或第二个区块。',
+  pasteReservedAgent: '代理名称“claude”保留给 Claude Code 使用。请网页聊天改用“claude-web”，再粘贴一次。',
   pasteNoProject: '新区块的第一行要写“## 项目名称”。',
   pasteNotYours: '这个 id 属于本地报告器、有续接信息的 session、另一个 agent，或没有结尾标记的区块，不能盖掉。',
   pasteBadTime: '来源时间缺少或无效。请报告者提供当前完整进度，updated= 使用真实 UTC 时间并以 Z 结尾，再粘贴一次。',
