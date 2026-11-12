@@ -931,6 +931,8 @@ export const ZH_CN: Strings = {
   pgVersions: (board: string, pkg: string): string => `看板程序 ${board}，软件包 ${pkg}`,
   pgVersionsOlder: (board: string, pkg: string): string => `看板程序 ${board} 比软件包 ${pkg} 旧。`,
   pgVersionsUpdate: (command: string): string => `更新前先预览：${command}，再加上 --apply。`,
+  pgVersionsUpdatePlugin: '更新：先在 Claude Code 更新 agent-board 插件，再运行 /progress connect。',
+  pgVersionsUpdateFallback: '在终端运行 npx @wenyuchiou/agent-board，查看完整更新命令。',
   pgUnreadable: (agent: string): string => `无法读取 ${agent} 的进度文件，部分任务可能未显示。`,
   pgHowFix: '如何修复',
   pgFixAdvice: '请确认进度文件可读取，并让代理重新报告进度。',

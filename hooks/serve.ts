@@ -239,7 +239,7 @@ export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string;
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
-export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null; update?: string | null }; unreadable: readonly string[] }
+export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null; update?: string | null; updateIsAdvice?: boolean }; unreadable: readonly string[] }
 type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
 type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
 type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
@@ -2847,7 +2847,7 @@ const PAGE_SCRIPT = String.raw`
       for (var i = 0; i < 3; i++) { var d = (+b[i] || 0) - (+a[i] || 0); if (d) return d > 0; }
       return false;
     };
-    document.getElementById('versions').textContent = !version.package || version.package === version.board ? w('pgVersion', version.board) : isOlder(version.board, version.package) ? w('pgVersionsOlder', version.board, version.package) + (version.update ? ' ' + w('pgVersionsUpdate', version.update) : '') : w('pgVersions', version.board, version.package);
+    document.getElementById('versions').textContent = !version.package || version.package === version.board ? w('pgVersion', version.board) : isOlder(version.board, version.package) ? w('pgVersionsOlder', version.board, version.package) + (version.update ? ' ' + (version.updateIsAdvice ? version.update : w('pgVersionsUpdate', version.update)) : '') : w('pgVersions', version.board, version.package);
     var priorCards = pg.cardNodes;
     var priorOrder = pg.order.cards || [];
     var priorRows = pg.rowKeys;

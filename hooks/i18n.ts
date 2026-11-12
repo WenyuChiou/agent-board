@@ -976,6 +976,8 @@ export const ZH_TW = {
   pgVersions: (board: string, pkg: string): string => `看板程式 ${board}，套件 ${pkg}`,
   pgVersionsOlder: (board: string, pkg: string): string => `看板程式 ${board} 比套件 ${pkg} 舊。`,
   pgVersionsUpdate: (command: string): string => `更新前先預覽：${command}，再加上 --apply。`,
+  pgVersionsUpdatePlugin: '更新：先在 Claude Code 更新 agent-board 外掛，再執行 /progress connect。',
+  pgVersionsUpdateFallback: '在終端機執行 npx @wenyuchiou/agent-board，查看完整更新指令。',
   pgUnreadable: (agent: string): string => `無法讀取 ${agent} 的進度檔，部分任務可能未顯示。`,
   pgHowFix: '如何修復',
   pgFixAdvice: '請確認進度檔可讀取，並讓代理程式重新回報進度。',

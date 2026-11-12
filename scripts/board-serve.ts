@@ -93,9 +93,8 @@ const isNewerVersion = (candidate: string, current: string): boolean => {
   }
   return false
 }
-// The launcher's update advice, whole or not at all: on Windows it can be two commands, one per shell, and a cut would
-// leave one that runs with a wrong folder. 1000 characters hold both for a folder of about 400 (#1304).
-export const wholeUpdate = (text: string | undefined): string | null => text !== undefined && text !== '' && text.length <= 1000 ? text : null
+// A truncated command can run with the wrong folder. For longer advice, direct the person to the terminal instead.
+export const wholeUpdate = (text: string | undefined, s: Strings): string | null => text === undefined || text === '' ? null : text.length <= 1000 ? text : s.pgVersionsUpdateFallback
 
 export const boardVersion = RELEASED.reduce((highest, release) => {
   return isNewerVersion(release.version, highest) ? release.version : highest
@@ -460,7 +459,11 @@ export const startServer = (o: ServeOptions): void => {
           const now = Date.now()
           const view = o.view()
           const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
-          const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion, update: isLan ? null : wholeUpdate(process.env.AGENT_BOARD_UPDATE_COMMAND) }, unreadable: view.unreadable ?? [] }
+          const command = process.env.AGENT_BOARD_UPDATE_COMMAND
+          const isPluginUpdate = process.env.AGENT_BOARD_UPDATE_KIND === 'plugin' && command === '/progress connect'
+          const update = isPluginUpdate ? o.s.pgVersionsUpdatePlugin : wholeUpdate(command, o.s)
+          const updateIsAdvice = isPluginUpdate || (command !== undefined && command.length > 1000)
+          const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion, update: isLan ? null : update, updateIsAdvice: !isLan && updateIsAdvice }, unreadable: view.unreadable ?? [] }
           const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.

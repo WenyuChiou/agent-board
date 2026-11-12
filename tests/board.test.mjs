@@ -8018,6 +8018,45 @@ test('with --lan the page also opens on the local network, with a token of its o
   }
 })
 
+test('the page shows the plugin update steps in each language when the plugin wrote an older board (#1328)', { timeout: 30_000 }, async () => {
+  const advice = {
+    en: 'To update it, update the agent-board plugin in Claude Code, then run /progress connect.',
+    'zh-TW': '更新：先在 Claude Code 更新 agent-board 外掛，再執行 /progress connect。',
+    'zh-CN': '更新：先在 Claude Code 更新 agent-board 插件，再运行 /progress connect。',
+  }
+  for (const [lang, expected] of Object.entries(advice)) {
+    const source = `globalThis.AGENT_BOARD.lang = ${JSON.stringify(lang)}\n${BOARD_SCRIPT}`
+    const board = await page('', { AGENT_BOARD_PACKAGE_VERSION: '99.9.9', AGENT_BOARD_UPDATE_COMMAND: '/progress connect', AGENT_BOARD_UPDATE_KIND: 'plugin' }, [], undefined, source)
+    try {
+      const model = (await board.call('GET', '/api/board')).json().model
+      assert.equal(model.view.versions.update, expected)
+      const dom = await pageDom(await sourcePage(lang), model)
+      assert.ok(dom.node('versions').textContent.includes(expected), dom.node('versions').textContent)
+      assert.ok(!dom.node('versions').textContent.includes('--apply'))
+    } finally { await board.close() }
+  }
+})
+
+test('the page points to the terminal in each language when the update command is too long to show whole (#1328)', { timeout: 30_000 }, async () => {
+  const advice = {
+    en: 'Run npx @wenyuchiou/agent-board in a terminal to see the full update command.',
+    'zh-TW': '在終端機執行 npx @wenyuchiou/agent-board，查看完整更新指令。',
+    'zh-CN': '在终端运行 npx @wenyuchiou/agent-board，查看完整更新命令。',
+  }
+  const update = `npx @wenyuchiou/agent-board setup --data-dir "C:\\Boards\\${'x'.repeat(1000)}"`
+  for (const [lang, expected] of Object.entries(advice)) {
+    const source = `globalThis.AGENT_BOARD.lang = ${JSON.stringify(lang)}\n${BOARD_SCRIPT}`
+    const board = await page('', { AGENT_BOARD_PACKAGE_VERSION: '99.9.9', AGENT_BOARD_UPDATE_COMMAND: update }, [], undefined, source)
+    try {
+      const model = (await board.call('GET', '/api/board')).json().model
+      assert.equal(model.view.versions.update, expected)
+      const dom = await pageDom(await sourcePage(lang), model)
+      assert.ok(dom.node('versions').textContent.includes(expected), dom.node('versions').textContent)
+      assert.ok(!dom.node('versions').textContent.includes('--apply'))
+    } finally { await board.close() }
+  }
+})
+
 test('the update command with a home path reaches the local page but never the page on the local network (#1304)', { timeout: 30_000 }, async t => {
   const update = 'npx @wenyuchiou/agent-board@9.9.9 setup --data-dir /home/synthetic-person/board'
   const board = await page('', { AGENT_BOARD_UPDATE_COMMAND: update })
@@ -8042,12 +8081,12 @@ test('the update command with a home path reaches the local page but never the p
 })
 
 // Two commands, one per shell, for a long Windows folder with `$` are longer than the old 500-character cut, which
-// ended the text inside the PowerShell command (Greptile on #1328). The advice reaches the page whole, or not at all.
-test('the update advice reaches the page whole, both shell commands of a long folder included, or not at all (#1304)', { timeout: 30_000 }, async () => {
+// ended the text inside the PowerShell command (Greptile on #1328). Longer advice gets a terminal fallback.
+test('the update advice reaches the page whole, or gives a terminal fallback (#1304)', { timeout: 30_000 }, async () => {
   const folder = `C:\\Boards\\$cache ${'x'.repeat(200)}`
   const two = `Command Prompt: npx @wenyuchiou/agent-board@9.9.9 setup --data-dir "${folder}"; PowerShell: npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '${folder}'`
   assert.ok(two.length > 500 && two.length <= 1000, String(two.length))
-  for (const [update, shown] of [[two, two], ['npx '.repeat(260), null]]) {
+  for (const [update, shown] of [[two, two], ['npx '.repeat(260), EN.pgVersionsUpdateFallback]]) {
     const board = await page('', { AGENT_BOARD_UPDATE_COMMAND: update })
     try {
       assert.equal((await board.call('GET', '/api/board')).json().model.view.versions.update, shown)

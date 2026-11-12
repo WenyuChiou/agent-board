@@ -1397,8 +1397,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const missingHeld: string[] = []
   const keptFiles = new Set<string>()
   const staleBeside = new Set<string>()
-  // The release table hashes the script from its second line on, so the first (settings) line is checked here:
-  // it must be one a release or this setup would write for this install, or the person edited it (review of #1328).
+  // The release table omits the settings line. Use an install's full-file hash when one exists; otherwise
+  // only accept settings that a release or this setup could have written for this install.
   const isSettingsLine = (line: string): boolean => {
     const head = 'globalThis.AGENT_BOARD = '
     if (!line.startsWith(head)) return false
@@ -1412,6 +1412,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     return data.codexRoot === undefined || data.codexRoot === root
   }
   const isReleasedBoard = (text: string): boolean => {
+    const recorded = [manifest.files[script], ...otherManifests.map(one => object(one.files ?? {})[script])]
+    if (recorded.some(value => typeof value === 'string')) return recorded.includes(hash(text))
     const first = /^globalThis\.AGENT_BOARD[^\n]*\n/.exec(text)?.[0]
     if (first !== undefined && !isSettingsLine(first.slice(0, -1).replace(/\r$/, ''))) return false
     const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))

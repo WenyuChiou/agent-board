@@ -178,7 +178,9 @@ const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(h
 // The path as one argument for the shell the command is shown for: single quotes on POSIX. On Windows, double quotes,
 // which cmd and PowerShell both read; PowerShell runs $(...) and backticks inside them, so such a path gets its single quotes.
 // cmd expands %NAME% even inside double quotes, so for cmd each % steps out of the quotes as ^%, which cmd reads as a plain %.
-const quoted = (text, shell) => !isWin ? `'${text.replaceAll("'", "'\\''")}'` : shell !== 'cmd' && /[$`]/.test(text) ? `'${text.replaceAll("'", "''")}'` : shell === 'cmd' ? `"${text.replaceAll('%', '"^%"')}"` : `"${text}"`
+// A native Windows argument parser treats backslashes immediately before a closing double quote as escapes.
+const doubleTrailingBackslashes = text => text.replace(/\\+$/, '$&$&')
+const quoted = (text, shell) => !isWin ? `'${text.replaceAll("'", "'\\''")}'` : shell !== 'cmd' && /[$`]/.test(text) ? `'${(/\s/.test(text) ? doubleTrailingBackslashes(text) : text).replaceAll("'", "''")}'` : shell === 'cmd' ? `"${doubleTrailingBackslashes(text.replaceAll('%', '"^%"'))}"` : `"${doubleTrailingBackslashes(text)}"`
 const code = error => error?.code ?? error?.name ?? 'UNKNOWN'
 // The part of a path below the home folder, with its leading separator ('' for home itself); undefined elsewhere.
 const belowHome = path => {
@@ -207,7 +209,7 @@ function setupAdvice(path, prelude) {
     if (isDefault) return ''
     if (rest !== undefined) {
       // Both shells read a backslash; a folder given with forward slashes is shown the same way.
-      const winRest = rest.replaceAll('/', '\\')
+      const winRest = doubleTrailingBackslashes(rest.replaceAll('/', '\\'))
       if (isWin) return ` --data-dir ${style === 'cmd' ? `"%USERPROFILE%${winRest.replaceAll('%', '"^%"')}"` : `"$HOME${winRest.replace(/[`$]/g, '`$&')}"`}`
       const below = rest.slice(1)
       return ` --data-dir ~${below === '' ? '' : `/${/[^\w.:\/~@+,=-]/.test(below) ? quoted(below, style) : below}`}`
@@ -325,6 +327,7 @@ language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? systemLang(process.
 const hash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
 // The command that updates the install being run, for the page to show; empty when the notice names no command.
 let updateCommand = ''
+let updateKind = ''
 // --json promises JSON, so a script that cannot return it is found out even for --chat and --status.
 let isJsonUnverified = args.includes('--json')
 // The maintenance modes (scripts/codex-local.ts): an older script may already answer their --json, so only the board
@@ -354,6 +357,7 @@ if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
           ? message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview with the command for your shell, then add --apply:${two}`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先用你的終端機對應的指令預覽，再加上 --apply：${two}`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先用你的终端对应的命令预览，再加上 --apply：${two}`)
           : message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
       } else {
+        if (old) { updateCommand = '/progress connect'; updateKind = 'plugin' }
         console.error(old
           ? message(`agent-board ${v}: the board script at ${path} is from ${old}; the Claude Code plugin wrote it. To update it, update the agent-board plugin in Claude Code, then run /progress connect.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版，由 Claude Code 外掛寫入。更新：先在 Claude Code 更新 agent-board 外掛，再執行 /progress connect。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版，由 Claude Code 插件写入。更新：先在 Claude Code 更新 agent-board 插件，再运行 /progress connect。`)
           : message(`agent-board ${v}: the board script at ${path} is a different build (newer, or edited). It runs as it is.`, `agent-board ${v}：${path} 的看板程式是另一個版本（較新，或被改過），照原樣執行。`, `agent-board ${v}：${path} 的看板程序是另一个版本（较新，或被改过），照原样运行。`))
@@ -369,4 +373,4 @@ if ((!isChat && !args.includes('--status')) || isJsonUnverified) {
 // A separate process preserves argv[1], which the installed page server identifies.
 const env = dataDir ? { ...process.env } : process.env
 if (dataDir) delete env.CLAUDE_PROGRESS_FILE
-run(installed, passArgs, { isJsonChecked: isJsonUnverified, adviceFor: prelude, env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v, AGENT_BOARD_UPDATE_COMMAND: updateCommand } })
+run(installed, passArgs, { isJsonChecked: isJsonUnverified, adviceFor: prelude, env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v, AGENT_BOARD_UPDATE_COMMAND: updateCommand, AGENT_BOARD_UPDATE_KIND: updateKind } })

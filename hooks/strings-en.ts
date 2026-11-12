@@ -937,6 +937,8 @@ export const EN: Strings = {
   pgVersions: (board: string, pkg: string): string => `board script ${board}, package ${pkg}`,
   pgVersionsOlder: (board: string, pkg: string): string => `board script ${board} is older than the package ${pkg}.`,
   pgVersionsUpdate: (command: string): string => `To update it, preview: ${command}, then add --apply.`,
+  pgVersionsUpdatePlugin: 'To update it, update the agent-board plugin in Claude Code, then run /progress connect.',
+  pgVersionsUpdateFallback: 'Run npx @wenyuchiou/agent-board in a terminal to see the full update command.',
   pgUnreadable: (agent: string): string => `${agent}'s progress file could not be read, so some of its tasks may be missing.`,
   pgHowFix: 'How to fix',
   pgFixAdvice: 'Check that the progress file can be read, then ask the agent to report its progress again.',

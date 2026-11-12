@@ -2608,12 +2608,43 @@ test('#1302 an edited worker keeps the older hooks too, so no new hook runs it (
 
 // Two-hour review of #1328 (codex_127), finding 1: the release table hashes the board script from its second line on,
 // so the settings line itself must be one setup or a release wrote; an edited one is the person's.
+test('an upgrade keeps a released board whose settings line was edited after the recorded install (#1328)', async () => {
+  const released = bundleFromRef(fileURLToPath(new URL('..', import.meta.url)), 'agent-board--v0.24.3')
+  for (const owner of ['codex', 'cursor']) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const head = readFileSync(f.script, 'utf8').split('\n', 1)[0]
+    const original = `${head}\n${released}`
+    const digest = createHash('sha256').update(original).digest('hex')
+    const record = join(f.root, 'install-codex.json')
+    const manifest = JSON.parse(readFileSync(record, 'utf8'))
+    if (owner === 'codex') manifest.files[f.script] = digest
+    else {
+      delete manifest.files[f.script]
+      f.save(join(f.root, 'install-cursor.json'), JSON.stringify({ files: { [f.script]: digest }, progress: f.progress }))
+    }
+    f.save(record, JSON.stringify(manifest))
+    const settings = JSON.parse(head.replace('globalThis.AGENT_BOARD = ', ''))
+    settings.path = join(f.home, '.claude', 'progress.md')
+    const edited = `globalThis.AGENT_BOARD = ${JSON.stringify(settings)}\n${released}`
+    f.save(f.script, edited)
+    const preview = JSON.parse(f.install('--agent', 'codex', '--json').stdout)
+    assert.notEqual(preview.changes.find(change => change.file === f.script)?.action, 'update', owner)
+    assert.ok(preview.keptCode?.includes(f.script) || preview.conflicts.includes(f.script), owner)
+    f.install('--agent', 'codex', '--apply')
+    assert.equal(readFileSync(f.script, 'utf8'), edited, owner)
+  })
+})
+
 test('#1302 a released board script whose settings line the person edited is kept, not overwritten (review of #1328)', () => fixture(f => {
   const released = bundleFromRef(fileURLToPath(new URL('..', import.meta.url)), 'agent-board--v0.24.3')
   assert.equal(f.install('--apply').status, 0)
   const head = readFileSync(f.script, 'utf8').split('\n', 1)[0]
   // The settings line setup wrote for this install, above a released body: still a released board, updated as before.
   f.save(f.script, `${head}\n${released}`)
+  const record = join(f.root, 'install-codex.json')
+  const manifest = JSON.parse(readFileSync(record, 'utf8'))
+  manifest.files[f.script] = createHash('sha256').update(`${head}\n${released}`).digest('hex')
+  f.save(record, JSON.stringify(manifest))
   const plain = JSON.parse(f.install('--json').stdout)
   assert.deepEqual(plain.conflicts, [])
   assert.deepEqual(plain.keptCode ?? [], [])

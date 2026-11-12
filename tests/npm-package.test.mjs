@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import { bundleFiles, bundleFromDir } from '../scripts/bundle-text.mjs'
 import { setupPrograms } from './helpers/setup-programs.mjs'
 
@@ -495,6 +496,43 @@ test('--json for a maintenance mode through an older board script runs it, as 0.
   assert.equal(board.stdout, '')
 }))
 
+test('a Windows folder ending in a backslash reaches the command whole in cmd and PowerShell (#1328)', () => fixture(f => {
+  const source = readFileSync(join(repo, 'bin/agent-board.mjs'), 'utf8')
+  const start = source.indexOf('const quoted =')
+  const end = source.indexOf('\nconst code =', start)
+  assert.ok(start >= 0 && end > start)
+  const helper = source.match(/^const doubleTrailingBackslashes = .+$/m)?.[0] ?? ''
+  const quoted = runInNewContext(`${helper}\n${source.slice(start, end)}\nquoted`, { isWin: true })
+  assert.equal(quoted('C:\\', 'cmd'), '"C:\\\\"')
+  assert.equal(quoted('C:\\', 'powershell'), '"C:\\\\"')
+  const withSpace = 'C:\\Synthetic board \\'
+  const withDollar = 'C:\\Synthetic $board \\'
+  assert.equal(quoted(withDollar, 'powershell'), "'C:\\Synthetic $board \\\\'")
+  if (process.platform !== 'win32') return
+  const probe = join(f.box, 'quote-probe.cmd')
+  save(probe, `@echo off\r\n"${process.execPath}" -e "console.log(JSON.stringify(process.argv[1]))" ${quoted('C:\\', 'cmd')}\r\n`)
+  const cmd = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', `"${probe}"`], { env: f.env, encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true })
+  assert.equal(cmd.status, 0, cmd.stderr)
+  assert.equal(JSON.parse(cmd.stdout.trim()), 'C:\\')
+  for (const path of [withSpace, withDollar]) {
+    const command = `& '${process.execPath.replaceAll("'", "''")}' -e 'console.log(JSON.stringify(process.argv[1]))' ${quoted(path, 'powershell')}`
+    const ps = spawnSync('powershell.exe', ['-NoProfile', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], { env: f.env, encoding: 'utf8', windowsHide: true })
+    assert.equal(ps.status, 0, ps.stderr)
+    assert.equal(JSON.parse(ps.stdout.trim()), path)
+  }
+}))
+
+test('the launcher passes the plugin update steps to the board it starts (#1328)', () => fixture(f => {
+  const pkg = packed(f)
+  const script = join(f.env.CLAUDE_CONFIG_DIR, 'agent-board.mjs')
+  const text = `globalThis.AGENT_BOARD = {}\nprocess.stdout.write(JSON.stringify({ command: process.env.AGENT_BOARD_UPDATE_COMMAND, kind: process.env.AGENT_BOARD_UPDATE_KIND }))\n// 0.24.2`
+  save(script, text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(text)}'] }]\n`)
+  const result = f.run(pkg, ['--print'])
+  success(result)
+  assert.deepEqual(JSON.parse(result.stdout), { command: '/progress connect', kind: 'plugin' })
+}))
+
 test('a custom path with % is shown once per shell on Windows, and each shell receives it exactly (review of #1328)', () => fixture(f => {
   const pkg = packed(f)
   // Command Prompt expands %USERNAME% even inside double quotes.
@@ -656,7 +694,7 @@ test('on Windows each shown update command, run in its own shell, receives the e
   }
 }))
 
-test('the launcher hands an older script the update command for the install it runs, and none for a plugin copy (#1304)', () => fixture(f => {
+test('the launcher hands an older script the update command for the install it runs and the plugin reconnect command (#1304)', () => fixture(f => {
   const pkg = packed(f)
   const root = join(f.home, 'data dir')
   const echo = head => `${head}process.stdout.write('update=' + JSON.stringify(process.env.AGENT_BOARD_UPDATE_COMMAND ?? null))\n// 0.24.2`
@@ -673,7 +711,7 @@ test('the launcher hands an older script the update command for the install it r
   save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.24.2', board: ['${bodyHash(plugin)}'] }]\n`)
   const fromPlugin = f.run(pkg, ['--print'])
   success(fromPlugin)
-  assert.equal(fromPlugin.stdout, 'update=""')
+  assert.equal(fromPlugin.stdout, 'update="/progress connect"')
 }))
 
 test('the board script beside CLAUDE_PROGRESS_FILE runs with the arguments unchanged and its own path as argv[1]', () => fixture(f => {
