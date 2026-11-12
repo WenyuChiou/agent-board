@@ -17,7 +17,10 @@ import { boardItems } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
 import { agentLabel } from '../hooks/strings'
-import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
+import type { ReceiverRoutes } from '../hooks/messaging'
+import type { SendDecision } from '../hooks/messaging'
+import { RECEIVER_ROUTES } from '../hooks/receiver-routes'
+import { lanAddress, localHosts, pagePolicy, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
@@ -32,6 +35,8 @@ import type { SettingsAgentControl } from './settings-agents'
 
 export type ServeOptions = {
   allowResume?: boolean
+  // The receivers' records in place of the built-in ones (the tests' stand-in, see board-cli.ts).
+  routes?: readonly ReceiverRoutes[]
   messagesDirectory: string
   isDefaultMessagesDirectory?: boolean
   reports?: (isFresh?: boolean) => ProgressBinding[]
@@ -269,7 +274,7 @@ const run = (plan: SendPlan, s: Strings, label: string): Promise<Result> =>
 
 export const startServer = (o: ServeOptions): void => {
   const messaging = (() => {
-    try { return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory) }
+    try { return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory, { routes: o.routes ?? RECEIVER_ROUTES, stateOfSession: (agent, session) => sessionState(o.view(), agent, session) }) }
     // The code (EACCES, EPERM) goes along, so the person gets advice that fits the cause.
     catch (error) { throw Object.assign(new Error(error instanceof Error ? error.message : '', { cause: 'MESSAGE_STORE_FAILED' }), { code: error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined }) }
   })()
@@ -457,7 +462,7 @@ export const startServer = (o: ServeOptions): void => {
           const view = o.view()
           const state = isLan ? undefined : messaging.snapshot(now, o.reports?.(false))
           const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
+          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state ?? { enabled: false, connections: [], messages: [] }, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now }
           // The page already compares its clock at minute precision. Keep that refresh boundary
           // without treating each millisecond as changed content; replies and receipts stay exact.
           const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
@@ -523,7 +528,7 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/act') {
         const state = isLan ? undefined : messaging.snapshot(Date.now())
         // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
-        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, deliveryTargets(state?.connections ?? [], state?.mailboxes), true, o.allowResume)
+        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, deliveryTargets(state?.connections ?? [], state?.mailboxes), true, o.allowResume, o.routes)
         if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})
@@ -533,6 +538,13 @@ export const startServer = (o: ServeOptions): void => {
             const note = 'status' in receipt ? notes[receipt.status] : o.s.messagesFailed
             return json(res, 200, { note, receipt })
           } catch (error) {
+            const code = (error as { code?: unknown } | null)?.code
+            if (['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
+            const decision = (error as { decision?: SendDecision } | null)?.decision
+            if (error instanceof Error && error.message === 'NO_RECORDED_ROUTE' && decision !== undefined && !decision.canSend) {
+              const state = sessionState(o.view(), action.connection.agent, text(body.session))
+              return json(res, 409, { note: routeText(decision.line, false, action.connection.agent, o.s, state, decision.reason) })
+            }
             const notes: Record<string, string> = { ID_CONFLICT: o.s.messagesConflict, TARGET_BUSY: o.s.messagesBusy, PAIR_BUSY: o.s.messagesBusy, TEXT_REFUSED: o.s.messagesTextRefused, CONTESTED: o.s.messagesContested }
             return json(res, 409, { note: error instanceof Error ? notes[error.message] ?? o.s.messagesFailed : o.s.messagesFailed })
           }
@@ -575,6 +587,8 @@ export const startServer = (o: ServeOptions): void => {
         return json(res, pasted.isAdded ? 200 : 409, { note: pasted.note, review: pasted.review })
       }
     } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code
+      if (url.pathname === '/api/act' && body.type === 'message' && ['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
       const note = o.failure(error, isLan)
       if (note === null) {
         process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)

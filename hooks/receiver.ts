@@ -4,6 +4,7 @@
 // it needs through ReceiverDeps. The hub's contract is docs/MESSAGING.md.
 import type { ReceiverPending, ReceiverState } from '../types'
 import { sha256 } from './sha256'
+import { SURFACE_IDS } from './messaging'
 
 export const RECEIVER_MS = 2000
 // The hub keeps a lease for 15 s, so a page that was closed stops offering Send within that.
@@ -129,7 +130,7 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
     if (address === null) return
     const { connection, secret, session: was } = await state()
     const replaces = connection !== '' && was === session ? { connection, secret } : {}
-    const answer = await call('register', { agent: 'claude', session, surface: 'Claude Code', turn: 'session', scope: 'session', ...replaces })
+    const answer = await call('register', { agent: 'claude', session, surface: SURFACE_IDS.claude, turn: 'session', scope: 'session', ...replaces })
     const made = answer?.json as { id?: unknown; secret?: unknown; leaseMs?: unknown } | undefined
     if (answer?.status !== 200 || typeof made?.id !== 'string' || typeof made.secret !== 'string') {
       // Credentials of a page that is gone, or of its last run, are not asked about again.

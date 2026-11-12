@@ -1,18 +1,28 @@
 import { ackLine, boardClient, deliveryPrompt } from './message-client.mjs'
+import { SURFACE_IDS } from '../hooks/messaging.ts'
 
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
   host: 'Codex',
-  surfaces: [{ name: 'Exclusive-owner app-server', evidence: null, earlier: 'docs/validation/2026-10-19-native-hooks.md' }],
+  surfaces: [{ name: 'Exclusive-owner app-server', id: SURFACE_IDS.codexSession, evidence: null, earlier: 'docs/validation/2026-10-19-native-hooks.md' }],
   tier: 1,
   primitive: '[P1]',
   isImplemented: true,
+  agent: 'codex',
+  kind: 'live',
+  // canReceive is true only while the session is idle, so a message sent during a turn waits for its end.
+  // No live note shows either route yet.
+  routes: {
+    idle: { line: 'now', record: null, surfaces: [] },
+    working: { line: 'stepEnd', record: null, surfaces: [] },
+    ended: { line: 'none', record: null, surfaces: [] },
+  },
 }
 
 // For an application that already owns a loaded Codex session and its notifications.
 // No socket, thread or model is created by attaching this adapter. `session` scope
 // means the host can queue a new turn on its own idle session, not a fabricated turn id.
-export const attachCodexSession = async ({ boardUrl, transport, thread, state, verifyOwner, surface = 'Codex owned session', onError }) => {
+export const attachCodexSession = async ({ boardUrl, transport, thread, state, verifyOwner, surface = SURFACE_IDS.codexSession, onError }) => {
   if (!transport || typeof transport.request !== 'function' || typeof transport.listen !== 'function' || typeof verifyOwner !== 'function' || !await verifyOwner(transport) || typeof state !== 'function' || !/^[a-f0-9-]{36}$/i.test(thread)) throw new Error('VERIFIED_OWNER_REQUIRED')
   let pending = null, isClosed = false
   const verify = async () => {
