@@ -1562,3 +1562,29 @@ test('a local preflight run with no pull request number finds its own pull reque
   // A branch with no pull request yet is later than every open one.
   assert.equal(duplicatePr(local('fix/1203-third')).problems.length, 2)
 })
+
+test('a reused branch name does not hide the earlier pull request, a CRLF or indented form section reads right, and a pull request in another repository is not the issue itself (#1348 round 3)', () => {
+  // Two forks may both push fix/shared: a local run at the later one's head still names the earlier one.
+  const open = [
+    { number: 1213, createdAt: '2026-11-01T00:00:00Z', body: 'Fixes #1203', headRef: 'fix/shared', headSha: 'a'.repeat(40) },
+    { number: 1240, createdAt: '2026-11-02T00:00:00Z', body: 'Fixes #1203', headRef: 'fix/shared', headSha: 'b'.repeat(40) },
+  ]
+  const atHead = head => duplicatePr({ number: null, title: 'fix: x', body: 'Fixes #1203', branch: 'fix/shared', head, open })
+  const later = atHead('b'.repeat(40))
+  assert.equal(later.problems.length, 1)
+  assert.match(later.problems[0].message, /#1203.*#1213/)
+  assert.deepEqual(atHead('a'.repeat(40)).problems, [])
+  const finding = 'Finding: badge stays after exit'
+  const shapes = [
+    // [what, input, flagged]
+    ['a CRLF form section', { title: finding, number: 1400, body: '### Pull request it came from\r\n\r\n#1299\r\n' }, false],
+    ['an indented next heading is not the answer', { title: finding, number: 1400, body: '### Pull request it came from\n\n  ### Notes about #1299\n' }, true],
+    ['a pull request with the same number in another repository', { title: finding, number: 1299, repo: 'synthetic/board', body: 'Seen in https://github.com/synthetic/other/pull/1299\n' }, false],
+    ['the issue itself by its own repository URL', { title: finding, number: 1299, repo: 'synthetic/board', body: 'Seen in https://github.com/synthetic/board/pull/1299\n' }, true],
+  ]
+  for (const [what, input, flagged] of shapes) {
+    const problems = findingLink(input).problems
+    assert.equal(problems.length, flagged ? 1 : 0, what)
+    if (flagged) assert.equal(problems[0].check, 'finding-link', what)
+  }
+})

@@ -150,8 +150,9 @@ export const duplicatePr = ({ body = '', title = '', number = null, branch = nul
   if (isReleaseTitle(title) || open === null || open === undefined) return output
   const fixing = [...new Set(issueLine(body, title).items.filter(item => item.kind === 'fixes').map(item => item.number))]
   if (!fixing.length) return output
-  // A local run (--body-file) has no number: its own open pull request is found by head commit, else by branch (a fork may
-  // reuse a branch name), so the original of two is not flagged from its own branch (#1348). With none yet, every open one is earlier.
+  // A local run (--body-file) has no number: its own open pull request is found by head commit, else by branch, and only that
+  // one is skipped, so the original of two is not flagged from its own branch while a fork reusing the branch name still
+  // counts (#1348). With none yet, every open one is earlier.
   const own = number !== null ? null
     : (head ? open.find(other => other?.headSha === head) : undefined) ?? (branch ? open.find(other => other?.headRef === branch) : undefined) ?? null
   const selfNumber = number ?? own?.number ?? null
@@ -160,7 +161,6 @@ export const duplicatePr = ({ body = '', title = '', number = null, branch = nul
   const reported = new Set()
   for (const other of open) {
     if (!other || other === own || (selfNumber !== null && other.number === selfNumber)) continue
-    if (number === null && branch && other.headRef && other.headRef === branch) continue
     if (selfNumber !== null) {
       const otherTime = other.createdAt ? Date.parse(other.createdAt) : NaN
       const isOtherEarlier = Number.isFinite(selfTime) && Number.isFinite(otherTime) && selfTime !== otherTime
@@ -227,18 +227,22 @@ export const duplicateIssue = ({ title = '', number = null, openIssues = [] } = 
 // A lane that files a finding marks it, with a title starting `Finding:` or `[finding]` (after an optional `type(scope):`) or
 // with --finding, and links the pull request it came from (#1325). Only that structure counts, never the body's wording: two
 // review rounds of #1348 showed prose cues reading ordinary reports as findings and colours as pull request links.
-export const findingLink = ({ title = '', body = '', number = null, isFinding = false } = {}) => {
+export const findingLink = ({ title = '', body = '', number = null, repo = null, isFinding = false } = {}) => {
   const output = result()
   const hasFindingTitle = /^\s*(?:[a-z]+(?:\([^)]*\))?!?:\s*)?(?:\[\s*finding\s*\]|finding\s*:)/i.test(String(title ?? ''))
   if (!isFinding && !hasFindingTitle) return output
   const clean = stripComments(body ?? '')
-  // The answer may itself start with #, as the form's placeholder `#1299` does; only the next heading ends the section.
-  const fromPrSection = clean.match(/^#{2,3}[ \t]*Pull request it came from[ \t]*\r?\n+(?!#{1,6}[ \t])([^\r\n]+)/im)?.[1]?.trim() ?? ''
+  // The answer may itself start with #, as the form's placeholder `#1299` does; only the next heading, indented or not, ends
+  // the section. Blank lines may be CRLF, as a body edited on the web is.
+  const fromPrSection = clean.match(/^#{2,3}[ \t]*Pull request it came from(?:[ \t]*\r?\n)+(?![ \t]*#{1,6}[ \t])([^\r\n]+)/im)?.[1]?.trim() ?? ''
   // Standalone Fixes/Part of lines are left out, so "Part of #209" does not stand in for the source pull request.
   const withoutLeadingIssues = linesOf(clean).filter(line => !/^\s*(?:Fixes|Part of|Closes|Resolves)\s+#\d+\b/i.test(line)).join('\n')
   // A source is a pull request URL, #N in the form's section, or "PR #N" / "pull request #N": a bare #N may be a colour or an issue.
   const validRef = pattern => [...withoutLeadingIssues.matchAll(pattern)].some(match => Number(match[1]) !== number)
-  const hasPullUrl = validRef(/github\.com\/[^/\s]+\/[^/\s]+\/pull\/([1-9]\d*)\b/gi)
+  // A pull request address is the issue itself only in this repository; with no repository named, the same number counts as it.
+  const isThisRepo = name => repo === null || name.toLowerCase() === String(repo).toLowerCase()
+  const hasPullUrl = [...withoutLeadingIssues.matchAll(/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/([1-9]\d*)\b/gi)]
+    .some(match => !(Number(match[2]) === number && isThisRepo(match[1])))
   const hasSectionNumber = [...fromPrSection.matchAll(/(?:^|[^\w#])#([1-9]\d*)\b/g)].some(match => Number(match[1]) !== number)
   const hasExplicitPr = validRef(/\b(?:pull\s*request|pr)\s*#([1-9]\d*)\b/gi)
   if (hasPullUrl || hasSectionNumber || hasExplicitPr) return output
@@ -251,7 +255,7 @@ export const findingLink = ({ title = '', body = '', number = null, isFinding = 
   return output
 }
 
-export const checkIssue = ({ title = '', body = '', number = null, association = null, openIssues = null, isFinding = false } = {}) => {
+export const checkIssue = ({ title = '', body = '', number = null, repo = null, association = null, openIssues = null, isFinding = false } = {}) => {
   const output = result()
   const add = next => {
     output.problems.push(...next.problems)
@@ -259,7 +263,7 @@ export const checkIssue = ({ title = '', body = '', number = null, association =
   }
   if (openIssues === null) output.info.push('duplicate-issue: skipped (offline).')
   else add(duplicateIssue({ title, number, openIssues }))
-  add(findingLink({ title, body, number, association, isFinding }))
+  add(findingLink({ title, body, number, repo, association, isFinding }))
   return output
 }
 
@@ -1099,6 +1103,7 @@ const runIssueCheck = async ({ options, cwd, repo, issue }) => {
     title: target.title,
     body: target.body ?? '',
     number: target.number ?? null,
+    repo,
     association: target.author_association ?? null,
     openIssues,
     isFinding: Boolean(options['--finding']),
