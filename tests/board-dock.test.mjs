@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
-import { dockArguments, dockCommand, dockPlace, dockScript, isReachable, launchPlace, probeOf, windowPlaceOf } from '../hooks/board-dock.ts'
+import { dockArguments, dockCommand, dockPlace, dockScript, isReachable, launchPlace, probeOf, windowPath, windowPlaceOf } from '../hooks/board-dock.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 
 const screen = (width, height = 1040, x = 0, y = 0) => ({ x, y, width, height })
@@ -58,12 +58,14 @@ test('#1084: a remembered place is used on the next open, and one on a monitor t
   assert.equal(dockArguments(address, remembered, { foreground: main, works: [main] }, 'p').at(-1), `--app=${address}&dock=1`)
 })
 
-test('#1084: the probe line and the settings file are read strictly', () => {
+test('#1084: the probe line and the window file are read strictly', () => {
   assert.deepEqual(probeOf('0,0,2560,1392|0,0,2560,1392;-1920,0,1920,1040\r\n'), { foreground: screen(2560, 1392), works: [screen(2560, 1392), screen(1920, 1040, -1920)] })
   assert.deepEqual(probeOf('|'), { foreground: null, works: [] })
   for (const bad of ['', 'garbage', '0,0,2560|', '0,0,2560,1392', '1,2,3,4|5,6,x,8']) assert.equal(probeOf(bad), null, bad)
-  assert.deepEqual(windowPlaceOf('{"barStyle":"ink","window":{"x":-8,"y":0,"width":560,"height":1392}}'), { x: -8, y: 0, width: 560, height: 1392 })
-  for (const bad of [null, '', '[]', 'not json', '{"window":{"x":1.5,"y":0,"width":560,"height":900}}', '{"window":{"x":0,"y":0,"width":20,"height":900}}', '{"window":"left"}']) assert.equal(windowPlaceOf(bad), null, String(bad))
+  assert.deepEqual(windowPlaceOf('{"x":-8,"y":0,"width":560,"height":1392}'), { x: -8, y: 0, width: 560, height: 1392 })
+  for (const bad of [null, '', '[]', 'not json', '{"x":1.5,"y":0,"width":560,"height":900}', '{"x":0,"y":0,"width":20,"height":900}', '"left"', '{"window":{"x":0,"y":0,"width":560,"height":900}}']) assert.equal(windowPlaceOf(bad), null, String(bad))
+  // Its own file beside progress.md, named like the settings file.
+  assert.equal(windowPath(join('home', 'progress.md')), join('home', 'progress-window.json'))
 })
 
 // The page's script in a stand-in window: the screen, the window's place and the timers are fake.
@@ -141,18 +143,21 @@ test('#1084: the docked page docks itself when the browser put it off its screen
 })
 
 test('#1084: a place the computer did not keep is sent again while the window stays there, each wait longer', async () => {
-  const answers = [{ ok: false }, null, { ok: true }]
+  // Refused, then a network failure, then no answer at all (counted as not kept after 10 s), then kept.
+  const answers = [{ ok: false }, null, 'hang', { ok: true }]
   const page = runDockScript({
     search: '?t=abc&dock=1', place: { x: 2000, y: 0, width: 560, height: 1392 }, avail: screen(2560, 1392),
-    answer: () => { const one = answers.shift(); return one ? Promise.resolve(one) : Promise.reject(new Error('offline')) },
+    answer: () => { const one = answers.shift(); return one === 'hang' ? new Promise(() => {}) : one ? Promise.resolve(one) : Promise.reject(new Error('offline')) },
   })
   const settle = () => new Promise(r => setImmediate(r))
   page.tick()
   page.win.screenX = 300
-  for (let i = 0; i < 10; i++) { page.tick(); await settle() }
+  for (let i = 0; i < 20; i++) { page.tick(); await settle() }
   const moved = ['/api/window', { x: 300, y: 0, width: 560, height: 1392 }]
-  assert.deepEqual(page.calls, [moved, moved, moved], 'refused, then failed, then kept; nothing after it was kept')
-  assert.deepEqual(page.timers.filter(one => !one.every).map(one => one.ms), [1500, 1000, 2000, 4000])
+  assert.deepEqual(page.calls, [moved, moved, moved, moved], 'nothing is sent after it was kept')
+  const timeouts = page.timers.filter(one => !one.every).map(one => one.ms)
+  assert.deepEqual(timeouts.filter(ms => ms !== 10000), [1500, 1000, 2000, 4000, 8000])
+  assert.equal(timeouts.filter(ms => ms === 10000).length, 4, 'each send has its 10 s limit')
 })
 
 test('#1084: the built page carries the dock script', () => {
@@ -160,14 +165,17 @@ test('#1084: the built page carries the dock script', () => {
   assert.ok(BOARD_SCRIPT.includes("call('/api/window', one)"))
 })
 
-test('#1084: the computer\'s page keeps the window place in the settings file; a bad place is refused', async () => {
+test('#1084: the computer\'s page keeps the window place in a file of its own and never rewrites the settings file; a bad place is refused', async () => {
   const root = mkdtempSync(join(tmpdir(), 'board-dock-'))
   let url = ''
   try {
     const progress = join(root, 'progress.md')
     const script = join(root, 'agent-board.mjs')
+    const settings = join(root, 'progress-settings.json')
+    const windowFile = join(root, 'progress-window.json')
+    const kept = () => JSON.parse(readFileSync(windowFile, 'utf8'))
     writeFileSync(progress, '# Progress\n## Demo\n### Synthetic task\n- [ ] Task 1\n')
-    writeFileSync(join(root, 'progress-settings.json'), '{"barStyle":"blue"}\n')
+    writeFileSync(settings, '{"barStyle":"blue"}\n')
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${BOARD_SCRIPT}`)
     const result = spawnSync(process.execPath, [script, '--html', '--no-open'], {
       encoding: 'utf8', timeout: 15000, windowsHide: true,
@@ -177,8 +185,16 @@ test('#1084: the computer\'s page keeps the window place in the settings file; a
     url = result.stdout.trim()
     const page = new URL(url)
     const post = body => fetch(new URL('/api/window', page), { method: 'POST', headers: { 'x-board-token': page.searchParams.get('t'), 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const settingsId = statSync(settings).ino
     assert.equal((await post({ x: -1500, y: 20, width: 700, height: 900 })).status, 200)
-    assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')), { barStyle: 'blue', window: { x: -1500, y: 20, width: 700, height: 900 } })
+    assert.deepEqual(kept(), { x: -1500, y: 20, width: 700, height: 900 })
+    assert.equal(windowPlaceOf(readFileSync(windowFile, 'utf8')).x, -1500, 'the next open reads what was kept')
+    // A setting another writer (the plugin's /progress style) saves meanwhile is never put back,
+    // and the settings file is never replaced, so access the person set on it stays.
+    writeFileSync(settings, '{"barStyle":"ink"}\n')
+    assert.equal((await post({ x: -1400, y: 20, width: 700, height: 900 })).status, 200)
+    assert.equal(readFileSync(settings, 'utf8'), '{"barStyle":"ink"}\n')
+    assert.equal(statSync(settings).ino, settingsId)
     assert.equal((await post({ x: 'left', y: 0, width: 700, height: 900 })).status, 400)
     assert.equal((await post({ x: 0, y: 0, width: 10, height: 900 })).status, 400)
     // A page a newer page replaced (#265) cannot overwrite the place; the newer page can.
@@ -188,47 +204,37 @@ test('#1084: the computer\'s page keeps the window place in the settings file; a
     assert.equal((await poll('pold')).status, 200)
     assert.equal((await poll('pnew')).status, 200)
     assert.equal((await postFrom('pold', { x: 10, y: 10, width: 700, height: 900 })).status, 409)
-    assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')).window, { x: -1500, y: 20, width: 700, height: 900 })
+    assert.deepEqual(kept(), { x: -1400, y: 20, width: 700, height: 900 })
     assert.equal((await postFrom('pnew', { x: 20, y: 20, width: 700, height: 900 })).status, 200)
-    assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')).window, { x: 20, y: 20, width: 700, height: 900 })
+    assert.deepEqual(kept(), { x: 20, y: 20, width: 700, height: 900 })
     // A page that said it is gone is retired: its late report is refused too.
     assert.equal((await fetch(new URL('/api/page-gone', page), { method: 'POST', headers: { 'x-board-token': token, 'x-board-page': 'pnew', 'content-type': 'application/json' }, body: '{}' })).status, 200)
     assert.equal((await postFrom('pnew', { x: 30, y: 30, width: 700, height: 900 })).status, 409)
-    assert.deepEqual(JSON.parse(readFileSync(join(root, 'progress-settings.json'), 'utf8')).window, { x: 20, y: 20, width: 700, height: 900 })
-    // A settings file that is a folder, or a link to another file, is left as it is (#1261).
-    const settings = join(root, 'progress-settings.json')
-    rmSync(settings)
-    mkdirSync(settings)
+    assert.deepEqual(kept(), { x: 20, y: 20, width: 700, height: 900 })
+    // No temp file stays beside it after a save.
+    assert.deepEqual(readdirSync(root).filter(name => name.endsWith('.tmp')), [])
+    // A window file that is a folder, a link to another file, or a file with a second hard link
+    // (its other name would change too) is left as it is.
+    rmSync(windowFile)
+    mkdirSync(windowFile)
     assert.equal((await post({ x: 0, y: 0, width: 700, height: 900 })).status, 409)
-    rmSync(settings, { recursive: true })
+    rmSync(windowFile, { recursive: true })
     const victim = join(root, 'victim.json')
     writeFileSync(victim, '{"kept":true}')
     let hasLink = true
-    try { symlinkSync(victim, settings) } catch { hasLink = false }
+    try { symlinkSync(victim, windowFile) } catch { hasLink = false }
     if (hasLink) {
       assert.equal((await post({ x: 0, y: 0, width: 700, height: 900 })).status, 409)
       assert.equal(readFileSync(victim, 'utf8'), '{"kept":true}')
-      unlinkSync(settings)
+      unlinkSync(windowFile)
     }
-    // A settings file with a second hard link is left as it is: its other name would change too.
-    writeFileSync(settings, '{"barStyle":"blue"}\n')
+    writeFileSync(windowFile, '{"x":1,"y":1,"width":700,"height":900}')
     const twin = join(root, 'twin.json')
-    linkSync(settings, twin)
+    linkSync(windowFile, twin)
     assert.equal((await post({ x: 0, y: 0, width: 700, height: 900 })).status, 409)
-    assert.equal(readFileSync(twin, 'utf8'), '{"barStyle":"blue"}\n')
+    assert.equal(readFileSync(twin, 'utf8'), '{"x":1,"y":1,"width":700,"height":900}')
     unlinkSync(twin)
-    // A write that cannot finish leaves the file whole: here a folder holds the temp file's name.
-    const temp = `${settings}.window.tmp`
-    mkdirSync(temp)
-    assert.equal((await post({ x: 0, y: 0, width: 700, height: 900 })).status, 409)
-    assert.equal(readFileSync(settings, 'utf8'), '{"barStyle":"blue"}\n')
-    rmSync(temp, { recursive: true })
-    // A temp file a crashed save left behind is cleared, and none stays after a save.
-    writeFileSync(temp, '{"barSt')
-    utimesSync(temp, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
-    assert.equal((await post({ x: 0, y: 0, width: 700, height: 900 })).status, 200)
-    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')), { barStyle: 'blue', window: { x: 0, y: 0, width: 700, height: 900 } })
-    assert.equal(existsSync(temp), false)
+    assert.equal(readFileSync(settings, 'utf8'), '{"barStyle":"ink"}\n')
   } finally {
     if (url) {
       const page = new URL(url)

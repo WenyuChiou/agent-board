@@ -59,7 +59,7 @@ export type ServeOptions = {
   language?: () => SettingsLang
   setLanguage?: (lang: SettingsLang) => boolean
   isLangOverridden?: () => boolean
-  // Where the person last put the docked window (#1084), kept in the board's settings file.
+  // Where the person last put the docked window (#1084), kept in its own file beside progress.md.
   setWindow?: (place: Rect) => boolean
   agents?: SettingsAgentControl
   sweep: () => void

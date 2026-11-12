@@ -38,13 +38,15 @@ export const placeOf = (value: unknown): Rect | null => {
   return { x, y, width, height }
 }
 
-// The remembered place from the settings file's text; anything else means none.
+// The remembered place has a file of its own beside progress.md, not a key in the settings file:
+// only the board script writes it, so no other writer's change can be lost to it and no file the
+// person secured is replaced by it.
+export const windowPath = (progressPath: string): string => `${progressPath.replace(/\.md$/i, '')}-window.json`
+
+// The remembered place from the window file's text; anything else means none.
 export const windowPlaceOf = (text: string | null): Rect | null => {
   if (text === null || text.trim() === '') return null
-  try {
-    const data: unknown = JSON.parse(text)
-    return data !== null && typeof data === 'object' && !Array.isArray(data) ? placeOf((data as Record<string, unknown>).window) : null
-  } catch { return null }
+  try { return placeOf(JSON.parse(text)) } catch { return null }
 }
 
 const span = (start: number, size: number, otherStart: number, otherSize: number): number => Math.max(0, Math.min(start + size, otherStart + otherSize) - Math.max(start, otherStart))
@@ -143,11 +145,11 @@ export const dockScript = String.raw`
       var target = dock(area);
       if (target) { try { window.resizeTo(target.width, target.height); window.moveTo(target.x, target.y); } catch (error) {} }
     }
-    var sent = null, seen = null, timer = null, isSending = false, wait = 1000;
+    var sent = null, seen = null, timer = null, isSending = false, wait = 1000, sendNumber = 0;
     function same(a, b) { return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height; }
     // A page a newer one replaced, or one the person closed, (isClosed, the page's own flag) is no
     // longer the board's window: its moves are not the place to open at. A place counts as sent
-    // only once the computer kept it; one it did not keep (the settings file held for a moment) is
+    // only once the computer kept it; one it did not keep (the window file held for a moment) is
     // sent again while the window stays there, each wait twice the last, up to a minute.
     function report() {
       timer = null;
@@ -157,10 +159,16 @@ export const dockScript = String.raw`
       // One report at a time, so an older place cannot land after a newer one.
       if (isSending) { timer = setTimeout(report, 1000); return; }
       isSending = true;
-      call('/api/window', one).then(function (data) { return data && data.ok; }, function () { return false; }).then(function (isKept) {
+      var mine = ++sendNumber;
+      function settle(isKept) {
+        if (mine !== sendNumber || !isSending) return;
         isSending = false;
         if (isKept) { sent = one; wait = 1000; } else wait = Math.min(wait * 2, 60000);
-      });
+      }
+      // A report the server never answers counts as not kept after 10 s, so it cannot stop the
+      // reports after it; its late answer is ignored.
+      setTimeout(function () { if (mine === sendNumber && isSending) { sendNumber++; isSending = false; wait = Math.min(wait * 2, 60000); } }, 10000);
+      call('/api/window', one).then(function (data) { return data && data.ok; }, function () { return false; }).then(settle);
     }
     // No event tells a page it moved, so the place is looked at every second; a change is sent
     // once it has held for a second, not on every step of a drag. The place the window opened at

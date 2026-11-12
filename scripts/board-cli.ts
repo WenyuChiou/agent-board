@@ -34,7 +34,7 @@ import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder'
-import { dockArguments, dockCommand, probeOf, windowPlaceOf } from '../hooks/board-dock'
+import { dockArguments, dockCommand, probeOf, windowPath, windowPlaceOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
@@ -764,9 +764,9 @@ const saveLanguage = (lang: SettingsLang): boolean => {
   return true
 }
 
-// A settings file this writer may replace: missing, or a regular file with this one name. A
+// A window file this writer may replace: missing, or a regular file with this one name. A
 // symlink, a folder or a file with another hard link (whose other names would change too) is not.
-const isOwnSettingsFile = (file: string): boolean => {
+const isOwnWindowFile = (file: string): boolean => {
   try {
     const stat = lstatSync(file)
     return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1
@@ -775,49 +775,38 @@ const isOwnSettingsFile = (file: string): boolean => {
   }
 }
 
-// The docked window's place (#1084): the other keys are kept. A file that cannot be read (locked,
-// no access), does not read as a JSON object, or is not this writer's own (above) is left as it
-// is: false, and the page sends the place again later. The new text goes to a temp file beside it,
-// flushed, then renamed over it, so a failed or cut-off write never leaves the other settings
-// empty or half written. Just before the rename the file is looked at again: one that changed
-// since it was read (another writer, or a swap for a link) is left as it is.
+// The docked window's place (#1084), in a file of its own (`windowPath`), never in the settings
+// file: only this script writes it, so a setting another writer saves meanwhile is never put back
+// and a settings file the person secured is never replaced. The place goes to a temp file of this
+// process's own, flushed, then renamed over the window file, so a cut-off write never leaves half
+// a place, and no other writer's temp file is ever touched. A window file that is not this
+// writer's own (above), looked at again just before the rename, is left as it is: false, and the
+// page sends the place again later.
 const saveWindow = (place: Rect): boolean => {
-  const file = settingsPath(path)
-  if (!isOwnSettingsFile(file)) return false
-  let text: string
-  try { text = read(file) } catch { return false }
-  const next = withBoardSettings(text, { window: place })
-  if (next === null) return false
-  const temp = `${file}.window.tmp`
-  const open = (): number => {
-    try { return openSync(temp, 'wx') } catch (error) {
-      // One a crashed save left behind is cleared; one being written now is not touched.
-      const stat = (error as { code?: string }).code === 'EEXIST' ? lstatSync(temp) : null
-      if (stat === null || !stat.isFile() || stat.isSymbolicLink() || Date.now() - stat.mtimeMs < 10_000) throw error
-      unlinkSync(temp)
-      return openSync(temp, 'wx')
-    }
-  }
+  const file = windowPath(path)
+  if (!isOwnWindowFile(file)) return false
+  const temp = `${file}.${process.pid}-${randomUUID()}.tmp`
   let isOwned = false
   try {
-    const fd = open()
+    const fd = openSync(temp, 'wx', 0o600)
     isOwned = true
     try {
-      writeFileSync(fd, next)
+      writeFileSync(fd, JSON.stringify(place))
       fsyncSync(fd)
     } finally { closeSync(fd) }
-    // The file keeps its permissions (a settings file the person made private stays private).
-    const mode = existsSync(file) ? statSync(file).mode & 0o777 : undefined
-    if (mode !== undefined) chmodSync(temp, mode)
-    if (!isOwnSettingsFile(file) || read(file) !== text) throw new Error('changed')
+    if (!isOwnWindowFile(file)) throw new Error('changed')
     renameSync(temp, file)
     isOwned = false
   } catch {
     if (isOwned) { try { unlinkSync(temp) } catch {} }
     return false
   }
-  settingsKept = { text: next, at: Date.now() }
   return true
+}
+
+// The remembered place for the next open: none when the window file is missing or unreadable.
+const windowNow = (): string | null => {
+  try { return readFileSync(windowPath(path), 'utf8') } catch { return null }
 }
 
 const options = () => ({
@@ -1106,7 +1095,7 @@ const dockLaunch = (programs: string[], target: string, done: (isOpen: boolean) 
     const end = output.indexOf('\n')
     if (end < 0) return
     isAnswered = true
-    const argv = dockArguments(target, windowPlaceOf(settingsNow()), probeOf(output.slice(0, end)), profile)
+    const argv = dockArguments(target, windowPlaceOf(windowNow()), probeOf(output.slice(0, end)), profile)
     child.stdin?.end(`${Buffer.from(argv.map(windowsArgument).join(' '), 'utf16le').toString('base64')}\n`)
   })
 }
