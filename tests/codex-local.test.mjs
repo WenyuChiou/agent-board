@@ -807,6 +807,25 @@ test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, G
   }
 }))
 
+test('a Codex hook mailbox is the CLI only when its history file names the terminal, so the app and the editor get no Queue (#826)', async () => mailboxFixture(async f => {
+  const { sendDecision } = await importTs('../hooks/messaging.ts')
+  const { RECEIVER_ROUTES } = await importTs('../hooks/receiver-routes.ts')
+  const history = join(f.home, 'codex-history')
+  mkdirSync(history, { recursive: true })
+  const file = join(history, `rollout-2026-11-12T00-00-00-${session}.jsonl`)
+  const mailboxOf = () => f.state().mailboxes?.find(one => one.agent === 'codex' && one.session === session)
+  for (const [originator, surface] of [['codex-tui', 'CLI'], ['Codex Desktop', 'unknown'], ['codex_vscode', 'unknown'], [null, 'unknown']]) {
+    f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, messages: [] }))
+    if (originator !== null) writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { id: session, originator, source: 'vscode' } }) + '\n')
+    await hookOrDeferred(() => f.call('codex', 'UserPromptSubmit', originator === null ? {} : { transcript_path: file }), () => mailboxOf() !== undefined)
+    const box = mailboxOf()
+    assert.equal(box?.surface, surface, String(originator))
+    const decision = sendDecision(box.id, [], f.state().mailboxes, () => 'idle', RECEIVER_ROUTES, Date.now())
+    assert.equal(decision.canSend, surface === 'CLI', String(originator))
+    if (!decision.canSend) assert.equal(decision.reason, 'SURFACE_UNKNOWN', String(originator))
+  }
+}))
+
 test('a held mailbox store claim reports deferral and the next turn delivers after release', async () => mailboxFixture(async f => {
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   f.seed()
