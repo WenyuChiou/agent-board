@@ -9757,7 +9757,7 @@ export const LINES = [
 "  const access = mcpMailbox(o.directory);",
 "  const identity = folderIdentity(o.cwd);",
 "  const folderDigest = identity?.folderCanonicalDigest ?? identity?.folderDigest;",
-"  const binding = () => ({ agent, session, surface: \"mcp\" });",
+"  const binding = () => ({ agent, session, surface: MCP_SURFACE });",
 "  const renew = async (now) => {",
 "    if (level === \"unbound\" || isRevoked)",
 "      return;",
