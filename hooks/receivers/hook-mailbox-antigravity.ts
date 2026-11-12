@@ -10,8 +10,9 @@ export const messagingReceiver = {
   primitive: 'unknown',
   isImplemented: true,
   routes: {
-    // The note ran the `agy` command line (headless stream), so it is recorded for the agy TUI row only.
-    idle: { line: 'nextTurn', record: 'docs/validation/2026-11-10-agy-live.md', surfaces: [SURFACE_IDS.antigravityTui] },
+    // docs/validation/2026-11-10-agy-live.md ran headless `agy` (stream JSON), not the interactive TUI, so it
+    // is no record for any surface here. Record the idle route when a run of the TUI shows it.
+    idle: { line: 'nextTurn', record: null, surfaces: [] },
     working: { line: 'nextTurn', record: null, surfaces: [] },
     ended: { line: 'none', record: null, surfaces: [] },
   },

@@ -267,3 +267,25 @@ test('after removal, the commands the README and remove output point to print pl
     }
   }
 })
+
+test('a remove that skips an agent for an edited file keeps the board script and does not say the direct command stops working (#1291)', () => {
+  const home = mkdtempSync(join(tmpdir(), 'setup-remove-conflict-'))
+  try {
+    const env = makeEnv(home)
+    const run = (...args) => spawnSync(process.execPath, [installer, '--home', home, ...args], { cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+    const install = run('--agent', 'codex,antigravity', '--lang', 'en', '--apply')
+    assert.equal(install.status, 0, install.stderr)
+    // The person edited Antigravity's skill, so its removal is skipped and the board script stays for it.
+    const find = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? find(join(dir, entry.name)) : [join(dir, entry.name)])
+    const skill = find(home).find(file => /gemini/.test(file) && file.endsWith('SKILL.md'))
+    assert.ok(skill, 'Antigravity skill installed')
+    writeFileSync(skill, `${readFileSync(skill, 'utf8')}\nedited by the person\n`)
+    const apply = run('--remove', '--lang', 'en', '--apply')
+    assert.equal(apply.status, 0, apply.stderr)
+    assert.ok(apply.stdout.includes('Antigravity: skipped'), apply.stdout)
+    assert.ok(existsSync(join(home, '.agent-board', 'agent-board.mjs')), 'the board script stays for Antigravity')
+    assert.ok(!apply.stdout.includes('The direct node command stops working'), apply.stdout)
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+})

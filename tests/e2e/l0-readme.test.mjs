@@ -64,18 +64,21 @@ const SCENES = {
 }
 // The first-run command stays on screen in every frame, reduced motion included.
 const COMMAND = 'npx @wenyuchiou/agent-board'
+// The plain line between the two Quick start blocks.
+const NEW_SESSION = { en: 'Then open a new session of your agent and run:', 'zh-TW': '然後開一個 agent 的新對話，執行：', 'zh-CN': '然后开一个 agent 的新对话，运行：' }
 // The seven agents with a 0.24.3 record, in the support table's order, and each one's board command (none for Cursor).
 const LISTED = ['Claude Code', 'Codex', 'Antigravity', 'Cursor', 'OpenCode', 'Grok Build', 'Hermes Agent']
 const BOARD_COMMANDS = { 'Claude Code': '/agent-board', Codex: '$agent-board', Antigravity: '/agent-board', OpenCode: '/agent-board', 'Grok Build': '/agent-board', 'Hermes Agent': '/agent-board' }
-// The agents whose board command was not run live in 0.24.3 (docs/validation/2026-11-10-parity-0.24.3.md, column a).
-const NOT_RUN_LIVE = ['Codex', 'Antigravity', 'Grok Build']
-// What each README says per language: the phrase for a step not run live, how each answer path is described
-// and the words of the phone row.
+// What each README says per language: the reply cells of the support table, how each answer button is
+// described, and the words of the phone row. The cells follow docs/MESSAGING.md "Agent and surface support"
+// (Proposed or None is "Not yet", Implemented and not tested is "Not tested", no such surface is a dash).
 const WORDS = {
-  en: { notLive: '(not run live)', send: /\*\*Send\*\* hands the answer to a connected session; a confirmation from that session means it was received/, queue: /\*\*Queue\*\* holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /\*\*Copy\*\* puts it on your clipboard/, answers: { 'Claude Code': 'Send', Codex: 'Queue', Antigravity: 'Queue', Cursor: 'Copy', OpenCode: 'Copy', 'Grok Build': 'Copy', 'Hermes Agent': 'Copy' }, viewOnly: /cannot send an answer/, askNote: '(opened by a prompt asking for the skill)' },
-  'zh-TW': { notLive: '（未實機執行）', send: /\*\*傳送\*\*把回答交給已連線的對話；對話回確認才代表收到/, queue: /\*\*排到下一輪\*\*會留到那個對話的下一輪才送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /\*\*複製\*\*把回答放進剪貼簿/, answers: { 'Claude Code': '傳送', Codex: '排到下一輪', Antigravity: '排到下一輪', Cursor: '複製', OpenCode: '複製', 'Grok Build': '複製', 'Hermes Agent': '複製' }, viewOnly: /不能傳送回答/, askNote: '（用提示請它執行 skill）' },
-  'zh-CN': { notLive: '（未实机运行）', send: /\*\*发送\*\*把回复交给已连接的对话；对话回确认才代表收到/, queue: /\*\*排到下一轮\*\*会留到那个对话的下一轮才送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /\*\*复制\*\*把回复放进剪贴板/, answers: { 'Claude Code': '发送', Codex: '排到下一轮', Antigravity: '排到下一轮', Cursor: '复制', OpenCode: '复制', 'Grok Build': '复制', 'Hermes Agent': '复制' }, viewOnly: /不能发送回复/, askNote: '（用提示让它执行 skill）' },
+  en: { now: 'Sent when it is free', next: 'Handed over from its next turn, one per turn', paste: 'You paste it', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it for that session's turns, one message a turn, oldest first, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: 'Ask it for the Agent Board skill' },
+  'zh-TW': { now: '它空下來就送出', next: '下一輪起交給它，一輪一則', paste: '你自己貼上', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留給那個對話的各個回合，一回合交一則，先排的先送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '請它執行 Agent Board skill' },
+  'zh-CN': { now: '它空下来就发出', next: '下一轮起交给它，一轮一条', paste: '你自己粘贴', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留给那个对话的各个回合，一回合交一条，先排的先送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '让它执行 Agent Board skill' },
 }
+// Each agent's command-line reply in the terminal table, a key of WORDS.
+const REPLY = { 'Claude Code': 'now', Codex: 'next', Antigravity: 'next', Cursor: 'paste', OpenCode: 'paste', 'Grok Build': 'paste', 'Hermes Agent': 'paste' }
 // A piece of text as a pattern that matches it and nothing else.
 const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 // What a heading holds: the lines after it, up to the next heading of its level or above.
@@ -84,7 +87,12 @@ const section = (text, heading, level = 2) => {
   const start = lines.indexOf(`${'#'.repeat(level)} ${heading}`)
   if (start < 0) return undefined
   const next = new RegExp(`^#{1,${level}} `)
-  const end = lines.findIndex((line, i) => i > start && next.test(line))
+  // A shell comment inside a code block (`# open a new session …`) is not a heading.
+  let isCode = false
+  const end = lines.findIndex((line, i) => {
+    if (i > start && /^```/.test(line)) isCode = !isCode
+    return i > start && !isCode && next.test(line)
+  })
   return lines.slice(start + 1, end < 0 ? undefined : end).join('\n')
 }
 // The anchor GitHub gives a heading: lower case, punctuation dropped, each space a hyphen.
@@ -113,7 +121,7 @@ const groupsAround = (svg, at) => {
 }
 
 describe('L0 discover and install from the README', () => {
-  test('L0 README: each README opens with its title, tagline, badges and cover, and its Quick start holds the install commands, the language flag and --no-open', () => {
+  test('L0 README: each README opens with its title, tagline, badges and cover, and its Quick start holds the install commands and three bullets', () => {
     const taglines = { en: 'A board that shows which AI agent is waiting on you.', 'zh-TW': '一塊本機看板，告訴你哪個 AI agent 在等你回答', 'zh-CN': '一块本机看板，告诉你哪个 AI agent 在等你回复' }
     for (const [name, lang] of READMES) {
       const text = read(name)
@@ -123,21 +131,31 @@ describe('L0 discover and install from the README', () => {
       const top = text.slice(0, cover).split('\n').filter(Boolean)
       assert.equal(top[0], '<h1 align="center"><img alt="Agent Board" src="docs/images/brand/agent-board-logo.svg" width="360"></h1>', `${name}: the logo, which follows the reader's theme, is the title and comes first`)
       assert.equal(top[1], `<p align="center"><b>${taglines[lang]}</b></p>`, `${name}: the owner's tagline follows the title`)
-      assert.match(top[2], /^<p align="center"><a href="LICENSE"><img [^>]*src="https:\/\/img\.shields\.io\//, `${name}: the badges follow the tagline`)
+      // Our own version comes first; the npm badge is the registry's, further along (owner, 11-11).
+      assert.match(top[2], /^<p align="center"><a href="CHANGELOG\.md"><img alt="Version" src="https:\/\/img\.shields\.io\/github\/package-json\/v\/WenyuChiou\/agent-board\?label=version"><\/a> <a href="LICENSE"><img [^>]*src="https:\/\/img\.shields\.io\//, `${name}: the version badge opens the badge row, after the tagline`)
+      assert.ok(top[2].indexOf('label=version') < top[2].indexOf('npm/v/'), `${name}: the version badge comes before the npm badge`)
       assert.ok(!text.slice(0, cover).includes('npx @wenyuchiou/agent-board'), `${name}: no install command comes before the cover`)
       assert.doesNotMatch(text, /coding agent|coding-agent/i, `${name}: it says AI agent, not coding agent`)
       const first = section(text, SECTIONS[lang][0])
       assert.ok(first, `${name}: Quick start exists`)
       const node = first.indexOf('Node.js 22')
-      const install = /```(?:sh|bash)\r?\n(npx @wenyuchiou\/agent-board@next setup\r?\nnpx @wenyuchiou\/agent-board@next)\r?\n```/.exec(first)
+      // Two copyable blocks, so a Claude-only setup has its new session before the board command runs (bin/agent-board.mjs):
+      // setup, then one plain line saying to open a new session, then the bare npx command.
+      const sequence = new RegExp('```sh\n' + literal('npx @wenyuchiou/agent-board@next setup') + '\n```\n\n' + literal(NEW_SESSION[lang]) + '\n\n```sh\n' + literal('npx @wenyuchiou/agent-board@next') + '\n```\n')
+      // String match, since runner.test.mjs's L0 safety check reads a call named exec on a variable as a process call.
+      const install = first.match(sequence)
+      assert.ok(install, `${name}: Quick start is the setup block, the exact new-session line, then the board block`)
+      assert.equal([...first.matchAll(/```sh\n/g)].length, 2, `${name}: Quick start has two command blocks`)
+      assert.ok(!/^#/m.test(first.slice(first.indexOf('```sh'), first.lastIndexOf('```'))), `${name}: no shell comment stands in for the new-session step`)
       assert.ok(node >= 0 && install && install.index > node, `${name}: Quick start gives Node 22, then setup and the board command in order`)
-      assert.ok(first.includes(`--lang ${lang}`), `${name}: Quick start says how to choose the language`)
-      assert.ok(first.includes('--no-open'), `${name}: Quick start says how to start the page without a window`)
+      // The language flag, --no-open, the clone route and the agent-install prompt moved to docs/SETUP.md (checked below).
+      assert.ok(!first.includes('--no-open') && !first.includes('--lang'), `${name}: Quick start leaves the options to the setup guide`)
       assert.ok(first.includes('/agent-board') && first.includes('$agent-board') && first.includes('Cursor'), `${name}: Quick start names the board command inside an agent and says Cursor has none`)
       assert.ok(first.includes('docs/SETUP.md#after-setup-per-agent'), `${name}: Quick start points to the per-agent steps after setup`)
-      assert.ok(first.includes('docs/SETUP.md#let-an-agent-install-it'), `${name}: Quick start links to the agent-install prompt`)
       // The README stays short: one screen of reading for a newcomer, not the guide.
       assert.ok(text.split('\n').length <= 140, `${name}: the README has at most 140 lines`)
+      // Bullets, not paragraphs: three after the code block.
+      assert.equal(first.split('\n').filter(line => line.startsWith('- ')).length, 3, `${name}: Quick start has three bullets`)
     }
   })
 
@@ -145,8 +163,8 @@ describe('L0 discover and install from the README', () => {
     for (const [name, lang] of READMES) {
       const quick = section(read(name), SECTIONS[lang][0])
       assert.ok(quick, `${name}: Quick start exists`)
-      const commands = /```(?:sh|bash)\n([\s\S]*?)\n```/.exec(quick)?.[1]
-      assert.ok(commands, `${name}: Quick start has a command block`)
+      const commands = [...quick.matchAll(/```(?:sh|bash)\n([\s\S]*?)\n```/g)].map(match => match[1]).join('\n')
+      assert.ok(commands, `${name}: Quick start has command blocks`)
       assert.ok(!commands.split('\n').some(line => /^\s*agent-board(?:\s|$)/.test(line)), `${name}: Quick start cannot require the global command`)
       assert.ok(commands.split('\n').includes('npx @wenyuchiou/agent-board@next'), `${name}: Quick start opens the board with npx, on the pre-release tag`)
     }
@@ -190,6 +208,8 @@ describe('L0 discover and install from the README', () => {
       const words = WORDS[lang]
       const answer = section(text, SECTIONS[lang][3]) ?? ''
       assert.match(answer, words.send, `${name}: Send hands the answer to a connected session, which confirms it`)
+      assert.ok(answer.includes(words.hide), `${name}: the hide button is named as the board labels it`)
+      assert.doesNotMatch(answer, /^- \*\*Queue\*\*/m, `${name}: no bare Queue button name`)
       assert.match(answer, words.queue, `${name}: Queue waits for the next turn and wakes no idle session`)
       assert.match(answer, words.copy, `${name}: Copy puts the answer on the clipboard`)
       assert.ok(answer.includes('](docs/MESSAGING.md#local-storage)'), `${name}: Send links to the local message hub`)
@@ -416,27 +436,69 @@ describe('L0 discover and install from the README', () => {
     assert.equal(new Set(Object.values(SECTIONS).map(list => list.length)).size, 1, 'every language has the same number of sections')
   })
 
-  test('L0 README: the support table lists the seven agents with a 0.24.3 record, each with its icon, board command, answer path and the same not-run-live phrase, and leaves Muse Code out', () => {
+  test('L0 README: Supported agents has one table for the terminal and one for desktop apps and IDEs, each row with its icon at 28 px, board command and reply, and leaves Muse Code out', () => {
+    const headings = {
+      en: ['In a terminal (command line)', 'In a desktop app or IDE'],
+      'zh-TW': ['在終端機（命令列）', '在桌面 app 或 IDE'],
+      'zh-CN': ['在终端（命令行）', '在桌面 app 或 IDE'],
+    }
+    const headers = {
+      en: ['Agent', 'Open the board', 'Your reply reaches it'],
+      'zh-TW': ['Agent', '開看板', '你的回答怎麼送到'],
+      'zh-CN': ['Agent', '打开看板', '你的回复怎么送到'],
+    }
+    // Words of the page and pane cells; "Not tested yet" is MESSAGING.md's Implemented with no live run.
+    const DESKTOP = {
+      en: { pane: '`/agent-board` (board page)', page: 'Board page', notYet: 'Not yet', untested: 'Not tested yet', second: 'The second Quick start command' },
+      'zh-TW': { pane: '`/agent-board`（看板網頁）', page: '看板網頁', notYet: '尚未支援', untested: '尚未測試', second: '快速開始的第二個指令' },
+      'zh-CN': { pane: '`/agent-board`（看板网页）', page: '看板网页', notYet: '暂不支持', untested: '尚未测试', second: '快速开始的第二个命令' },
+    }
+    // Agents with a desktop app or IDE in docs/MESSAGING.md "Agent and surface support", and what that table says of each.
+    const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'untested'], Cursor: ['page', 'untested'], OpenCode: ['page', 'notYet'] }
+    const messaging = read('docs/MESSAGING.md')
+    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Proposed', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Implemented', 'Not tested'], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Proposed', 'Not tested']]) {
+      assert.ok(messaging.split('\n').some(line => line.startsWith(`| ${host} | ${surface} | `) && line.includes(`| ${status} | ${live} |`)), `docs/MESSAGING.md: ${host} ${surface} is ${status}, ${live}`)
+    }
     for (const [name, lang] of READMES) {
       const text = read(name)
       const words = WORDS[lang]
-      const table = firstTable(section(text, SECTIONS[lang][2]) ?? '')
-      assert.ok(table, `${name}: the support table exists`)
-      const agents = rows(table, '| <img')
-      assert.deepEqual(agents.map(cells => /alt="([^"]+)"/.exec(cells[0])?.[1]), LISTED, `${name}: one row per agent, in order`)
-      for (const [icon, agent, command, question, answer] of agents) {
+      const desk = DESKTOP[lang]
+      const support = section(text, SECTIONS[lang][2]) ?? ''
+      const [terminalPart, desktopPart] = headings[lang].map(heading => section(support, heading, 3))
+      assert.ok(terminalPart && desktopPart, `${name}: the terminal and the desktop app subsections exist`)
+      assert.ok(support.indexOf(headings[lang][0]) < support.indexOf(headings[lang][1]), `${name}: the terminal comes first`)
+      // Nothing between a subsection heading and its table.
+      for (const part of [terminalPart, desktopPart]) assert.ok(part.trim().startsWith('| | Agent'), `${name}: a table follows its heading at once`)
+      const terminal = firstTable(terminalPart)
+      const desktop = firstTable(desktopPart)
+      for (const table of [terminal, desktop]) assert.deepEqual(rows(table, '| |')[0].slice(1), headers[lang], `${name}: the table's columns`)
+      const agents = rows(terminal, '| <img')
+      assert.deepEqual(agents.map(cells => /alt="([^"]+)"/.exec(cells[0])?.[1]), LISTED, `${name}: one terminal row per agent, in order`)
+      for (const [icon, agent, command, reply] of agents) {
         const file = /src="([^"]+)"/.exec(icon)[1]
         assert.ok(exists(file), `${name}: ${file} exists`)
+        assert.match(icon, /\swidth="28"/, `${name}: ${agent}'s mark is drawn at 28 px, where the brand mark reads`)
         assert.equal(agent, /alt="([^"]+)"/.exec(icon)[1], `${name}: the row names ${agent}`)
-        assert.deepEqual(codeSpans(command), BOARD_COMMANDS[agent] ? [BOARD_COMMANDS[agent]] : [], `${name}: ${agent}'s board command`)
-        assert.equal(command.includes(words.notLive), NOT_RUN_LIVE.includes(agent), `${name}: ${agent} carries the not-run-live phrase only if its board command was not run live`)
+        assert.deepEqual(codeSpans(command), BOARD_COMMANDS[agent] && agent !== 'Hermes Agent' ? [BOARD_COMMANDS[agent]] : [], `${name}: ${agent}'s board command`)
+        assert.equal(command === desk.second, agent === 'Cursor', `${name}: only Cursor opens the board with the second Quick start command`)
         assert.equal(command.includes(words.askNote), agent === 'Hermes Agent', `${name}: only Hermes's command carries the note that a prompt asked for the skill`)
-        assert.ok(question.length > 0, `${name}: ${agent} has its question cell`)
-        assert.ok(answer.startsWith(`**${words.answers[agent]}**`), `${name}: ${agent}'s answer path is ${words.answers[agent]}`)
+        assert.equal(reply, words[REPLY[agent]], `${name}: ${agent}'s command-line reply`)
       }
+      const apps = rows(desktop, '| <img')
+      assert.deepEqual(apps.map(cells => /alt="([^"]+)"/.exec(cells[0])?.[1]), Object.keys(DESK), `${name}: the desktop table lists the agents with an app or IDE, and no others`)
+      for (const [icon, agent, open, reply] of apps) {
+        assert.match(icon, /\swidth="28"/, `${name}: ${agent}'s mark is drawn at 28 px`)
+        assert.equal(open, desk[DESK[agent][0]], `${name}: how ${agent}'s app opens the board`)
+        assert.equal(agent, /alt="([^"]+)"/.exec(icon)[1], `${name}: ${agent}'s desktop row name matches its icon`)
+        assert.equal(reply, desk[DESK[agent][1]], `${name}: ${agent}'s app reply`)
+      }
+      const bullets = { en: ["- Board page: run `npx @wenyuchiou/agent-board@next --html` in a terminal, the app's own included.", '- Not yet or Not tested yet: copy your answer from the board and paste it into the app.'], 'zh-TW': ['- 看板網頁：在終端機執行 `npx @wenyuchiou/agent-board@next --html`，app 自己的終端機也行。', '- 尚未支援或尚未測試：從看板複製回答，貼到 app 裡。'], 'zh-CN': ['- 看板网页：在终端运行 `npx @wenyuchiou/agent-board@next --html`，app 自带的终端也行。', '- 暂不支持或尚未测试：从看板复制回复，粘贴到 app 里。'] }
+      assert.ok(desktopPart.includes(bullets[lang].join('\n')), `${name}: the two bullets under the desktop table, in order`)
       assert.doesNotMatch(text, /Muse/i, `${name}: Muse Code is not in the README`)
-      assert.match(section(text, SECTIONS[lang][2]), lang === 'en' ? /earlier 0\.24\.3 head/ : /較早的 0\.24\.3|较早的 0\.24\.3/, `${name}: the live rows ran on an earlier 0.24.3 head, and the README says so`)
-      assert.equal(text.split(words.notLive).length - 1, NOT_RUN_LIVE.length, `${name}: the phrase appears once per agent not run live`)
+      // The notes about which version was tested live in the validation records, not in the README.
+      assert.doesNotMatch(support, /0\.24\.3|not run live|未實機執行|未实机运行/, `${name}: the support section carries no test-record notes`)
+      assert.doesNotMatch(support, /\bQueue\b/, `${name}: the support tables never say Queue`)
+      assert.ok(support.includes('docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste'), `${name}: web chats link to the hand-report steps`)
     }
   })
 
@@ -463,7 +525,8 @@ describe('L0 discover and install from the README', () => {
         const workflow = 'https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml'
         const isLicense = href === 'LICENSE' && src === 'https://img.shields.io/badge/license-MIT-green'
         const isNpm = href === 'https://www.npmjs.com/package/@wenyuchiou/agent-board' && src === 'https://img.shields.io/npm/v/@wenyuchiou/agent-board'
-        assert.ok(isLicense || isNpm || (href === workflow && src === `${workflow}/badge.svg`), `${name}: ${src} is the license badge, the test workflow's status or the npm version`)
+        const isVersion = href === 'CHANGELOG.md' && src === 'https://img.shields.io/github/package-json/v/WenyuChiou/agent-board?label=version'
+        assert.ok(isLicense || isNpm || isVersion || (href === workflow && src === `${workflow}/badge.svg`), `${name}: ${src} is the version badge, the license badge, the test workflow's status or the npm version`)
       }
       assert.equal(badges.length, [...header.matchAll(/img\.shields\.io|\/badge\.svg/g)].length, `${name}: every badge is one of those`)
       const quick = section(text, SECTIONS[lang][0])
@@ -519,11 +582,10 @@ describe('L0 discover and install from the README', () => {
   })
 
   // #1326's bot-route review (codex_089): the commands a README gives do what it says on every computer.
-  const ASK = { en: 'shows what it would change and, when there is something to set up, asks once (`Set these up? [Y/n]`, or `要設定這些嗎？[Y/n]` and `要设置这些吗？[Y/n]` on a Chinese system); a no writes nothing.', 'zh-TW': '列出它要改什麼；有東西要設定時才問一次（繁體中文系統上是 `要設定這些嗎？[Y/n]`，英文系統上是 `Set these up? [Y/n]`）；回答 n 就什麼都不寫。', 'zh-CN': '列出它要改什么；有东西要设置时才问一次（简体中文系统上是 `要设置这些吗？[Y/n]`，英文系统上是 `Set these up? [Y/n]`）；回答 n 就什么都不写。' }
   const SCOPE = {
-    en: { cli: 'each run as its command-line tool', untested: 'the desktop apps and IDE extensions of these agents', terminal: ['in an interactive terminal over SSH or on Linux with no display', 'plain text in CI', 'the page everywhere else', 'in any interactive terminal'] },
-    'zh-TW': { cli: '用命令列版本測過', untested: '這些 agent 的桌面 app 和 IDE 擴充', terminal: ['在互動式終端機裡，透過 SSH 連線或在沒有顯示器的 Linux 上', 'CI 裡印出純文字', '其他情況都開網頁', '在互動式終端機加 `--watch`'] },
-    'zh-CN': { cli: '用命令行版本测过', untested: '这些 agent 的桌面 app 和 IDE 扩展', terminal: ['在交互式终端里，通过 SSH 连接或在没有显示器的 Linux 上', 'CI 里打印纯文本', '其他情况都开网页', '在交互式终端加 `--watch`'] },
+    en: { terminal: ['in an interactive terminal over SSH or on Linux with no display', 'plain text in CI', 'the page everywhere else', 'in any interactive terminal'] },
+    'zh-TW': { terminal: ['在互動式終端機裡，透過 SSH 連線或在沒有顯示器的 Linux 上', 'CI 裡印出純文字', '其他情況都開網頁', '在互動式終端機加 `--watch`'] },
+    'zh-CN': { terminal: ['在交互式终端里，通过 SSH 连接或在没有显示器的 Linux 上', 'CI 里打印纯文本', '其他情况都开网页', '在交互式终端加 `--watch`'] },
   }
   // The doctor belongs in SETUP.md, and the clone route opens the chosen or plugin board.
   // Run the journey in an isolated world, never against this machine's own folders.
@@ -583,7 +645,7 @@ describe('L0 discover and install from the README', () => {
     } finally { await world.close() }
   })
 
-  test('L0 README: the no-window page command, the clone route, the global install on @next and the tested command-line tools are right in all three languages', () => {
+  test('L0 README: the setup guide holds the no-window page command, the language flag and the clone route, and the global install uses @next, in all three languages', () => {
     const clone = section(read('docs/SETUP.md'), 'Install from a clone')
     assert.ok(clone, 'SETUP.md: Install from a clone exists')
     for (const step of ['git clone https://github.com/WenyuChiou/agent-board.git', 'cd agent-board', 'node scripts/setup-agent.mjs\n', 'node scripts/setup-agent.mjs --apply']) {
@@ -605,18 +667,18 @@ describe('L0 discover and install from the README', () => {
     for (const [name, lang] of READMES) {
       const text = read(name)
       const first = section(text, SECTIONS[lang][0])
-      // `--no-open` alone gives the terminal board in an interactive terminal over SSH or without a display.
-      assert.ok(first.includes('`--html --no-open`'), `${name}: Quick start starts the page with no window by --html --no-open`)
+      // The options moved out of the README: the setup guide holds each of them (and the README says no more).
+      const setup = read('docs/SETUP.md')
+      assert.ok(setup.includes('`--html --no-open`') && setup.includes('`--no-open` alone does not'), 'SETUP.md: starting the page with no window is --html --no-open, and --no-open alone is not')
+      assert.ok(setup.includes('`--lang en`, `--lang zh-TW` or `--lang zh-CN`') && setup.includes('follows the system language') && setup.includes('Without `--lang` or a language it saved'), 'SETUP.md: the language flag, its precedence and the system-language default')
+      assert.ok(setup.includes('`要設定這些嗎？[Y/n]`') && setup.includes('`要设置这些吗？[Y/n]`'), 'SETUP.md: the question is localized')
+      assert.ok(setup.includes('Open the board in the new session with `/agent-board`, or `$agent-board` in Codex. Cursor has no such command'), 'SETUP.md: how to open the board per agent, and that Cursor has no command')
+      assert.ok(setup.includes('In Hermes Agent, ask it for the Agent Board skill.'), 'SETUP.md: how to open the board in Hermes Agent')
+      assert.ok(setup.includes('## Install from a clone') && setup.includes('## Let an agent install it'), 'SETUP.md: the clone route and the agent-install prompt')
       assert.doesNotMatch(first, /`--no-open`/, `${name}: Quick start does not give --no-open alone`)
-      assert.ok(first.includes('docs/SETUP.md#install-from-a-clone'), `${name}: Quick start links the clone route`)
       // The stable tag is still 0.24.2, whose launcher has no `remove`.
       assert.ok(text.includes('`npm install -g @wenyuchiou/agent-board@next`'), `${name}: the global install uses @next`)
       assert.doesNotMatch(text, /npm install -g @wenyuchiou\/agent-board`/, `${name}: no global install of the stable tag`)
-      // The 0.24.3 record ran each agent's command-line tool; Cursor's was cursor-agent; apps and IDEs were not run.
-      const support = section(text, SECTIONS[lang][2])
-      assert.ok(support.includes('`cursor-agent`') && support.includes(SCOPE[lang].cli) && support.includes(SCOPE[lang].untested), `${name}: the support section says the record ran the command-line tools and not the apps or IDEs`)
-      // codex_093: setup asks only when there is something to set up, in the system's language.
-      assert.ok(text.includes(ASK[lang]), `${name}: Quick start says when setup asks and how the question reads`)
       // Which surface the bare command picks (hooks/surface.ts): the terminal board only in an interactive terminal over SSH
       // or on Linux with no display, text in CI, the page otherwise; --watch in any interactive terminal.
       const terminalRow = text.split('\n').find(line => line.startsWith('|') && line.includes('`npx @wenyuchiou/agent-board`'))

@@ -4418,12 +4418,13 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.equal(routeOf(RECEIVER_ROUTES, 'deepseek', 'mailbox', 'idle', 'Web').canSend, true)
   assert.equal(routeOf(RECEIVER_ROUTES, 'deepseek', 'mailbox', 'idle', 'TUI').canSend, false)
   assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'IDE').canSend, false)
-  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, true)
+  // The only Antigravity note ran headless `agy`, not the TUI, so no Antigravity surface has a recorded route.
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, false)
   const { readReceiverRecords, renderMatrix } = await import('../scripts/messaging-matrix.mjs')
   const root = join(import.meta.dirname, '..')
   const rows = renderMatrix(await readReceiverRecords(root), 'docs/MESSAGING.md', root).split('\n')
   const rowOf = (host, surface) => rows.find(one => one.startsWith(`| ${host} | ${surface} |`))
-  assert.ok(rowOf('Antigravity', 'agy TUI').includes('2026-11-10-agy-live.md'))
+  assert.ok(!rowOf('Antigravity', 'agy TUI').includes('2026-11-10-agy-live.md'))
   assert.ok(!rowOf('Antigravity', 'IDE').includes('2026-11-10-agy-live.md'))
   assert.ok(!rowOf('Antigravity', '2.0 Desktop App').includes('2026-11-10-agy-live.md'))
   assert.ok(rowOf('DeepSeek Harness', 'Web').includes('2026-11-08-deepseek-harness-live.md'))
@@ -4689,6 +4690,28 @@ test('shape 15: conflicting board states for one session cannot send', async () 
   shapeViewTransform = view => ({ ...view, groups: [...view.groups, ...other.groups], idle: [...view.idle, ...other.idle], stopped: [...view.stopped, ...other.stopped] })
   await shapeCopy(w)
 })
+test('shape 15b: a task due soon keeps its session\'s route, and a due row that disagrees with another row still cannot send', async () => {
+  const w = await shapeCase({ state: 'working' })
+  const soon = new Date(Date.now() + 3 * 86_400_000).toISOString().slice(0, 10)
+  shapeFile = stateFile('claude', 'working', w.session).replace('### Route table\n', `### Route table\n> due ${soon}\n`)
+  const due = buildView(parseProgress(shapeFile), [], null, Date.now(), 0, {}, EN)
+  assert.deepEqual([due.due.length, due.groups.flatMap(group => group.rows).length, due.idle.length, due.stopped.length], [1, 0, 0, 0])
+  await shapeSend(w, 'stepEnd')
+  // The pressed message is removed, so the presses below are new sends rather than retries of it.
+  assert.equal((await w.remove(`shape-card-${shapeSerial}`)).status, 200)
+  // An idle row of the same session alone would send now; beside the working due row the state is not known.
+  const otherFile = stateFile('claude', 'idle', w.session).replaceAll('abcdef01', 'abcdef02').replace('Route table', 'Other row')
+  const other = buildView(parseProgress(otherFile), [], null, Date.now(), 0, {}, EN)
+  assert.equal(other.waiting.length, 1)
+  shapeViewTransform = view => ({ ...view, waiting: [...view.waiting, ...other.waiting] })
+  assert.equal((await w.card()).delivery, undefined)
+  const refused = await w.direct('shape-due-conflict')
+  assert.deepEqual([refused.status, refused.body.error], [409, 'NO_RECORDED_ROUTE'])
+  const pressed = await w.press('shape-due-press')
+  assert.equal(pressed.body.receipt, undefined)
+  const messages = (await w.call('/api/board')).body.messaging.messages
+  assert.deepEqual(messages.filter(one => one.id === 'shape-due-conflict' || one.id === 'shape-due-press'), [])
+})
 test('shape 16: DeepSeek TUI and a custom Codex proxy surface keep Copy', async () => {
   await shapeCopy(await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'TUI' }))
   await shapeCopy(await shapeCase({ agent: 'codex', kind: 'turn', surface: 'custom-proxy', state: 'working' }))
@@ -4820,4 +4843,64 @@ test('a peer send remains independent of recorded board routes', async () => {
   const sender = await w.call('/api/messages/register', { agent: 'codex', session: shapeSession(), surface: 'fixture', turn: 'turn1' })
   const result = await w.direct('shape-peer', { source: sender.body.id, secret: sender.body.secret })
   assert.equal(result.status, 200)
+})
+
+test('a question that moved to the reminder list still gives its session a state, and a session whose rows disagree has none (#1351)', async () => {
+  const { sessionState } = await import('../hooks/serve.ts')
+  const row = (extra = {}) => ({ agent: 'claude', nativeSession: 'sess-1', steps: [], auto: 'waiting', target: null, ...extra })
+  const question = (extra = {}) => ({ agent: '', nativeSession: 'sess-1', auto: 'waiting', target: null, ...extra })
+  const view = (extra = {}) => ({ groups: [], idle: [], stopped: [], due: [], active: [], waiting: [], hidden: [], ...extra })
+  // The question is three days old, so the view lists it under reminder and nowhere else.
+  assert.equal(sessionState(view({ reminder: [question()] }), 'claude', 'sess-1'), 'idle')
+  assert.equal(sessionState(view({ reminder: [question({ auto: 'working' })] }), 'claude', 'sess-1'), 'working')
+  // Every list the view can hold a session's question or row in gives its state.
+  for (const bucket of ['waiting', 'provisional', 'hidden', 'reminder', 'older']) assert.equal(sessionState(view({ [bucket]: [question({ auto: 'ended' })] }), 'claude', 'sess-1'), 'ended', bucket)
+  for (const bucket of ['idle', 'stopped', 'due', 'active', 'recentAsking']) assert.equal(sessionState(view({ [bucket]: [row({ auto: 'ended' })] }), 'claude', 'sess-1'), 'ended', bucket)
+  assert.equal(sessionState(view({ groups: [{ rows: [row({ auto: 'working' })] }] }), 'claude', 'sess-1'), 'working')
+  assert.equal(sessionState(view({ recent: [{ key: 'k', questions: [question({ auto: 'ended' })] }] }), 'claude', 'sess-1'), 'ended')
+  assert.equal(sessionState(view({ stopped: [row({ auto: 'ended', questions: [question({ auto: 'ended' })] })] }), 'claude', 'sess-1'), 'ended')
+  // Conflicting evidence, in the same list or across lists, is no state; another session's rows are not counted.
+  assert.equal(sessionState(view({ reminder: [question({ auto: 'working' })], older: [question({ auto: 'ended' })] }), 'claude', 'sess-1'), undefined)
+  assert.equal(sessionState(view({ groups: [{ rows: [row({ auto: 'working' })] }], reminder: [question()] }), 'claude', 'sess-1'), undefined)
+  assert.equal(sessionState(view({ reminder: [question({ auto: 'working' }), question({ nativeSession: 'sess-2', auto: 'ended' })] }), 'claude', 'sess-1'), 'working')
+  assert.equal(sessionState(view(), 'claude', 'sess-1'), undefined)
+})
+
+test('a board message goes only to the surface its route was checked for, and stays queued for any other (#1351)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'message-surface-bound-'))
+  const note = 'docs/validation/synthetic.md'
+  const routes = [{ agent: 'deepseek', kind: 'mailbox', routes: { idle: { line: 'now', record: note, surfaces: ['Web'] }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  const hub = openTestMessaging(dir, false, { routes, stateOfSession: () => 'idle' })
+  try {
+    const now = Date.now()
+    const box = { agent: 'deepseek', session: 'ds-session' }
+    hub.act('mailbox-turn', { ...box, surface: 'Web' }, now)
+    const sent = hub.act('send', { id: 'AB-BOUND-1', target: mailboxId('deepseek', 'ds-session'), turn: 'session', text: 'hello' }, now + 1)
+    assert.equal(sent.status, 'queued')
+    // A TUI of the same session, whose surface no note covers, cannot take it.
+    assert.equal(hub.act('mailbox-turn', { ...box, surface: 'unknown' }, now + 2).message, null)
+    assert.equal(hub.act('mailbox-turn', { ...box, surface: 'TUI' }, now + 3).message, null)
+    assert.equal(hub.snapshot(now + 4).messages.find(one => one.id === 'AB-BOUND-1').status, 'queued')
+    assert.equal('surface' in sent, false)
+    // The surface it was checked for takes it as before.
+    const taken = hub.act('mailbox-turn', { ...box, surface: 'Web' }, now + 5).message
+    assert.equal(taken.id, 'AB-BOUND-1')
+    assert.equal(taken.status, 'uncertain')
+  } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test("a session's own MCP inbox takes a board message bound to another surface of that session, and a hook mailbox on another surface still does not (#1351)", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'message-surface-mcp-'))
+  const note = 'docs/validation/synthetic.md'
+  const routes = [{ agent: 'deepseek', kind: 'mailbox', routes: { idle: { line: 'now', record: note, surfaces: ['Web'] }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  const hub = openTestMessaging(dir, false, { routes, stateOfSession: () => 'idle' })
+  try {
+    const now = Date.now()
+    const box = { agent: 'deepseek', session: 'ds-session' }
+    hub.act('mailbox-turn', { ...box, surface: 'Web' }, now)
+    hub.act('send', { id: 'AB-BOUND-2', target: mailboxId('deepseek', 'ds-session'), turn: 'session', text: 'hello' }, now + 1)
+    assert.equal(hub.act('mailbox-turn', { ...box, surface: 'TUI' }, now + 2).message, null)
+    assert.equal(hub.act('mailbox-turn', { ...box, surface: 'unknown' }, now + 3).message, null)
+    assert.equal(hub.act('mailbox-turn', { ...box, surface: 'mcp' }, now + 4).message?.id, 'AB-BOUND-2')
+  } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
 })

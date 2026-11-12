@@ -2,7 +2,7 @@
 
 <p align="center"><b>A board that shows which AI agent is waiting on you.</b></p>
 
-<p align="center"><a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a> <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a> <a href="https://www.npmjs.com/package/@wenyuchiou/agent-board"><img alt="npm" src="https://img.shields.io/npm/v/@wenyuchiou/agent-board"></a></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="Version" src="https://img.shields.io/github/package-json/v/WenyuChiou/agent-board?label=version"></a> <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green"></a> <a href="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml"><img alt="Tests" src="https://github.com/WenyuChiou/agent-board/actions/workflows/test.yml/badge.svg"></a> <a href="https://www.npmjs.com/package/@wenyuchiou/agent-board"><img alt="npm" src="https://img.shields.io/npm/v/@wenyuchiou/agent-board"></a></p>
 
 <p align="center">English · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
 
@@ -18,14 +18,17 @@ With Node.js 22+, in any terminal:
 
 ```sh
 npx @wenyuchiou/agent-board@next setup
+```
+
+Then open a new session of your agent and run:
+
+```sh
 npx @wenyuchiou/agent-board@next
 ```
 
-`setup` finds the agents on this computer, shows what it would change and, when there is something to set up, asks once (`Set these up? [Y/n]`, or `要設定這些嗎？[Y/n]` and `要设置这些吗？[Y/n]` on a Chinese system); a no writes nothing. Without a terminal to answer in, such as an agent's chat, it only previews, and `setup --apply` writes. The second command opens the board. With only Claude Code, the board comes with its plugin: after a yes installs it, open a new Claude Code session and type `/agent-board` there; without a yes, the next paragraph says how. 0.24.3 is a pre-release, so both commands use `@next`.
-
-Then finish the steps your agent needs (Claude Code's plugin, Codex's hook trust: [after setup](docs/SETUP.md#after-setup-per-agent)) and start a new session of it; one that was already open is not connected. Open the board in it with `/agent-board`, or `$agent-board` in Codex; Cursor has no such command, so use the second command.
-
-The board follows your system language when it is Traditional or Simplified Chinese, and English otherwise; add `--lang en`, `--lang zh-TW` or `--lang zh-CN` to the setup command to choose. Add `--html --no-open` to the board command to start the page without opening a browser window. More options: the [setup guide](docs/SETUP.md#install-with-npm). Without npm, from the source: [install from a clone](docs/SETUP.md#install-from-a-clone); to let an agent install it: [this prompt](docs/SETUP.md#let-an-agent-install-it).
+- `setup` shows what it will change and asks once before it writes.
+- In that new session, type `/agent-board` (`$agent-board` in Codex; in Hermes, ask it for the Agent Board skill), or run the second command (Cursor has no such command).
+- Per-agent steps, language, options and other ways to install: [setup guide](docs/SETUP.md#after-setup-per-agent).
 
 ## What you get
 
@@ -38,25 +41,42 @@ The board follows your system language when it is Traditional or Simplified Chin
 
 ## Supported agents
 
-Seven agents have a 0.24.3 record on Windows 11, each run as its command-line tool (Cursor as `cursor-agent`) ([parity](docs/validation/2026-11-10-parity-0.24.3.md), [simulated user](docs/validation/2026-11-10-usersim-0.24.3.md)). The live rows ran on an earlier 0.24.3 head: the later fixes to question detection and settings were not re-run on them. Where a cell says "not run live", the step was not run live.
+### In a terminal (command line)
 
-| | Agent | Open the board inside it | A question reaches the board | Your answer |
-|:-:|---|---|---|---|
-| <img src="docs/images/agents/claude-code.svg" width="20" alt="Claude Code"> | Claude Code | `/agent-board` | Yes | **Send**, confirmed by the session |
-| <img src="docs/images/agents/codex.svg" width="20" alt="Codex"> | Codex | `$agent-board` (not run live) | Yes | **Queue** for its next turn; delivery not seen live in 0.24.3 |
-| <img src="docs/images/agents/antigravity.svg" width="20" alt="Antigravity"> | Antigravity | `/agent-board` (not run live) | Yes | **Queue**; it arrived at the next turn |
-| <img src="docs/images/agents/cursor.svg" width="20" alt="Cursor"> | Cursor | None; use the terminal command | Yes | **Copy** |
-| <img src="docs/images/agents/opencode.svg" width="20" alt="OpenCode"> | OpenCode | `/agent-board` | Yes | **Copy** |
-| <img src="docs/images/agents/grok-build.svg" width="20" alt="Grok Build"> | Grok Build | `/agent-board` (not run live) | Yes | **Copy** |
-| <img src="docs/images/agents/hermes-agent.svg" width="20" alt="Hermes Agent"> | Hermes Agent | `/agent-board` (opened by a prompt asking for the skill) | Yes | **Copy** |
+| | Agent | Open the board | Your reply reaches it |
+|:-:|---|---|---|
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | Sent when it is free |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | Handed over from its next turn, one per turn |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | Handed over from its next turn, one per turn |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | The second Quick start command | You paste it |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | You paste it |
+| <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | You paste it |
+| <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | Ask it for the Agent Board skill | You paste it |
 
-Not tested for 0.24.3: the desktop apps and IDE extensions of these agents, OpenClaw, DeepSeek Harness (setup still installs them) and macOS. dot and other web chats report by hand: [how](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste).
+### In a desktop app or IDE
+
+| | Agent | Open the board | Your reply reaches it |
+|:-:|---|---|---|
+| <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` (board page) | Not yet |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page | Not yet |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | Not tested yet |
+| <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page | Not tested yet |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page | Not yet |
+
+- Board page: run `npx @wenyuchiou/agent-board@next --html` in a terminal, the app's own included.
+- Not yet or Not tested yet: copy your answer from the board and paste it into the app.
+- dot and other web chats report by hand: [how](docs/REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste).
 
 ## Answer from the board
 
 <img alt="Three ways an answer from the board reaches its agent: Send to Claude Code, queue for the next turn of Antigravity or Codex, or copy for Cursor, OpenCode, Grok Build and Hermes. Synthetic data." src="docs/images/answer-en.svg" width="100%">
 
-**Send** hands the answer to a connected session; a confirmation from that session means it was received. With no confirmation it may still have arrived, so look at the agent before you use **Copy**, or it may get the answer twice. **Queue** holds it until that session's next turn, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires (Codex's was rejected in the parity run). **Copy** puts it on your clipboard to paste into that agent. Send needs [messaging on](docs/MESSAGING.md#local-storage). If you answered in the agent's own window, press **Already answered, hide** to clear the card.
+An answer to an agent's question and a message you send it travel the same way, by the button you press:
+
+- **Send** hands it to a connected session; a confirmation from that session means it was received. With no confirmation it may still have arrived, so look at the agent before you use **Copy answer**, or it may get it twice. Send needs [messaging on](docs/MESSAGING.md#local-storage).
+- **Queue for the agent's next turn** holds it for that session's turns, one message a turn, oldest first, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires.
+- **Copy answer** puts it on your clipboard to paste into that agent.
+- Answered in the agent's own window? Press **Already answered, hide** to clear the card.
 
 ## Open it anywhere
 
@@ -110,4 +130,4 @@ To check Claude Code's setup, run `claude plugin list` and `/progress connect st
 
 [MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) and belong to their owners; an agent without a logo is shown by its initial.
 
-<p align="center"><a href="CHANGELOG.md"><img alt="Source version 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>Latest stable version: 0.24.2 · 0.24.3 is a pre-release (<code>npx @wenyuchiou/agent-board@next setup</code>) · <a href="CHANGELOG.md">Changelog</a> · macOS was not tested for 0.24.3.</sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="Source version 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>Latest stable version: 0.24.2 · 0.24.3 is a pre-release (<code>npx @wenyuchiou/agent-board@next setup</code>) · <a href="CHANGELOG.md">Changelog</a>.</sub></p>
