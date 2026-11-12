@@ -35,6 +35,7 @@ import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server
 import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { isTimeout, privateFolderHandoff } from './private-folder'
 import { addressFileName } from '../hooks/receiver'
+import { isReceiverRoutes } from '../hooks/messaging'
 import type { ReceiverRoutes } from '../hooks/messaging'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pagePortOf, pickSurface, sshTargetOf } from '../hooks/surface'
@@ -2083,8 +2084,8 @@ const routesStandIn = (): ReceiverRoutes[] | undefined => {
   const file = process.env.AGENT_BOARD_ROUTES
   if (file === undefined || file === '') return undefined
   const list: unknown = JSON.parse(readFileSync(file, 'utf8'))
-  if (!Array.isArray(list)) throw new Error('INVALID_ROUTES')
-  return list as ReceiverRoutes[]
+  if (!isReceiverRoutes(list)) throw new Error('INVALID_ROUTES')
+  return list
 }
 
 // The page at that address is asked to close, and whether it agreed is answered. It refuses while

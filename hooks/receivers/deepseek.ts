@@ -14,8 +14,9 @@ export const messagingReceiver = {
   isImplemented: true,
   // Idle: the live run woke the session within seconds. Working: the plugin holds the message until the
   // session is idle (tests only; the live note says a long busy session was not run). Ended: no mailbox.
+  // The live run was `dsh web` only, so the idle record names the Web surface; the terminal interface keeps Copy.
   routes: {
-    idle: { line: 'now', record: 'docs/validation/2026-11-08-deepseek-harness-live.md' },
+    idle: { line: 'now', record: 'docs/validation/2026-11-08-deepseek-harness-live.md', surfaces: ['Web'] },
     working: { line: 'stepEnd', record: null },
     ended: { line: 'none', record: null },
   },
@@ -27,12 +28,15 @@ export const deepseekReceiverSource = (node: string, board: string, progress: st
 import { readFileSync, watch } from 'node:fs'
 import { join } from 'node:path'
 import { spawn as spawnMailbox } from 'node:child_process'
+// The surface this dsh process runs: \`dsh web\` is the Web page, any other call the terminal interface. The board
+// offers Send only on the surface a live note ran on, so a process it cannot place stays on Copy.
+const surface = process.argv.slice(2).includes('web') ? 'Web' : 'TUI'
 // One call to the board script's --mailbox; its one JSON line, or null when it failed or took too long.
 const mailboxCall = (action, session, extra = []) => new Promise(resolve => {
   let child, timer, output = ''
   const finish = value => { clearTimeout(timer); resolve(value) }
   try {
-    child = spawnMailbox(${JSON.stringify(node)}, [${JSON.stringify(board)}, '--mailbox', action, '--agent', 'deepseek', '--home', ${JSON.stringify(home)}, '--progress-file', ${JSON.stringify(progress)}, '--session', session, ...extra], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+    child = spawnMailbox(${JSON.stringify(node)}, [${JSON.stringify(board)}, '--mailbox', action, '--agent', 'deepseek', '--home', ${JSON.stringify(home)}, '--progress-file', ${JSON.stringify(progress)}, '--session', session, '--surface', surface, ...extra], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
   } catch { return resolve(null) }
   timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} resolve(null) }, 15000)
   child.on('error', () => finish(null))

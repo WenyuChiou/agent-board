@@ -842,6 +842,7 @@ export const ZH_CN: Strings = {
   serveQueueNextOpen: (agent: string): string => `排入 ${agent} 下次打开此会话时`,
   serveNextOpenHint: '此会话只在打开时读取消息，所以会等到那时。要现在送达请用复制。',
   serveLineNow: (agent: string): string => `${agent} 正在等，会马上收到。`,
+  serveLineNowWorking: (agent: string): string => `${agent} 正在工作，这条会马上加进当前这一轮。`,
   serveLineStepEnd: (agent: string): string => `${agent} 正在工作，这一步结束后会收到。`,
   serveLineReopen: (agent: string): string => `发送时会重新打开 ${agent} 的这个会话，再把消息交给它。`,
   serveLineNone: (agent: string): string => `${agent} 还不能从看板收消息：请复制后贴到它的会话里。`,

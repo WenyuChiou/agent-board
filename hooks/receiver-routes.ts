@@ -8,7 +8,7 @@ import { messagingReceiver as gemini } from './receivers/hook-mailbox-gemini'
 import { messagingReceiver as muse } from './receivers/hook-mailbox-muse'
 
 // A record module is plain data, so its lines read as strings here; the cast is the one place that trusts them, and a test checks each.
-type RecordShape = { agent: string; kind: string; routes: { [state in RowState]: { line: string; record: string | null } } }
+type RecordShape = { agent: string; kind: string; routes: { [state in RowState]: { line: string; record: string | null; surfaces?: string[] } } }
 const fromRecord = (one: RecordShape): ReceiverRoutes => ({ agent: one.agent, kind: one.kind as RouteKind, routes: one.routes as ReceiverRoutes['routes'] })
 
 // The routes the board knows, one per receiver record in hooks/. The three adapters in scripts/ (the

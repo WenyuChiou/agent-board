@@ -136,6 +136,9 @@ export type WaitingItem = {
   step: StepRef | null
   // Another agent's session the question came from; null for Claude's and hand-kept ones.
   target: AgentTarget | null
+  // The state of that session's block as the row shows it (a stopped or silent one is ended), so the
+  // receiver's route is read for the state the session is in, not always for idle (#1351).
+  auto?: 'working' | 'waiting' | 'ended'
 }
 
 // The one thing the top of the pane puts in front of the person: the most pressing thing
@@ -1146,7 +1149,7 @@ export const buildView = (
           questionId: isFrozen ? undefined : observed?.keys[slotAt(index)],
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
-          ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
+          ...(task.auto === null ? {} : { auto: task.auto.state === 'done' || isComplete || stale || isSilence ? 'ended' as const : task.auto.state, nativeSession: task.auto.resume ?? task.auto.session }),
         })
       })
       const unresolved = taskQuestions.filter(item => {

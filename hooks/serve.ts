@@ -31,7 +31,7 @@ import { RECEIVER_ROUTES } from './receiver-routes'
 // that Claude Code session; none: copied, then pasted into the agent's chat.
 export type SendMode = 'send' | 'connected' | 'mailbox' | 'open' | 'claude' | 'none'
 type Delivery = { id: string; turn: string; agent: string }
-type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted'> & { when: string; isMailbox: boolean }
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean }
 type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly Omit<Message, 'nonce' | 'hash'>[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
@@ -52,7 +52,7 @@ const rowReceipt = (agent: string, session: string | undefined, messages: readon
   const one = to === undefined
     ? answers === undefined ? undefined : messages.filter(message => message.answers === answers).at(-1)
     : messages.filter(message => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1)
-  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...(one.hasAccepted === true ? { hasAccepted: true } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
+  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 // The person's answer to this question reached its session: the session took it, or replied.
 const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
@@ -62,11 +62,21 @@ const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerC
 // ended, one at work is working, any other (waiting on a question, done) is idle.
 const stateOf = (auto: 'working' | 'waiting' | 'ended' | null | undefined, isClosed: boolean): RowState => isClosed || auto === 'ended' ? 'ended' : auto === 'working' ? 'working' : 'idle'
 const rowState = (row: { auto: 'working' | 'waiting' | 'ended' | null; target: AgentTarget | null; isRecordedEnded?: true }): RowState => stateOf(row.auto, row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true)
+// The route a send straight to the message API (no card, no press) would take: the receiver's record for the
+// state the target's session is in on the board, read the way a card reads it. A session the board shows
+// nowhere counts as idle. Without a record on that state and surface, the API refuses as the page would.
+export const directRoute = (view: View, target: Connection, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): { line: RouteLine; canSend: boolean } => {
+  const rows = [...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped]
+  const row = rows.find(one => (one.agent || 'claude') === target.agent && one.nativeSession === target.session)
+  const ask = row === undefined ? view.waiting.find(one => (one.agent || 'claude') === target.agent && one.nativeSession === target.session) : undefined
+  const state: RowState = row !== undefined ? rowState(row) : ask !== undefined ? stateOf(ask.auto, ask.target?.isClosed === true) : 'idle'
+  return routeOf(routes, target.agent, routeKind(target.scope), state, target.surface)
+}
 // One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route
 // the record has not shown live also says only Copy is offered.
-const routeText = (line: RouteLine, canSend: boolean, agent: string, s: Strings): string => {
+const routeText = (line: RouteLine, canSend: boolean, agent: string, s: Strings, state: RowState = 'idle'): string => {
   const name = isClaudeAgent(agent) ? 'Claude' : agentLabel(agent, s)
-  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : s.serveLineNow(name))
+  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name))
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
     : line === 'nextTurn' ? s.serveNextTurnHint
     : line === 'chatOpen' ? s.serveNextOpenHint
@@ -414,11 +424,12 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const baseMode = isManual ? 'none' : sendMode(ask.agent, ask.target)
       // The receiver's record picks the line; a route it has not shown live keeps the card on Copy, and the
       // delivery is left off it so the page has nothing to send to.
-      const route = found === undefined ? undefined : routeOf(routes, ask.agent, routeKind(found.scope), stateOf(undefined, ask.target?.isClosed === true))
+      const askState = stateOf(ask.auto, ask.target?.isClosed === true)
+      const route = found === undefined ? undefined : routeOf(routes, ask.agent, routeKind(found.scope), askState, found.surface)
       const connection = route?.canSend === true ? found : undefined
       const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : found ? 'none' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
-      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, ask.agent, s) }
+      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, ask.agent, s, askState) }
         : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, ask.agent, s) } : { line: 'none' as const, canSend: false, lineText: '' }
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan, true)
@@ -475,11 +486,12 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const found = isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)
       const isContested = !isLan && found === undefined && (messaging?.connections.some(one => one.agent === (row.agent || 'claude') && one.session === row.nativeSession) ?? false)
       const baseMode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
-      const route = found === undefined ? undefined : routeOf(routes, row.agent, routeKind(found.scope), rowState(row))
+      const state = rowState(row)
+      const route = found === undefined ? undefined : routeOf(routes, row.agent, routeKind(found.scope), state, found.surface)
       const connection = route?.canSend === true ? found : undefined
       const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : found ? 'none' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
-      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s) }
+      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s, state) }
         : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, row.agent, s) } : { line: 'none' as const, canSend: false, lineText: '' }
       // A Claude session still at work that this board cannot reach: its card says so and copies.
       const isOpenClaude = !isLan && send === 'claude' && row.auto !== 'ended'
@@ -644,7 +656,7 @@ export type ServeAction =
   | { type: 'hide'; key: string; text: string }
   | { type: 'unhide'; key: string | null }
   | { type: 'send'; target: AgentTarget; text: string; title: string }
-  | { type: 'message'; connection: Delivery; text: string; title: string; answers?: string }
+  | { type: 'message'; connection: Delivery; text: string; title: string; answers?: string; line: RouteLine }
   | { type: 'refuse'; note: string }
 
 const MAX_REPLY = 4000
@@ -733,9 +745,10 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
     if (isLan || !connected || connected.id !== request.connection || connected.turn !== request.turn || connected.session !== request.session || (request.asked ?? '') !== question || !text) return { type: 'refuse', note: s.messagesFailed }
     // The page offers Send only on a route its receiver's record has shown live; a press on any other is
     // refused with the card's own words, so a page that was altered cannot send there either.
-    const route = routeOf(routes, agent, routeKind(connected.scope), item.type === 'ask' ? stateOf(undefined, target?.isClosed === true) : rowState(item.row))
-    if (!route.canSend) return { type: 'refuse', note: routeText(route.line, false, agent, s) }
-    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
+    const state = item.type === 'ask' ? stateOf(item.ask.auto, target?.isClosed === true) : rowState(item.row)
+    const route = routeOf(routes, agent, routeKind(connected.scope), state, connected.surface)
+    if (!route.canSend) return { type: 'refuse', note: routeText(route.line, false, agent, s, state) }
+    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title, line: route.line, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
   }
   if (connected) return { type: 'refuse', note: s.boardLineChanged }
   if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }
@@ -1610,6 +1623,7 @@ const PAGE_SCRIPT = String.raw`
     clearEnqueueResult(key, receipt);
     if (!agent || String(agent).toLowerCase() === 'claude') return claudeReceipt(receipt, key, canSend);
     // A session that takes its message the moment it is idle is not handed one at a turn it starts later (#725).
+    line = receipt.line || line;
     var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : line === 'now' || line === 'stepEnd' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     // A mailbox message that was handed over gets no ACK, so its id is done with here: the next send is a new message.
     if (receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
@@ -1883,8 +1897,10 @@ const PAGE_SCRIPT = String.raw`
     } else {
       var options = ask.answers || [];
       canWrite = true;
-      // When a message from the board reaches this agent, from its receiver's record.
+      // When a message from the board reaches this agent, from its receiver's record. A question the board has
+      // no receiver for (not connected, or on the local network) has no such line: its own words say why it is only copied.
       if (ask.lineText) add(body, el('p', 'note', ask.lineText));
+      else if (ask.info) add(body, el('p', 'note', ask.info));
       if (options.length) {
         var identity = JSON.stringify([ask.session || '', ask.text || '', ask.fp || '', ask.delivery ? [ask.delivery.id, ask.delivery.turn] : '', options]);
         var savedChoice = cardChoices[key];

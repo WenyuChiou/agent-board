@@ -887,6 +887,7 @@ export const ZH_TW = {
   serveQueueNextOpen: (agent: string): string => `排入 ${agent} 下次開啟此對話時`,
   serveNextOpenHint: '此對話只在開啟時讀取訊息，所以會等到那時。要現在送達請用複製。',
   serveLineNow: (agent: string): string => `${agent} 正在等，會馬上收到。`,
+  serveLineNowWorking: (agent: string): string => `${agent} 正在工作，這則會馬上加進目前這一輪。`,
   serveLineStepEnd: (agent: string): string => `${agent} 正在工作，這一步結束後會收到。`,
   serveLineReopen: (agent: string): string => `傳送時會重新開啟 ${agent} 的這個對話，再把訊息交給它。`,
   serveLineNone: (agent: string): string => `${agent} 還不能從看板收訊息：請複製後貼到它的對話裡。`,

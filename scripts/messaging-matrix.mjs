@@ -76,7 +76,7 @@ export const hasReceiverRecord = text => /^export\s+const\s+messagingReceiver\b|
 
 const lines = ['now', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
 const states = ['idle', 'working', 'ended']
-const isRoute = route => route && lines.includes(route.line) && (route.record === null || isText(route.record))
+const isRoute = route => route && lines.includes(route.line) && (route.record === null || isText(route.record)) && (route.surfaces === undefined || Array.isArray(route.surfaces) && route.surfaces.length > 0 && route.surfaces.every(isText))
 const isRoutes = record => record.routes === undefined || isText(record.agent) && ['live', 'mailbox', 'turn'].includes(record.kind) && states.every(state => isRoute(record.routes[state]))
 const isText = value => typeof value === 'string' && value.trim() !== '' && !/[\r\n]/.test(value)
 
@@ -86,6 +86,9 @@ export const readReceiverRecords = async (directory = root) => {
     if (!hasReceiverRecord(readFileSync(path, 'utf8'))) continue
     // Record modules must be safe to import: no host startup or model calls at load time.
     const { messagingReceiver: record } = await import(pathToFileURL(path).href)
+    if (record?.routes !== undefined && Array.isArray(record.surfaces) && states.some(state => record.routes[state]?.surfaces?.some(name => !record.surfaces.some(surface => surface?.name === name)))) {
+      throw new Error('A route names a surface its record does not list: ' + relative(directory, path))
+    }
     if (!record || !isText(record.host) || ![1, 2, 3, 4].includes(record.tier) || !/^(?:\[P[1-5]\]|unknown)$/.test(record.primitive) || typeof record.isImplemented !== 'boolean' || !Array.isArray(record.surfaces) || !record.surfaces.length || record.surfaces.some(surface => !isText(surface?.name) || surface.evidence !== null && !isText(surface.evidence) || surface.earlier !== undefined && !isText(surface.earlier)) || !isRoutes(record)) {
       throw new Error('Invalid messaging receiver record: ' + relative(directory, path))
     }
@@ -131,9 +134,10 @@ const cell = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&l
 const link = (path, file) => `[${cell(path)}](${file.startsWith('docs/') ? '../' : ''}${path.split('/').map(encodeURIComponent).join('/')})`
 
 // A route's line, and the note that showed it live when the file is there.
-const routeCell = (route, file, directory, s) => {
+// A route recorded for some surfaces only shows its note on those rows.
+const routeCell = (route, file, directory, s, surface) => {
   if (!route) return s.none
-  if (route.record === null) return `${route.line} · ${s.noRecord}`
+  if (route.record === null || route.surfaces !== undefined && !route.surfaces.includes(surface)) return `${route.line} · ${s.noRecord}`
   return `${route.line} · ${hasEarlierRun(directory, route.record) ? link(route.record, file) : s.noRecord}`
 }
 
@@ -152,7 +156,7 @@ export const renderMatrix = (records, file, directory = root) => {
       cell(row.host), cell(row.surface), row.tier, row.primitive === 'unknown' ? s.unknown : cell(row.primitive), s.statuses[row.status],
       row.evidence ? link(row.evidence, file) : row.earlier ? s.earlier + ' ' + link(row.earlier, file) : s.notTested,
       row.source ? link(row.source, file) : s.none,
-      ...states.map(state => routeCell(row.routes?.[state], file, directory, s)),
+      ...states.map(state => routeCell(row.routes?.[state], file, directory, s, row.surface)),
     ].join(' | ') + ' |'),
     '', end,
   ].join('\n')

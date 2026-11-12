@@ -8,7 +8,8 @@ export const messagingReceiver = {
   primitive: 'unknown',
   isImplemented: true,
   routes: {
-    idle: { line: 'nextTurn', record: 'docs/validation/2026-11-10-agy-live.md' },
+    // The note ran the `agy` command line (headless stream), so it is recorded for the agy TUI row only.
+    idle: { line: 'nextTurn', record: 'docs/validation/2026-11-10-agy-live.md', surfaces: ['agy TUI'] },
     working: { line: 'nextTurn', record: null },
     ended: { line: 'none', record: null },
   },

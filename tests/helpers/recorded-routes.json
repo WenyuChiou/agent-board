@@ -178,5 +178,59 @@
         "record": null
       }
     }
+  },
+  {
+    "agent": "fixture",
+    "kind": "live",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "fixture",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
+  },
+  {
+    "agent": "fixture",
+    "kind": "turn",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md"
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md"
+      },
+      "ended": {
+        "line": "none",
+        "record": null
+      }
+    }
   }
 ]

@@ -18,7 +18,7 @@ import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
 import { agentLabel } from '../hooks/strings'
 import type { ReceiverRoutes } from '../hooks/messaging'
-import { lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
+import { directRoute, lanAddress, localHosts, pagePolicy, requestProblem, sendKey, sendPlan, serveAction, serveModel, servePage, worktreeRepoName } from '../hooks/serve'
 import type { SendPlan } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
@@ -505,6 +505,13 @@ export const startServer = (o: ServeOptions): void => {
       const action = url.pathname.slice('/api/messages/'.length)
       // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
       if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
+      // A send that names no connected session as its sender is the board's own. It goes only where a card
+      // would offer Send: a route its receiver's record has shown live, on the target's state and surface.
+      if (action === 'send' && body.source === undefined) {
+        const snapshot = messaging.snapshot(Date.now())
+        const target = deliveryTargets(snapshot.connections, snapshot.mailboxes).find(one => one.id === body.target)
+        if (target !== undefined && !target.contested && target.expires > Date.now() && !directRoute(o.view(), target, o.routes).canSend) return json(res, 409, { error: 'NO_RECORDED_ROUTE' })
+      }
       try { return json(res, 200, messaging.act(action, body, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
       catch (error) {
         // A temporary file lock is storage unavailability, not a stale binding.
@@ -531,7 +538,7 @@ export const startServer = (o: ServeOptions): void => {
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})
           try {
-            const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text, ...(action.answers === undefined ? {} : { answers: action.answers }) }, Date.now())
+            const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text, line: action.line, ...(action.answers === undefined ? {} : { answers: action.answers }) }, Date.now())
             const notes = { queued: o.s.messagesQueued, uncertain: o.s.messagesUncertain, accepted: o.s.messagesAccepted, acknowledged: o.s.messagesAcknowledged, rejected: o.s.messagesRejected }
             const note = 'status' in receipt ? notes[receipt.status] : o.s.messagesFailed
             return json(res, 200, { note, receipt })

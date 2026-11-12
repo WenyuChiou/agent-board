@@ -422,6 +422,45 @@ test('a DeepSeek mailbox card is a plain Send with no Copy, and an answer handed
   assert.ok(page.text().includes(EN.messagesHandedNow), page.text())
 })
 
+test('a handed-over DeepSeek message is worded for the route it went out on, also after its mailbox has expired (#1351)', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now(), seed = enrollMailbox({ messages: [] }, 'deepseek', 'mailbox-session', 'Web', now, 43_200_000), mailbox = seed.mailboxes[0]
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=deepseek resume=mailbox-session state=waiting updated=${new Date(now).toISOString()} -->\n### Mailbox page\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  // Only the board may name the line, and only a known one.
+  assert.throws(() => queueMessage(seed, { id: 'line-peer', target: mailbox.id, turn: 'session', text: 'Blue', line: 'now' }, 'codex:other', mailbox, now), /UNKNOWN_FIELD/)
+  assert.throws(() => queueMessage(seed, { id: 'line-bad', target: mailbox.id, turn: 'session', text: 'Blue', line: 'soon' }, 'board', mailbox, now), /UNKNOWN_FIELD/)
+  const queued = queueMessage(seed, { id: 'line-now', target: mailbox.id, turn: 'session', text: 'Blue', line: 'now' }, 'board', mailbox, now)
+  assert.equal(queued.message.line, 'now')
+  const taken = takeMailboxMessage(queued.state, 'deepseek', 'mailbox-session', 'Web', now + 1, 43_200_000, 'abcdef')
+  const accepted = acceptMailboxMessage(taken.state, 'deepseek', 'mailbox-session', 'line-now', 'abcdef', now + 2)
+  // The mailbox has expired: the card has no route, but the receipt keeps the one the message took.
+  const model = serveModel(view, [], EN, new Set(), false, { connections: [], mailboxes: [], messages: accepted.messages }, false, group)
+  assert.equal(model.asks[0].receipt.line, 'now')
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  assert.ok(page.text().includes(EN.messagesHandedNow), page.text())
+  assert.ok(!page.text().includes(EN.messagesHandedNextTurn), page.text())
+})
+
+test('a question the board has no receiver for still says on its card why it is only copied (#1351)', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now()
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=11111111-2222-4333-8444-555555555555 state=waiting updated=${new Date(now).toISOString()} -->\n### Offline card\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+  const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  for (const isLan of [false, true]) {
+    const model = serveModel(view, [], EN, new Set(), isLan, { connections: [], mailboxes: [], messages: [] }, false, group)
+    assert.equal(model.asks[0].lineText, '')
+    assert.notEqual(model.asks[0].info, '')
+    const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn)?.click()
+    assert.ok(page.text().includes(model.asks[0].info), String(isLan) + ' ' + page.text())
+  }
+})
+
 test('the same text queued again after the first was handed over is a new message', async () => {
   const { servePage } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
@@ -2650,7 +2689,7 @@ test('portable agents share one durable synthetic hub without implicit native de
 }))
 
 test('an expired connector disappears and cannot take a queued message', { timeout: 40000 }, async () => fixture(async board => {
-  const connected = (await board.call('/api/messages/register', { agent: 'claude', session: 'fixture', turn: 'turn1', surface: 'Synthetic adapter' })).body
+  const connected = (await board.call('/api/messages/register', { agent: 'fixture', session: 'fixture', turn: 'turn1', surface: 'Synthetic adapter' })).body
   await board.call('/api/messages/send', { ...input, target: connected.id })
   await pause(15100)
   const model = (await board.call('/api/board')).body.messaging
@@ -4254,8 +4293,9 @@ test('every receiver record against idle, working and ended shows its line, with
     const now = Date.now(), route = record.routes[state]
     const view = buildView(parseProgress(stateFile(record.agent, state, session)), [], null, now, 0, {}, s)
     const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
-    const live = record.kind === 'mailbox' ? { connections: [], mailboxes: enrollMailbox({ messages: [] }, record.agent, session, 'Synthetic', now, 43_200_000).mailboxes, messages: [] }
-      : { connections: [{ id: 'table-receiver', agent: record.agent, session, surface: 'Synthetic', turn: record.kind === 'turn' ? 'turn1' : 'session', scope: record.kind === 'turn' ? 'turn' : 'session', expires: now + 60_000 }], messages: [] }
+    const surface = route.surfaces?.[0] ?? 'Synthetic'
+    const live = record.kind === 'mailbox' ? { connections: [], mailboxes: enrollMailbox({ messages: [] }, record.agent, session, surface, now, 43_200_000).mailboxes, messages: [] }
+      : { connections: [{ id: 'table-receiver', agent: record.agent, session, surface, turn: record.kind === 'turn' ? 'turn1' : 'session', scope: record.kind === 'turn' ? 'turn' : 'session', expires: now + 60_000 }], messages: [] }
     const model = realServeModel(view, [], s, new Set(), false, live, false, group, RECEIVER_ROUTES)
     const card = state === 'idle' ? model.asks[0] : [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)].find(one => one.title === 'Route table')
     const label = `${record.agent}/${record.kind}/${state}/${s.pgCopyAnswer}`
@@ -4272,7 +4312,7 @@ test('every receiver record against idle, working and ended shows its line, with
     assert.equal(card.send === 'connected' || card.send === 'mailbox', canSend, label)
     if (!canSend && state !== 'ended') assert.ok(labels.includes(s.pgCopyAnswer), label + ' ' + labels.join(' | '))
     if (!isGone) {
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint, chatOpen: s.serveNextOpenHint, none: s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint, chatOpen: s.serveNextOpenHint, none: s.serveLineNone(name) }[route.line]
       assert.ok(page.text().includes(words), label + ' ' + words)
       assert.equal(page.text().includes(s.serveLineUnrecorded), !canSend && route.line !== 'none', label)
     }
@@ -4280,6 +4320,59 @@ test('every receiver record against idle, working and ended shows its line, with
   }
   // The table is not all one kind: some routes are shown live and some are not.
   assert.ok(sendable > 0 && copyOnly > 0)
+})
+
+test('a question asked while its session is working reads the working route, not the idle one, in every receiver record (#1351)', async () => {
+  const session = '11111111-2222-4333-8444-555555555555'
+  let checked = 0
+  for (const record of RECEIVER_ROUTES) {
+    const now = Date.now(), route = record.routes.working
+    const file = `## Synthetic\n<!-- auto session=abcdef01 agent=${record.agent} resume=${session} state=working updated=${new Date().toISOString()} -->\n### Route table\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+    const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+    const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+    const surface = route.surfaces?.[0] ?? 'Synthetic'
+    const live = record.kind === 'mailbox' ? { connections: [], mailboxes: enrollMailbox({ messages: [] }, record.agent, session, surface, now, 43_200_000).mailboxes, messages: [] }
+      : { connections: [{ id: 'table-receiver', agent: record.agent, session, surface, turn: record.kind === 'turn' ? 'turn1' : 'session', scope: record.kind === 'turn' ? 'turn' : 'session', expires: now + 60_000 }], messages: [] }
+    const ask = realServeModel(view, [], EN, new Set(), false, live, false, group, RECEIVER_ROUTES).asks[0]
+    const label = `${record.agent}/${record.kind}`
+    assert.equal(ask.line, route.line, label)
+    assert.equal(ask.canSend, route.line !== 'none' && route.record !== null, label)
+    assert.equal(ask.send === 'connected' || ask.send === 'mailbox', ask.canSend, label)
+    if (route.line === 'now' && record.agent !== 'claude') assert.ok(!ask.lineText.includes('waiting'), label + ' ' + ask.lineText)
+    checked += 1
+  }
+  assert.ok(checked >= 10)
+  // A working Codex proxy keeps its recorded Send, and a working DeepSeek session, whose idle route is recorded, does not gain it.
+  const routeOfRecord = (agent, kind, state) => RECEIVER_ROUTES.find(one => one.agent === agent && one.kind === kind).routes[state]
+  assert.notEqual(routeOfRecord('codex', 'turn', 'working').record, null)
+  assert.equal(routeOfRecord('deepseek', 'mailbox', 'working').record, null)
+  assert.notEqual(routeOfRecord('deepseek', 'mailbox', 'idle').record, null)
+})
+
+test('a route recorded for one surface is not offered on another, and the matrix names the surface the note ran on (#1351)', async () => {
+  const table = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md', surfaces: ['Web'] }, working: { line: 'nextTurn', record: 'docs/validation/synthetic.md' }, ended: { line: 'none', record: null } } }]
+  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'idle', 'Web'), { line: 'now', canSend: true })
+  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'idle', 'TUI'), { line: 'now', canSend: false })
+  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'idle'), { line: 'now', canSend: false })
+  assert.deepEqual(routeOf(table, 'alpha', 'mailbox', 'working', 'anything'), { line: 'nextTurn', canSend: true })
+  // A record that is not a non-empty string is no record, whatever else the route says.
+  const bare = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now' }, working: { line: 'now', record: '' }, ended: { line: 'none', record: null } } }]
+  assert.equal(routeOf(bare, 'alpha', 'mailbox', 'idle').canSend, false)
+  assert.equal(routeOf(bare, 'alpha', 'mailbox', 'working').canSend, false)
+  assert.deepEqual(RECEIVER_ROUTES.find(one => one.agent === 'deepseek').routes.idle.surfaces, ['Web'])
+  assert.equal(routeOf(RECEIVER_ROUTES, 'deepseek', 'mailbox', 'idle', 'Web').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'deepseek', 'mailbox', 'idle', 'TUI').canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'IDE').canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, true)
+  const { readReceiverRecords, renderMatrix } = await import('../scripts/messaging-matrix.mjs')
+  const root = join(import.meta.dirname, '..')
+  const rows = renderMatrix(await readReceiverRecords(root), 'docs/MESSAGING.md', root).split('\n')
+  const rowOf = (host, surface) => rows.find(one => one.startsWith(`| ${host} | ${surface} |`))
+  assert.ok(rowOf('Antigravity', 'agy TUI').includes('2026-11-10-agy-live.md'))
+  assert.ok(!rowOf('Antigravity', 'IDE').includes('2026-11-10-agy-live.md'))
+  assert.ok(!rowOf('Antigravity', '2.0 Desktop App').includes('2026-11-10-agy-live.md'))
+  assert.ok(rowOf('DeepSeek Harness', 'Web').includes('2026-11-08-deepseek-harness-live.md'))
+  assert.ok(!rowOf('DeepSeek Harness', 'TUI').includes('2026-11-08-deepseek-harness-live.md'))
 })
 
 test('the line and Send of a route come from its record: no record gives none and Copy', () => {
@@ -4307,7 +4400,9 @@ test('each receiver record names a validation note that exists, and the table th
   }
   // The stand-in the page tests and the e2e worlds use is the shipped table with a note named on every route that exists.
   // Except that a running-turn adapter takes a message while idle too: tests register connections without a scope, which is a turn.
-  assert.deepEqual(recorded, RECEIVER_ROUTES.map(one => ({ ...one, routes: Object.fromEntries(Object.entries(one.routes).map(([state, route]) => [state, one.kind === 'turn' && state === 'idle' ? { line: 'now', record: 'docs/validation/synthetic.md' } : { ...route, record: route.line === 'none' ? null : 'docs/validation/synthetic.md' }])) })))
+  // The generic adapters the transport tests register under the agent name `fixture` are recorded on every kind too, so the message API accepts them.
+  assert.deepEqual(recorded.filter(one => one.agent === 'fixture').map(one => one.kind).sort(), ['live', 'mailbox', 'turn'])
+  assert.deepEqual(recorded.filter(one => one.agent !== 'fixture'), RECEIVER_ROUTES.map(one => ({ ...one, routes: Object.fromEntries(Object.entries(one.routes).map(([state, route]) => [state, one.kind === 'turn' && state === 'idle' ? { line: 'now', record: 'docs/validation/synthetic.md' } : { line: route.line, record: route.line === 'none' ? null : 'docs/validation/synthetic.md' }])) })))
 })
 
 test('with the receivers\' own records, a Claude card sends and a Codex card that no live note covers is refused in its own words (#1351)', () => fixture(async (board, dir) => {
@@ -4325,5 +4420,25 @@ test('with the receivers\' own records, a Claude card sends and a Codex card tha
   assert.equal(refused.status, 409)
   assert.equal(refused.body.note, cx.lineText)
   assert.equal((await board.call('/api/board')).body.messaging.messages.length, 0)
+  // The message API is held to the same table as the card: a send that names no sender is the board's own.
+  const direct = await board.call('/api/messages/send', { id: 'AB-DIRECT-codex', target: codexConnection.id, turn: 'session', text: 'Yes' })
+  assert.equal(direct.status, 409)
+  assert.equal(direct.body.error, 'NO_RECORDED_ROUTE')
+  assert.equal((await board.call('/api/board')).body.messaging.messages.length, 0)
   assert.equal((await board.call('/api/act', { ...request(cl), session: CLAUDE_SESSION, connection: claudeConnection.id, turn: 'session' })).status, 200)
+  // A recorded route is not refused by the table (a second message to the same session is held back by the usual busy rule).
+  assert.notEqual((await board.call('/api/messages/send', { id: 'AB-DIRECT-claude', target: claudeConnection.id, turn: 'session', text: 'Again' })).body.error, 'NO_RECORDED_ROUTE')
 }, '', undefined, RECEIVER_ROUTES))
+
+test('the routes the tests hand the board are checked whole: a missing record key, an unknown line or a non-list is refused, and only a non-empty string is a record (#1351)', async () => {
+  const { isReceiverRoutes } = await import('../hooks/messaging.ts')
+  const good = { agent: 'alpha', kind: 'live', routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md' }, working: { line: 'stepEnd', record: null }, ended: { line: 'none', record: null } } }
+  assert.equal(isReceiverRoutes([good]), true)
+  assert.equal(isReceiverRoutes({}), false)
+  assert.equal(isReceiverRoutes([{ ...good, routes: { ...good.routes, idle: { line: 'now' } } }]), false)
+  assert.equal(isReceiverRoutes([{ ...good, routes: { ...good.routes, idle: { line: 'soon', record: null } } }]), false)
+  assert.equal(isReceiverRoutes([{ ...good, routes: { idle: good.routes.idle, working: good.routes.working } }]), false)
+  assert.equal(isReceiverRoutes([{ ...good, kind: 'other' }]), false)
+  assert.equal(isReceiverRoutes([{ ...good, routes: { ...good.routes, idle: { line: 'now', record: null, surfaces: [1] } } }]), false)
+  assert.equal(isReceiverRoutes(JSON.parse(readFileSync(new URL('./helpers/recorded-routes.json', import.meta.url), 'utf8'))), true)
+})

@@ -317,10 +317,10 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 
 | Host | Surface | Tier | Primitive | Status | Live run | Receiver | Idle | Working | Ended |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Antigravity | 2.0 Desktop App | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-10-agy-live.md](../docs/validation/2026-11-10-agy-live.md) | nextTurn · no live note | none · no live note |
+| Antigravity | 2.0 Desktop App | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
 | Antigravity | agy TUI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-10-agy-live.md](../docs/validation/2026-11-10-agy-live.md) | nextTurn · no live note | none · no live note |
 | Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
-| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-10-agy-live.md](../docs/validation/2026-11-10-agy-live.md) | nextTurn · no live note | none · no live note |
+| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
 | Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | stepEnd · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | none · no live note |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
@@ -333,7 +333,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) | chatOpen · no live note | chatOpen · no live note | none · no live note |
 | DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| DeepSeek Harness | TUI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) | now · [docs/validation/2026-11-08-deepseek-harness-live.md](../docs/validation/2026-11-08-deepseek-harness-live.md) | stepEnd · no live note | none · no live note |
+| DeepSeek Harness | TUI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) | now · no live note | stepEnd · no live note | none · no live note |
 | DeepSeek Harness | Web | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-08-deepseek-harness-live.md](../docs/validation/2026-11-08-deepseek-harness-live.md) | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) | now · [docs/validation/2026-11-08-deepseek-harness-live.md](../docs/validation/2026-11-08-deepseek-harness-live.md) | stepEnd · no live note | none · no live note |
 | dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |

@@ -508,7 +508,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const mailbox = hookMailbox(directory, 5000)
     const answer = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value)}\n`) }
     if (action === 'take') {
-      const message = await mailbox.turn(agent, session, 'dsh', Date.now())
+      const surface = flag('--surface')
+      const message = await mailbox.turn(agent, session, surface === 'Web' || surface === 'TUI' ? surface : 'dsh', Date.now())
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line

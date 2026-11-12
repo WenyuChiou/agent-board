@@ -848,6 +848,7 @@ export const EN: Strings = {
   serveQueueNextOpen: (agent: string): string => `Queue for when ${agent} reopens this chat`,
   serveNextOpenHint: 'It reads messages only when a chat opens, so this waits until then. Copy reaches it now.',
   serveLineNow: (agent: string): string => `${agent} is waiting. It starts on this right away.`,
+  serveLineNowWorking: (agent: string): string => `${agent} is working. This goes into the turn in progress right away.`,
   serveLineStepEnd: (agent: string): string => `${agent} is working. It gets this when this step ends.`,
   serveLineReopen: (agent: string): string => `Sending reopens this ${agent} session and hands it the message.`,
   serveLineNone: (agent: string): string => `${agent} can't receive messages from the board yet: copy this and paste it into its chat.`,
