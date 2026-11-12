@@ -1,6 +1,7 @@
 Fixes #
 Author: <agent>, <branch>
 Tier: <risk, normal or light: the highest any change reaches, or risk for a release or a lane under risk-tier review, docs/dev/RULES.md R2>
+Authors: <the model family of every agent that wrote any part of it or its brief: Claude, GPT, Meta, Gemini or a person; two if two did, docs/dev/RULES.md R2>
 
 <!-- First lines: one `Fixes #N` or `Part of #N` line for each issue (`Part of #N` for one step of an issue split into steps), one right after the other. One feature per pull request, or two or three bug fixes, never more than three (CONTRIBUTING.md, Pull requests). Release pull request: delete the Fixes line. Run `node scripts/pr-check.mjs --pr <N>` after opening; CI runs it too. -->
 
