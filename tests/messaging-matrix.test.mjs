@@ -26,8 +26,10 @@ const fixture = action => {
   const directory = mkdtempSync(join(tmpdir(), 'agent-board-matrix-'))
   try {
     mkdirSync(join(directory, 'scripts'))
+    mkdirSync(join(directory, 'hooks'))
     mkdirSync(join(directory, 'docs/validation'), { recursive: true })
     for (const file of ['messaging-matrix.mjs', 'message-client.mjs', 'ws-stdio.mjs', ...connectors]) copyFileSync(join(root, 'scripts', file), join(directory, 'scripts', file))
+    for (const file of ['messaging.ts', 'i18n.ts', 'sha256.ts']) copyFileSync(join(root, 'hooks', file), join(directory, 'hooks', file))
     for (const file of matrixFiles) writeFileSync(join(directory, file), `Before ${file}\n${start}\n${end}\nAfter ${file}\n`)
     return action(directory)
   } finally { rmSync(directory, { recursive: true, force: true }) }
@@ -87,7 +89,6 @@ test('the messaging matrix is generated from each receiver record and CI fails w
       for (const file of matrixFiles) assert.match(read(join(directory, file)), /Synthetic Host \| Synthetic IDE \| 2 \| &#91;P4&#93; \| Implemented/)
       assert.deepEqual(connectors.map(file => read(join(directory, 'scripts', file))), before)
 
-      mkdirSync(join(directory, 'hooks'))
       writeFileSync(join(directory, 'hooks/typed.ts'), "export const messagingReceiver: { host: string, tier: number, primitive: string, isImplemented: boolean, surfaces: { name: string, evidence: null }[] } = { host: 'Typed Host', tier: 3, primitive: '[P3]', isImplemented: true, surfaces: [{ name: 'CLI', evidence: null }] }\n")
       writeFileSync(join(directory, 'scripts/named.mjs'), "const messagingReceiver = { host: 'Named Host', tier: 3, primitive: '[P3]', isImplemented: true, surfaces: [{ name: 'CLI', evidence: null }] }\nexport { messagingReceiver }\n")
       assert.equal(run(directory, '--check', outside).status, 1)
@@ -196,3 +197,79 @@ test('a receiver record marks a surface Verified only when it names a live-run f
   assert.equal(run(directory, '--write', directory).status, 0)
   for (const file of matrixFiles) assert.doesNotMatch(read(join(directory, file)), /\| Verified(?:（已驗證）|（已验证）)? \|/)
 }))
+
+test('a receiver record prints its idle, working and ended routes, and one that names a line the board does not know is refused', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-board-matrix-routes-'))
+  try {
+  mkdirSync(join(directory, 'scripts'))
+  putRecord(directory, 'routed.mjs', {
+    host: 'Routed Host', surfaces: [{ name: 'CLI', id: 'CLI', evidence: null }], tier: 3, primitive: '[P4]', isImplemented: true,
+    agent: 'routed', kind: 'mailbox',
+    routes: { idle: { line: 'nextTurn', record: null, surfaces: [] }, working: { line: 'stepEnd', record: 'docs/validation/2026-01-02-synthetic.md', surfaces: ['CLI'] }, ended: { line: 'none', record: null, surfaces: [] } },
+  })
+  mkdirSync(join(directory, 'docs/validation'), { recursive: true })
+  writeFileSync(join(directory, 'docs/validation/2026-01-02-synthetic.md'), '# Synthetic\n')
+  const table = renderMatrix(await readReceiverRecords(directory), 'docs/MESSAGING.md', directory)
+  assert.match(table, /\| Idle \| Working \| Ended \|/)
+  assert.match(table, /Routed Host \| CLI \| 3 \| &#91;P4&#93; \| Implemented \| Not tested \| \[scripts\/routed\.mjs\]\(\.\.\/scripts\/routed\.mjs\) \| nextTurn · no live note \| stepEnd · \[docs\/validation\/2026-01-02-synthetic\.md\]\([^)]*\) \| none · no live note \|/)
+  // A module is imported once, so the refused record is another file.
+  putRecord(directory, 'refused.mjs', {
+    host: 'Routed Host', surfaces: [{ name: 'CLI', id: 'CLI', evidence: null }], tier: 3, primitive: '[P4]', isImplemented: true,
+    agent: 'routed', kind: 'mailbox',
+    routes: { idle: { line: 'sometime', record: null, surfaces: [] }, working: { line: 'stepEnd', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } },
+  })
+  await assert.rejects(() => readReceiverRecords(directory), /Invalid messaging receiver record: scripts[\\/]refused\.mjs/)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('a routed receiver record requires known surface ids and explicit recorded surfaces', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-board-matrix-invalid-'))
+  try {
+    const record = {
+      host: 'Synthetic Host', surfaces: [{ name: 'Synthetic CLI', id: 'CLI', evidence: null }],
+      tier: 3, primitive: '[P4]', isImplemented: true, agent: 'synthetic', kind: 'mailbox',
+      routes: { idle: { line: 'nextTurn', record: 'docs/validation/2026-01-02-synthetic.md', surfaces: ['CLI'] }, working: { line: 'nextTurn', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } },
+    }
+    const cases = [
+      ['missing-id', one => { delete one.surfaces[0].id }, /Invalid messaging receiver record/],
+      ['unknown-id', one => { one.surfaces[0].id = 'Synthetic unknown' }, /Invalid messaging receiver record/],
+      ['missing-surfaces', one => { delete one.routes.idle.surfaces }, /Invalid messaging receiver record/],
+      ['empty-recorded-surfaces', one => { one.routes.idle.surfaces = [] }, /Invalid messaging receiver record/],
+      ['other-surface', one => { one.routes.idle.surfaces = ['Web'] }, /A route names a surface its record does not list/],
+    ]
+    for (const [name, change, error] of cases) {
+      const one = structuredClone(record), folder = join(directory, name)
+      change(one)
+      mkdirSync(join(folder, 'scripts'), { recursive: true })
+      putRecord(folder, 'receiver.mjs', one)
+      await assert.rejects(() => readReceiverRecords(folder), error, name)
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('shape 23 matrix: each displayed surface names its registered id and only its own recorded routes', async () => {
+  const records = (await readReceiverRecords(root)).filter(one => one.routes)
+  const { SURFACE_IDS } = await import('../hooks/messaging.ts')
+  assert.ok(SURFACE_IDS, 'the shared surface ids are exported')
+  const ids = new Set(Object.values(SURFACE_IDS))
+  let checked = 0
+  for (const record of records) for (const surface of record.surfaces) {
+    assert.ok(ids.has(surface.id), `${record.source}: unknown id for ${surface.name}`)
+    for (const [index, state] of ['idle', 'working', 'ended'].entries()) {
+      const route = record.routes[state]
+      assert.ok(Array.isArray(route.surfaces), `${record.source}: missing ${state} surfaces`)
+      for (const id of route.surfaces) assert.ok(ids.has(id), `${record.source}: unknown ${state} surface ${id}`)
+      for (const file of ['docs/MESSAGING.md', 'docs/MESSAGING.zh-TW.md', 'docs/MESSAGING.zh-CN.md']) {
+        const row = renderMatrix([record], file, root).split('\n').find(line => line.startsWith(`| ${record.host} | ${surface.name} |`))
+        assert.ok(row, `${record.source}: missing matrix row for ${surface.name}`)
+        const cell = row.slice(2, -2).split(' | ')[7 + index]
+        assert.ok(cell.startsWith(`${route.line} · `), `${record.source}: wrong ${state} line on ${surface.name}`)
+        for (const note of new Set(Object.values(record.routes).map(one => one.record).filter(Boolean))) {
+          assert.equal(cell.includes(note), note === route.record && route.surfaces.includes(surface.id), `${record.source}: wrong ${state} note on ${surface.name}`)
+        }
+        checked++
+      }
+    }
+  }
+  assert.ok(checked > 0)
+})

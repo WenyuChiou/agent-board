@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks'
 import { dirname } from 'node:path'
 import { attachCodexSession } from '../../../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../../../scripts/antigravity-session-connector.mjs'
-import { deliveryText } from '../../../hooks/messaging.ts'
+import { deliveryText, SURFACE_IDS } from '../../../hooks/messaging.ts'
 import { makeWorld } from './world.mjs'
 import { block } from './writers.mjs'
 import { readStore } from './hub-wire.mjs'
@@ -56,7 +56,7 @@ const ownedCodex = async (hub, actor) => {
       return { turn: { id: turn } }
     },
   }
-  const connector = await attachCodexSession({ boardUrl: hub.server.url, transport, thread: actor.session, state: () => current, verifyOwner: one => one === transport, surface: 'Synthetic owned Codex', onError: error => actor.errors.push(error.message) })
+  const connector = await attachCodexSession({ boardUrl: hub.server.url, transport, thread: actor.session, state: () => current, verifyOwner: one => one === transport, surface: SURFACE_IDS.codexSession, onError: error => actor.errors.push(error.message) })
   return { ...connector, close: async () => { await connector.close(); assert.equal(listener, null) } }
 }
 
@@ -74,7 +74,7 @@ const ownedAntigravity = async (hub, actor) => {
       listener({ event: 'result', result: { conversation_id: actor.session, num_turns: turns, status: 'SUCCESS', response: ackReply(message, actor) } })
     },
   }
-  const connector = await attachAntigravitySession({ boardUrl: hub.server.url, transport, session: actor.session, state: () => current, verifyOwner: one => one === transport, surface: 'Synthetic Antigravity stream', onError: error => actor.errors.push(error.message) })
+  const connector = await attachAntigravitySession({ boardUrl: hub.server.url, transport, session: actor.session, state: () => current, verifyOwner: one => one === transport, surface: SURFACE_IDS.antigravityStream, onError: error => actor.errors.push(error.message) })
   return { ...connector, close: async () => { await connector.close(); assert.equal(listener, null) } }
 }
 

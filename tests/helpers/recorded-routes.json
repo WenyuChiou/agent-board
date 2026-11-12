@@ -1,0 +1,275 @@
+[
+  {
+    "agent": "claude",
+    "kind": "live",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "deepseek",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "antigravity",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "codex",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "cursor",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "chatOpen",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "chatOpen",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "gemini",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "muse",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "nextTurn",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "codex",
+    "kind": "live",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "codex",
+    "kind": "turn",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "antigravity",
+    "kind": "live",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "fixture",
+    "kind": "live",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "fixture",
+    "kind": "mailbox",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  },
+  {
+    "agent": "fixture",
+    "kind": "turn",
+    "routes": {
+      "idle": {
+        "line": "now",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "working": {
+        "line": "stepEnd",
+        "record": "docs/validation/synthetic.md",
+        "surfaces": ["921 T1", "Antigravity owned CLI stream", "CLI", "CLI TUI", "Claude Code", "Codex local proxy", "Codex owned session", "IDE", "IDE (Composer)", "Mock", "Mock owned session", "Mock proxy", "Private transport", "Synthetic", "Synthetic Antigravity stream", "Synthetic CLI", "Synthetic Codex", "Synthetic Codex CLI", "Synthetic adapter", "Synthetic busy owner", "Synthetic busy retry", "Synthetic contract only", "Synthetic delivery boundary", "Synthetic desktop", "Synthetic different agent", "Synthetic expired adapter", "Synthetic forbidden adapter", "Synthetic lost-response adapter", "Synthetic overlap control", "Synthetic owned stream", "Synthetic owner-loss adapter", "Synthetic prefix", "Synthetic receiver", "Synthetic recovery adapter", "Synthetic restart", "Synthetic storage denied", "Synthetic storage moment", "Synthetic storage recovery", "Synthetic terminal", "Synthetic timeout adapter", "TUI", "Web", "agy TUI", "custom-proxy", "dsh", "fixture", "unknown", "unrecognized-surface"]
+      },
+      "ended": {
+        "line": "none",
+        "record": null,
+        "surfaces": []
+      }
+    }
+  }
+]

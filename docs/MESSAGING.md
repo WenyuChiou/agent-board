@@ -5,7 +5,10 @@ session and turn, or an explicitly identified idle session owned by its host. A 
 card alone never enables sending. The adapter must verify its
 existing host connection, register a short-lived lease, and keep it alive. Disconnected
 adapters lose their card's Send action within 15 seconds. Ordinary messages cannot
-approve tools, grant hook trust or merge a PR.
+approve tools, grant hook trust or merge a PR. A tool approval has its own route: Claude
+Code's `PermissionRequest` hook asks the local page, and only a press on the page the board
+opened itself can answer it. A message, an agent's MCP or CLI tool, or the page on the
+network never can ([SECURITY.md](../SECURITY.md#approvals-on-the-board)).
 
 A temporary network failure, timeout or HTTP 5xx during polling preserves the same
 verified binding only while its last confirmed lease remains valid. Successful polling
@@ -17,13 +20,20 @@ Temporary store locks (`EPERM`, `EBUSY`, `EAGAIN`) report HTTP 503 so polling ca
 recover within that deadline. Idle polls do not rewrite the message file. Sending
 and receipts are never automatically retried, including after a store lock.
 
-Use the existing reply box on the session's card. A matching live receiver enables Send;
-a hook mailbox offers Queue for next turn beside Copy. Internal connection ids stay hidden. There is no
+Use the existing reply box on the session's card. A matching receiver enables Send or
+Queue only when its session state, surface and route have a live record. When the state
+or route is unknown, the card offers Copy. Internal connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
 An offline card retains Copy. By default, the web UI and
 action API cannot spawn a CLI or resume a saved session. The existing copy-resume command
 remains available where the board already offered it.
+
+The direct message API applies the same recorded-route check to board sends. A mailbox
+with a live receiver for the same session is refused rather than redirected; an unrecorded
+route returns `NO_RECORDED_ROUTE`. Retrying an existing message id returns that message
+when its contents match, even if the route has since changed. The server records the route
+line itself; callers cannot supply `line`.
 
 ## Next-turn mailbox
 
@@ -313,47 +323,49 @@ restored on restart. They never send, retry, approve or create a progress block.
 
 <!-- messaging-matrix:start -->
 
-Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface.
+Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface. Idle, Working and Ended give the route for a session in that state: `now`, `stepEnd` (when its step ends), `nextTurn`, `chatOpen` (when the chat opens again), `reopen` or `none`, with the live note that showed it; the board offers Send only on a route with a note.
 
-| Host | Surface | Tier | Primitive | Status | Live run | Receiver |
-| --- | --- | --- | --- | --- | --- | --- |
-| Antigravity | 2.0 Desktop App | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
-| Antigravity | agy TUI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
-| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) |
-| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) |
-| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) |
-| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Codex | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) |
-| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) |
-| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) |
-| Cursor | cursor-agent CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) |
-| Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) |
-| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| DeepSeek Harness | TUI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) |
-| DeepSeek Harness | Web | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-08-deepseek-harness-live.md](../docs/validation/2026-11-08-deepseek-harness-live.md) | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) |
-| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Gemini CLI | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-gemini.ts](../hooks/receivers/hook-mailbox-gemini.ts) |
-| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| Muse Code | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-muse.ts](../hooks/receivers/hook-mailbox-muse.ts) |
-| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None |
-| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None |
+| Host | Surface | Tier | Primitive | Status | Live run | Receiver | Idle | Working | Ended |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Antigravity | 2.0 Desktop App | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Antigravity | agy TUI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
+| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | stepEnd · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | none · no live note |
+| Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Codex | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
+| Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) | none · no live note | now · [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | none · no live note |
+| Cursor | cursor-agent CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) | chatOpen · no live note | chatOpen · no live note | none · no live note |
+| Cursor | IDE (Composer) | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) | chatOpen · no live note | chatOpen · no live note | none · no live note |
+| DeepSeek Harness | Cordis CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| DeepSeek Harness | Desktop | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| DeepSeek Harness | TUI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) | now · no live note | stepEnd · no live note | none · no live note |
+| DeepSeek Harness | Web | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-08-deepseek-harness-live.md](../docs/validation/2026-11-08-deepseek-harness-live.md) | [hooks/receivers/deepseek.ts](../hooks/receivers/deepseek.ts) | now · [docs/validation/2026-11-08-deepseek-harness-live.md](../docs/validation/2026-11-08-deepseek-harness-live.md) | stepEnd · no live note | none · no live note |
+| dot / Web Chats | ChatGPT | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| dot / Web Chats | Claude.ai | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| dot / Web Chats | DeepSeek Web | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Gemini CLI | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-gemini.ts](../hooks/receivers/hook-mailbox-gemini.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Muse Code | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-muse.ts](../hooks/receivers/hook-mailbox-muse.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 
 <!-- messaging-matrix:end -->
+
+The board reads these routes from `hooks/receiver-routes.ts`. `AGENT_BOARD_ROUTES`, a path to a JSON file of routes that replaces them, is for tests only (like `AGENT_BOARD_GROK`); do not set it in real use.
 
 ### What earlier runs saw
 
@@ -429,7 +441,9 @@ await receiver.close()
 API is agent-neutral; Claude Code, legacy Gemini, Cursor and other UI adapters still need their
 own supported transport and live acceptance. No shell typing, transcript scraping,
 credential discovery, automatic resume, or approval RPC is implemented by this client.
-The original host remains responsible for its normal permission checks.
+The original host remains responsible for its normal permission checks. Board approvals
+(Claude Code only so far) come through the plugin's hook, not this client; the host still
+asks in its own window whenever the board does not answer.
 
 An adapter declaring at least three parameters receives `begin()`. Finish every check that can
 refuse delivery, then call it immediately before writing to the external host. A failure

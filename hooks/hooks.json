@@ -1,1 +1,12 @@
-{ "modules": ["./register.tsx"] }
+{
+  "modules": ["./register.tsx"],
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claude-approval.mjs\"", "timeout": 45 }
+        ]
+      }
+    ]
+  }
+}

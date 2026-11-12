@@ -6047,7 +6047,12 @@ require('node:module').syncBuiltinESMExports()
     url = board.urlOf(out)
     assert.ok(url, out)
     for (let tries = 0; !existsSync(opened) && tries < 50; tries++) await delay(100)
-    assert.deepEqual(readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean), [url], 'the address must not gain backticks')
+    // The board opens its own page, with its one-time approval key after the # (D3, #1318), which it
+    // never prints: the address before the key is the one served, and nothing gains backticks.
+    const recorded = readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean)
+    assert.equal(recorded.length, 1, `one launch: ${JSON.stringify(recorded)}`)
+    assert.ok(recorded[0].startsWith(`${url}#k=`), `the address must not gain backticks: ${recorded[0]}`)
+    assert.match(recorded[0].slice(`${url}#k=`.length), /^[\w-]{32}$/, 'the key is the only addition')
   } finally {
     await board.end(url ? [url] : [])
   }
@@ -7825,7 +7830,10 @@ const timer = setInterval(() => {
   }
 }
 
-test('an answer key on the terminal board sends to a connected session through the open page and says what it sent; with the page closed it only copies', { timeout: 60_000 }, async () => {
+// The send path is tested on the recorded-routes table; the shipped table has no live note for these Codex routes.
+const ROUTES_ENV = { AGENT_BOARD_ROUTES: fileURLToPath(new URL('./helpers/recorded-routes.json', import.meta.url)) }
+
+test('an answer key on a route with no live record only copies, even with a connected session (#1351)', { timeout: 60_000 }, async () => {
   const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
   const board = await page(`
 ## Demo
@@ -7835,9 +7843,30 @@ test('an answer key on the terminal board sends to a connected session through t
 <!-- /auto session=e5f6a7b8 -->
 `, {}, ['--messages-dir', messages])
   const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  try {
+    await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })
+    const out = spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', 'y'], { env, encoding: 'utf8', timeout: 30_000 }).stdout
+    assert.ok(out.includes('copies the answer'), out)
+    assert.ok(!out.includes('You answered'), out)
+  } finally {
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('an answer key on the terminal board sends to a connected session through the open page and says what it sent; with the page closed it only copies', { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, ROUTES_ENV, ['--messages-dir', messages])
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
   const play = keys => spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }).stdout
   try {
-    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })).json()
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
     const sent = play('y')
     assert.ok(sent.includes('You answered “Yes, go ahead”.'), sent)
     const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
@@ -7862,7 +7891,7 @@ test('an answer key the page refuses shows the page note, sends nothing and neve
 ### Ship the docs
 - [?] Publish them, OK?
 <!-- /auto session=e5f6a7b8 -->
-`, {}, ['--messages-dir', messages])
+`, ROUTES_ENV, ['--messages-dir', messages])
   // A page in front of the real one that refuses every press, as the page does for a line,
   // question or session that no longer matches.
   const front = createServer((req, res) => {
@@ -7883,7 +7912,7 @@ test('an answer key the page refuses shows the page note, sends nothing and neve
   // Not spawnSync: the page in front answers from this process.
   const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
   try {
-    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })).json()
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
     const refused = await play('y')
     assert.ok(refused.includes('Synthetic refusal from the page'), refused)
     assert.ok(!refused.includes('You answered'), refused)
