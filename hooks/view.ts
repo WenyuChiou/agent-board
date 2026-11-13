@@ -19,6 +19,8 @@ import { inboxQuestionOrigin, observeQuestions, partsKey2, partsKey3, pendingQue
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
 import { identity, isSilenceTask, isWorkingTask } from './grouping'
+import { deriveRowState, livenessOf } from './row-state'
+import type { RowState } from './row-state'
 import { closedCopies, mergeCopies, recordFolder } from './question-merge'
 import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
 import type { RunGroup } from './runs'
@@ -166,6 +168,11 @@ export type TaskRow = {
   hasFutureTime?: boolean
   isHere: boolean
   auto: 'working' | 'waiting' | 'ended' | null
+  // The row's one derived state (#1317): from hooks/row-state.ts, so the pane,
+  // the page, the terminal board and --json all read the same state. Only
+  // 'unsure' changes the rendering yet; the rest are computed, not shown.
+  // The age is `at`/`when`, as before: now minus the block's last move.
+  rowState?: RowState
   // The block itself says state=ended (its session closed). `auto` also reads 'ended' for a finished,
   // stale or silent block, which does not mean the session is closed.
   isRecordedEnded?: true
@@ -1200,6 +1207,19 @@ export const buildView = (
       }
 
       const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || isGone || isSilence ? 'ended' : task.auto.state
+      // The row's one derived state (#1317). The mirror is this session's own
+      // list, so another session's row carries none. The open ask is the
+      // ledger-resolved one: an open ask keeps its card in Needs you even on
+      // an unsure session (Q5), since 'unsure' is not confirmed ended.
+      const derivedRowState = deriveRowState({
+        auto: task.auto,
+        steps: task.steps,
+        mirror: null,
+        events: { hasSessionEnd: task.auto?.state === 'ended', lastEventAt: hasTime(lastActive) ? lastActive : 0, host: task.auto?.agent ?? '' },
+        liveness: livenessOf(task.auto, gone),
+        now,
+        hasOpenAsk: task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)),
+      })
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
@@ -1213,7 +1233,13 @@ export const buildView = (
       const { done, total } = countSteps(shown)
       const isAnsweredWaiting = !isBlocked && (auto === 'waiting' || isRepliedTask) && (task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index)) || isRepliedTask)
       const phrase =
-        auto === 'working' && isBlocked
+        // An unsure row keeps its shelf (Q3) and its lifecycle step text (Q4);
+        // only its status line changes, to the unsure wording with its age.
+        // A row the collapse already reads as ended keeps today's rendering:
+        // a working silence row already says "session stopped" on that shelf.
+        derivedRowState === 'unsure' && auto !== 'ended'
+          ? { status: s.rowUnsure(when), tone: 'quiet' as const }
+          : auto === 'working' && isBlocked
           ? stepPhrase(task, s, isPrompt)
           : isAnsweredWaiting
             ? { status: s.answeredWaiting, tone: 'quiet' as const }
@@ -1241,6 +1267,7 @@ export const buildView = (
         ...(clock.isFuture ? { hasFutureTime: true } : {}),
         isHere,
         auto,
+        rowState: derivedRowState,
         steps: rowSteps(shown, s, isRepliedTask),
         ...(isManual ? { stepLines: task.steps.map(step => step.line), stepTask: { project: name, title: task.title, line: task.line, session: null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) } } : {}),
         cells: rowCells(shown, isRepliedTask),
@@ -1328,7 +1355,7 @@ export const buildView = (
       row: {
         key,
         project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
-        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], cells: [], left: [], next: null, due: null, pr: '',
+        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', rowState: 'ended', steps: [], cells: [], left: [], next: null, due: null, pr: '',
         agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
         archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
       },

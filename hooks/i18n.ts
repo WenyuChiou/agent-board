@@ -297,6 +297,8 @@ export const ZH_TW = {
     deepseek: 'DeepSeek',
   } as Record<string, string>,
   sessionStopped: (when: string): string => `對話已停，${when}沒動靜`,
+  // A row quiet past 30 min with no live process: unsure, with its age (#1317).
+  rowUnsure: (when: string): string => `不確定，${when}沒動靜`,
   sessionEnded: '對話已結束，可接手',
   uncategorized: '（未分類）',
   unnamed: '（未命名）',

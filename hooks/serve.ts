@@ -14,6 +14,7 @@ import type { Tone } from './palette'
 import { cellCode } from './progress-bar'
 import { RESUME } from './parse'
 import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from './view'
+import type { RowState as DerivedRowState } from './row-state'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
 import { deliveryTargets } from './hook-messages'
@@ -237,6 +238,9 @@ export type ServeRow = {
   when: string
   agent: string
   auto?: 'working' | 'waiting' | 'ended' | null
+  // The row's one derived state (#1317), from buildView; its age is `at`/`when`.
+  // Only 'unsure' changes the rendering yet; the rest are computed, not shown.
+  rowState?: DerivedRowState
   done: number
   total: number
   // One character per step for the progress bar (#1085, `hooks/progress-bar.ts` cellCode); '' with no steps.
@@ -301,6 +305,9 @@ type PageView = {
   // sheet with their line and leave the count, on the page and on every other surface (#1296).
   needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[]; handled: string[] }
   working: PageRef[]
+  // Rows whose derived state is 'unsure' (#1317). They stay on their shelf in
+  // the lists above; this only names them, and no count reads it.
+  unsure: PageRef[]
   quiet: Quiet
   all: PageBucket & { isHidden: boolean }
   own: PageBucket
@@ -606,6 +613,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
           ...(needs?.kind === 'stuck'
             ? { stuck: { reason: needs.reason } }
             : {}),
+          // The row's one derived state (#1317), with its age in `at`/`when`.
+          ...(row.rowState === undefined ? {} : { rowState: row.rowState }),
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s)),
@@ -729,6 +738,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     agents: grouped.agents.map(one => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),
     needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref), held, failed) },
     working: grouped.working.map(ref),
+    unsure: grouped.unsure.map(ref),
     quiet: grouped.quiet,
     all: { ...bucket(grouped.all), isHidden: grouped.all.isHidden },
     own: bucket(grouped.own),
@@ -926,7 +936,7 @@ const PAGE_WORDS = [
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
   'serveLineStepEnd', 'serveQueueNextTurn', 'serveQueueNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
-  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting',
+  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure',
   'archiveNow', 'cleanUp', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
@@ -1067,6 +1077,7 @@ div.row-btn{cursor:default}
 .row-btn[aria-expanded="true"] .r-chev{transform:rotate(90deg)}
 div.row-btn .r-chev{visibility:hidden}
 .r-meta .st{color:var(--ink)}
+.r-meta .st.t-quiet{color:var(--muted)}
 .r-meta .prog{display:inline-flex;align-items:center;gap:var(--s2);vertical-align:-1px}
 .r-meta .prog span{margin-left:0}
 .pbar{display:inline-flex;align-items:center;gap:2px;width:96px;height:8px;flex:none}
@@ -2276,12 +2287,13 @@ const PAGE_SCRIPT = String.raw`
     if (sameName(step, clean(fullTitle(ref)))) step = '';
     var isAnsweredWaiting = row.status === w('answeredWaiting');
     var detail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
-    var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
+    var isUnsureRow = row.rowState === 'unsure';
+    var status = isUnsureRow ? w('rowUnsure', row.when) : ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
     var project = showProject ? clean(ref.repo || row.project) : '';
     if (sameName(project, title)) project = '';
     var progress = isTask && row.total > 0 && (section === 'working' || section === 'stopped' || section === 'others') ? progressNode(row.cells || '', row.done, row.total, current ? clean(current.text) : '') : null;
-    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
+    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
     var titleNode = el('span', 'r-title', title);
     titleNode.setAttribute('title', title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));

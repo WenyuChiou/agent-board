@@ -45,6 +45,8 @@ type BoardRow = {
   total: number
   updatedAt: string | null
   age: string
+  // The row's one derived state (#1317), when buildView set one; its age is `age`.
+  state?: string
   isUnsure: boolean
 }
 
@@ -292,6 +294,8 @@ export const boardDocument = (
     const one = source(ref)
     const steps = one.steps ?? []
     const current = steps.find(step => step.isCurrent) ?? steps.find(step => step.status !== 'done' && step.status !== 'cancelled')
+    // The derived state, from the served row or the view's own row (#1317).
+    const derived = one.rowState ?? original.get(ref.sourceKey ?? ref.key)?.rowState
 
     return {
       agent: clean(ref.agent),
@@ -302,9 +306,11 @@ export const boardDocument = (
       total: one.total ?? 0,
       updatedAt: iso(one.at ?? ref.at),
       age: age(ref),
+      ...(derived === undefined ? {} : { state: derived }),
       // The page falls back to Unknown time; view.ts also labels a future clock.
-      // It has no separate age cutoff for an "unsure" row.
-      isUnsure: !one.when || one.when === s.pgUnknownAge || original.get(ref.sourceKey ?? ref.key)?.hasFutureTime === true,
+      // A row the derivation calls 'unsure' is unsure by its age, not only by
+      // an unknown one: quiet past 30 min with no live process (#1317).
+      isUnsure: !one.when || one.when === s.pgUnknownAge || original.get(ref.sourceKey ?? ref.key)?.hasFutureTime === true || derived === 'unsure',
     }
   }
   const needsRefs: Ref[] = group === undefined ? grouped.asks.map(ask => page.needs.cards.find(ref => ref.key === ask.key) ?? {

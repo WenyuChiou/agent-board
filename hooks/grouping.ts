@@ -144,6 +144,10 @@ export type Grouping = {
   agents: AgentGroup[]
   needs: NeedsYou
   working: GroupedTask[]
+  // Rows whose derived state is 'unsure' (#1317): quiet past 30 min with no
+  // live process. They stay on their shelf and in every count as before; this
+  // list only names them, and no count reads it.
+  unsure: GroupedTask[]
   // Why Working now is empty; only `none` may say that no agent did anything (#612).
   quiet: Quiet
   // Every agent's rows, not the hand-kept ones. Hidden below two agents.
@@ -457,6 +461,10 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
       if (steps.some(step => isLifecycleStep(step.text)) && steps.every(step => isLifecycleStep(step.text) || step.status === 'done' || step.status === 'cancelled')) return false
       const isDoing = isWorkingTask(steps, task.at, now)
       return isDoing
+    }),
+    unsure: sortedTasks.filter(task => {
+      const source = task.source
+      return typeof source === 'object' && source !== null && 'rowState' in source && source.rowState === 'unsure'
     }),
     quiet: quietOf(cards, sortedTasks, now),
     all: { ...bucketOf(one => !one.isOwn), isHidden: agents.length < 2 },
