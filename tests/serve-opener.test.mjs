@@ -234,3 +234,39 @@ test('printed local addresses and tokens are synthetic or sanitized, keeping sec
   assert.ok(parsed)
   assert.equal(parsed.url, url)
 })
+
+test('--serve asks openInBrowser for the app window like the plain command and --html (#1345)', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'board-serve-app-'))
+  const urls = []
+  try {
+    const progress = join(root, 'progress.md')
+    const script = join(root, 'agent-board.mjs')
+    const log = join(root, 'open-calls.jsonl')
+    writeFileSync(progress, '# Progress\n## Demo\n### Synthetic task\n- [ ] Task 1\n')
+
+    const opening = BOARD_SCRIPT.indexOf('var openInBrowser =')
+    const opened = BOARD_SCRIPT.indexOf('var isRegularFile =', opening)
+    assert.ok(opening > 0 && opened > opening, 'locates openInBrowser')
+    const mockedScript = `${BOARD_SCRIPT.slice(0, opening)}var openInBrowser = (target, done, asApp = false) => { process.getBuiltinModule('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ asApp: asApp === true }) + '\\n'); done(true) }\n${BOARD_SCRIPT.slice(opened)}`
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${mockedScript}`)
+
+    for (const mode of [['--serve'], ['--html'], []]) {
+      const result = spawnSync(process.execPath, [script, ...mode], {
+        encoding: 'utf8',
+        timeout: 15000,
+        windowsHide: true,
+        env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1', CI: '' },
+      })
+      assert.equal(result.status, 0, `${mode.join(' ') || 'plain'}: ${result.stderr}`)
+      const match = /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/.exec(result.stdout)
+      assert.ok(match, `${mode.join(' ') || 'plain'} stdout address:\n${result.stdout}`)
+      urls.push(match[0])
+      await closePage(match[0])
+    }
+
+    const calls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    assert.deepEqual(calls, [{ asApp: true }, { asApp: true }, { asApp: true }])
+  } finally {
+    await cleanup(root, urls)
+  }
+})
