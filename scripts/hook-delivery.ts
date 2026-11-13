@@ -15,10 +15,15 @@ import { defaultMessagesDirectory } from './runtime-folder.ts'
 type Json = Record<string, unknown>
 
 // Codex's terminal, app and editor extension run the same hooks, and only the terminal has a
-// live record (docs/validation/2026-11-12-codex-cli-mailbox-live.md). The session's history file
-// names the terminal `codex-tui`; any other name, or no readable file, is a surface the board does
-// not know, so the page offers no Queue there.
-export const codexSurface = (meta: CodexMeta | null): string => meta?.originator === 'codex-tui' ? SURFACE_IDS.cli : SURFACE_IDS.unknown
+// live record (docs/validation/2026-11-12-codex-cli-mailbox-live.md). The history file's first
+// record names the client that started the session (`codex-tui` for the terminal), but a session
+// resumed in another client keeps that file, so the client running now must agree: the desktop
+// app and the editor extension start Codex with CODEX_INTERNAL_ORIGINATOR_OVERRIDE set to their
+// own name, the terminal leaves it unset, and Codex passes its environment on to hooks. Anything
+// else, or no readable file, is a surface the board does not know, so the page offers no Queue.
+const CODEX_CLIENT_VARIABLE = 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE'
+export const codexSurface = (meta: CodexMeta | null, client: string | undefined): string =>
+  meta?.originator === 'codex-tui' && (client === undefined || client === 'codex-tui') ? SURFACE_IDS.cli : SURFACE_IDS.unknown
 
 export type TurnDelivery = {
   mode: string
@@ -58,7 +63,8 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
       let message = null
       const transcript = raw.transcript_path
       const surface = agent === 'cursor' ? SURFACE_IDS.cursor : agent === 'antigravity' ? SURFACE_IDS.antigravityIde
-        : agent === 'codex' ? codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null) : SURFACE_IDS.cli
+        : agent === 'codex' ? codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null, process.env[CODEX_CLIENT_VARIABLE])
+        : SURFACE_IDS.cli
       try { message = await mailbox?.turn(agent, session, surface, Date.now()) ?? null } catch {}
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)

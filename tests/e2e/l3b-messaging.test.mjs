@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { after, before, describe, test } from 'node:test'
 import { performance } from 'node:perf_hooks'
 import { CONNECTOR_POLL_MS, GAPS, NATIVE_RECEIVERS, RECEIVERS, SENDERS, openHub, receiptBudget, withHub } from './lib/hub.mjs'
@@ -19,9 +21,15 @@ test('messages: a Codex session with no poller takes a page message on its next 
   const world = makeWorld()
   world.env.NODE_OPTIONS = world.env.NODE_OPTIONS.split(' ').filter(one => !one.includes('clock-preload')).join(' ')
   const session = '60300000-2222-4333-8444-555555555555'
+  // Queue is offered only for Codex's terminal, which a session's history file names (#826).
+  const history = join(world.home, '.codex', 'sessions', '2026', '11', '12')
+  mkdirSync(history, { recursive: true })
+  const transcript = join(history, `rollout-2026-11-12T00-00-00-${session}.jsonl`)
+  writeFileSync(transcript, `${JSON.stringify({ type: 'session_meta', payload: { id: session, originator: 'codex-tui', source: 'cli' } })}
+`)
   try {
     const server = await serve.start(world)
-    const hook = event => run(world, ['--codex-event', '--home', world.home, '--progress-file', world.path], { input: JSON.stringify({ session_id: session, hook_event_name: event, turn_id: 'next-turn' }) })
+    const hook = event => run(world, ['--codex-event', '--home', world.home, '--progress-file', world.path], { input: JSON.stringify({ session_id: session, hook_event_name: event, turn_id: 'next-turn', transcript_path: transcript }) })
     await hookOrDeferred(() => hook('SessionStart'), async () => (await server.get('/api/board')).json().messaging.mailboxes.length > 0)
     let snapshot = (await server.get('/api/board')).json()
     assert.equal(snapshot.messaging.connections.length, 0)

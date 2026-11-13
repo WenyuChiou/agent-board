@@ -117,7 +117,9 @@ const isolatedEnv = (home, pathValue) => {
     OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
   }
   for (const key of Object.keys(env)) {
-    if (key.toLowerCase() === 'path') delete env[key]
+    // The Codex app and editor set the client variable for the Codex they start, so tests run
+    // from inside one would read every hook as that client, not the terminal.
+    if (key.toLowerCase() === 'path' || key.toUpperCase() === 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE') delete env[key]
   }
   env[pathKey] = cleanPath
   return env
@@ -739,11 +741,11 @@ const mailboxFixture = async fn => fixture(async f => {
   f.save(progress, '')
   const env = { ...f.env, XDG_RUNTIME_DIR: join(f.home, 'runtime') }
   const directory = defaultMessagesDirectory(progress, f.home, env, process.platform)
-  const call = (agent, event, extra = {}, flags = []) => spawnSync(process.execPath, [script,
+  const call = (agent, event, extra = {}, flags = [], extraEnv = {}) => spawnSync(process.execPath, [script,
     '--home', f.home, '--data-dir', f.root, '--progress-file', progress, '--agent', agent,
     ...(['codex', 'cursor'].includes(agent) ? ['--codex-event'] : ['--agent-status', '--state', /SessionEnd|sessionEnd/.test(event) ? 'ended' : /SessionStart|Stop|AfterAgent/.test(event) ? 'waiting' : 'working']),
     ...(agent === 'antigravity' ? ['--event', event] : []), ...flags,
-  ], { cwd: f.home, env, input: JSON.stringify({ session_id: session, conversation_id: session, conversationId: session, hook_event_name: event, turn_id: 'mailbox-turn', generation_id: 'mailbox-turn', ...extra }), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  ], { cwd: f.home, env: { ...env, ...extraEnv }, input: JSON.stringify({ session_id: session, conversation_id: session, conversationId: session, hook_event_name: event, turn_id: 'mailbox-turn', generation_id: 'mailbox-turn', ...extra }), encoding: 'utf8', windowsHide: true, timeout: 15000 })
   const seed = (agent = 'codex') => {
     const now = Date.now()
     const state = enrollMailbox({ messages: [] }, agent, session, 'CLI', now, 43_200_000)
@@ -807,22 +809,31 @@ test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, G
   }
 }))
 
-test('a Codex hook mailbox is the CLI only when its history file names the terminal, so the app and the editor get no Queue (#826)', async () => mailboxFixture(async f => {
+test('a Codex hook mailbox is the CLI only when its history file names the terminal and no other client runs it now, so the app, the editor and a resumed session get no Queue (#826)', async () => mailboxFixture(async f => {
   const { sendDecision } = await importTs('../hooks/messaging.ts')
   const { RECEIVER_ROUTES } = await importTs('../hooks/receiver-routes.ts')
   const history = join(f.home, 'codex-history')
   mkdirSync(history, { recursive: true })
   const file = join(history, `rollout-2026-11-12T00-00-00-${session}.jsonl`)
   const mailboxOf = () => f.state().mailboxes?.find(one => one.agent === 'codex' && one.session === session)
-  for (const [originator, surface] of [['codex-tui', 'CLI'], ['Codex Desktop', 'unknown'], ['codex_vscode', 'unknown'], [null, 'unknown']]) {
+  // The client running now is the variable the desktop app and the editor extension set when they
+  // start Codex; the terminal leaves it unset. A resumed session keeps the file of the client that
+  // started it, so the terminal → app and app → terminal resumes are both here.
+  const cases = [
+    ['codex-tui', undefined, 'CLI'], ['codex-tui', 'codex-tui', 'CLI'], ['Codex Desktop', undefined, 'unknown'], ['codex_vscode', undefined, 'unknown'], [null, undefined, 'unknown'],
+    ['codex-tui', 'Codex Desktop', 'unknown'], ['codex-tui', 'codex_vscode', 'unknown'], ['codex-tui', '', 'unknown'],
+  ]
+  for (const [originator, client, surface] of cases) {
+    const label = `${originator} in ${client}`
     f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, messages: [] }))
     if (originator !== null) writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { id: session, originator, source: 'vscode' } }) + '\n')
-    await hookOrDeferred(() => f.call('codex', 'UserPromptSubmit', originator === null ? {} : { transcript_path: file }), () => mailboxOf() !== undefined)
+    const env = client === undefined ? {} : { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: client }
+    await hookOrDeferred(() => f.call('codex', 'UserPromptSubmit', originator === null ? {} : { transcript_path: file }, [], env), () => mailboxOf() !== undefined)
     const box = mailboxOf()
-    assert.equal(box?.surface, surface, String(originator))
+    assert.equal(box?.surface, surface, label)
     const decision = sendDecision(box.id, [], f.state().mailboxes, () => 'idle', RECEIVER_ROUTES, Date.now())
-    assert.equal(decision.canSend, surface === 'CLI', String(originator))
-    if (!decision.canSend) assert.equal(decision.reason, 'SURFACE_UNKNOWN', String(originator))
+    assert.equal(decision.canSend, surface === 'CLI', label)
+    if (!decision.canSend) assert.equal(decision.reason, 'SURFACE_UNKNOWN', label)
   }
 }))
 
