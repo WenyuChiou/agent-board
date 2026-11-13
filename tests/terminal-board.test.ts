@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { confirmTask, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { boardAgents, boardItems, boardKey, boardLayout, boardScreen, boardText, chatText, displayColumns, emptyBoardState, fingerprint, frame, nearest256, peekInbox, pinned, routesOf, terminalLook } from '../hooks/board'
 import type { AnswerRoute } from '../hooks/board'

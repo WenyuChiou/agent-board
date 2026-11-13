@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { agentHooks, COLLISION, DELETE, openclawPlugin, opencodePlugin } from '../hooks/connect'
 import { hookTimeout, hostHookTimeout } from '../hooks/hook-safety'
 import { answerAgentPrompt, blockId, inboxOrder, normalizeTurnOrder, readTurn, restoreAgentBoardQuestion, turnOrder, turnsToDigest, withAgentPrompts } from '../hooks/inbox'

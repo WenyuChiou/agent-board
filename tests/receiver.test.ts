@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 
 import type { ReceiverState } from '../types'
 import { ackLine, addressFileName, addressFolder, addressKey, createReceiver, emptyReceiver, parseAddress } from '../hooks/receiver'

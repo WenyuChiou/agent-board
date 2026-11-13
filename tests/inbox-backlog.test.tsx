@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { blockId, CLAIM_MS, MAX_TRIES, readClaim, RETAKE_PER_LOOK, RETAKE_TRY, retakenFailedName, takenName, withAgentPrompts } from '../hooks/inbox'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'

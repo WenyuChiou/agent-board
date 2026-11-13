@@ -1,5 +1,5 @@
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import type { Engine } from 'claude-code/testing'
 import { oldMonthFiles } from '../hooks/old-months'
 import { engineBeneath, FILE, makeWorld } from './fixtures/pane-world'

@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 
 import { boardItems, boardScreen, boardText, chatText, emptyBoardState } from '../hooks/board'
 import { extractAutoBlock, removeAutoBlock, renderAutoBlock, takeTask, upsertAutoBlock } from '../hooks/blocks'

@@ -1,4 +1,4 @@
-import { test, expect } from 'claude-code/testing'
+import { test, expect } from './kit'
 import { clipLine, LABEL_ROOM, LINE_ROOM } from '../hooks/clip'
 import { parseProgress } from '../hooks/parse'
 import { serveModel } from '../hooks/serve'

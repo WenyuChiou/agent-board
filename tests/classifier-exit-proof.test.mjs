@@ -5,7 +5,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { inspect } from 'node:util'
 import { reporterPs1 } from '../hooks/hook-reporters.ts'
-import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { assertClassifierExited, classifierExitState, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
 
 test('classifier exit proof refuses missing, unstarted, live and malformed observations without exposing their contents', () => {
   const dir = mkdtempSync(join(tmpdir(), 'classifier-exit-proof-'))
@@ -26,6 +26,29 @@ test('classifier exit proof refuses missing, unstarted, live and malformed obser
     refuses()
     writeFileSync(file, '\uFEFF{"started":true,"exited":true}')
     assertClassifierExited(file)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('classifier exit proof names whether the classifier exited, kept running or never started, so only a never-started run is tried again', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'classifier-exit-state-'))
+  const file = join(dir, 'proof.json')
+  try {
+    assert.equal(classifierExitState(file), 'never-started')
+    const cases = [
+      [{ started: true, exited: true }, 'exited'],
+      [{ started: true, exited: false }, 'running'],
+      [{ started: false, exited: false }, 'never-started'],
+      [{ started: false, exited: true }, 'unreadable'],
+      [{ started: true, exited: true, pid: 123456789 }, 'unreadable'],
+    ]
+    for (const [value, state] of cases) {
+      writeFileSync(file, JSON.stringify(value))
+      assert.equal(classifierExitState(file), state)
+    }
+    writeFileSync(file, 'PRIVATE_MALFORMED')
+    assert.equal(classifierExitState(file), 'unreadable')
+    writeFileSync(file, JSON.stringify({ started: true, exited: false }))
+    assert.throws(() => assertClassifierExited(file), error => /seen: running/.test(error.message) && !/PRIVATE_|123456789/.test(inspect(error)))
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 

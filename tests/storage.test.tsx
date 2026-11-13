@@ -1,5 +1,5 @@
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import type { Engine } from 'claude-code/testing'
 import type { ProgressMirror } from '../types'
 import { completionPrefix, emptyMirror } from '../hooks/mirror'

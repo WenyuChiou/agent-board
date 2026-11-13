@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 
 import { splitLines } from '../hooks/lines'
 import { currentStepIndex, isCutMarker, isHereProject, parseProgress, progressTail, readable } from '../hooks/parse'

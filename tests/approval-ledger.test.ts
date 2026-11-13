@@ -1,4 +1,4 @@
-import { test, expect } from 'claude-code/testing'
+import { test, expect } from './kit'
 import { renderAutoBlock } from '../hooks/blocks'
 import { boardConfirmedReport, codexEvent, codexReport, putCodexBlock, questionSteps, validateCodexReport } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'

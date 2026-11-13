@@ -1,4 +1,4 @@
-import { test, expect } from 'claude-code/testing'
+import { test, expect } from './kit'
 import { ageQuestions, questionAge, QUESTION_DAY } from '../hooks/question-aging'
 import { archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionsJson, withCaptures } from '../hooks/questions'
 import { parseProgress } from '../hooks/parse'

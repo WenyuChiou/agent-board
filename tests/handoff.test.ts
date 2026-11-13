@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { renderAutoBlock } from '../hooks/blocks'
 import { boardText } from '../hooks/board'
 import { applyDigest, parseDigest } from '../hooks/digest'

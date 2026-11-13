@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import type { ProgressMirror } from '../types'
 import { addManualTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, mergeBlock, removeAutoBlock, scanBlocks, takeArchivable, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { boardScreen, boardText, chatText, mutedLine } from '../hooks/board'

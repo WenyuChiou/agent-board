@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { copiesToKeep, identitiesToRetire, parseQuestions, questionProofJson, questionProofPath, questionScope, questionsJson, questionsPath, withCaptures } from '../hooks/questions'
 import type { QuestionCapture, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'

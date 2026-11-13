@@ -1,4 +1,4 @@
-import { test, expect } from 'claude-code/testing'
+import { test, expect } from './kit'
 import { emptyQuestions, observeQuestions, questionWords, resolveQuestion, withCaptures } from '../hooks/questions'
 import type { QuestionLedger } from '../hooks/questions'
 import { parseProgress } from '../hooks/parse'

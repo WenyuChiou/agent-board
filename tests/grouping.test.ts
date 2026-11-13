@@ -1,4 +1,4 @@
-import { test, expect } from 'claude-code/testing'
+import { test, expect } from './kit'
 import { groupBoard } from '../hooks/grouping'
 import type { Grouping, GroupingAsk, GroupingDone, GroupingInput, GroupingRetained, GroupingRow, GroupingTurn } from '../hooks/grouping'
 import type { ServeModel } from '../hooks/serve'

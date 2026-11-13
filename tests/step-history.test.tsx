@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { setManualStep } from '../hooks/blocks'
 import { historyDaysOf, historyLineOf, sweepHistory } from '../hooks/history'
 import { ZH_TW } from '../hooks/i18n'

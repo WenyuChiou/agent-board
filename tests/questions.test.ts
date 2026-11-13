@@ -1,4 +1,4 @@
-import { test, expect } from 'claude-code/testing'
+import { test, expect } from './kit'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, copiesToKeep, emptyQuestions, isAskedBy, isContinuationTurn, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionWords, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'

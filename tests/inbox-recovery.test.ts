@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { claimAction, CLAIM_MS, inboxOrder, isInboxFile, isQuestionHold, isQuestionStale, MAX_TRIES, normalizeTurnOrder, QUESTION_HOLD, QUESTION_KEEP_MS, readClaim, readTurn, RETAKE_TRY, retakenFailedName, setAsideOf, takenName, turnOrder } from '../hooks/inbox'
 import { EN } from '../hooks/strings-en'
 import { ZH_TW } from '../hooks/i18n'

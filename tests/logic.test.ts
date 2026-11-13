@@ -1,5 +1,5 @@
 import { emptyQuestions, observeQuestions } from '../hooks/questions'
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { countedText } from './fixtures/counted-work'
 
 import type { ProgressMirror } from '../types'

@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { OTHERS_CAP, othersNote, sessionPushNote } from '../hooks/others'
 import { parseProgress } from '../hooks/parse'
 import { STRINGS } from '../hooks/strings'

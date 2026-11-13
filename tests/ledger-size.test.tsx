@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { parseProgress } from '../hooks/parse'
 import { parseQuestions, questionsPath } from '../hooks/questions'
 import { EN } from '../hooks/strings-en'

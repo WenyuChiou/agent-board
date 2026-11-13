@@ -1,5 +1,5 @@
 import type { On, PromptOrigin, RenderPropsOf } from 'claude-code'
-import { expect, mock, test as pluginTest } from 'claude-code/testing'
+import { expect, mock, test as pluginTest } from './kit'
 import type { Engine, MockClock } from 'claude-code/testing'
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
 import { agentHooks, boardScript, isNodeSupported, isSetupState, NODE_MIN, openclawPlugin, RELEASE_PATHS } from '../hooks/connect'

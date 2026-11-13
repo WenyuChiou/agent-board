@@ -18,7 +18,7 @@ import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-d
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
-import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { assertClassifierExited, classifierExitState, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
 import { partTest } from '../scripts/ci-impact.mjs'
 
 // The Windows board job runs this file in two parts, and each part runs its share of the tests: the
@@ -4112,7 +4112,9 @@ test('a reporter sweeps scratch files older than a minute from the inbox and kee
   const held = join(inbox, 'codex-prompt-1-3.tmp')
   f.save(held, 'held'); utimesSync(held, old, old)
   f.save(script, isWindows ? reporterPs1() : reporterSh(inbox))
-  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'prompt'] : [script, 'codex', 'prompt']
+  // A turn event, not a prompt: a prompt starts the classifier first, and when a stalled runner spends the reporter's
+  // 2 s on it, REPORTER_TIMEOUT ends the run before the sweep. The sweep is the same code for every event.
+  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'turn'] : [script, 'codex', 'turn']
   const lock = isWindows ? openSync(held, 0x10000000) : undefined
   let out
   try {
@@ -4123,7 +4125,7 @@ test('a reporter sweeps scratch files older than a minute from the inbox and kee
   assert.equal(out.error, undefined, hookFailure(out))
   assert.equal(out.status, 0, hookFailure(out))
   const files = readdirSync(inbox)
-  for (const name of names) assert.equal(files.includes(name), false, name)
+  for (const name of names) assert.equal(files.includes(name), false, `${name}: ${hookLog(f)}`)
   assert.equal(files.includes('codex-prompt-1-2.tmp'), true)
   assert.equal(files.includes('notes.txt'), true)
   assert.equal(files.filter(name => name.endsWith('.json')).length, 1)
@@ -4255,14 +4257,21 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
     const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
     const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
     const session = `synthetic-timeout-${index}`
-    rmSync(pidFile, { force: true })
-    rmSync(exitProof, { force: true })
-    rmSync(join(f.root, 'hook-errors.log'), { force: true })
     let isGone = false
     try {
-      const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env,
-        JSON.stringify({ ...(key === null ? {} : { [key]: session }), ...payload }),
-        callback => setTimeout(callback, 30000))
+      // On Windows a stalled runner can spend the reporter's whole 2 s before the classifier is started at all. That run
+      // tests no process, so it runs once more; a second run that never starts the classifier fails below as never-started.
+      let out
+      for (let attempt = 1; ; attempt++) {
+        if (attempt > 1) for (const name of existsSync(inbox) ? readdirSync(inbox) : []) rmSync(join(inbox, name), { force: true })
+        rmSync(pidFile, { force: true })
+        rmSync(exitProof, { force: true })
+        rmSync(join(f.root, 'hook-errors.log'), { force: true })
+        out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env,
+          JSON.stringify({ ...(key === null ? {} : { [key]: session }), ...payload }),
+          callback => setTimeout(callback, 30000))
+        if (!isWindows || attempt === 2 || classifierExitState(exitProof) !== 'never-started') break
+      }
       assert.equal(out.error, undefined, hookFailure(out))
       assert.equal(out.status, 0, hookFailure(out))
       assert.equal(out.stdout.trim(), '{}')

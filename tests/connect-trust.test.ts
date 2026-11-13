@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { agentHooks, withGroupedHook } from '../hooks/connect'
 
 test('reconnecting Codex preserves each owned group position and foreign hook groups', () => {

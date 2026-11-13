@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, test } from './kit'
 import { applyDigest } from '../hooks/digest'
 import { blockId } from '../hooks/inbox'
 import { emptyMirror } from '../hooks/mirror'

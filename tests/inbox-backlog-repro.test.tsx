@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import { blockId, claimAction, CLAIM_MS, failedName, MAX_TRIES, readClaim, takenName } from '../hooks/inbox'
 import { engineBeneath, makeWorld, FILE, INBOX } from './fixtures/pane-world'
 import type { ProgressMirror } from '../types'

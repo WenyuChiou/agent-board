@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, test } from './kit'
 import type { ProgressMirror } from '../types'
 import { emptyMirror } from '../hooks/mirror'
 import { keepRecent, liveToldKeys, remindersOf, toldKey } from '../hooks/remind'

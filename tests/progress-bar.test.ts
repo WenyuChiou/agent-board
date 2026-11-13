@@ -1,4 +1,4 @@
-import { test, expect } from 'claude-code/testing'
+import { test, expect } from './kit'
 import type { ProgressStepStatus } from '../types'
 import { barPieces, barRole, barShape, barStyleOf, BAR_STYLES, cellCode, cellsOf, cellsOfCode, nextBarStyle, plainBar, withBarStyle } from '../hooks/progress-bar'
 import type { BarStyle, Cell } from '../hooks/progress-bar'
