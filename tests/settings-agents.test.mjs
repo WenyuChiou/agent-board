@@ -527,6 +527,8 @@ test('Settings removes an earlier Gemini CLI install while Cursor stays, leaving
   for (const name of Object.keys(cursorOnly).filter(name => name.split(/[\\/]/)[0] === '.cursor')) {
     assert.equal(afterPage[name], cursorOnly[name], `${name} is Cursor's and stays the same`)
   }
+  // The same removal code serves the page and --codex-remove, so matching files alone would not show Gemini's are gone.
+  assert.deepEqual(geminiAdded.filter(name => name in afterPage), [], 'every file the Gemini install wrote is removed')
   // Twin homes use identical logical paths, so absolute commands and ownership hashes compare exactly.
   renameSync(f.home, join(f.root, 'page-home'))
   cpSync(baseline, f.home, { recursive: true })
