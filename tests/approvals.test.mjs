@@ -259,6 +259,92 @@ test('the hook reads <XDG_RUNTIME_DIR>\\agent-board on Windows only when its ACL
   }
 })
 
+test('address discovery shares one budget before asking the board and skips asking when exhausted (#1436 review)', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    let tick = 0
+    const exhausted = await hook.run(place.env, process.platform, {
+      input: request('npm run synthetic-discovery-exhausted'),
+      discoveryMs: 0,
+      now: () => tick,
+    })
+    assert.equal(exhausted, null)
+    assert.deepEqual(stand.seen, [], 'an exhausted discovery budget never asks the board')
+
+    const valid = await hook.run(place.env, process.platform, {
+      input: request('npm run synthetic-discovery-ok'),
+      now: () => tick,
+    })
+    assert.deepEqual(valid, ALLOW)
+    assert.equal(stand.seen.length, 1)
+
+    if (isWindows) {
+      const root = mkdtempSync(join(tmpdir(), 'approvals-win-budget-'))
+      try {
+        const home = join(root, 'home')
+        const own = join(root, 'own')
+        const progress = join(home, '.claude', 'progress.md')
+        mkdirSync(join(home, '.claude'), { recursive: true })
+        writeFileSync(progress, '# Progress\n')
+        const runtimeFolder = privateRuntimeFolder(join(own, 'agent-board'))
+        const file = join(runtimeFolder, receiverFileName(receiverKey(progress)))
+        writePrivateRuntimeFile(file, JSON.stringify({ pid: process.pid, port: Number(new URL(stand.url).port), url: stand.url, path: progress, built: '' }))
+        const env = {
+          ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(CLAUDE_|XDG_RUNTIME_DIR$|HOME$|USERPROFILE$)/.test(name))),
+          CLAUDE_PROGRESS_FILE: progress,
+          HOME: home,
+          USERPROFILE: home,
+          XDG_RUNTIME_DIR: own,
+        }
+        const sid = 'S-1-5-21-1000-2000-3000-1001'
+        const sddls = [`O:${sid}G:${sid}D:P(A;OICI;FA;;;${sid})`, `O:${sid}G:${sid}D:AI(A;ID;FA;;;${sid})`]
+        const seenTimeouts = []
+
+        // First probe takes 4 s, leaving 6 s (not a full 10 s or 30 s) for PowerShell; total 7 s < 10 s proceeds.
+        tick = 0
+        const withinBudget = await hook.run(env, 'win32', {
+          input: request('npm run synthetic-win-within-budget'),
+          now: () => tick,
+          probeAccount: timeout => { seenTimeouts.push(['account', timeout]); tick += 4_000; return { sid, aliases: {} } },
+          probeAcls: (_files, timeout) => { seenTimeouts.push(['acls', timeout]); tick += 3_000; return sddls },
+        })
+        assert.deepEqual(seenTimeouts, [['account', hook.DISCOVERY_MS], ['acls', hook.DISCOVERY_MS - 4_000]])
+        assert.deepEqual(withinBudget, ALLOW)
+        assert.equal(stand.seen.length, 2)
+
+        // Combined 4 s + 6 s consumes the 10 s discovery budget -> even with valid SDDL, the board is not asked.
+        tick = 0
+        const spentBudget = await hook.run(env, 'win32', {
+          input: request('npm run synthetic-win-spent-budget'),
+          now: () => tick,
+          probeAccount: () => { tick += 4_000; return { sid, aliases: {} } },
+          probeAcls: () => { tick += hook.DISCOVERY_MS - 4_000; return sddls },
+        })
+        assert.equal(spentBudget, null)
+        assert.equal(stand.seen.length, 2)
+
+        // First probe alone uses the entire budget -> PowerShell is never started.
+        let aclCalls = 0
+        tick = 0
+        const firstExhausts = await hook.run(env, 'win32', {
+          input: request('npm run synthetic-win-first-exhausts'),
+          now: () => tick,
+          probeAccount: () => { tick += hook.DISCOVERY_MS; return { sid, aliases: {} } },
+          probeAcls: () => { aclCalls++; return sddls },
+        })
+        assert.equal(firstExhausts, null)
+        assert.equal(aclCalls, 0)
+        assert.equal(stand.seen.length, 2)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  } finally {
+    await stand.close()
+  }
+})
+
 test('the hook only ever answers allow, or deny with a message, and never adds a standing rule', () => {
   assert.deepEqual(hook.decisionOutput({ behavior: 'allow', updatedPermissions: [{ type: 'setMode', mode: 'bypassPermissions' }] }), { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } })
   assert.deepEqual(hook.decisionOutput({ behavior: 'deny', message: 'Synthetic reason', interrupt: true }), { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: 'Synthetic reason' } } })
