@@ -12182,7 +12182,7 @@ export const LINES = [
 "var browserProfile = () => {",
 "  try {",
 "    const runtime = process.env.XDG_RUNTIME_DIR;",
-"    const dir = join22(runtime ? join22(runtime, \"agent-board\") : join22(homedir5(), \".cache\", \"agent-board\"), \"browser\");",
+"    const dir = join22(runtime ? join22(runtime, \"agent-board\") : join22(homedir6(), \".cache\", \"agent-board\"), \"browser\");",
 "    privateFolder(dir);",
 "    return dir;",
 "  } catch {",
