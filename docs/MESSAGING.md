@@ -162,7 +162,7 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 
 | State | Evidence |
 | --- | --- |
-| queued | Stored locally; no external delivery yet, except a message handed back after a later receipt made an accepted one uncertain (#1407) |
+| queued | Stored locally and not handed out since. A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain (#1407) |
 | uncertain | Claimed durably before delivery, a disconnect/timeout after claiming (unless accepted), or an accepted message a later receipt reports uncertain (#1407) |
 | accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is not sent again while it stays accepted |
 | acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
