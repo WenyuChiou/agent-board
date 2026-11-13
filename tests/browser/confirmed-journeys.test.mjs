@@ -220,6 +220,25 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
     })
   })
 
+  test("an agent's fold the person opened stays open when the agent renames its task", { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('fold-follows-session', async ({ page, progress, startServer }) => {
+      const report = title => block('f01dcafe', 'muse', 'working', 'Synthetic agent folds', title, ['- [x] Synthetic agent finished one', '- [x] Synthetic agent finished two', '- [~] Synthetic agent current'])
+      writeProgress(progress, report('Agent fold before rename'))
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      const before = await board.openTask('Agent fold before rename')
+      await before.getByText('2 steps done', { exact: true }).click()
+      const openFolds = row => row.evaluate(node => [...node.querySelectorAll('details')].filter(fold => fold.open).length)
+      assert.equal(await openFolds(before), 1)
+      // The same session renames its task: the row key follows the title, so the row is drawn as a new one.
+      writeProgress(progress, report('Agent fold after rename'))
+      await board.task('Agent fold after rename').waitFor()
+      const after = board.task('Agent fold after rename')
+      if (!(await after.getByText('Synthetic agent current').first().isVisible())) await after.locator('.row-btn').first().click()
+      assert.equal(await openFolds(after), 1)
+    })
+  })
+
   test('setup is idempotent and a reported Muse question remains recoverable across reloads', { concurrency: false, timeout: 120_000 }, async () => {
     await browserFixture('report-hide-restore', async ({ page, progress, root, startServer }) => {
       const board = new BoardPage(page)

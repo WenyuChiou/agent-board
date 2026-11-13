@@ -17,6 +17,7 @@ import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from '
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
 import { deliveryTargets } from './hook-messages'
+import { sha256 } from './sha256'
 import { address, isMailboxTarget, isOpen, sendDecision } from './messaging'
 import { RECEIVER_ROUTES } from './receiver-routes'
 
@@ -224,6 +225,9 @@ export type ServeRow = {
   at?: number
   dir?: string | null
   sessionId?: string
+  // What an agent's row is across redraws, for the page's fold state: a hash of its agent and session, so it stays on the
+  // network page, where the session id itself is removed, and says nothing that could be used to reach the session.
+  foldKey?: string
   stuck?: { reason: string }
   delivery?: Delivery
   receipt?: Receipt
@@ -609,6 +613,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s)),
+        ...(row.nativeSession === undefined ? {} : { foldKey: sha256(`fold:${row.agent || 'claude'}:${row.nativeSession}`).slice(0, 16) }),
         key: item.key,
         project: row.project,
         title: row.title,
@@ -1922,8 +1927,9 @@ const PAGE_SCRIPT = String.raw`
   }
   // A task's fold state is kept under what the task is, not under its row key: a second task with the same title is
   // keyed #2 until the first goes, and then it would take over the first one's open fold. A session's block is its
-  // agent and session; a hand-kept task is its project, title and first step, and twins that read alike take the
-  // order of their row keys. draw() fills pg.foldIds and drops the state of tasks that are gone.
+  // foldKey (a hash of its agent and session, sent on the network page too), so a renamed task keeps its folds; a
+  // hand-kept task is its project, title and first step, and twins that read alike take the order of their row keys.
+  // draw() fills pg.foldIds and drops the state of tasks that are gone.
   function foldId(key) { return pg.foldIds[key] || key; }
   function foldIdsOf(sources) {
     var seen = {};
@@ -1931,7 +1937,7 @@ const PAGE_SCRIPT = String.raw`
     Object.keys(sources).sort().forEach(function (key) {
       var row = sources[key];
       if (!row || !Array.isArray(row.steps)) return;
-      var base = row.nativeSession ? (row.agent || 'claude') + ':' + row.nativeSession : row.project + '::' + row.title + '::' + (row.steps.length ? row.steps[0].text : '');
+      var base = row.foldKey ? 'session:' + row.foldKey : row.project + '::' + row.title + '::' + (row.steps.length ? row.steps[0].text : '');
       seen[base] = (seen[base] || 0) + 1;
       ids[key] = seen[base] === 1 ? base : base + '#' + seen[base];
     });

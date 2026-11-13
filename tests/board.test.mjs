@@ -12973,6 +12973,10 @@ test('the page of a grouped board draws each question once, copies an answer and
     assert.ok(lanModel.asks.every(ask => ask.reopen === null))
     assert.ok(rowsOf(lanModel).every(row => row.resume === null))
     assert.ok(rowsOf(lanModel).every(row => !('sessionId' in row)))
+    // The fold key stays on the phone page as a short hash only, never the session id it is made from (#1412).
+    const sessions = rowsOf(homeModel).flatMap(row => row.sessionId ? [row.sessionId] : [])
+    assert.ok(rowsOf(lanModel).some(row => 'foldKey' in row))
+    assert.ok(rowsOf(lanModel).every(row => row.foldKey === undefined || /^[0-9a-f]{16}$/.test(row.foldKey) && !sessions.some(one => one.includes(row.foldKey) || row.foldKey.includes(one))))
     const lanDom = await pageDom(runtime.servePage(EN, 'synthetic', true), lanModel)
     assert.ok(!lanDom.node('board').textContent.includes('Copy resume command'))
     assert.ok(lanDom.node('agent-note').textContent.includes("Codex's progress file could not be read"))
