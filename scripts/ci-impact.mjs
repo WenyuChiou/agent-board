@@ -14,7 +14,7 @@ const safePath = value => {
   if (typeof value !== 'string' || !value || /[\0\r\n\\:]/.test(value) || isAbsolute(value) || value.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('invalid repository path')
   return value
 }
-const groupForTest = path => {
+export const groupForTest = path => {
   if (path === 'tests/ci-impact.test.mjs') return null
   if (/^tests\/browser\/[^/]+\.test\.mjs$/.test(path)) return 'browser'
   if (/^tests\/e2e\/[^/]+\.test\.mjs$/.test(path)) return 'journeys'

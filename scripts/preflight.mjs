@@ -18,62 +18,13 @@ const splitPaths = text => text.split('\0').filter(Boolean)
 
 // A whole test file gets ten minutes here. tests/codex-local.test.mjs (441 tests) ran 449.9 s alone on CI's Ubuntu
 // runner (test.yml, #1130) and never finished in ten minutes on a Windows computer, where starting processes is
-// slower; tests/board.test.mjs is as large, and tests/messaging.test.mjs (192) also ran out of time there while other
-// work ran. A touched file that declares more tests than this is left to CI, which runs it whole. Picking only the
-// changed tests out of the source text missed deleted lines, helpers and titles built at run time (#1392 review), so
-// preflight does not guess: it says the file was not run, and the author runs the tests they changed by name.
-export const largeTestFile = 150
-// Only declarations at the start of a line count, and only outside strings, template literals, regular expressions
-// and comments, so a fixture that writes test files does not add its lines. A slash is read as a regular expression
-// after an operator or an opening bracket, and as a division after a name or a value; a miscount decides only
-// between running the file and saying it was not run.
-const testDeclaration = /^(?:test|it)(?:\.(?:skip|only|todo))?\s*\(/
-const beforeRegex = /[(,=:[!&|?{};+\-*%<>~^]/
-export const declaredTests = text => {
-  const stack = [{ mode: 'code', braces: 0 }]
-  let count = 0
-  let last = ''
-  for (let i = 0; i < text.length; i++) {
-    const top = stack.at(-1)
-    if ((i === 0 || text[i - 1] === '\n') && stack.length === 1 && testDeclaration.test(text.slice(i, i + 40))) count++
-    const c = text[i]
-    const next = text[i + 1]
-    // A line comment ends with its line; so does a quote or a regular expression left open by a misread.
-    if (top.mode === 'line' || (top.mode === 'quote' || top.mode === 'regex') && c === '\n') {
-      if (c === '\n') stack.pop()
-    } else if (top.mode === 'block') {
-      if (c === '*' && next === '/') { stack.pop(); i++ }
-    } else if (top.mode === 'quote') {
-      if (c === '\\') i++
-      else if (c === top.quote) { stack.pop(); last = 'x' }
-    } else if (top.mode === 'regex') {
-      if (c === '\\') i++
-      else if (c === '[') top.inClass = true
-      else if (c === ']') top.inClass = false
-      else if (c === '/' && !top.inClass) { stack.pop(); last = 'x' }
-    } else if (top.mode === 'template') {
-      if (c === '\\') i++
-      else if (c === '`') { stack.pop(); last = 'x' }
-      else if (c === '$' && next === '{') { stack.push({ mode: 'code', braces: 0 }); last = '{'; i++ }
-    } else if (c === '/' && next === '/') { stack.push({ mode: 'line' }); i++ }
-    else if (c === '/' && next === '*') { stack.push({ mode: 'block' }); i++ }
-    else if (c === '/' && (last === '' || beforeRegex.test(last))) stack.push({ mode: 'regex', inClass: false })
-    else if (c === "'" || c === '"') stack.push({ mode: 'quote', quote: c })
-    else if (c === '`') stack.push({ mode: 'template' })
-    else {
-      if (c === '{') top.braces++
-      else if (c === '}') {
-        if (top.braces > 0) top.braces--
-        else if (stack.length > 1) { stack.pop(); continue }
-      }
-      if (!/\s/.test(c)) last = c
-    }
-  }
-  return count
-}
-// The test files CI runs: tests/*.test.mjs, tests/e2e/*.test.mjs and tests/browser/*.test.mjs (listTests and
-// groupForTest in scripts/ci-impact.mjs). A large file anywhere else is run here whole, as before, since CI would not.
-const isRunByCi = path => /^tests\/(?:e2e\/|browser\/)?[^/]+\.test\.mjs$/.test(path)
+// slower; tests/board.test.mjs is as large, and tests/messaging.test.mjs (191) also ran out of time there while other
+// work ran. These files are named here and left to CI, which runs them whole: the files CI already runs in parts
+// (selfPartedTests in scripts/ci-impact.mjs; a test keeps the two lists in step, since importing ci-impact.mjs here
+// would load hooks/messaging.ts), and messaging. A file joins the list only in a reviewed change, so preflight does
+// not guess which files are too long or which tests a change reaches (#1392 review): it says the file was not run,
+// and the author runs the tests they changed by name.
+export const leftToCi = new Set(['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs'])
 
 // Without a recorded or readable identity, a live PID cannot safely be identified as a replacement.
 export const isLiveMarker = ({ isAlive, recordedIdentity, identity = null }) =>
@@ -851,9 +802,8 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     if (owner?.path) {
       try {
         for (const path of paths) {
-          const declared = declaredTests(read(join(cwd, path)))
-          if (declared > largeTestFile && isRunByCi(path)) {
-            add('WARN', `${path}: not run here, since its ${declared} tests can take longer than preflight's ten minutes; CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" ${path}) and list them under Evidence.`)
+          if (leftToCi.has(path)) {
+            add('WARN', `${path}: not run here; it is on preflight's list of files too long for its ten-minute limit (leftToCi in scripts/preflight.mjs), and CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" ${path}) and list them under Evidence.`)
             continue
           }
           const temp = mkdtempSync(join(tmpdir(), 'agent-board-preflight-'))
@@ -871,7 +821,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
             const isPassed = !tested.error && tested.status === 0 && count === '0'
             const failedNames = isPassed ? [] : failedTapNames(output)
             const failedDetail = failedNames.length ? `; failed: ${failedNames.join('; ')}` : ''
-            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
+            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}${tested.error?.code === 'ETIMEDOUT' ? '; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change' : ''}.`)
           } finally {
             rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
           }

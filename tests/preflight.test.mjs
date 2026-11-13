@@ -9,7 +9,7 @@ import os from 'node:os'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
+import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, leftToCi, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
 
 const script = fileURLToPath(new URL('../scripts/preflight.mjs', import.meta.url))
 const syntheticIdentity = ticks => `linux:00000000-0000-4000-8000-000000000001:${ticks}:time:[1]:pid:[2]`
@@ -1870,55 +1870,62 @@ test('preflight runs a touched nested e2e test', async t => {
 })
 
 const syntheticTests = count => `import test from 'node:test'\nimport assert from 'node:assert/strict'\n${Array.from({ length: count }, (_, i) => `test('synthetic case ${i}', () => {})\n`).join('')}`
-const sizedFixture = (t, text, path = 'tests/sized.test.mjs') => {
+const touchCase = text => text.replace("test('synthetic case 3', () => {})", "test('synthetic case 3', () => { assert.equal(1, 1) })")
+const sizedFixture = (t, files, runTest) => {
   const f = fixture(t)
-  f.write(path, text)
+  for (const [path, text] of Object.entries(files)) f.write(path, text)
   f.commit()
   f.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
   const runs = []
   const run = (program, args, options) => {
-    if (args.includes('--test')) runs.push(args)
-    return f.run(program, args, options)
+    if (!args.includes('--test')) return f.run(program, args, options)
+    runs.push(args)
+    return runTest ? runTest(program, args, options) : f.run(program, args, options)
   }
   return { ...f, runs, check: options => f.check({ run, ...options }) }
 }
 
-test('preflight leaves a touched test file of more than 150 tests to CI and says it was not run', async t => {
-  const f = sizedFixture(t, syntheticTests(151))
-  f.write('tests/sized.test.mjs', syntheticTests(151).replace("test('synthetic case 75', () => {})", "test('synthetic case 75', () => { assert.equal(1, 1) })"))
+test('preflight does not run a touched file on its left-to-CI list and says so', async t => {
+  const f = sizedFixture(t, { 'tests/board.test.mjs': syntheticTests(5) })
+  // The changed test fails, so a run here would show as a FAIL line.
+  f.write('tests/board.test.mjs', syntheticTests(5).replace("test('synthetic case 3', () => {})", "test('synthetic case 3', () => { assert.equal(1, 2) })"))
   const checks = await f.check()
-  assert.ok(has(checks, 'WARN', 'tests/sized.test.mjs: not run here, since its 151 tests can take longer than preflight\'s ten minutes; CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" tests/sized.test.mjs) and list them under Evidence.'), JSON.stringify(checks))
+  assert.ok(has(checks, 'WARN', 'tests/board.test.mjs: not run here; it is on preflight\'s list of files too long for its ten-minute limit (leftToCi in scripts/preflight.mjs), and CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" tests/board.test.mjs) and list them under Evidence.'), JSON.stringify(checks))
   assert.equal(f.runs.length, 0)
-  assert.equal(checks.some(item => item.state !== 'WARN' && item.message.startsWith('tests/sized.test.mjs')), false)
+  assert.equal(checks.some(item => item.state !== 'WARN' && item.message.startsWith('tests/board.test.mjs')), false)
 })
 
-test('preflight still runs a touched test file of 150 tests whole', async t => {
-  const f = sizedFixture(t, syntheticTests(150))
-  f.write('tests/sized.test.mjs', syntheticTests(150).replace("test('synthetic case 75', () => {})", "test('synthetic case 75', () => { assert.equal(1, 1) })"))
+test('preflight runs whole every touched test file not on the list, whatever its source holds', async t => {
+  // A file of 500 tests, and one named board.test.mjs in a folder the list does not name.
+  const paths = ['tests/sized.test.mjs', 'tests/e2e/deeper/board.test.mjs']
+  const f = sizedFixture(t, Object.fromEntries(paths.map(path => [path, syntheticTests(500)])))
+  for (const path of paths) f.write(path, touchCase(syntheticTests(500)))
   const checks = await f.check()
-  assert.ok(has(checks, 'PASS', 'tests/sized.test.mjs: 150 tests, 0 failed.'), JSON.stringify(checks))
-  assert.equal(f.runs.length, 1)
-  assert.equal(f.runs[0].includes('--test-name-pattern'), false)
+  for (const path of paths) assert.ok(has(checks, 'PASS', `${path}: 500 tests, 0 failed.`), JSON.stringify(checks))
+  assert.deepEqual(f.runs.map(args => args.at(-1)).sort(), [...paths].sort())
+  assert.equal(f.runs.some(args => args.includes('--test-name-pattern')), false)
 })
 
-test('preflight runs whole a touched test file whose fixture text holds more than 150 test lines', async t => {
-  // A template literal and a block comment hold test-like lines, after a regular expression with a backtick; one
-  // test is real.
-  const written = Array.from({ length: 151 }, (_, i) => `test('written case ${i}', () => {})\n`).join('')
-  const text = `import test from 'node:test'\nconst tick = /\`/\nconst written = \`\n${written}\`\n/*\ntest('commented', () => {})\n*/\ntest('the one real test', () => {})\n`
-  const f = sizedFixture(t, text)
-  f.write('tests/sized.test.mjs', text.replace("test('the one real test', () => {})", "test('the one real test', () => { tick.test('`') })"))
+test('an unlisted file that does not finish is a FAIL', async t => {
+  const f = sizedFixture(t, { 'tests/sized.test.mjs': syntheticTests(5) }, () => ({ error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: 'not ok 3 - x\n', stderr: '' }))
+  f.write('tests/sized.test.mjs', touchCase(syntheticTests(5)))
   const checks = await f.check()
-  assert.ok(has(checks, 'PASS', 'tests/sized.test.mjs: 1 tests, 0 failed.'), JSON.stringify(checks))
+  const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/sized.test.mjs'))
+  assert.ok(failed, JSON.stringify(checks))
+  assert.match(failed.message, /the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change\.$/)
   assert.equal(f.runs.length, 1)
 })
 
-test('preflight runs whole a touched large test file in a folder CI does not list', async t => {
-  const f = sizedFixture(t, syntheticTests(151), 'tests/e2e/deeper/sized.test.mjs')
-  f.write('tests/e2e/deeper/sized.test.mjs', syntheticTests(151).replace("test('synthetic case 75', () => {})", "test('synthetic case 75', () => { assert.equal(1, 1) })"))
-  const checks = await f.check()
-  assert.ok(has(checks, 'PASS', 'tests/e2e/deeper/sized.test.mjs: 151 tests, 0 failed.'), JSON.stringify(checks))
-  assert.equal(f.runs.length, 1)
+test('every left-to-CI file exists and CI runs it', async () => {
+  // Imported here only: ci-impact.mjs loads hooks/messaging.ts.
+  const { groupForTest, selfPartedTests } = await import('../scripts/ci-impact.mjs')
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  for (const path of leftToCi) {
+    assert.ok(existsSync(join(root, path)), path)
+    assert.ok(['board', 'messaging'].includes(groupForTest(path)), path)
+    assert.match(path, /^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/)
+  }
+  for (const path of selfPartedTests) assert.ok(leftToCi.has(path), path)
 })
 
 test('preflight removes parent credentials from the touched test environment', async t => {
