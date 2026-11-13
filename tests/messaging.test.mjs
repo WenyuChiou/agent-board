@@ -2464,7 +2464,7 @@ test('a store rename refused for another reason is not retried, and the receiver
 
 // A disposable loopback proxy faults only heartbeat responses. The real store still
 // decides whether a message was durably claimed before the response was lost.
-const pollingProxy = async (board, mode) => {
+const pollingProxy = async (board, mode, onClaim) => {
   const upstream = new URL(board.address)
   let faults = 0, polls = 0, registrations = 0
   const server = createServer(async (req, res) => {
@@ -2479,7 +2479,7 @@ const pollingProxy = async (board, mode) => {
         res.writeHead(code, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ error: 'SYNTHETIC_POLL_FAILURE' }))
       }
-      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim') {
+      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim' && mode !== 'pass') {
         if (mode === 'network' || mode === 'timeout') {
           faults += 1
           if (mode === 'network') req.socket.destroy()
@@ -2493,6 +2493,7 @@ const pollingProxy = async (board, mode) => {
       })
       const text = await answer.text()
       if (isPoll && faults === 0 && mode === 'after-claim' && JSON.parse(text).messages?.length) return fail(503)
+      if (isPoll && onClaim && JSON.parse(text).messages?.length) await onClaim()
       res.writeHead(answer.status, { 'content-type': 'application/json' })
       res.end(text)
     } catch { res.writeHead(502); res.end('{}') }
@@ -4166,9 +4167,10 @@ const codexThread = '11111111-2222-4333-8444-555555555555'
 // Most Codex tests share one board (a board start costs seconds, and CI has a time limit for this file): each gets its own
 // thread, so no two meet in the board's one-message-at-a-time rule for a session, and its own message ids.
 let codexCurrent = codexThread, codexSuffix = ''
-// The board sends only on a route a live note has shown, to a session whose state it knows (#1351). The real table has no
-// note for this receiver yet, so these tests hand the board a table that shows the Codex route live, and a Codex row in
-// progress.md for each thread they use. The CLI surface is for the tests' own stand-in holder of a session.
+// The board sends only on a route a live note has shown, to a session whose state it knows (#1351). The real table records
+// this receiver's idle route only, so these tests hand the board a table that shows the busy route live too (the receiver
+// itself still waits for idle), and a Codex row in progress.md for each thread they use. The CLI surface is for the tests'
+// own stand-in holder of a session.
 const codexRoutes = testUnitRoutes.map(one => one.agent === 'codex' && one.kind === 'live'
   ? { ...one, routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.codexDaemon, SURFACE_IDS.cli] }, working: { line: 'stepEnd', record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.codexDaemon, SURFACE_IDS.cli] }, ended: { line: 'none', record: null, surfaces: [] } } }
   : one)
@@ -4195,7 +4197,7 @@ const codexFixture = async fn => {
 const codexMock = new URL('./helpers/codex-daemon-mock.mjs', import.meta.url)
 const codexDaemon = (dir, config) => {
   const file = join(dir, 'mock.json'), log = join(dir, 'rpc.log')
-  writeFileSync(file, JSON.stringify({ log, loaded: [codexCurrent], status: 'idle', start: 'ack', steer: 'ack', turn: 'turn-busy', ...config }))
+  writeFileSync(file, JSON.stringify({ log, loaded: [codexCurrent], status: 'idle', start: 'ack', turn: 'turn-busy', ...config }))
   return { executable: fileURLToPath(codexMock), env: { ...process.env, CODEX_MOCK_CONFIG: file }, log, calls: () => (readFileSyncSafe(log) ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line)) }
 }
 const codexCase = (dir, i, config) => {
@@ -4268,6 +4270,8 @@ test('an idle Codex thread gets the message through turn/start, not the queue', 
     const calls = daemon.calls().filter(one => one.method)
     const starts = calls.filter(one => one.method === 'turn/start')
     assert.equal(starts.length, 1)
+    // The thread is read fresh right before the start (#1370).
+    assert.equal(calls[calls.indexOf(starts[0]) - 1].method, 'thread/read')
     assert.ok(!calls.some(one => /^thread\/queue|^turn\/steer/.test(one.method)))
     const text = starts[0].params.input[0].text
     // The claim nonce is the message id Codex records, and the header tells a thread that answered already what to do.
@@ -4301,28 +4305,6 @@ test('a busy Codex thread gets the message only after its running turn ends', as
   } finally { await receiver.close() }
 }))
 
-test('turn/steer is used only when the setting is on, with the expected turn id', () => codexFixture(async (board, dir) => {
-  for (const [i, isSteerOn] of [false, true].entries()) {
-    const { daemon, id } = codexCase(dir, i, { status: 'active' })
-    const receiver = codexReceiver(board, daemon, { isSteerOn })
-    try {
-      const connection = await codexConnection(board)
-      await codexSend(board, connection, id)
-      if (!isSteerOn) {
-        await pause(2500)
-        assert.equal((await codexMessage(board, id)).status, 'queued')
-        assert.equal(daemon.calls().filter(one => /^turn\//.test(one.method ?? '')).length, 0)
-        continue
-      }
-      await waitFor(async () => (await codexMessage(board, id))?.status === 'acknowledged')
-      const steers = daemon.calls().filter(one => one.method === 'turn/steer')
-      assert.equal(steers.length, 1)
-      assert.equal(steers[0].params.expectedTurnId, 'turn-busy')
-      assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 0)
-    } finally { await receiver.close() }
-  }
-}))
-
 test('a turn that ends without an explicit completed status is uncertain, never acknowledged', () => codexFixture(async (board, dir) => {
   const { daemon, id } = codexCase(dir, 0, { endStatus: 'none' })
   const receiver = codexReceiver(board, daemon)
@@ -4334,28 +4316,6 @@ test('a turn that ends without an explicit completed status is uncertain, never 
     await pause(1000)
     assert.equal(daemon.calls().filter(call => call.method === 'turn/start').length, 1)
   } finally { await receiver.close() }
-}))
-
-test('a running turn the daemon did not replay is looked up on attach, so steering has its turn id', () => codexFixture(async (board, dir) => {
-  for (const [i, listed] of [undefined, 'none'].entries()) {
-    const { daemon, id } = codexCase(dir, i, { status: 'active', replay: false, ...(listed ? { listed } : {}) })
-    const receiver = codexReceiver(board, daemon, { isSteerOn: true })
-    try {
-      const connection = await codexConnection(board)
-      await codexSend(board, connection, id)
-      if (listed === 'none') {
-        // No turn in progress is found: nothing is steered, the message waits.
-        await pause(2000)
-        assert.equal((await codexMessage(board, id)).status, 'queued')
-        assert.equal(daemon.calls().filter(one => /^turn\/(start|steer)$/.test(one.method ?? '')).length, 0)
-        continue
-      }
-      await waitFor(async () => (await codexMessage(board, id))?.status === 'acknowledged')
-      const steers = daemon.calls().filter(one => one.method === 'turn/steer')
-      assert.equal(steers.length, 1)
-      assert.equal(steers[0].params.expectedTurnId, 'turn-busy')
-    } finally { await receiver.close() }
-  }
 }))
 
 test('a thread that went idle in the same read as its resume answer is not left looking busy', () => codexFixture(async (board, dir) => {
@@ -4476,36 +4436,75 @@ test('a progress read that fails for a moment keeps the receiver and its queued 
   } finally { await receiver.close() }
 }))
 
-test('a slow thread/turns/list answer does not undo a turn that ended meanwhile', () => codexFixture(async (board, dir) => {
-  const endFlag = join(dir, 'end-turn')
-  const daemon = codexDaemon(dir, { status: 'active', replay: false, listDelay: 1200, endFlag })
-  const receiver = codexReceiver(board, daemon, { isSteerOn: true })
+test('a turn that starts between the poll and the delivery gives the claim back: the message waits and goes once, after that turn (#318)', () => codexFixture(async (board, dir) => {
+  const beginFlag = join(dir, 'begin-turn'), endFlag = join(dir, 'end-turn')
+  const daemon = codexDaemon(dir, { beginFlag, endFlag })
+  let claims = 0
+  // The first poll that hands the message out is held until the person's own turn has started and the receiver heard it.
+  const proxy = await pollingProxy(board, 'pass', async () => {
+    if (++claims > 1) return
+    writeFileSync(beginFlag, '')
+    await waitFor(async () => daemon.calls().length > 0 && !existsSync(beginFlag))
+    await pause(400)
+  })
+  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100 })
   try {
-    await waitFor(async () => daemon.calls().some(one => one.method === 'thread/turns/list'))
-    // The turn ends while the lookup is out; its answer still names that turn as in progress.
-    writeFileSync(endFlag, '')
     const connection = await codexConnection(board)
-    await pause(500)
     assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => claims >= 1)
+    await pause(1500)
+    // Nothing was started: the claim went back (the unit checks below: with its ACK code), and Codex got no turn/start.
+    assert.equal((await codexMessage(board, 'AB-CX-001')).status, 'queued')
+    assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 0)
+    writeFileSync(endFlag, '')
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
-    // The thread was idle: a new turn was started, nothing was steered into the finished one.
     assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 1)
-    assert.equal(daemon.calls().filter(one => one.method === 'turn/steer').length, 0)
-  } finally { await receiver.close() }
+  } finally { await receiver.close(); await proxy.close() }
+  // Only a claim with nothing accepted and no error on record can be given back.
+  const target = { id: 'live-1', agent: 'codex', session: codexThread, surface: SURFACE_IDS.codexDaemon, turn: 'session', scope: 'session', expires: 10_000, origin: 'local' }
+  const queued = queueMessage({ messages: [], connections: [] }, { id: 'AB-REL-1', target: target.id, turn: 'session', text: 'Synthetic' }, 'board', target, 1, 'local').state
+  assert.throws(() => messageReceipt(queued, target, { id: 'AB-REL-1', nonce: 'abcdef', status: 'released' }, 2), /CLAIM_REQUIRED/)
+  const claimed = claimMessages(queued, target, 2, 'abcdef').state
+  const accepted = messageReceipt(claimed, target, { id: 'AB-REL-1', nonce: 'abcdef', status: 'accepted' }, 3)
+  assert.throws(() => messageReceipt(accepted, target, { id: 'AB-REL-1', nonce: 'abcdef', status: 'released' }, 4), /INVALID_RECEIPT/)
+  assert.throws(() => messageReceipt(claimed, target, { id: 'AB-REL-1', nonce: 'abcdef', status: 'released', error: 'SESSION_BUSY' }, 4), /INVALID_RECEIPT/)
+  const back = messageReceipt(claimed, target, { id: 'AB-REL-1', nonce: 'abcdef', status: 'released' }, 4).messages[0]
+  assert.deepEqual([back.status, back.nonce, back.claimed], ['queued', 'abcdef', 0])
 }))
 
-test('a steer that leaves the turn silent becomes uncertain and is not sent again', async () => codexFixture(async (board, dir) => {
-  const daemon = codexDaemon(dir, { status: 'active', steer: 'silent' })
-  const receiver = codexReceiver(board, daemon, { isSteerOn: true, steerSilenceMs: 300 })
-  try {
-    const connection = await codexConnection(board)
-    await codexSend(board, connection)
-    const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
-    assert.equal(one.error, 'STEER_SILENT')
-    await pause(1500)
-    assert.equal(daemon.calls().filter(call => call.method === 'turn/steer').length, 1)
-  } finally { await receiver.close() }
-}))
+test('a delivery that joins a turn begun just before it is uncertain, never accepted, and a thread that reads busy keeps the message (#1370)', async () => {
+  // The person's turn starts just before turn/start reaches the daemon: the answer names that turn, which this connection heard start first.
+  await codexFixture(async (board, dir) => {
+    const daemon = codexDaemon(dir, { joinOnStart: true })
+    const receiver = codexReceiver(board, daemon)
+    try {
+      const connection = await codexConnection(board)
+      await codexSend(board, connection)
+      const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'uncertain' && found.error && found })
+      assert.equal(one.error, 'TURN_JOINED')
+      assert.notEqual(one.hasAccepted, true)
+      await pause(1000)
+      assert.equal(daemon.calls().filter(call => call.method === 'turn/start').length, 1)
+    } finally { await receiver.close() }
+  })
+  // The fresh read says the thread is busy before any notice of it arrived: nothing is started, and the message waits for the turn's end.
+  await codexFixture(async (board, dir) => {
+    const endFlag = join(dir, 'end-turn')
+    const daemon = codexDaemon(dir, { readActive: true, endFlag })
+    const receiver = codexReceiver(board, daemon)
+    try {
+      const connection = await codexConnection(board)
+      await codexSend(board, connection)
+      await waitFor(async () => daemon.calls().some(call => call.method === 'thread/read'))
+      await pause(1500)
+      assert.equal((await codexMessage(board, 'AB-CX-001')).status, 'queued')
+      assert.equal(daemon.calls().filter(call => call.method === 'turn/start').length, 0)
+      writeFileSync(endFlag, '')
+      await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+      assert.equal(daemon.calls().filter(call => call.method === 'turn/start').length, 1)
+    } finally { await receiver.close() }
+  })
+})
 
 test('turn/start success is accepted, never acknowledged', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { start: 'silent' })
@@ -4523,27 +4522,27 @@ test('turn/start success is accepted, never acknowledged', async () => codexFixt
 }))
 
 const codexResultCases = cases => codexFixture(async (board, dir) => {
-  for (const [i, [start, steer]] of cases.entries()) {
-    const { daemon, id } = codexCase(dir, i, steer === undefined ? { start } : { status: 'active', steer })
-    const receiver = codexReceiver(board, daemon, steer === undefined ? {} : { isSteerOn: true })
+  for (const [i, start] of cases.entries()) {
+    const { daemon, id } = codexCase(dir, i, { start })
+    const receiver = codexReceiver(board, daemon)
     try {
       const connection = await codexConnection(board)
       await codexSend(board, connection, id)
-      const isRefusal = start === 'error' || steer === 'error'
+      const isRefusal = start === 'error'
       const one = await waitFor(async () => { const found = await codexMessage(board, id); return found?.status === (isRefusal ? 'rejected' : 'uncertain') && found.error && found })
       assert.equal(one.error, isRefusal ? 'OWNER_REJECTED' : 'INVALID_TURN_RESPONSE')
       await pause(1500)
       const methods = daemon.calls().filter(call => call.method).map(call => call.method)
-      assert.equal(methods.filter(method => method === (steer === undefined ? 'turn/start' : 'turn/steer')).length, 1)
-      assert.ok(!methods.some(method => /^thread\/queue/.test(method) || method === (steer === undefined ? 'turn/steer' : 'turn/start')))
+      assert.equal(methods.filter(method => method === 'turn/start').length, 1)
+      assert.ok(!methods.some(method => /^thread\/queue/.test(method) || method === 'turn/steer'))
     } finally { await receiver.close() }
   }
 })
 
-test('an unclear result is marked uncertain and nothing else is tried', () => codexResultCases([['empty']]))
+test('an unclear result is marked uncertain and nothing else is tried', () => codexResultCases(['empty']))
 
-// An error answer of the daemon (a refused turn/start, or a steer of a turn that is no longer the running one) is a refusal before anything was done.
-test('a refusal from the daemon is rejected, and nothing else is tried', () => codexResultCases([['error'], ['ack', 'error']]))
+// An error answer of the daemon to turn/start is a refusal before anything was done.
+test('a refusal from the daemon is rejected, and nothing else is tried', () => codexResultCases(['error']))
 
 test('a Codex turn that ends without the ACK or fails after it never reads as acknowledged', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { start: 'silent', endFlag: join(dir, 'end-turn') })
@@ -4692,6 +4691,40 @@ test('the board runs the Codex receiver for a Codex session it knows and ends it
     // The page took the Codex program it started away with it.
   } finally {
     delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG
+    await board?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
+  }
+})
+
+test('a board file that is missing for two ticks keeps the Codex receiver and its queued message; a row read as ended stops it (#318)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-missing-'))
+  const progress = join(dir, 'progress.md'), away = join(dir, 'progress.away')
+  writeFileSync(progress, `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${codexThread} state=waiting updated=${new Date().toISOString()} -->\n### A Codex task\n- [~] Keep going\n<!-- /auto session=abcdef01 -->\n`)
+  const endFlag = join(dir, 'end-turn')
+  // The thread is busy, so the message waits in the board while the file is gone.
+  const daemon = codexDaemon(dir, { status: 'active', endFlag, pidFile: join(dir, 'proxy.pid') })
+  process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
+  process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
+  let board
+  try {
+    board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send'], codexRoutes)
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    // The page's receiver reads the file every 3 seconds: two reads find no file.
+    fs.renameSync(progress, away)
+    await pause(6500)
+    fs.renameSync(away, progress)
+    assert.ok((await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
+    assert.equal((await codexMessage(board, 'AB-CX-001')).status, 'queued')
+    writeFileSync(endFlag, '')
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    const proxy = Number(readFileSync(join(dir, 'proxy.pid'), 'utf8'))
+    writeFileSync(progress, readFileSync(progress, 'utf8').replace('state=waiting', 'state=ended'))
+    await waitFor(async () => { try { process.kill(proxy, 0); return false } catch { return true } })
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG
+    if (existsSync(away) && !existsSync(progress)) fs.renameSync(away, progress)
     await board?.close().catch(() => undefined)
     await removeKilledPageFolder(dir)
   }
@@ -5054,14 +5087,23 @@ test('each receiver record names a validation note that exists, and the table th
   const root = join(import.meta.dirname, '..')
   const records = (await readReceiverRecords(root)).filter(one => one.routes !== undefined)
   assert.ok(records.length >= 9)
+  const states = ['idle', 'working', 'ended']
   for (const record of records) {
-    for (const state of ['idle', 'working', 'ended']) {
+    for (const state of states) {
       const route = record.routes[state]
       if (route.record !== null) assert.ok(existsSync(join(root, route.record)), `${record.source} ${state}: ${route.record}`)
       assert.ok(!(route.line === 'none' && route.record !== null), `${record.source} ${state} names a note for a route that does not exist`)
     }
     const shipped = RECEIVER_ROUTES.find(one => one.agent === record.agent && one.kind === record.kind)
-    assert.deepEqual(shipped?.routes, record.routes, `${record.source} differs from hooks/receiver-routes.ts`)
+    // Two adapters can share an agent and kind (the Codex owner connector and the daemon receiver): a note covers only the
+    // surfaces it names, so each record must match the shipped entry on its own surfaces.
+    const ids = record.surfaces.map(surface => surface.id)
+    const own = route => { const surfaces = route.surfaces.filter(id => ids.includes(id)); return { line: route.line, record: surfaces.length > 0 ? route.record : null, surfaces } }
+    assert.deepEqual(shipped && Object.fromEntries(states.map(state => [state, own(shipped.routes[state])])), record.routes, `${record.source} differs from hooks/receiver-routes.ts`)
+  }
+  // And every surface a shipped note covers is one a record names for that same note.
+  for (const shipped of RECEIVER_ROUTES) for (const state of states) for (const id of shipped.routes[state].surfaces) {
+    assert.ok(records.some(record => record.agent === shipped.agent && record.kind === shipped.kind && record.routes[state].record === shipped.routes[state].record && record.routes[state].surfaces.includes(id)), `${shipped.agent} ${shipped.kind} ${state}: ${id}`)
   }
   // The stand-in the page tests and the e2e worlds use is the shipped table with a note named on every route that exists.
   // Except that a running-turn adapter takes a message while idle too: tests register connections without a scope, which is a turn.
@@ -5220,6 +5262,7 @@ test('shape 03: an idle DeepSeek Web mailbox sends now from both paths', async (
 })
 test('shape 04: a shadowed mailbox is refused rather than redirected', async () => {
   const w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'Web' })
+  shapeRoutes.push({ agent: 'deepseek', kind: 'live', routes: { idle: { line: 'now', record: shapeNote, surfaces: ['Web'] }, working: { line: 'stepEnd', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } })
   const live = await w.call('/api/messages/register', { agent: 'deepseek', session: w.session, surface: 'Web', turn: 'session', scope: 'session' })
   assert.equal(live.status, 200)
   const result = await w.direct('shape-shadowed')
@@ -5446,6 +5489,29 @@ test('shape 26: receipts keep the sent line, older receipts are neutral, and cal
   const older = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
   assert.ok(older.text().includes(EN.messagesHandedNow))
   assert.ok(!older.text().includes(EN.messagesHandedNextTurn))
+})
+test('shape 27: a Codex live connection takes the mailbox\'s place only on its recorded idle route, with the shipped table (#318)', async () => {
+  const w = await shapeCase({ agent: 'codex', kind: 'mailbox', surface: SURFACE_IDS.cli })
+  shapeRoutes.splice(0, shapeRoutes.length, ...RECEIVER_ROUTES)
+  const queue = await w.card()
+  assert.deepEqual([queue.delivery?.id, queue.line, queue.canSend], [w.target.id, 'nextTurn', true])
+  // A connection whose route no note covers on its surface leaves the card and the mailbox as they were.
+  const owned = (await w.call('/api/messages/register', { agent: 'codex', session: w.session, surface: SURFACE_IDS.codexSession, turn: 'session', scope: 'session' })).body
+  assert.deepEqual(await w.card(), queue)
+  const queued = await w.direct('shape-i1-mailbox')
+  assert.deepEqual([queued.status, queued.body.line], [200, 'nextTurn'])
+  assert.equal((await w.remove('shape-i1-mailbox')).status, 200)
+  assert.equal((await w.call('/api/messages/disconnect', { connection: owned.id, secret: owned.secret, turn: 'session' })).status, 200)
+  // The daemon receiver's idle route has its note: the card sends now, through the receiver.
+  const daemon = (await w.call('/api/messages/register', { agent: 'codex', session: w.session, surface: SURFACE_IDS.codexDaemon, turn: 'session', scope: 'session', unclaimed: true })).body
+  const live = await w.card()
+  assert.deepEqual([live.delivery?.id, live.line, live.canSend], [daemon.id, 'now', true])
+  // While the session works, the receiver's route has no note: the card is the one the mailbox gives without the receiver.
+  shapeFile = stateFile('codex', 'working', w.session)
+  const busy = await w.card()
+  assert.equal(busy.canSend, false)
+  assert.equal((await w.call('/api/messages/disconnect', { connection: daemon.id, secret: daemon.secret, turn: 'session' })).status, 200)
+  assert.deepEqual(busy, await w.card())
 })
 test('a peer send remains independent of recorded board routes', async () => {
   const w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'TUI' })

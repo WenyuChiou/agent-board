@@ -7,9 +7,15 @@ import { openWebSocketStdio } from './ws-stdio.mjs'
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
   host: 'Codex',
-  // No `<date>-codex-live.md` yet: the synthetic tests only establish Implemented (docs/validation/2026-11-06-send-to-codex.md).
-  surfaces: [{ name: 'Daemon', evidence: null }],
-  // No `routes` yet: the board offers Send only on a route a dated live note has shown (#1351), and none has for this receiver.
+  agent: 'codex',
+  kind: 'live',
+  // The live run woke an idle Codex CLI session on the shared daemon; a message during a running turn is not recorded (#1409).
+  surfaces: [{ name: 'Daemon', id: 'Codex daemon', evidence: 'docs/validation/2026-11-13-codex-cli-wake-live.md' }],
+  routes: {
+    idle: { line: 'now', record: 'docs/validation/2026-11-13-codex-cli-wake-live.md', surfaces: ['Codex daemon'] },
+    working: { line: 'stepEnd', record: null, surfaces: [] },
+    ended: { line: 'none', record: null, surfaces: [] },
+  },
   tier: 1,
   primitive: '[P1]',
   isImplemented: true,
@@ -20,8 +26,6 @@ const SURFACE = 'Codex daemon'
 const THREAD = /^[a-f0-9-]{36}$/i
 // A turn that never ends cannot hold a message for ever; the board's own limit on an unanswered message is 30 minutes.
 const ACK_LIMIT_MS = 30 * 60_000
-// A steered turn that says nothing for this long is uncertain (L2: a steer once stalled a turn for over 3 minutes).
-const STEER_SILENCE_MS = 60_000
 const TICK_MS = 3000
 const RETRY_MAX_MS = 30_000
 
@@ -92,18 +96,19 @@ const connectDaemon = async ({ executable, socket, env, onMessage, onClose }) =>
         if (!one) return
         requests.delete(value.id); clearTimeout(one.timer)
         if (value.error) one.reject(new Error('OWNER_REJECTED'))
-        else one.done(value.result)
+        else { one.onAnswer?.(); one.done(value.result) }
         return
       }
       // A request the daemon makes of its clients (an approval) is left unanswered: it is the person's own client that answers it.
       if (typeof value.method === 'string') onMessage(value)
     },
   })
-  const request = (method, params, limit = 5000) => new Promise((done, reject) => {
+  // onAnswer runs the moment the answer is read: notices that follow it in the same read are handled before the caller resumes.
+  const request = (method, params, limit = 5000, onAnswer) => new Promise((done, reject) => {
     if (!isOpen) { reject(new Error('OWNER_DISCONNECTED')); return }
     const id = ++sequence
     const timer = setTimeout(() => { requests.delete(id); reject(new Error('OWNER_TIMEOUT')) }, limit)
-    requests.set(id, { done, reject, timer })
+    requests.set(id, { done, reject, timer, onAnswer })
     try { websocket.send(JSON.stringify({ id, method, params })) } catch (error) { clearTimeout(timer); requests.delete(id); reject(error) }
   })
   // Sync, so a process that is exiting can still end the Codex program.
@@ -134,13 +139,16 @@ const loadedThreads = async daemon => {
 }
 
 const input = prompt => [{ type: 'text', text: prompt, text_elements: [] }]
+// Nothing was started: the board queues the message again, with the same ACK code (the `released` receipt).
+const released = (code = 'SESSION_BUSY') => Object.assign(new Error(code), { isReleased: true })
 
 // Takes a board message for each Codex thread that the shared daemon has loaded and the board knows, and
-// starts one turn with it. `threads()` gives the Codex session ids the board knows. Nothing is started
-// for a thread the daemon has not loaded, and nothing goes through Codex's queue.
+// starts one turn with it while the thread is idle. `threads()` gives the Codex session ids the board knows,
+// and throws when it cannot tell. Nothing is started for a thread the daemon has not loaded, nothing goes
+// through Codex's queue, and a running turn is never steered (#1409).
 export const startCodexReceiver = ({
-  boardUrl, threads, executable, socket, env = process.env, isSteerOn = false,
-  tickMs = TICK_MS, ackMs = ACK_LIMIT_MS, steerSilenceMs = STEER_SILENCE_MS, onError = () => undefined,
+  boardUrl, threads, executable, socket, env = process.env,
+  tickMs = TICK_MS, ackMs = ACK_LIMIT_MS, onError = () => undefined,
 }) => {
   if (typeof threads !== 'function' || !isAbsolute(executable ?? '')) throw new Error('EXPLICIT_EXECUTABLE_REQUIRED')
   const client = boardClient(boardUrl)
@@ -152,10 +160,8 @@ export const startCodexReceiver = ({
     const one = typeof p?.threadId === 'string' ? attached.get(p.threadId) : undefined
     if (!one) return
     const state = one.state
-    state.heard = Date.now()
-    state.seen += 1
     if (value.method === 'thread/status/changed' && typeof p.status?.type === 'string') { state.status = p.status.type; state.statusEvents += 1 }
-    else if (value.method === 'turn/started' && p.turn?.id) state.turn = p.turn.id
+    else if (value.method === 'turn/started' && p.turn?.id) { state.turn = p.turn.id; state.pending?.begun.add(p.turn.id) }
     else if (value.method === 'turn/completed' && p.turn?.id) {
       if (state.turn === p.turn.id) state.turn = null
       if (state.pending) { state.pending.ended.set(p.turn.id, typeof p.turn.status === 'string' ? p.turn.status : ''); one.settle() }
@@ -179,7 +185,7 @@ export const startCodexReceiver = ({
   }
 
   const attach = async thread => {
-    const state = { status: 'unknown', turn: null, pending: null, heard: 0, seen: 0, statusEvents: 0 }
+    const state = { status: 'unknown', turn: null, pending: null, statusEvents: 0 }
     const one = { state, receiver: null, isLost: false, settle: () => undefined }
     attached.set(thread, one)
     // The delivery turn settles when its own turn has ended: an ACK seen in another turn, or none, or a
@@ -198,21 +204,7 @@ export const startCodexReceiver = ({
         else pending.reject(new Error('TURN_STATUS_UNKNOWN'))
       }
     }
-    // The running turn, when the daemon did not replay its start to this connection (a turn that began before the
-    // connection joined): the newest turn of the thread, if it is still in progress.
-    const activeTurn = async () => {
-      try {
-        const listed = await daemon.request('thread/turns/list', { threadId: thread, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' })
-        const newest = Array.isArray(listed?.data) ? listed.data[0] : undefined
-        return newest?.status === 'inProgress' && typeof newest.id === 'string' && newest.id ? newest.id : null
-      } catch { return null }
-    }
-    // The answer is used only if the thread said nothing meanwhile: a completion or idle notice that arrived first is newer.
-    const learnTurn = async () => {
-      const seen = state.seen
-      const id = await activeTurn()
-      if (id !== null && state.seen === seen && state.turn === null && state.status === 'active') state.turn = id
-    }
+    const isIdle = () => !state.pending && state.turn === null && state.status === 'idle'
     try {
       // Resuming a loaded thread subscribes this connection to its events without starting a turn.
       const statusEvents = state.statusEvents
@@ -220,7 +212,6 @@ export const startCodexReceiver = ({
       // A status notice that came while the answer was on its way is at least as new as the answer, which can reach this
       // code after notices that followed it in the same read.
       if (state.statusEvents === statusEvents) state.status = typeof resumed?.thread?.status?.type === 'string' ? resumed.thread.status.type : 'unknown'
-      if (isSteerOn && state.status === 'active' && state.turn === null) await learnTurn()
       const verify = async () => {
         let isLoaded = false
         try { isLoaded = daemon !== null && daemon.isOpen() && (await loadedThreads(daemon)).has(thread) } catch { isLoaded = false }
@@ -230,48 +221,49 @@ export const startCodexReceiver = ({
       one.receiver = await client.attach({
         agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: SURFACE, unclaimed: true, verify, onError,
         // Busy is not a refusal: the lease stays alive and the message waits in the board until the turn ends.
-        canReceive: async () => {
-          if (isSteerOn && !state.pending && state.status === 'active' && state.turn === null) await learnTurn()
-          return !state.pending && (state.turn === null && state.status === 'idle' || isSteerOn && state.turn !== null && state.status === 'active')
-        },
+        canReceive: async () => isIdle(),
         deliver: async (message, accepted, begin) => {
-          if (state.pending) throw new Error('SESSION_BUSY')
-          const isSteer = state.turn !== null || state.status !== 'idle'
-          if (isSteer ? !(isSteerOn && state.turn !== null && state.status === 'active') : false) throw new Error('SESSION_BUSY')
+          // A turn that began after the board's poll: the claim goes back, and the message waits for that turn's end.
+          if (!isIdle()) throw released()
+          // The thread is read fresh right before the start, so a turn this connection has not heard of yet keeps the message
+          // waiting too. A read that got no answer started nothing either; a refused or odd answer is a refusal.
+          if (daemon === null) throw released('OWNER_DISCONNECTED')
+          const statusEvents = state.statusEvents
+          let status
+          try { status = (await daemon.request('thread/read', { threadId: thread, includeTurns: false }))?.thread?.status?.type } catch (error) {
+            throw error?.message === 'OWNER_TIMEOUT' || error?.message === 'OWNER_DISCONNECTED' ? released(error.message) : error
+          }
+          if (typeof status !== 'string') throw new Error('INVALID_OWNER_RESPONSE')
+          // A busy answer is kept until a status notice says otherwise, so the next poll does not claim the message again.
+          if (state.statusEvents === statusEvents && !state.pending) state.status = status
+          if (status !== 'idle' || !isIdle() || daemon === null) throw released()
           let timer
           const answer = new Promise((done, reject) => {
-            state.pending = { nonce: message.nonce, turn: isSteer ? state.turn : null, acked: new Map(), ended: new Map(), done, reject }
+            // begun: the turns whose start this connection heard while turn/start was out.
+            state.pending = { nonce: message.nonce, turn: null, begun: new Set(), acked: new Map(), ended: new Map(), done, reject }
             timer = setTimeout(() => reject(new Error('ACK_TIMEOUT')), ackMs)
           })
           void answer.catch(() => undefined)
-          let silence
           try {
             const prompt = deliveryPrompt(message)
-            // The daemon's own error answer (a turn that is no longer the running one, a refused request) is a refusal
-            // before anything was done: the message is rejected, not uncertain. Anything else that goes wrong after the
-            // request left (no answer, a closed connection, an odd answer) may have been delivered.
-            const send = async (method, params, limit) => {
-              try { return await daemon.request(method, params, limit) } catch (error) { if (error?.message !== 'OWNER_REJECTED') begin(); throw error }
-            }
-            if (isSteer) {
-              const result = await send('turn/steer', { threadId: thread, expectedTurnId: state.pending.turn, input: input(prompt) })
-              begin()
-              if (result?.turnId !== state.pending.turn) throw new Error('TURN_MISMATCH')
-              state.heard = Date.now()
-              silence = setInterval(() => { if (Date.now() - state.heard > steerSilenceMs) state.pending?.reject(new Error('STEER_SILENT')) }, Math.max(10, Math.min(1000, steerSilenceMs)))
-              silence.unref?.()
-            } else {
-              // The claim nonce is the message id Codex records, so a repeated request names the same message.
-              const result = await send('turn/start', { threadId: thread, input: input(prompt), clientUserMessageId: message.nonce }, 10_000)
-              begin()
-              if (!result?.turn?.id) throw new Error('INVALID_TURN_RESPONSE')
-              state.pending.turn = result.turn.id
-              if (!state.pending.ended.has(result.turn.id)) state.turn = result.turn.id
-            }
+            // The daemon's own error answer (a refused request) is a refusal before anything was done: the message is rejected,
+            // not uncertain. Anything else that goes wrong after the request left (no answer, a closed connection, an odd
+            // answer) may have been delivered. The claim nonce is the message id Codex records.
+            let result, begunBefore = new Set()
+            const pending = state.pending
+            try { result = await daemon.request('turn/start', { threadId: thread, input: input(prompt), clientUserMessageId: message.nonce }, 10_000, () => { begunBefore = new Set(pending.begun) }) } catch (error) { if (error?.message !== 'OWNER_REJECTED') begin(); throw error }
+            begin()
+            if (!result?.turn?.id) throw new Error('INVALID_TURN_RESPONSE')
+            // turn/start has no idle-only form: on a running turn it adds the text to that turn and answers with its id. A turn
+            // whose start was heard before this answer arrived was already running, so the text joined it: uncertain, never an
+            // ordinary acceptance (#1370).
+            if (begunBefore.has(result.turn.id)) throw new Error('TURN_JOINED')
+            state.pending.turn = result.turn.id
+            if (!state.pending.ended.has(result.turn.id)) state.turn = result.turn.id
             await accepted()
             one.settle()
             return await answer
-          } finally { clearTimeout(timer); clearInterval(silence); state.pending = null }
+          } finally { clearTimeout(timer); state.pending = null }
         },
       })
     } catch (error) { attached.delete(thread); throw error }

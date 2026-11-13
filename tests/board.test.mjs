@@ -6548,7 +6548,13 @@ test('a plain board command keeps a page started with --codex-send, and a plain 
   const board = serveIn()
   let url = null
   try {
-    url = board.urlOf(await board.serve(['--quiet-board', '--codex-send', '--codex-steer']))
+    // Steering a running turn is not part of this release (#1409): the flag is refused like any unknown one, and no page starts.
+    const steer = spawnSync(process.execPath, [board.script, '--serve', '--codex-send', '--codex-steer', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+    assert.equal(steer.status, 2, steer.stderr)
+    assert.equal(steer.stderr, `${EN.boardUnknownFlag('--codex-steer')}
+`)
+    assert.ok(!existsSync(board.served))
+    url = board.urlOf(await board.serve(['--quiet-board', '--codex-send']))
     assert.ok(url)
     const before = JSON.parse(readFileSync(board.served, 'utf8'))
     // The command the README tells (and /agent-board) does not know the flag: it must not replace the page and end Send to Codex.

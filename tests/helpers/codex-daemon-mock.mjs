@@ -6,14 +6,14 @@
 //   loaded     thread ids the daemon has loaded
 //   status     'idle' | 'active': the thread's status when it is resumed
 //   turn       the running turn's id when the thread is active
-//   start      what turn/start does: 'ack' (answers, ACKs, completes), 'silent' (answers, nothing else),
-//              'error' (an error answer), 'empty' (an answer with no turn)
-//   steer      what turn/steer does: 'ack' (answers with the turn id, ACKs, completes), 'silent', or 'error' (an error answer)
+//   start      what turn/start does on an idle thread: 'ack' (answers, ACKs, completes), 'silent' (answers, nothing else),
+//              'error' (an error answer), 'empty' (an answer with no turn). On a running turn it answers with that turn's id
+//              and starts nothing, as the real daemon does (the text joins the turn).
+//   joinOnStart when true, the person's own turn starts just before the first turn/start is handled, so the call joins it
+//   readActive  when true, the person's own turn starts as thread/read is first asked: the answer says active, the notices follow
 //   endStatus  the status the delivery turn ends with: 'completed' (default), 'failed', 'interrupted', 'none' (no status field) or any other word
-//   replay     false: resuming a thread with a running turn does not replay that turn's start to the new connection
-//   listed     'none': thread/turns/list names no turn in progress
-//   listDelay  milliseconds thread/turns/list waits before answering (the answer is the state when it was asked)
 //   approval   when true, the daemon asks its client for an approval during the turn
+//   beginFlag  a file whose appearance starts the person's own turn ('turn-person') on an idle thread
 //   endFlag    a file whose appearance ends the running turn
 //   pidFile    file that gets this process's id
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -24,9 +24,15 @@ const log = value => appendFileSync(config.log, JSON.stringify(value) + '\n')
 if (config.pidFile) writeFileSync(config.pidFile, String(process.pid))
 log({ argv: process.argv.slice(2), env: process.env })
 let running = config.status === 'active' ? config.turn : null
-let emitNow
+let emitNow, hasRaced = false
 const thread = id => ({ id, status: { type: running ? 'active' : 'idle' } })
 const ackOf = text => 'ACK ' + text.match(/ACK ([0-9a-f]{6})/)[1]
+// The person's own turn, started in their own client.
+const begin = threadId => {
+  running = 'turn-person'
+  emitNow({ method: 'turn/started', params: { threadId, turn: { id: running } } })
+  emitNow({ method: 'thread/status/changed', params: { threadId, status: { type: 'active' } } })
+}
 const finish = (id, threadId, text) => {
   if (config.approval) emitNow({ id: 999, method: 'item/commandExecution/requestApproval', params: { threadId, turnId: id } })
   if (text) emitNow({ method: 'item/completed', params: { threadId, turnId: id, item: { type: 'agentMessage', text } } })
@@ -56,14 +62,21 @@ serveWebSocketProxy({
         return
       }
       emit({ id: value.id, result: { thread: thread(threadId) } })
-      if (running && config.replay !== false) emit({ method: 'turn/started', params: { threadId, turn: { id: running } } })
+      if (running) emit({ method: 'turn/started', params: { threadId, turn: { id: running } } })
     }
-    if (value.method === 'thread/turns/list') {
-      const answer = { id: value.id, result: { data: running && config.listed !== 'none' ? [{ id: running, status: 'inProgress' }] : [], nextCursor: null } }
-      if (config.listDelay) setTimeout(() => emit(answer), config.listDelay)
-      else emit(answer)
+    if (value.method === 'thread/read') {
+      if (config.readActive && !running && !hasRaced) {
+        hasRaced = true
+        running = 'turn-person'
+        emit({ id: value.id, result: { thread: thread(threadId) } })
+        begin(threadId)
+        return
+      }
+      emit({ id: value.id, result: { thread: thread(threadId) } })
     }
     if (value.method === 'turn/start') {
+      if (config.joinOnStart && !running && !hasRaced) { hasRaced = true; begin(threadId) }
+      if (running) { emit({ id: value.id, result: { turn: { id: running } } }); return }
       if (config.start === 'error') { emit({ id: value.id, error: { code: -32600, message: 'synthetic' } }); return }
       if (config.start === 'empty') { emit({ id: value.id, result: {} }); return }
       running = 'turn-delivery'
@@ -72,14 +85,11 @@ serveWebSocketProxy({
       emit({ method: 'thread/status/changed', params: { threadId, status: { type: 'active' } } })
       if (config.start === 'ack') setTimeout(() => finish('turn-delivery', threadId, ackOf(value.params.input[0].text)), 50)
     }
-    if (value.method === 'turn/steer') {
-      if (config.steer === 'error') { emit({ id: value.id, error: { code: -32600, message: 'expected turn is not running' } }); return }
-      emit({ id: value.id, result: { turnId: value.params.expectedTurnId } })
-      if (config.steer === 'ack') setTimeout(() => finish(value.params.expectedTurnId, threadId, ackOf(value.params.input[0].text)), 50)
-    }
   },
 })
 const watcher = setInterval(() => {
+  if (!emitNow) return
+  if (!running && config.beginFlag && existsSync(config.beginFlag)) { unlinkSync(config.beginFlag); begin(config.loaded[0]) }
   if (!running || !config.endFlag || !existsSync(config.endFlag)) return
   unlinkSync(config.endFlag)
   finish(running, config.loaded[0], '')

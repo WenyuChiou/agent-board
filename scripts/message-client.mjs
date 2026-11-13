@@ -6,7 +6,7 @@
  * to one exact surface; a CLI run must never verify a desktop or IDE implicitly.
  * @typedef {Object} MessagingReceiverRecord
  * @property {string} host
- * @property {{ name: string, evidence: string | null, earlier?: string }[]} surfaces `evidence` is a
+ * @property {{ name: string, id?: string, evidence: string | null, earlier?: string }[]} surfaces `evidence` is a
  *   `docs/validation/<date>-<host>-live.md` file; `earlier` is a dated note on a run that doesn't count as one.
  * @property {1 | 2 | 3 | 4} tier
  * @property {'[P1]' | '[P2]' | '[P3]' | '[P4]' | '[P5]' | 'unknown'} primitive `unknown` when the roadmap names none for this surface.
@@ -83,6 +83,8 @@ export const boardClient = address => {
           const reply = await (deliver.length >= 3 ? deliver(message, accept, begin) : deliver(message, accept))
           if (typeof reply === 'string' && reply.trim()) await receipt(message, 'acknowledged', reply)
         } catch (error) {
+          // A receiver that started nothing and says so (`isReleased`, e.g. the session turned busy) gives the claim back.
+          if (!hasStarted && error?.isReleased === true) { await receipt(message, 'released').catch(() => undefined); return }
           if (!hasStarted) await receipt(message, 'rejected', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : undefined).catch(() => undefined)
           else await receipt(message, 'uncertain', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : 'DELIVERY_UNCERTAIN').catch(() => undefined)
           // After delivery begins, a timeout or exception never authorizes redelivery.

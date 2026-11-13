@@ -66,6 +66,13 @@ export type SendDecision =
 
 const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteKind, state: RowState): Route | undefined =>
   records.find(one => one.agent === (agent === '' ? 'claude' : agent) && one.kind === kind)?.routes[state]
+// Whether a connection's own route, for its session's state now, has a live note that covers its surface. Only such a
+// live connection takes the place of the session's mailbox: an unrecorded route never stands in for a recorded one (#318).
+export const isRecordedRoute = (one: Connection, stateOfSession: (agent: string, session: string) => RowState | undefined, routes: readonly ReceiverRoutes[]): boolean => {
+  const state = stateOfSession(one.agent, one.session)
+  const route = state === undefined ? undefined : routeOf(routes, one.agent, routeKind(one.scope), state)
+  return route !== undefined && route.line !== 'none' && typeof route.record === 'string' && route.record !== '' && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface)
+}
 
 export const sendDecision = (
   targetId: string, connections: readonly Connection[], mailboxes: readonly Connection[],
@@ -75,8 +82,9 @@ export const sendDecision = (
   const target = connections.find(one => one.id === targetId) ?? mailboxes.find(one => one.id === targetId)
   if (target === undefined) return { canSend: false, line: 'none', reason: 'NO_TARGET' }
   const live = connections.filter(one => address(one.agent, one.session) === address(target.agent, target.session) && one.expires > now)
-  if (mailboxes.includes(target) && live.length > 0) return { canSend: false, line: 'none', reason: 'SHADOWED' }
-  if (target.contested || live.length > 1) return { canSend: false, line: 'none', reason: 'CONTESTED' }
+  const isMailbox = mailboxes.includes(target)
+  if (isMailbox && live.some(one => isRecordedRoute(one, stateOfSession, routes))) return { canSend: false, line: 'none', reason: 'SHADOWED' }
+  if (target.contested || !isMailbox && live.length > 1) return { canSend: false, line: 'none', reason: 'CONTESTED' }
   if (target.expires <= now) return { canSend: false, line: 'none', reason: 'OFFLINE' }
   const state = stateOfSession(target.agent, target.session)
   if (state === undefined) return { canSend: false, line: 'none', reason: 'STATE_UNKNOWN' }
@@ -300,6 +308,13 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   if (one.status === 'queued') throw new Error('CLAIM_REQUIRED')
   if (!one.nonce || input.nonce !== one.nonce) throw new Error('TARGET_MISMATCH')
   if (one.status === 'uncertain' && one.error === 'EXPIRED') throw new Error('MESSAGE_EXPIRED')
+  // A receiver gives a claim back when it started nothing (its session began a turn after the poll): the message is queued
+  // again with the same ACK code. Only a claim with no acceptance and no error on record can be given back (#318).
+  if (input.status === 'released') {
+    if (one.status !== 'uncertain' || one.error !== '' || one.hasAccepted === true || input.reply !== undefined || input.error !== undefined) throw new Error('INVALID_RECEIPT')
+    const { ref: _ref, ...kept } = one
+    return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, claimed: 0, updated: now } : message) }
+  }
   if (!['uncertain', 'accepted', 'acknowledged', 'rejected'].includes(String(input.status))) throw new Error('INVALID_RECEIPT')
   const status = input.status as Message['status']
   const reply = input.reply === undefined ? '' : input.reply

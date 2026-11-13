@@ -78,7 +78,7 @@ const flag = (name: string): string | undefined => {
 }
 const BOOL_FLAGS = new Set([
   '--all', '--allow-resume', '--agent-status', '--apply', '--chat', '--codex-doctor',
-  '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-steer', '--codex-trust',
+  '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
@@ -2128,9 +2128,9 @@ const serveChild = (): void => {
       isDefaultMessagesDirectory: flag('--messages-dir') === undefined,
       codex: {
         // Read now, not the page's cache: a tick has no page poll behind it, so a cache would keep an ended session attached and miss a new one.
-        threads: () => parseProgress(read(path)).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
+        // A file that is missing or cannot be read throws, so the tick keeps every thread: only a row read as ended or gone ends one.
+        threads: () => parseProgress(readFileSync(path, 'utf8')).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
         executable: codexReceiverExecutable(),
-        isSteerOn: args.includes('--codex-steer'),
       },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests
@@ -2140,7 +2140,7 @@ const serveChild = (): void => {
       },
       get s() { return s },
       port: requestedPort,
-      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSteer: args.includes('--codex-steer'), codexSend: args.includes('--codex-send'), messagesDirectory: messagesDirectory() },
+      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: args.includes('--codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       pending: (isFresh = true) => pending(undefined, isFresh),
@@ -2294,7 +2294,7 @@ const runningPage = async (isStarting = false): Promise<{ page: Running; isKept:
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
   const requestedStale = staleTimeoutMs()
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (!args.includes('--codex-steer') || answer.codexSteer === true) && (!args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (!args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
@@ -2378,7 +2378,6 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
-  if (args.includes('--codex-steer')) rest.push('--codex-steer')
   if (args.includes('--codex-send')) rest.push('--codex-send')
   // The child runs with cwd set to the board's folder, so a relative path would resolve
   // against the board's folder instead of this command's folder. Pass the board and the
