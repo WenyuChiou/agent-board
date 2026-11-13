@@ -20,6 +20,28 @@ type Json = Record<string, unknown>
 // not know, so the page offers no Queue there.
 export const codexSurface = (meta: CodexMeta | null): string => meta?.originator === 'codex-tui' ? SURFACE_IDS.cli : SURFACE_IDS.unknown
 
+// Antigravity's CLI, desktop app and editor run the same hooks and send no client name, but each
+// keeps its conversations in its own app data folder under `.gemini`, and the hook's transcript
+// path (else its artifact folder) lies inside it: `antigravity-cli` is the terminal (agy TUI),
+// `antigravity` and `antigravity-ide` the app and the editor. Whole folder names are compared, so
+// a look-alike folder is a surface the board does not know.
+const ANTIGRAVITY_FOLDERS: Record<string, string> = {
+  'antigravity-cli': SURFACE_IDS.antigravityTui, antigravity: SURFACE_IDS.antigravityIde, 'antigravity-ide': SURFACE_IDS.antigravityIde,
+}
+const antigravityFolderSurface = (path: unknown): string => {
+  if (typeof path !== 'string') return SURFACE_IDS.unknown
+  const parts = path.split(/[\\/]+/).map(part => part.toLowerCase())
+  for (let at = parts.length - 2; at >= 0; at -= 1) {
+    const surface = parts[at] === '.gemini' ? ANTIGRAVITY_FOLDERS[parts[at + 1] ?? ''] : undefined
+    if (surface !== undefined) return surface
+  }
+  return SURFACE_IDS.unknown
+}
+export const antigravitySurface = (transcriptPath: unknown, artifactPath: unknown): string => {
+  const surface = antigravityFolderSurface(transcriptPath)
+  return surface !== SURFACE_IDS.unknown ? surface : antigravityFolderSurface(artifactPath)
+}
+
 export type TurnDelivery = {
   mode: string
   agent: string
@@ -57,7 +79,7 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
     } else if (isTurnStart(agent, event)) {
       let message = null
       const transcript = raw.transcript_path
-      const surface = agent === 'cursor' ? SURFACE_IDS.cursor : agent === 'antigravity' ? SURFACE_IDS.antigravityIde
+      const surface = agent === 'cursor' ? SURFACE_IDS.cursor : agent === 'antigravity' ? antigravitySurface(raw.transcriptPath, raw.artifactDirectoryPath)
         : agent === 'codex' ? codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null) : SURFACE_IDS.cli
       try { message = await mailbox?.turn(agent, session, surface, Date.now()) ?? null } catch {}
       const owner = hash(`${agent}:${session}`)

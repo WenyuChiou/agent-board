@@ -826,6 +826,29 @@ test('a Codex hook mailbox is the CLI only when its history file names the termi
   }
 }))
 
+test('an Antigravity hook mailbox is agy TUI when its transcript lies in the CLI folder, and the app and the editor stay IDE', async () => mailboxFixture(async f => {
+  const { antigravitySurface } = await importTs('../scripts/hook-delivery.ts')
+  const brain = folder => [f.home, '.gemini', folder, 'brain', 'synthetic-conversation'].join('/')
+  const mailboxOf = () => f.state().mailboxes?.find(one => one.agent === 'antigravity' && one.session === session)
+  for (const [payload, surface] of [
+    [{ transcriptPath: `${brain('antigravity-cli')}/.system_generated/logs/transcript.jsonl` }, 'agy TUI'],
+    [{ transcriptPath: `${brain('antigravity-ide')}/.system_generated/logs/transcript.jsonl` }, 'IDE'],
+    [{ artifactDirectoryPath: brain('antigravity-cli') }, 'agy TUI'],
+    [{}, 'unknown'],
+  ]) {
+    f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, messages: [] }))
+    await hookOrDeferred(() => f.call('antigravity', 'PreInvocation', payload), () => mailboxOf() !== undefined)
+    assert.equal(mailboxOf()?.surface, surface, JSON.stringify(payload))
+  }
+  // Either separator and any letter case; whole folder names only; the artifact folder decides when the transcript cannot.
+  assert.equal(antigravitySurface('C:\\Synthetic\\.Gemini\\Antigravity-CLI\\brain\\x\\transcript.jsonl', undefined), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity/brain/x/transcript.jsonl', undefined), 'IDE')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-cli-old/brain/x/transcript.jsonl', undefined), 'unknown')
+  assert.equal(antigravitySurface('/home/synthetic/antigravity-cli/brain/x/transcript.jsonl', undefined), 'unknown')
+  assert.equal(antigravitySurface(42, '/home/synthetic/.gemini/antigravity-ide/brain/x'), 'IDE')
+  assert.equal(antigravitySurface('', ''), 'unknown')
+}))
+
 test('a held mailbox store claim reports deferral and the next turn delivers after release', async () => mailboxFixture(async f => {
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   f.seed()

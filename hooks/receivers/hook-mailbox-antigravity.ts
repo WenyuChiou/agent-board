@@ -1,6 +1,7 @@
 import { SURFACE_IDS } from '../messaging.ts'
 
-// The hook identifies both desktop and IDE as IDE; it cannot distinguish the two.
+// The hook reads the surface from the app data folder in its transcript path (scripts/hook-delivery.ts,
+// antigravitySurface): the CLI's folder is agy TUI; the desktop app and the IDE both read as IDE.
 export const messagingReceiver = {
   host: 'Antigravity',
   agent: 'antigravity',
