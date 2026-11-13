@@ -12973,10 +12973,16 @@ test('the page of a grouped board draws each question once, copies an answer and
     assert.ok(lanModel.asks.every(ask => ask.reopen === null))
     assert.ok(rowsOf(lanModel).every(row => row.resume === null))
     assert.ok(rowsOf(lanModel).every(row => !('sessionId' in row)))
-    // The fold key stays on the phone page as a short hash only, never the session id it is made from (#1412).
-    const sessions = rowsOf(homeModel).flatMap(row => row.sessionId ? [row.sessionId] : [])
-    assert.ok(rowsOf(lanModel).some(row => 'foldKey' in row))
-    assert.ok(rowsOf(lanModel).every(row => row.foldKey === undefined || /^[0-9a-f]{16}$/.test(row.foldKey) && !sessions.some(one => one.includes(row.foldKey) || row.foldKey.includes(one))))
+    // The phone page carries no fold key and nothing made from a session id, however short or guessable the id is (#1412).
+    const sessions = rowsOf(homeModel).flatMap(row => row.sessionId ? [row] : [])
+    assert.ok(sessions.length > 0 && rowsOf(homeModel).some(row => typeof row.foldKey === 'string'), 'the computer page keeps the fold key of a session row')
+    const lanText = JSON.stringify(lanModel)
+    assert.ok(!lanText.includes('foldKey'), 'the phone page sends no fold key')
+    for (const row of sessions) {
+      const derived = createHash('sha256').update(`fold:${row.agent || 'claude'}:${row.sessionId}`).digest('hex').slice(0, 16)
+      assert.ok(!lanText.includes(derived), 'the phone page sends nothing made from a session id')
+      assert.ok(!lanText.includes(row.foldKey), 'the phone page sends nothing made from a session id')
+    }
     const lanDom = await pageDom(runtime.servePage(EN, 'synthetic', true), lanModel)
     assert.ok(!lanDom.node('board').textContent.includes('Copy resume command'))
     assert.ok(lanDom.node('agent-note').textContent.includes("Codex's progress file could not be read"))

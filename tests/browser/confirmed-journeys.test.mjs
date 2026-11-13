@@ -220,6 +220,47 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
     })
   })
 
+  test('a fold stays open when a step of a hand-kept task with more than seven steps is ticked', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('fold-long-task', async ({ page, progress, startServer }) => {
+      const steps = done => Array.from({ length: 9 }, (_, index) => `- [${index < done ? 'x' : ' '}] Synthetic long step ${index + 1}`).join('\n')
+      writeProgress(progress, `## Synthetic long\n### Long fold task\n${steps(3)}\n`)
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      const task = await board.openTask('Long fold task')
+      // The step folds of the task: a details whose own summary says "done" or "more".
+      const folds = (node, click) => [...node.querySelectorAll('details')].filter(fold => /\b(?:done|more)\b/.test(fold.querySelector(':scope > summary')?.textContent ?? '')).map(fold => { if (click) fold.querySelector(':scope > summary').click(); return fold.open })
+      assert.ok((await task.evaluate(folds, false)).length >= 2)
+      await task.evaluate(folds, true)
+      const openFolds = () => task.evaluate(folds, false)
+      const before = await openFolds()
+      assert.ok(before.every(Boolean), 'every fold is open')
+      // One more step is ticked: the first shown step now reads "4 steps done", and the folds stay as the person left them.
+      writeProgress(progress, `## Synthetic long\n### Long fold task\n${steps(4)}\n### Synthetic task added later\n- [ ] Synthetic later step\n`)
+      await board.task('Synthetic task added later').waitFor()
+      await page.waitForFunction(() => document.body.textContent.includes('4 steps done'))
+      assert.deepEqual(await openFolds(), before)
+    })
+  })
+
+  test('a fold stays closed on a task whose title and first step only join to the same text as a removed task', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('fold-same-join', async ({ page, progress, startServer }) => {
+      const task = (title, first) => [`### ${title}`, `- [x] ${first}`, '- [x] Synthetic second finished', '- [ ] Synthetic current'].join('\n')
+      writeProgress(progress, `## Synthetic joins\n${task('Plan', 'A::B')}\n${task('Plan::A', 'B')}\n`)
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      const rows = board.main.locator('li.row').filter({ hasText: 'Plan' })
+      await rows.nth(1).waitFor()
+      for (const index of [0, 1]) await rows.nth(index).locator('.row-btn').first().click()
+      // Only the first task's finished-steps fold is opened by the person.
+      await rows.nth(0).getByText('2 steps done', { exact: true }).click()
+      const openFolds = () => rows.evaluateAll(nodes => nodes.map(node => [...node.querySelectorAll('details')].filter(fold => fold.open).length))
+      assert.deepEqual(await openFolds(), [1, 0])
+      writeProgress(progress, `## Synthetic joins\n${task('Plan::A', 'B')}\n`)
+      await page.waitForFunction(() => [...document.querySelectorAll('li.row')].filter(row => row.innerText.includes('Plan::A')).length === 1 && ![...document.querySelectorAll('li.row')].some(row => row.innerText.includes('A::B')))
+      assert.deepEqual(await openFolds(), [0])
+    })
+  })
+
   test("an agent's fold the person opened stays open when the agent renames its task", { concurrency: false, timeout: 120_000 }, async () => {
     await browserFixture('fold-follows-session', async ({ page, progress, startServer }) => {
       const report = title => block('f01dcafe', 'muse', 'working', 'Synthetic agent folds', title, ['- [x] Synthetic agent finished one', '- [x] Synthetic agent finished two', '- [~] Synthetic agent current'])

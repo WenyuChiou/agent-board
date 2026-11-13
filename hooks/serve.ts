@@ -228,8 +228,11 @@ export type ServeRow = {
   at?: number
   dir?: string | null
   sessionId?: string
-  // What an agent's row is across redraws, for the page's fold state: a hash of its agent and session, so it stays on the
-  // network page, where the session id itself is removed, and says nothing that could be used to reach the session.
+  // What a task is across redraws, for the page's fold state, from the task and not from what the page shows of it: a
+  // JSON list of its project, title, real first step and which of the tasks reading alike this is, never a joined string.
+  foldId?: string
+  // A session's row on the computer's page: a hash of its agent and session, so a renamed task keeps its folds. The network
+  // page gets none: a hash of a short session id can be guessed back (#1412).
   foldKey?: string
   stuck?: { reason: string }
   delivery?: Delivery
@@ -514,6 +517,15 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     const { heldBy } = holderOf(item.ask)
     if (heldBy !== undefined) openBy.set(heldBy, (openBy.get(heldBy) ?? 0) + 1)
   }
+  // A task's identity for the page's fold state: its project, title and real first step (before the view folds the steps into
+  // counts), as a JSON list so no two tasks join to the same text, and which of the tasks reading alike it is.
+  const foldSeen = new Map<string, number>()
+  const foldIdOf = (row: { project: string; title: string; firstStep?: string }): string => {
+    const same = JSON.stringify([row.project, row.title, row.firstStep ?? ''])
+    const place = (foldSeen.get(same) ?? 0) + 1
+    foldSeen.set(same, place)
+    return JSON.stringify([same, place])
+  }
   for (const item of items) {
     if (item.type === 'ask') {
       const { ask } = item
@@ -623,7 +635,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, undefined, isMessageSurfaceLost)),
-        ...(row.nativeSession === undefined ? {} : { foldKey: sha256(`fold:${row.agent || 'claude'}:${row.nativeSession}`).slice(0, 16) }),
+        ...(isLan || row.nativeSession === undefined ? {} : { foldKey: sha256(`fold:${row.agent || 'claude'}:${row.nativeSession}`).slice(0, 16) }),
+        foldId: foldIdOf(row),
         key: item.key,
         project: row.project,
         title: row.title,
@@ -1958,19 +1971,16 @@ const PAGE_SCRIPT = String.raw`
   }
   // A task's fold state is kept under what the task is, not under its row key: a second task with the same title is
   // keyed #2 until the first goes, and then it would take over the first one's open fold. A session's block is its
-  // foldKey (a hash of its agent and session, sent on the network page too), so a renamed task keeps its folds; a
-  // hand-kept task is its project, title and first step, and twins that read alike take the order of their row keys.
+  // foldKey (a hash of its agent and session, on the computer's page only), so a renamed task keeps its folds; any other
+  // task is the foldId the server made from its project, title, real first step and place among tasks reading alike.
   // draw() fills pg.foldIds and drops the state of tasks that are gone.
   function foldId(key) { return pg.foldIds[key] || key; }
   function foldIdsOf(sources) {
-    var seen = {};
     var ids = {};
-    Object.keys(sources).sort().forEach(function (key) {
+    Object.keys(sources).forEach(function (key) {
       var row = sources[key];
       if (!row || !Array.isArray(row.steps)) return;
-      var base = row.foldKey ? 'session:' + row.foldKey : row.project + '::' + row.title + '::' + (row.steps.length ? row.steps[0].text : '');
-      seen[base] = (seen[base] || 0) + 1;
-      ids[key] = seen[base] === 1 ? base : base + '#' + seen[base];
+      ids[key] = row.foldKey ? 'session:' + row.foldKey : row.foldId || key;
     });
     return ids;
   }
