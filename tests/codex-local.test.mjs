@@ -4165,6 +4165,41 @@ test('a reporter whose prompt classifier timed out sweeps old scratch files afte
   }
 }))
 
+const GIT_SH = join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'usr', 'bin', 'sh.exe')
+// The classifier is killed and waited for before the sweep starts, so it cannot be reading or writing a scratch file the sweep removes.
+test('a timed-out sh reporter has stopped its classifier before it sweeps the inbox', { skip: process.platform === 'win32' && !existsSync(GIT_SH) }, () => fixture(async f => {
+  const isWindows = process.platform === 'win32', shellProgram = isWindows ? GIT_SH : '/bin/sh'
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.sh')
+  const tools = join(f.home, 'tools'), pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs'), seen = join(f.home, 'classifier-at-sweep')
+  const find = spawnSync(shellProgram, ['-c', 'command -v find'], { encoding: 'utf8' })
+  assert.equal(find.status, 0, find.stderr)
+  const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
+  // Every find the sweep runs first records whether the classifier still lives. Git Bash numbers processes its own way, so there the Windows pid is looked up with ps -W.
+  const lives = isWindows ? `ps -W | awk -v p="$(cat ${shellQuote(pidFile)})" '$4 == p { found = 1 } END { exit !found }'` : `kill -0 "$(cat ${shellQuote(pidFile)})" 2>/dev/null`
+  f.save(join(tools, 'find'), `#!/bin/sh\nif ${lives}; then echo alive; else echo stopped; fi >> ${shellQuote(seen)}\nexec ${shellQuote(find.stdout.trim())} "$@"\n`)
+  chmodSync(join(tools, 'find'), 0o700)
+  // Without uname saying Linux, the sh reporter on Windows hands over to PowerShell.
+  f.save(join(tools, 'uname'), '#!/bin/sh\nprintf "%s\\n" Linux\n')
+  chmodSync(join(tools, 'uname'), 0o700)
+  const old = new Date(Date.now() - 300000), stale = join(inbox, 'codex-prompt-1-1.tmp')
+  f.save(stale, 'stale'); utimesSync(stale, old, old)
+  f.save(script, reporterSh(inbox))
+  f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  const env = { ...f.env, PATH: `${tools}${delimiter}${f.env.PATH}`, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+  try {
+    const out = await nativeProcess(shellProgram, [script, 'codex', 'prompt'], env, JSON.stringify({ session_id: 'synthetic-sweep-order', prompt: 'PRIVATE_RAW_PROMPT' }))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    assert.match(hookLog(f), /REPORTER_TIMEOUT/)
+    assert.equal(existsSync(pidFile), true, 'the classifier started')
+    assert.equal(existsSync(seen), true, 'the timed-out run swept')
+    assert.deepEqual([...new Set(readFileSync(seen, 'utf8').trim().split('\n'))], ['stopped'])
+    assert.equal(existsSync(stale), false)
+  } finally {
+    if (existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+  }
+}))
+
 test('PowerShell reporter retries a scratch file released after its first failed removal', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.ps1')
   const held = join(inbox, 'synthetic-held.tmp'), probe = join(f.home, 'retry-started'), release = join(f.home, 'retry-release')

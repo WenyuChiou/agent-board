@@ -170,7 +170,11 @@ timed_out() {
   if [ "$phase" = REPORTER_TIMEOUT ]; then write_fallback; fi
   log_error "$phase"
   # A timed-out run sweeps too, after its outcome is logged: a run cut at the budget is no reason to leave old scratch files.
-  if [ "$phase" = REPORTER_TIMEOUT ]; then sweep_inbox; fi
+  # The alarm cut the wait short, so the classifier may still run: stop it first, or the sweep could remove a file it reads or writes.
+  if [ "$phase" = REPORTER_TIMEOUT ]; then
+    [ -z "$reader" ] || { kill -KILL "$reader"; wait "$reader"; reader=''; }
+    sweep_inbox
+  fi
   finish
 }
 trap cleanup 0
