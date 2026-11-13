@@ -53,8 +53,10 @@ the host and its accept call succeeded; it does not prove the model read it, and
 collected. A hook that stops waiting hands its claim back when it still can, and the message is
 queued again for a later hook. A claim the hook named and nobody accepted can be claimed again by
 a later hook once 30 seconds have passed, at most three times, with the same ACK code and a line
-saying it may be a repeat; after that it stays uncertain and blocks that target until the
-open-message limit. A `board_inbox` claim is never handed out again.
+saying it may be a repeat, and only while it is still uncertain with no error: not once it has
+expired, been dismissed, or been marked disconnected when the session ended. After the third time
+it is not handed out again. While it is open it stays uncertain and blocks that target, at most
+until it expires 30 minutes after its last claim. A `board_inbox` claim is never handed out again.
 
 Mailboxes expire after 12 hours. Session end rejects queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create
@@ -217,13 +219,13 @@ is needed; LAN requests are refused. A page button will come in a later change.
 Dismissal rejects a queued message before it can be handed out. An accepted or uncertain
 message becomes final `uncertain` with error `DISMISSED`: delivery may already have happened,
 but it no longer blocks the next message. Disconnect and restart preserve that result;
-later receipts fail with `MESSAGE_DISMISSED`. Dismissed records and their text are deleted
-after 24 hours. Dismissing an already finished record fails with `MESSAGE_FINISHED`,
+later receipts fail with `MESSAGE_DISMISSED`. A dismissed record drops its text at once, like any
+finished message, and is deleted after 24 hours, or sooner under the limits above. Dismissing an already finished record fails with `MESSAGE_FINISHED`,
 and an unknown id fails with `NOT_FOUND`.
 
 Open messages are queued, accepted, or uncertain without `EXPIRED` or `DISMISSED`. Each target
 `agent:session` permits at most three (`TARGET_BUSY`), and each source/target pair permits
-one (`PAIR_BUSY`). Sourceless sends count as source `board`. The hub assigns `hops: 1`
+one (`PAIR_BUSY`). A mailbox message a hook delivered (accepted, with no ACK awaited) is not counted in either. Sourceless sends count as source `board`. The hub assigns `hops: 1`
 without a source; an authenticated source inherits one plus the hops of the message most
 recently claimed by its `agent:session`, or one if none. A third hop fails with `HOP_LIMIT`.
 Clients cannot set hops. Two live registrations for one agent/session mark both contested:
@@ -279,8 +281,8 @@ receipt, so reconnecting the original receiver after a board restart may report 
 with a new connection id or turn, provided that connection is not contested. Board JSON
 omits nonces; only the receiver's claimed delivery supplies one. Receipts cannot set the
 hub's reserved `EXPIRED` or `DISMISSED` errors. Send and claim still require the current turn.
-Restart keeps claimed messages uncertain (an accepted message stays accepted, marked disconnected) and does not redeliver them by itself; a claim a turn-start hook named can still be claimed again by a later hook of that session, under the conditions in "Next-turn mailbox". Repeated restarts
-and disconnects do not reset their age limit. Expiry or dismissal lets the card send again.
+A restart hands out nothing by itself. It applies the age limit, and it marks a message disconnected, as a disconnect would, only when its target is gone: a live receiver's connection never outlasts the board, and a mailbox is gone once its session ended or it expired. A claimed message whose mailbox is still enrolled is left as it was, uncertain or accepted; a claim a turn-start hook named can then still be claimed again by a later hook of that session, under the conditions in "Next-turn mailbox". Restarts
+and disconnects do not reset an uncertain message's age limit. An accepted message's 30 minutes count from its first disconnected mark, and later marks do not start them again. Expiry or dismissal lets the card send again.
 Stores are saved as version 2, which earlier releases cannot read: before going back to one,
 move both `messages.json` and `server.lock` out of the folder, since 0.24.0 and earlier take
 the lock before they read the store and keep it after refusing the file. Version 1 loads with `hops: 1`, `claimed: 0`, and an empty nonce. Such legacy messages cannot
@@ -683,7 +685,7 @@ Sending requires the running board hub (`BOARD_NOT_RUNNING`) and a target enroll
 in the same workspace (`WORKSPACE_UNKNOWN` or `WORKSPACE_MISMATCH` otherwise).
 Contested owners, peer pause, hop limit and pair budget can refuse delivery. Peer pause and pair budget
 also apply to a connected adapter's own sends. An unverified sender's message cannot be passed on.
-A message taken by a lease holder holds its session until `board_ack` or 30 minutes; a hook's does not.
+A message taken by a lease holder holds its session until `board_ack` or 30 minutes; a hook's does not once the hook has accepted it.
 Inbox acceptance means the response write completed; ACK separately records acknowledgement.
 There is no parked wait, progress notification, host launcher or automatic MCP configuration yet.
 A lease needs a launcher that sets `AGENT_BOARD_AGENT`, `AGENT_BOARD_SESSION_ID`, `AGENT_BOARD_HOST_PID` and `AGENT_BOARD_HOST_STARTED`.
