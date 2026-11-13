@@ -2,7 +2,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
-import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
+import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
 import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
@@ -97,6 +97,13 @@ export const mailboxAction = (state: MessageState, action: string, body: Record<
     if (!isClaimRef(body.ref)) throw new Error('INVALID_REF')
     if (agent !== 'opencode') throw new Error('INVALID_MAILBOX_CALL')
     return { state: attemptMailboxMessage(state, agent, session, body.ref, now), result: { ok: true } }
+  }
+  // OpenCode's plugin takes only while a session is idle, so a busy session opens or renews its mailbox with this, which
+  // claims nothing (#1366): the board can then queue a message for it, and a turn longer than the mailbox's life keeps it.
+  if (action === 'mailbox-open') {
+    messageFields(body, ['agent', 'session', 'surface'])
+    if (agent !== 'opencode') throw new Error('INVALID_MAILBOX_CALL')
+    return { state: enrollMailbox(state, agent, session, messageText(body.surface, 100), now, STALE_MS), result: { ok: true } }
   }
   messageFields(body, action === 'mailbox-end' ? ['agent', 'session'] : action === 'mailbox-ack' ? ['agent', 'session', 'id', 'nonce', 'reply'] : ['agent', 'session', 'id', 'nonce', 'awaitsAck'])
   const target = state.mailboxes?.find(one => one.id === mailboxId(agent, session))
@@ -428,7 +435,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         save(dismissMessage(state, messageId(body.id), now), now)
         return { ok: true }
       }
-      if (['mailbox-turn', 'mailbox-release', 'mailbox-attempt', 'mailbox-accept', 'mailbox-end', 'mailbox-ack', 'mcp-enroll'].includes(action)) {
+      if (['mailbox-turn', 'mailbox-release', 'mailbox-attempt', 'mailbox-open', 'mailbox-accept', 'mailbox-end', 'mailbox-ack', 'mcp-enroll'].includes(action)) {
         const next = mailboxAction(state, action, body, now)
         save(next.state, now)
         return next.result
@@ -607,6 +614,8 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
       const left = deadline - Date.now()
       await mailboxAccess(directory, Math.min(boardWait, left), Math.min(storeWait, left), true).call('mailbox-attempt', { agent, session, ref }, now)
     },
+    // An OpenCode plugin opens or renews a busy session's mailbox without taking anything (#1366).
+    open: async (agent: string, session: string, surface: string, now: number): Promise<void> => { await access.call('mailbox-open', { agent, session, surface }, now) },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
     // The same end for a caller that must tell a write that failed from one that worked.
     endOrThrow: async (agent: string, session: string, now: number): Promise<void> => { await access.call('mailbox-end', { agent, session }, now) },

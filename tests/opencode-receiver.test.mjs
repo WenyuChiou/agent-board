@@ -100,6 +100,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
         return run('mailbox-ack', { ...base, id: at('--id'), nonce: at('--nonce'), reply: `ACK ${at('--nonce')}${summary ? ` ${Buffer.from(summary, 'base64').toString('utf8')}` : ''}` })
       },
       end: (run, base) => run('mailbox-end', base),
+      open: (run, base) => run('mailbox-open', { ...base, surface: 'CLI' }),
     }
     // The board script's answer to one --mailbox call.
     const answerOf = (action, args) => {
@@ -1407,7 +1408,7 @@ test('R33 for every call the receiver makes and every fault it can meet, from a 
     accept: ['throw', 'hang', 'error', 'lose', 'empty'],
     report: ['throw', 'hang', 'error'],
   }
-  const NOT_IN_A_WAKE = { ack: 'the model calls it after the wake (R6, R23, R35)', end: 'only when the session ends (R17)' }
+  const NOT_IN_A_WAKE = { ack: 'the model calls it after the wake (R6, R23, R35)', end: 'only when the session ends (R17)', open: 'it claims nothing: only a busy session calls it (R36, R37)' }
   // By design nobody can know whether these wakes arrived: the message stays a started wake, with one call, never repeated.
   const UNKNOWN = ['promptAsync throw', 'promptAsync hang', 'promptAsync lose']
   let methods
@@ -1465,3 +1466,49 @@ test('R35 an agent_board_ack with a summary is saved through the real board scri
   assert.equal(await f.hooks.tool.agent_board_ack.execute({ id: 'r35-message', nonce, summary: 'Synthetic summary' }, { sessionID: 'ses_r35' }).catch(error => error.message), 'Acknowledged.')
   assert.deepEqual([f.message('r35-message').status, f.message('r35-message').reply], ['acknowledged', `ACK ${nonce} Synthetic summary`])
 }, { spawn: true }))
+
+// Round 5 of the #1366 review: only a take opened or renewed a session's mailbox, and a busy session takes nothing. A session
+// first seen busy had no mailbox until its turn ended, and a turn longer than the mailbox's 12 hours lost it and its messages.
+test('R36 a session first seen busy, through chat.message or against its idle event, has its mailbox opened at once and takes nothing until it is idle (round 5)', async () => {
+  for (const entry of ['chat.message', 'created']) {
+    await fixture(async f => {
+      f.calls.busy = { ses_r36: { type: 'busy' } }
+      await (entry === 'chat.message' ? f.chat('ses_r36') : f.created('ses_r36'))
+      await f.quiet()
+      const box = () => { try { return (f.store().mailboxes ?? []).find(one => one.agent === 'opencode' && one.session === 'ses_r36') } catch { return undefined } }
+      assert.ok(box()?.expires > f.clock.now(), `${entry}: the busy session's mailbox is open, so the board can queue a message for it`)
+      assert.deepEqual([f.count('open'), f.count('take')], [1, 0], entry)
+      f.queue('ses_r36', 'r36-message', 'Synthetic text for a session first seen busy')
+      f.tick()
+      await f.quiet()
+      assert.deepEqual([f.count('take'), f.message('r36-message').status], [0, 'queued'], `${entry}: nothing is taken while the session is busy`)
+      delete f.calls.busy
+      await f.idle('ses_r36')
+      await f.quiet()
+      assert.deepEqual([f.message('r36-message').status, f.calls.promptAsync.length], ['accepted', 1], `${entry}: the message went out at session.idle`)
+    }, { watch: false })
+  }
+})
+
+test('R37 a session busy across a keep-alive tick has its mailbox renewed with open, not take, so a turn longer than 12 hours keeps its mailbox and its message (round 5)', () => fixture(async f => {
+  const HOUR = 60 * MIN
+  await f.created('ses_r37')
+  await f.quiet()
+  assert.equal(f.count('take'), 1, 'the idle session opened its mailbox with a take')
+  f.calls.busy = { ses_r37: { type: 'busy' } }
+  await f.reported({ session: 'ses_r37', type: 'busy' })
+  f.queue('ses_r37', 'r37-message', 'Synthetic text for a long turn')
+  await f.quiet()
+  const box = () => f.store().mailboxes.find(one => one.agent === 'opencode' && one.session === 'ses_r37')
+  const first = box().expires
+  f.advance(11 * HOUR)
+  for (let round = 1; round <= 20; round++) { f.tick(); await f.quiet() }
+  assert.deepEqual([f.count('open'), f.count('take')], [1, 1], 'the twentieth tick opened the mailbox again and took nothing')
+  assert.ok(box().expires > first + 10 * HOUR, 'the mailbox was renewed')
+  // Past the first 12 hours: without the renewal the mailbox would have run out, and its message with it.
+  f.advance(2 * HOUR)
+  delete f.calls.busy
+  await f.idle('ses_r37')
+  await f.quiet()
+  assert.deepEqual([f.message('r37-message').status, f.calls.promptAsync.length], ['accepted', 1])
+}, { watch: false }))

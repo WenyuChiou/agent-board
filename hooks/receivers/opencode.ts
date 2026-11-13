@@ -89,11 +89,28 @@ const boardReceiver = (client, directory, replay) => {
   // ending: a closed mailbox whose end the board has not saved yet, with the tries so far.
   // pending: a session an event or chat.message named that is not known yet, with the state it reported and the tick's tries.
   // clean: a session whose last take answered ok, with no failure and no step begun since: the only kind the tick may skip.
-  const roots = new Map(), taking = new Set(), clean = new Set(), again = new Set(), marks = new Map(), settling = new Map(), held = new Map(), ending = new Map(), pending = new Map(), replaying = new Set(), closing = new Set(), sawBusy = new Set()
-  let watcher = null, folder = null, debounce = null, timer = null, ticks = 0, isTakeFailing = false
+  // unopened: a known session whose mailbox no take or open has answered ok for since it became known. opening: an open under way.
+  const roots = new Map(), taking = new Set(), clean = new Set(), again = new Set(), marks = new Map(), settling = new Map(), held = new Map(), ending = new Map(), pending = new Map(), replaying = new Set(), closing = new Set(), sawBusy = new Set(), unopened = new Set(), opening = new Set()
+  let watcher = null, folder = null, debounce = null, timer = null, ticks = 0, isTakeFailing = false, isOpenFailing = false
   const mark = session => marks.get(session) ?? 0
   const bump = session => marks.set(session, mark(session) + 1)
   const accept = (session, message) => boardCall('accept', session, directory, ['--id', message.id, '--nonce', message.nonce, '--awaits-ack'])
+  // Only a take opened a session's mailbox, and a busy session takes nothing (#1366 review). A busy session opens or renews it
+  // with open instead, which claims nothing, so the board can queue a message for it while its turn runs, and a turn longer
+  // than the mailbox's 12 hours keeps it. A failed open stays owed, and the tick asks again; it is logged once, until one works.
+  // An open and an end of one session never run at once: an end waits for the open, so a mailbox the session closed
+  // meanwhile is not left open behind it, and an open skipped for an end stays owed for the tick.
+  const openMailbox = async session => {
+    if (opening.has(session) || closing.has(session)) return
+    opening.add(session)
+    const answer = await boardCall('open', session, directory)
+    opening.delete(session)
+    if (answer?.ok === true) {
+      isOpenFailing = false
+      unopened.delete(session)
+    } else if (!isOpenFailing) { isOpenFailing = true; hookError('MAILBOX_FAILED') }
+    if (ending.has(session)) closeMailbox(session)
+  }
   // The host's own view of a session. OpenCode lists only sessions that are not idle (F9: \`{}\` for an idle
   // one), so a lookup that answers with no entry means idle; a failed lookup, an error answer or an entry of
   // no known shape leaves it unknown. A host without the lookup is left to the last event.
@@ -150,8 +167,10 @@ const boardReceiver = (client, directory, replay) => {
     // An unknown state claims nothing, and the message stays queued for the tick to see.
     if (state === 'unknown') return
     if (state === 'busy') {
-      // The host contradicts an idle event: no further event may come, so the tick asks again.
+      // The host contradicts an idle event: no further event may come, so the tick asks again. A session first seen this way
+      // has no mailbox yet, and takes nothing while busy: it opens one.
       roots.set(session, 'busy')
+      if (unopened.has(session)) openMailbox(session)
       return
     }
     const ref = newRef()
@@ -164,6 +183,8 @@ const boardReceiver = (client, directory, replay) => {
       return
     }
     isTakeFailing = false
+    // A take opens the mailbox as well.
+    unopened.delete(session)
     if (typeof taken.watch === 'string') follow(taken.watch)
     const message = taken.message
     if (message == null) { clean.add(session); return }
@@ -289,7 +310,7 @@ const boardReceiver = (client, directory, replay) => {
   // The session's mailbox is closed on the board. A write that failed is asked again at the tick, a few times: the mailbox's
   // own lifetime (12 hours) is the last resort. A session that comes back stops it. Reported once.
   const closeMailbox = async session => {
-    if (closing.has(session)) return
+    if (closing.has(session) || opening.has(session)) return
     closing.add(session)
     const answer = await boardCall('end', session, directory)
     closing.delete(session)
@@ -317,13 +338,15 @@ const boardReceiver = (client, directory, replay) => {
   // The one recovery path, every 30 seconds. A known session with no step under way goes through heal and then deliver, unless
   // the tick has proof there is nothing to do: the session is clean, the board's file was read and shows nothing queued, or
   // claimed and not marked, for it, and it owes the board no step. Not knowing (no folder yet, a file it cannot read, a lookup
-  // or a take that failed, a step that threw) means it acts. Every twentieth tick each session takes once, which keeps its
-  // mailbox open. Every session still written down is looked up again.
+  // or a take that failed, a step that threw) means it acts. Every twentieth tick each session renews its mailbox: an idle
+  // one takes once, and a busy one, which takes nothing, opens it (a busy one whose mailbox is not open yet does so at every
+  // tick). Every session still written down is looked up again.
   const tick = () => {
     ticks += 1
     const waiting = waitingFor(true)
     const isKeepAlive = ticks % 20 === 0
     for (const session of roots.keys()) {
+      if (roots.get(session) === 'busy' && (isKeepAlive || unopened.has(session))) openMailbox(session)
       if (taking.has(session)) continue
       const isSettled = clean.has(session) && waiting !== null && !waiting.has('opencode:' + session) && !held.has(session)
       if (isKeepAlive || !isSettled) heal(session)
@@ -355,6 +378,7 @@ const boardReceiver = (client, directory, replay) => {
       again.delete(session)
       held.delete(session)
       sawBusy.delete(session)
+      unopened.delete(session)
       endSettle(session)
       marks.delete(session)
       ending.set(session, 0)
@@ -364,6 +388,8 @@ const boardReceiver = (client, directory, replay) => {
     if (state !== 'working' && state !== 'waiting') return
     if (!roots.has(session) && !isReported) { pend(session, state); return }
     pending.delete(session)
+    // A session that becomes known has no mailbox the receiver opened yet: a take opens it while idle, an open while busy.
+    if (!roots.has(session)) unopened.add(session)
     if (state === 'working') {
       bump(session)
       roots.set(session, 'busy')
@@ -372,6 +398,7 @@ const boardReceiver = (client, directory, replay) => {
       endSettle(session)
       ending.delete(session)
       run()
+      if (unopened.has(session)) openMailbox(session)
       return
     }
     bump(session)

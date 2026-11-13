@@ -83,8 +83,12 @@ of its own for it. The tick goes on for each session it knows, with no step unde
 waits: the session's last take answered ok with no failure since, the board's file was read and shows nothing queued, or
 claimed and not marked as a wake, for it, and no step is owed to the board. Without that proof (no board folder yet, a file
 it cannot read, a lookup or a take that failed) it asks the host and the board again; with it, the tick makes no board call
-and asks the host nothing. Every twentieth tick each session takes once, which keeps its mailbox
-open. A claim the plugin did not mark is handed to the next take from the same mailbox at once, without waiting for its
+and asks the host nothing. Only an idle session takes, and a take also opens or renews the session's mailbox (12 hours). A
+busy session opens or renews it with `--mailbox open` instead, which claims nothing: at once when the plugin first learns
+the session while it is busy (its first event is often `chat.message`), so the board can queue a message for it during
+that turn, and at every tick until an open answers ok. Every twentieth tick each session renews its mailbox, an idle one by
+a take and a busy one by an open, so a turn longer than 12 hours keeps it.
+A claim the plugin did not mark is handed to the next take from the same mailbox at once, without waiting for its
 30-second lease, and the old ref then answers `CLAIM_LOST` to an attempt; the lease still gives it back to queued, as often
 as needed, with no repeat line, and it is never expired while the mailbox is open. A session the plugin does not know yet
 is written down before its metadata lookup is awaited; if that lookup fails, throws or never answers, or the session's

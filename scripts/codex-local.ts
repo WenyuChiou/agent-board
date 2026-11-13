@@ -504,20 +504,23 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (mode === '--mailbox') {
     const action = flag('--mailbox'), session = flag('--session')
     // OpenCode's plugin (#724) also acknowledges for its own session: ack upgrades an accepted message.
-    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'release', 'attempt'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
+    // open (OpenCode's too) opens or renews the mailbox of a session that is busy, where the plugin takes nothing (#1366).
+    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'release', 'attempt', 'open'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
     const directory = defaultMessagesDirectory(progress, home, process.env, process.platform)
     // This path runs in the plugin's own process with seconds to spare, so it waits for a busy board or store (a turn-start hook cannot).
     const mailbox = hookMailbox(directory, 5000, 2000, 2000)
     const answer = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value)}\n`) }
     // A failed call answers ok false with the board's own code, never a bare failure and never ok true.
     const codeOf = (error: unknown): string => error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING'
+    // The surface a take or an open records for the mailbox.
+    const surfaceOf = (surface: string | undefined): string => surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui || agent === 'opencode' && surface === SURFACE_IDS.cli ? surface : SURFACE_IDS.unknown
     if (action === 'take') {
       const surface = flag('--surface'), ref = flag('--ref')
       // OpenCode's plugin names the claim (12 hex), so it can release it again.
       if (ref !== undefined && (agent !== 'opencode' || !/^[0-9a-f]{12}$/.test(ref))) throw new Error('INVALID_MAILBOX_CALL')
       let message: Awaited<ReturnType<typeof mailbox.turnOrThrow>>
       try {
-        message = await mailbox.turnOrThrow(agent, session, surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui || agent === 'opencode' && surface === SURFACE_IDS.cli ? surface : SURFACE_IDS.unknown, Date.now(), ref)
+        message = await mailbox.turnOrThrow(agent, session, surfaceOf(surface), Date.now(), ref)
       } catch (error) {
         // A failed take is not an empty mailbox: the plugin tries again on its own clock.
         answer({ ok: false, code: error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING', watch: directory, message: null })
@@ -527,6 +530,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
       answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary } })
+    } else if (action === 'open') {
+      // OpenCode's plugin only. It claims nothing; a failed open is asked again at the plugin's next tick. With no board
+      // folder at all no board can queue a message, so there is nothing to open yet, as for end.
+      try {
+        await mailbox.open(agent, session, surfaceOf(flag('--surface')), Date.now())
+        answer({ ok: true })
+      } catch (error) {
+        answer(codeOf(error) === 'BOARD_NOT_RUNNING' && !existsSync(directory) ? { ok: true } : { ok: false, code: codeOf(error) })
+      }
     } else if (action === 'release' || action === 'attempt') {
       // OpenCode's plugin only. release hands a claim back (--unsent: the host was never called, so even a started wake goes back);
       // attempt marks the wake it is about to start, and answers CLAIM_LOST when the ref is no longer the claim (#724).

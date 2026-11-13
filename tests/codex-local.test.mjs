@@ -1066,6 +1066,34 @@ test('the hook finds the same default messages folder as --serve', async () => m
   } finally { await world.close() }
 }))
 
+// OpenCode's plugin takes only while a session is idle, so a busy session opens its mailbox with open instead (#1366).
+test('--mailbox open for OpenCode opens or renews the session mailbox and leaves its queued message queued; another agent is refused', async () => mailboxFixture(async f => {
+  f.seed('opencode')
+  const file = join(f.directory, 'messages.json')
+  // The mailbox is about to run out.
+  const stored = f.state()
+  f.save(file, JSON.stringify({ ...stored, mailboxes: stored.mailboxes.map(one => ({ ...one, expires: Date.now() + 60_000 })) }))
+  const open = (agent, name) => spawnSync(process.execPath, [f.script, '--mailbox', 'open', '--agent', agent, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--session', name, '--surface', 'CLI'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const box = name => f.state().mailboxes.find(one => one.id === f.mailboxId('opencode', name))
+  const renewed = open('opencode', session)
+  assert.equal(renewed.status, 0, renewed.stderr)
+  assert.deepEqual(JSON.parse(renewed.stdout.trim().split('\n').pop()), { ok: true })
+  assert.ok(box(session).expires > Date.now() + 11 * 60 * 60 * 1000, 'renewed for the mailbox lifetime')
+  assert.equal(box(session).surface, 'CLI')
+  const [message] = f.state().messages
+  assert.deepEqual([message.id, message.status, message.claimed, message.ref], ['hook-mailbox-message', 'queued', 0, undefined], 'open claims nothing')
+  // A session with no mailbox yet gets one.
+  const fresh = open('opencode', 'synthetic-open-session')
+  assert.equal(fresh.status, 0, fresh.stderr)
+  assert.ok(box('synthetic-open-session')?.expires > Date.now())
+  // Like ack, release and attempt, open is OpenCode's alone.
+  const before = readFileSync(file, 'utf8')
+  const refused = open('deepseek', session)
+  assert.notEqual(refused.status, 0)
+  assert.match(refused.stderr, /INVALID_MAILBOX_CALL/)
+  assert.equal(readFileSync(file, 'utf8'), before)
+}))
+
 test('the codex-local fixture removes its own prefix\'s folders older than six hours and keeps newer ones', async () => {
   const older = mkdtempSync(join(tmpdir(), 'codex local-'))
   const newer = mkdtempSync(join(tmpdir(), 'codex local-'))
