@@ -33,7 +33,7 @@ const { hookMailbox, parseMessageStore } = await import('../scripts/board-messag
 const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
 const { serveModel: realServeModel, serveAction: realServeAction } = await import('../hooks/serve.ts')
 const { RECEIVER_ROUTES } = await import('../hooks/receiver-routes.ts')
-const { sendDecision, SURFACE_IDS } = await import('../hooks/messaging.ts')
+const { MCP_SURFACE, sendDecision, SURFACE_IDS } = await import('../hooks/messaging.ts')
 // The page's Send paths are tested with every route the receivers name taken as shown live; the
 // tests of what the real records allow (the end of this file) pass RECEIVER_ROUTES themselves.
 // tests/helpers/recorded-routes.json holds them, so the e2e worlds can hand the same table to a board they start.
@@ -5008,5 +5008,101 @@ test("a session's own MCP inbox takes a board message bound to another surface o
     assert.equal(hub.act('mailbox-turn', { ...box, surface: 'TUI' }, now + 2).message, null)
     assert.equal(hub.act('mailbox-turn', { ...box, surface: 'unknown' }, now + 3).message, null)
     assert.equal(hub.act('mailbox-turn', { ...box, surface: 'mcp' }, now + 4).message?.id, 'AB-BOUND-2')
+  } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('docs/MESSAGING.md names the Codex proxy surface accepted by sendDecision and documents RECEIVER_ROUTES (#1415)', () => {
+  const messagingDoc = readFileSync(new URL('../docs/MESSAGING.md', import.meta.url), 'utf8')
+  const jsonLine = messagingDoc.split(/\r?\n/).find(line => line.includes('"executable":"<absolute Codex executable>"'))
+  assert.ok(jsonLine, 'expected Codex proxy stdin JSON example in docs/MESSAGING.md')
+  const example = JSON.parse(jsonLine)
+  const surface = example.surface ?? SURFACE_IDS.codexProxy
+  assert.equal(surface, SURFACE_IDS.codexProxy)
+  const now = Date.now()
+  const proxyConnection = { id: 'proxy-doc-1', agent: 'codex', session: 'synthetic-thread', turn: 'turn-1', scope: 'turn', surface, expires: now + 60_000 }
+  const allowed = sendDecision(proxyConnection.id, [proxyConnection], [], () => 'working', RECEIVER_ROUTES, now)
+  assert.equal(allowed.canSend, true)
+  assert.equal(allowed.line, 'now')
+  const refused = sendDecision('proxy-cli-1', [{ ...proxyConnection, id: 'proxy-cli-1', surface: SURFACE_IDS.cli }], [], () => 'working', RECEIVER_ROUTES, now)
+  assert.equal(refused.canSend, false)
+  assert.equal(refused.reason, 'SURFACE_UNKNOWN')
+  assert.ok(messagingDoc.includes('RECEIVER_ROUTES'))
+})
+
+test('a queued Codex CLI message stops waiting forever and offers Copy when a later hook reads unknown (#1405)', async () => {
+  const { handledOnly, servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const { ZH_TW } = await import('../hooks/i18n.ts')
+  const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'message-surface-lost-'))
+  const hub = openTestMessaging(dir, false, { routes: RECEIVER_ROUTES, stateOfSession: () => 'idle' })
+  try {
+    const now = Date.now()
+    const box = { agent: 'codex', session: 'codex-surface-lost' }
+    hub.act('mailbox-turn', { ...box, surface: SURFACE_IDS.cli }, now)
+    const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=codex-surface-lost state=waiting updated=${new Date(now).toISOString()} -->\n### Surface change\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+    const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+    const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+    const beforeModel = realServeModel(view, [], EN, new Set(), false, hub.snapshot(now + 1), false, group, RECEIVER_ROUTES)
+    const askKey = beforeModel.asks[0].key
+    const questionId = beforeModel.asks[0].questionId
+    assert.equal(beforeModel.asks[0].send, 'mailbox')
+
+    const sent = hub.act('send', { id: 'AB-LOST-1', target: mailboxId('codex', 'codex-surface-lost'), turn: 'session', text: 'Yes', ...(questionId === undefined ? {} : { answers: questionId }) }, now + 1)
+    assert.equal(sent.status, 'queued')
+
+    // An older saved message with no bound surface stays deliverable when a hook reads unknown.
+    const unboundModel = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), false, {
+      connections: [],
+      mailboxes: [enrollMailbox({ messages: [] }, 'codex', 'codex-surface-lost', SURFACE_IDS.unknown, now, 43_200_000).mailboxes[0]],
+      messages: [{ ...sent, surface: undefined }],
+    }, false, group, RECEIVER_ROUTES)
+    assert.equal(unboundModel.asks[0].receipt?.isSurfaceLost, undefined)
+    assert.ok(unboundModel.view.needs.handled.includes(askKey))
+
+    // Check while still queued on CLI: card says Queued for next turn, held in handled.
+    const queuedModel = s => realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, s), [], s, new Set(), false, hub.snapshot(now + 2), false, group, RECEIVER_ROUTES)
+    assert.equal(queuedModel(EN).asks[0].isSending, true)
+    assert.ok(queuedModel(EN).view.needs.handled.includes(askKey))
+
+    // A later turn-start hook reads unknown: mailbox surface becomes unknown, message is unclaimed.
+    const taken = hub.act('mailbox-turn', { ...box, surface: SURFACE_IDS.unknown }, now + 3)
+    assert.equal(taken.message, null)
+
+    const snap = hub.snapshot(now + 4)
+    const afterEn = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), false, snap, false, group, RECEIVER_ROUTES)
+    assert.equal(afterEn.asks[0].send, 'none')
+    assert.equal(afterEn.asks[0].isSending, false)
+    assert.equal(afterEn.asks[0].receipt?.isSurfaceLost, true)
+    assert.ok(!afterEn.view.needs.handled.includes(askKey))
+    const lanAfter = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), true, handledOnly(snap), false, group, RECEIVER_ROUTES)
+    assert.ok(!lanAfter.view.needs.handled.includes(askKey))
+
+    // Enrolling the session's MCP inbox updates mailbox.surface to 'mcp', but MCP can still pull the message.
+    hub.act('mcp-enroll', { agent: 'codex', session: 'codex-surface-lost', surface: MCP_SURFACE, owner: '100:mcp-1', folderDigest: '0'.repeat(64), until: now + 60_000 }, now + 5)
+    const mcpSnap = hub.snapshot(now + 6)
+    const mcpModel = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), false, mcpSnap, false, group, RECEIVER_ROUTES)
+    assert.equal(mcpModel.asks[0].receipt?.isSurfaceLost, undefined)
+    assert.ok(mcpModel.view.needs.handled.includes(askKey))
+
+    for (const s of [EN, ZH_TW, ZH_CN]) {
+      const m0 = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, s), [], s, new Set(), false, { connections: [], mailboxes: [enrollMailbox({ messages: [] }, 'codex', 'codex-surface-lost', SURFACE_IDS.cli, now, 43_200_000).mailboxes[0]], messages: [] }, false, group, RECEIVER_ROUTES)
+      const m1 = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, s), [], s, new Set(), false, { ...snap, mailboxes: [enrollMailbox({ messages: [] }, 'codex', 'codex-surface-lost', SURFACE_IDS.cli, now, 43_200_000).mailboxes[0]], messages: [{ ...sent, surface: undefined }] }, false, group, RECEIVER_ROUTES)
+      const m2 = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, s), [], s, new Set(), false, snap, false, group, RECEIVER_ROUTES)
+      const page = await pageDom(servePage(s, 'synthetic-nonce'), m0, async () => ({ ok: true, json: async () => ({ ok: true, note: s.serveQueuedNextTurn('Codex'), receipt: m1.asks[0].receipt }) }))
+      page.cards().flatMap(card => page.buttons(card)).find(btn => btn.textContent === s.pgWriteOwn).click()
+      page.inputs(page.cards()[0])[0].value = 'Yes'
+      page.cards().flatMap(card => page.buttons(card)).find(btn => btn.textContent.startsWith(s.serveQueueNextTurn('Codex'))).click()
+      await page.flush()
+      await page.redraw(m2)
+      const text = page.text()
+      assert.ok(text.includes(s.messagesSurfaceLost), text)
+      assert.ok(!text.includes(s.serveQueuedNextTurn('Codex')), text)
+      const buttons = page.cards().flatMap(card => page.buttons(card)).map(btn => btn.textContent)
+      assert.ok(buttons.includes(s.serveCopyMessage), buttons.join())
+      assert.ok(buttons.includes(s.messageTakeBack), buttons.join())
+      assert.ok(buttons.includes(s.pgCopyChoice), buttons.join())
+      assert.ok(!buttons.includes(s.serveRetry), buttons.join())
+    }
   } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
 })

@@ -62,7 +62,7 @@ export const MCP_SURFACE = 'mcp'
 // A note covers only the surfaces on which its route was recorded.
 export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[] }
 export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route> }
-type SendRefusal = 'NO_TARGET' | 'SHADOWED' | 'CONTESTED' | 'OFFLINE' | 'STATE_UNKNOWN' | 'SURFACE_UNKNOWN' | 'NO_RECORD'
+type SendRefusal = 'NO_TARGET' | 'SHADOWED' | 'CONTESTED' | 'OFFLINE' | 'STATE_UNKNOWN' | 'SURFACE_UNKNOWN' | 'NO_RECORD' | 'TURN_RUNNING'
 export type SendDecision =
   | { canSend: true; line: RouteLine; target: Connection; state: RowState }
   | { canSend: false; line: RouteLine; reason: SendRefusal }
@@ -85,6 +85,8 @@ export const sendDecision = (
   if (state === undefined) return { canSend: false, line: 'none', reason: 'STATE_UNKNOWN' }
   const route = routeOf(routes, target.agent, routeKind(target.scope), state)
   if (route === undefined) return { canSend: false, line: 'none', reason: 'NO_RECORD' }
+  // Background resume cannot run while a turn is already active in that conversation.
+  if (route.line === 'reopen' && state === 'working') return { canSend: false, line: 'none', reason: 'TURN_RUNNING' }
   if (route.line === 'none' || typeof route.record !== 'string' || route.record === '') return { canSend: false, line: route.line, reason: 'NO_RECORD' }
   if (target.surface === SURFACE_IDS.unknown || !Object.values(SURFACE_IDS).some(surface => surface === target.surface) || !Array.isArray(route.surfaces) || !route.surfaces.includes(target.surface)) return { canSend: false, line: route.line, reason: 'SURFACE_UNKNOWN' }
   return { canSend: true, line: route.line, target, state }
@@ -172,6 +174,17 @@ export const shownMessage = ({ nonce, hash: _hash, framingNonce: _framingNonce, 
   ...one,
   reply: nonce !== '' && (one.reply === `ACK ${nonce}` || one.reply.startsWith(`ACK ${nonce} `)) ? one.reply.slice(`ACK ${nonce}`.length).trimStart() : one.reply,
 })
+// A queued mailbox message bound to one surface cannot be claimed when that mailbox later reads another
+// non-MCP surface (MCP pulls claim across surfaces in claimMessages, so mcp-enroll never drops a queued message).
+export const isMailboxSurfaceLost = (
+  one: Pick<Message, 'status' | 'target' | 'surface'> & { isSurfaceLost?: boolean },
+  mailboxes: readonly Connection[] = [],
+): boolean => {
+  if (one.isSurfaceLost === true) return true
+  if (one.status !== 'queued' || !isMailboxTarget(one.target) || one.surface === undefined) return false
+  const mailbox = mailboxes.find(box => box.id === one.target)
+  return mailbox !== undefined && mailbox.surface !== one.surface && mailbox.surface !== MCP_SURFACE
+}
 export const originOf = (value: unknown): Origin => {
   if (value === undefined || value === 'local') return 'local'
   throw new Error('ORIGIN_UNSUPPORTED')

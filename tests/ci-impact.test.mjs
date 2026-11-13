@@ -155,6 +155,12 @@ test('ci impact unions independent known changes', () => {
   assert.deepEqual(plan.installerMatrix, ['ubuntu-latest'])
 })
 
+test('ci impact runs no product check for a change to the review bot settings in greptile.json', () => {
+  const plan = makePlan(['greptile.json'], options())
+  assert.equal(plan.full, false)
+  assertOnly(plan, [])
+})
+
 test('ci impact falls back to a full plan for an unknown changed path', () => {
   const plan = makePlan(['new-runtime-root/feature.mjs'], options())
   assert.equal(plan.full, true)

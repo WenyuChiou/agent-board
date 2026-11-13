@@ -87,7 +87,7 @@ export const makePlan = (files, options = {}) => {
       known = true
     }
     if (known) continue
-    if (/^(?:README(?:\.[\w-]+)?\.md|CHANGELOG\.md|LICENSE|CODE_OF_CONDUCT\.md|SECURITY\.md)$/.test(path) || /^(?:docs|changelog\.d)\/.*\.(?:md|svg|png|jpg|webp|gif)$/.test(path)) continue
+    if (/^(?:README(?:\.[\w-]+)?\.md|CHANGELOG\.md|LICENSE|CODE_OF_CONDUCT\.md|SECURITY\.md|greptile\.json)$/.test(path) || /^(?:docs|changelog\.d)\/.*\.(?:md|svg|png|jpg|webp|gif)$/.test(path)) continue
     full = true
     reasons.push({ group: 'full', path, reason: 'unclassified path' })
   }
