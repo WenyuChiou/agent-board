@@ -274,12 +274,11 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   // The agent's own MCP pull is exempt: it asks for its messages itself, so nothing starts a turn on an unchecked surface.
   const canReach = (one: Message): boolean => one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE
   const isOwn = (one: Message): boolean => one.target === target.id && one.turn === target.turn
-  // A session has at most one message in doubt. While one is, a claim can take only that same message again,
-  // and only on a surface it allows; a claimant it does not allow gets nothing, so nothing else goes out meanwhile.
+  // While a message of the session is in doubt, no queued message goes out. A claim can take one in doubt again
+  // only when every one is this binding's and has lapsed, and only on a surface that message allows.
   const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one))
   const canTake = (one: Message): boolean => one.status === 'queued' && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
-  const doubt = held[0]
-  const pick = held.length === 0 ? state.messages.find(canTake) : held.length === 1 && doubt !== undefined && isOwn(doubt) && canReach(doubt) && isLapsed(doubt, now) ? doubt : undefined
+  const pick = held.length === 0 ? state.messages.find(canTake) : held.every(one => isOwn(one) && isLapsed(one, now)) ? held.find(canReach) : undefined
   const messages = pick === undefined ? [] : [pick]
   if (messages.length === 0) return { state, messages }
   // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.

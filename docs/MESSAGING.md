@@ -58,10 +58,13 @@ after a hand-back does not count), and not while it has an error (`EXPIRED` and 
 final; a later receipt from the session can clear a disconnected mark). That includes a message a
 hook accepted if a later receipt from its session made it uncertain with no error, and such a
 message can also be handed back; the board's own receivers send `uncertain` only with an error, so
-this takes another client (#1407). While a claim stays uncertain it holds back the session's other
-messages: only that claim can be taken again, by a later hook of that session whose surface it
-allows (above) or by its `board_inbox`. One left uncertain expires at the board's next action or snapshot after more than 30 minutes without
-an update. A `board_inbox` claim is never handed out again.
+this takes another client (#1407). While a claim stays open as uncertain (not yet `EXPIRED` or
+`DISMISSED`), the session's queued messages wait. A claim is taken again only when every message of
+the session still in doubt (an open uncertain claim, or a lease holder's accepted delivery) is one of
+this mailbox's claims that can be handed out again (above); then a later hook whose surface the claim
+allows, or the session's `board_inbox`, takes the oldest of them it may take. An open uncertain claim expires at
+the board's next action or snapshot after more than 30 minutes without an update; an expired or
+dismissed one no longer holds the session. A `board_inbox` claim is never handed out again.
 
 A mailbox normally expires 12 hours after it was last enrolled or renewed; the session's hooks and MCP tools (such as `board_inbox` and `board_status`) can renew it, and session end can remove it sooner. Session end rejects queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create
@@ -159,8 +162,8 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 
 | State | Evidence |
 | --- | --- |
-| queued | Stored locally; no external delivery yet |
-| uncertain | Claimed durably before delivery, or a disconnect/timeout after claiming (unless accepted) |
+| queued | Stored locally; no external delivery yet, except a message handed back after a later receipt made an accepted one uncertain (#1407) |
+| uncertain | Claimed durably before delivery, a disconnect/timeout after claiming (unless accepted), or an accepted message a later receipt reports uncertain (#1407) |
 | accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is not sent again while it stays accepted |
 | acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
 | rejected | Refused before claiming, or adapter reports a clean rejection |

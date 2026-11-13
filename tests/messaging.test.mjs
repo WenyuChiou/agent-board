@@ -187,6 +187,21 @@ test("a hook takes its session's lapsed claim again before a queued message, eve
   assert.equal(taken.state.messages.find(one => one.id === 'bound-queued').status, 'queued')
 })
 
+test('when two claims of a session are in doubt, a hook takes the older again once both have lapsed, as before', () => {
+  const now = Date.now()
+  let state = mailboxQueue(mailboxQueue(mailboxSeed(now), 'first', 'board', now), 'second', 'gemini:sender-session', now)
+  state = mailboxHook(state, SURFACE_IDS.cli, now, 'abcdef').state
+  state = acceptMailboxMessage(state, 'codex', 'mailbox-session', 'first', 'abcdef', now + 1)
+  let taken = mailboxHook(state, SURFACE_IDS.cli, now + 2, '111111')
+  state = taken.state
+  assert.equal(taken.message.id, 'second')
+  // A same-session receipt with no error reports the accepted message uncertain again (#1407).
+  state = messageReceipt(state, state.mailboxes[0], { id: 'first', nonce: 'abcdef', status: 'uncertain' }, now + 3)
+  assert.equal(mailboxHook(state, SURFACE_IDS.cli, now + MAILBOX_LEASE_MS, '222222').message, null)
+  taken = mailboxHook(state, SURFACE_IDS.cli, now + 2 + MAILBOX_LEASE_MS, '333333')
+  assert.deepEqual([taken.message.id, taken.message.redelivered], ['first', 1])
+})
+
 test('a saved message with no claim time never counts as the latest delivery, so the hop limit still holds', () => {
   const now = Date.now()
   const base = mailboxQueue(mailboxSeed(now), 'one-hop', 'board', now)
