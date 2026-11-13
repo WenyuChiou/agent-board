@@ -63,7 +63,10 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     }
     // The board's clock moves on, and its store is pruned as it would be by the next call.
     const advance = ms => { clock.skew += ms; writeState(readState()) }
-    const calls = { promptAsync: [], status: [], sent: [], lookups: 0, board: [], atWake: [], faults: {}, prompts: [], answers: [], cwds: [], gets: 0 }
+    // broken: faults that last until a test mends them (deletes the entry), by the name of the call: a host method, a board
+    // action, or 'report' (the plugin's --agent-status report, which gives a session its card). reports: every call the plugin
+    // made of its worker, with whether the report was saved.
+    const calls = { promptAsync: [], status: [], sent: [], lookups: 0, board: [], atWake: [], faults: {}, prompts: [], answers: [], cwds: [], gets: 0, broken: {}, reports: [] }
     // The plugin's interval timers: nothing runs them but tick().
     const intervals = new Set()
     const fakeSetInterval = (run, ms) => { const one = { run, ms, unref() {} }; intervals.add(one); return one }
@@ -74,7 +77,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       let last = ''
       for (const end = Date.now() + 15_000; Date.now() < end;) {
         await wait(70)
-        const now = `${calls.board.length}/${calls.status.length}/${calls.promptAsync.length}/${calls.gets}`
+        const now = `${calls.board.length}/${calls.status.length}/${calls.promptAsync.length}/${calls.gets}/${calls.reports.length}`
         if (running.size === 0 && now === last) return
         last = now
       }
@@ -82,26 +85,32 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     }
     const sessions = new Map()
     const code = error => error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING'
-    // The board script's answer to one --mailbox call, worked out from the same functions the script runs.
+    // The board script's --mailbox actions, each worked out from the same functions the script runs. R33 gives every one of
+    // them a row, so an action cannot be added here without one.
+    const BOARD = {
+      take: (run, base, at) => {
+        const taken = run('mailbox-turn', { ...base, surface: 'CLI', ref: at('--ref') }).message
+        return { watch: directory, message: taken === null ? null : { id: taken.id, nonce: taken.nonce, text: deliveryText(taken, STRINGS.en), summary: '' } }
+      },
+      attempt: (run, base, at) => run('mailbox-attempt', { ...base, ref: at('--ref') }),
+      release: (run, base, at, args) => run('mailbox-release', { ...base, ref: at('--ref'), ...(args.includes('--unsent') ? { unsent: true } : {}) }),
+      accept: (run, base, at, args) => run('mailbox-accept', { ...base, id: at('--id'), nonce: at('--nonce'), awaitsAck: args.includes('--awaits-ack') }),
+      ack: (run, base, at) => {
+        const summary = at('--summary-b64')
+        return run('mailbox-ack', { ...base, id: at('--id'), nonce: at('--nonce'), reply: `ACK ${at('--nonce')}${summary ? ` ${Buffer.from(summary, 'base64').toString('utf8')}` : ''}` })
+      },
+      end: (run, base) => run('mailbox-end', base),
+    }
+    // The board script's answer to one --mailbox call.
     const answerOf = (action, args) => {
       const at = name => { const index = args.indexOf(name); return index < 0 ? undefined : args[index + 1] }
       const base = { agent: 'opencode', session: at('--session') }
       const now = clock.now()
       const run = (name, body) => { const out = mailboxAction(readState(), name, body, now); writeState(out.state); return out.result }
+      if (!Object.hasOwn(BOARD, action)) return { ok: false, code: 'INVALID_MAILBOX_CALL' }
       try {
-        if (action === 'take') {
-          const taken = run('mailbox-turn', { ...base, surface: 'CLI', ref: at('--ref') }).message
-          return { watch: directory, message: taken === null ? null : { id: taken.id, nonce: taken.nonce, text: deliveryText(taken, STRINGS.en), summary: '' } }
-        }
-        if (action === 'attempt') run('mailbox-attempt', { ...base, ref: at('--ref') })
-        else if (action === 'release') run('mailbox-release', { ...base, ref: at('--ref'), ...(args.includes('--unsent') ? { unsent: true } : {}) })
-        else if (action === 'accept') run('mailbox-accept', { ...base, id: at('--id'), nonce: at('--nonce'), awaitsAck: args.includes('--awaits-ack') })
-        else if (action === 'ack') {
-          const summary = at('--summary-b64')
-          run('mailbox-ack', { ...base, id: at('--id'), nonce: at('--nonce'), reply: `ACK ${at('--nonce')}${summary ? ` ${Buffer.from(summary, 'base64').toString('utf8')}` : ''}` })
-        } else if (action === 'end') run('mailbox-end', base)
-        else return { ok: false, code: 'INVALID_MAILBOX_CALL' }
-        return { ok: true }
+        const answer = BOARD[action](run, base, at, args)
+        return action === 'take' ? answer : { ok: true }
       } catch (error) { return { ok: false, code: code(error), ...(action === 'take' ? { watch: directory, message: null } : {}) } }
     }
     const spawnBoard = (...args) => {
@@ -110,6 +119,9 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       if (canned) calls.canned[action] -= 1
       calls.board.push(action)
       calls.cwds.push({ action, cwd: args[1][args[1].indexOf('--cwd') + 1] })
+      const broken = calls.broken[action]
+      // The board script cannot even be started.
+      if (!isSpawn && broken === 'throw') throw new Error('spawn failed')
       if (isSpawn) {
         const line = JSON.stringify({ ok: false, code: 'BOARD_NOT_RUNNING', watch: directory, message: null })
         const child = canned ? spawn(process.execPath, ['-e', 'process.stdout.write(process.argv[1] + "\n")', line], args[2]) : spawn(...args)
@@ -130,9 +142,11 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
         child.emit('close', code)
       }
       setImmediate(() => {
-        const fault = canned ? 'fail' : calls.faults[action]?.shift()
+        const fault = canned ? 'fail' : broken ?? calls.faults[action]?.shift()
         if (fault === 'hang') return
-        if (fault === 'fail') return finish(0, { ok: false, code: 'BOARD_NOT_RUNNING', watch: directory, message: null })
+        if (fault === 'fail' || fault === 'error') return finish(0, { ok: false, code: 'BOARD_NOT_RUNNING', watch: directory, message: null })
+        // The script ends without a line.
+        if (fault === 'empty') return finish(0)
         // The board answers, but only after the session had time to change.
         if (fault === 'slow') return void setTimeout(() => finish(0, answerOf(action, args[1])), 40)
         const answer = answerOf(action, args[1])
@@ -189,6 +203,44 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
         },
       },
     }
+    // A host method given a lasting fault (calls.broken): throw fails at once; hang answers only after the plugin's own deadline
+    // for that call (the hook's two seconds for a lookup, hostMs for the others); error is an error answer (400 for a wake);
+    // empty is an answer with no data; lose, for a wake, reaches the session and loses the answer. A faulted call is counted
+    // as any other and runs until it settles, so quiet() waits for it.
+    const HANG_MS = { get: 2300, messages: 2300, status: 400, promptAsync: 400 }
+    const late = { get: options => ({ data: { id: options.path.id, ...(sessions.get(options.path.id) ?? {}) } }), messages: () => ({ data: [] }), status: () => ({ data: {} }), promptAsync: () => ({ data: undefined }) }
+    for (const [name, real] of Object.entries(client.session)) client.session[name] = async options => {
+      const fault = calls.broken[name]
+      if (fault === undefined) return real(options)
+      const token = {}
+      running.add(token)
+      try {
+        if (name === 'get') calls.gets += 1
+        else if (name === 'status') calls.status.push(1)
+        else if (name === 'messages') calls.lookups += 1
+        else calls.promptAsync.push(options)
+        if (fault === 'hang') await wait(HANG_MS[name])
+        if (name === 'promptAsync' && (fault === 'hang' || fault === 'lose')) calls.sent.push(options.body.parts[0].text)
+        if (fault === 'throw' || fault === 'lose') throw new Error(`${name} failed`)
+        if (fault === 'error') return { error: { name: 'Failed' }, response: { status: 400 } }
+        if (fault === 'empty') return { data: name === 'status' ? null : undefined }
+        return late[name](options)
+      } finally { running.delete(token) }
+    }
+    // The plugin's worker: a progress report (--agent-status) is recorded, and given the fault calls.broken.report names.
+    const reporter = (_node, args, options) => {
+      const mode = args[3]
+      let payload = {}
+      try { payload = JSON.parse(options.input) } catch {}
+      const fault = mode === '--agent-status' ? calls.broken.report : undefined
+      calls.reports.push({ mode, session: payload.session_id, state: payload.state, isSaved: fault === undefined })
+      if (fault === 'throw') throw new Error('spawn failed')
+      if (fault === 'hang') return { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), status: null, stdout: '', stderr: '' }
+      if (fault === 'error') return { status: 1, stdout: '', stderr: '' }
+      return { status: 0, stdout: '', stderr: '' }
+    }
+    // The saved progress reports of a session, other than its end: a session with one has a card on the board.
+    const cards = session => calls.reports.filter(one => one.mode === '--agent-status' && one.session === session && one.isSaved && one.state !== 'ended').length
     const prompts = {
       // The host refuses the wake: proof it was not sent.
       refuse: () => ({ error: { name: 'Failed' }, response: { status: 400 } }),
@@ -219,7 +271,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     const build = async () => {
       if (!isSpawn) globalThis[TIMING_KEY] = { ...FAST, ...timing }
       try {
-        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0] }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), tool, spawnBoard, readFileSync, watchBoard, join, existsSync, fakeSetInterval, fakeClearInterval)
+        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0] }`)(createRequire, reporter, tool, spawnBoard, readFileSync, watchBoard, join, existsSync, fakeSetInterval, fakeClearInterval)
         const hooks = await factory.plugin({ client, directory: home })
         receiverOf = factory.receiver
         return { hooks, receiver: factory.receiver, plugin: factory.plugin }
@@ -230,10 +282,14 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     const idle = session => hooks.event({ event: { type: 'session.idle', properties: { sessionID: session } } })
     const created = session => hooks.event({ event: { type: 'session.created', properties: { info: { id: session } } } })
     const deleted = session => hooks.event({ event: { type: 'session.deleted', properties: { info: { id: session } } } })
+    // A prompt submitted in the session: OpenCode's chat.message hook.
+    const chat = session => hooks['chat.message']({ sessionID: session }, {})
     // The receiver's own state change, with no event handler (and so no reply capture) around it.
     const note = (session, state) => receiverOf().note(session, state)
     const rebuild = async () => { ({ hooks, plugin } = await build()); return hooks }
-    const f = { tick, quiet, home, board, progress, directory, calls, sessions, queue, message, store, until, settled, reported, idle, created, deleted, note, save, watchers, advance, clock, prompts, rebuild, plugin: options => plugin(options), receiver: () => receiverOf(), count: action => calls.board.filter(one => one === action).length }
+    // The calls a fault can be given: the stand-in host's methods and the stand-in board's actions.
+    const methods = { host: Object.keys(client.session), board: Object.keys(BOARD) }
+    const f = { tick, quiet, home, board, progress, directory, calls, sessions, queue, message, store, until, settled, reported, idle, created, deleted, chat, note, save, watchers, advance, clock, prompts, rebuild, cards, methods, plugin: options => plugin(options), receiver: () => receiverOf(), count: action => calls.board.filter(one => one === action).length }
     Object.defineProperty(f, 'hooks', { get: () => hooks })
     await fn(f)
   } finally {
@@ -1255,70 +1311,6 @@ test('R26 a failed status lookup at the end of the settle wait is looked at agai
   assert.equal(f.calls.promptAsync.length, 2)
 }, { watch: false }))
 
-test('R27 a new session whose only metadata lookup failed is learned at the next tick and its message is woken; a subagent is not, and the lookup stops after 20 tries (round 3)', () => fixture(async f => {
-  f.calls.getFails = true
-  f.queue('ses_r27', 'r27-message', 'Synthetic text for a session not yet learned')
-  await f.created('ses_r27').catch(() => {})
-  await f.quiet()
-  f.calls.getFails = false
-  assert.equal(f.count('take'), 0)
-  assert.equal(f.calls.promptAsync.length, 0)
-  f.tick()
-  await f.until(() => f.message('r27-message').status === 'accepted' && f.settled(), 'the tick learned the session and woke it')
-  assert.equal(f.calls.promptAsync.length, 1)
-  // A session with a parent is looked up again, found to be a subagent, and never registered.
-  f.sessions.set('ses_r27_child', { parentID: 'ses_r27' })
-  f.queue('ses_r27_child', 'r27-child', 'Synthetic text for a subagent')
-  f.calls.getFails = true
-  await f.created('ses_r27_child').catch(() => {})
-  f.calls.getFails = false
-  const takes = f.count('take')
-  f.tick()
-  await f.quiet()
-  assert.equal(f.count('take'), takes)
-  assert.equal(f.message('r27-child').status, 'queued')
-  // A lookup that keeps failing is repeated 20 times and then given up.
-  f.calls.getFails = true
-  await f.created('ses_r27_never').catch(() => {})
-  const first = f.calls.gets
-  for (let round = 0; round < 25; round++) { f.tick(); await wait(15) }
-  assert.equal(f.calls.gets - first, 20)
-}, { watch: false }))
-
-test('R28 for every fault the host and the board can be given, one tick later the message is woken once or is back to queued (round 3)', async () => {
-  const cases = []
-  for (const fault of ['fail', 'hang', 'lose']) for (const action of ['take', 'attempt', 'accept']) cases.push({ name: `${action} ${fault}`, set: f => { f.calls.faults[action] = [fault] } })
-  for (const fault of ['fail', 'hang', 'lose']) cases.push({ name: `release ${fault}`, set: f => { f.calls.prompts.push(f.prompts.refuse); f.calls.faults.release = [fault] } })
-  for (const fault of ['fail', 'hang']) cases.push({ name: `status ${fault}`, set: f => { f.calls.answers.push(fault) } })
-  cases.push({ name: 'status error answer', set: f => { f.calls.statusError = true }, mend: f => { f.calls.statusError = false } })
-  cases.push({ name: 'session lookup error answer', isFresh: true, set: f => { f.calls.getFails = true }, mend: f => { f.calls.getFails = false } })
-  cases.push({ name: 'wake refused', set: f => { f.calls.prompts.push(f.prompts.refuse) } })
-  cases.push({ name: 'wake answered 500', set: f => { f.calls.prompts.push(f.prompts.http(500)) } })
-  cases.push({ name: 'wake arrived, answer lost', set: f => { f.calls.prompts.push(f.prompts.arrivedThenLost) } })
-  cases.push({ name: 'wake never arrived, answer lost', set: f => { f.calls.prompts.push(f.prompts.lost) } })
-  let open
-  cases.push({ name: 'wake answered after the deadline', set: f => { f.calls.prompts.push(f.prompts.late(new Promise(done => { open = done }))) }, mend: () => open() })
-  for (const one of cases) {
-    await fixture(async f => {
-      // The session is open, and its first take, which answered empty, taught the receiver the board folder. The fault is given after it.
-      if (!one.isFresh) { await f.created('ses_r28'); await f.quiet() }
-      f.queue('ses_r28', 'r28-message', 'Synthetic text for the fault loop')
-      one.set(f)
-      await (one.isFresh ? f.created('ses_r28') : f.idle('ses_r28')).catch(() => {})
-      await f.quiet()
-      one.mend?.(f)
-      f.tick()
-      await f.quiet()
-      const shown = f.message('r28-message')
-      const isQueued = shown.status === 'queued' && shown.ref === undefined && shown.attempted === undefined
-      const isWoken = f.calls.promptAsync.length >= 1 && shown.attempted !== undefined && shown.status !== 'queued'
-      assert.ok(isQueued || isWoken, `${one.name}: neither back to queued nor woken: ${JSON.stringify({ status: shown.status, error: shown.error, attempted: shown.attempted, ref: shown.ref, wakes: f.calls.promptAsync.length })}`)
-      assert.ok(!(shown.status === 'uncertain' && shown.attempted === undefined && shown.error === ''), `${one.name}: left claimed and unmarked`)
-      assert.ok(f.calls.sent.length <= 1, `${one.name}: arrived ${f.calls.sent.length} times`)
-    }, { timing: { settleMs: 40 }, watch: false })
-  }
-})
-
 test('R29 with nothing waiting a tick spawns no board call and asks the host nothing; the take that keeps the mailbox open comes every twentieth tick (round 3)', () => fixture(async f => {
   await f.created('ses_r29')
   await f.quiet()
@@ -1333,3 +1325,143 @@ test('R29 with nothing waiting a tick spawns no board call and asks the host not
   assert.equal(f.calls.board.length, board + 1, 'the twentieth tick keeps the mailbox open')
   assert.equal(f.calls.board.at(-1), 'take')
 }, { watch: false }))
+
+// Round 4 of the #1366 review (the diagnosis's rules I1-I3): a session is written down before its lookup is awaited, one path
+// makes a session known whether an event or the tick found it, and the tick acts unless it has proof there is nothing to do.
+test('R30 a new session whose only lookup throws or never answers, or whose only event is chat.message, is looked up again at the next tick and woken with no further event; a subagent found then is let go (round 4)', async () => {
+  for (const one of [{ fault: 'throw', start: 'created' }, { fault: 'hang', start: 'created' }, { fault: 'throw', start: 'chat' }]) {
+    const name = `${one.fault}, ${one.start}`
+    await fixture(async f => {
+      f.queue('ses_r30', 'r30-message', 'Synthetic text for a session whose lookup failed')
+      f.calls.broken.get = one.fault
+      await (one.start === 'chat' ? f.chat('ses_r30') : f.created('ses_r30'))
+      await f.quiet()
+      delete f.calls.broken.get
+      assert.equal(f.count('take'), 0, `${name}: nothing was taken before the tick`)
+      const gets = f.calls.gets
+      f.tick()
+      await f.until(() => f.message('r30-message').status === 'accepted' && f.settled(), `${name}: the tick looked the session up again and woke the message`)
+      assert.ok(f.calls.gets > gets, name)
+      assert.equal(f.calls.promptAsync.length, 1, name)
+    }, { watch: false })
+  }
+  await fixture(async f => {
+    f.sessions.set('ses_r30_child', { parentID: 'ses_r30' })
+    f.queue('ses_r30_child', 'r30-child', 'Synthetic text for a subagent')
+    f.calls.broken.get = 'throw'
+    await f.created('ses_r30_child')
+    await f.quiet()
+    delete f.calls.broken.get
+    f.tick()
+    await f.quiet()
+    const gets = f.calls.gets
+    f.tick()
+    await f.quiet()
+    assert.equal(f.calls.gets, gets, 'the subagent is not looked up again')
+    assert.equal(f.count('take'), 0)
+    assert.equal(f.message('r30-child').status, 'queued')
+  }, { watch: false })
+})
+
+test('R31 a session learned at a tick gets its board card and its place in the open list, and a message queued after that is woken (round 4)', () => fixture(async f => {
+  f.calls.broken.get = 'error'
+  await f.created('ses_r31')
+  await f.quiet()
+  delete f.calls.broken.get
+  assert.equal(f.cards('ses_r31'), 0)
+  f.tick()
+  await f.until(() => f.count('take') === 1 && f.settled(), 'the tick learned the session and opened its mailbox')
+  assert.ok(f.cards('ses_r31') >= 1, 'the session learned at the tick was reported, so it has a card')
+  assert.ok(globalThis[Symbol.for('agent-board.opencode-open-sessions')].has('ses_r31'), 'it is in the open list, so it is ended at exit')
+  f.queue('ses_r31', 'r31-message', 'Synthetic text sent once the card is there')
+  await f.until(() => f.message('r31-message').status === 'accepted' && f.settled(), 'the message queued after the card was woken')
+  assert.equal(f.calls.promptAsync.length, 1)
+}))
+
+test('R32 on a new plugin instance, a first status lookup that fails, or that says busy against the idle event, is asked again at the first tick and the message is woken then (round 4)', async () => {
+  for (const answer of ['fail', 'busy']) {
+    await fixture(async f => {
+      f.queue('ses_r32', 'r32-message', 'Synthetic text for a first status lookup')
+      f.calls.answers.push(answer)
+      await f.created('ses_r32')
+      await f.quiet()
+      assert.deepEqual([f.calls.status.length, f.count('take'), f.calls.promptAsync.length], [1, 0, 0], answer)
+      f.tick()
+      await f.until(() => f.message('r32-message').status === 'accepted' && f.settled(), `${answer}: the first tick asked again and woke the message`)
+      assert.equal(f.calls.promptAsync.length, 1, answer)
+    }, { watch: false })
+  }
+})
+
+test('R33 for every call the receiver makes and every fault it can meet, from a cold start and a warm one, the message is woken once within two ticks after the fault is mended, and the session has its card (round 4)', async () => {
+  // The faults each call can meet (see the fixture). Every call of the stand-in host and board, and the progress report, has a
+  // row, or is named here as not part of a wake, so a call cannot be added to them without one.
+  const FAULTS = {
+    get: ['throw', 'hang', 'error', 'empty'],
+    messages: ['throw', 'hang', 'error', 'empty'],
+    status: ['throw', 'hang', 'error', 'empty'],
+    promptAsync: ['throw', 'hang', 'lose', 'error'],
+    take: ['throw', 'hang', 'error', 'lose', 'empty'],
+    attempt: ['throw', 'hang', 'error', 'lose', 'empty'],
+    release: ['throw', 'hang', 'error', 'lose', 'empty'],
+    accept: ['throw', 'hang', 'error', 'lose', 'empty'],
+    report: ['throw', 'hang', 'error'],
+  }
+  const NOT_IN_A_WAKE = { ack: 'the model calls it after the wake (R6, R23, R35)', end: 'only when the session ends (R17)' }
+  // By design nobody can know whether these wakes arrived: the message stays a started wake, with one call, never repeated.
+  const UNKNOWN = ['promptAsync throw', 'promptAsync hang', 'promptAsync lose']
+  let methods
+  await fixture(async f => { methods = f.methods })
+  for (const call of [...methods.host, ...methods.board, 'report']) assert.ok(call in FAULTS || call in NOT_IN_A_WAKE, `${call} has no row`)
+  const problems = []
+  for (const [call, faults] of Object.entries(FAULTS)) for (const fault of faults) for (const isCold of [true, false]) for (const entry of call === 'get' ? ['event', 'chat.message'] : ['event']) {
+    const name = `${call} ${fault}, ${isCold ? 'cold' : 'warm'}, ${entry}`
+    await fixture(async f => {
+      // Warm: the session is open and its first take, which answered empty, taught the receiver the board folder. Cold: no
+      // session was opened and nothing was taken before the fault.
+      if (!isCold) { await f.created('ses_r33'); await f.quiet() }
+      f.queue('ses_r33', 'r33-message', 'Synthetic text for the fault loop')
+      // A release is called only for a wake the host refused.
+      if (call === 'release') f.calls.prompts.push(f.prompts.refuse)
+      f.calls.broken[call] = fault
+      await (entry === 'chat.message' ? f.chat('ses_r33') : isCold ? f.created('ses_r33') : f.idle('ses_r33'))
+      await f.quiet()
+      // A tick while the fault lasts.
+      f.tick()
+      await f.quiet()
+      delete f.calls.broken[call]
+      const shown = () => f.message('r33-message')
+      if (UNKNOWN.includes(`${call} ${fault}`)) {
+        for (let round = 0; round < 3; round++) { f.tick(); await f.quiet() }
+        if (f.calls.promptAsync.length !== 1 || shown().attempted === undefined) problems.push(`${name}: ${f.calls.promptAsync.length} wake calls, attempted ${shown().attempted}`)
+      } else {
+        const isWoken = () => shown().status === 'accepted' && f.calls.sent.length === 1
+        for (let round = 0; round < 2 && !isWoken(); round++) { f.tick(); await f.quiet() }
+        if (!isWoken()) problems.push(`${name}: not woken within two ticks of the mend: ${JSON.stringify({ status: shown().status, error: shown().error, sent: f.calls.sent.length })}`)
+      }
+      if (f.calls.sent.length > 1) problems.push(`${name}: arrived ${f.calls.sent.length} times`)
+      if (f.cards('ses_r33') === 0) problems.push(`${name}: no card`)
+    }, { timing: { settleMs: 40 }, watch: false })
+  }
+  assert.deepEqual(problems, [])
+})
+
+test('R34 a session whose lookup keeps failing is looked up 20 times at the ticks, then let go, and that is logged once (round 4)', () => fixture(async f => {
+  f.calls.getFails = true
+  await f.created('ses_r34')
+  await f.quiet()
+  const first = f.calls.gets
+  for (let round = 0; round < 25; round++) { f.tick(); await f.quiet() }
+  assert.equal(f.calls.gets - first, 20)
+  const log = join(f.home, '.agent-board', 'hook-errors.log')
+  assert.equal((existsSync(log) ? readFileSync(log, 'utf8') : '').split('HOST_METADATA_FAILED').length - 1, 1)
+}, { watch: false }))
+
+test('R35 an agent_board_ack with a summary is saved through the real board script (round 4)', () => fixture(async f => {
+  f.queue('ses_r35', 'r35-message', 'Synthetic text for an ack with a summary')
+  await f.created('ses_r35')
+  await f.until(() => f.message('r35-message').status === 'accepted' && f.settled(), 'the message was woken and accepted')
+  const nonce = f.message('r35-message').nonce
+  assert.equal(await f.hooks.tool.agent_board_ack.execute({ id: 'r35-message', nonce, summary: 'Synthetic summary' }, { sessionID: 'ses_r35' }).catch(error => error.message), 'Acknowledged.')
+  assert.deepEqual([f.message('r35-message').status, f.message('r35-message').reply], ['acknowledged', `ACK ${nonce} Synthetic summary`])
+}, { spawn: true }))

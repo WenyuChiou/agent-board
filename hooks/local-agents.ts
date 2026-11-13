@@ -193,9 +193,9 @@ ${board === undefined ? 'const receiver = null' : `// One receiver per workspace
 // through the client and the directory of the instance that made it.
 const receivers = new Map()
 ${opencodeReceiverSource(node, board, progress, home, words)}
-const receiverFor = (client, directory) => {
+const receiverFor = (client, directory, replay) => {
   let one = receivers.get(directory)
-  if (one === undefined) { one = boardReceiver(client, directory); receivers.set(directory, one) }
+  if (one === undefined) { one = boardReceiver(client, directory, replay); receivers.set(directory, one) }
   return one
 }`}
 // A one-shot \`opencode run\` exits without session.deleted (#217). As OpenCode exits, the
@@ -249,28 +249,46 @@ const withStatusEvent = (event, action) => {
   })
 }
 
-export const AgentBoardLocal = async ({ client, directory }) => ${board === undefined ? '' : '{ const receiver = receiverFor(client, directory); return '}({
+export const AgentBoardLocal = async ({ client, directory }) => {
+${board === undefined ? '' : `  // The receiver's tick makes a session it still holds known through this plugin's own status path: the same lookup,
+  // report and card as for an event (#1366 review).
+  const receiver = receiverFor(client, directory, (session, state) => hooks.event({ event: { type: 'session.status', properties: { sessionID: session, status: { type: state === 'working' ? 'busy' : 'idle' } } } }))
+`}  // The one path that makes a top-level session known: the host's lookup, the parent check, the open list, the progress report,
+  // and then the receiver. Status events and chat.message run it, and so does the receiver's tick, through replay. The receiver
+  // writes the session down before anything here is awaited and lets it go only on an answer that settles it, so a lookup that
+  // throws, hangs or answers nothing, or a report that fails, is tried again at its tick (#1366 review).
+  const reach = async ({ session, state, current, isNewest, isLatest, info: given, isReplying, report }) => {
+    if (state === 'ended') receiver?.drop(session)
+    else receiver?.pend(session, state)
+    const info = given ?? current(await client.session.get({ path: { id: session } }))
+    if (info.error) throw Error('HOST_METADATA_FAILED')
+    // A subagent's session is never noted, so it keeps no order entry.
+    if (info.data?.parentID) sequence.last.delete(session)
+    if (info.data && (info.data.id !== session || info.data.parentID)) { receiver?.drop(session); return }
+    if (!info.data || !isLatest()) return
+    const where = folderOf(info.data, directory)
+    // A known session keeps the state its latest event noted: an earlier lookup may return last.
+    const known = open.get(session)
+    if (state === 'ended') {
+      pendingIdle.delete(session)
+      open.delete(session)
+      receiver?.note(session, state)
+    } else if (known) known.where = where
+    else open.set(session, { isReplying, where })
+    let isReported = false
+    try { await report(where); isReported = true }
+    finally { if (state !== 'ended' && isNewest() && isLatest()) receiver?.note(session, state, isReported) }
+  }
+  const hooks = {
   'chat.message': async ({ sessionID }, output) => withHook(async (current, deadline) => {
       const isNewest = takeSequence(sessionID)
       pendingIdle.delete(sessionID)
       // A known session notes the new reply at once, as events do before their lookup.
       if (open.has(sessionID)) open.get(sessionID).isReplying = true
-      const info = current(await client.session.get({ path: { id: sessionID } }))
-      if (info.error) {
-        // The receiver's tick looks the session up again, so a session whose only lookup failed is still learned.
-        if (isNewest()) receiver?.retryLookup(sessionID, 'working')
-        throw Error('HOST_METADATA_FAILED')
-      }
-      // A subagent's session is never noted, so it keeps no order entry.
-      if (info.data?.parentID) sequence.last.delete(sessionID)
-      if (!info.data || info.data.id !== sessionID || info.data.parentID) return
-      if (isNewest()) receiver?.note(sessionID, 'working')
-      const where = folderOf(info.data, directory)
       // The reply may have ended while the lookup ran: a known session keeps what was noted since.
-      const known = open.get(sessionID)
-      if (known) known.where = where
-      else open.set(sessionID, { isReplying: true, where })
-      run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...where, ...(isBoardRequest(output) ? { board_request: true } : {}) }, undefined, deadline)
+      await reach({ session: sessionID, state: 'working', current, isNewest, isLatest: () => true, isReplying: true, report: async where => {
+        run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...where, ...(isBoardRequest(output) ? { board_request: true } : {}) }, undefined, deadline)
+      } })
   }),
   event: async ({ event }) => withStatusEvent(event, async (current, deadline, isIdle, isLatest) => {
     const p = event.properties ?? {}
@@ -295,50 +313,32 @@ export const AgentBoardLocal = async ({ client, directory }) => ${board === unde
     if (state === 'working') pendingIdle.delete(session)
     // A known session notes a finished reply at once: OpenCode may exit before the lookup returns.
     if (open.has(session) && state !== 'ended') open.get(session).isReplying = state === 'working'
-    const info = event.type === 'session.deleted' ? { data: p.info } : current(await client.session.get({ path: { id: session } }))
-    if (info.error) {
-      if (state !== 'ended' && isNewest()) receiver?.retryLookup(session, state)
-      throw Error('HOST_METADATA_FAILED')
-    }
-    // A subagent's session is never noted, so it keeps no order entry.
-    if (info.data?.parentID) sequence.last.delete(session)
-    if (!info.data || info.data.id !== session || info.data.parentID || !isLatest()) return
-    const where = folderOf(info.data, directory)
-    // A known session keeps the state its latest event noted: an earlier lookup may return last.
-    const known = open.get(session)
-    if (state === 'ended') {
-      pendingIdle.delete(session)
-      open.delete(session)
-    } else if (known) known.where = where
-    else open.set(session, { isReplying: state === 'working', where })
-    let reply
-    if (state === 'ended' || state === 'working' && isNewest()) receiver?.note(session, state)
-    if (isIdle) {
-      // Leave time for the status even if the messages request never settles.
-      const wait = deadline - Date.now() - 1000
-      if (wait > 0) {
-        let timer
-        try {
-          const listed = await Promise.race([
-            client.session.messages({ path: { id: session } }),
-            new Promise(resolve => { timer = setTimeout(() => resolve(null), wait) }),
-          ])
-          if (!listed?.error && Array.isArray(listed?.data)) {
-            const last = [...listed.data].reverse().find(message => message.info?.role === 'assistant')
-            if (Array.isArray(last?.parts)) {
-              const text = last.parts.filter(part => part?.type === 'text' && !part.synthetic && !part.ignored && typeof part.text === 'string').map(part => part.text).join('\\n')
-              // An oversized message must not make the worker refuse the status with it.
-              if (Buffer.byteLength(JSON.stringify({ session_id: session, state, ...where, last_assistant_message: text }), 'utf8') <= 1048576) reply = text
+    await reach({ session, state, current, isNewest, isLatest, info: event.type === 'session.deleted' ? { data: p.info } : undefined, isReplying: state === 'working', report: async where => {
+      let reply
+      if (isIdle) {
+        // Leave time for the status even if the messages request never settles.
+        const wait = deadline - Date.now() - 1000
+        if (wait > 0) {
+          let timer
+          try {
+            const listed = await Promise.race([
+              client.session.messages({ path: { id: session } }),
+              new Promise(resolve => { timer = setTimeout(() => resolve(null), wait) }),
+            ])
+            if (!listed?.error && Array.isArray(listed?.data)) {
+              const last = [...listed.data].reverse().find(message => message.info?.role === 'assistant')
+              if (Array.isArray(last?.parts)) {
+                const text = last.parts.filter(part => part?.type === 'text' && !part.synthetic && !part.ignored && typeof part.text === 'string').map(part => part.text).join('\\n')
+                // An oversized message must not make the worker refuse the status with it.
+                if (Buffer.byteLength(JSON.stringify({ session_id: session, state, ...where, last_assistant_message: text }), 'utf8') <= 1048576) reply = text
+              }
             }
-          }
-        } catch {} finally { clearTimeout(timer) }
+          } catch {} finally { clearTimeout(timer) }
+        }
       }
-    }
-    if (isLatest()) {
       // The board's status goes first; a message waiting for this idle session is handed over after it.
-      try { run('--agent-status', { session_id: session, state, ...where, ...(reply === undefined ? {} : { last_assistant_message: reply }) }, undefined, deadline) }
-      finally { if (state === 'waiting' && isNewest()) receiver?.note(session, state) }
-    }
+      if (isLatest()) run('--agent-status', { session_id: session, state, ...where, ...(reply === undefined ? {} : { last_assistant_message: reply }) }, undefined, deadline)
+    } })
   }),
   tool: {
     agent_board_progress: tool({
@@ -355,5 +355,7 @@ export const AgentBoardLocal = async ({ client, directory }) => ${board === unde
     }),
     ...(receiver?.tools ?? {}),
   },
-})${board === undefined ? '' : ' }'}
+  }
+  return hooks
+}
 `

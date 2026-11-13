@@ -79,13 +79,17 @@ from then on the board never hands that message out again, whatever happens to t
 
 A message left waiting after a lost answer or a failed lookup goes out at the session's next event, the next board write,
 or the plugin's 30-second tick, whichever comes first, if the session is idle then. No step of the plugin keeps a timer
-of its own for it. The tick reads the board's file and goes on for each session it knows that has a message queued, or
-claimed and not marked as a wake, or a step still owed to the board; with nothing waiting it makes no board call. Every
-twentieth tick (every second tick when there is no board folder to read) each session takes once, which keeps its mailbox
+of its own for it. The tick goes on for each session it knows, with no step under way, unless it has proof that nothing
+waits: the session's last take answered ok with no failure since, the board's file was read and shows nothing queued, or
+claimed and not marked as a wake, for it, and no step is owed to the board. Without that proof (no board folder yet, a file
+it cannot read, a lookup or a take that failed) it asks the host and the board again; with it, the tick makes no board call
+and asks the host nothing. Every twentieth tick each session takes once, which keeps its mailbox
 open. A claim the plugin did not mark is handed to the next take from the same mailbox at once, without waiting for its
 30-second lease, and the old ref then answers `CLAIM_LOST` to an attempt; the lease still gives it back to queued, as often
-as needed, with no repeat line, and it is never expired while the mailbox is open. A session whose metadata lookup failed
-is looked up again at the tick, up to 20 times.
+as needed, with no repeat line, and it is never expired while the mailbox is open. A session the plugin does not know yet
+is written down before its metadata lookup is awaited; if that lookup fails, throws or never answers, or the session's
+progress report fails, the tick makes them again through the plugin's own path, so the session also gets its card, up to
+20 times, and a session given up is logged once. This receiver implements receiving only: sending from OpenCode is #1413.
 
 The plugin takes a marked message back (`--mailbox release --unsent`) in three cases: the host answered 400 or 404, which
 proves it was not sent; the session changed after the attempt was saved, before the host was called; and an attempt

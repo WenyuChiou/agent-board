@@ -90,7 +90,7 @@ const VALUE_FLAGS = new Set([
   '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
   '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
   '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--ref', '--removing',
-  '--session', '--stale-ms', '--state', '--surface', '--theme',
+  '--session', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
 ])
 const unknownFlag = (argv: readonly string[]): string | undefined => {
   for (let i = 0; i < argv.length; i += 1) {

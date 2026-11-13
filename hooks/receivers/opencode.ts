@@ -35,8 +35,9 @@ export const messagingReceiver = {
 }
 
 // The receiver's part of the generated plugin: module-level code that the plugin's event and chat.message
-// handlers feed through note(session, 'working' | 'waiting' | 'ended'), and whose tool the plugin's tool
-// map spreads in. It uses the plugin's own hookError and tool. Only top-level sessions are ever noted.
+// handlers feed through pend (before a lookup), drop and note(session, 'working' | 'waiting' | 'ended'), that
+// calls the plugin's replay(session, state) at its tick, and whose tool the plugin's tool map spreads in. It uses
+// the plugin's own hookError and tool. Only top-level sessions are ever noted.
 // The words the model reads (tool description, replies, the ack note) come from the string tables, chosen by the caller.
 export type OpencodeWords = Pick<Strings, 'opencodeAckTool' | 'opencodeAcknowledged' | 'opencodeAckNote'>
 export const opencodeReceiverSource = (node: string, board: string, progress: string, home: string, words: OpencodeWords): string => `import { spawn as spawnBoard } from 'node:child_process'
@@ -76,19 +77,20 @@ const hostCall = call => new Promise((resolve, reject) => {
 // Why the receiver can promise at most one wake per message: the board is told a wake has started (attempt) before the host
 // is called, and a message marked that way is never handed out again, whatever happens to the host call. The receiver
 // keeps no record of its own beyond the step it is in; after a restart the board's state is enough.
-// Why it can promise that a message left waiting goes out: no step arms a timer of its own. A message waiting after a lost
-// answer or a failed lookup is seen again at the session's next event, at the next board write, or at the tick every 30 seconds,
-// which reads the board's file and goes on for each known session with a message queued or claimed and not marked, or with a
-// step still owed. A claim nobody marked is handed to the next take at once, so the tick needs no lease to wait out.
-const boardReceiver = (client, directory) => {
-  // A session is known only after the plugin saw it report as a top-level session; idle or busy as of its last event.
+// Why it can promise that a message left waiting goes out: no step arms a timer of its own, and no way out of a step has to
+// remember to write anything down. A session is written down before its lookup is awaited; the tick every 30 seconds acts on
+// every known session unless it has proof there is nothing to do, and looks every session still written down up again through
+// the plugin's own path. A claim nobody marked is handed to the next take at once, so the tick needs no lease to wait out.
+const boardReceiver = (client, directory, replay) => {
+  // A session is known only after the plugin's own path reported it as a top-level session; idle or busy as of its last event.
   // marks: one counter per session, bumped by every event (idle too) and by this receiver's own wake. An answer to a
   // question asked of the host counts only if the counter is what it was when the question was asked.
   // held: the one step a session still owes the board: saving an accept, taking a started wake back as unsent.
-  // ending: a closed mailbox whose end the board has not saved yet, with the tries so far. unlearned: a session whose
-  // metadata lookup failed, which the tick looks up again.
-  const roots = new Map(), taking = new Set(), failing = new Set(), again = new Set(), marks = new Map(), settling = new Map(), held = new Map(), ending = new Map(), unlearned = new Map(), closing = new Set(), looking = new Set(), sawBusy = new Set()
-  let watcher = null, folder = null, pending = null, timer = null, ticks = 0
+  // ending: a closed mailbox whose end the board has not saved yet, with the tries so far.
+  // pending: a session an event or chat.message named that is not known yet, with the state it reported and the tick's tries.
+  // clean: a session whose last take answered ok, with no failure and no step begun since: the only kind the tick may skip.
+  const roots = new Map(), taking = new Set(), clean = new Set(), again = new Set(), marks = new Map(), settling = new Map(), held = new Map(), ending = new Map(), pending = new Map(), replaying = new Set(), closing = new Set(), sawBusy = new Set()
+  let watcher = null, folder = null, debounce = null, timer = null, ticks = 0, isTakeFailing = false
   const mark = session => marks.get(session) ?? 0
   const bump = session => marks.set(session, mark(session) + 1)
   const accept = (session, message) => boardCall('accept', session, directory, ['--id', message.id, '--nonce', message.nonce, '--awaits-ack'])
@@ -134,6 +136,8 @@ const boardReceiver = (client, directory) => {
     if (await giveBack(session, one.ref, true)) held.delete(session)
   }
   const step = async session => {
+    // Clean again only once a take answered ok and nothing after it failed: every other way out leaves the tick to act.
+    clean.delete(session)
     const one = held.get(session)
     if (one !== undefined) return finishHeld(session, one)
     if (roots.get(session) !== 'idle') return
@@ -153,16 +157,16 @@ const boardReceiver = (client, directory) => {
     const ref = newRef()
     const taken = await boardCall('take', session, directory, ['--ref', ref])
     // A board script that is missing, fails or does not answer keeps the card from offering Send; it says so
-    // with ok false, which is not the same as an empty mailbox. It is logged once, until a call works again,
+    // with ok false, which is not the same as an empty mailbox. It is logged once, until a take works again,
     // so a tick that keeps asking does not fill the log.
     if (taken === null || typeof taken !== 'object' || taken.ok === false) {
-      if (!failing.has(session)) { failing.add(session); hookError('MAILBOX_FAILED') }
+      if (!isTakeFailing) { isTakeFailing = true; hookError('MAILBOX_FAILED') }
       return
     }
-    failing.delete(session)
+    isTakeFailing = false
     if (typeof taken.watch === 'string') follow(taken.watch)
     const message = taken.message
-    if (message == null) return
+    if (message == null) { clean.add(session); return }
     if (typeof message.text !== 'string' || typeof message.id !== 'string' || typeof message.nonce !== 'string') throw new Error('MAILBOX_FAILED')
     // A session that closed meanwhile does not get it: the next take of its mailbox has the claim.
     if (!roots.has(session)) return
@@ -210,7 +214,8 @@ const boardReceiver = (client, directory) => {
     if (result === 'unknown') { hookError('MAILBOX_FAILED'); return }
     // Accepted is only the transport; the model's ack upgrades it. A failed save is owed to the board; the message is not handed out meanwhile.
     const answer = await accept(session, message)
-    if (answer?.ok !== true && !isFinal(answer?.code)) { held.set(session, { phase: 'accept', message }); hookError('MAILBOX_FAILED') }
+    if (answer?.ok !== true && !isFinal(answer?.code)) { held.set(session, { phase: 'accept', message }); hookError('MAILBOX_FAILED'); return }
+    clean.add(session)
   }
   const deliver = async session => {
     if (!roots.has(session)) return
@@ -220,7 +225,7 @@ const boardReceiver = (client, directory) => {
     if (taking.has(session)) { again.add(session); return }
     if (isWake && settling.has(session)) return
     taking.add(session)
-    try { await step(session) } catch { hookError('MAILBOX_FAILED') }
+    try { await step(session) } catch { clean.delete(session); hookError('MAILBOX_FAILED') }
     finally {
       taking.delete(session)
       if (again.delete(session)) deliver(session)
@@ -266,9 +271,9 @@ const boardReceiver = (client, directory) => {
           return
         }
         if (name != null && name !== 'messages.json') return
-        clearTimeout(pending)
-        pending = setTimeout(check, 250)
-        pending.unref?.()
+        clearTimeout(debounce)
+        debounce = setTimeout(check, 250)
+        debounce.unref?.()
       })
       watcher = current
       watcher.on('error', () => { try { current.close() } catch {} if (watcher === current) watcher = null })
@@ -280,7 +285,7 @@ const boardReceiver = (client, directory) => {
     try { watcher?.close() } catch {}
     watcher = null
   }
-  const stopIfIdle = () => { if (roots.size === 0 && ending.size === 0 && unlearned.size === 0) stop() }
+  const stopIfIdle = () => { if (roots.size === 0 && ending.size === 0 && pending.size === 0) stop() }
   // The session's mailbox is closed on the board. A write that failed is asked again at the tick, a few times: the mailbox's
   // own lifetime (12 hours) is the last resort. A session that comes back stops it. Reported once.
   const closeMailbox = async session => {
@@ -295,49 +300,58 @@ const boardReceiver = (client, directory) => {
     if (round >= 8 || roots.has(session)) { ending.delete(session); stopIfIdle(); return }
     ending.set(session, round + 1)
   }
-  // The same session lookup and top-level check the plugin made when it failed, repeated; a session found to be top-level is
-  // noted in the state its failed event reported. Given up after 20 tries.
-  const learn = async session => {
-    const one = unlearned.get(session)
-    if (one === undefined || looking.has(session)) return
-    looking.add(session)
-    let info = null
-    try { info = await hostCall(() => client.session.get({ path: { id: session } })) } catch {}
-    looking.delete(session)
-    if (unlearned.get(session) !== one) return
-    if (info?.error || info?.data == null) {
-      one.tries += 1
-      if (one.tries >= 20) { unlearned.delete(session); stopIfIdle() }
-      return
-    }
-    unlearned.delete(session)
-    if (info.data.id === session && !info.data.parentID && !roots.has(session)) note(session, one.state)
-    stopIfIdle()
+  // A session still written down goes through the plugin's own path again (replay), the one that made it known in the first
+  // place, so it gets its card as a session an event found does. It replays the host's current state when the host can say it,
+  // else the state its last event reported. After 20 tries it is let go, and that is logged once.
+  const recover = async session => {
+    const one = pending.get(session)
+    if (one === undefined || replaying.has(session)) return
+    if (one.tries >= 20) { pending.delete(session); hookError('HOST_METADATA_FAILED'); stopIfIdle(); return }
+    one.tries += 1
+    replaying.add(session)
+    try {
+      const live = typeof client?.session?.status === 'function' ? await hostState(session) : 'unknown'
+      if (pending.get(session) === one) await replay(session, live === 'idle' ? 'waiting' : live === 'busy' ? 'working' : one.state)
+    } catch {} finally { replaying.delete(session) }
   }
-  // The one recovery path, every 30 seconds. It reads the board's file as check() does and goes on, for each known session
-  // that has a message queued or claimed and not marked there, or a step still owed, with heal and then deliver. A session
-  // with a step under way is left to it. Every twentieth tick (every second with no file to read) each session takes once, which
-  // keeps its mailbox open. A session whose take failed with no file to read is tried at every tick.
+  // The one recovery path, every 30 seconds. A known session with no step under way goes through heal and then deliver, unless
+  // the tick has proof there is nothing to do: the session is clean, the board's file was read and shows nothing queued, or
+  // claimed and not marked, for it, and it owes the board no step. Not knowing (no folder yet, a file it cannot read, a lookup
+  // or a take that failed, a step that threw) means it acts. Every twentieth tick each session takes once, which keeps its
+  // mailbox open. Every session still written down is looked up again.
   const tick = () => {
     ticks += 1
     const waiting = waitingFor(true)
-    const isKeepAlive = ticks % (waiting === null ? 2 : 20) === 0
+    const isKeepAlive = ticks % 20 === 0
     for (const session of roots.keys()) {
       if (taking.has(session)) continue
-      if (isKeepAlive || held.has(session) || waiting?.has('opencode:' + session) || waiting === null && failing.has(session)) heal(session)
+      const isSettled = clean.has(session) && waiting !== null && !waiting.has('opencode:' + session) && !held.has(session)
+      if (isKeepAlive || !isSettled) heal(session)
     }
     for (const session of ending.keys()) closeMailbox(session)
-    for (const session of unlearned.keys()) learn(session)
+    for (const session of pending.keys()) recover(session)
     stopIfIdle()
   }
   const run = () => { if (timer === null) { timer = setInterval(tick, TIMING.tickMs); timer.unref?.() } }
-  // The plugin reports a top-level session's state: 'working' (a turn runs), 'waiting' (session.idle) or 'ended'.
-  const note = (session, state) => {
+  // An event or chat.message names a session before its lookup is awaited: one not known yet is written down, in the state it
+  // reported, so no way out of that lookup (a throw, a hang, an error answer, no data) can lose it. It leaves only on an answer
+  // that settles it: made known, found to be a subagent or another session (drop), ended, or given up at the tick.
+  const pend = (session, state) => {
+    if (typeof session !== 'string' || session === '' || roots.has(session) || !['working', 'waiting'].includes(state)) return
+    const one = pending.get(session)
+    if (one === undefined) pending.set(session, { state, tries: 0 })
+    else one.state = state
+    run()
+  }
+  const drop = session => { if (pending.delete(session)) stopIfIdle() }
+  // The plugin reports a top-level session's state: 'working' (a turn runs), 'waiting' (session.idle) or 'ended'. A session not
+  // known yet becomes known only once the plugin's progress report of it went out (isReported); until then it stays written down.
+  const note = (session, state, isReported = true) => {
     if (typeof session !== 'string' || session === '') return
     if (state === 'ended') {
-      unlearned.delete(session)
-      if (!roots.delete(session)) return
-      failing.delete(session)
+      pending.delete(session)
+      if (!roots.delete(session)) { stopIfIdle(); return }
+      clean.delete(session)
       again.delete(session)
       held.delete(session)
       sawBusy.delete(session)
@@ -347,6 +361,9 @@ const boardReceiver = (client, directory) => {
       closeMailbox(session)
       return
     }
+    if (state !== 'working' && state !== 'waiting') return
+    if (!roots.has(session) && !isReported) { pend(session, state); return }
+    pending.delete(session)
     if (state === 'working') {
       bump(session)
       roots.set(session, 'busy')
@@ -354,26 +371,19 @@ const boardReceiver = (client, directory) => {
       // A busy event after a wake is what the settle wait was for.
       endSettle(session)
       ending.delete(session)
-      unlearned.delete(session)
       run()
       return
     }
-    if (state !== 'waiting') return
     bump(session)
     roots.set(session, 'idle')
     ending.delete(session)
-    unlearned.delete(session)
     run()
     deliver(session)
   }
   return {
     note,
-    // The plugin names a session whose metadata lookup failed, with the state its event reported: the tick looks it up again.
-    retryLookup: (session, state) => {
-      if (typeof session !== 'string' || session === '' || !['working', 'waiting'].includes(state) || roots.has(session)) return
-      unlearned.set(session, { state, tries: 0 })
-      run()
-    },
+    pend,
+    drop,
     // The tool is bound to the session id the host gives each call, so a call cannot name another session.
     tools: {
       agent_board_ack: tool({

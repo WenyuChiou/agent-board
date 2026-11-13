@@ -10961,6 +10961,7 @@ export const LINES = [
 "  \"--session\",",
 "  \"--stale-ms\",",
 "  \"--state\",",
+"  \"--summary-b64\",",
 "  \"--surface\",",
 "  \"--theme\"",
 "]);",
