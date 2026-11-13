@@ -56,10 +56,10 @@ named that was neither accepted nor handed back can be handed out again after 30
 same ACK code and a line saying it may be a repeat: at most three times for one message (a claim
 after a hand-back does not count), and never once it has an error (expired, dismissed, or marked
 disconnected). While a claim stays uncertain it can hold back the session's other messages; one
-still uncertain 30 minutes after its last claim expires. A `board_inbox` claim is never handed
-out again.
+left uncertain expires at the board's next action or snapshot after more than 30 minutes without
+an update. A `board_inbox` claim is never handed out again.
 
-A mailbox expires 12 hours after the last turn-start hook or `board_inbox` call of its session that reached the board. Session end rejects queued messages with `DISCONNECTED`.
+A mailbox normally expires 12 hours after it was last enrolled or renewed; the session's hooks and MCP tools (such as `board_inbox` and `board_status`) can renew it, and session end can remove it sooner. Session end rejects queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create
 the messages folder and only find the default one; a board using `--messages-dir` has no hook mailboxes.
 
