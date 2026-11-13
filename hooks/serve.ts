@@ -17,7 +17,7 @@ import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from '
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
 import { deliveryTargets } from './hook-messages'
-import { address, isMailboxTarget, isOpen, sendDecision } from './messaging'
+import { address, isMailboxSurfaceLost, isMailboxTarget, isOpen, sendDecision, SURFACE_IDS } from './messaging'
 import { RECEIVER_ROUTES } from './receiver-routes'
 
 // The board's page: what `agent-board` shows in a browser for agents other than
@@ -31,8 +31,9 @@ import { RECEIVER_ROUTES } from './receiver-routes'
 // that Claude Code session; none: copied, then pasted into the agent's chat.
 export type SendMode = 'send' | 'connected' | 'mailbox' | 'open' | 'claude' | 'none'
 type Delivery = { id: string; turn: string; agent: string }
-type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean }
-type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly Omit<Message, 'nonce' | 'hash'>[] }
+type ShownMessage = Omit<Message, 'nonce' | 'hash'> & { isSurfaceLost?: boolean }
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean; isSurfaceLost?: true }
+type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly ShownMessage[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
   const matches = session === undefined ? [] : connections.filter(one => address(one.agent, one.session) === address(agent || 'claude', session))
@@ -43,7 +44,7 @@ const reachable = (agent: string, session: string | undefined, target: AgentTarg
   const found = liveTarget(agent, session, targets)
   return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
 }
-const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[], now: number, s: Strings, answers?: string): { receipt?: Receipt } => {
+const rowReceipt = (agent: string, session: string | undefined, messages: readonly ShownMessage[], now: number, s: Strings, answers?: string, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true): { receipt?: Receipt } => {
   // A kept question (no live session here) is found by the one message the board sent to answer it; a message
   // with no such link is no receipt for it. Only the board sets that link, so the question id alone names the
   // message. On a live question's card, an answer to another question is no receipt for this one (#725), while
@@ -52,7 +53,7 @@ const rowReceipt = (agent: string, session: string | undefined, messages: readon
   const one = to === undefined
     ? answers === undefined ? undefined : messages.filter(message => message.answers === answers).at(-1)
     : messages.filter(message => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1)
-  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
+  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 // The person's answer to this question reached its session: the session took it, or replied.
 const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
@@ -415,42 +416,48 @@ const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): Ser
 
 // An answer that was sent, or queued for the session's next turn, no longer waits for the person (#1296). A message
 // that timed out or was refused waits again. The page, the terminal board, --status and --json all count from this.
-const isFailedReceipt = (receipt: Pick<Message, 'status' | 'error' | 'hasAccepted'> | undefined): boolean =>
-  receipt !== undefined && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
+const isFailedReceipt = (receipt: (Pick<Message, 'status' | 'error' | 'hasAccepted'> & { isSurfaceLost?: boolean }) | undefined): boolean =>
+  receipt !== undefined && (receipt.isSurfaceLost === true || receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
 // A question counts as handled by the message bound to it, not by any message to its session (#1296): with two
 // questions in one session, one queued answer hands over one. `holder` is true when a message still held for
 // the session's next turn answers this question. A message bound to no question answers one only when the session
 // has exactly one open question (`openInSession`); with two or more it answers none, and the card keeps waiting.
-const answersQuestion = (one: Omit<Message, 'nonce' | 'hash'>, to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
+const answersQuestion = (one: ShownMessage, to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
   to !== undefined && one.from === 'board' && one.to === to && (one.answers === undefined ? openInSession === 1 : one.answers === questionId)
-const holdsAnswer = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
+const holdsAnswer = (messages: readonly ShownMessage[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
   messages.some(one => answersQuestion(one, to, questionId, openInSession) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)))
 // Whether the board's latest message for this very question failed. A later message to the same session from
 // anyone else says nothing about the answer being counted.
-const answerFailed = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
-  isFailedReceipt(messages.filter(one => answersQuestion(one, to, questionId, openInSession)).at(-1))
+const answerFailed = (messages: readonly ShownMessage[], to: string | undefined, questionId: string | undefined, openInSession: number, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true): boolean => {
+  const last = messages.filter(one => answersQuestion(one, to, questionId, openInSession)).at(-1)
+  return last !== undefined && (isFailedReceipt(last) || isSurfaceLost(last))
+}
 // What the page on the local network is given of the messaging state: enough to tell which answers are queued, and no
 // connection, text or reply (that page shows counts only).
 export const handledOnly = (messaging: Messaging): Messaging => ({
   connections: [],
   mailboxes: [],
-  messages: messaging.messages.map(one => ({
-    id: one.id,
-    target: one.target,
-    turn: '',
-    from: one.from === 'board' ? 'board' : 'other',
-    to: one.to,
-    text: '',
-    origin: one.origin,
-    status: one.status,
-    updated: one.updated,
-    reply: '',
-    error: /^(TIMEOUT|EXPIRED|DISMISSED)/.exec(one.error)?.[0] ?? '',
-    ...(one.hasAccepted === true ? { hasAccepted: true } : {}),
-    hops: 0,
-    claimed: 0,
-    ...(one.answers === undefined ? {} : { answers: one.answers }),
-  })),
+  messages: messaging.messages.map(one => {
+    const isSurfaceLost = isMailboxSurfaceLost(one, messaging.mailboxes) || one.status === 'queued' && isMailboxTarget(one.target) && messaging.mailboxes?.find(box => box.id === one.target)?.surface === SURFACE_IDS.unknown
+    return {
+      id: one.id,
+      target: one.target,
+      turn: '',
+      from: one.from === 'board' ? 'board' : 'other',
+      to: one.to,
+      text: '',
+      origin: one.origin,
+      status: one.status,
+      updated: one.updated,
+      reply: '',
+      error: /^(TIMEOUT|EXPIRED|DISMISSED)/.exec(one.error)?.[0] ?? '',
+      ...(one.hasAccepted === true ? { hasAccepted: true } : {}),
+      ...(isSurfaceLost ? { isSurfaceLost: true as const } : {}),
+      hops: 0,
+      claimed: 0,
+      ...(one.answers === undefined ? {} : { answers: one.answers }),
+    }
+  }),
 })
 const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: ReadonlyMap<string, boolean>, failed: ReadonlySet<string>): string[] => {
   const sources = new Map<string, { isSending?: boolean; receipt?: Receipt }>()
@@ -474,10 +481,18 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
   const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes)
   const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], (agent, session) => sessionState(view, agent, session), routes, group?.now ?? 0)
+  const isMessageSurfaceLost = (one: ShownMessage): boolean => {
+    if (one.status !== 'queued' || !isMailboxTarget(one.target)) return false
+    if (isMailboxSurfaceLost(one, messaging?.mailboxes)) return true
+    const mailbox = (messaging?.mailboxes ?? []).find(box => box.id === one.target)
+    if (mailbox === undefined) return false
+    const decision = decisionFor(mailbox)
+    return !decision.canSend && decision.reason === 'SURFACE_UNKNOWN'
+  }
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
-  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId))
+  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId, isMessageSurfaceLost))
   const asks: ServeAsk[] = []
   // Per ask card: whether an answer to this very question is held (the page's `isSending` is per session).
   const held = new Map<string, boolean>()
@@ -526,13 +541,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const { heldBy } = holderOf(ask)
       const openInSession = heldBy === undefined ? 0 : openBy.get(heldBy) ?? 0
       held.set(item.key, sending.has(cardSendKey(item.key)) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, openInSession))
-      if (answerFailed(messaging?.messages ?? [], heldBy, ask.questionId, openInSession)) failed.add(item.key)
+      if (answerFailed(messaging?.messages ?? [], heldBy, ask.questionId, openInSession, isMessageSurfaceLost)) failed.add(item.key)
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         // A question the board knows gets the receipt of the answer sent to it, not of an earlier message
         // to the same session.
-        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId)),
+        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId, isMessageSurfaceLost)),
         key: item.key,
         ...(ask.questionId === undefined ? {} : { questionId: ask.questionId }),
         project: ask.project,
@@ -567,7 +582,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
-        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
+        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
       continue
@@ -595,7 +610,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const heldBy = connection !== undefined ? address(connection.agent, connection.session) : row.nativeSession === undefined ? undefined : address(row.agent || 'claude', row.nativeSession)
       const rowTurn = heldBy !== undefined && (openBy.get(heldBy) ?? 0) === 0 ? 1 : 0
       held.set(item.key, isSending(row.target) || holdsAnswer(messaging?.messages ?? [], heldBy, undefined, rowTurn))
-      if (answerFailed(messaging?.messages ?? [], heldBy, undefined, rowTurn)) failed.add(item.key)
+      if (answerFailed(messaging?.messages ?? [], heldBy, undefined, rowTurn, isMessageSurfaceLost)) failed.add(item.key)
       const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
       rows.push({
@@ -609,7 +624,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
             : {}),
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
-        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s)),
+        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, undefined, isMessageSurfaceLost)),
         key: item.key,
         project: row.project,
         title: row.title,
@@ -647,7 +662,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         // A row says why only when a reply could otherwise be expected here.
         info: found ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
         ...lineOf,
-        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
+        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
         hasCopyBox: !(row.auto === 'ended' && row.question === null && send === 'none') && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined || found !== undefined && connection === undefined),
         // A Claude row has no target, so its closed session is the block's own state=ended.
@@ -926,7 +941,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1814,11 +1829,14 @@ const PAGE_SCRIPT = String.raw`
     var reply = receipt.reply || '';
     var ack = 'ACK ' + receipt.id;
     if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
+    var isSurfaceLost = receipt.isSurfaceLost === true;
     var isFailed = receiptFailed(receipt);
     var isFailTone = isFailed || receipt.status === 'uncertain' && receipt.hasAccepted !== true;
     var toneClass = isFailTone ? ' t-alert' : receipt.status === 'queued' ? ' t-wait' : ' t-done';
     var isAcceptedUnconfirmed = receipt.status === 'uncertain' && receipt.hasAccepted === true;
-    var labelText = isFailed && receipt.status === 'uncertain'
+    var labelText = isSurfaceLost
+      ? w('messagesSurfaceLost')
+      : isFailed && receipt.status === 'uncertain'
       ? w('messagesTimeout')
       : isAcceptedUnconfirmed ? w('messagesAcceptedUnconfirmed')
       : receipt.status === 'accepted' && line === 'reopen'
@@ -1839,6 +1857,11 @@ const PAGE_SCRIPT = String.raw`
     var lineEl = el('p', 'receipt' + toneClass, labelText + (reply ? ' · ' + reply : ''));
     lineEl.setAttribute('role', isFailTone ? 'alert' : 'status');
     var last = key && sentLast[key];
+    var words = receipt.text || (last ? last.text : '');
+    if (isSurfaceLost) {
+      var acts = add(el('div', 'acts'), words ? button(w('serveCopyMessage'), function () { copy(words, key); }, '', true) : null, dismissButton(w('messageTakeBack'), receipt, key));
+      return add(el('div', 'receipt-box'), lineEl, acts);
+    }
     if (!isFailed || !last) return lineEl;
     return add(el('div', 'receipt-box'), lineEl, add(el('div', 'acts'), button(w('serveRetry'), function () { last.again(); }), button(w('serveCopyMessage'), function () { copy(last.text, key); }, '', true)));
   }
@@ -1971,7 +1994,7 @@ const PAGE_SCRIPT = String.raw`
   function matchesAgent(id) { return !pg.filter || pg.filter === id; }
   function matches(id, project) { return matchesAgent(id) && (!pg.project || pg.project === project); }
   function receiptFailed(receipt) {
-    return !!receipt && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error || ''));
+    return !!receipt && (receipt.isSurfaceLost === true || receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error || ''));
   }
   // A sent answer is on its way: its card stays on the sheet with its line, but it no longer waits for the person.
   // A message that timed out or was refused waits for the person again.
@@ -2228,7 +2251,7 @@ const PAGE_SCRIPT = String.raw`
     add(after, afterMk, parts.msg, parts.again);
     parts.after = fx(after, false);
     add(body, parts.ask, parts.reply, parts.after);
-    if (ask.receipt && ask.receipt.error === 'DISMISSED' && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
+    if (ask.receipt && (ask.receipt.error === 'DISMISSED' || ask.receipt.isSurfaceLost === true) && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
     var receiptEl = ask.receipt ? receiptLine(ask.receipt, key, ask.agent, !!ask.delivery, ask.line) : null;
     if (receiptEl) {
       parts.hasReceipt = true;

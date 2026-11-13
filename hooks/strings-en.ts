@@ -21,6 +21,7 @@ export const EN: Strings = {
   messagesAcceptedDisconnected: "Connection interrupted. Result unconfirmed; waiting for a reply.",
   messagesAcknowledged: "Replied",
   messagesRejected: 'Rejected / not sent',
+  messagesSurfaceLost: "Cannot hand over here: this session no longer reads this message's surface. Copy this and paste it into its chat.",
   messagesFailed: 'Could not send. It may be offline; copy this and paste it there.',
   messagesConflict: 'This message id already has different contents; resend refused.',
   messagesBusy: 'Not sent: another message to this session is still waiting.',

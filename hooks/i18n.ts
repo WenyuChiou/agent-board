@@ -59,6 +59,7 @@ export const ZH_TW = {
   messagesAcceptedDisconnected: "連線中斷。結果未確認；等候回覆。",
   messagesAcknowledged: "已回覆",
   messagesRejected: '已拒絕／未送出',
+  messagesSurfaceLost: '無法從這裡轉交：這個對話已不再讀取此訊息的介面，請複製後貼到對話中。',
   messagesFailed: '未能送出。對方可能已離線，請複製後貼到那邊。',
   messagesConflict: '相同訊息編號已有不同內容，已拒絕重送。',
   messagesBusy: '未送出：給這個對話的另一則訊息還在等待。',
