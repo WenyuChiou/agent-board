@@ -722,6 +722,7 @@ export const ZH_TW = {
   boardQueuedCount: (n: number): string => `${n} 項排隊中`,
   boardUsage: '用法：agent-board | agent-board setup | agent-board stop | agent-board --json [--days N] · --help all 查看所有選項（--watch、--tidy [--stopped | --agent 名稱 | --older 天數]、--all...）',
   boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve（舊）] [--stop] [--json] [--days <天數>] [--project <名稱>] [--tidy] [--all] [--no-open] [--lan] [--port <埠號>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出閒置和已停止項目',
+  boardUnknownFlag: (flag: string): string => `agent-board：不認得的選項「${flag}」。請執行 npx @wenyuchiou/agent-board --version，或用 --help 查看用法。`,
   boardHidden: (text: string): string => `已隱藏「${text}」；問題一改就會再出現。`,
   boardShown: '隱藏的問題都重新顯示了。',
   hideFailed: '記不下「已回覆」，這一項還留在清單上。',

@@ -75,6 +75,43 @@ const flag = (name: string): string | undefined => {
   const at = args.indexOf(name)
   return at === -1 ? undefined : args[at + 1]
 }
+const BOOL_FLAGS = new Set([
+  '--all', '--allow-resume', '--agent-status', '--apply', '--chat', '--codex-doctor',
+  '--codex-event', '--codex-remove', '--codex-report', '--codex-setup', '--codex-trust',
+  '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
+  '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--recover-hooks',
+  '--remove', '--report', '--serve', '--serve-child', '--status', '--stop', '--stopped',
+  '--tidy', '--version', '-v', '--watch',
+])
+const VALUE_FLAGS = new Set([
+  '--agent', '--codex-bin', '--codex-dir', '--data-dir', '--deepseek-dir', '--event',
+  '--grok-dir', '--hermes-dir', '--home', '--hook-deadline', '--hook-event', '--hook-started',
+  '--id', '--idle-minutes', '--keys', '--lang', '--legacy-connect-request', '--mailbox',
+  '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
+  '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
+  '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--removing',
+  '--session', '--stale-ms', '--state', '--surface', '--theme',
+])
+const unknownFlag = (argv: readonly string[]): string | undefined => {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!
+    if (arg === '--') break
+    if (!arg.startsWith('-')) continue
+    if (VALUE_FLAGS.has(arg)) { i += 1; continue }
+    if (arg === '--days') {
+      const next = argv[i + 1]
+      if (next !== undefined && !next.startsWith('--')) i += 1
+      continue
+    }
+    if (arg === '--lan') {
+      const next = argv[i + 1]
+      if (next !== undefined && /^[\d.]+$/.test(next)) i += 1
+      continue
+    }
+    if (!BOOL_FLAGS.has(arg)) return arg
+  }
+  return undefined
+}
 const idleMs = (): number => {
   const value = flag('--idle-minutes')
   if (args.includes('--idle-minutes') && value === undefined) throw new Error('INVALID_IDLE_MINUTES')
@@ -2775,6 +2812,16 @@ const runWatchTerminal = async (): Promise<void> => {
 }
 
 const run = async (): Promise<void> => {
+  const badFlag = unknownFlag(args)
+  if (badFlag !== undefined) {
+    process.stderr.write(`${s.boardUnknownFlag(badFlag)}\n`)
+    process.exitCode = 2
+    return
+  }
+  if (args.includes('--version') || args.includes('-v')) {
+    process.stdout.write(`agent-board ${boardVersion}\n`)
+    return
+  }
   if (args.includes('--days')) {
     const daysIndex = args.indexOf('--days')
     const nextArg = args[daysIndex + 1]
@@ -2842,7 +2889,7 @@ const run = async (): Promise<void> => {
     return
   }
   if (await runCodexLocal(args, path, s)) return
-  if (args.includes('--help') && !args.includes('--chat')) {
+  if ((args.includes('--help') || args.includes('-h')) && !args.includes('--chat')) {
     process.stdout.write(args.includes('all') ? `${s.boardUsageAll}\n` : `${s.boardUsage}\n`)
   } else if (args[0] === 'stop' || args.includes('--stop')) {
     await stopBoard()

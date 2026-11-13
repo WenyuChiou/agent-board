@@ -13578,3 +13578,51 @@ test('Settings notifications stay off after denial or dismissal without another 
   const insecure = await pageDom(servePage(EN, 'synthetic', true), redesignModel(), { notification: InsecureNotification })
   assert.equal(insecure.node('settings-notifications').hidden, true)
 })
+
+test('the board script answers --version and rejects unknown flags without starting a server (#1275)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-flags-'))
+  try {
+    const script = join(dir, 'agent-board.mjs')
+    const progress = join(dir, 'progress.md')
+    writeFileSync(progress, '## Demo\n### Open task\n- [ ] Step\n')
+    const baked = lang => `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang })}\n${BOARD_SCRIPT}`
+    const runScript = (args, lang = 'en') => {
+      writeFileSync(script, baked(lang))
+      return spawnSync(process.execPath, [script, ...args], {
+        env: { ...process.env, HOME: dir, USERPROFILE: dir, CLAUDE_CONFIG_DIR: dir, LANG: lang === 'zh-TW' ? 'zh_TW.UTF-8' : lang === 'zh-CN' ? 'zh_CN.UTF-8' : 'C' },
+        encoding: 'utf8',
+        timeout: 15_000,
+        windowsHide: true,
+      })
+    }
+    const pkgVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+    for (const flag of ['--version', '-v', '--help']) {
+      const ran = runScript(flag === '--help' ? ['--version', '--help'] : [flag])
+      assert.equal(ran.status, 0, ran.stderr)
+      assert.equal(ran.stdout, `agent-board ${pkgVersion}\n`)
+      assert.equal(ran.stderr, '')
+    }
+    for (const [lang, expected] of [
+      ['en', EN.boardUnknownFlag('--bogus')],
+      ['zh-TW', ZH_TW.boardUnknownFlag('--bogus')],
+      ['zh-CN', ZH_CN.boardUnknownFlag('--bogus')],
+    ]) {
+      const ran = runScript(['--bogus'], lang)
+      assert.notEqual(ran.status, 0)
+      assert.equal(ran.stdout, '')
+      assert.equal(ran.stderr, `${expected}\n`)
+      assert.ok(ran.stderr.includes('npx @wenyuchiou/agent-board --version') && ran.stderr.includes('--help'), ran.stderr)
+    }
+    for (const args of [['--days', '7', '--bogus'], ['--lan', '--bogus'], ['-x']]) {
+      const ran = runScript(args)
+      assert.notEqual(ran.status, 0)
+      assert.equal(ran.stdout, '')
+      assert.match(ran.stderr, /--bogus|-x/)
+    }
+    // Known display options and flag values still run cleanly without opening a page.
+    const printed = runScript(['--print', '--no-color', '--theme', 'dark', '--project', '--bogus', '-h'])
+    assert.equal(printed.status, 0, printed.stderr)
+    // No server address or runtime files were written.
+    assert.deepEqual(readdirSync(dir).sort(), ['agent-board.mjs', 'progress.md'])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

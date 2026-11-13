@@ -678,6 +678,7 @@ export const ZH_CN: Strings = {
   boardQueuedCount: (n: number): string => `${n} 项排队中`,
   boardUsage: '用法：agent-board | agent-board setup | agent-board stop | agent-board --json [--days N] · --help all 查看所有选项（--watch、--tidy [--stopped | --agent 名称 | --older 天数]、--all...）',
   boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve（旧）] [--stop] [--json] [--days <天数>] [--project <名称>] [--tidy] [--all] [--no-open] [--lan] [--port <端口>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出闲置和已停止项目',
+  boardUnknownFlag: (flag: string): string => `agent-board：不认识的选项「${flag}」。请运行 npx @wenyuchiou/agent-board --version，或用 --help 查看用法。`,
   boardHidden: (text: string): string => `已隐藏「${text}」；问题一改就会再出现。`,
   boardShown: '隐藏的问题都重新显示了。',
   hideFailed: '记不下「已回复」，这一项还留在清单上。',
