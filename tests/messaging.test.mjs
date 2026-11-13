@@ -156,6 +156,64 @@ test('a mailbox message a hook claimed but never accepted is handed out again af
   assert.equal(takeMailboxMessage(inbox, 'codex', 'mailbox-session', 'CLI', now + 10 * MAILBOX_LEASE_MS, '555555', 'a1b2c3d4e5f6').message, null)
 })
 
+const mailboxAt = id => ({ id, target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: id })
+const mailboxBound = (state, id, surface, now) => queueMessage(state, mailboxAt(id), 'board', state.mailboxes[0], now, 'local', undefined, undefined, surface).state
+const mailboxHook = (state, surface, at, nonce) => takeMailboxMessage(state, 'codex', 'mailbox-session', surface, at, 43_200_000, nonce, 'a1b2c3d4e5f6')
+
+test('a lapsed claim saved for one surface holds back its session for a hook on another, and only a hook on its own surface takes it again', () => {
+  const now = Date.now()
+  let state = mailboxQueue(mailboxBound(mailboxSeed(now), 'bound-first', SURFACE_IDS.cli, now), 'unbound-later', 'gemini:sender-session', now)
+  let taken = mailboxHook(state, SURFACE_IDS.cli, now, 'abcdef')
+  state = taken.state
+  assert.equal(taken.message.id, 'bound-first')
+  // The claim lapses and the next hook reads unknown: it cannot take the claim, and nothing else goes out meanwhile.
+  taken = mailboxHook(state, SURFACE_IDS.unknown, now + MAILBOX_LEASE_MS, '111111')
+  assert.equal(taken.message, null)
+  state = taken.state
+  assert.deepEqual(state.messages.map(one => [one.id, one.status]), [['bound-first', 'uncertain'], ['unbound-later', 'queued']])
+  taken = mailboxHook(state, SURFACE_IDS.cli, now + MAILBOX_LEASE_MS + 1, '222222')
+  assert.deepEqual([taken.message.id, taken.message.nonce, taken.message.redelivered], ['bound-first', 'abcdef', 1])
+})
+
+test("a hook takes its session's lapsed claim again before a queued message, even one queued earlier", () => {
+  const now = Date.now()
+  let state = mailboxQueue(mailboxBound(mailboxSeed(now), 'bound-queued', SURFACE_IDS.cli, now), 'unbound-claimed', 'gemini:sender-session', now)
+  // A hook reading unknown cannot take the bound message, so it takes the unbound one behind it.
+  let taken = mailboxHook(state, SURFACE_IDS.unknown, now, 'abcdef')
+  state = taken.state
+  assert.equal(taken.message.id, 'unbound-claimed')
+  taken = mailboxHook(state, SURFACE_IDS.cli, now + MAILBOX_LEASE_MS, '222222')
+  assert.deepEqual([taken.message.id, taken.message.redelivered], ['unbound-claimed', 1])
+  assert.equal(taken.state.messages.find(one => one.id === 'bound-queued').status, 'queued')
+})
+
+test('when two claims of a session are in doubt, a hook takes the older again once both have lapsed, as before', () => {
+  const now = Date.now()
+  let state = mailboxQueue(mailboxQueue(mailboxSeed(now), 'first', 'board', now), 'second', 'gemini:sender-session', now)
+  state = mailboxHook(state, SURFACE_IDS.cli, now, 'abcdef').state
+  state = acceptMailboxMessage(state, 'codex', 'mailbox-session', 'first', 'abcdef', now + 1)
+  let taken = mailboxHook(state, SURFACE_IDS.cli, now + 2, '111111')
+  state = taken.state
+  assert.equal(taken.message.id, 'second')
+  // A same-session receipt with no error reports the accepted message uncertain again (#1407).
+  state = messageReceipt(state, state.mailboxes[0], { id: 'first', nonce: 'abcdef', status: 'uncertain' }, now + 3)
+  assert.equal(mailboxHook(state, SURFACE_IDS.cli, now + MAILBOX_LEASE_MS, '222222').message, null)
+  taken = mailboxHook(state, SURFACE_IDS.cli, now + 2 + MAILBOX_LEASE_MS, '333333')
+  assert.deepEqual([taken.message.id, taken.message.redelivered], ['first', 1])
+})
+
+test('a saved message with no claim time never counts as the latest delivery, so the hop limit still holds', () => {
+  const now = Date.now()
+  const base = mailboxQueue(mailboxSeed(now), 'one-hop', 'board', now)
+  const [message] = base.messages
+  const delivered = { ...message, id: 'two-hop', status: 'acknowledged', hops: 2, claimed: now + 10, nonce: 'aaaaaa', reply: 'ACK aaaaaa', updated: now + 10 }
+  // Handed back after an accept, as an earlier board could save it: no claim time, updated after the two-hop delivery.
+  const handedBack = { ...message, status: 'queued', claimed: 0, nonce: 'bbbbbb', hasAccepted: true, updated: now + 20 }
+  const loaded = parseMessageStore(JSON.stringify({ version: 2, ...base, messages: [handedBack, delivered] }), now + 30)
+  const other = { id: 'live-other', agent: 'claude', session: 'other-session', surface: SURFACE_IDS.cli, turn: 'turn1', expires: now + 10 * MAILBOX_LEASE_MS }
+  assert.throws(() => queueMessage(loaded, { id: 'third-hop', target: other.id, turn: other.turn, text: 'third' }, 'codex:mailbox-session', other, now + 31), /HOP_LIMIT/)
+})
+
 test('a queued mailbox message shows busy on the card when a live poller connects, then moves to the poller in order without replay', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mailbox-live-poller-'))
   let hub
