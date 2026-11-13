@@ -10,6 +10,8 @@ import type { AddressInfo } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
 import { basename } from 'node:path'
 import { deliveryTargets } from '../hooks/hook-messages'
+import { placeOf } from '../hooks/board-dock'
+import type { Rect } from '../hooks/board-dock'
 import { boardItems } from '../hooks/board'
 import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
@@ -61,6 +63,8 @@ export type ServeOptions = {
   language?: () => SettingsLang
   setLanguage?: (lang: SettingsLang) => { result: 'ok' | 'invalid' | 'unsafe'; lockLeft?: string }
   isLangOverridden?: () => boolean
+  // Where the person last put the docked window (#1084), kept in its own file beside progress.md.
+  setWindow?: (place: Rect) => boolean
   agents?: SettingsAgentControl
   sweep: () => void
   sweepMs: number
@@ -689,6 +693,18 @@ export const startServer = (o: ServeOptions): void => {
         const note = isOverridden ? o.s.settingsLanguageOverridden : o.s.settingsLanguageChanged
         const lockNote = saved.lockLeft === undefined ? '' : ` ${o.s.settingsLockLeft(isLan ? basename(saved.lockLeft) : saved.lockLeft)}`
         return json(res, 200, { lang, isOverridden, note: note + lockNote, ...(saved.lockLeft === undefined ? {} : { lockLeft: true }) })
+      }
+      if (url.pathname === '/api/window') {
+        // Only the computer's own page has a window to place; the phone's page never sends one.
+        const place = placeOf(body)
+        if (isLan || place === null || o.setWindow === undefined) return json(res, 400, {})
+        // A page a newer one replaced (#265) keeps its window until the person closes it; a move
+        // there must not overwrite where the current window was put.
+        const id = pageIdOf(req.headers)
+        const mine = pages.get(id)?.seq
+        const now = Date.now()
+        if (retired.has(id) || mine !== undefined && [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)) return json(res, 409, {})
+        return o.setWindow(place) ? json(res, 200, {}) : json(res, 409, {})
       }
       if (url.pathname === '/api/clean') {
         const note = o.clean()

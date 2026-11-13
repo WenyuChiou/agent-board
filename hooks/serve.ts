@@ -6,6 +6,7 @@ import { groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, Quiet, RepoOf } from './grouping'
 import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardIcon, boardLogo, faviconLink, ICON_CSS, LOGO_CSS, LOGO_STATES, filterStore, GITHUB_PATH, htmlLang, motionCss, pageBaseCss, pageTokens, POWER_PATH, sheetCss, themeHead } from './page-look'
 import { settingsCss, settingsPanel, settingsScript, settingsToggle } from './page-settings'
+import { dockScript } from './board-dock'
 import type { SettingsLang } from './board-settings'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -1584,6 +1585,7 @@ const PAGE_SCRIPT = String.raw`
     }).catch(function (error) { unreachable(); throw error; });
   }
   ${settingsScript}
+  ${dockScript}
   // The progress bar's style (#1085): the root's data-bar picks the colours, so a pick shows on every
   // bar at once. A pick in Settings goes to the board, which keeps it for the pane and the
   // terminal board too; one that does not land goes back to what it was.
