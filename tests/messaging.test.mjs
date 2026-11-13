@@ -4422,8 +4422,11 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'CLI').canSend, false)
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'TUI').canSend, false)
   assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'IDE').canSend, false)
-  // The only Antigravity note ran headless `agy`, not the TUI, so no Antigravity surface has a recorded route.
-  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, false)
+  // The agy TUI note ran the interactive TUI with the session idle: only that route and surface gain Send. The
+  // headless `agy` note is no record for any surface.
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'working', 'agy TUI').canSend, false)
+  assert.equal(RECEIVER_ROUTES.find(one => one.agent === 'antigravity').routes.idle.record, 'docs/validation/2026-11-12-antigravity-tui-mailbox-live.md')
   const { readReceiverRecords, renderMatrix } = await import('../scripts/messaging-matrix.mjs')
   const root = join(import.meta.dirname, '..')
   const rows = renderMatrix(await readReceiverRecords(root), 'docs/MESSAGING.md', root).split('\n')
