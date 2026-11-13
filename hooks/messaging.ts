@@ -112,7 +112,8 @@ const isHookDelivered = (one: Message): boolean => one.status === 'accepted' && 
 // receiver) is handed over once.
 export const MAILBOX_LEASE_MS = 30_000
 export const MAILBOX_REDELIVERIES = 3
-const isLapsed = (one: Message, now: number): boolean => one.status === 'uncertain' && one.error === '' && one.ref !== undefined && isMailboxTarget(one.target)
+// A message the host accepted once is never handed out again, even if a later receipt calls it uncertain.
+const isLapsed = (one: Message, now: number): boolean => one.status === 'uncertain' && one.error === '' && !one.hasAccepted && one.ref !== undefined && isMailboxTarget(one.target)
   && now - one.claimed >= MAILBOX_LEASE_MS && (one.redelivered ?? 0) < MAILBOX_REDELIVERIES
 
 export const FINISHED_KEEP_MS = 24 * 60 * 60 * 1000

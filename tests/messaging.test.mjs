@@ -156,6 +156,19 @@ test('a mailbox message a hook claimed but never accepted is handed out again af
   assert.equal(takeMailboxMessage(inbox, 'codex', 'mailbox-session', 'CLI', now + 10 * MAILBOX_LEASE_MS, '555555', 'a1b2c3d4e5f6').message, null)
 })
 
+test('a mailbox message a hook accepted is never handed out again, even after a later uncertain receipt from its session', () => {
+  const now = Date.now()
+  let state = mailboxQueue(mailboxSeed(now), 'mailbox-accepted', 'board', now)
+  state = takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', now, 43_200_000, 'abcdef', 'a1b2c3d4e5f6').state
+  state = acceptMailboxMessage(state, 'codex', 'mailbox-session', 'mailbox-accepted', 'abcdef', now + 1)
+  // The same session reports the accepted message uncertain, with no error: it keeps the hook's claim name.
+  state = messageReceipt(state, state.mailboxes[0], { id: 'mailbox-accepted', nonce: 'abcdef', status: 'uncertain' }, now + 2)
+  assert.deepEqual([state.messages[0].status, state.messages[0].hasAccepted, state.messages[0].ref], ['uncertain', true, 'a1b2c3d4e5f6'])
+  for (let round = 1; round <= MAILBOX_REDELIVERIES + 1; round++) {
+    assert.equal(takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', now + round * MAILBOX_LEASE_MS, '222222', 'a1b2c3d4e5f6').message, null)
+  }
+})
+
 test('a queued mailbox message shows busy on the card when a live poller connects, then moves to the poller in order without replay', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mailbox-live-poller-'))
   let hub

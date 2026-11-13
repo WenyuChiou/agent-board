@@ -9305,7 +9305,7 @@ export const LINES = [
 "var isHookDelivered = (one) => one.status === \"accepted\" && isMailboxTarget(one.target) && !one.awaitsAck;",
 "var MAILBOX_LEASE_MS = 30000;",
 "var MAILBOX_REDELIVERIES = 3;",
-"var isLapsed = (one, now) => one.status === \"uncertain\" && one.error === \"\" && one.ref !== undefined && isMailboxTarget(one.target) && now - one.claimed >= MAILBOX_LEASE_MS && (one.redelivered ?? 0) < MAILBOX_REDELIVERIES;",
+"var isLapsed = (one, now) => one.status === \"uncertain\" && one.error === \"\" && !one.hasAccepted && one.ref !== undefined && isMailboxTarget(one.target) && now - one.claimed >= MAILBOX_LEASE_MS && (one.redelivered ?? 0) < MAILBOX_REDELIVERIES;",
 "var FINISHED_KEEP_MS = 24 * 60 * 60 * 1000;",
 "var OPEN_LIMIT_MS = 30 * 60 * 1000;",
 "var HOP_LIMIT = 2;",
