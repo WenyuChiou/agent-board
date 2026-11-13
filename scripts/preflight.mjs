@@ -784,8 +784,14 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   await check('touched Node tests', () => {
     const paths = [...changed].filter(path => isTest(path) && path.endsWith('.mjs') && existsSync(join(cwd, path)))
     if (!paths.length) add('PASS', 'no touched Node test files need running.')
+    // A listed file is never run here, so its WARN does not wait for the test lock, and a branch that touches only
+    // listed files takes no lock: another preflight's run cannot turn it into a lock FAIL.
+    for (const path of paths.filter(path => leftToCi.has(path))) {
+      add('WARN', `${path}: not run here; it is on preflight's list of files too long for its ten-minute limit (leftToCi in scripts/preflight.mjs), and CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" ${path}) and list them under Evidence.`)
+    }
+    const toRun = paths.filter(path => !leftToCi.has(path))
     let owner = null
-    try { owner = paths.length ? acquireTestLock(lockPath, onLockPublished, fallbackLockPath, readProcessIdentity, lockPlatform) : null } catch (error) {
+    try { owner = toRun.length ? acquireTestLock(lockPath, onLockPublished, fallbackLockPath, readProcessIdentity, lockPlatform) : null } catch (error) {
       add('FAIL', error.message?.startsWith('test lock directory ') ? error.message : 'test lock directory could not be used; check account directory access.')
       return
     }
@@ -801,11 +807,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     if (owner?.isFallback) add('PASS', "the home folder cannot hold the test lock, so the test lock was this account's shared fallback folder, and any home lock folder was still read.")
     if (owner?.path) {
       try {
-        for (const path of paths) {
-          if (leftToCi.has(path)) {
-            add('WARN', `${path}: not run here; it is on preflight's list of files too long for its ten-minute limit (leftToCi in scripts/preflight.mjs), and CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" ${path}) and list them under Evidence.`)
-            continue
-          }
+        for (const path of toRun) {
           const temp = mkdtempSync(join(tmpdir(), 'agent-board-preflight-'))
           try {
             const env = { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' }

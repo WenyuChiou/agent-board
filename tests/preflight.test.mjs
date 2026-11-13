@@ -1925,7 +1925,39 @@ test('every left-to-CI file exists and CI runs it', async () => {
     assert.ok(['board', 'messaging'].includes(groupForTest(path)), path)
     assert.match(path, /^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/)
   }
-  for (const path of selfPartedTests) assert.ok(leftToCi.has(path), path)
+  // The list is exactly CI's self-parted files plus messaging, which CI runs whole: a file added to or dropped
+  // from either side without the other fails here.
+  assert.deepEqual([...leftToCi].sort(), [...new Set([...selfPartedTests, 'tests/messaging.test.mjs'])].sort())
+})
+
+const heldLock = (f, n) => {
+  const live = `${process.pid}-00000000-0000-4000-8000-0000000001${n}.lock`
+  mkdirSync(f.lockPath, { recursive: true, mode: 0o700 })
+  writeFileSync(join(f.lockPath, live), '')
+  return live
+}
+
+test('a branch that touches only listed files gets their WARN and takes no test lock, while another preflight holds it', async t => {
+  const f = sizedFixture(t, { 'tests/board.test.mjs': syntheticTests(5) })
+  f.write('tests/board.test.mjs', touchCase(syntheticTests(5)))
+  const live = heldLock(f, '01')
+  const checks = await f.check({ onLockPublished: () => assert.fail('a marker must not be published') })
+  assert.ok(has(checks, 'WARN', 'tests/board.test.mjs: not run here'), JSON.stringify(checks))
+  assert.equal(has(checks, 'FAIL', 'another preflight test run is already active'), false, JSON.stringify(checks))
+  assert.equal(f.runs.length, 0)
+  assert.deepEqual(readdirSync(f.lockPath), [live])
+})
+
+test('a branch that touches a listed and an unlisted file gets the WARN and the lock FAIL, while another preflight holds the lock', async t => {
+  const f = sizedFixture(t, { 'tests/board.test.mjs': syntheticTests(5), 'tests/sized.test.mjs': syntheticTests(5) })
+  f.write('tests/board.test.mjs', touchCase(syntheticTests(5)))
+  f.write('tests/sized.test.mjs', touchCase(syntheticTests(5)))
+  const live = heldLock(f, '02')
+  const checks = await f.check()
+  assert.ok(has(checks, 'WARN', 'tests/board.test.mjs: not run here'), JSON.stringify(checks))
+  assert.ok(has(checks, 'FAIL', 'another preflight test run is already active'), JSON.stringify(checks))
+  assert.equal(f.runs.length, 0)
+  assert.deepEqual(readdirSync(f.lockPath), [live])
 })
 
 test('preflight removes parent credentials from the touched test environment', async t => {
