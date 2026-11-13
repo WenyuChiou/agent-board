@@ -439,9 +439,14 @@ This table is written by hand and covers progress reporting too. Its runs have n
 | DeepSeek Harness | Independent Cordis lifecycle plugin and native skill | Generic client contract checked; no DeepSeek-native receiver or model ACK acceptance |
 | dot / other UIs | Explicit progress relay where documented | No native receiving connector or real ACK established |
 
-To add a receiver, export `messagingReceiver` from its own import-safe `.mjs` or `.ts`
-module under `scripts/` or `hooks/`; no central receiver list or other receiver changes
-are needed. The `MessagingReceiverRecord` type is in `scripts/message-client.mjs`.
+To add a receiver, complete both steps: export `messagingReceiver` from its own import-safe `.mjs` or `.ts`
+module under `scripts/` or `hooks/` for matrix discovery (`scripts/messaging-matrix.mjs`),
+and add its routes to the runtime list `RECEIVER_ROUTES` in `hooks/receiver-routes.ts`
+(no other receiver changes are needed). The board offers Send only for routes in
+`RECEIVER_ROUTES` — a receiver missing there gets Copy — and the pinning test
+`'each receiver record names a validation note that exists, and the table the board reads matches every record'`
+in `tests/messaging.test.mjs` checks that `RECEIVER_ROUTES` matches every exported record.
+The `MessagingReceiverRecord` type is in `scripts/message-client.mjs`.
 Each surface names its own `docs/validation/<date>-<host>-live.md` file, or `null`; the host's
 name in lower case, with spaces and slashes as hyphens, starts the `<host>` part (`deepseek-harness`,
 `dot-web-chats`), and a surface may follow it. Importing a record module must start nothing;
@@ -573,8 +578,10 @@ After a person approves the exact disposable server/thread/active-turn binding, 
 JSON on stdin:
 
 ```json
-{"boardUrl":"<private loopback board URL>","executable":"<absolute Codex executable>","thread":"<actual thread UUID>","turn":"<actual active turn id>","surface":"Codex CLI"}
+{"boardUrl":"<private loopback board URL>","executable":"<absolute Codex executable>","thread":"<actual thread UUID>","turn":"<actual active turn id>","surface":"Codex local proxy"}
 ```
+
+`surface` may also be omitted, because `connectCodexProxy` defaults to `"Codex local proxy"` (`SURFACE_IDS.codexProxy`).
 
 An explicit `socket` path may select an already-running owner. Preflight and each poll
 check `thread/loaded/list`; each send uses `turn/steer` with `expectedTurnId`. A stale turn

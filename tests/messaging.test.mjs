@@ -5010,3 +5010,21 @@ test("a session's own MCP inbox takes a board message bound to another surface o
     assert.equal(hub.act('mailbox-turn', { ...box, surface: 'mcp' }, now + 4).message?.id, 'AB-BOUND-2')
   } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('docs/MESSAGING.md names the Codex proxy surface accepted by sendDecision and documents RECEIVER_ROUTES (#1415)', () => {
+  const messagingDoc = readFileSync(new URL('../docs/MESSAGING.md', import.meta.url), 'utf8')
+  const jsonLine = messagingDoc.split(/\r?\n/).find(line => line.includes('"executable":"<absolute Codex executable>"'))
+  assert.ok(jsonLine, 'expected Codex proxy stdin JSON example in docs/MESSAGING.md')
+  const example = JSON.parse(jsonLine)
+  const surface = example.surface ?? SURFACE_IDS.codexProxy
+  assert.equal(surface, SURFACE_IDS.codexProxy)
+  const now = Date.now()
+  const proxyConnection = { id: 'proxy-doc-1', agent: 'codex', session: 'synthetic-thread', turn: 'turn-1', scope: 'turn', surface, expires: now + 60_000 }
+  const allowed = sendDecision(proxyConnection.id, [proxyConnection], [], () => 'working', RECEIVER_ROUTES, now)
+  assert.equal(allowed.canSend, true)
+  assert.equal(allowed.line, 'now')
+  const refused = sendDecision('proxy-cli-1', [{ ...proxyConnection, id: 'proxy-cli-1', surface: SURFACE_IDS.cli }], [], () => 'working', RECEIVER_ROUTES, now)
+  assert.equal(refused.canSend, false)
+  assert.equal(refused.reason, 'SURFACE_UNKNOWN')
+  assert.ok(messagingDoc.includes('RECEIVER_ROUTES'))
+})
