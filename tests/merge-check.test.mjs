@@ -48,7 +48,8 @@ const assertClean = clone => {
   const output = git(clone, 'worktree', 'list', '--porcelain')
   const listed = output.split(/\r?\n/).filter(line => line.startsWith('worktree '))
   assert.equal(listed.length, 1)
-  assert.equal(realpathSync(listed[0].slice(9)), realpathSync(clone))
+  // The native form expands Windows short names (RUNNER~1) in the temp folder, as git's own listing does.
+  assert.equal(realpathSync.native(listed[0].slice(9)), realpathSync.native(clone))
   assert.equal(output.includes('ab-merge-check-'), false)
 }
 
