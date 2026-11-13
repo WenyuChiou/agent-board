@@ -9,7 +9,7 @@ import os from 'node:os'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
+import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, leftToCi, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
 
 const script = fileURLToPath(new URL('../scripts/preflight.mjs', import.meta.url))
 const syntheticIdentity = ticks => `linux:00000000-0000-4000-8000-000000000001:${ticks}:time:[1]:pid:[2]`
@@ -1869,6 +1869,170 @@ test('preflight runs a touched nested e2e test', async t => {
   assert.ok(has(await f.check(), 'PASS', 'tests/e2e/deeper/nested.test.mjs: 1 tests, 0 failed'))
 })
 
+const syntheticTests = count => `import test from 'node:test'\nimport assert from 'node:assert/strict'\n${Array.from({ length: count }, (_, i) => `test('synthetic case ${i}', () => {})\n`).join('')}`
+const touchCase = text => text.replace("test('synthetic case 3', () => {})", "test('synthetic case 3', () => { assert.equal(1, 1) })")
+const sizedFixture = (t, files, runTest) => {
+  const f = fixture(t)
+  for (const [path, text] of Object.entries(files)) f.write(path, text)
+  f.commit()
+  f.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+  const runs = []
+  const run = (program, args, options) => {
+    if (!args.includes('--test')) return f.run(program, args, options)
+    runs.push(args)
+    return runTest ? runTest(program, args, options) : f.run(program, args, options)
+  }
+  return { ...f, runs, check: options => f.check({ run, ...options }) }
+}
+
+test('preflight does not run a touched file on its left-to-CI list and says so', async t => {
+  const f = sizedFixture(t, { 'tests/board.test.mjs': syntheticTests(5) })
+  // The changed test fails, so a run here would show as a FAIL line.
+  f.write('tests/board.test.mjs', syntheticTests(5).replace("test('synthetic case 3', () => {})", "test('synthetic case 3', () => { assert.equal(1, 2) })"))
+  const checks = await f.check()
+  assert.ok(has(checks, 'WARN', 'tests/board.test.mjs: not run here; it is on preflight\'s list of files too long for its ten-minute limit (leftToCi in scripts/preflight.mjs), and CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" tests/board.test.mjs) and list them under Evidence.'), JSON.stringify(checks))
+  assert.equal(f.runs.length, 0)
+  assert.equal(checks.some(item => item.state !== 'WARN' && item.message.startsWith('tests/board.test.mjs')), false)
+})
+
+test('preflight runs whole every touched test file not on the list, whatever its source holds', async t => {
+  // A file of 500 tests, and one named board.test.mjs in a folder the list does not name.
+  const paths = ['tests/sized.test.mjs', 'tests/e2e/deeper/board.test.mjs']
+  const f = sizedFixture(t, Object.fromEntries(paths.map(path => [path, syntheticTests(500)])))
+  for (const path of paths) f.write(path, touchCase(syntheticTests(500)))
+  const checks = await f.check()
+  for (const path of paths) assert.ok(has(checks, 'PASS', `${path}: 500 tests, 0 failed.`), JSON.stringify(checks))
+  assert.deepEqual(f.runs.map(args => args.at(-1)).sort(), [...paths].sort())
+  assert.equal(f.runs.some(args => args.includes('--test-name-pattern')), false)
+})
+
+test('an unlisted file that does not finish is a FAIL', async t => {
+  const f = sizedFixture(t, { 'tests/sized.test.mjs': syntheticTests(5) }, () => ({ error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: 'not ok 3 - x\n', stderr: '' }))
+  f.write('tests/sized.test.mjs', touchCase(syntheticTests(5)))
+  const checks = await f.check()
+  const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/sized.test.mjs'))
+  assert.ok(failed, JSON.stringify(checks))
+  assert.match(failed.message, /the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change\.$/)
+  assert.equal(f.runs.length, 1)
+})
+
+const asAccount = async (name, run) => {
+  const saved = { USERNAME: process.env.USERNAME, USER: process.env.USER }
+  process.env.USERNAME = name
+  process.env.USER = name
+  try { return await run() } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+test('an account named like a listed file or the list keeps the WARN and the hint whole, while a failed test name still hides it', async t => {
+  const listed = sizedFixture(t, { 'tests/board.test.mjs': syntheticTests(5) })
+  listed.write('tests/board.test.mjs', touchCase(syntheticTests(5)))
+  const warned = await asAccount('board', () => listed.check())
+  assert.ok(has(warned, 'WARN', 'tests/board.test.mjs: not run here;'), JSON.stringify(warned))
+  assert.ok(has(warned, 'WARN', '(node --test --test-name-pattern "<title>" tests/board.test.mjs)'), JSON.stringify(warned))
+  const timedOut = sizedFixture(t, { 'tests/sized.test.mjs': syntheticTests(5) }, () => ({ error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: 'not ok 3 - leftToCi case\n', stderr: '' }))
+  timedOut.write('tests/sized.test.mjs', touchCase(syntheticTests(5)))
+  const failed = await asAccount('leftToCi', () => timedOut.check())
+  assert.ok(has(failed, 'FAIL', 'tests/sized.test.mjs: unknown tests, unknown failed; failed: <user> case; the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change.'), JSON.stringify(failed))
+})
+
+const didNotFinish = '; the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change.'
+
+test('a touched test file that is not committed has its name scrubbed in the RUN line and the result', async t => {
+  const f = sizedFixture(t, { 'tests/sized.test.mjs': syntheticTests(1) }, () => ({ status: 0, signal: null, stdout: '# tests 1\n# fail 0\n', stderr: '' }))
+  // One name only on this disk, one staged and not committed: neither is in the pull request yet.
+  f.write('tests/ghp_syntheticToken.test.mjs', syntheticTests(1))
+  f.write('tests/exchange.test.mjs', syntheticTests(1))
+  f.git('add', 'tests/exchange.test.mjs')
+  const lines = []
+  const checks = await asAccount('exchange', () => f.check({ onProgress: line => lines.push(line) }))
+  const all = JSON.stringify([checks, lines])
+  assert.equal(all.includes('ghp_syntheticToken'), false, all)
+  assert.ok(has(checks, 'PASS', 'tests/<token>.test.mjs: 1 tests, 0 failed.'), all)
+  assert.ok(has(checks, 'PASS', 'tests/<user>.test.mjs: 1 tests, 0 failed.'), all)
+  assert.deepEqual(lines.sort(), ['RUN tests/<token>.test.mjs', 'RUN tests/<user>.test.mjs'])
+})
+
+test('a dollar sign in a committed file name or a failed test name is shown as written', async t => {
+  const path = 'tests/a$$b.test.mjs'
+  const f = sizedFixture(t, { [path]: syntheticTests(5) }, () => ({ status: 1, signal: null, stdout: 'not ok 1 - costs $& and $$ more\n# tests 5\n# fail 1\n', stderr: '' }))
+  f.write(path, touchCase(syntheticTests(5)))
+  const checks = await f.check()
+  assert.ok(has(checks, 'FAIL', 'tests/a$$b.test.mjs: 5 tests, 1 failed; failed: costs $& and $$ more.'), JSON.stringify(checks))
+})
+
+test('a run ended by a signal with no timeout error is a FAIL with the list hint too', async t => {
+  const f = sizedFixture(t, { 'tests/sized.test.mjs': syntheticTests(5) }, () => ({ status: null, signal: 'SIGKILL', stdout: '', stderr: '' }))
+  f.write('tests/sized.test.mjs', touchCase(syntheticTests(5)))
+  const checks = await f.check()
+  assert.ok(has(checks, 'FAIL', `tests/sized.test.mjs: unknown tests, unknown failed${didNotFinish}`), JSON.stringify(checks))
+})
+
+test('an account named like a committed unlisted file keeps its name in the PASS and FAIL lines and in the RUN line', async t => {
+  const path = 'tests/exchange.test.mjs'
+  const results = [
+    ['PASS', { status: 0, signal: null, stdout: '# tests 5\n# fail 0\n', stderr: '' }, `${path}: 5 tests, 0 failed.`],
+    ['FAIL', { error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: '', stderr: '' }, `${path}: unknown tests, unknown failed${didNotFinish}`],
+  ]
+  for (const [state, result, words] of results) {
+    const f = sizedFixture(t, { [path]: syntheticTests(5) }, () => result)
+    f.write(path, touchCase(syntheticTests(5)))
+    const lines = []
+    const checks = await asAccount('exchange', () => f.check({ onProgress: line => lines.push(line) }))
+    assert.ok(has(checks, state, words), JSON.stringify(checks))
+    assert.equal(JSON.stringify(checks).includes('tests/<user>'), false, JSON.stringify(checks))
+    assert.deepEqual(lines, [`RUN ${path}`])
+  }
+})
+
+test('every left-to-CI file exists and CI runs it', async () => {
+  // Imported here only: ci-impact.mjs loads hooks/messaging.ts.
+  const { groupForTest, selfPartedTests } = await import('../scripts/ci-impact.mjs')
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  for (const path of leftToCi) {
+    assert.ok(existsSync(join(root, path)), path)
+    assert.ok(['board', 'messaging'].includes(groupForTest(path)), path)
+    assert.match(path, /^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/)
+  }
+  // The list is exactly CI's self-parted files plus messaging, which CI runs whole: a file added to or dropped
+  // from either side without the other fails here.
+  assert.deepEqual([...leftToCi].sort(), [...new Set([...selfPartedTests, 'tests/messaging.test.mjs'])].sort())
+})
+
+const heldLock = (f, n) => {
+  const live = `${process.pid}-00000000-0000-4000-8000-0000000001${n}.lock`
+  mkdirSync(f.lockPath, { recursive: true, mode: 0o700 })
+  writeFileSync(join(f.lockPath, live), '')
+  return live
+}
+
+test('a branch that touches only listed files gets their WARN and takes no test lock, while another preflight holds it', async t => {
+  const f = sizedFixture(t, { 'tests/board.test.mjs': syntheticTests(5) })
+  f.write('tests/board.test.mjs', touchCase(syntheticTests(5)))
+  const live = heldLock(f, '01')
+  const checks = await f.check({ onLockPublished: () => assert.fail('a marker must not be published') })
+  assert.ok(has(checks, 'WARN', 'tests/board.test.mjs: not run here'), JSON.stringify(checks))
+  assert.equal(has(checks, 'FAIL', 'another preflight test run is already active'), false, JSON.stringify(checks))
+  assert.equal(f.runs.length, 0)
+  assert.deepEqual(readdirSync(f.lockPath), [live])
+})
+
+test('a branch that touches a listed and an unlisted file gets the WARN and the lock FAIL, while another preflight holds the lock', async t => {
+  const f = sizedFixture(t, { 'tests/board.test.mjs': syntheticTests(5), 'tests/sized.test.mjs': syntheticTests(5) })
+  f.write('tests/board.test.mjs', touchCase(syntheticTests(5)))
+  f.write('tests/sized.test.mjs', touchCase(syntheticTests(5)))
+  const live = heldLock(f, '02')
+  const checks = await f.check()
+  assert.ok(has(checks, 'WARN', 'tests/board.test.mjs: not run here'), JSON.stringify(checks))
+  assert.ok(has(checks, 'FAIL', 'another preflight test run is already active'), JSON.stringify(checks))
+  assert.equal(f.runs.length, 0)
+  assert.deepEqual(readdirSync(f.lockPath), [live])
+})
+
 test('preflight removes parent credentials from the touched test environment', async t => {
   const f = fixture(t)
   const names = ['GITHUB_TOKEN', 'GH_TOKEN', 'NPM_TOKEN', 'ANTHROPIC_API_KEY']
@@ -1969,7 +2133,7 @@ test('missing or interrupted TAP remains a failed touched Node check', async t =
     ? { status: null, signal: 'SIGTERM', error: new Error('synthetic interruption'), stdout: '', stderr: '' }
     : f.run(program, args, options)
   const interrupted = await f.check({ run: interruptedRun })
-  assert.ok(has(interrupted, 'FAIL', safeLine('tests/missing-tap.test.mjs: unknown tests, unknown failed; the runner did not finish')), JSON.stringify(interrupted))
+  assert.ok(has(interrupted, 'FAIL', 'tests/missing-tap.test.mjs: unknown tests, unknown failed; the runner did not finish'), JSON.stringify(interrupted))
 })
 
 test('passing touched Node output keeps its existing message and outcome', async t => {
@@ -2002,10 +2166,13 @@ test('preflight detects committed staged and untracked tests while skipping unto
   }
   await f.check({ run })
   assert.deepEqual(paths.sort(), ['tests/committed.test.mjs', 'tests/staged.test.mjs', 'tests/untracked.test.mjs'])
+  // A touched slow suite runs, unless it is on the left-to-CI list.
+  f.write('tests/exchange.test.mjs', '// changed\n')
   f.write('tests/board.test.mjs', '// changed\n')
   paths.length = 0
   await f.check({ run })
-  assert.ok(paths.includes('tests/board.test.mjs'))
+  assert.ok(paths.includes('tests/exchange.test.mjs'))
+  assert.equal(paths.includes('tests/board.test.mjs'), false)
 })
 
 test('preflight warns that touched TypeScript tests need the Claude runner', async t => {

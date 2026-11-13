@@ -272,14 +272,16 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string): { state: MessageState; messages: Message[] } => {
   if (target.contested || target.expires <= now) return { state, messages: [] }
   const to = address(target.agent, target.session)
-  // A lapsed claim stops blocking only the binding that takes it again; any other still waits behind it.
-  const isRetaken = (one: Message): boolean => isLapsed(one, now) && one.target === target.id && one.turn === target.turn
-  const busy = state.messages.some(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isRetaken(one))
   // A message the board checked a route for goes only to a claimant on that same surface; on any other it stays queued.
   // The agent's own MCP pull is exempt: it asks for its messages itself, so nothing starts a turn on an unchecked surface.
-  const canClaim = (one: Message): boolean => (one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE) && (one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))
-    || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === 'queued')
-  const messages = busy ? [] : state.messages.filter(canClaim).slice(0, 1)
+  const canReach = (one: Message): boolean => one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE
+  const isOwn = (one: Message): boolean => one.target === target.id && one.turn === target.turn
+  // While a message of the session is in doubt, no queued message goes out. A claim can take one in doubt again
+  // only when every one is this binding's and has lapsed, and only on a surface that message allows.
+  const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one))
+  const canTake = (one: Message): boolean => one.status === 'queued' && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
+  const pick = held.length === 0 ? state.messages.find(canTake) : held.every(one => isOwn(one) && isLapsed(one, now)) ? held.find(canReach) : undefined
+  const messages = pick === undefined ? [] : [pick]
   if (messages.length === 0) return { state, messages }
   // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.
   const claimed = messages.map(({ ref: _ref, ...one }) => ({

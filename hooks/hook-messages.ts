@@ -33,7 +33,7 @@ export const takeMailboxMessage = (state: MessageState, agent: string, session: 
   return { state: claimed.state, message: claimed.messages[0] ?? null }
 }
 // A hook that stopped waiting never showed what the board claimed for it, so it hands the claim back
-// and the next turn has the message at once (#990). The ACK code stays, for a message shown before.
+// and the message is queued again for a later hook (#990). The ACK code stays, for a message shown before.
 export const releaseMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number): MessageState => {
   const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && message.error === '')
   if (one === undefined) return state
