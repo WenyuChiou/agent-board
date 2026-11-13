@@ -449,3 +449,32 @@ test('the brand lockups and the mark are paths and circles only, on a transparen
   assert.equal(/<style>([\s\S]*?)<\/style>/.exec(logo)?.[1], '.ink{fill:' + light.ink + '}.brand{fill:' + light.brand + '}@media (prefers-color-scheme:dark){.ink{fill:' + dark.ink + '}.brand{fill:' + dark.brand + '}}', 'the theme-following lockup uses the lockups’ colours')
   assert.doesNotMatch(logo, PRIVACY, 'the theme-following lockup satisfies the privacy contract')
 })
+
+test('receipt state groups have distinct tokens with >= 4.5:1 contrast and disabled primary buttons keep contrast (#1400)', () => {
+  const automatic = valuesOf(tokenRules.find(rule => rule.selector.includes(':not(')))
+  const groups = ['wait', 'done', 'fail']
+  for (const [mode, palette] of Object.entries({ light, dark })) {
+    const fgs = new Set(), bgs = new Set()
+    for (const group of groups) {
+      const fg = palette[`receipt-${group}`], bg = palette[`receipt-${group}-bg`], line = palette[`receipt-${group}-line`]
+      assert.ok(fg && bg && line, `${mode}: receipt-${group} tokens exist`)
+      if (mode === 'dark') {
+        assert.equal(automatic[`receipt-${group}`], fg, `system dark and explicit dark agree for receipt-${group}`)
+        assert.equal(automatic[`receipt-${group}-bg`], bg, `system dark and explicit dark agree for receipt-${group}-bg`)
+        assert.equal(automatic[`receipt-${group}-line`], line, `system dark and explicit dark agree for receipt-${group}-line`)
+      }
+      assert.ok(contrast(fg, bg) >= 4.5, `${mode}: receipt-${group} on receipt-${group}-bg is ${contrast(fg, bg).toFixed(2)}:1, requires 4.5:1`)
+      fgs.add(fg.toLowerCase())
+      bgs.add(bg.toLowerCase())
+    }
+    assert.equal(fgs.size, 3, `${mode}: all three receipt state text colours differ`)
+    assert.equal(bgs.size, 3, `${mode}: all three receipt state background colours differ`)
+  }
+  const pageRules = styleRules(renders().find(one => one.name === 'page').html)
+  const disabledPrimary = pageRules.find(rule => rule.selector === 'button.primary:disabled')
+  assert.equal(disabledPrimary?.declarations.find(item => item.property === 'background')?.value, 'var(--act)')
+  assert.equal(disabledPrimary?.declarations.find(item => item.property === 'color')?.value, 'var(--on-act)')
+  assert.equal(disabledPrimary?.declarations.find(item => item.property === 'opacity')?.value, '1')
+  const disabledSendingArrow = pageRules.find(rule => rule.selector === '.answers button.answer-send[data-sending="1"]:disabled')
+  assert.equal(disabledSendingArrow?.declarations.find(item => item.property === 'opacity')?.value, '1')
+})
