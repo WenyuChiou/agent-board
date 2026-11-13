@@ -27,7 +27,7 @@ started a session, not which client runs a turn, so a terminal session continued
 that leaves no mark in the hook's environment can keep the terminal's Queue; whether a message
 queued there reaches the model has no record (see the Codex CLI record's "Not covered"). A mailbox
 last enrolled by a Codex terminal hook that carries the Windows background service's mark gets no
-Queue (the card offers Copy unless another recorded route for that session offers Send). Internal
+Queue. Internal
 connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
