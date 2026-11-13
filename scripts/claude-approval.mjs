@@ -7,12 +7,13 @@
 // about a request to run without the sandbox. It never answers in a mode where Claude Code would not
 // ask, and it never sends updatedPermissions, updatedInput or interrupt: nothing standing is ever added.
 // Plain Node with no imports outside node:, as the plugin's hooks.json runs it directly. The
-// address rules are hooks/receiver.ts's (addressKey, addressFolder, addressFileName, parseAddress);
-// tests/approvals.test.mjs keeps the two in step.
+// address rules follow hooks/receiver.ts, plus Windows XDG_RUNTIME_DIR ACL verification matching
+// scripts/runtime-folder.ts; tests/approvals.test.mjs keeps them in step.
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { resolve } from 'node:path'
+import { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { homedir, hostname } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // A board that will wait for a press sends its headers at once: one that has not within this
@@ -55,13 +56,14 @@ export const addressKey = path => {
 
 export const addressFileName = key => `agent-board-${createHash('sha256').update(key, 'utf8').digest('hex').slice(0, 16)}.json`
 
-// hooks/receiver.ts addressFolder: on Windows only the account's own cache folder is trusted.
+// On POSIX, an own XDG_RUNTIME_DIR holds the address file directly; on Windows, the board places
+// it in <XDG_RUNTIME_DIR>\agent-board and protects its ACL via scripts/runtime-folder.ts (#1378).
 export const addressFolder = (isWindows, home, runtime, isRuntimeOwn) => {
   if (home === '') return null
   const sep = isWindows ? '\\' : '/'
   const cache = [home.replace(/[\\/]+$/, ''), '.cache', 'agent-board'].join(sep)
   if (runtime === undefined || runtime === '') return cache
-  if (isWindows) return null
+  if (isWindows) return isRuntimeOwn ? [runtime.replace(/[\\/]+$/, ''), 'agent-board'].join(sep) : null
   return isRuntimeOwn ? runtime : cache
 }
 
@@ -103,17 +105,133 @@ export const parseAddress = (text, key) => {
   }
 }
 
-export const addressFile = (env = process.env, platform = process.platform) => {
+const WIN_OPTIONS = { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: 'pipe' }
+const WIN_POWERSHELL_OPTIONS = { ...WIN_OPTIONS, timeout: 30_000 }
+const winSystem = () => join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+const winIsKilled = error => error?.code === 'ETIMEDOUT' || typeof error?.signal === 'string'
+let winAccount
+
+const winCurrentAccount = () => {
+  if (winAccount !== undefined) return winAccount
+  try {
+    const output = execFileSync(join(winSystem(), 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], WIN_OPTIONS)
+    const row = /"([^"\\]*)\\[^"]*","(S-\d+(?:-\d+)+)"\s*$/.exec(output)
+    const domain = row?.[1], sid = row?.[2]
+    if (domain === undefined || sid === undefined) return null
+    const computer = process.env.COMPUTERNAME || hostname().slice(0, 15)
+    const base = /^(S-1-5-21-\d+-\d+-\d+)-\d+$/.exec(sid)?.[1]
+    const aliases = base !== undefined && domain.toLowerCase() === computer.toLowerCase() ? { LA: `${base}-500`, LG: `${base}-501` } : {}
+    return (winAccount = { sid, aliases })
+  } catch {
+    return null
+  }
+}
+
+const winAcls = files => {
+  const resolved = files.map(file => resolve(file))
+  const script = "$ErrorActionPreference = 'Stop'; $PSModuleAutoLoadingPreference = 'None'; "
+    + "$sections = [System.Security.AccessControl.AccessControlSections]'Access,Owner,Group'; "
+    + "$targets = $env:AGENT_BOARD_RUNTIME_ACL_PATH.Split('|'); "
+    + 'for ($at = 0; $at -lt $targets.Length; $at++) { $target = $targets[$at]; '
+    + 'try { $security = if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::GetAccessControl($target, $sections) } else { [System.IO.File]::GetAccessControl($target, $sections) }; '
+    + '$security.GetSecurityDescriptorSddlForm($sections) } '
+    + "catch { if ($at -eq 0) { throw }; '-' } }"
+  let output
+  try {
+    output = execFileSync(join(winSystem(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', script], {
+      ...WIN_POWERSHELL_OPTIONS,
+      env: { ...process.env, PSModulePath: join(winSystem(), 'WindowsPowerShell', 'v1.0', 'Modules'), AGENT_BOARD_RUNTIME_ACL_PATH: resolved.join('|') },
+    })
+  } catch (error) {
+    const printed = error?.stdout
+    if (!winIsKilled(error) || typeof printed !== 'string' || !printed.endsWith('\n')) return null
+    const lines = printed.trim().split(/\r?\n/).map(line => line.trim())
+    return lines.length === files.length && lines.every(line => line !== '') ? lines : null
+  }
+  const lines = output.trim().split(/\r?\n/).map(line => line.trim())
+  return lines.length === files.length ? lines : null
+}
+
+// scripts/runtime-folder.ts isPrivateRuntimeSddl: owner + sole full-control grant to this account.
+const isSoleGrant = (controls, flags, trustee, sid, isDirectory, aliases) =>
+  (trustee === sid || aliases[trustee] === sid) && (isDirectory ? controls.includes('P') && flags === 'OICI' : flags === '' || flags === 'ID')
+
+export const isPrivateRuntimeSddl = (sddl, sid, isDirectory, aliases = {}) => {
+  if (!/^S-\d+(?:-\d+)+$/.test(sid)) return false
+  const parts = /^O:([^:]+?)(?:G:[^:]*)?D:([A-Z]*)(\(A;([A-Z]*);FA;;;([^;()]+)\))$/.exec(sddl)
+  if (parts === null) return false
+  const owner = parts[1] ?? '', controls = parts[2] ?? '', flags = parts[4] ?? '', trustee = parts[5] ?? ''
+  return (owner === sid || aliases[owner] === sid) && isSoleGrant(controls, flags, trustee, sid, isDirectory, aliases)
+}
+
+const isPlain = (file, isDirectory) => {
+  const found = lstatSync(file)
+  return !found.isSymbolicLink() && (isDirectory ? found.isDirectory() : found.isFile() && found.nlink === 1)
+}
+
+const hasPlainParents = dir => {
+  let current = resolve(dir)
+  for (;;) {
+    try { if (!isPlain(current, true)) return false } catch { return false }
+    const parent = dirname(current)
+    if (parent === current) return true
+    current = parent
+  }
+}
+
+const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino
+  && left.size === right.size && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs
+
+const isOwnWindowsRuntime = folder => {
+  if (!hasPlainParents(folder)) return false
+  const account = winCurrentAccount()
+  if (account === null) return false
+  const sddls = winAcls([folder])
+  return sddls !== null && isPrivateRuntimeSddl(sddls[0] ?? '', account.sid, true, account.aliases)
+}
+
+const readWindowsPrivateFile = (folder, file) => {
+  let fd
+  try {
+    if (!hasPlainParents(folder)) return null
+    const before = lstatSync(file)
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 16_384) return null
+    const account = winCurrentAccount()
+    if (account === null) return null
+    const sddls = winAcls([folder, file])
+    if (sddls === null) return null
+    if (!isPrivateRuntimeSddl(sddls[0] ?? '', account.sid, true, account.aliases)) return null
+    if (!isPrivateRuntimeSddl(sddls[1] ?? '', account.sid, false, account.aliases)) return null
+    fd = openSync(file, 'r')
+    if (!sameFile(before, fstatSync(fd))) return null
+    const text = readFileSync(fd, 'utf8')
+    if (!isPlain(file, false) || !sameFile(before, fstatSync(fd)) || !sameFile(before, lstatSync(file))) return null
+    return text
+  } catch {
+    return null
+  } finally {
+    if (fd !== undefined) try { closeSync(fd) } catch {}
+  }
+}
+
+const resolveAddressFile = (env, platform, verifyWindowsRuntime) => {
   const key = addressKey(progressPath(env))
   if (key === null) return null
   const isWindows = platform === 'win32'
   const home = (env.USERPROFILE ?? env.HOME ?? '').replace(/[\\/]+$/, '')
   const runtime = env.XDG_RUNTIME_DIR
-  const isRuntimeOwn = !isWindows && runtime !== undefined && runtime !== '' && isOwnRuntime(runtime)
+  const winRuntime = isWindows && runtime !== undefined && runtime !== ''
+    ? [runtime.replace(/[\\/]+$/, ''), 'agent-board'].join('\\')
+    : ''
+  const isRuntimeOwn = isWindows
+    ? (winRuntime !== '' && (!verifyWindowsRuntime || (process.platform === 'win32' && isOwnWindowsRuntime(winRuntime))))
+    : (runtime !== undefined && runtime !== '' && isOwnRuntime(runtime))
   const folder = addressFolder(isWindows, home, runtime, isRuntimeOwn)
   if (folder === null) return null
   return { key, folder, home, file: [folder, addressFileName(key)].join(isWindows ? '\\' : '/') }
 }
+
+export const addressFile = (env = process.env, platform = process.platform) => resolveAddressFile(env, platform, true)
 
 // The board's process is still running: a board that stopped without removing its file leaves an
 // address another program may now hold.
@@ -160,13 +278,25 @@ const isInsideSession = (found, cwd, platform) => {
 }
 
 const readAddress = (env, platform, cwd) => {
-  const found = addressFile(env, platform)
+  const found = resolveAddressFile(env, platform, false)
   if (found === null) return null
+  const hasRuntime = env.XDG_RUNTIME_DIR !== undefined && env.XDG_RUNTIME_DIR !== ''
   try {
     if (lstatSync(found.file).isSymbolicLink()) return null
     if (isInsideSession(found, cwd, platform)) return null
-    if (platform !== 'win32' && !isOwn(found.folder, found.file)) return null
-    const text = readFileSync(found.file, 'utf8')
+    let text
+    if (platform === 'win32') {
+      if (hasRuntime) {
+        if (process.platform !== 'win32') return null
+        text = readWindowsPrivateFile(found.folder, found.file)
+        if (text === null) return null
+      } else {
+        text = readFileSync(found.file, 'utf8')
+      }
+    } else {
+      if (!isOwn(found.folder, found.file)) return null
+      text = readFileSync(found.file, 'utf8')
+    }
     if (!isRunning(JSON.parse(text)?.pid)) return null
     return parseAddress(text, found.key)
   } catch {

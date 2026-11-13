@@ -201,9 +201,13 @@ export const startServer = (o: ServeOptions): void => {
   // and nothing more. The key does pass on the browser's command line: a used key stays known
   // until it expires, and a second use of it turns approvals off (see the pair route).
   const pairKeys = new Map<string, { until: number; secret: string }>()
-  // Each page secret: when it was given, when any page last asked for the board with it, and when
-  // a visible page did.
-  const pageSecrets = new Map<string, { pairedAt: number; seen: number; watched: number }>()
+  // Each page secret: which page holds it, that page's order (when known), when it was given,
+  // when that page last asked for the board with it, and when it did so while visible.
+  const pageSecrets = new Map<string, { page: string; seq: number; pairedAt: number; seen: number; watched: number }>()
+  const dropPageSecrets = (id: string): void => {
+    if (id === '') return
+    for (const [secret, held] of pageSecrets) if (held.page === id) pageSecrets.delete(secret)
+  }
   // A pairing key used twice: no page answers approvals again until the board restarts.
   let isApprovalOff = false
   // A host asked for an approval since the board started: only then does an open page that cannot
@@ -219,11 +223,12 @@ export const startServer = (o: ServeOptions): void => {
     const secret = text(headers['x-board-approve'])
     const held = secret === '' || isApprovalOff ? undefined : pageSecrets.get(secret)
     if (held === undefined) return ''
-    // A page that stopped asking (closed, or its tab gone) takes its secret with it.
-    if (now - held.seen > secretMs) {
+    // A page that stopped asking, left, or was replaced takes its secret with it (#1378).
+    if (now - held.seen > secretMs || (held.page !== '' && retired.has(held.page))) {
       pageSecrets.delete(secret)
       return ''
     }
+    if (held.page !== '' && pageIdOf(headers) !== held.page) return ''
     return secret
   }
   const isWatched = (now: number): boolean => !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs && now - held.watched < APPROVAL_PAGE_MS)
@@ -367,10 +372,19 @@ export const startServer = (o: ServeOptions): void => {
         retired.add(id)
         // A bound on the memory: the oldest ids are forgotten first.
         if (retired.size > 256) retired.delete(retired.values().next().value as string)
-      } else pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
+        dropPageSecrets(id)
+      } else {
+        pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
+        // Any secret bound to an older page is retired once a newer page asks for the board (#1378).
+        for (const [other, held] of pageSecrets) if (held.page !== '' && held.page !== id && held.seq < mine) pageSecrets.delete(other)
+      }
       // A page asking with its secret keeps it; only a visible one counts as watching for approvals.
       const held = isReplaced ? undefined : pageSecrets.get(secretOf(req.headers, now))
       if (held !== undefined) {
+        if (held.page === '') {
+          held.page = id
+          held.seq = mine
+        }
         held.seen = now
         if (req.headers['x-board-visible'] !== '0') held.watched = now
       }
@@ -452,6 +466,7 @@ export const startServer = (o: ServeOptions): void => {
       if (gone !== '') {
         retired.add(gone)
         if (retired.size > 256) retired.delete(retired.values().next().value as string)
+        dropPageSecrets(gone)
       }
       loadedAt = 0
       return json(res, 200, {})
@@ -540,6 +555,8 @@ export const startServer = (o: ServeOptions): void => {
       // program can send one: the one-time key and the page secret are what count.
       if (req.headers.origin === undefined) return json(res, 403, {})
       if (url.pathname === '/api/approvals/pair') {
+        const page = pageIdOf(req.headers)
+        if (page !== '' && retired.has(page)) return json(res, 403, { note: o.s.approvalNoSecret })
         const key = text(body.key)
         const known = key === '' ? undefined : pairKeys.get(key)
         // Only in time: a key read later from a browser's history opens nothing.
@@ -553,10 +570,12 @@ export const startServer = (o: ServeOptions): void => {
         }
         const secret = randomBytes(24).toString('base64url')
         known.secret = secret
-        for (const [other, held] of pageSecrets) if (now - held.seen > secretMs) pageSecrets.delete(other)
+        const seq = page !== '' ? (pages.get(page)?.seq ?? ++pageSeq) : 0
+        if (page !== '' && !pages.has(page)) pages.set(page, { seq, at: now, visible: false })
+        for (const [other, held] of pageSecrets) if (now - held.seen > secretMs || (page !== '' && held.page !== '' && held.page !== page && held.seq < seq)) pageSecrets.delete(other)
         if (pageSecrets.size >= 16) pageSecrets.delete(pageSecrets.keys().next().value as string)
         // Counted as watching only once the page asks for the board while it is in front.
-        pageSecrets.set(secret, { pairedAt: now, seen: now, watched: 0 })
+        pageSecrets.set(secret, { page, seq, pairedAt: now, seen: now, watched: 0 })
         return json(res, 200, { secret })
       }
       const secret = secretOf(req.headers, now)
