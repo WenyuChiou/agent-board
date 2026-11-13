@@ -44,14 +44,15 @@ const fixture = run => {
 
 // isUnchanged: the press took back everything it wrote, so it says nothing was changed (#248);
 // otherwise it must never say so.
-const failed = (result, path, code, lang = 'en', isUnchanged = false) => {
+const failed = (result, path, code, lang = 'en', isUnchanged = false, isRead = false) => {
   const s = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }[lang]
   assert.equal(result.error, undefined)
   assert.equal(result.status, 1, result.stdout + result.stderr)
   const said = result.stdout + result.stderr
   assert.ok(said.includes(path.endsWith('progress.md') ? 'your progress file' : basename(path)), said)
   assert.ok(!said.includes(path), said)
-  const why = code === 'EACCES' ? s.storageReadOnly : code === 'ENOSPC' ? s.storageFull : s.storageUnknown
+  // A read that fails never says the file is read-only (#342); a write that fails keeps it.
+  const why = code === 'EACCES' ? (isRead ? s.storageUnreadable : s.storageReadOnly) : code === 'ENOSPC' ? s.storageFull : s.storageUnknown
   assert.ok(said.includes(why), said)
   assert.ok(!said.includes(code), said)
   assert.ok(!(result.stdout + result.stderr).includes('Done:'))
@@ -124,7 +125,7 @@ for (const kind of ['board', 'archive', 'journal']) {
     test(`an ${code} reading the ${kind} aborts the action and preserves every existing file`, () => fixture(({ dir, paths, play }) => {
       const before = Object.fromEntries(Object.entries(paths).map(([name, path]) => [name, readFileSync(path, 'utf8')]))
       const fault = `const original = fs.readFileSync\nfs.readFileSync = (path, ...args) => { if (String(path) === ${JSON.stringify(paths[kind])}) throw Object.assign(new Error('injected read failure'), { code: '${code}' }); return original(path, ...args) }`
-      failed(play(kind === 'archive' ? 'a' : 'x', fault), paths[kind], code)
+      failed(play(kind === 'archive' ? 'a' : 'x', fault), paths[kind], code, 'en', false, true)
       for (const [name, path] of Object.entries(paths)) assert.equal(readFileSync(path, 'utf8'), before[name])
       assert.ok(!readdirSync(dir).some(name => name.endsWith('.board-tmp')))
     }))
@@ -274,7 +275,7 @@ test('watch recovers on its next redraw after a read error and restores raw mode
 test('watch can quit while its board remains unreadable', () => fixture(({ paths, play }) => {
   const fault = `const original = fs.readFileSync\nfs.readFileSync = (path, ...args) => { if (String(path) === ${JSON.stringify(paths.board)}) throw Object.assign(new Error('injected persistent read failure'), { code: 'EACCES' }); return original(path, ...args) }\nObject.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = value => { if (!value) process.stderr.write('RAW_RESTORED\\n') }\nsetTimeout(() => process.stdin.emit('data', 'q'), 50)`
   const result = play('', fault, 'en', true)
-  failed(result, paths.board, 'EACCES')
+  failed(result, paths.board, 'EACCES', 'en', false, true)
   assert.ok(result.stderr.includes('RAW_RESTORED'))
 }))
 

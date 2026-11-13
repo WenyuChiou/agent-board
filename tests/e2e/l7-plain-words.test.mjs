@@ -20,7 +20,7 @@ const resolver = registerHooks({ resolve(specifier, context, next) {
     return next(`${specifier}.ts`, context)
   }
 } })
-const { plainReason } = await import('../../hooks/strings.ts')
+const { plainReadReason, plainReason } = await import('../../hooks/strings.ts')
 resolver.deregister()
 
 const locales = [EN, ZH_TW, ZH_CN]
@@ -192,9 +192,20 @@ test('L7 words: an unknown storage reason stays a short clause in every language
       assert.notEqual(plainReason(s, code), code)
     }
     assert.doesNotMatch(s.storageUnknown, /[.?!。？！]/u)
+    // A read that fails never says the file is read-only, whatever stopped the read.
+    for (const [code, expected] of [['EACCES', s.storageUnreadable], ['EPERM', s.storageUnreadable], ['EROFS', s.storageUnreadable], ['EBUSY', s.storageBusy], ['EAGAIN', s.storageBusy], ['ENOSPC', s.storageFull], ['EISDIR', s.storageIsFolder], ['ENOENT', s.storageMissing], ['EIO', s.storageUnknown]]) {
+      assert.equal(plainReadReason(s, code), expected)
+    }
+    assert.doesNotMatch(s.storageUnreadable, /[.?!。？！]/u)
     const message = s.boardStorageFailed(s.fileNamed('board.html'), s.storageUnknown)
     assert.ok(message.includes(reason), message)
     assert.equal((message.match(/[.?!。？！](?=\s|$)/gu) ?? []).length, 1, message)
+  }
+})
+
+test('L7 words: a file name is quoted in every language, each in its own marks', () => {
+  for (const [s, quoted] of [[EN, '“board.html”'], [ZH_TW, '「board.html」'], [ZH_CN, '“board.html”']]) {
+    assert.equal(s.fileNamed('board.html'), quoted)
   }
 })
 
@@ -230,11 +241,11 @@ test('L7 errors: every error is one plain sentence with no stack trace and no fu
       assert.equal(unreadable.status, 1)
       assert.equal(unreadable.stderr, '')
       const unreadableText = JSON.parse(unreadable.stdout).error
-      assert.equal(unreadableText, s.chatReadFailed(s.fileProgress, s.storageReadOnly))
+      assert.equal(unreadableText, s.chatReadFailed(s.fileProgress, s.storageUnreadable))
       sentence(unreadableText, world)
     } finally { await world.close() }
   }
-  for (const [code, why] of [['EPERM', EN.storageReadOnly], ['EROFS', EN.storageReadOnly], ['EBUSY', EN.storageBusy], ['EAGAIN', EN.storageBusy], ['ENOSPC', EN.storageFull], ['EIO', EN.storageUnknown]]) {
+  for (const [code, why] of [['EPERM', EN.storageUnreadable], ['EROFS', EN.storageUnreadable], ['EBUSY', EN.storageBusy], ['EAGAIN', EN.storageBusy], ['ENOSPC', EN.storageFull], ['EIO', EN.storageUnknown]]) {
     const world = makeWorld()
     try {
       world.write('progress.md', '## Synthetic\n### Check routes\n- [ ] Review routes\n')

@@ -4773,7 +4773,7 @@ test("the terminal board and the board page mark any agent's question answered w
   // The page's script and words carry the buttons.
   const page = servePage(STRINGS.en, 'n')
   expect(page).toContain("button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); })")
-  expect(page).toContain("button(w('pgAnswered'), function () { hideQuestion(key, ask.unhideKey); }, 'primary')")
+  expect(page).not.toContain('pgAnswered')
   expect(page).toContain("act(one.key, 'unhide')")
   expect(pageWords(STRINGS.en).hiddenCount).toBe('\u0001 answered, hidden')
 })

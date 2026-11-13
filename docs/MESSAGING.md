@@ -22,7 +22,13 @@ and receipts are never automatically retried, including after a store lock.
 
 Use the existing reply box on the session's card. A matching receiver enables Send or
 Queue only when its session state, surface and route have a live record. When the state
-or route is unknown, the card offers Copy. Internal connection ids stay hidden. There is no
+or route is unknown, the card offers Copy. One known gap: a Codex hook can read which client
+started a session, not which client runs a turn, so a terminal session continued in another client
+that leaves no mark in the hook's environment can keep the terminal's Queue; whether a message
+queued there reaches the model has no record (see the Codex CLI record's "Not covered"). A mailbox
+last enrolled by a Codex terminal hook that carries the Windows background service's mark gets no
+Queue. Internal
+connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
 An offline card retains Copy. By default, the web UI and
@@ -37,14 +43,31 @@ line itself; callers cannot supply `line`.
 
 ## Next-turn mailbox
 
-A turn-start hook enrolls its session when the default message store already exists.
-The page can queue a message for that exact session without waking it. Its next hook
-hands over one message, oldest first. `accepted` means the hook wrote it to the host;
-it does not prove the model read it, and no ACK is collected. A hook that stops waiting hands its
-claim back, so the next turn has the message. A claim the hook named and nobody accepted is handed
-out again after 30 seconds, at most three times, with the same ACK code and a line saying it may be
-a repeat; after that it stays uncertain and blocks that target until the open-message limit (OpenCode's claims follow the
-rule below instead). A `board_inbox` claim is never handed out again.
+A turn-start hook can enroll its session only when the default messages folder already exists.
+The page can queue a message for that exact session without waking it. A later turn-start
+hook of that session can claim one message, the oldest it is allowed to take. A message the page
+queues is saved with the surface its route was checked on. A hook that reads another surface does
+not claim such a message; the session's own MCP pull (`board_inbox`) still can. A message saved
+without a surface, by an older board or from another agent's session, is not held to one.
+A turn-start hook marks a message `accepted` only after it has written the message to its output
+for the host; that does not prove the model read it, and the hook collects no ACK. A hook that
+stops waiting can hand its claim back, and a claim handed back is queued again. A claim the hook
+named that is still uncertain with no error can be handed out again after 30 seconds, with the
+same ACK code and a line saying it may be a repeat: at most three times for one message (a claim
+after a hand-back does not count), and not while it has an error (`EXPIRED` and `DISMISSED` are
+final; a later receipt from the session can clear a disconnected mark). That includes a message a
+hook accepted if a later receipt from its session made it uncertain with no error, and such a
+message can also be handed back; the board's own receivers send `uncertain` only with an error, so
+this takes another client (#1407). While a claim stays open as uncertain (not yet `EXPIRED` or
+`DISMISSED`), none of the session's queued messages is handed out. A claim is taken again only when
+every message that holds the session (the condition is under "stdio MCP") is one of this mailbox's
+claims that can be handed out again (above); then a
+later hook whose surface the claim allows, or the session's `board_inbox`, can take the oldest of
+them it may take, when the mailbox is not contested and its request succeeds. An open uncertain
+claim left more than 30 minutes without an update expires the next time the store is loaded or saved
+(the board tries a save at every action and snapshot); an expired or dismissed one no longer holds
+the session. A `board_inbox` claim is never handed out again.
+OpenCode's claims follow the rules below instead of the 30-second hand-out and the 30-minute expiry.
 A receiver that runs inside the host (OpenCode, DeepSeek) waits up to two seconds for a busy board or store, where a
 turn-start hook waits well under a second. A take that still fails is reported as a failure, not as an empty mailbox.
 OpenCode's receiver asks the host whether the session is idle before each take and hands a claim back when the session
@@ -79,15 +102,15 @@ still an active started wake. Each workspace the host loads the plugin for has i
 `ok: false` with a code when its write fails, and the tick asks again, a few times. The plugin reads no message of the
 conversation to decide any of this.
 
-Mailboxes expire after 12 hours. Session end rejects queued messages with `DISCONNECTED`.
+A mailbox normally expires 12 hours after it was last enrolled or renewed; the session's hooks and MCP tools (such as `board_inbox` and `board_status`) can renew it, and session end can remove it sooner. A session-end hook that reaches the store removes the mailbox and rejects its queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create
-the store and only find the default folder; a board using `--messages-dir` has no hook mailboxes.
+the messages folder and only find the default one; a board using `--messages-dir` with another folder has no hook mailboxes.
 
 Supported turn starts: Codex `SessionStart` / `UserPromptSubmit`, Antigravity
-`SessionStart` / `PreInvocation`, Gemini CLI `SessionStart` / `BeforeAgent`, Muse Code
+`SessionStart` / `PreInvocation`, Muse Code
 `UserPromptSubmit`, and Cursor `sessionStart` (never `beforeSubmitPrompt`, which Cursor
 ignores, so a Cursor message waits until that chat opens again and its card says so). End events
-are `SessionEnd` for Codex, Gemini and Muse, and `sessionEnd` for Cursor.
+are `SessionEnd` for Codex and Muse, and `sessionEnd` for Cursor.
 
 The separate legacy `--allow-resume` option deliberately allows a local reply to
 start an ended Codex or Grok Build session. It is disabled by default, never enabled by
@@ -175,9 +198,9 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 
 | State | Evidence |
 | --- | --- |
-| queued | Stored locally; no external delivery yet |
-| uncertain | Claimed durably before delivery, or a disconnect/timeout after claiming (unless accepted) |
-| accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is never sent again |
+| queued | Stored locally and not handed out since. A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain (#1407) |
+| uncertain | Claimed durably with no acceptance on record: before delivery, or after a disconnect or timeout. Also an accepted message that a later receipt reports uncertain (for a hook's message, #1407), or that expired or was dismissed |
+| accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is not sent again while it stays accepted |
 | acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
 | rejected | Refused before claiming, or adapter reports a clean rejection |
 
@@ -240,13 +263,13 @@ is needed; LAN requests are refused. A page button will come in a later change.
 Dismissal rejects a queued message before it can be handed out. An accepted or uncertain
 message becomes final `uncertain` with error `DISMISSED`: delivery may already have happened,
 but it no longer blocks the next message. Disconnect and restart preserve that result;
-later receipts fail with `MESSAGE_DISMISSED`. Dismissed records and their text are deleted
-after 24 hours. Dismissing an already finished record fails with `MESSAGE_FINISHED`,
+later receipts fail with `MESSAGE_DISMISSED`. A dismissed record drops its text at once, like any
+finished message, and is deleted after 24 hours, or sooner under the limits above. Dismissing an already finished record fails with `MESSAGE_FINISHED`,
 and an unknown id fails with `NOT_FOUND`.
 
 Open messages are queued, accepted, or uncertain without `EXPIRED` or `DISMISSED`. Each target
 `agent:session` permits at most three (`TARGET_BUSY`), and each source/target pair permits
-one (`PAIR_BUSY`). Sourceless sends count as source `board`. The hub assigns `hops: 1`
+one (`PAIR_BUSY`). An accepted mailbox message with no ACK marked as awaited ("stdio MCP") is not counted in either. Sourceless sends count as source `board`. The hub assigns `hops: 1`
 without a source; an authenticated source inherits one plus the hops of the message most
 recently claimed by its `agent:session`, or one if none. A third hop fails with `HOP_LIMIT`.
 Clients cannot set hops. Two live registrations for one agent/session mark both contested:
@@ -302,8 +325,11 @@ receipt, so reconnecting the original receiver after a board restart may report 
 with a new connection id or turn, provided that connection is not contested. Board JSON
 omits nonces; only the receiver's claimed delivery supplies one. Receipts cannot set the
 hub's reserved `EXPIRED` or `DISMISSED` errors. Send and claim still require the current turn.
-Restart keeps claimed messages uncertain (an accepted message stays accepted, marked disconnected) and never redelivers them; repeated restarts
-and disconnects do not reset their age limit. Expiry or dismissal lets the card send again.
+A restart hands out nothing by itself; a later hook can still claim, as "Next-turn mailbox" says.
+It applies the age limit, and it marks disconnected, as a disconnect would, the open messages whose
+target is gone: a live receiver's connection, or a mailbox whose session ended or which expired.
+Messages of a mailbox that is still enrolled get no mark. A restart or a disconnect gives an
+uncertain message no extra time. After expiry or dismissal that message no longer stops the card from sending.
 Stores are saved as version 2, which earlier releases cannot read: before going back to one,
 move both `messages.json` and `server.lock` out of the folder, since 0.24.0 and earlier take
 the lock before they read the store and keep it after refusing the file. Version 1 loads with `hops: 1`, `claimed: 0`, and an empty nonce. Such legacy messages cannot
@@ -367,7 +393,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | stepEnd · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | none · no live note |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| Codex | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Codex | CLI | 3 | Unknown | Verified | [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | nextTurn · no live note | none · no live note |
 | Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
@@ -384,7 +410,6 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | dot / Web Chats | dot | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | dot / Web Chats | Grok Web | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Gemini | Web | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| Gemini CLI | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-gemini.ts](../hooks/receivers/hook-mailbox-gemini.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
 | Grok Build | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Hermes Agent | Chat Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Hermes Agent | CLI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
@@ -398,7 +423,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 
 <!-- messaging-matrix:end -->
 
-The board reads these routes from `hooks/receiver-routes.ts`. `AGENT_BOARD_ROUTES`, a path to a JSON file of routes that replaces them, is for tests only (like `AGENT_BOARD_GROK`); do not set it in real use.
+The board reads these routes from `hooks/receiver-routes.ts`. `AGENT_BOARD_ROUTES`, a path to a JSON file of routes that replaces them, is for tests only (like `AGENT_BOARD_GROK`); do not set it in real use. The one other use is the maintainer's live check in the kept test home (`docs/validation/PARITY-CHECKLIST.md`): a route with no record offers only Copy, so the board page there alone is started with a file that opens that one route, and the run becomes its first record.
 
 ### What earlier runs saw
 
@@ -409,7 +434,7 @@ This table is written by hand and covers progress reporting too. Its runs have n
 | Codex | Independent setup and explicit reporter; isolated native app-server SessionStart, UserPromptSubmit and Stop observed | Authenticated owners forwarded two prompts each way with Antigravity and native ACKs; autonomous model tools, CLI TTY and desktop chat remain separate |
 | Antigravity CLI | Independent named hooks; all four native Windows events observed after the command-quoting fix | Same cross-host owner acceptance; native stream ACK, idle continuation, deduplication, conflict and offline rejection verified |
 | Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established |
-| Legacy Gemini CLI | Separate enterprise/API compatibility hooks and `/agent-board` integration | Generic client API only; no Gemini-native connector or bidirectional acceptance |
+| Gemini CLI (retired) | No longer offered by setup; Google's CLI is Antigravity CLI. An install from an earlier release still reports | The board no longer routes messages to it; its card offers Copy |
 | OpenCode | Independent setup, session-context progress tool and plugin events | Generic client API only; no native receiving adapter or real bidirectional acceptance yet |
 | OpenClaw | Independent metadata lifecycle plugin and native skill; separate optional Claude reporter | Its native session tools are not yet integrated into this hub; no real bidirectional acceptance |
 | Grok Build | Existing reporter hooks; optional legacy resume requires `--allow-resume` | No live receiving adapter acceptance |
@@ -471,7 +496,7 @@ await receiver.close()
 ```
 
 `host` above is the integrating application's API, not a built-in connector. The
-API is agent-neutral; Claude Code, legacy Gemini, Cursor and other UI adapters still need their
+API is agent-neutral; Claude Code, Cursor and other UI adapters still need their
 own supported transport and live acceptance. No shell typing, transcript scraping,
 credential discovery, automatic resume, or approval RPC is implemented by this client.
 The original host remains responsible for its normal permission checks. Board approvals
@@ -706,7 +731,12 @@ Sending requires the running board hub (`BOARD_NOT_RUNNING`) and a target enroll
 in the same workspace (`WORKSPACE_UNKNOWN` or `WORKSPACE_MISMATCH` otherwise).
 Contested owners, peer pause, hop limit and pair budget can refuse delivery. Peer pause and pair budget
 also apply to a connected adapter's own sends. An unverified sender's message cannot be passed on.
-A message taken by a lease holder holds its session until `board_ack` or 30 minutes; a hook's does not.
+A message holds its session while it is open (not acknowledged, rejected, expired or dismissed) and
+either uncertain, or accepted when a live receiver's connection claimed it last, or accepted when its
+mailbox claimed it last and an ACK is marked as awaited on it. An accept request that carries
+`awaitsAck` and succeeds sets that mark, and nothing clears it: a leased `board_inbox` sends it; a
+turn-start hook and an unleased `board_inbox` do not. A message both a hook and a leased `board_inbox`
+accepted has the mark.
 Inbox acceptance means the response write completed; ACK separately records acknowledgement.
 There is no parked wait, progress notification, host launcher or automatic MCP configuration yet.
 A lease needs a launcher that sets `AGENT_BOARD_AGENT`, `AGENT_BOARD_SESSION_ID`, `AGENT_BOARD_HOST_PID` and `AGENT_BOARD_HOST_STARTED`.

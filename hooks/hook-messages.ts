@@ -33,7 +33,7 @@ export const takeMailboxMessage = (state: MessageState, agent: string, session: 
   return { state: claimed.state, message: claimed.messages[0] ?? null }
 }
 // A hook that stopped waiting never showed what the board claimed for it, so it hands the claim back
-// and the next turn has the message at once (#990). The ACK code stays, for a message shown before.
+// and the message is queued again for a later hook (#990). The ACK code stays, for a message shown before.
 // A started OpenCode wake (marked by attemptMailboxMessage) is handed back only with isUnsent, which the plugin sets
 // when it knows the host was never called (#724); a plain release leaves it as it is. A wake that read "sent, not
 // confirmed" meanwhile (the release could not be saved for 30 minutes) is taken back by isUnsent too.
