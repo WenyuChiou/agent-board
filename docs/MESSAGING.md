@@ -45,8 +45,9 @@ line itself; callers cannot supply `line`.
 A turn-start hook enrolls its session when the default message store already exists.
 The page can queue a message for that exact session without waking it. A later turn-start
 hook of that session can claim one message, oldest first. A message the page queued is bound to
-the surface its route was checked on: only a hook that reads that same surface claims it, and a
-surface mismatch leaves it queued. `accepted` means the hook wrote the message to its output for
+the surface its route was checked on: a hook claims it only when it reads that same surface, and
+a hook on another surface leaves it queued; the session's own MCP pull (`board_inbox`) may still
+claim it, since it asks for its messages itself. `accepted` means the hook wrote the message to its output for
 the host and its accept call succeeded; it does not prove the model read it, and no ACK is
 collected. A hook that stops waiting hands its claim back when it still can, and the message is
 queued again for a later hook. A claim the hook named and nobody accepted can be claimed again by
