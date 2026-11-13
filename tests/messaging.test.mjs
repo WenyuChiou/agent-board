@@ -4501,6 +4501,15 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.equal(routeOf(withNotes({ CLI: '   ' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
   const spaced = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: '   ', surfaces: ['CLI'] }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
   assert.equal(routeOf(spaced, 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  // A note on two lines names no file either: the gate refuses it for a surface and for a route.
+  assert.equal(routeOf(withNotes({ CLI: 'docs/validation/a.md\ndocs/validation/b.md' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  const twoLines = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: 'docs/validation/a.md\ndocs/validation/b.md', surfaces: ['CLI'] }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(twoLines, 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  // A route with no note of its own may carry one surface's note: Send on that surface alone, and the route check takes it.
+  const surfaceOnly = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: null, surfaces: ['Web', 'CLI'], surfaceRecords: { CLI: 'docs/validation/other.md' } }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(surfaceOnly, 'alpha', 'mailbox', 'idle', 'CLI').canSend, true)
+  assert.equal(routeOf(surfaceOnly, 'alpha', 'mailbox', 'idle', 'Web').canSend, false)
+  assert.equal(isReceiverRoutes(surfaceOnly), true)
   // agy TUI's idle route cites the TUI's own note; the app's note covers IDE.
   const agyIdle = RECEIVER_ROUTES.find(one => one.agent === 'antigravity' && one.kind === 'mailbox').routes.idle
   assert.equal(routeRecord(agyIdle, 'agy TUI'), 'docs/validation/2026-11-12-antigravity-tui-mailbox-live.md')
@@ -4519,6 +4528,7 @@ test('a route recorded for one surface is not offered on another, and the matrix
   // Each Antigravity row cites the note that ran its own surface: the TUI's idle cell its own note, the app's
   // cells the app note, and the editor, which has no run of its own, the route's note.
   const cells = row => row.split(' | ')
+  assert.match(cells(rowOf('Antigravity', 'agy TUI'))[4], /Verified/)
   assert.match(cells(rowOf('Antigravity', 'agy TUI'))[7], /2026-11-12-antigravity-tui-mailbox-live\.md/)
   assert.match(cells(rowOf('Antigravity', 'agy TUI'))[8], /no live note/)
   assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[4], /Verified/)

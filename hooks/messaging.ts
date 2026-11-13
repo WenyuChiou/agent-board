@@ -94,24 +94,26 @@ export const sendDecision = (
   if (target.surface === SURFACE_IDS.unknown || !Object.values(SURFACE_IDS).some(surface => surface === target.surface) || !Array.isArray(route.surfaces) || !route.surfaces.includes(target.surface)) return { canSend: false, line: route.line, reason: 'SURFACE_UNKNOWN' }
   return { canSend: true, line: route.line, target, state }
 }
+// A well-formed route: a known line; a record that is a note (`isNote`) or null; surfaces that are notes, at least
+// one when there is a record; and a surface's own notes, if any, in a plain object whose keys are surfaces the
+// route covers and whose values are notes. The board's routes file and the matrix's receiver records
+// (scripts/messaging-matrix.mjs) are checked by this one function, so the two cannot accept different routes.
+export const isRoute = (value: unknown): value is Route => {
+  if (value === null || typeof value !== 'object') return false
+  const { line, record, surfaces, surfaceRecords } = value as Record<string, unknown>
+  return ROUTE_LINES.includes(line as RouteLine) && (record === null || isNote(record))
+    && Array.isArray(surfaces) && surfaces.every(isNote) && (record === null || surfaces.length > 0)
+    && (surfaceRecords === undefined || surfaceRecords !== null && typeof surfaceRecords === 'object' && !Array.isArray(surfaceRecords)
+      && Object.entries(surfaceRecords).every(([name, note]) => surfaces.includes(name) && isNote(note)))
+}
 // Whether a list read from outside (the tests' stand-in file) holds well-formed receiver routes: every entry
-// names an agent and a kind, and every state has a known line and a record that is a string or null; a surface's
-// own note, if any, is a note (`isNote`) for a surface the route covers. Anything else is refused whole, so a
-// missing key cannot read as a record.
+// names an agent (a note) and a kind, and every state has a route `isRoute` takes. Anything else is refused
+// whole, so a missing key cannot read as a record.
 export const isReceiverRoutes = (value: unknown): value is ReceiverRoutes[] => Array.isArray(value) && value.every(one => {
   if (one === null || typeof one !== 'object') return false
   const { agent, kind, routes } = one as Record<string, unknown>
-  if (typeof agent !== 'string' || agent === '' || kind !== 'live' && kind !== 'mailbox' && kind !== 'turn' || routes === null || typeof routes !== 'object') return false
-  return (['idle', 'working', 'ended'] as const).every(state => {
-    const route = (routes as Record<string, unknown>)[state]
-    if (route === null || typeof route !== 'object') return false
-    const { line, record, surfaces, surfaceRecords } = route as Record<string, unknown>
-    return ROUTE_LINES.includes(line as RouteLine) && (record === null || typeof record === 'string')
-      && Array.isArray(surfaces) && surfaces.every(name => typeof name === 'string')
-      && (!(typeof record === 'string' && record !== '') || surfaces.length > 0)
-      && (surfaceRecords === undefined || surfaceRecords !== null && typeof surfaceRecords === 'object' && !Array.isArray(surfaceRecords)
-        && Object.entries(surfaceRecords).every(([name, note]) => surfaces.includes(name) && isNote(note)))
-  })
+  if (!isNote(agent) || kind !== 'live' && kind !== 'mailbox' && kind !== 'turn' || routes === null || typeof routes !== 'object') return false
+  return (['idle', 'working', 'ended'] as const).every(state => isRoute((routes as Record<string, unknown>)[state]))
 })
 // A connection's scope names its kind of receiver: a session the host owns, a hook mailbox, or one turn.
 export const routeKind = (scope: Connection['scope']): RouteKind => scope === 'mailbox' ? 'mailbox' : scope === 'session' ? 'live' : 'turn'

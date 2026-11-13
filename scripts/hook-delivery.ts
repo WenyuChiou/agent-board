@@ -39,11 +39,13 @@ export const codexSurface = (meta: CodexMeta | null, client: string | undefined,
   meta?.originator === 'codex-tui' && (client === undefined || client === 'codex-tui') && daemon === undefined ? SURFACE_IDS.cli : SURFACE_IDS.unknown
 
 // Antigravity's CLI, desktop app and editor run the same hooks and send no client name, so the
-// surface comes from the folder name right after a `.gemini` folder in the hook's transcript path
-// (else its artifact folder): `antigravity-cli` gives agy TUI, `antigravity` and `antigravity-ide`
-// give IDE (only the CLI and the app were run). Whole folder names are compared, so a look-alike
-// folder is a surface the board does not know. A Map, so a folder named like a property every
-// object inherits (`constructor`) is no surface either.
+// surface comes from the hook's transcript path (else its artifact folder): the folder name right
+// after the last `.gemini` folder that is followed by one of the three names below.
+// `antigravity-cli` gives agy TUI, `antigravity` and `antigravity-ide` give IDE (only the CLI and
+// the app were run). Whole folder names are compared, so a look-alike folder is a surface the board
+// does not know. A Map, so a folder named like a property every object inherits (`constructor`)
+// is no surface either.
+// Letter case is ignored on every system, by choice, though Linux and macOS tell `.Gemini` from `.gemini`.
 const ANTIGRAVITY_FOLDERS: ReadonlyMap<string, string> = new Map([
   ['antigravity-cli', SURFACE_IDS.antigravityTui], ['antigravity', SURFACE_IDS.antigravityIde], ['antigravity-ide', SURFACE_IDS.antigravityIde],
 ])

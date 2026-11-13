@@ -21,7 +21,8 @@ recover within that deadline. Idle polls do not rewrite the message file. Sendin
 and receipts are never automatically retried, including after a store lock.
 
 Use the existing reply box on the session's card. A matching receiver enables Send or
-Queue only when the route for its session state and surface (as the hook labels it) has a live record. When the state
+Queue only when the route for its session state and the surface it registered or enrolled as has a live
+record; clients that share a surface share that record. When the state
 or route is unknown, the card offers Copy. One known gap: a Codex hook can read which client
 started a session, not which client runs a turn, so a terminal session continued in another client
 that leaves no mark in the hook's environment can keep the terminal's Queue; whether a message
@@ -48,7 +49,12 @@ A turn-start hook can enroll its session only when the default messages folder a
 The page can queue a message for that exact session without waking it. A later turn-start
 hook of that session can claim one message, the oldest it is allowed to take. A message the page
 queues is saved with the surface its route was checked on. A hook that reads another surface does
-not claim such a message; the session's own MCP pull (`board_inbox`) still can. A message saved
+not claim such a message; the session's own MCP pull (`board_inbox`) still can. One known gap (#1405):
+no hook of the other surface takes such a message, and nothing rejects it for that, so it can stay
+queued until the mailbox expires or, where the agent's hook reports it, the session ends (below).
+After an upgrade this can catch an agy TUI session that an earlier release's hook enrolled as `IDE`:
+a message queued for it then is saved for `IDE`, and from its next turn the hook enrolls it as
+`agy TUI`. A message saved
 without a surface, by an older board or from another agent's session, is not held to one.
 A turn-start hook marks a message `accepted` only after it has written the message to its output
 for the host; that does not prove the model read it, and the hook collects no ACK. A hook that
@@ -227,8 +233,11 @@ answers `MESSAGE_STORE_BUSY`.
 The local hub accepts `POST /api/messages/dismiss` with only `{ "id": "<message-id>" }`,
 using the board token and the same browser-origin rules as sending. No receiver secret
 is needed; LAN requests are refused. On the page, only a Claude card's message has the
-buttons: Take back while it is queued, and Dismiss once it is handed over or unconfirmed.
-Dismissal rejects a queued message before it can be handed out. An accepted or uncertain
+buttons: Take back while it is queued; Dismiss once it is handed over, or while it is
+unconfirmed and not expired. A replied, stopped or expired message has neither.
+Dismissing a queued message rejects it, so it is not handed out after that; a message a hook
+handed back may already have been shown to its host (`queued` in the status table above).
+An accepted or uncertain
 message becomes final `uncertain` with error `DISMISSED`: delivery may already have happened,
 but it no longer blocks the next message. Disconnect and restart preserve that result;
 later receipts fail with `MESSAGE_DISMISSED`. A dismissed record drops its text at once, like any
@@ -395,13 +404,13 @@ The board reads these routes from `hooks/receiver-routes.ts`. `AGENT_BOARD_ROUTE
 
 ### What earlier runs saw
 
-This table is written by hand and covers progress reporting too. Apart from the Antigravity desktop app's mailbox runs, which have their own record ([2026-11-13-antigravity-app-mailbox-live.md](validation/2026-11-13-antigravity-app-mailbox-live.md)) and make that route Verified above, its runs have no `<date>-<host>-live.md` record, so they make no surface Verified above; the notes for the Codex and Antigravity runs are in [2026-10-19-native-hooks.md](validation/2026-10-19-native-hooks.md).
+This table is written by hand and covers progress reporting too. Its runs have no `<date>-<host>-live.md` record, so none of them makes a surface Verified above; the notes for the Codex and Antigravity runs are in [2026-10-19-native-hooks.md](validation/2026-10-19-native-hooks.md).
 
 | Agent / surface | Progress integration in this repository | Connected-session messaging evidence |
 | --- | --- | --- |
 | Codex | Independent setup and explicit reporter; isolated native app-server SessionStart, UserPromptSubmit and Stop observed | Authenticated owners forwarded two prompts each way with Antigravity and native ACKs; autonomous model tools, CLI TTY and desktop chat remain separate |
 | Antigravity CLI | Independent named hooks; all four native Windows events observed after the command-quoting fix | Same cross-host owner acceptance; native stream ACK, idle continuation, deduplication, conflict and offline rejection verified |
-| Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | Next-turn hook mailbox recorded live for the desktop app, idle and working; the editor reads as the same surface, with no run of its own |
+| Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established in these runs. The desktop app's later next-turn mailbox runs have their own record, in the matrix above |
 | Gemini CLI (retired) | No longer offered by setup; Google's CLI is Antigravity CLI. An install from an earlier release still reports | The board no longer routes messages to it; its card offers Copy |
 | OpenCode | Independent setup, session-context progress tool and plugin events | Generic client API only; no native receiving adapter or real bidirectional acceptance yet |
 | OpenClaw | Independent metadata lifecycle plugin and native skill; separate optional Claude reporter | Its native session tools are not yet integrated into this hub; no real bidirectional acceptance |

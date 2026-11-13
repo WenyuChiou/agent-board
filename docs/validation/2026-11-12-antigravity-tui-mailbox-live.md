@@ -50,7 +50,7 @@ Before queueing, the page's own data for the new row: `send: mailbox`, `line: ne
 Not shown:
 - An ACK line: the model printed none in either run. Run 1's model used the text; run 2's did not.
 - A message queued while the session is working: no run.
-- The desktop app and the editor: not run here. The desktop app's record is `docs/validation/2026-11-13-antigravity-app-mailbox-live.md`; the editor reads as the same `IDE` surface, so the app's routes cover it with no run of its own.
+- The desktop app and the editor: not run here. The desktop app's record is `docs/validation/2026-11-13-antigravity-app-mailbox-live.md`. The editor has no run: the hook labels the folders `.gemini/antigravity` and `.gemini/antigravity-ide` both `IDE`, as it labelled the app's mailbox, so the app's routes would cover the editor if it writes to either folder; which folder it writes to was not seen.
 
 ## Also seen
 

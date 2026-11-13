@@ -52,7 +52,7 @@ Question: does a message queued from the board's page for an Antigravity desktop
 
 Not shown:
 - Waking an idle conversation. The hook hands a message over only at a turn start and starts no turn; #1396 looks for a way to start a turn from the board.
-- The editor. The hook gives the desktop app and the editor the same surface, `IDE` (`antigravitySurface` in `scripts/hook-delivery.ts`); only the desktop app was run.
+- The editor. The hook labels the folders `.gemini/antigravity` and `.gemini/antigravity-ide` both `IDE` (`antigravitySurface` in `scripts/hook-delivery.ts`); only the desktop app was run, and which folder the editor writes to was not seen.
 - A turn that calls tools. Both running turns were one model call each; whether the hook also hands a message over between the calls of one turn was not seen.
 
 ## Also seen
