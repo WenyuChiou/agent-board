@@ -22,10 +22,12 @@ and receipts are never automatically retried, including after a store lock.
 
 Use the existing reply box on the session's card. A matching receiver enables Send or
 Queue only when its session state, surface and route have a live record. When the state
-or route is unknown, the card offers Copy. One known gap: Codex tells a hook which client
-started a session but not which client runs its next turn, so a terminal session continued in
-another client can keep the terminal's Queue; whether a message queued there reaches the model has
-no record (see the Codex CLI record's "Not covered"). Internal connection ids stay hidden. There is no
+or route is unknown, the card offers Copy. One known gap: a Codex hook can read which client
+started a session, not which client runs a turn, so a terminal session continued in another client
+that leaves no mark in the hook's environment can keep the terminal's Queue; whether a message
+queued there reaches the model has no record (see the Codex CLI record's "Not covered"). A Codex
+terminal whose hook carries the Windows background service's mark gets Copy. Internal connection
+ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
 An offline card retains Copy. By default, the web UI and
@@ -41,13 +43,16 @@ line itself; callers cannot supply `line`.
 ## Next-turn mailbox
 
 A turn-start hook enrolls its session when the default message store already exists.
-The page can queue a message for that exact session without waking it. Its next hook
-hands over one message, oldest first. `accepted` means the hook wrote it to the host;
-it does not prove the model read it, and no ACK is collected. A hook that stops waiting hands its
-claim back, so the next turn has the message. A claim the hook named and nobody accepted is handed
-out again after 30 seconds, at most three times, with the same ACK code and a line saying it may be
-a repeat; after that it stays uncertain and blocks that target until the open-message limit. A
-`board_inbox` claim is never handed out again.
+The page can queue a message for that exact session without waking it. A later turn-start
+hook of that session can claim one message, oldest first. A message the page queued is bound to
+the surface its route was checked on: only a hook that reads that same surface claims it, and a
+surface mismatch leaves it queued. `accepted` means the hook wrote the message to its output for
+the host and its accept call succeeded; it does not prove the model read it, and no ACK is
+collected. A hook that stops waiting hands its claim back when it still can, and the message is
+queued again for a later hook. A claim the hook named and nobody accepted can be claimed again by
+a later hook once 30 seconds have passed, at most three times, with the same ACK code and a line
+saying it may be a repeat; after that it stays uncertain and blocks that target until the
+open-message limit. A `board_inbox` claim is never handed out again.
 
 Mailboxes expire after 12 hours. Session end rejects queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create

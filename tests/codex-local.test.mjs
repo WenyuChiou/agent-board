@@ -118,8 +118,8 @@ const isolatedEnv = (home, pathValue) => {
   }
   for (const key of Object.keys(env)) {
     // Read from Codex 0.167's source, not seen in a live run: the Codex app, the editor and Codex's
-    // background service mark the Codex they start, so tests
-    // run from inside one would read every hook as that client, not the terminal.
+    // background service on Windows mark the Codex they start. With such a mark left in the
+    // environment, no hook in these tests would read as the terminal.
     if (key.toLowerCase() === 'path' || ['CODEX_INTERNAL_ORIGINATOR_OVERRIDE', 'CODEX_DAEMON_SHUTDOWN_SOCKET'].includes(key.toUpperCase())) delete env[key]
   }
   env[pathKey] = cleanPath
@@ -820,8 +820,9 @@ test('a Codex hook mailbox is the CLI only when its history file names the termi
   // Read from Codex 0.167's source, not seen in a live run: the desktop app and the editor extension
   // mark the Codex they start with the client variable,
   // and Codex's background service on Windows with the daemon variable; the terminal sets neither.
-  // A resumed session keeps the file of the client that started it, so the terminal → app,
-  // terminal → editor and app → terminal resumes are all here.
+  // A resumed session keeps the file of the client that started it (also read from the source), so
+  // a written file plus the variables stand in for terminal → app, terminal → editor and
+  // app → terminal. No case here resumes a real session.
   const cases = [
     ['codex-tui', undefined, undefined, 'CLI'], ['codex-tui', 'codex-tui', undefined, 'CLI'], ['Codex Desktop', undefined, undefined, 'unknown'],
     ['codex_vscode', undefined, undefined, 'unknown'], [null, undefined, undefined, 'unknown'],
