@@ -197,9 +197,10 @@ export const ZH_TW = {
     "directRemoved": "直接執行的 node 指令已無法使用；請改用 {command}。"
   },
   setupNoAgent: {
-    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
+    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "retired": "agent-board：Gemini CLI 已退役，setup 不再設定它。Google 現在的 CLI 是 Antigravity CLI：請用 --agent antigravity 執行 setup。"
   },
   setupErrorMissingValue: 'agent-board：setup 有個選項後面沒有接值。--agent、--home、--data-dir 這類選項都要接一個值；請在選項後面補上，再執行一次 setup。',
   setupErrorConfig: (host: string): string => `agent-board：setup 讀不懂或無法安全更新 ${host} 的設定，所以保持原樣。請修正或移開該 agent 的設定檔，再執行一次 setup。`,
@@ -723,6 +724,7 @@ export const ZH_TW = {
   boardQueuedCount: (n: number): string => `${n} 項排隊中`,
   boardUsage: '用法：agent-board | agent-board setup | agent-board stop | agent-board --json [--days N] · --help all 查看所有選項（--watch、--tidy [--stopped | --agent 名稱 | --older 天數]、--all...）',
   boardUsageAll: '用法：agent-board [--print] [--status] [--watch] [--serve（舊）] [--stop] [--json] [--days <天數>] [--project <名稱>] [--tidy] [--all] [--no-open] [--lan] [--port <埠號>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all 列出閒置和已停止項目',
+  boardUnknownFlag: (flag: string): string => `agent-board：不認得的選項「${flag}」。請執行 npx @wenyuchiou/agent-board --version，或用 --help 查看用法。`,
   boardHidden: (text: string): string => `已隱藏「${text}」；問題一改就會再出現。`,
   boardShown: '隱藏的問題都重新顯示了。',
   hideFailed: '記不下「已回覆」，這一項還留在清單上。',
@@ -756,6 +758,7 @@ export const ZH_TW = {
   fileQuestions: '問題清單',
   fileNamed: (name: string): string => `「${name}」`,
   storageReadOnly: '檔案唯讀或被鎖住',
+  storageUnreadable: '無法讀取',
   storageBusy: '有別的程式正在用',
   storageFull: '磁碟滿了',
   storageIsFolder: '那是資料夾，不是檔案',
@@ -818,6 +821,11 @@ export const ZH_TW = {
   serveMoved: '看板已移到較新的分頁，這個分頁不再更新，可以關了。要再開看板，可在 agent 對話中輸入 /agent-board 或在終端機執行 agent-board。',
   serveCloseBusy: '還有一句正在傳給 agent，等它回完再關閉看板。',
   serveNotStarted: '伺服器沒有啟動。',
+  serveInvalidPort: (port: string): string => port === ''
+    ? '缺少或無效的 --port（需為 1–65535）。請在 --port 後提供連接埠號，或省略 --port 自動選擇。'
+    : `連接埠 ${port} 無效（需為 1–65535）。請改用其他 --port，或省略 --port 自動選擇。`,
+  servePortInUse: (port: number): string => `連接埠 ${port} 已被使用。請改用其他 --port，或省略 --port 自動選擇。`,
+  servePortDenied: (port: number): string => `連接埠 ${port} 無法使用（權限不足）。請改用 1023 以上的 --port，或省略 --port 自動選擇。`,
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `看板無法開啟訊息資料夾（${code}）：${folder}。請先停止所有看板 server，一併檢查 server.lock、server.owner 與 .message-claim-*.json。確認沒有 hub 執行後，僅移除已核實過期的持有者資料。請保留 messages.json 與不確定是否送達的紀錄，勿重送這些訊息。`
     : code === 'MESSAGE_STORE_CLOSED'

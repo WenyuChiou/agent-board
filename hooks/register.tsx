@@ -98,7 +98,7 @@ import type { PressOutcome } from '../types'
 import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
-import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
+import { chosenLang, langOf, plainReadReason, plainReason, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, applyLateDigest, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, noteChatReply, parseDigest, replyData, requestData, settleChatReply, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, retainApproval, markApproval, raiseApproval, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
 import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
@@ -4752,7 +4752,7 @@ export const register: Register = (on, options) => {
           <Text color={palette.alert}>{s.fileUnreadable}</Text>
           {await read($, hasPendingQuestionsProblem) && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
           {await read($, hasQuestionsProblem) && <Text color={palette.alert}>{s.questionsUnreadable()}</Text>}
-          {why !== undefined && <Text color={palette.muted}>{plainReason(s, why)}</Text>}
+          {why !== undefined && <Text color={palette.muted}>{plainReadReason(s, why)}</Text>}
         </Box>
       )
     }

@@ -211,14 +211,15 @@ export const issueTitleKeys = title => {
 
 // GitHub's /issues endpoint includes pull requests (which carry pull_request); only open issues count here so a pull
 // request sharing its own issue's title (#1259 and #1257) never reads as a duplicate issue.
-export const duplicateIssue = ({ title = '', number = null, openIssues = [] } = {}) => {
+export const duplicateIssue = ({ title = '', number = null, action = null, openIssues = [] } = {}) => {
   const output = result()
   const keys = new Set(issueTitleKeys(title))
   if (!keys.size || openIssues === null || openIssues === undefined) return output
   for (const existing of openIssues) {
     if (!existing || existing.pull_request) continue
     if (existing.number === number) continue
-    if (number !== null && typeof existing.number === 'number' && existing.number >= number) continue
+    // On an edited event, check newer open issues too so renaming an older issue to match a newer one still flags (#1355).
+    if (action !== 'edited' && number !== null && typeof existing.number === 'number' && existing.number >= number) continue
     if (existing.state && existing.state !== 'open') continue
     if (issueTitleKeys(existing.title).some(key => keys.has(key))) {
       output.problems.push(problem(
@@ -262,14 +263,14 @@ export const findingLink = ({ title = '', body = '', number = null, repo = null,
   return output
 }
 
-export const checkIssue = ({ title = '', body = '', number = null, repo = null, association = null, openIssues = null, isFinding = false } = {}) => {
+export const checkIssue = ({ title = '', body = '', number = null, action = null, repo = null, association = null, openIssues = null, isFinding = false } = {}) => {
   const output = result()
   const add = next => {
     output.problems.push(...next.problems)
     output.info.push(...next.info)
   }
   if (openIssues === null) output.info.push('duplicate-issue: skipped (offline).')
-  else add(duplicateIssue({ title, number, openIssues }))
+  else add(duplicateIssue({ title, number, action, openIssues }))
   add(findingLink({ title, body, number, repo, association, isFinding }))
   return output
 }
@@ -749,11 +750,14 @@ const isFreshLine = line => {
 // name; on the risk tier, or with no tier named, a reviewer named like the author is the author approving (RULES R2).
 export const isLaneReviewer = (review, tier) => review?.isFresh === true && (tier === 'light' || tier === 'normal')
 
+const isBotUser = user => user?.type === 'Bot' || /\[bot\]$/i.test(user?.login ?? '')
+
 export const reviewOf = item => {
   if (!item) return null
+  const isBot = typeof item === 'object' && isBotUser(item.user)
   const body = typeof item === 'string' ? item : item.body ?? ''
   const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
-  if (match) {
+  if (match && !(match[1].toUpperCase() === 'APPROVE' && isBot)) {
     const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
     const isFresh = isFreshLine(body.slice(match.index).split(/\r?\n/, 1)[0])
     return {
@@ -763,7 +767,7 @@ export const reviewOf = item => {
       ...(isFresh ? { isFresh } : {}),
     }
   }
-  if (typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
+  if (!isBot && typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
     const reviewer = item.user?.login ?? null
     return { kind: 'APPROVE', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
   }
@@ -1108,7 +1112,7 @@ const syncIssueNotice = async ({ checked, api, write, number }) => {
   else await write('POST', `issues/${number}/comments`, { body })
 }
 
-const runIssueCheck = async ({ options, cwd, repo, issue }) => {
+const runIssueCheck = async ({ options, cwd, repo, issue, action = null }) => {
   if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('repository must be owner/repo.')
   const api = options['--offline'] ? null : apiReader(options, repo, cwd)
   let target = issue
@@ -1127,6 +1131,7 @@ const runIssueCheck = async ({ options, cwd, repo, issue }) => {
     title: target.title,
     body: target.body ?? '',
     number: target.number ?? null,
+    action,
     repo,
     association: target.author_association ?? null,
     openIssues,
@@ -1163,7 +1168,7 @@ export const main = async (argv = process.argv.slice(2)) => {
       const event = readJson(readText(resolve(options['--event'])))
       if (event.issue && !event.pull_request) {
         if (!event.repository) throw new Error('event must contain issue and repository metadata.')
-        return await runIssueCheck({ options, cwd, repo: event.repository.full_name, issue: event.issue })
+        return await runIssueCheck({ options, cwd, repo: event.repository.full_name, issue: event.issue, action: event.action ?? null })
       }
       const pr = event.pull_request
       if (!pr || !event.repository) throw new Error('event must contain pull_request and repository metadata.')

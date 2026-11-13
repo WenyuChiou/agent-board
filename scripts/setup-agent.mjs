@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { isatty } from 'node:tty'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, isBoardPluginDisabled as isPluginDisabled, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
+import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, isBoardPluginDisabled as isPluginDisabled, retiredAgents, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
 
 const args = process.argv.slice(2)
 const isRemove = args.includes('--remove')
@@ -222,19 +222,22 @@ const words = (key, values = {}) => summary[key].replace(/\{(\w+)\}/g, (text, na
 // Keep this copy identical to setupNoAgent in all three tables.
 const noAgentWords = [
   {
-    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all)."
+    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "retired": "agent-board: Gemini CLI is retired, so setup no longer sets it up. Google's CLI is Antigravity CLI now: run setup with --agent antigravity."
   },
   {
-    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
+    "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "retired": "agent-board：Gemini CLI 已退役，setup 不再設定它。Google 現在的 CLI 是 Antigravity CLI：請用 --agent antigravity 執行 setup。"
   },
   {
-    "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "home": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "unknown": "agent-board：--agent 写了 setup 不认识的 agent 名称。指定一个：{next}（或 cursor、opencode、gemini、grok、muse、hermes、openclaw、antigravity、deepseek、all）。"
+    "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "home": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "unknown": "agent-board：--agent 写了 setup 不认识的 agent 名称。指定一个：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
+    "retired": "agent-board：Gemini CLI 已退役，setup 不再设置它。Google 现在的 CLI 是 Antigravity CLI：请用 --agent antigravity 运行 setup。"
   }
 ]
 const noAgentText = (key, values) => message(...noAgentWords.map(table => table[key].replace(/\{(\w+)\}/g, (text, name) => String(values[name] ?? text))))
@@ -245,6 +248,7 @@ const missingValue = message(
   'agent-board：setup 有个选项后面没有接值。--agent、--home、--data-dir 这类选项都要接一个值；请在选项后面补上，再运行一次 setup。',
 )
 const noTarget = noAgentText('unknown', { next: `${command ? `${command} ` : ''}--agent codex` })
+const retiredTarget = noAgentText('retired', {})
 const childFailed = host => message(
   `agent-board: setup stopped while working on ${host}. Run it again with --json to see the reason.`,
   `agent-board：setup 處理 ${host} 時中止了。加上 --json 再執行一次，就能看到原因。`,
@@ -360,11 +364,14 @@ const main = () => {
     deepseek: flag('--deepseek-dir') || process.env.DSH_HOME,
   }
   const data = flag('--data-dir') || join(home, '.agent-board')
-  const touched = targets.filter(agent => existsSync(join(data, `install-${agent}.json`)))
+  // A retired agent is offered nowhere and refused by name, but a remove still takes away what an earlier setup wrote for it (#1327).
+  if (!isRemove && selector.split(',').some(agent => retiredAgents.includes(agent))) fail('RETIRED_AGENT', retiredTarget)
+  const removable = [...targets, ...retiredAgents]
+  const touched = removable.filter(agent => existsSync(join(data, `install-${agent}.json`)))
   // --home can name another account's home; PATH and apps belong to the running account.
   const selected = isRemove
-    ? (selector === 'all' ? targets : selector === 'auto' ? touched : selector.split(','))
-    : (selector === 'all' ? targets : selector === 'auto' ? discoverSetupAgents(home, data, hostDirs, homeAt < 0) : selector.split(','))
+    ? (selector === 'all' ? [...removable] : selector === 'auto' ? touched : selector.split(','))
+    : (selector === 'all' ? [...targets] : selector === 'auto' ? discoverSetupAgents(home, data, hostDirs, homeAt < 0) : selector.split(','))
   const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
   const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude'], ['.exe', '.cmd']) : undefined
   const hasClaude = existsSync(claudeDirectory) || (homeAt < 0 && !!claude)
@@ -391,7 +398,7 @@ const main = () => {
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n${claudeNext.map((step, i) => `${i + 1}. ${step}`).join('\n')}` : noAgent}\n`)
     return
   }
-  if ((!selected.length && selector !== 'auto') || selected.some(agent => !targets.includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
+  if ((!selected.length && selector !== 'auto') || selected.some(agent => !(isRemove ? removable : targets).includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
   const apply = args.includes('--apply')
   const isShowingApplied = apply
   // Only inside a test run (as AGENT_BOARD_SETUP_TTY), a stand-in helper can report what a real one cannot on cue.

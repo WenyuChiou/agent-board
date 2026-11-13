@@ -617,25 +617,24 @@ test('the board script prints the board from the file it was written for, in its
   assert.ok(run('en', ['--lang', 'zh-CN']).startsWith('进度'))
 })
 
-test('a --serve whose server cannot start says so without mentioning a page', () => {
-  const lines = {
-    en: "Couldn't open the board page: its server did not start.",
-    'zh-TW': '開不了看板網頁：伺服器沒有啟動。',
-    'zh-CN': '打不开看板网页：服务器没有启动。',
-  }
-  for (const [lang, line] of Object.entries(lines)) {
-    let text = ''
-    try {
-      run(lang, ['--serve', '--no-open', '--port', '65536'])
-      assert.fail('a --serve that started no page exits non-zero (#1292)')
-    } catch (error) {
-      if (error.code === 'ERR_ASSERTION') throw error
-      assert.equal(error.status, 1, 'a --serve that started no page exits 1 (#1292)')
-      text = error.stdout
+test('a --serve with an invalid --port says why and what to try without mentioning a page (#1295)', () => {
+  const strings = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }
+  for (const [lang, locale] of Object.entries(strings)) {
+    for (const bad of ['65536', '0', 'abc', undefined]) {
+      const cliArgs = bad === undefined ? ['--serve', '--no-open', '--port'] : ['--serve', '--no-open', '--port', bad]
+      let text = ''
+      try {
+        run(lang, cliArgs)
+        assert.fail('a --serve that started no page exits non-zero (#1292)')
+      } catch (error) {
+        if (error.code === 'ERR_ASSERTION') throw error
+        assert.equal(error.status, 1, 'a --serve that started no page exits 1 (#1292)')
+        text = error.stdout
+      }
+      assert.equal(text.trim().split('\n').at(-1), locale.serveFailed(locale.serveInvalidPort(bad ?? '')))
+      assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
+      assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
     }
-    assert.equal(text.trim().split('\n').at(-1), line)
-    assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
-    assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
   }
 })
 
@@ -1555,7 +1554,7 @@ syncBuiltinESMExports()`)
       const out = play(fault)
       const said = out.stdout + out.stderr
       assert.equal(out.status, 1, said)
-      assert.ok(said.includes('progress-answered.json') && said.includes(code === 'EACCES' ? EN.storageReadOnly : EN.storageUnknown) && !said.includes(list), said)
+      assert.ok(said.includes('progress-answered.json') && said.includes(code === 'EACCES' ? EN.storageUnreadable : EN.storageUnknown) && !said.includes(list), said)
       assert.ok(!said.includes('Hidden:'), said)
       // The board is drawn after the press, with the question still on it.
       assert.ok(out.stdout.includes('Per-key limit'), said)
@@ -3410,7 +3409,7 @@ syncBuiltinESMExports()
   try {
     const seen = await board.call('GET', '/api/board')
     assert.equal(seen.status, 409, seen.body)
-    assert.match(seen.json().note, /^Couldn't safely read or update .*-journal-.*\(it is read-only or locked\)/)
+    assert.match(seen.json().note, /^Couldn't safely read or update .*-journal-.*\(it cannot be read\)/)
     // The page says that note, and "offline" only when the board sent none.
     const home = await board.call('GET', `/?t=${board.token}`, { headers: { 'x-board-token': '' } })
     const dom = await pageDom(home.body, null, { getBoard: async () => ({ ok: false, json: async () => seen.json() }) })
@@ -3424,7 +3423,7 @@ syncBuiltinESMExports()
       const lan = new URL(opened.json().url)
       const far = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': lan.searchParams.get('t') })
       assert.equal(far.status, 409, far.body)
-      assert.match(far.json().note, /^Couldn't safely read or update progress-journal-\d{4}-\d{2}\.md \(it is read-only or locked\)/)
+      assert.match(far.json().note, /^Couldn't safely read or update “progress-journal-\d{4}-\d{2}\.md” \(it cannot be read\)/)
       assert.ok(!far.json().note.includes(board.dir), far.json().note)
     }
   } finally {
@@ -3968,9 +3967,16 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       return prevented
     },
     key: event => {
-      document.events.keydown?.(event)
+      const originalPrevent = event.preventDefault
+      const dispatched = {
+        ...event,
+        defaultPrevented: Boolean(event.defaultPrevented),
+        preventDefault() { this.defaultPrevented = true; originalPrevent?.call(this) },
+      }
+      document.events.keydown?.(dispatched)
       if (['Enter', ' '].includes(event.key) && document.activeElement?.tag === 'button') document.activeElement.click()
     },
+    body: document.body,
     active: () => document.activeElement,
     title: () => document.title,
     delays,
@@ -4552,8 +4558,8 @@ test('every serve page action on every card kind from every agent answers with a
             return { ok: false, json: async () => ({ note: serverNote }) }
           } finally { fixture.disable(); refreshed = runtime.serveModel(runtime.view(), runtime.pending(), runtime.s) }
         } })
-        // The line after a copy (Copy again, Answered) only exists once something was copied; it is not an offered action.
-        const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain, runtime.s.pgAnswered]
+        // Copy again lives inside .state and only appears once something was copied; it is not an offered action.
+        const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain]
         const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent)).flatMap(button =>
           button.className === 'answer-send'
             ? pressWalk(pageCard(button)).filter(node => node.className === 'choice').map(choice => ({ button, choice }))
@@ -4602,7 +4608,7 @@ test('every serve page action on every card kind from every agent answers with a
       }
       if (projected.expected === 0) {
         const dom = await pageDom(html, projected.model)
-        assert.equal(dom.buttons().filter(button => ![runtime.s.pgCopyAgain, runtime.s.pgAnswered].includes(button.textContent)).length, 0, `${cell.title}: the retained shelf is explicitly read-only`)
+        assert.equal(dom.buttons().filter(button => ![runtime.s.pgCopyAgain].includes(button.textContent)).length, 0, `${cell.title}: the retained shelf is explicitly read-only`)
       }
     }
     assert.deepEqual([...seen].sort(), PRESS_CELLS.map(cell => cell.title).sort())
@@ -5092,7 +5098,7 @@ syncBuiltinESMExports()
     writeFileSync(flag, '')
     const read = await board.call('GET', '/api/board')
     assert.equal(read.status, 409, read.body)
-    assert.equal(read.json().note, EN.boardStorageFailed(EN.fileNamed(journal), EN.storageReadOnly))
+    assert.equal(read.json().note, EN.boardStorageFailed(EN.fileNamed(journal), EN.storageUnreadable))
     assert.ok(!read.json().note.includes(board.dir), read.body)
   } finally {
     await board.close()
@@ -6136,6 +6142,32 @@ test('Windows page startup times out without leaving its child or ready files', 
     if (pid === undefined && existsSync(marker)) pid = Number(readFileSync(marker, 'utf8'))
     if (pid && processAlive(pid)) process.kill(pid)
     if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    await board.end([])
+  }
+})
+test('a --serve on a busy --port says why and what to try in all languages (#1295)', { timeout: 25_000 }, async () => {
+  const strings = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }
+  const blocker = createNetServer()
+  await new Promise((done, fail) => {
+    blocker.once('error', fail)
+    blocker.listen(0, '127.0.0.1', done)
+  })
+  const busyPort = blocker.address().port
+  const board = serveIn()
+  try {
+    for (const [lang, locale] of Object.entries(strings)) {
+      const began = performance.now()
+      const { status, out } = await board.serveFailing(['--lang', lang, '--port', String(busyPort)])
+      const elapsed = performance.now() - began
+      assert.equal(status, 1, 'busy --port exits 1 (#1295)')
+      assert.ok(elapsed < 10_000, `busy --port must fail quickly without 20s retry (${elapsed}ms)`)
+      assert.equal(out.trim().split('\n').at(-1), locale.serveFailed(locale.servePortInUse(busyPort)))
+      assert.ok(!out.includes('--serve'), 'busy --port failure gives no instructions for an existing page')
+      assert.ok(!out.includes('http://127.0.0.1:'), 'no page address was created')
+      assert.ok(locale.servePortDenied(80).includes('--port'), 'permission denied message names a next step')
+    }
+  } finally {
+    await new Promise(done => blocker.close(() => done()))
     await board.end([])
   }
 })
@@ -10627,7 +10659,7 @@ test('a question card puts choices before its copy button and the hide button la
   const dom = await pageDom(await sourcePage(), cardsModel())
   const card = cardWithKey(dom, 'ask')
   // The answers come first; what More holds follows: the command, the link, the resume command, then Already answered, hide.
-  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), [EN.pgCopyChoice, EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
   const answers = card.childNodes.flatMap(node => pressWalk(node)).find(node => node.className === 'answers')
   assert.deepEqual(answers.childNodes[0].childNodes.slice(0, 2).map(node => node.textContent), ['Yes', 'No'])
   assert.equal(answers.childNodes.at(-1).getAttribute('aria-label'), EN.pgCopyChoice)
@@ -10647,7 +10679,7 @@ test('a card with more than three actions shows three and the rest behind More',
   const card = cardWithKey(dom, 'ask')
   const actions = cardActionNodes(card)
   // Three answers show; the command, the link, the resume command and Already answered, hide wait behind More.
-  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), ['↑'])
+  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
   assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No', 'Maybe'])
   const more = cardMore(card)
   assert.equal(more.length, 1)
@@ -10723,7 +10755,7 @@ test('a card with nothing behind More shows no More button', async () => {
     const card = cardWithKey(dom, 'ask')
     // Already answered, hide alone still goes behind More.
     assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice').map(node => node.textContent), ['Yes', 'No'])
-    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
+    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
     assert.equal(cardMore(card).length, canHide ? 1 : 0)
     assert.equal(cardActionNodes(card).length, canHide ? 2 : 1)
     const row = cardWithKey(dom, 'row')
@@ -10740,13 +10772,13 @@ test('a question with four answers shows three and keeps the fourth behind More'
   const card = cardWithKey(dom, 'ask')
   const visibleChoices = () => pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent)
   assert.deepEqual(visibleChoices(), ['A', 'B', 'C'])
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
   const more = cardMore(card)[0]
   assert.ok(more)
   more.click()
   assert.equal(more.getAttribute('aria-expanded'), 'true')
   assert.deepEqual(visibleChoices(), ['A', 'B', 'C', 'D'])
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice, EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
 })
 
 test('More opens and closes by keyboard and keeps its state across a refresh', async () => {
@@ -11911,8 +11943,13 @@ test('picking a view shows only that section', async () => {
   const { board, model, html } = await groupedPage()
   try {
     const dom = await pageDom(html, model, { width: 1280 })
-    // The page hides every section but the chosen one; Overview shows them all.
-    for (const view of ['needs', 'working', 'others', 'done']) assert.ok(html.includes(`.shell[data-view="${view}"] #board>[data-sec]:not([data-sec="${view}"])`), view)
+    // The page hides every section but the chosen one at every width (outside the 560px+ block); Overview shows them all.
+    const wideAt = html.indexOf('@media (min-width:560px)')
+    for (const view of ['needs', 'working', 'others', 'done']) {
+      const rule = `.shell[data-view="${view}"] #board>[data-sec]:not([data-sec="${view}"])`
+      const at = html.indexOf(rule)
+      assert.ok(at !== -1 && at < wideAt, `${view} view rule applies below 560px too`)
+    }
     for (const name of ['needs', 'working', 'others', 'done', 'all']) {
       dom.node(`view-${name}`).click()
       await dom.flush()
@@ -12353,6 +12390,186 @@ test('the sidebar folds to a rail at the docked width', async () => {
     // The rail is a narrow column; the grid follows the fold.
     assert.ok(html.includes('.shell[data-rail="1"]{grid-template-columns:64px minmax(0,1fr)}'))
     assert.ok(html.includes('grid-template-columns:232px minmax(0,1fr)'))
+  } finally { await board.close() }
+})
+
+test('under 560 px the sidebar opens as a drawer from the button at the top left', async () => {
+  const { board, model, html } = await groupedPage()
+  try {
+    // The button sits at the top left of the header, before the heading, labelled with the sidebar's own words, and says whether the drawer is open.
+    assert.match(html, /<button[^>]*id="drawer-btn"[^>]*aria-expanded="false"[^>]*aria-controls="side"/)
+    const topbar = html.slice(html.indexOf('<header class="head"'), html.indexOf('</header>'))
+    assert.ok(topbar.indexOf('id="drawer-btn"') < topbar.indexOf('class="brand"'), 'the button is at the top left, before the heading')
+    assert.ok(topbar.includes(EN.sideTitle), 'the button is labelled with the sidebar title')
+    // The drawer is the same aside the wide page shows, with a backdrop behind it and a Close button at its top.
+    assert.ok(html.includes('<aside class="side" id="side"'), 'the drawer is the sidebar itself')
+    assert.ok(html.includes('id="drawer-backdrop"'), 'there is a backdrop')
+    assert.ok(html.includes('id="drawer-close"'), 'there is a Close button')
+    // Reduced motion removes transitions so the drawer opens and closes immediately.
+    const reduced = mediaBlocks(html, '(prefers-reduced-motion:reduce)').join('\n')
+    assert.ok(reduced.includes('transition:none!important'), 'reduced motion disables transitions')
+    const dom = await pageDom(html, model, { width: 400 })
+    const shell = dom.node('shell')
+    const btn = dom.node('drawer-btn')
+    const side = dom.node('side')
+    // Shut at first: the sidebar is off screen and out of the tab order, the footer under the work.
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(btn.getAttribute('aria-expanded'), 'false')
+    assert.equal(side.inert, true)
+    assert.equal(dom.node('pfoot').parentNode, dom.node('main'))
+    // The button opens it: focus moves inside, and the footer moves to the foot of the drawer.
+    btn.click()
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    assert.equal(btn.getAttribute('aria-expanded'), 'true')
+    assert.equal(side.inert, false)
+    assert.equal(dom.active(), dom.node('drawer-close'))
+    assert.equal(dom.node('pfoot').parentNode, dom.node('side-foot'))
+    // The drawer shows the same views, agents and projects as the wide sidebar, with the same counts.
+    assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
+    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
+    assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => node.getAttribute('data-project')), ['client-repo', 'deep-project', 'docs-repo', 'shared-repo'])
+    // The button again shuts it, and focus goes back to the button.
+    btn.click()
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(btn.getAttribute('aria-expanded'), 'false')
+    assert.equal(side.inert, true)
+    assert.equal(dom.active(), btn)
+    assert.equal(dom.node('pfoot').parentNode, dom.node('main'))
+  } finally { await board.close() }
+})
+
+test('a pick in the drawer filters the board and closes the drawer', async () => {
+  const { board, model, html } = await groupedPage()
+  try {
+    // A view pick applies and closes the drawer, and focus goes back to the button.
+    const views = await pageDom(html, model, { width: 400 })
+    views.node('drawer-btn').click()
+    assert.equal(views.node('shell').getAttribute('data-drawer'), '1')
+    views.node('view-needs').click()
+    assert.equal(views.node('shell').getAttribute('data-view'), 'needs')
+    assert.equal(views.node('view-needs').getAttribute('aria-pressed'), 'true')
+    assert.equal(views.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(views.active(), views.node('drawer-btn'))
+    // An agent pick does the same, and the chips on the page show it.
+    const agents = await pageDom(html, model, { width: 400 })
+    agents.node('drawer-btn').click()
+    sideAgent(agents, 'codex').click()
+    assert.equal(sideAgent(agents, 'codex').getAttribute('aria-pressed'), 'true')
+    assert.equal(rowAgent(agents, 'codex').getAttribute('aria-pressed'), 'true')
+    assert.equal(agents.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(agents.active(), agents.node('drawer-btn'))
+    // A project pick does the same.
+    const projects = await pageDom(html, model, { width: 400 })
+    projects.node('drawer-btn').click()
+    const docs = projects.node('side-projects').querySelectorAll('[data-project]').find(node => node.getAttribute('data-project') === 'docs-repo')
+    docs.click()
+    assert.equal(docs.getAttribute('aria-pressed'), 'true')
+    assert.equal(projects.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(projects.active(), projects.node('drawer-btn'))
+  } finally { await board.close() }
+})
+
+test('Esc and the backdrop close the drawer and focus goes back to its button', async () => {
+  const { board, model, html } = await groupedPage()
+  try {
+    const dom = await pageDom(html, model, { width: 400 })
+    const shell = dom.node('shell')
+    const btn = dom.node('drawer-btn')
+    // Esc closes it and focus goes back to the button.
+    btn.click()
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    dom.key({ key: 'Escape' })
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // The backdrop does the same.
+    btn.click()
+    dom.node('drawer-backdrop').click()
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // The Close button does the same.
+    btn.click()
+    dom.node('drawer-close').click()
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // Tab stays inside: from the last control it wraps to the first, and back again.
+    btn.click()
+    assert.equal(dom.active(), dom.node('drawer-close'))
+    const last = dom.node('side-projects').querySelectorAll('[data-project]').at(-1)
+    last.focus()
+    dom.key({ key: 'Tab' })
+    assert.equal(dom.active(), dom.node('drawer-close'))
+    dom.key({ key: 'Tab', shiftKey: true })
+    assert.equal(dom.active(), last)
+    // Settings opened from inside the drawer owns Tab and Esc until it closes; the drawer stays open behind it.
+    dom.node('settings-toggle').click()
+    assert.equal(dom.node('settings').hidden, false)
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    assert.equal(dom.active(), dom.node('settings-close'))
+    let prevented = false
+    dom.key({ key: 'Tab', preventDefault: () => { prevented = true } })
+    assert.equal(prevented, false, 'Tab advances inside Settings instead of wrapping the inert drawer')
+    dom.key({ key: 'Escape', preventDefault() {} })
+    assert.equal(dom.node('settings').hidden, true)
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    assert.equal(dom.active(), dom.node('settings-toggle'))
+    dom.key({ key: 'Escape' })
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // Closing the board from inside the drawer clears the drawer, backdrop state and scroll lock.
+    const closer = await pageDom(html, model, { width: 400, post: () => ({ ok: true, json: async () => ({ ok: true }) }) })
+    closer.node('drawer-btn').click()
+    assert.equal(closer.node('shell').getAttribute('data-drawer'), '1')
+    assert.equal(closer.body.style.overflow, 'hidden')
+    closer.node('close').click()
+    await closer.settle()
+    assert.equal(closer.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(closer.body.style.overflow, '')
+    assert.equal(closer.node('side').hidden, true)
+    // A newer page taking over clears an open drawer too.
+    let isMoved = false
+    const moved = await pageDom(html, model, { width: 400, currentBoard: () => isMoved ? { moved: true } : {} })
+    moved.node('drawer-btn').click()
+    assert.equal(moved.node('shell').getAttribute('data-drawer'), '1')
+    assert.equal(moved.body.style.overflow, 'hidden')
+    isMoved = true
+    await moved.redraw(model)
+    await moved.settle()
+    assert.equal(moved.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(moved.body.style.overflow, '')
+    assert.equal(moved.node('side').hidden, true)
+  } finally { await board.close() }
+})
+
+test('from 560 px up the sidebar shows as before and there is no drawer button', async () => {
+  const html = await sourcePage()
+  const { board, model } = await groupedPage()
+  try {
+    // From 560px the sidebar shows (a rail of icons first, 232px from 800px) and the header, with its drawer button, gives way.
+    const wide = mediaBlocks(html, '(min-width:560px)').join('\n')
+    assert.ok(wide.includes('.side{display:flex'), 'the sidebar shows from 560px')
+    assert.ok(wide.includes('.head,.agents-in{display:none}'), 'the header and its drawer button give way to the sidebar')
+    // The drawer rules live below 560px only, hiding the offscreen sidebar from screen readers and pointer clicks when shut.
+    const narrow = mediaBlocks(html, '(max-width:559px)').join('\n')
+    assert.ok(narrow.includes('.shell[data-drawer="1"] .side{transform:none'), 'the drawer slides in below 560px')
+    assert.ok(narrow.includes('visibility:hidden'), 'the shut drawer stays hidden from screen readers and visible queries')
+    assert.ok(narrow.includes('.drawer-backdrop'), 'the backdrop is a narrow-window rule')
+    // At 560px and at 1280px the drawer never opens: the button does nothing and the sidebar stays live.
+    for (const width of [560, 1280]) {
+      const dom = await pageDom(html, model, { width })
+      const shell = dom.node('shell')
+      dom.node('drawer-btn').click()
+      assert.equal(shell.getAttribute('data-drawer'), '', `no drawer at ${width}px`)
+      assert.equal(dom.node('drawer-btn').getAttribute('aria-expanded'), 'false', `the button stays shut at ${width}px`)
+      assert.equal(dom.node('side').inert, false, `the sidebar stays live at ${width}px`)
+    }
+    // A resize from narrow to wide shuts a drawer left open.
+    const dom = await pageDom(html, model, { width: 400 })
+    dom.node('drawer-btn').click()
+    assert.equal(dom.node('shell').getAttribute('data-drawer'), '1')
+    dom.resize(700)
+    assert.equal(dom.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(dom.node('side').inert, false)
+    assert.equal(dom.node('pfoot').parentNode, dom.node('main'))
   } finally { await board.close() }
 })
 
@@ -13592,4 +13809,216 @@ test('Settings notifications stay off after denial or dismissal without another 
   }
   const insecure = await pageDom(servePage(EN, 'synthetic', true), redesignModel(), { notification: InsecureNotification })
   assert.equal(insecure.node('settings-notifications').hidden, true)
+})
+
+test('the board script answers --version and rejects unknown flags without starting a server (#1275)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-flags-'))
+  try {
+    const script = join(dir, 'agent-board.mjs')
+    const progress = join(dir, 'progress.md')
+    writeFileSync(progress, '## Demo\n### Open task\n- [ ] Step\n')
+    const baked = lang => `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang })}\n${BOARD_SCRIPT}`
+    const runScript = (args, lang = 'en') => {
+      writeFileSync(script, baked(lang))
+      return spawnSync(process.execPath, [script, ...args], {
+        env: { ...process.env, HOME: dir, USERPROFILE: dir, CLAUDE_CONFIG_DIR: dir, LANG: lang === 'zh-TW' ? 'zh_TW.UTF-8' : lang === 'zh-CN' ? 'zh_CN.UTF-8' : 'C' },
+        encoding: 'utf8',
+        timeout: 15_000,
+        windowsHide: true,
+      })
+    }
+    const pkgVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+    for (const flag of ['--version', '-v', '--help']) {
+      const ran = runScript(flag === '--help' ? ['--version', '--help'] : [flag])
+      assert.equal(ran.status, 0, ran.stderr)
+      assert.equal(ran.stdout, `agent-board ${pkgVersion}\n`)
+      assert.equal(ran.stderr, '')
+    }
+    for (const [lang, expected] of [
+      ['en', EN.boardUnknownFlag('--bogus')],
+      ['zh-TW', ZH_TW.boardUnknownFlag('--bogus')],
+      ['zh-CN', ZH_CN.boardUnknownFlag('--bogus')],
+    ]) {
+      const ran = runScript(['--bogus'], lang)
+      assert.notEqual(ran.status, 0)
+      assert.equal(ran.stdout, '')
+      assert.equal(ran.stderr, `${expected}\n`)
+      assert.ok(ran.stderr.includes('npx @wenyuchiou/agent-board --version') && ran.stderr.includes('--help'), ran.stderr)
+    }
+    for (const args of [['--days', '7', '--bogus'], ['--lan', '--bogus'], ['-x']]) {
+      const ran = runScript(args)
+      assert.notEqual(ran.status, 0)
+      assert.equal(ran.stdout, '')
+      assert.match(ran.stderr, /--bogus|-x/)
+    }
+    // Known display and plugin options and flag values still run cleanly without opening a page.
+    const printed = runScript(['--print', '--quiet-board', '--no-color', '--theme', 'dark', '--project', '--bogus', '-h'])
+    assert.equal(printed.status, 0, printed.stderr)
+    // No server address or runtime files were written.
+    assert.deepEqual(readdirSync(dir).sort(), ['agent-board.mjs', 'progress.md'])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('the answer picker labels its confirm button Copy when the agent cannot receive (#1268)', async () => {
+  const { servePage } = await sourceBoard()
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const html = servePage(words, 'synthetic')
+    const copyModel = cardsModel()
+    copyModel.asks[0] = { ...copyModel.asks[0], send: 'none', answers: ['Yes', 'No'] }
+    const dom = await pageDom(html, copyModel)
+    const card = cardWithKey(dom, 'ask')
+    const button = pressWalk(card).find(node => node.className === 'answer-send')
+    assert.ok(button)
+    assert.equal(button.textContent, words.pgCopyChoice)
+    assert.equal(button.getAttribute('aria-label'), words.pgCopyChoice)
+    assert.equal(button.title, words.pgCopyChoice)
+    assert.equal(button.getAttribute('data-copy'), '1')
+    assert.notEqual(button.textContent, '↑')
+
+    const sendModel = cardsModel()
+    sendModel.asks[0] = { ...sendModel.asks[0], send: 'send', answers: ['Yes', 'No'] }
+    const sendDom = await pageDom(html, sendModel)
+    const sendBtn = pressWalk(cardWithKey(sendDom, 'ask')).find(node => node.className === 'answer-send')
+    assert.ok(sendBtn)
+    assert.equal(sendBtn.textContent, '↑')
+    assert.equal(sendBtn.getAttribute('aria-label'), words.pgSendChoice)
+    assert.equal(sendBtn.title, words.pgSendChoice)
+    assert.equal(sendBtn.getAttribute('data-copy'), null)
+  }
+})
+
+test('#1363: a waiting card keeps one hide button named answeredHide across Copy, Send, Queue and Cancel, and hiding shows only one working Show again button', async () => {
+  const { servePage } = await sourceBoard()
+  const insideClass = (node, cls) => {
+    for (let cur = node; cur; cur = cur.parentNode) if (String(cur.className || '').split(' ').includes(cls)) return true
+    return false
+  }
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const html = servePage(s, 'synthetic')
+    const base = redesignModel()
+    const cardButtons = (dom, key) => {
+      const card = pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === key)
+      assert.ok(card, `card ${key}`)
+      return pressWalk(card).filter(node => node.tag === 'button')
+    }
+
+    // 1. One hide button per card, always answeredHide (never pgAnswered), moving between .more and .state.
+    const agentLabel = s.agentNames.codex || 'Codex'
+    for (const variant of [
+      { key: 'copy-card', send: 'copy', where: 'none', delivery: undefined, line: undefined, action: 'copy', submitLabel: s.pgCopyAnswer },
+      { key: 'send-card', send: 'send', where: 'pane-1', delivery: undefined, line: undefined, action: 'send', submitLabel: s.serveSend(agentLabel) },
+      { key: 'queue-card', send: 'mailbox', where: 'mailbox', delivery: { id: 'c1', agent: 'codex', turn: 't1' }, line: 'chatOpen', action: 'queue', submitLabel: s.serveQueueNextOpen(agentLabel) },
+    ]) {
+      const model = {
+        ...base,
+        asks: [{
+          ...base.asks[0],
+          key: variant.key,
+          agent: 'codex',
+          send: variant.send,
+          canHide: true,
+          unhideKey: `hidden:${variant.key}`,
+          where: variant.where,
+          delivery: variant.delivery,
+          line: variant.line,
+          answers: ['Proceed', 'Skip'],
+          isSending: false,
+        }],
+        hidden: [],
+      }
+      const dom = await pageDom(html, model, {
+        copyAllowed: true,
+        post: async request => {
+          assert.equal(request.path, '/api/act')
+          return { ok: true, json: async () => ({ ok: true, note: 'OK' }) }
+        },
+      })
+      const checkHideState = (expectInState, label) => {
+        const btns = cardButtons(dom, variant.key)
+        const hides = btns.filter(btn => btn.textContent === s.answeredHide)
+        assert.equal(hides.length, 1, `${label}: exactly one hide button`)
+        assert.equal(btns.some(btn => btn.textContent === s.pgAnswered), false, `${label}: never pgAnswered`)
+        assert.equal(insideClass(hides[0], 'state'), expectInState, `${label}: inside .state === ${expectInState}`)
+        assert.equal(insideClass(hides[0], 'more'), !expectInState, `${label}: inside .more === ${!expectInState}`)
+      }
+      checkHideState(false, `${variant.key} initial`)
+      const writeBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === s.pgWriteOwn)
+      assert.ok(writeBtn, `${variant.key}: write button`)
+      writeBtn.click()
+      checkHideState(false, `${variant.key} write`)
+      const cancelBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === s.pgCancel)
+      cancelBtn.click()
+      checkHideState(false, `${variant.key} cancel back to ask`)
+
+      writeBtn.click()
+      const card = pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === variant.key)
+      const textarea = pressWalk(card).find(node => node.tag === 'textarea')
+      textarea.value = 'Synthetic reply'
+      const submitBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === variant.submitLabel)
+      assert.ok(submitBtn, `${variant.key}: submit button ${variant.submitLabel}`)
+      submitBtn.click()
+      await dom.settle()
+      checkHideState(true, `${variant.key} after ${variant.action}`)
+      await dom.redraw(model)
+      checkHideState(true, `${variant.key} redraw while after`)
+    }
+
+    // 2. First Show again appears once (never duplicated in hiddenShelf while the active notice is shown), and works.
+    let liveModel = {
+      ...base,
+      asks: [{ ...base.asks[0], key: 'ask-hide-1', text: 'Hide me once?', canHide: true, unhideKey: 'hidden:h1', isSending: false }],
+      hidden: [],
+    }
+    const calls = []
+    const hideDom = await pageDom(html, liveModel, {
+      copyAllowed: true,
+      currentModel: () => liveModel,
+      post: async request => {
+        calls.push(request)
+        if (request.body.type === 'hide') {
+          liveModel = {
+            ...liveModel,
+            asks: [],
+            hidden: [{ key: 'hidden:h1', project: 'repo', agent: 'claude', task: 'Task 1', text: 'Hide me once?' }],
+          }
+          return { ok: true, json: async () => ({ ok: true, note: s.hidQuestion || 'Hidden' }) }
+        }
+        liveModel = {
+          ...liveModel,
+          asks: [{ ...base.asks[0], key: 'ask-hide-1', text: 'Hide me once?', canHide: true, unhideKey: 'hidden:h1', isSending: false }],
+          hidden: [],
+        }
+        return { ok: true, json: async () => ({ ok: true, note: 'Shown again' }) }
+      },
+    })
+    const hideBtn = cardButtons(hideDom, 'ask-hide-1').find(btn => btn.textContent === s.answeredHide)
+    hideBtn.click()
+    await hideDom.settle()
+    const countShowAgain = dom => pressWalk(dom.node('board')).filter(node => node.tag === 'button' && node.textContent === s.showAgain)
+    const shelfNode = dom => pressWalk(dom.node('board')).find(node => node.tag === 'section' && String(node.className || '').split(' ').includes('shelf') && node.textContent.includes(s.hiddenCount(1)))
+    const shelfShowAgain = dom => pressWalk(shelfNode(dom)).filter(node => node.tag === 'button' && node.textContent === s.showAgain)
+
+    assert.equal(countShowAgain(hideDom).length, 1, 'only one Show again button right after hiding')
+    assert.equal(shelfShowAgain(hideDom).length, 0, 'no duplicate Show again in collapsed hidden shelf')
+    const shelfToggle = pressWalk(shelfNode(hideDom)).find(node => node.tag === 'button' && String(node.className || '').includes('shelf-head'))
+    assert.ok(shelfToggle, 'hidden shelf toggle')
+    shelfToggle.click()
+    assert.equal(countShowAgain(hideDom).length, 1, 'still one Show again button after opening hidden shelf')
+    assert.equal(shelfShowAgain(hideDom).length, 0, 'no duplicate Show again in open hidden shelf')
+
+    countShowAgain(hideDom)[0].click()
+    await hideDom.settle()
+    assert.deepEqual(calls.map(c => ({ key: c.body.key, type: c.body.type })), [
+      { key: 'ask-hide-1', type: 'hide' },
+      { key: 'hidden:h1', type: 'unhide' },
+    ])
+
+    // Reloading with hidden items renders Show again inside hiddenShelf as normal.
+    const reloaded = await pageDom(html, {
+      ...base,
+      asks: [],
+      hidden: [{ key: 'hidden:h1', project: 'repo', agent: 'claude', task: 'Task 1', text: 'Hide me once?' }],
+    })
+    assert.equal(shelfShowAgain(reloaded).length, 1, 'hidden shelf renders Show again when no active notice is present')
+  }
 })

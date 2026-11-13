@@ -940,7 +940,7 @@ const PAGE_WORDS = [
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent',
-  'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
+  'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
@@ -1023,6 +1023,7 @@ button.quiet{border-color:transparent;background:transparent;color:var(--ink);te
 button.quiet:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
 .answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);background:color-mix(in srgb,var(--act) 12%,var(--hover))}
 .answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-lg)}
+.answers button.answer-send[data-copy="1"]{flex:0 0 auto;width:auto;min-width:var(--hit);padding:0 14px;font-size:var(--text-sm)}
 .answers button.answer-send:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 .answers button.answer-send:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:.35;cursor:default}
 .chev{display:inline-block;transition:transform var(--dur-base) var(--ease-out)}.chev::before{content:"▸"}
@@ -1185,6 +1186,17 @@ ${ICON_CSS}
 .ver-link svg.i{width:16px;height:16px;fill:currentColor;stroke:none}
 .set-row{display:inline-flex;align-items:center;gap:var(--s1)}
 .pfoot .grow{flex:1 1 auto}
+/* The drawer button in the header (an outlined button, so it reads on the ground) and the drawer's Close button.
+   The header is hidden from 560px, so the button only ever shows on a narrow window; the Close button only inside the open drawer. */
+.drawer-btn{gap:var(--s2);flex:none}
+.drawer-btn>svg.i{width:18px;height:18px}
+.drawer-close{display:none}
+.drawer-backdrop{display:none}
+/* one view at a time; Overview shows them all */
+.shell[data-view="needs"] #board>[data-sec]:not([data-sec="needs"]),
+.shell[data-view="working"] #board>[data-sec]:not([data-sec="working"]),
+.shell[data-view="others"] #board>[data-sec]:not([data-sec="others"]),
+.shell[data-view="done"] #board>[data-sec]:not([data-sec="done"]){display:none}
 
 @media (min-width:560px){
   .shell{display:grid;grid-template-columns:232px minmax(0,1fr);align-items:start;transition:grid-template-columns var(--dur-layout) var(--ease-out)}
@@ -1195,11 +1207,6 @@ ${ICON_CSS}
   #offline:not(:empty){top:0;padding:var(--s3) var(--s5)}
   /* the can't-read line and the work share one width, so their edges line up */
   .col{max-width:1040px}
-  /* one view at a time; Overview shows them all */
-  .shell[data-view="needs"] #board>[data-sec]:not([data-sec="needs"]),
-  .shell[data-view="working"] #board>[data-sec]:not([data-sec="working"]),
-  .shell[data-view="others"] #board>[data-sec]:not([data-sec="others"]),
-  .shell[data-view="done"] #board>[data-sec]:not([data-sec="done"]){display:none}
   /* the rail: the views and the agents as 44px icons with their badges; names in the tooltip; the project link, the theme and Close the board in the footer */
   .shell[data-rail="1"] .side{padding:var(--s3) 10px;align-items:center}
   .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-logo){display:none}
@@ -1212,6 +1219,21 @@ ${ICON_CSS}
   .shell[data-rail="1"] .s-txt{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
   .shell[data-rail="1"] .s-n:not(.hot){display:none}
   .shell[data-rail="1"] :is(.s-n.hot,.side .badge){position:absolute;top:-3px;right:-5px;border:2px solid var(--ground);line-height:18px}
+}
+@media (max-width:559px){
+  /* A narrow window shows the same sidebar as a drawer from the left, over the work, with a backdrop behind it.
+     It stays hidden and off screen until opened, so closed offscreen controls never catch focus or visibility checks. */
+  .side{display:flex;flex-direction:column;gap:var(--s4);position:fixed;top:0;left:0;bottom:0;width:min(300px,84vw);overflow-x:hidden;overflow-y:auto;padding:var(--s4) var(--s3);border-right:1px solid var(--line);background:var(--ground);z-index:8;transform:translateX(-102%);pointer-events:none;visibility:hidden;transition:transform var(--dur-layout) var(--ease-out),visibility var(--dur-layout) step-end}
+  .shell[data-drawer="1"] .side{transform:none;pointer-events:auto;visibility:visible;transition:transform var(--dur-layout) var(--ease-out),visibility var(--dur-layout) step-start}
+  .drawer-backdrop{display:block;position:fixed;inset:0;z-index:7;background:color-mix(in srgb,var(--ink) 45%,transparent);opacity:0;pointer-events:none;transition:opacity var(--dur-layout) var(--ease-out)}
+  .shell[data-drawer="1"] .drawer-backdrop{opacity:1;pointer-events:auto}
+  .shell[data-drawer="1"] .drawer-close{display:flex}
+  /* The rail toggle has nothing to fold in a drawer; the Close button is the way out. */
+  .shell[data-drawer="1"] .s-toggle{display:none}
+}
+@media (max-width:399px){
+  /* The button is an icon alone where the heading would crowd its label out. */
+  .drawer-btn .drawer-label{display:none}
 }
 @media (min-width:1280px){
   .shell:is([data-view="all"],[data-view="needs"]) .col{max-width:1440px}
@@ -1253,6 +1275,7 @@ ${ICON_CSS}
   .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet{flex:0 0 auto;min-height:44px}
   .answers button.answer-send{flex:0 0 48px;width:48px;min-width:48px;justify-content:center}
+  .answers button.answer-send[data-copy="1"]{flex:0 0 auto;width:auto;min-width:48px;padding:0 14px}
   .pfoot #close,.pfoot #settings-toggle{height:48px;min-width:48px;min-height:48px}
   .s-toggle{width:44px;height:44px}
   #away-line .away-x{width:44px;height:44px}
@@ -1294,14 +1317,16 @@ ${settingsCss}
 <body>
 <div class="shell" id="shell" data-view="all">
 <aside class="side" id="side" aria-label="Agent Board">
+<button type="button" class="s-item drawer-close" id="drawer-close" data-local><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg><span class="s-txt">${esc(s.sideClose)}</span></button>
 <div class="s-brand"><span class="b-logo">${boardLogo(esc(s.serveLiveHint))}</span><span class="b-icon">${boardIcon(28, esc(s.serveLiveHint))}</span><button type="button" class="s-toggle" id="side-toggle" data-local aria-expanded="true" aria-label="${esc(s.pgSideFold)}" title="${esc(s.pgSideFold)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6.5 2.5v11"/></svg></button></div>
 <nav class="s-group s-views" id="side-views" aria-label="${esc(s.pgViews)}">${sideView('all', s.pgOverview, false)}${sideView('needs', s.pgNeeds, true)}${sideView('working', s.pgWorking, true)}${sideView('others', s.pgOthers, true)}${sideView('done', s.pgDone, true)}</nav>
 <div class="s-group s-agents" id="side-agent-group" role="group" aria-labelledby="side-agents-label" hidden><p class="s-label" id="side-agents-label">${esc(s.pgAgents)}</p><div class="s-group" id="side-agents"></div></div>
 <div class="s-group s-projects" id="side-project-group" role="group" aria-labelledby="side-projects-label" hidden><p class="s-label" id="side-projects-label">${esc(s.pgProjects)}</p><div class="s-group" id="side-projects"></div></div>
 <div class="s-foot" id="side-foot"></div>
 </aside>
+<div class="drawer-backdrop" id="drawer-backdrop"></div>
 <div class="stage">
-<header class="head" id="head"><div class="col topbar"><div class="brand"><h1>${boardLogo(esc(s.serveLiveHint))}</h1></div></div></header>
+<header class="head" id="head"><div class="col topbar"><button type="button" class="btn drawer-btn" id="drawer-btn" data-local aria-expanded="false" aria-controls="side" aria-label="${esc(s.sideTitle)}" title="${esc(s.sideTitle)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg><span class="drawer-label">${esc(s.sideTitle)}</span></button><div class="brand"><h1>${boardLogo(esc(s.serveLiveHint))}</h1></div></div></header>
 <template id="fresh-mark">${boardIcon(44, '', true, ' is-arriving')}</template>
 <div id="offline" role="status" aria-live="polite"></div>
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
@@ -1915,10 +1940,22 @@ const PAGE_SCRIPT = String.raw`
     reveal(parts.reply, state.mode === 'write');
     var isAfter = state.mode === 'copied' || state.mode === 'sent' || state.mode === 'queued';
     reveal(parts.after, isAfter);
-    if (!isAfter) return;
+    if (!isAfter) {
+      if (parts.hideBtn && parts.moreActs && parts.hideBtn.parentNode !== parts.moreActs) {
+        toggleClass(parts.hideBtn, 'primary', false);
+        if (parts.hideBtn.parentNode) parts.hideBtn.parentNode.removeChild(parts.hideBtn);
+        parts.moreActs.appendChild(parts.hideBtn);
+      }
+      return;
+    }
     parts.msg.textContent = state.mode === 'queued' ? w('messagesQueued') : state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text) : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
-    parts.answered.hidden = !parts.canHide;
-    parts.answered.textContent = w(state.mode === 'copied' ? 'pgAnswered' : 'answeredHide');
+    if (parts.hideBtn) {
+      toggleClass(parts.hideBtn, 'primary', true);
+      if (parts.hideBtn.parentNode !== parts.afterRow) {
+        if (parts.hideBtn.parentNode) parts.hideBtn.parentNode.removeChild(parts.hideBtn);
+        parts.afterRow.insertBefore(parts.hideBtn, parts.again);
+      }
+    }
     parts.again.hidden = state.mode !== 'copied';
   }
   function setMode(key, mode, text) {
@@ -2034,9 +2071,12 @@ const PAGE_SCRIPT = String.raw`
         };
         options.slice(0, 3).forEach(function (answer, index) { add(choiceArea, makeChoice(answer, index)); });
         options.slice(3).forEach(function (answer, index) { others.push(makeChoice(answer, index + 3)); });
-        pickerSend = button('↑', function () { if (selected >= 0) pressAnswer(ask, key, options[selected], pickerSend); }, 'answer-send', !sends(mode));
-        pickerSend.setAttribute('aria-label', w(sends(mode) ? 'pgSendChoice' : 'pgCopyChoice'));
-        pickerSend.disabled = selected < 0 || sends(mode) && ask.isSending === true;
+        var isCopyMode = !sends(mode);
+        pickerSend = button(isCopyMode ? w('pgCopyChoice') : '↑', function () { if (selected >= 0) pressAnswer(ask, key, options[selected], pickerSend); }, 'answer-send', isCopyMode);
+        pickerSend.setAttribute('aria-label', w(isCopyMode ? 'pgCopyChoice' : 'pgSendChoice'));
+        pickerSend.title = w(isCopyMode ? 'pgCopyChoice' : 'pgSendChoice');
+        if (isCopyMode) pickerSend.setAttribute('data-copy', '1');
+        pickerSend.disabled = selected < 0 || !isCopyMode && ask.isSending === true;
       }
       if (ask.command) others.push(button(w('serveCopyCommand'), function () { copy(ask.command, key); }, '', true));
       if (ask.link && /^https:\/\//i.test(ask.link)) {
@@ -2047,9 +2087,11 @@ const PAGE_SCRIPT = String.raw`
         others.push(link);
       }
       if (ask.reopen) others.push(button(w('serveCopyResume'), function () { copy(ask.reopen, key); }, '', true));
-      if (ask.canHide) others.push(button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
+      var hideBtn = ask.canHide ? button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }) : null;
+      if (hideBtn) others.push(hideBtn);
     }
-    var parts = { agent: agent, canHide: ask.canHide === true, late: lateWord(agentPresence[id]) !== '' };
+    var moreActs = null;
+    var parts = { agent: agent, canHide: ask.canHide === true, late: lateWord(agentPresence[id]) !== '', hideBtn: hideBtn || null, moreActs: null };
     cardParts[key] = parts;
     var askBlock = el('div');
     add(askBlock, answers);
@@ -2057,7 +2099,9 @@ const PAGE_SCRIPT = String.raw`
       var more = el('div', 'more' + (opened['more:' + key] ? ' open' : ''));
       var fold = el('div', 'fold');
       fold.inert = !opened['more:' + key];
-      add(more, add(fold, add(el('div', 'fold-in'), add.apply(null, [el('div', 'acts')].concat(others)))));
+      moreActs = add.apply(null, [el('div', 'acts')].concat(others));
+      parts.moreActs = moreActs;
+      add(more, add(fold, add(el('div', 'fold-in'), moreActs)));
       var toggle = navButton(w('serveMore'), function () {
         var isOpen = !hasClass(more, 'open');
         toggleClass(more, 'open', isOpen);
@@ -2088,12 +2132,12 @@ const PAGE_SCRIPT = String.raw`
     var after = el('div', 'state');
     after.setAttribute('role', 'status');
     parts.msg = el('span', 'msg ok');
-    parts.answered = button(w('pgAnswered'), function () { hideQuestion(key, ask.unhideKey); }, 'primary');
     parts.again = button(w('pgCopyAgain'), function () {
       var state = cardState[key];
       if (state) copy(state.text, key);
     }, 'quiet', true);
-    add(after, add(el('span', 'mk ok', '✓')), parts.msg, parts.answered, parts.again);
+    parts.afterRow = after;
+    add(after, add(el('span', 'mk ok', '✓')), parts.msg, parts.again);
     parts.after = fx(after, false);
     add(body, parts.ask, parts.reply, parts.after);
     paintMode(key);
@@ -2548,6 +2592,8 @@ const PAGE_SCRIPT = String.raw`
     if (latest && latest.view) drawNote(chipEntries(latest.view));
     layout();
     peekChip();
+    // A pick made in the drawer applies at once and closes it.
+    if (drawerOpen) setDrawer(false);
   }
   function chipEntries(view) {
     var entries = [];
@@ -2667,6 +2713,8 @@ const PAGE_SCRIPT = String.raw`
   function setProject(name) {
     pg.project = pg.project === name ? '' : name;
     layout();
+    // A pick made in the drawer applies at once and closes it.
+    if (drawerOpen) setDrawer(false);
   }
   // A view shows one section alone (the rail and the sidebar); Overview shows them all. Done opens its list.
   var VIEWS = ['all', 'needs', 'working', 'others', 'done'];
@@ -2687,6 +2735,8 @@ const PAGE_SCRIPT = String.raw`
     if (pg.sections) layout();
     enter(board);
     if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
+    // A pick made in the drawer applies at once and closes it.
+    if (drawerOpen) setDrawer(false);
   }
   // The sidebar folds to a rail of icons at any width from 560px up; the pick is kept. Below 800px it starts folded.
   // The footer (version link, theme, Close the board) lives at the foot of the full sidebar, and under the work otherwise.
@@ -2696,22 +2746,77 @@ const PAGE_SCRIPT = String.raw`
     return kept === 'rail' || kept === 'full' ? kept : '';
   }
   var sidePick = savedSide();
+  // A narrow window has no sidebar on the page, so the same aside opens as a drawer over the work: the shell
+  // says it is open, the backdrop covers the rest, and the page behind does not scroll. Focus moves into the
+  // drawer when it opens and back to its button when it closes; Tab stays inside while it is open.
+  var drawerOpen = false;
+  function focusablesIn(node, list) {
+    if (!node || !node.childNodes) return list;
+    node.childNodes.forEach(function (child) {
+      if (child.tagName === 'BUTTON' || (child.tagName === 'A' && child.getAttribute && child.getAttribute('href'))) list.push(child);
+      focusablesIn(child, list);
+    });
+    return list;
+  }
+  function drawerFocusable() {
+    var list = [];
+    var shell = document.getElementById('shell');
+    var isEmpty = shell && shell.getAttribute('data-empty') === '1';
+    var close = document.getElementById('drawer-close');
+    if (close) list.push(close);
+    if (!isEmpty) VIEWS.forEach(function (name) { var node = document.getElementById('view-' + name); if (node) list.push(node); });
+    var agents = document.getElementById('side-agents');
+    if (agents) agents.querySelectorAll('[data-agent]').forEach(function (node) { list.push(node); });
+    var projects = document.getElementById('side-projects');
+    if (!isEmpty && projects) projects.querySelectorAll('[data-project]').forEach(function (node) { list.push(node); });
+    var foot = document.getElementById('pfoot');
+    var footHome = document.getElementById('side-foot');
+    if (foot && footHome && foot.parentNode === footHome) focusablesIn(foot, list);
+    return list.filter(function (node) { return !node.disabled && !(node.closest ? node.closest('[hidden]') : node.hidden); });
+  }
+  function setDrawer(open, keepFocus) {
+    var shell = document.getElementById('shell');
+    var side = document.getElementById('side');
+    var btn = document.getElementById('drawer-btn');
+    if (!shell || !side || !btn) return;
+    // A wide window shows the sidebar itself, so there is no drawer to open.
+    if (open && typeof window.innerWidth === 'number' && window.innerWidth >= 560) return;
+    if (drawerOpen === open) return;
+    drawerOpen = open;
+    document.body.style.overflow = open ? 'hidden' : '';
+    fitSide();
+    if (open) {
+      var first = drawerFocusable()[0];
+      if (first) first.focus({ preventScroll: true });
+    } else if (!keepFocus) {
+      btn.focus({ preventScroll: true });
+    }
+  }
   function fitSide() {
     var width = window.innerWidth;
     var shell = document.getElementById('shell');
     if (typeof width !== 'number' || !shell) return;
     var hasSide = width >= 560;
+    // A wide window shows the sidebar itself, so a drawer left open by a resize closes without taking focus.
+    if (hasSide && drawerOpen) { setDrawer(false, true); return; }
     var isRail = hasSide && (sidePick === 'rail' || (sidePick !== 'full' && width < 800));
     shell.setAttribute('data-rail', isRail ? '1' : '');
+    shell.setAttribute('data-drawer', drawerOpen ? '1' : '');
     var toggle = document.getElementById('side-toggle');
     var label = w(isRail ? 'pgSideOpen' : 'pgSideFold');
     toggle.setAttribute('aria-expanded', String(!isRail));
     toggle.setAttribute('aria-label', label);
     toggle.setAttribute('title', label);
+    var drawerBtn = document.getElementById('drawer-btn');
+    if (drawerBtn) drawerBtn.setAttribute('aria-expanded', String(drawerOpen));
+    var side = document.getElementById('side');
+    if (side) side.inert = !hasSide && !drawerOpen;
     var foot = document.getElementById('pfoot');
-    var home = hasSide && !isRail ? document.getElementById('side-foot') : document.querySelector('main');
+    // The footer lives at the foot of the sidebar when it is shown full, or in the drawer when that is open; otherwise under the work.
+    var inSide = (hasSide && !isRail) || (!hasSide && drawerOpen);
+    var home = inSide ? document.getElementById('side-foot') : document.querySelector('main');
     if (!foot || !home || foot.parentNode === home) return;
-    if (hasSide && !isRail) home.appendChild(foot);
+    if (inSide) home.appendChild(foot);
     else home.insertBefore(foot, document.getElementById('note'));
   }
   // While a row is open the list it is in keeps its order, so what is being read does not move; anything new comes first.
@@ -2908,6 +3013,12 @@ const PAGE_SCRIPT = String.raw`
     resultSlot(wrap, 'recent', '', w('pgDone'));
     return wrap;
   }
+  function hasActiveRestore(unhideKey) {
+    return Object.keys(results).some(function (key) {
+      var result = results[key];
+      return result && result.unhideKey === unhideKey && !resultSlots[key] && (result.pending || result.tone === 'alert' || result.tone === 'done');
+    });
+  }
   function hiddenShelf(model) {
     var items = model.hidden || [];
     if (!items.length) return null;
@@ -2930,7 +3041,8 @@ const PAGE_SCRIPT = String.raw`
     items.forEach(function (one) {
       var item = el('div', 'hid');
       var line = [one.project, one.isOwn ? w('pgOwn') : agentName(one.agent)].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : '');
-      add(item, el('p', 'c-meta', line), el('p', 'q', one.text), add(el('div', 'acts'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
+      add(item, el('p', 'c-meta', line), el('p', 'q', one.text));
+      if (!hasActiveRestore(one.key)) add(item, add(el('div', 'acts'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
       resultSlot(item, one.key, one.text, one.task);
       add(body, item);
     });
@@ -3208,6 +3320,7 @@ const PAGE_SCRIPT = String.raw`
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) {
         isClosed = true;
+        if (drawerOpen) setDrawer(false, true);
         paintLight();
         var movedMain = document.querySelector('main');
         movedMain.textContent = '';
@@ -3314,6 +3427,24 @@ const PAGE_SCRIPT = String.raw`
     importBlock(text, true);
   });
   if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
+    // Let Settings own Escape and Tab while it sits modal above an open drawer.
+    var settings = document.getElementById('settings');
+    if (event.defaultPrevented || (settings && !settings.hidden)) return;
+    // The drawer takes Esc to close and keeps Tab inside it; the page behind is not reachable while it is open.
+    if (drawerOpen) {
+      if (event.key === 'Escape') { setDrawer(false); return; }
+      if (event.key !== 'Tab') return;
+      var list = drawerFocusable();
+      if (!list.length) return;
+      var at = list.indexOf(document.activeElement);
+      var wrap = null;
+      if (event.shiftKey) { if (at <= 0) wrap = list[list.length - 1]; }
+      else if (at === -1 || at === list.length - 1) { wrap = list[0]; }
+      if (!wrap) return;
+      wrap.focus({ preventScroll: true });
+      if (typeof event.preventDefault === 'function') event.preventDefault();
+      return;
+    }
     if (event.key !== 'Escape') return;
     // Only the panel the focus is in (or its More button) closes; with no focus anywhere, every open one does.
     // A reply being typed elsewhere is left alone.
@@ -3349,6 +3480,10 @@ const PAGE_SCRIPT = String.raw`
     try { localStorage.setItem('agent-board.side', sidePick); } catch (e) {}
     fitSide();
   });
+  // The drawer: its button toggles it, its Close button and the backdrop shut it.
+  document.getElementById('drawer-btn').addEventListener('click', function () { setDrawer(!drawerOpen); });
+  document.getElementById('drawer-close').addEventListener('click', function () { setDrawer(false); });
+  document.getElementById('drawer-backdrop').addEventListener('click', function () { setDrawer(false); });
   if (typeof window.addEventListener === 'function') window.addEventListener('resize', fitSide);
   fitSide();
   document.getElementById('close').addEventListener('click', function () {
@@ -3357,6 +3492,7 @@ const PAGE_SCRIPT = String.raw`
     say(w('pressPending'), '', 'close');
     var shut = function () {
       isClosed = true;
+      if (drawerOpen) setDrawer(false, true);
       paintLight();
       clearTimeout(timer);
       var main = document.querySelector('main');

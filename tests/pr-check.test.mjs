@@ -654,6 +654,36 @@ test('approval gate: a ready pull request requires a qualifying review approval 
     prComments: [{ body: 'Review: APPROVE 0031e5df25a34216c69c7421d21c0c301d8c7c68 by R2 reviewer (antigravity)' }]
   })
   assert.ok(pr1189.problems.some(p => p.check === 'review' && p.message.includes('RULES.md, R2')))
+
+  // 8. A review bot's APPROVED review or Review: APPROVE comment never counts as a qualifying approval (#1343),
+  // while its REQUEST CHANGES / CHANGES_REQUESTED verdict still blocks.
+  for (const botReview of [
+    { state: 'APPROVED', commit_id: head, body: '', user: { login: 'greptile-apps[bot]', type: 'Bot' } },
+    { state: 'APPROVED', commit_id: head, body: '', user: { login: 'review-app[bot]' } },
+    { state: 'APPROVED', commit_id: head, body: '', user: { login: 'review-app', type: 'Bot' } },
+    { body: `Review: APPROVE ${head} by bot`, user: { login: 'greptile-apps[bot]', type: 'Bot' } },
+    { body: `Review: APPROVE ${head} by bot`, user: { login: 'review-app[bot]' } },
+  ]) {
+    assert.equal(reviewOf(botReview), null)
+    const blocked = checkPr({ ...basePr, prComments: [botReview] })
+    assert.ok(blocked.problems.some(p => p.check === 'review' && p.message.includes('needs a qualifying review approval')))
+  }
+  assert.deepEqual(
+    reviewOf({ state: 'CHANGES_REQUESTED', commit_id: head, body: '', user: { login: 'greptile-apps[bot]', type: 'Bot' } }),
+    { kind: 'REQUEST CHANGES', sha: head.toLowerCase(), reviewer: 'greptile-apps[bot]' },
+  )
+  assert.deepEqual(
+    reviewOf({ body: `Review: REQUEST CHANGES ${head}`, user: { login: 'greptile-apps[bot]', type: 'Bot' } }),
+    { kind: 'REQUEST CHANGES', sha: head.toLowerCase(), reviewer: 'greptile-apps[bot]' },
+  )
+  const humanApprovedAfterBot = checkPr({
+    ...basePr,
+    prComments: [
+      { body: `Review: APPROVE ${head} by Muse Spark` },
+      { state: 'APPROVED', commit_id: head, body: '', user: { login: 'greptile-apps[bot]', type: 'Bot' } },
+    ],
+  })
+  assert.equal(humanApprovedAfterBot.problems.filter(p => p.check === 'review').length, 0)
 })
 
 test('pr-check combines issue state and draft information without mutating inputs', () => {
@@ -1292,13 +1322,33 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
   assert.match(dupPrefix.problems[0].message, /#88/)
   // Short generic remainder after prefix is not falsely equated across distinct prefixes.
   assert.deepEqual(issueTitleKeys('fix(board): add badge'), ['fix(board): add badge'])
-  // Closed issue, self-edit, and editing the original issue when a later duplicate exists are not flagged.
+  // Closed issue, self-edit, and opening/checking an older issue when a later duplicate exists are not flagged, whereas editing an older issue to match a newer open one flags it (#1355).
   assert.deepEqual(duplicateIssue({ title: 'fix(board): closed issue with same title', openIssues }).problems, [])
   assert.deepEqual(duplicateIssue({ number: 88, title: 'fix(board): stale card badge stays visible after exit', openIssues }).problems, [])
+  const openWithNewer = [...openIssues, { number: 200, state: 'open', title: 'fix(board): stale card badge stays visible after exit' }]
   assert.deepEqual(duplicateIssue({
     number: 88,
+    action: 'opened',
     title: 'fix(board): stale card badge stays visible after exit',
-    openIssues: [...openIssues, { number: 200, state: 'open', title: 'fix(board): stale card badge stays visible after exit' }],
+    openIssues: openWithNewer,
+  }).problems, [])
+  const renamedOlder = duplicateIssue({
+    number: 88,
+    action: 'edited',
+    title: 'fix(board): stale card badge stays visible after exit',
+    openIssues: openWithNewer,
+  })
+  assert.equal(renamedOlder.problems.length, 1)
+  assert.match(renamedOlder.problems[0].message, /open issue #200 already has a matching title/)
+  assert.deepEqual(duplicateIssue({
+    number: 1257,
+    action: 'edited',
+    title: 'docs(dev): clarify worktree usage',
+    openIssues: [
+      ...openIssues,
+      { number: 1257, state: 'open', title: 'docs(dev): clarify worktree usage' },
+      { number: 1259, state: 'open', pull_request: {}, title: 'docs(dev): clarify worktree usage' },
+    ],
   }).problems, [])
   // Offline issue check skips duplicate lookup cleanly.
   assert.ok(checkIssue({ title: 'fix(board): new title', body: '', openIssues: null }).info.includes('duplicate-issue: skipped (offline).'))
@@ -1464,11 +1514,40 @@ test('pr-check flags duplicate open issues, duplicate open pull requests and lan
   assert.match(formFindingRun.stdout, /FAIL finding-link:/)
 
   setup.put('issue-self.json', JSON.stringify({
+    action: 'edited',
     repository: { full_name: 'synthetic/example' },
     issue: { number: 1257, state: 'open', title: sharedTitle, body: 'Found in #1259 follow-up.\nAuthor: codex' },
   }))
   const ownIssueRun = await runMain(['--event', join(setup.directory, 'issue-self.json')], apiEnv)
   assert.equal(ownIssueRun.status, 0, ownIssueRun.stdout + ownIssueRun.stderr)
+
+  // Editing an older issue to match a newer open one flags the newer issue via --event; opened does not (#1355).
+  const openWithNewerEvents = [...openIssues, { number: 200, state: 'open', title: 'fix(board): stale card badge stays visible after exit' }]
+  globalThis.fetch = async url => {
+    const payload = url.pathname.endsWith('/issues') ? openWithNewerEvents : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  setup.put('issue-opened-older.json', JSON.stringify({
+    action: 'opened',
+    repository: { full_name: 'synthetic/example' },
+    issue: { number: 88, state: 'open', title: 'fix(board): stale card badge stays visible after exit', body: 'Older issue.' },
+  }))
+  const openedOlderRun = await runMain(['--event', join(setup.directory, 'issue-opened-older.json')], apiEnv)
+  assert.equal(openedOlderRun.status, 0, openedOlderRun.stdout + openedOlderRun.stderr)
+
+  setup.put('issue-edited-older.json', JSON.stringify({
+    action: 'edited',
+    repository: { full_name: 'synthetic/example' },
+    issue: { number: 88, state: 'open', title: 'fix(board): stale card badge stays visible after exit', body: 'Renamed older issue.' },
+  }))
+  const editedOlderRun = await runMain(['--event', join(setup.directory, 'issue-edited-older.json')], apiEnv)
+  assert.equal(editedOlderRun.status, 1, editedOlderRun.stdout + editedOlderRun.stderr)
+  assert.match(editedOlderRun.stdout, /FAIL duplicate-issue: open issue #200 already has a matching title/)
+
+  globalThis.fetch = async url => {
+    const payload = url.pathname.endsWith('/issues') ? openIssues : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
 
   // 6. --comment-issue posts a visible notice comment on a flagged issue and updates it when fixed, failing closed on write error.
   const writes = []
