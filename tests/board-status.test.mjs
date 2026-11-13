@@ -10,7 +10,8 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
@@ -47,7 +48,9 @@ const progressFile = resolve(process.env.STATUS_PROGRESS)
 const answeredFile = resolve(process.env.STATUS_PROGRESS.replace(/\\.md$/i, '') + '-answered.json')
 const questionsFile = resolve(process.env.STATUS_PROGRESS.replace(/\\.md$/i, '') + '-questions.json')
 const settingsFile = resolve(process.env.STATUS_PROGRESS.replace(/\\.md$/i, '') + '-settings.json')
-const reads = { progress: 0, answered: 0, questions: 0, settings: 0, inboxDir: 0, inbox: {} }
+// The store file of the answers queued for a session's next turn: read-only, once, so the line agrees with the page (#1296).
+const messagesFile = process.env.STATUS_MESSAGES ? resolve(process.env.STATUS_MESSAGES) : null
+const reads = { progress: 0, answered: 0, questions: 0, settings: 0, messages: 0, inboxDir: 0, inbox: {} }
 const inboxDir = resolve(dirname(progressFile), 'progress-inbox')
 const violations = []
 fs.readFileSync = (file, ...args) => {
@@ -69,6 +72,10 @@ fs.readFileSync = (file, ...args) => {
   }
   if (target === settingsFile) {
     reads.settings++
+    return read(file, ...args)
+  }
+  if (messagesFile !== null && target === messagesFile) {
+    reads.messages++
     return read(file, ...args)
   }
   if (target.startsWith(inboxDir + sep)) {
@@ -99,13 +106,14 @@ process.on('exit', () => {
   assert.ok(reads.answered <= 1, 'answered file is read at most once')
   assert.ok(reads.questions <= 1, 'questions ledger is read at most once')
   assert.ok(reads.settings <= 1, 'settings file is read at most once')
+  assert.ok(reads.messages <= 1, 'queued-answer store is read at most once')
   assert.ok(reads.inboxDir <= 1, 'inbox directory is listed at most once')
   for (const [file, count] of Object.entries(reads.inbox)) assert.ok(count <= 1, 'inbox file is read at most once: ' + file)
 })
 }
 `
 
-const run = (args = [], { file = FILE, answered = null, questions = null, lang = 'en', denied = false, launcher = false, inbox = null, deniedSidecar = null, settings = null } = {}) => {
+const run = (args = [], { file = FILE, answered = null, questions = null, lang = 'en', denied = false, launcher = false, inbox = null, deniedSidecar = null, settings = null, store = null } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'board-status-'))
   try {
     const path = join(root, 'progress.md')
@@ -117,13 +125,22 @@ const run = (args = [], { file = FILE, answered = null, questions = null, lang =
       mkdirSync(join(root, 'progress-inbox'))
       for (const turn of inbox) writeFileSync(join(root, 'progress-inbox', turn.name), turn.body)
     }
+    let messagesPath = ''
+    if (store !== null) {
+      // Where the page keeps it: beside the run folder, named by the progress file (scripts/runtime-folder.ts).
+      const folder = process.platform === 'win32' ? join(root, 'agent-board') : root
+      const messages = join(folder, `agent-board-${createHash('sha256').update(resolve(path)).digest('hex').slice(0, 16)}-messages`)
+      mkdirSync(messages, { recursive: true })
+      messagesPath = join(messages, 'messages.json')
+      writeFileSync(messagesPath, JSON.stringify(store))
+    }
     const script = join(root, 'agent-board.mjs')
     writeFileSync(script, `${guard}\nglobalThis.AGENT_BOARD = ${JSON.stringify({ path, lang })}\n${BOARD_SCRIPT}`)
     const before = readdirSync(root).sort()
     const command = launcher ? [fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url)), '--progress-file', path] : [script]
     const result = spawnSync(process.execPath, [...command, '--status', ...args], {
       cwd: root, encoding: 'utf8', timeout: 10_000,
-      env: { ...process.env, HOME: root, USERPROFILE: root, CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: root, CLAUDE_PROGRESS_FILE: '', XDG_CONFIG_HOME: root, XDG_RUNTIME_DIR: root, LOCALAPPDATA: root, APPDATA: root, HERMES_HOME: root, OPENCLAW_STATE_DIR: root, OPENCODE_CONFIG_DIR: root, DSH_HOME: root, GROK_HOME: root, STATUS_PROGRESS: path, STATUS_DENIED: denied ? '1' : '', STATUS_DENIED_SIDECAR: deniedSidecar ?? '', NO_COLOR: undefined, FORCE_COLOR: '3' },
+      env: { ...process.env, HOME: root, USERPROFILE: root, CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: root, CLAUDE_PROGRESS_FILE: '', XDG_CONFIG_HOME: root, XDG_RUNTIME_DIR: root, LOCALAPPDATA: root, APPDATA: root, HERMES_HOME: root, OPENCLAW_STATE_DIR: root, OPENCODE_CONFIG_DIR: root, DSH_HOME: root, GROK_HOME: root, STATUS_PROGRESS: path, STATUS_MESSAGES: messagesPath, STATUS_DENIED: denied ? '1' : '', STATUS_DENIED_SIDECAR: deniedSidecar ?? '', NO_COLOR: undefined, FORCE_COLOR: '3' },
     })
     assert.equal(result.error, undefined)
     assert.deepEqual(readdirSync(root).sort(), before)
@@ -139,6 +156,20 @@ test('the status line counts what needs you and what is working in one line and 
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.stderr, '')
   assert.equal(result.stdout, '2 need you · 3 working\n')
+})
+
+test('the status line leaves out an answer queued for the next turn and says so, reading its store once (#1296)', async () => {
+  const { queueMessage } = await import('../hooks/messaging.ts')
+  const { mailboxId } = await import('../hooks/hook-messages.ts')
+  const now = NOW
+  const session = '11111111-2222-4333-8444-555555555555'
+  const box = { id: mailboxId('codex', session), agent: 'codex', session, surface: 'synthetic', turn: 'session', scope: 'mailbox', expires: now + 3_600_000 }
+  const queued = queueMessage({ messages: [], mailboxes: [box] }, { id: 'SYNTHETIC-QUEUED-1', text: 'Yes', target: box.id, turn: 'session' }, 'board', box, now)
+  const file = '## Synthetic project\n' + block('aaaa1111', 'waiting', '- [?] First choice?', 5, 'codex', `resume=${session}`) + block('bbbb2222', 'waiting', '- [?] Continue, OK?', 10, 'claude')
+  const result = run([], { file, store: { version: 2, ...queued.state } })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '1 need you · 0 working · 1 queued\n')
+  assert.equal(run([], { file }).stdout, '2 need you · 0 working\n')
 })
 
 test('the status line uses all three languages and an explicit language overrides the installed one', () => {
