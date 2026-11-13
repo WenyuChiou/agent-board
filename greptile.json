@@ -1,6 +1,6 @@
 {
   "strictness": 2,
-  "commentTypes": ["logic"],
+  "commentTypes": ["logic", "syntax"],
   "autoReview": ["open", "push"],
   "triggerOnDrafts": true,
   "statusCheck": true,
