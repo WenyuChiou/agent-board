@@ -158,9 +158,10 @@ export const EN: Strings = {
     "directRemoved": "The direct node command stops working; use {command} instead."
   },
   setupNoAgent: {
-    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all)."
+    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "retired": "agent-board: Gemini CLI is retired, so setup no longer sets it up. Google's CLI is Antigravity CLI now: run setup with --agent antigravity."
   },
   setupErrorMissingValue: 'agent-board: a setup option is missing its value. Options such as --agent, --home and --data-dir each take one; add it after the option and run setup again.',
   setupErrorConfig: (host: string): string => `agent-board: setup cannot read or safely update the settings for ${host}, so it left them as they were. Fix or move that agent's config file, then run setup again.`,

@@ -1,7 +1,10 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join, resolve } from 'node:path'
 
-export const setupAgents = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
+// Gemini CLI is retired (#1327): setup neither finds nor offers it. An install from an earlier release is still removable.
+export const retiredAgents = ['gemini']
+
+export const setupAgents = ['codex', 'cursor', 'opencode', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
 
 export const findOnPath = (commands, extensions = ['.exe', '.cmd', '.bat', '.com', '.ps1']) => {
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path')
@@ -23,11 +26,11 @@ export const findOnPath = (commands, extensions = ['.exe', '.cmd', '.bat', '.com
 export const discoverSetupAgents = (home, data, hostDirs, isOwnHome) => {
   const signs = {
     codex: ['.codex'], cursor: ['.cursor'], opencode: ['.config/opencode'],
-    gemini: ['.gemini/settings.json'], grok: ['.grok/config.toml', '.grok/sessions'], muse: ['.config/muse'],
+    grok: ['.grok/config.toml', '.grok/sessions'], muse: ['.config/muse'],
     hermes: ['.hermes'], openclaw: ['.openclaw'], antigravity: ['.gemini/antigravity-cli', '.gemini/antigravity', '.gemini/antigravity-ide'], deepseek: ['.dsh'],
   }
   const commands = {
-    codex: ['codex'], cursor: ['cursor-agent', 'cursor'], opencode: ['opencode'], gemini: ['gemini'],
+    codex: ['codex'], cursor: ['cursor-agent', 'cursor'], opencode: ['opencode'],
     grok: ['grok'], muse: ['muse'], hermes: ['hermes'], openclaw: ['openclaw'], antigravity: ['agy', 'antigravity'], deepseek: ['dsh'],
   }
   const ownPrograms = { grok: join(home, '.grok', 'bin', process.platform === 'win32' ? 'grok.exe' : 'grok') }
@@ -59,7 +62,7 @@ export const isBoardPluginDisabled = directory => {
   try { return JSON.parse(readFileSync(join(directory, 'settings.json'), 'utf8').replace(/^﻿/, ''))?.enabledPlugins?.['agent-board@agent-board'] === false } catch { return false }
 }
 
-export const setupRecordChanges = (plan, selected) => setupAgents.filter(other => !selected.includes(other)).map(other => join(plan.data, `install-${other}.json`)).filter(file => {
+export const setupRecordChanges = (plan, selected) => [...setupAgents, ...retiredAgents].filter(other => !selected.includes(other)).map(other => join(plan.data, `install-${other}.json`)).filter(file => {
   try {
     const held = JSON.parse(readFileSync(file, 'utf8')).files ?? {}
     return plan.changes.some(change => Object.hasOwn(held, change.file))
