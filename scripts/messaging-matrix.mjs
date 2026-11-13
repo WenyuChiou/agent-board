@@ -136,11 +136,13 @@ const cell = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&l
 const link = (path, file) => `[${cell(path)}](${file.startsWith('docs/') ? '../' : ''}${path.split('/').map(encodeURIComponent).join('/')})`
 
 // A route's line, and the note that showed it live when the file is there.
-// A route recorded for some surfaces only shows its note on those rows.
-const routeCell = (route, file, directory, s, surface) => {
+// A route recorded for some surfaces only shows its note on those rows; a row whose surface has its own live
+// note shows that one, since one route can be recorded by a different note on each surface it covers.
+const routeCell = (route, file, directory, s, surface, evidence) => {
   if (!route) return s.none
   if (route.record === null || !route.surfaces.includes(surface)) return `${route.line} · ${s.noRecord}`
-  return `${route.line} · ${hasEarlierRun(directory, route.record) ? link(route.record, file) : s.noRecord}`
+  const note = evidence ?? route.record
+  return `${route.line} · ${hasEarlierRun(directory, note) ? link(note, file) : s.noRecord}`
 }
 
 export const renderMatrix = (records, file, directory = root) => {
@@ -158,7 +160,7 @@ export const renderMatrix = (records, file, directory = root) => {
       cell(row.host), cell(row.surface), row.tier, row.primitive === 'unknown' ? s.unknown : cell(row.primitive), s.statuses[row.status],
       row.evidence ? link(row.evidence, file) : row.earlier ? s.earlier + ' ' + link(row.earlier, file) : s.notTested,
       row.source ? link(row.source, file) : s.none,
-      ...states.map(state => routeCell(row.routes?.[state], file, directory, s, row.surfaceId)),
+      ...states.map(state => routeCell(row.routes?.[state], file, directory, s, row.surfaceId, row.evidence)),
     ].join(' | ') + ' |'),
     '', end,
   ].join('\n')

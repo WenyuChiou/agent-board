@@ -4421,12 +4421,14 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'CLI').canSend, true)
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'CLI').canSend, false)
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'TUI').canSend, false)
-  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'IDE').canSend, false)
-  // The agy TUI note ran the interactive TUI with the session idle: only that route and surface gain Send. The
-  // headless `agy` note is no record for any surface.
+  // The agy TUI note ran the interactive TUI with the session idle; the desktop app note ran the app idle and
+  // working, and the app reads as IDE. The headless `agy` note is no record for any surface.
   assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, true)
   assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'working', 'agy TUI').canSend, false)
-  assert.equal(RECEIVER_ROUTES.find(one => one.agent === 'antigravity').routes.idle.record, 'docs/validation/2026-11-12-antigravity-tui-mailbox-live.md')
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'IDE').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'working', 'IDE').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'ended', 'IDE').canSend, false)
+  assert.equal(RECEIVER_ROUTES.find(one => one.agent === 'antigravity').routes.idle.record, 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md')
   const { readReceiverRecords, renderMatrix } = await import('../scripts/messaging-matrix.mjs')
   const root = join(import.meta.dirname, '..')
   const rows = renderMatrix(await readReceiverRecords(root), 'docs/MESSAGING.md', root).split('\n')
@@ -4437,6 +4439,16 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.ok(rowOf('DeepSeek Harness', 'Web').includes('2026-11-08-deepseek-harness-live.md'))
   assert.ok(!rowOf('DeepSeek Harness', 'TUI').includes('2026-11-08-deepseek-harness-live.md'))
   assert.ok(rowOf('Codex', 'CLI').includes('2026-11-12-codex-cli-mailbox-live.md'))
+  // Each Antigravity row cites the note that ran its own surface: the TUI's idle cell its own note, the app's
+  // cells the app note, and the editor, which has no run of its own, the route's note.
+  const cells = row => row.split(' | ')
+  assert.match(cells(rowOf('Antigravity', 'agy TUI'))[7], /2026-11-12-antigravity-tui-mailbox-live\.md/)
+  assert.match(cells(rowOf('Antigravity', 'agy TUI'))[8], /no live note/)
+  assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[4], /Verified/)
+  assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[7], /2026-11-13-antigravity-app-mailbox-live\.md/)
+  assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[8], /2026-11-13-antigravity-app-mailbox-live\.md/)
+  assert.match(cells(rowOf('Antigravity', 'IDE'))[4], /Implemented/)
+  assert.match(cells(rowOf('Antigravity', 'IDE'))[7], /2026-11-13-antigravity-app-mailbox-live\.md/)
 })
 
 test('the line and Send of a route come from its record: no record gives none and Copy', () => {
