@@ -32,9 +32,11 @@ Queue. Internal
 connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
-An offline card retains Copy. By default, the web UI and
-action API cannot spawn a CLI or resume a saved session. The existing copy-resume command
-remains available where the board already offered it.
+An offline card retains Copy. By default, only a recorded background-resume receiver
+(`reopen`, under [Background resume](#background-resume)) or an explicit `--allow-resume`
+opt-in may run an AI's own resume command from the local board; the LAN page and
+unrecorded routes keep Copy. The existing copy-resume command remains available where the
+board already offered it.
 
 The direct message API applies the same recorded-route check to board sends. A mailbox
 with a live receiver for the same session is refused rather than redirected; an unrecorded
@@ -90,6 +92,36 @@ start an ended Codex or Grok Build session. It is disabled by default, never ena
 setup, and works for closed sessions even with the message hub running. It is not live delivery.
 Reopening without the option replaces an idle server that had it enabled. LAN sends remain
 refused. Review the native agent's permissions before choosing this legacy mode.
+
+## Background resume
+
+For CLIs that have no external wake transport into an already-open session, a board message
+can run the AI's own resume command in the background (`reopen` route via the shared helper in
+`scripts/background-resume.ts`): `<ai> <resume flag> <conversation> <message>`. It reads the
+reply and the exact `ACK <code>` line from stdout and records the message receipt. Every
+background-resume receiver is bound by the owner's five limits:
+
+1. **Loopback only**: accepted only from the local board page on this computer (`127.0.0.1` /
+   `localhost`); requests off loopback or over `--lan` are refused.
+2. **Default permission mode only**: runs in the AI's own default permission mode and refuses
+   permission-widening or auto-approval flags (`--yolo`, `--full-auto`, `--dangerously-*`,
+   `--bypass-*`, `--permission-mode`, `--approval-mode`, `--ask-for-approval`, `--sandbox`, etc.).
+3. **Never mid-turn**: refused whenever the conversation has a turn running (`working` state, an
+   in-flight background resume, or an unknown session state).
+4. **One live record per AI before Send**: a card stays on Copy until a dated live run in
+   `docs/validation/` verifies the `reopen` route for that AI and surface.
+5. **Card wording**: before and after sending, the card explains that the turn runs in the
+   background and to open the AI's window to see it there.
+
+Each AI uses only routes permitted by its own terms and FAQ; the board never authenticates to
+or calls a vendor API directly:
+
+| AI / CLI | Background resume status | Policy / notes |
+| --- | --- | --- |
+| Antigravity (`agy`) | Out of scope | Disallowed on consumer plans (FAQ / terms section 6); uses own hooks / sidecar route (`#1396`). |
+| Cursor (`cursor-agent`) | Planned (`#1403`) | Pending vendor terms review, receiver wiring, and dated live record. |
+| Grok Build (`grok`) | Planned (`#1404`) | Pending vendor terms review, receiver wiring, and dated live record (separate from `--allow-resume`). |
+| Hermes Agent (`hermes`) | Planned (`#233`) | Pending vendor terms review, receiver wiring, and dated live record. |
 
 ## Local storage
 
@@ -418,9 +450,14 @@ This table is written by hand and covers progress reporting too. Its runs have n
 | DeepSeek Harness | Independent Cordis lifecycle plugin and native skill | Generic client contract checked; no DeepSeek-native receiver or model ACK acceptance |
 | dot / other UIs | Explicit progress relay where documented | No native receiving connector or real ACK established |
 
-To add a receiver, export `messagingReceiver` from its own import-safe `.mjs` or `.ts`
-module under `scripts/` or `hooks/`; no central receiver list or other receiver changes
-are needed. The `MessagingReceiverRecord` type is in `scripts/message-client.mjs`.
+To add a receiver, complete both steps: export `messagingReceiver` from its own import-safe `.mjs` or `.ts`
+module under `scripts/` or `hooks/` for matrix discovery (`scripts/messaging-matrix.mjs`),
+and add its routes to the runtime list `RECEIVER_ROUTES` in `hooks/receiver-routes.ts`
+(no other receiver changes are needed). The board offers Send only for routes in
+`RECEIVER_ROUTES` — a receiver missing there gets Copy — and the pinning test
+`'each receiver record names a validation note that exists, and the table the board reads matches every record'`
+in `tests/messaging.test.mjs` checks that `RECEIVER_ROUTES` matches every exported record.
+The `MessagingReceiverRecord` type is in `scripts/message-client.mjs`.
 Each surface names its own `docs/validation/<date>-<host>-live.md` file, or `null`; the host's
 name in lower case, with spaces and slashes as hyphens, starts the `<host>` part (`deepseek-harness`,
 `dot-web-chats`), and a surface may follow it. Importing a record module must start nothing;
@@ -552,8 +589,10 @@ After a person approves the exact disposable server/thread/active-turn binding, 
 JSON on stdin:
 
 ```json
-{"boardUrl":"<private loopback board URL>","executable":"<absolute Codex executable>","thread":"<actual thread UUID>","turn":"<actual active turn id>","surface":"Codex CLI"}
+{"boardUrl":"<private loopback board URL>","executable":"<absolute Codex executable>","thread":"<actual thread UUID>","turn":"<actual active turn id>","surface":"Codex local proxy"}
 ```
+
+`surface` may also be omitted, because `connectCodexProxy` defaults to `"Codex local proxy"` (`SURFACE_IDS.codexProxy`).
 
 An explicit `socket` path may select an already-running owner. Preflight and each poll
 check `thread/loaded/list`; each send uses `turn/steer` with `expectedTurnId`. A stale turn
