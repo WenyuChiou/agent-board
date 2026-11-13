@@ -1,4 +1,5 @@
 import { SURFACE_IDS } from '../messaging.ts'
+import { STALE_MS } from '../parse.ts'
 import type { Strings } from '../i18n.ts'
 
 // OpenCode receives a board message in its own process (#724). The agent-board-local plugin keeps each
@@ -35,9 +36,10 @@ export const messagingReceiver = {
 }
 
 // The receiver's part of the generated plugin: module-level code that the plugin's event and chat.message
-// handlers feed through pend (before a lookup), drop and note(session, 'working' | 'waiting' | 'ended'), that
+// handlers feed through seen (as an event arrives, before any lookup), drop and note(session, 'working' | 'waiting' | 'ended'), that
 // calls the plugin's replay(session, state) at its tick, and whose tool the plugin's tool map spreads in. It uses
-// the plugin's own hookError and tool. Only top-level sessions are ever noted.
+// the plugin's own hookError and tool. Only top-level sessions are ever noted. What a session owes the board (its mailbox, a message
+// waiting) is read from the board's own file at each tick, never remembered from an answer.
 // The words the model reads (tool description, replies, the ack note) come from the string tables, chosen by the caller.
 export type OpencodeWords = Pick<Strings, 'opencodeAckTool' | 'opencodeAcknowledged' | 'opencodeAckNote'>
 export const opencodeReceiverSource = (node: string, board: string, progress: string, home: string, words: OpencodeWords): string => `import { spawn as spawnBoard } from 'node:child_process'
@@ -67,8 +69,10 @@ const toB64 = text => Buffer.from(String(text), 'utf8').toString('base64')
 // call below runs while the session's step is open, and one that never settled would keep it open: no later event,
 // tick or board write could deliver to that session again (#1366 review). The board script calls have their own boardMs.
 // settleMs: how long after a wake the session may still be busy without an event having said so. tickMs: the one clock
-// that recovers anything the events and the board's writes did not.
-const TIMING = { hostMs: 10000, boardMs: 15000, settleMs: 5000, tickMs: 30000, ...(globalThis[Symbol.for('agent-board.opencode-timing')] ?? {}) }
+// that recovers anything the events and the board's writes did not. mailboxMs: the mailbox's lifetime on the board (its own constant,
+// so the two cannot drift apart and reopen at every write); it is renewed
+// once less than that minus renewMs is left in the board's file.
+const TIMING = { hostMs: 10000, boardMs: 15000, settleMs: 5000, tickMs: 30000, mailboxMs: ${STALE_MS}, renewMs: 600000, ...(globalThis[Symbol.for('agent-board.opencode-timing')] ?? {}) }
 const hostCall = call => new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('HOST_TIMEOUT')), TIMING.hostMs)
   timer.unref?.()
@@ -88,16 +92,16 @@ const boardReceiver = (client, directory, replay) => {
   // held: the one step a session still owes the board: saving an accept, taking a started wake back as unsent.
   // ending: a closed mailbox whose end the board has not saved yet, with the tries so far.
   // pending: a session an event or chat.message named that is not known yet, with the state it reported and the tick's tries.
-  // clean: a session whose last take answered ok, with no failure and no step begun since: the only kind the tick may skip.
-  // unopened: a known session whose mailbox no take or open has answered ok for since it became known. opening: an open under way.
-  const roots = new Map(), taking = new Set(), clean = new Set(), again = new Set(), marks = new Map(), settling = new Map(), held = new Map(), ending = new Map(), pending = new Map(), replaying = new Set(), closing = new Set(), sawBusy = new Set(), unopened = new Set(), opening = new Set()
-  let watcher = null, folder = null, debounce = null, timer = null, ticks = 0, isTakeFailing = false, isOpenFailing = false
+  // opening: an open under way. Nothing else remembers whether a mailbox is open or a message waits: owed() reads the board's file.
+  const roots = new Map(), taking = new Set(), again = new Set(), marks = new Map(), settling = new Map(), held = new Map(), ending = new Map(), pending = new Map(), replaying = new Set(), closing = new Set(), sawBusy = new Set(), opening = new Set()
+  let watcher = null, folder = null, debounce = null, timer = null, isTakeFailing = false, isOpenFailing = false
   const mark = session => marks.get(session) ?? 0
   const bump = session => marks.set(session, mark(session) + 1)
   const accept = (session, message) => boardCall('accept', session, directory, ['--id', message.id, '--nonce', message.nonce, '--awaits-ack'])
-  // Only a take opened a session's mailbox, and a busy session takes nothing (#1366 review). A busy session opens or renews it
+  // A take opens a session's mailbox, and a busy session takes nothing (#1366 review). A busy session opens or renews it
   // with open instead, which claims nothing, so the board can queue a message for it while its turn runs, and a turn longer
-  // than the mailbox's 12 hours keeps it. A failed open stays owed, and the tick asks again; it is logged once, until one works.
+  // than the mailbox's 12 hours keeps it. The answer changes nothing here but the board folder it names: a failed or empty answer
+  // needs no handling, since the next tick reads the file and finds the mailbox still missing. A failure is logged once, until one works.
   // An open and an end of one session never run at once: an end waits for the open, so a mailbox the session closed
   // meanwhile is not left open behind it, and an open skipped for an end stays owed for the tick.
   const openMailbox = async session => {
@@ -105,10 +109,9 @@ const boardReceiver = (client, directory, replay) => {
     opening.add(session)
     const answer = await boardCall('open', session, directory)
     opening.delete(session)
-    if (answer?.ok === true) {
-      isOpenFailing = false
-      unopened.delete(session)
-    } else if (!isOpenFailing) { isOpenFailing = true; hookError('MAILBOX_FAILED') }
+    if (typeof answer?.watch === 'string') follow(answer.watch)
+    if (answer?.ok === true) isOpenFailing = false
+    else if (!isOpenFailing) { isOpenFailing = true; hookError('MAILBOX_FAILED') }
     if (ending.has(session)) closeMailbox(session)
   }
   // The host's own view of a session. OpenCode lists only sessions that are not idle (F9: \`{}\` for an idle
@@ -153,24 +156,22 @@ const boardReceiver = (client, directory, replay) => {
     if (await giveBack(session, one.ref, true)) held.delete(session)
   }
   const step = async session => {
-    // Clean again only once a take answered ok and nothing after it failed: every other way out leaves the tick to act.
-    clean.delete(session)
     const one = held.get(session)
     if (one !== undefined) return finishHeld(session, one)
     if (roots.get(session) !== 'idle') return
-    const seen = mark(session)
+    const before = mark(session)
     // The host is asked before the take: a busy or unknown session claims nothing, so no claim waits out a long turn.
     const state = await hostState(session)
     if (!roots.has(session)) return
     // An event arrived while the question was out: its answer says nothing about now, so it is asked again.
-    if (mark(session) !== seen) { again.add(session); return }
+    if (mark(session) !== before) { again.add(session); return }
     // An unknown state claims nothing, and the message stays queued for the tick to see.
     if (state === 'unknown') return
     if (state === 'busy') {
-      // The host contradicts an idle event: no further event may come, so the tick asks again. A session first seen this way
-      // has no mailbox yet, and takes nothing while busy: it opens one.
+      // The host contradicts an idle event: no further event may come, so the tick asks again. A session with no mailbox yet
+      // takes nothing while busy: it opens one.
       roots.set(session, 'busy')
-      if (unopened.has(session)) openMailbox(session)
+      openIfOwed(session)
       return
     }
     const ref = newRef()
@@ -183,16 +184,14 @@ const boardReceiver = (client, directory, replay) => {
       return
     }
     isTakeFailing = false
-    // A take opens the mailbox as well.
-    unopened.delete(session)
     if (typeof taken.watch === 'string') follow(taken.watch)
     const message = taken.message
-    if (message == null) { clean.add(session); return }
+    if (message == null) return
     if (typeof message.text !== 'string' || typeof message.id !== 'string' || typeof message.nonce !== 'string') throw new Error('MAILBOX_FAILED')
     // A session that closed meanwhile does not get it: the next take of its mailbox has the claim.
     if (!roots.has(session)) return
     // The session changed after the take: the claim goes back at once, or to the next take if the board cannot take it back.
-    if (mark(session) !== seen) {
+    if (mark(session) !== before) {
       if (await giveBack(session, ref, false) && roots.get(session) === 'idle') again.add(session)
       return
     }
@@ -206,7 +205,7 @@ const boardReceiver = (client, directory, replay) => {
     }
     if (!roots.has(session)) return
     // It turned busy while the attempt was saved, and the host was never called: the mark is taken back.
-    if (mark(session) !== seen) {
+    if (mark(session) !== before) {
       if (!(await giveBack(session, ref, true))) held.set(session, { phase: 'unsent', message, ref })
       else if (roots.get(session) === 'idle') again.add(session)
       return
@@ -236,7 +235,6 @@ const boardReceiver = (client, directory, replay) => {
     // Accepted is only the transport; the model's ack upgrades it. A failed save is owed to the board; the message is not handed out meanwhile.
     const answer = await accept(session, message)
     if (answer?.ok !== true && !isFinal(answer?.code)) { held.set(session, { phase: 'accept', message }); hookError('MAILBOX_FAILED'); return }
-    clean.add(session)
   }
   const deliver = async session => {
     if (!roots.has(session)) return
@@ -246,7 +244,7 @@ const boardReceiver = (client, directory, replay) => {
     if (taking.has(session)) { again.add(session); return }
     if (isWake && settling.has(session)) return
     taking.add(session)
-    try { await step(session) } catch { clean.delete(session); hookError('MAILBOX_FAILED') }
+    try { await step(session) } catch { hookError('MAILBOX_FAILED') }
     finally {
       taking.delete(session)
       if (again.delete(session)) deliver(session)
@@ -262,20 +260,37 @@ const boardReceiver = (client, directory, replay) => {
     }
     await deliver(session)
   }
-  // The addresses the board's file shows a message waiting for: queued, and with isClaimed also claimed and not marked as a
-  // wake, which a take lost on its way back leaves behind. Null when there is no folder or the file cannot be read.
-  const waitingFor = isClaimed => {
+  // The board's file, read: null when no folder is known yet or the file cannot be read (not knowing), undefined when the known
+  // folder does not exist (no board has made it, so nobody can queue anything and there is nothing to open).
+  const readStore = () => {
     if (folder === null) return null
-    let store
-    try { store = JSON.parse(readBoardStore(joinBoard(folder, 'messages.json'), 'utf8')) } catch { return null }
-    const messages = Array.isArray(store?.messages) ? store.messages : []
-    return new Set(messages.filter(one => typeof one?.to === 'string' && (one.status === 'queued' || isClaimed && one.status === 'uncertain' && one.error === '' && one.attempted === undefined && typeof one.ref === 'string')).map(one => one.to))
+    if (!boardFolderExists(folder)) return undefined
+    try { return JSON.parse(readBoardStore(joinBoard(folder, 'messages.json'), 'utf8')) } catch { return null }
   }
-  // The board rewrites messages.json whenever it queues a message: an idle session with one waiting takes it.
+  // What one session owes, worked out from the file each time and never remembered (#1366 round 6): mailbox (none in the file, or
+  // less than its lifetime minus ten minutes left, so it is opened or renewed), waiting (a message queued for it, and with
+  // isClaimed also one claimed and not marked as a wake, which a take lost on its way back leaves behind), and sure (the file was read).
+  const owed = (session, store, isClaimed) => {
+    if (store === undefined) return { mailbox: false, waiting: false, sure: true }
+    if (store === null || typeof store !== 'object') return { mailbox: true, waiting: false, sure: false }
+    const entry = (Array.isArray(store.mailboxes) ? store.mailboxes : []).find(one => one?.agent === 'opencode' && one.session === session)
+    const messages = Array.isArray(store.messages) ? store.messages : []
+    const waiting = messages.some(one => one?.to === 'opencode:' + session && (one.status === 'queued' || isClaimed && one.status === 'uncertain' && one.error === '' && one.attempted === undefined && typeof one.ref === 'string'))
+    return { mailbox: !(entry?.expires - Date.now() > TIMING.mailboxMs - TIMING.renewMs), waiting, sure: true }
+  }
+  // A busy session with no mailbox, or one running out, opens or renews it; an idle one does the same by taking.
+  const openIfOwed = session => { if (owed(session, readStore(), false).mailbox) openMailbox(session) }
+  // The board rewrites messages.json whenever it queues a message or a mailbox goes: an idle session with one waiting takes it,
+  // and a session whose mailbox is gone gets it again.
   const check = () => {
-    const waiting = waitingFor(false)
-    if (waiting === null) return
-    for (const session of roots.keys()) if (waiting.has('opencode:' + session) || held.has(session)) deliver(session)
+    const store = readStore()
+    if (store == null) return
+    for (const session of roots.keys()) {
+      const need = owed(session, store, false)
+      const isBusy = roots.get(session) === 'busy'
+      if (isBusy && need.mailbox) openMailbox(session)
+      if (held.has(session) || need.waiting || need.mailbox && !isBusy) deliver(session)
+    }
   }
   const follow = directoryToWatch => {
     if (watcher !== null && folder === directoryToWatch) return
@@ -335,32 +350,39 @@ const boardReceiver = (client, directory, replay) => {
       if (pending.get(session) === one) await replay(session, live === 'idle' ? 'waiting' : live === 'busy' ? 'working' : one.state)
     } catch {} finally { replaying.delete(session) }
   }
-  // The one recovery path, every 30 seconds. A known session with no step under way goes through heal and then deliver, unless
-  // the tick has proof there is nothing to do: the session is clean, the board's file was read and shows nothing queued, or
-  // claimed and not marked, for it, and it owes the board no step. Not knowing (no folder yet, a file it cannot read, a lookup
-  // or a take that failed, a step that threw) means it acts. Every twentieth tick each session renews its mailbox: an idle
-  // one takes once, and a busy one, which takes nothing, opens it (a busy one whose mailbox is not open yet does so at every
-  // tick). Every session still written down is looked up again.
+  // The one recovery path, every 30 seconds. Each known session is judged from the board's file alone (owed): a busy one whose
+  // mailbox is missing or running out opens it, and any one that owes a mailbox or a message, owes the board a step, or whose
+  // file could not be read goes through heal and then deliver. A session with nothing owed costs nothing. A folder that
+  // appeared after it was learned is watched from then on. Every session still written down is looked up again.
   const tick = () => {
-    ticks += 1
-    const waiting = waitingFor(true)
-    const isKeepAlive = ticks % 20 === 0
+    const store = readStore()
+    if (store !== null && store !== undefined && watcher === null) follow(folder)
     for (const session of roots.keys()) {
-      if (roots.get(session) === 'busy' && (isKeepAlive || unopened.has(session))) openMailbox(session)
+      const need = owed(session, store, true)
+      const isBusy = roots.get(session) === 'busy'
+      if (isBusy && need.mailbox) openMailbox(session)
       if (taking.has(session)) continue
-      const isSettled = clean.has(session) && waiting !== null && !waiting.has('opencode:' + session) && !held.has(session)
-      if (isKeepAlive || !isSettled) heal(session)
+      if (held.has(session) || need.waiting || !need.sure || need.mailbox && !isBusy) heal(session)
     }
     for (const session of ending.keys()) closeMailbox(session)
     for (const session of pending.keys()) recover(session)
     stopIfIdle()
   }
   const run = () => { if (timer === null) { timer = setInterval(tick, TIMING.tickMs); timer.unref?.() } }
-  // An event or chat.message names a session before its lookup is awaited: one not known yet is written down, in the state it
-  // reported, so no way out of that lookup (a throw, a hang, an error answer, no data) can lose it. It leaves only on an answer
-  // that settles it: made known, found to be a subagent or another session (drop), ended, or given up at the tick.
-  const pend = (session, state) => {
-    if (typeof session !== 'string' || session === '' || roots.has(session) || !['working', 'waiting'].includes(state)) return
+  // Every event and chat.message reaches the receiver here, as the first thing the plugin does with it and before anything is
+  // awaited (#1366 round 6). A session not known yet is written down, in the state it reported, so no way out of its lookup (a
+  // throw, a hang, an error answer, no data) can lose it; it leaves only on an answer that settles it: made known, found to be a
+  // subagent or another session (drop), ended, or given up at the tick. A known session's counter moves at once, and a busy
+  // event also marks it busy and ends the settle wait, so a step already under way sees the change when its call returns.
+  const seen = (session, state) => {
+    if (typeof session !== 'string' || session === '') return
+    if (state === 'ended') { drop(session); return }
+    if (!['working', 'waiting'].includes(state)) return
+    if (roots.has(session)) {
+      bump(session)
+      if (state === 'working') { roots.set(session, 'busy'); sawBusy.add(session); endSettle(session) }
+      return
+    }
     const one = pending.get(session)
     if (one === undefined) pending.set(session, { state, tries: 0 })
     else one.state = state
@@ -374,11 +396,9 @@ const boardReceiver = (client, directory, replay) => {
     if (state === 'ended') {
       pending.delete(session)
       if (!roots.delete(session)) { stopIfIdle(); return }
-      clean.delete(session)
       again.delete(session)
       held.delete(session)
       sawBusy.delete(session)
-      unopened.delete(session)
       endSettle(session)
       marks.delete(session)
       ending.set(session, 0)
@@ -386,22 +406,19 @@ const boardReceiver = (client, directory, replay) => {
       return
     }
     if (state !== 'working' && state !== 'waiting') return
-    if (!roots.has(session) && !isReported) { pend(session, state); return }
+    if (!roots.has(session) && !isReported) { seen(session, state); return }
     pending.delete(session)
-    // A session that becomes known has no mailbox the receiver opened yet: a take opens it while idle, an open while busy.
-    if (!roots.has(session)) unopened.add(session)
+    // The counter moved when the event arrived (seen); this only records the state of the newest event.
     if (state === 'working') {
-      bump(session)
       roots.set(session, 'busy')
       sawBusy.add(session)
       // A busy event after a wake is what the settle wait was for.
       endSettle(session)
       ending.delete(session)
       run()
-      if (unopened.has(session)) openMailbox(session)
+      openIfOwed(session)
       return
     }
-    bump(session)
     roots.set(session, 'idle')
     ending.delete(session)
     run()
@@ -409,7 +426,7 @@ const boardReceiver = (client, directory, replay) => {
   }
   return {
     note,
-    pend,
+    seen,
     drop,
     // The tool is bound to the session id the host gives each call, so a call cannot name another session.
     tools: {

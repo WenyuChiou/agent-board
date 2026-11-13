@@ -258,8 +258,8 @@ ${board === undefined ? '' : `  // The receiver's tick makes a session it still 
   // writes the session down before anything here is awaited and lets it go only on an answer that settles it, so a lookup that
   // throws, hangs or answers nothing, or a report that fails, is tried again at its tick (#1366 review).
   const reach = async ({ session, state, current, isNewest, isLatest, info: given, isReplying, report }) => {
-    if (state === 'ended') receiver?.drop(session)
-    else receiver?.pend(session, state)
+    // First, before any await: a known session's counter and busy state move at once, an unknown one is written down.
+    receiver?.seen(session, state)
     const info = given ?? current(await client.session.get({ path: { id: session } }))
     if (info.error) throw Error('HOST_METADATA_FAILED')
     // A subagent's session is never noted, so it keeps no order entry.

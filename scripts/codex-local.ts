@@ -531,13 +531,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
       answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary } })
     } else if (action === 'open') {
-      // OpenCode's plugin only. It claims nothing; a failed open is asked again at the plugin's next tick. With no board
-      // folder at all no board can queue a message, so there is nothing to open yet, as for end.
+      // OpenCode's plugin only. It claims nothing, and the plugin reads the board's file to see whether it worked. The answer
+      // names the folder to watch. With no board folder at all no board can queue a message, so nothing is enrolled yet
+      // (enrolled false), as for end.
       try {
         await mailbox.open(agent, session, surfaceOf(flag('--surface')), Date.now())
-        answer({ ok: true })
+        answer({ ok: true, enrolled: true, watch: directory })
       } catch (error) {
-        answer(codeOf(error) === 'BOARD_NOT_RUNNING' && !existsSync(directory) ? { ok: true } : { ok: false, code: codeOf(error) })
+        answer(codeOf(error) === 'BOARD_NOT_RUNNING' && !existsSync(directory) ? { ok: true, enrolled: false, watch: directory } : { ok: false, code: codeOf(error), watch: directory })
       }
     } else if (action === 'release' || action === 'attempt') {
       // OpenCode's plugin only. release hands a claim back (--unsent: the host was never called, so even a started wake goes back);

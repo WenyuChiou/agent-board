@@ -81,15 +81,15 @@ from then on the board never hands that message out again, whatever happens to t
 
 A message left waiting after a lost answer or a failed lookup goes out at the session's next event, the next board write,
 or the plugin's 30-second tick, whichever comes first, if the session is idle then. No step of the plugin keeps a timer
-of its own for it. The tick goes on for each session it knows, with no step under way, unless it has proof that nothing
-waits: the session's last take answered ok with no failure since, the board's file was read and shows nothing queued, or
-claimed and not marked as a wake, for it, and no step is owed to the board. Without that proof (no board folder yet, a file
-it cannot read, a lookup or a take that failed) it asks the host and the board again; with it, the tick makes no board call
-and asks the host nothing. Only an idle session takes, and a take also opens or renews the session's mailbox (12 hours). A
-busy session opens or renews it with `--mailbox open` instead, which claims nothing: at once when the plugin first learns
-the session while it is busy (its first event is often `chat.message`), so the board can queue a message for it during
-that turn, and at every tick until an open answers ok. Every twentieth tick each session renews its mailbox, an idle one by
-a take and a busy one by an open, so a turn longer than 12 hours keeps it.
+of its own for it. The plugin keeps no copy of what a session owes the board: at each tick it reads the board's file and works
+it out for each session it knows, so an answer to an open or a take never says "done". A session owes a mailbox when the
+file holds none for it, or less than the lifetime (12 hours) minus ten minutes of its time is left, and it owes a take when
+a message is queued, or claimed and not marked as a wake, for it. A session that owes nothing, and no step to the board,
+costs no board call and no question to the host. One that owes something, or whose file could not be read (no board folder
+yet, a file it cannot read), asks the host and the board again. Only an idle session takes, and a take also opens or renews
+the session's mailbox. A busy session opens or renews it with `--mailbox open` instead, which claims nothing, so the board
+can queue a message for it during that turn (its first event is often `chat.message`), and so a turn longer than 12 hours
+keeps it; the answer names the board folder to watch, and says `enrolled: false` while no folder exists yet.
 A claim the plugin did not mark is handed to the next take from the same mailbox at once, without waiting for its
 30-second lease, and the old ref then answers `CLAIM_LOST` to an attempt; the lease still gives it back to queued, as often
 as needed, with no repeat line, and it is never expired while the mailbox is open. A session the plugin does not know yet

@@ -1077,7 +1077,7 @@ test('--mailbox open for OpenCode opens or renews the session mailbox and leaves
   const box = name => f.state().mailboxes.find(one => one.id === f.mailboxId('opencode', name))
   const renewed = open('opencode', session)
   assert.equal(renewed.status, 0, renewed.stderr)
-  assert.deepEqual(JSON.parse(renewed.stdout.trim().split('\n').pop()), { ok: true })
+  assert.deepEqual(JSON.parse(renewed.stdout.trim().split('\n').pop()), { ok: true, enrolled: true, watch: f.directory })
   assert.ok(box(session).expires > Date.now() + 11 * 60 * 60 * 1000, 'renewed for the mailbox lifetime')
   assert.equal(box(session).surface, 'CLI')
   const [message] = f.state().messages

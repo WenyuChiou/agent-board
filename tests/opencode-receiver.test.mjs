@@ -66,7 +66,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     // broken: faults that last until a test mends them (deletes the entry), by the name of the call: a host method, a board
     // action, or 'report' (the plugin's --agent-status report, which gives a session its card). reports: every call the plugin
     // made of its worker, with whether the report was saved.
-    const calls = { promptAsync: [], status: [], sent: [], lookups: 0, board: [], atWake: [], faults: {}, prompts: [], answers: [], cwds: [], gets: 0, broken: {}, reports: [] }
+    const calls = { promptAsync: [], status: [], sent: [], lookups: 0, board: [], atWake: [], faults: {}, prompts: [], answers: [], cwds: [], gets: 0, broken: {}, reports: [], hold: {}, noFolder: false }
     // The plugin's interval timers: nothing runs them but tick().
     const intervals = new Set()
     const fakeSetInterval = (run, ms) => { const one = { run, ms, unref() {} }; intervals.add(one); return one }
@@ -109,9 +109,14 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       const now = clock.now()
       const run = (name, body) => { const out = mailboxAction(readState(), name, body, now); writeState(out.state); return out.result }
       if (!Object.hasOwn(BOARD, action)) return { ok: false, code: 'INVALID_MAILBOX_CALL' }
+      // A board that has not made its messages folder yet: an open enrolls nothing and a take finds nothing, as the board script answers.
+      if (calls.noFolder && !existsSync(directory)) {
+        if (action === 'open') return { ok: true, enrolled: false, watch: directory }
+        if (action === 'take') return { watch: directory, message: null }
+      }
       try {
         const answer = BOARD[action](run, base, at, args)
-        return action === 'take' ? answer : { ok: true }
+        return action === 'take' ? answer : action === 'open' ? { ok: true, enrolled: true, watch: directory } : { ok: true }
       } catch (error) { return { ok: false, code: code(error), ...(action === 'take' ? { watch: directory, message: null } : {}) } }
     }
     const spawnBoard = (...args) => {
@@ -153,6 +158,10 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
         const answer = answerOf(action, args[1])
         // The call was applied on the board, but its answer never reached the plugin.
         if (fault === 'lose') return finish(1)
+        // The call was applied, and its answer comes only when a test opens the gate (calls.hold[action]); a test that holds a call
+        // names a boardMs long enough to outlast it.
+        const gate = calls.hold[action]
+        if (gate) { calls.hold[action] = null; return void gate.then(() => finish(0, answer)) }
         finish(0, answer)
       })
       return child
@@ -290,7 +299,13 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     const rebuild = async () => { ({ hooks, plugin } = await build()); return hooks }
     // The calls a fault can be given: the stand-in host's methods and the stand-in board's actions.
     const methods = { host: Object.keys(client.session), board: Object.keys(BOARD) }
-    const f = { tick, quiet, home, board, progress, directory, calls, sessions, queue, message, store, until, settled, reported, idle, created, deleted, chat, note, save, watchers, advance, clock, prompts, rebuild, cards, methods, plugin: options => plugin(options), receiver: () => receiverOf(), count: action => calls.board.filter(one => one === action).length }
+    // The board's store as a test reads and changes it: a session's mailbox entry, its time left, a folder that appears later.
+    const mailbox = session => { try { return (store().mailboxes ?? []).find(one => one.agent === 'opencode' && one.session === session) } catch { return undefined } }
+    const makeFolder = () => save(file, JSON.stringify({ version: 2, messages: [] }))
+    const reshape = (session, change) => { const state = store(); writeFileSync(file, JSON.stringify({ ...state, mailboxes: change(state.mailboxes ?? [], session) })) }
+    const shorten = (session, left) => reshape(session, (all, id) => all.map(one => one.session === id ? { ...one, expires: Date.now() + left } : one))
+    const unmailbox = session => reshape(session, (all, id) => all.filter(one => one.session !== id))
+    const f = { mailbox, makeFolder, shorten, unmailbox, tick, quiet, home, board, progress, directory, calls, sessions, queue, message, store, until, settled, reported, idle, created, deleted, chat, note, save, watchers, advance, clock, prompts, rebuild, cards, methods, plugin: options => plugin(options), receiver: () => receiverOf(), count: action => calls.board.filter(one => one === action).length }
     Object.defineProperty(f, 'hooks', { get: () => hooks })
     await fn(f)
   } finally {
@@ -608,6 +623,8 @@ test('opencodePlugin wakes a session whose idle event was lost at the next tick,
 const T0 = 1_800_000_000_000
 const SEC = 1000
 const MIN = 60 * SEC
+// The board's mailbox lifetime (12 hours).
+const LIFETIME = 12 * 60 * MIN
 const refOf = n => String(n).padStart(12, '0')
 
 const mailbox = async () => {
@@ -1312,19 +1329,21 @@ test('R26 a failed status lookup at the end of the settle wait is looked at agai
   assert.equal(f.calls.promptAsync.length, 2)
 }, { watch: false }))
 
-test('R29 with nothing waiting a tick spawns no board call and asks the host nothing; the take that keeps the mailbox open comes every twentieth tick (round 3)', () => fixture(async f => {
+test('R29 with nothing owed a tick spawns no board call and asks the host nothing; a mailbox with less than its lifetime minus ten minutes left is renewed by a take at the next tick (round 3, round 6)', () => fixture(async f => {
   await f.created('ses_r29')
   await f.quiet()
   const board = f.calls.board.length
   const status = f.calls.status.length
-  for (let round = 1; round < 20; round++) { f.tick(); await wait(10) }
+  for (let round = 1; round <= 20; round++) { f.tick(); await wait(10) }
   await f.quiet()
-  assert.equal(f.calls.board.length, board, 'nineteen ticks with nothing waiting')
+  assert.equal(f.calls.board.length, board, 'twenty ticks with nothing owed')
   assert.equal(f.calls.status.length, status)
+  f.shorten('ses_r29', 5 * MIN)
   f.tick()
   await f.quiet()
-  assert.equal(f.calls.board.length, board + 1, 'the twentieth tick keeps the mailbox open')
+  assert.equal(f.calls.board.length, board + 1, 'the next tick renews the mailbox')
   assert.equal(f.calls.board.at(-1), 'take')
+  assert.ok(f.mailbox('ses_r29').expires > Date.now() + LIFETIME - 10 * MIN)
 }, { watch: false }))
 
 // Round 4 of the #1366 review (the diagnosis's rules I1-I3): a session is written down before its lookup is awaited, one path
@@ -1394,54 +1413,75 @@ test('R32 on a new plugin instance, a first status lookup that fails, or that sa
   }
 })
 
-test('R33 for every call the receiver makes and every fault it can meet, from a cold start and a warm one, the message is woken once within two ticks after the fault is mended, and the session has its card (round 4)', async () => {
+test('R33 for every call the receiver makes and every fault it can meet, with the session idle or busy and the board store holding no folder, no mailbox or a mailbox, the invariants V1 to V5 hold two ticks after the fault is mended (round 4, round 6)', async () => {
   // The faults each call can meet (see the fixture). Every call of the stand-in host and board, and the progress report, has a
-  // row, or is named here as not part of a wake, so a call cannot be added to them without one.
+  // row, or is ack, which the model calls after the wake, so a call cannot be added to them without one.
   const FAULTS = {
-    get: ['throw', 'hang', 'error', 'empty'],
-    messages: ['throw', 'hang', 'error', 'empty'],
-    status: ['throw', 'hang', 'error', 'empty'],
-    promptAsync: ['throw', 'hang', 'lose', 'error'],
-    take: ['throw', 'hang', 'error', 'lose', 'empty'],
-    attempt: ['throw', 'hang', 'error', 'lose', 'empty'],
-    release: ['throw', 'hang', 'error', 'lose', 'empty'],
-    accept: ['throw', 'hang', 'error', 'lose', 'empty'],
-    report: ['throw', 'hang', 'error'],
+    get: ['throw', 'empty'],
+    messages: ['throw'],
+    status: ['throw', 'error'],
+    promptAsync: ['lose', 'error'],
+    take: ['throw', 'lose'],
+    attempt: ['error', 'lose'],
+    release: ['error', 'lose'],
+    accept: ['error', 'lose'],
+    open: ['throw', 'error'],
+    end: ['throw'],
+    report: ['throw'],
   }
-  const NOT_IN_A_WAKE = { ack: 'the model calls it after the wake (R6, R23, R35)', end: 'only when the session ends (R17)', open: 'it claims nothing: only a busy session calls it (R36, R37)' }
+  const NOT_A_ROW = { ack: 'the model calls it after the wake (R6, R23, R35)' }
+  // A call made only for a message waiting is run with a message; an end is made only when the session ends, so it is met with none.
+  const WITH_A_MESSAGE = ['promptAsync', 'attempt', 'release', 'accept', 'end']
   // By design nobody can know whether these wakes arrived: the message stays a started wake, with one call, never repeated.
-  const UNKNOWN = ['promptAsync throw', 'promptAsync hang', 'promptAsync lose']
+  const UNKNOWN = ['promptAsync lose']
+  const session = 'ses_r33', id = 'r33-message'
+  // V1 a known session's mailbox is in the board's file with its time left, V2 nothing wakes a busy session, V3 a message arrives
+  // at most once, V4 a message waiting for an idle session is woken, V5 an owed accept or release is saved. Read from the board's
+  // file and the call log alone.
+  const assertInvariants = (f, { name, isBusy, hasMessage, isUnknown }) => {
+    const problems = []
+    if (!(f.mailbox(session)?.expires > Date.now() + LIFETIME - 10 * MIN)) problems.push(`${name}: V1 no mailbox with its time left`)
+    if (isBusy && f.calls.promptAsync.length > 0) problems.push(`${name}: V2 woken while busy`)
+    if (f.calls.sent.length > 1) problems.push(`${name}: V3 arrived ${f.calls.sent.length} times`)
+    if (hasMessage && !isBusy) {
+      const one = f.message(id)
+      if (isUnknown) { if (f.calls.promptAsync.length !== 1 || one.attempted === undefined) problems.push(`${name}: V3 ${f.calls.promptAsync.length} wake calls, attempted ${one.attempted}`) }
+      else if (one.status !== 'accepted' || f.calls.sent.length !== 1) problems.push(`${name}: V4 V5 not woken and accepted: ${JSON.stringify({ status: one.status, error: one.error, sent: f.calls.sent.length })}`)
+    }
+    return problems
+  }
   let methods
   await fixture(async f => { methods = f.methods })
-  for (const call of [...methods.host, ...methods.board, 'report']) assert.ok(call in FAULTS || call in NOT_IN_A_WAKE, `${call} has no row`)
+  for (const call of [...methods.host, ...methods.board, 'report']) assert.ok(call in FAULTS || call in NOT_A_ROW, `${call} has no row`)
   const problems = []
-  for (const [call, faults] of Object.entries(FAULTS)) for (const fault of faults) for (const isCold of [true, false]) for (const entry of call === 'get' ? ['event', 'chat.message'] : ['event']) {
-    const name = `${call} ${fault}, ${isCold ? 'cold' : 'warm'}, ${entry}`
+  const settle = async (f, ticks) => { for (let round = 0; round < ticks; round++) { f.tick(); await f.quiet() } }
+  for (const [call, faults] of Object.entries(FAULTS)) for (const fault of faults) for (const state of ['idle', 'busy']) for (const start of WITH_A_MESSAGE.includes(call) ? ['mailbox'] : ['none', 'empty', 'mailbox']) {
+    const name = `${call} ${fault}, ${state}, store ${start}`
+    const isBusy = state === 'busy', hasMessage = start === 'mailbox'
     await fixture(async f => {
-      // Warm: the session is open and its first take, which answered empty, taught the receiver the board folder. Cold: no
-      // session was opened and nothing was taken before the fault.
-      if (!isCold) { await f.created('ses_r33'); await f.quiet() }
-      f.queue('ses_r33', 'r33-message', 'Synthetic text for the fault loop')
+      // none: the board has not made its folder; empty: it has, with no mailbox; mailbox: the session is known and its mailbox is open.
+      if (start === 'none') f.calls.noFolder = true
+      if (start === 'empty') f.makeFolder()
+      if (hasMessage) { await f.created(session); await f.quiet(); f.queue(session, id, 'Synthetic text for the matrix') }
       // A release is called only for a wake the host refused.
-      if (call === 'release') f.calls.prompts.push(f.prompts.refuse)
+      if (call === 'release' && !isBusy) f.calls.prompts.push(f.prompts.refuse)
       f.calls.broken[call] = fault
-      await (entry === 'chat.message' ? f.chat('ses_r33') : isCold ? f.created('ses_r33') : f.idle('ses_r33'))
+      if (isBusy) f.calls.busy = { [session]: { type: 'busy' } }
+      await (isBusy ? f.reported({ session, type: 'busy' }) : hasMessage ? f.idle(session) : f.created(session))
       await f.quiet()
-      // A tick while the fault lasts.
-      f.tick()
-      await f.quiet()
+      // A tick while the fault lasts, then the fault is mended and the board's folder appears.
+      await settle(f, 1)
       delete f.calls.broken[call]
-      const shown = () => f.message('r33-message')
-      if (UNKNOWN.includes(`${call} ${fault}`)) {
-        for (let round = 0; round < 3; round++) { f.tick(); await f.quiet() }
-        if (f.calls.promptAsync.length !== 1 || shown().attempted === undefined) problems.push(`${name}: ${f.calls.promptAsync.length} wake calls, attempted ${shown().attempted}`)
-      } else {
-        const isWoken = () => shown().status === 'accepted' && f.calls.sent.length === 1
-        for (let round = 0; round < 2 && !isWoken(); round++) { f.tick(); await f.quiet() }
-        if (!isWoken()) problems.push(`${name}: not woken within two ticks of the mend: ${JSON.stringify({ status: shown().status, error: shown().error, sent: f.calls.sent.length })}`)
+      if (start === 'none') f.makeFolder()
+      await settle(f, 2)
+      problems.push(...assertInvariants(f, { name, isBusy, hasMessage, isUnknown: UNKNOWN.includes(`${call} ${fault}`) }))
+      if (isBusy) {
+        delete f.calls.busy
+        await f.idle(session)
+        await f.quiet()
+        await settle(f, 2)
+        problems.push(...assertInvariants(f, { name: `${name}, then idle`, isBusy: false, hasMessage, isUnknown: false }))
       }
-      if (f.calls.sent.length > 1) problems.push(`${name}: arrived ${f.calls.sent.length} times`)
-      if (f.cards('ses_r33') === 0) problems.push(`${name}: no card`)
     }, { timing: { settleMs: 40 }, watch: false })
   }
   assert.deepEqual(problems, [])
@@ -1490,8 +1530,7 @@ test('R36 a session first seen busy, through chat.message or against its idle ev
   }
 })
 
-test('R37 a session busy across a keep-alive tick has its mailbox renewed with open, not take, so a turn longer than 12 hours keeps its mailbox and its message (round 5)', () => fixture(async f => {
-  const HOUR = 60 * MIN
+test('R37 a session busy across a long turn has its mailbox renewed with open, not take, once less than its lifetime minus ten minutes is left, so a turn longer than 12 hours keeps its mailbox and its message (round 5, round 6)', () => fixture(async f => {
   await f.created('ses_r37')
   await f.quiet()
   assert.equal(f.count('take'), 1, 'the idle session opened its mailbox with a take')
@@ -1499,16 +1538,125 @@ test('R37 a session busy across a keep-alive tick has its mailbox renewed with o
   await f.reported({ session: 'ses_r37', type: 'busy' })
   f.queue('ses_r37', 'r37-message', 'Synthetic text for a long turn')
   await f.quiet()
-  const box = () => f.store().mailboxes.find(one => one.agent === 'opencode' && one.session === 'ses_r37')
-  const first = box().expires
-  f.advance(11 * HOUR)
   for (let round = 1; round <= 20; round++) { f.tick(); await f.quiet() }
-  assert.deepEqual([f.count('open'), f.count('take')], [1, 1], 'the twentieth tick opened the mailbox again and took nothing')
-  assert.ok(box().expires > first + 10 * HOUR, 'the mailbox was renewed')
-  // Past the first 12 hours: without the renewal the mailbox would have run out, and its message with it.
-  f.advance(2 * HOUR)
+  assert.deepEqual([f.count('open'), f.count('take')], [0, 1], 'twenty ticks with the mailbox\'s time left ask for nothing')
+  // The turn has run for nearly the mailbox's whole life.
+  f.shorten('ses_r37', 5 * MIN)
+  f.tick()
+  await f.quiet()
+  assert.deepEqual([f.count('open'), f.count('take')], [1, 1], 'the next tick opened the mailbox again and took nothing')
+  assert.ok(f.mailbox('ses_r37').expires > Date.now() + LIFETIME - 10 * MIN, 'the mailbox was renewed')
+  f.tick()
+  await f.quiet()
+  assert.equal(f.count('open'), 1, 'and it is not asked again')
   delete f.calls.busy
   await f.idle('ses_r37')
   await f.quiet()
   assert.deepEqual([f.message('r37-message').status, f.calls.promptAsync.length], ['accepted', 1])
 }, { watch: false }))
+
+// Round 6 of the #1366 review (the diagnosis's rules V1-V8): what a session owes is read from the board's store at each tick, never
+// remembered from an answer, and an event reaches the receiver before anything is awaited. Each test below holds a call with a gate.
+test('T1 a session busy before the board folder exists has its mailbox at the first tick after the folder appears, also when it was idle first', async () => {
+  for (const first of ['busy', 'idle']) {
+    await fixture(async f => {
+      f.calls.noFolder = true
+      const session = 'ses_t1'
+      if (first === 'busy') f.calls.busy = { [session]: { type: 'busy' } }
+      await f.created(session)
+      await f.quiet()
+      if (first === 'idle') {
+        assert.equal(f.count('take'), 1, 'the idle session took, and found no folder')
+        f.calls.busy = { [session]: { type: 'busy' } }
+        await f.reported({ session, type: 'busy' })
+        await f.quiet()
+      }
+      assert.equal(f.mailbox(session), undefined, `${first}: no folder, so no mailbox yet`)
+      f.makeFolder()
+      f.tick()
+      await f.quiet()
+      assert.ok(f.mailbox(session)?.expires > Date.now() + LIFETIME - 10 * MIN, `${first}: the first tick after the folder appeared opened the mailbox`)
+      assert.equal(f.count('take'), first === 'idle' ? 1 : 0, `${first}: a busy session still takes nothing`)
+    }, { watch: false })
+  }
+})
+
+test('T2 a renewal that fails is asked again at the next tick, and the store then shows the new time', () => fixture(async f => {
+  const session = 'ses_t2'
+  f.calls.busy = { [session]: { type: 'busy' } }
+  await f.chat(session)
+  await f.quiet()
+  const opened = f.count('open')
+  f.tick()
+  await f.quiet()
+  assert.equal(f.count('open'), opened, 'a mailbox with its time left is not renewed')
+  f.shorten(session, 5 * MIN)
+  f.calls.faults.open = ['fail']
+  f.tick()
+  await f.quiet()
+  assert.equal(f.count('open'), opened + 1, 'the tick asked for a renewal, and it failed')
+  assert.ok(f.mailbox(session).expires < Date.now() + 6 * MIN, 'the store still shows the short time')
+  f.tick()
+  await f.quiet()
+  assert.equal(f.count('open'), opened + 2, 'the next tick asked again')
+  assert.ok(f.mailbox(session).expires > Date.now() + LIFETIME - 10 * MIN, 'the store shows the new time')
+  f.tick()
+  await f.quiet()
+  assert.equal(f.count('open'), opened + 2, 'and nothing more is asked')
+}, { watch: false }))
+
+test('T3 for each of status, take and attempt held open, a busy event whose lookup is held starts no wake; the claim goes back and the next idle wakes it once', async () => {
+  for (const held of ['status', 'take', 'attempt']) {
+    await fixture(async f => {
+      const session = 'ses_t3'
+      await f.created(session)
+      await f.quiet()
+      f.queue(session, 't3-message', 'Synthetic text for a busy event during a call')
+      let open, lookup
+      const gate = new Promise(done => { open = done })
+      const before = held === 'status' ? f.calls.status.length : f.count(held)
+      if (held === 'status') f.calls.gate = gate
+      else f.calls.hold[held] = gate
+      await f.idle(session)
+      await f.until(() => (held === 'status' ? f.calls.status.length : f.count(held)) > before, `${held} is held open`)
+      // The busy event's own lookup stays held, so the receiver has only the event's first statement to go by.
+      // The host's own answer stays idle, as a status answered just before the turn began would be.
+      f.calls.holdGet = new Promise(done => { lookup = done })
+      const gets = f.calls.gets
+      const busy = f.reported({ session, type: 'busy' })
+      await f.until(() => f.calls.gets > gets, 'the busy event reached its lookup')
+      open()
+      await f.quiet()
+      assert.equal(f.calls.promptAsync.length, 0, `${held}: no wake is started once a busy event has reached the plugin`)
+      assert.equal(f.message('t3-message').status, 'queued', `${held}: the claim went back`)
+      lookup()
+      await busy
+      await f.quiet()
+      await f.idle(session)
+      await f.until(() => f.message('t3-message').status === 'accepted' && f.settled(), `${held}: the next idle woke it`)
+      assert.equal(f.calls.promptAsync.length, 1, held)
+    }, { timing: { hostMs: 20000, boardMs: 20000 }, watch: false })
+  }
+})
+
+test('T4 a mailbox removed from the store under a known session is opened again at the next tick: a late end, a store made new, an entry that ran out', async () => {
+  const CASES = {
+    'a late end': (f, session) => f.unmailbox(session),
+    'a store made new': f => f.makeFolder(),
+    'an entry that ran out': (f, session) => f.shorten(session, -1000),
+  }
+  for (const [name, change] of Object.entries(CASES)) for (const state of ['idle', 'busy']) {
+    await fixture(async f => {
+      const session = 'ses_t4'
+      if (state === 'busy') f.calls.busy = { [session]: { type: 'busy' } }
+      await (state === 'busy' ? f.chat(session) : f.created(session))
+      await f.quiet()
+      assert.ok(f.mailbox(session), `${name}, ${state}: the session has its mailbox first`)
+      change(f, session)
+      assert.ok(!(f.mailbox(session)?.expires > Date.now()), `${name}, ${state}: the mailbox is gone from the store`)
+      f.tick()
+      await f.quiet()
+      assert.ok(f.mailbox(session)?.expires > Date.now() + LIFETIME - 10 * MIN, `${name}, ${state}: the next tick opened it again`)
+    }, { watch: false })
+  }
+})
