@@ -940,7 +940,7 @@ const PAGE_WORDS = [
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent',
-  'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgAnswered', 'pgCopyAgain', 'pgCancel',
+  'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
@@ -1940,10 +1940,22 @@ const PAGE_SCRIPT = String.raw`
     reveal(parts.reply, state.mode === 'write');
     var isAfter = state.mode === 'copied' || state.mode === 'sent' || state.mode === 'queued';
     reveal(parts.after, isAfter);
-    if (!isAfter) return;
+    if (!isAfter) {
+      if (parts.hideBtn && parts.moreActs && parts.hideBtn.parentNode !== parts.moreActs) {
+        toggleClass(parts.hideBtn, 'primary', false);
+        if (parts.hideBtn.parentNode) parts.hideBtn.parentNode.removeChild(parts.hideBtn);
+        parts.moreActs.appendChild(parts.hideBtn);
+      }
+      return;
+    }
     parts.msg.textContent = state.mode === 'queued' ? w('messagesQueued') : state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text) : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
-    parts.answered.hidden = !parts.canHide;
-    parts.answered.textContent = w(state.mode === 'copied' ? 'pgAnswered' : 'answeredHide');
+    if (parts.hideBtn) {
+      toggleClass(parts.hideBtn, 'primary', true);
+      if (parts.hideBtn.parentNode !== parts.afterRow) {
+        if (parts.hideBtn.parentNode) parts.hideBtn.parentNode.removeChild(parts.hideBtn);
+        parts.afterRow.insertBefore(parts.hideBtn, parts.again);
+      }
+    }
     parts.again.hidden = state.mode !== 'copied';
   }
   function setMode(key, mode, text) {
@@ -2075,9 +2087,11 @@ const PAGE_SCRIPT = String.raw`
         others.push(link);
       }
       if (ask.reopen) others.push(button(w('serveCopyResume'), function () { copy(ask.reopen, key); }, '', true));
-      if (ask.canHide) others.push(button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
+      var hideBtn = ask.canHide ? button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }) : null;
+      if (hideBtn) others.push(hideBtn);
     }
-    var parts = { agent: agent, canHide: ask.canHide === true, late: lateWord(agentPresence[id]) !== '' };
+    var moreActs = null;
+    var parts = { agent: agent, canHide: ask.canHide === true, late: lateWord(agentPresence[id]) !== '', hideBtn: hideBtn || null, moreActs: null };
     cardParts[key] = parts;
     var askBlock = el('div');
     add(askBlock, answers);
@@ -2085,7 +2099,9 @@ const PAGE_SCRIPT = String.raw`
       var more = el('div', 'more' + (opened['more:' + key] ? ' open' : ''));
       var fold = el('div', 'fold');
       fold.inert = !opened['more:' + key];
-      add(more, add(fold, add(el('div', 'fold-in'), add.apply(null, [el('div', 'acts')].concat(others)))));
+      moreActs = add.apply(null, [el('div', 'acts')].concat(others));
+      parts.moreActs = moreActs;
+      add(more, add(fold, add(el('div', 'fold-in'), moreActs)));
       var toggle = navButton(w('serveMore'), function () {
         var isOpen = !hasClass(more, 'open');
         toggleClass(more, 'open', isOpen);
@@ -2116,12 +2132,12 @@ const PAGE_SCRIPT = String.raw`
     var after = el('div', 'state');
     after.setAttribute('role', 'status');
     parts.msg = el('span', 'msg ok');
-    parts.answered = button(w('pgAnswered'), function () { hideQuestion(key, ask.unhideKey); }, 'primary');
     parts.again = button(w('pgCopyAgain'), function () {
       var state = cardState[key];
       if (state) copy(state.text, key);
     }, 'quiet', true);
-    add(after, add(el('span', 'mk ok', '✓')), parts.msg, parts.answered, parts.again);
+    parts.afterRow = after;
+    add(after, add(el('span', 'mk ok', '✓')), parts.msg, parts.again);
     parts.after = fx(after, false);
     add(body, parts.ask, parts.reply, parts.after);
     paintMode(key);
@@ -2997,6 +3013,12 @@ const PAGE_SCRIPT = String.raw`
     resultSlot(wrap, 'recent', '', w('pgDone'));
     return wrap;
   }
+  function hasActiveRestore(unhideKey) {
+    return Object.keys(results).some(function (key) {
+      var result = results[key];
+      return result && result.unhideKey === unhideKey && !resultSlots[key] && (result.pending || result.tone === 'alert' || result.tone === 'done');
+    });
+  }
   function hiddenShelf(model) {
     var items = model.hidden || [];
     if (!items.length) return null;
@@ -3019,7 +3041,8 @@ const PAGE_SCRIPT = String.raw`
     items.forEach(function (one) {
       var item = el('div', 'hid');
       var line = [one.project, one.isOwn ? w('pgOwn') : agentName(one.agent)].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : '');
-      add(item, el('p', 'c-meta', line), el('p', 'q', one.text), add(el('div', 'acts'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
+      add(item, el('p', 'c-meta', line), el('p', 'q', one.text));
+      if (!hasActiveRestore(one.key)) add(item, add(el('div', 'acts'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
       resultSlot(item, one.key, one.text, one.task);
       add(body, item);
     });

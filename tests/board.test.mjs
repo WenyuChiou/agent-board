@@ -4559,8 +4559,8 @@ test('every serve page action on every card kind from every agent answers with a
             return { ok: false, json: async () => ({ note: serverNote }) }
           } finally { fixture.disable(); refreshed = runtime.serveModel(runtime.view(), runtime.pending(), runtime.s) }
         } })
-        // The line after a copy (Copy again, Answered) only exists once something was copied; it is not an offered action.
-        const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain, runtime.s.pgAnswered]
+        // Copy again lives inside .state and only appears once something was copied; it is not an offered action.
+        const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain]
         const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent)).flatMap(button =>
           button.className === 'answer-send'
             ? pressWalk(pageCard(button)).filter(node => node.className === 'choice').map(choice => ({ button, choice }))
@@ -4609,7 +4609,7 @@ test('every serve page action on every card kind from every agent answers with a
       }
       if (projected.expected === 0) {
         const dom = await pageDom(html, projected.model)
-        assert.equal(dom.buttons().filter(button => ![runtime.s.pgCopyAgain, runtime.s.pgAnswered].includes(button.textContent)).length, 0, `${cell.title}: the retained shelf is explicitly read-only`)
+        assert.equal(dom.buttons().filter(button => ![runtime.s.pgCopyAgain].includes(button.textContent)).length, 0, `${cell.title}: the retained shelf is explicitly read-only`)
       }
     }
     assert.deepEqual([...seen].sort(), PRESS_CELLS.map(cell => cell.title).sort())
@@ -13844,5 +13844,141 @@ test('the answer picker labels its confirm button Copy when the agent cannot rec
     assert.equal(sendBtn.getAttribute('aria-label'), words.pgSendChoice)
     assert.equal(sendBtn.title, words.pgSendChoice)
     assert.equal(sendBtn.getAttribute('data-copy'), null)
+  }
+})
+
+test('#1363: a waiting card keeps one hide button named answeredHide across Copy, Send, Queue and Cancel, and hiding shows only one working Show again button', async () => {
+  const { servePage } = await sourceBoard()
+  const insideClass = (node, cls) => {
+    for (let cur = node; cur; cur = cur.parentNode) if (String(cur.className || '').split(' ').includes(cls)) return true
+    return false
+  }
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const html = servePage(s, 'synthetic')
+    const base = redesignModel()
+    const cardButtons = (dom, key) => {
+      const card = pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === key)
+      assert.ok(card, `card ${key}`)
+      return pressWalk(card).filter(node => node.tag === 'button')
+    }
+
+    // 1. One hide button per card, always answeredHide (never pgAnswered), moving between .more and .state.
+    const agentLabel = s.agentNames.codex || 'Codex'
+    for (const variant of [
+      { key: 'copy-card', send: 'copy', where: 'none', delivery: undefined, line: undefined, action: 'copy', submitLabel: s.pgCopyAnswer },
+      { key: 'send-card', send: 'send', where: 'pane-1', delivery: undefined, line: undefined, action: 'send', submitLabel: s.serveSend(agentLabel) },
+      { key: 'queue-card', send: 'mailbox', where: 'mailbox', delivery: { id: 'c1', agent: 'codex', turn: 't1' }, line: 'chatOpen', action: 'queue', submitLabel: s.serveQueueNextOpen(agentLabel) },
+    ]) {
+      const model = {
+        ...base,
+        asks: [{
+          ...base.asks[0],
+          key: variant.key,
+          agent: 'codex',
+          send: variant.send,
+          canHide: true,
+          unhideKey: `hidden:${variant.key}`,
+          where: variant.where,
+          delivery: variant.delivery,
+          line: variant.line,
+          answers: ['Proceed', 'Skip'],
+          isSending: false,
+        }],
+        hidden: [],
+      }
+      const dom = await pageDom(html, model, {
+        copyAllowed: true,
+        post: async request => {
+          assert.equal(request.path, '/api/act')
+          return { ok: true, json: async () => ({ ok: true, note: 'OK' }) }
+        },
+      })
+      const checkHideState = (expectInState, label) => {
+        const btns = cardButtons(dom, variant.key)
+        const hides = btns.filter(btn => btn.textContent === s.answeredHide)
+        assert.equal(hides.length, 1, `${label}: exactly one hide button`)
+        assert.equal(btns.some(btn => btn.textContent === s.pgAnswered), false, `${label}: never pgAnswered`)
+        assert.equal(insideClass(hides[0], 'state'), expectInState, `${label}: inside .state === ${expectInState}`)
+        assert.equal(insideClass(hides[0], 'more'), !expectInState, `${label}: inside .more === ${!expectInState}`)
+      }
+      checkHideState(false, `${variant.key} initial`)
+      const writeBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === s.pgWriteOwn)
+      assert.ok(writeBtn, `${variant.key}: write button`)
+      writeBtn.click()
+      checkHideState(false, `${variant.key} write`)
+      const cancelBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === s.pgCancel)
+      cancelBtn.click()
+      checkHideState(false, `${variant.key} cancel back to ask`)
+
+      writeBtn.click()
+      const card = pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === variant.key)
+      const textarea = pressWalk(card).find(node => node.tag === 'textarea')
+      textarea.value = 'Synthetic reply'
+      const submitBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === variant.submitLabel)
+      assert.ok(submitBtn, `${variant.key}: submit button ${variant.submitLabel}`)
+      submitBtn.click()
+      await dom.settle()
+      checkHideState(true, `${variant.key} after ${variant.action}`)
+      await dom.redraw(model)
+      checkHideState(true, `${variant.key} redraw while after`)
+    }
+
+    // 2. First Show again appears once (never duplicated in hiddenShelf while the active notice is shown), and works.
+    let liveModel = {
+      ...base,
+      asks: [{ ...base.asks[0], key: 'ask-hide-1', text: 'Hide me once?', canHide: true, unhideKey: 'hidden:h1', isSending: false }],
+      hidden: [],
+    }
+    const calls = []
+    const hideDom = await pageDom(html, liveModel, {
+      copyAllowed: true,
+      currentModel: () => liveModel,
+      post: async request => {
+        calls.push(request)
+        if (request.body.type === 'hide') {
+          liveModel = {
+            ...liveModel,
+            asks: [],
+            hidden: [{ key: 'hidden:h1', project: 'repo', agent: 'claude', task: 'Task 1', text: 'Hide me once?' }],
+          }
+          return { ok: true, json: async () => ({ ok: true, note: s.hidQuestion || 'Hidden' }) }
+        }
+        liveModel = {
+          ...liveModel,
+          asks: [{ ...base.asks[0], key: 'ask-hide-1', text: 'Hide me once?', canHide: true, unhideKey: 'hidden:h1', isSending: false }],
+          hidden: [],
+        }
+        return { ok: true, json: async () => ({ ok: true, note: 'Shown again' }) }
+      },
+    })
+    const hideBtn = cardButtons(hideDom, 'ask-hide-1').find(btn => btn.textContent === s.answeredHide)
+    hideBtn.click()
+    await hideDom.settle()
+    const countShowAgain = dom => pressWalk(dom.node('board')).filter(node => node.tag === 'button' && node.textContent === s.showAgain)
+    const shelfNode = dom => pressWalk(dom.node('board')).find(node => node.tag === 'section' && String(node.className || '').split(' ').includes('shelf') && node.textContent.includes(s.hiddenCount(1)))
+    const shelfShowAgain = dom => pressWalk(shelfNode(dom)).filter(node => node.tag === 'button' && node.textContent === s.showAgain)
+
+    assert.equal(countShowAgain(hideDom).length, 1, 'only one Show again button right after hiding')
+    assert.equal(shelfShowAgain(hideDom).length, 0, 'no duplicate Show again in collapsed hidden shelf')
+    const shelfToggle = pressWalk(shelfNode(hideDom)).find(node => node.tag === 'button' && String(node.className || '').includes('shelf-head'))
+    assert.ok(shelfToggle, 'hidden shelf toggle')
+    shelfToggle.click()
+    assert.equal(countShowAgain(hideDom).length, 1, 'still one Show again button after opening hidden shelf')
+    assert.equal(shelfShowAgain(hideDom).length, 0, 'no duplicate Show again in open hidden shelf')
+
+    countShowAgain(hideDom)[0].click()
+    await hideDom.settle()
+    assert.deepEqual(calls.map(c => ({ key: c.body.key, type: c.body.type })), [
+      { key: 'ask-hide-1', type: 'hide' },
+      { key: 'hidden:h1', type: 'unhide' },
+    ])
+
+    // Reloading with hidden items renders Show again inside hiddenShelf as normal.
+    const reloaded = await pageDom(html, {
+      ...base,
+      asks: [],
+      hidden: [{ key: 'hidden:h1', project: 'repo', agent: 'claude', task: 'Task 1', text: 'Hide me once?' }],
+    })
+    assert.equal(shelfShowAgain(reloaded).length, 1, 'hidden shelf renders Show again when no active notice is present')
   }
 })
