@@ -27,6 +27,19 @@ Before this run the route had no record, so the card offered only Copy (#1354) a
 
 The record covers the idle route on the CLI surface only.
 
+## Second run: the idle route alone, and the CLI label from the session file
+
+The same day, 19:00 to 19:06 US Eastern, same host and kept test home, board and hooks from `82f3b422` (the fix in this file's second pull request). This time the switch file opened only Codex's idle route on the CLI surface, so a Queue button meant the board had chosen the idle route; in the first run both routes were open and the card's words are the same for both.
+
+| Time | Stage |
+|---|---|
+| 19:03 | Turn 1, `codex --no-daemon -s read-only -a never "<the same synthetic question>"`, asked "Blue or green?" (the default start did not submit its prompt, see below) |
+| before queueing | The page's own data for that question: `send: mailbox`, `line: nextTurn`, `canSend: true`. The mailbox's surface was `CLI`, read from the session file's `codex-tui`. The card: "It waits for this session's next turn. It does not wake an idle session." |
+| 19:05 | Blue queued from the page; the card showed "Queued" |
+| 19:05:42 | Turn 2, `codex resume --last --no-daemon -s read-only -a never "Synthetic test: go on."`: the turn-start hook claimed the message, the store marked it `accepted`, and the model's reply was its `ACK <code>` line |
+
+**PASS.** In the kept test home Codex's background service did not come up (its process file named a process that was not running, and its hourly self-update failed); `--no-daemon` worked. The board's hooks file there was unchanged, and no hooks review screen appeared.
+
 ## Also seen
 
 - The card answered here was not seen leaving Needs you after the message was accepted (page reloaded at about 17:00), and it read "2 h ago". Run 1's question had the same words, was never answered and was asked two hours earlier, so the card seen may have been run 1's; not checked further.
