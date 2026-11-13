@@ -6032,9 +6032,10 @@ test('on Windows the page address reaches the shell exactly as served, with no w
   const opened = join(board.dir, 'opened.txt')
   const preload = join(board.dir, 'record-open.cjs')
   // The launcher's own PowerShell runs, so its escaping is the real one, but Start-Process is swapped
-  // for a function that only notes -FilePath: no window opens on the tester's screen.
+  // for a function that refuses the app-window browsers and notes the fallback -FilePath: no window
+  // opens on the tester's screen.
   const needle = 'Microsoft.PowerShell.Management\\Start-Process'
-  const recorder = `function Record-Start { param($FilePath, $ArgumentList, $WorkingDirectory, [switch]$PassThru, $WindowStyle) [IO.File]::AppendAllText('${opened}', $FilePath + [Environment]::NewLine) }; `
+  const recorder = `function Record-Start { param($FilePath, $ArgumentList, $WorkingDirectory, [switch]$PassThru, $WindowStyle) if ($ArgumentList) { throw 'no app browser' }; [IO.File]::AppendAllText('${opened}', $FilePath + [Environment]::NewLine) }; `
   writeFileSync(preload, `const cp = require('node:child_process')
 const spawn = cp.spawn
 cp.spawn = function (file, args, options) {
