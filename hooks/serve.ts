@@ -432,16 +432,13 @@ const answerFailed = (messages: readonly ShownMessage[], to: string | undefined,
   const last = messages.filter(one => answersQuestion(one, to, questionId, openInSession)).at(-1)
   return last !== undefined && (isFailedReceipt(last) || isSurfaceLost(last))
 }
-const isUnknownMailboxSurface = (one: ShownMessage, mailboxes: readonly Connection[] | undefined): boolean =>
-  isMailboxSurfaceLost(one, mailboxes) || one.status === 'queued' && isMailboxTarget(one.target) && mailboxes?.find(box => box.id === one.target)?.surface === SURFACE_IDS.unknown
-
 // What the page on the local network is given of the messaging state: enough to tell which answers are queued, and no
 // connection, text or reply (that page shows counts only).
 export const handledOnly = (messaging: Messaging): Messaging => ({
   connections: [],
   mailboxes: [],
   messages: messaging.messages.map(one => {
-    const isSurfaceLost = isUnknownMailboxSurface(one, messaging.mailboxes)
+    const isSurfaceLost = isMailboxSurfaceLost(one, messaging.mailboxes)
     return {
       id: one.id,
       target: one.target,
@@ -484,7 +481,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
   const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes)
   const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], (agent, session) => sessionState(view, agent, session), routes, group?.now ?? 0)
-  const isMessageSurfaceLost = (one: ShownMessage): boolean => isUnknownMailboxSurface(one, messaging?.mailboxes)
+  const isMessageSurfaceLost = (one: ShownMessage): boolean => isMailboxSurfaceLost(one, messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.

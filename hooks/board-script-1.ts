@@ -9379,7 +9379,7 @@ export const LINES = [
 "  if (one.status !== \"queued\" || !isMailboxTarget(one.target) || one.surface === undefined)",
 "    return false;",
 "  const mailbox = mailboxes.find((box) => box.id === one.target);",
-"  return mailbox !== undefined && mailbox.surface !== one.surface;",
+"  return mailbox !== undefined && mailbox.surface !== one.surface && mailbox.surface !== MCP_SURFACE;",
 "};",
 "var originOf = (value) => {",
 "  if (value === undefined || value === \"local\")",

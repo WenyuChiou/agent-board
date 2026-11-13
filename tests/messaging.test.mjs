@@ -33,7 +33,7 @@ const { hookMailbox, parseMessageStore } = await import('../scripts/board-messag
 const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
 const { serveModel: realServeModel, serveAction: realServeAction } = await import('../hooks/serve.ts')
 const { RECEIVER_ROUTES } = await import('../hooks/receiver-routes.ts')
-const { sendDecision, SURFACE_IDS } = await import('../hooks/messaging.ts')
+const { MCP_SURFACE, sendDecision, SURFACE_IDS } = await import('../hooks/messaging.ts')
 // The page's Send paths are tested with every route the receivers name taken as shown live; the
 // tests of what the real records allow (the end of this file) pass RECEIVER_ROUTES themselves.
 // tests/helpers/recorded-routes.json holds them, so the e2e worlds can hand the same table to a board they start.
@@ -5051,6 +5051,15 @@ test('a queued Codex CLI message stops waiting forever and offers Copy when a la
     const sent = hub.act('send', { id: 'AB-LOST-1', target: mailboxId('codex', 'codex-surface-lost'), turn: 'session', text: 'Yes', ...(questionId === undefined ? {} : { answers: questionId }) }, now + 1)
     assert.equal(sent.status, 'queued')
 
+    // An older saved message with no bound surface stays deliverable when a hook reads unknown.
+    const unboundModel = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), false, {
+      connections: [],
+      mailboxes: [enrollMailbox({ messages: [] }, 'codex', 'codex-surface-lost', SURFACE_IDS.unknown, now, 43_200_000).mailboxes[0]],
+      messages: [{ ...sent, surface: undefined }],
+    }, false, group, RECEIVER_ROUTES)
+    assert.equal(unboundModel.asks[0].receipt?.isSurfaceLost, undefined)
+    assert.ok(unboundModel.view.needs.handled.includes(askKey))
+
     // Check while still queued on CLI: card says Queued for next turn, held in handled.
     const queuedModel = s => realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, s), [], s, new Set(), false, hub.snapshot(now + 2), false, group, RECEIVER_ROUTES)
     assert.equal(queuedModel(EN).asks[0].isSending, true)
@@ -5068,6 +5077,13 @@ test('a queued Codex CLI message stops waiting forever and offers Copy when a la
     assert.ok(!afterEn.view.needs.handled.includes(askKey))
     const lanAfter = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), true, handledOnly(snap), false, group, RECEIVER_ROUTES)
     assert.ok(!lanAfter.view.needs.handled.includes(askKey))
+
+    // Enrolling the session's MCP inbox updates mailbox.surface to 'mcp', but MCP can still pull the message.
+    hub.act('mcp-enroll', { agent: 'codex', session: 'codex-surface-lost', surface: MCP_SURFACE, owner: '100:mcp-1', folderDigest: '0'.repeat(64), until: now + 60_000 }, now + 5)
+    const mcpSnap = hub.snapshot(now + 6)
+    const mcpModel = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), false, mcpSnap, false, group, RECEIVER_ROUTES)
+    assert.equal(mcpModel.asks[0].receipt?.isSurfaceLost, undefined)
+    assert.ok(mcpModel.view.needs.handled.includes(askKey))
 
     for (const s of [EN, ZH_TW, ZH_CN]) {
       const m0 = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, s), [], s, new Set(), false, { connections: [], mailboxes: [enrollMailbox({ messages: [] }, 'codex', 'codex-surface-lost', SURFACE_IDS.cli, now, 43_200_000).mailboxes[0]], messages: [] }, false, group, RECEIVER_ROUTES)

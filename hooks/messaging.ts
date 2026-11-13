@@ -146,7 +146,8 @@ export const shownMessage = ({ nonce, hash: _hash, framingNonce: _framingNonce, 
   ...one,
   reply: nonce !== '' && (one.reply === `ACK ${nonce}` || one.reply.startsWith(`ACK ${nonce} `)) ? one.reply.slice(`ACK ${nonce}`.length).trimStart() : one.reply,
 })
-// A queued mailbox message bound to one surface cannot be claimed when that mailbox later reads another.
+// A queued mailbox message bound to one surface cannot be claimed when that mailbox later reads another
+// non-MCP surface (MCP pulls claim across surfaces in claimMessages, so mcp-enroll never drops a queued message).
 export const isMailboxSurfaceLost = (
   one: Pick<Message, 'status' | 'target' | 'surface'> & { isSurfaceLost?: boolean },
   mailboxes: readonly Connection[] = [],
@@ -154,7 +155,7 @@ export const isMailboxSurfaceLost = (
   if (one.isSurfaceLost === true) return true
   if (one.status !== 'queued' || !isMailboxTarget(one.target) || one.surface === undefined) return false
   const mailbox = mailboxes.find(box => box.id === one.target)
-  return mailbox !== undefined && mailbox.surface !== one.surface
+  return mailbox !== undefined && mailbox.surface !== one.surface && mailbox.surface !== MCP_SURFACE
 }
 export const originOf = (value: unknown): Origin => {
   if (value === undefined || value === 'local') return 'local'
