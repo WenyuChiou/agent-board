@@ -80,9 +80,11 @@ export const failureReason = (file, { code, output }) => {
     try { report = JSON.parse(line.slice(REPORT.length)) } catch { return 'test report is not valid JSON (cut off?)' }
     if (!sameFile(report?.file, file)) return `test report is for ${JSON.stringify(report?.file)}, not this file`
     if (!Array.isArray(report.results) || !report.results.length) return 'test report has no results'
-    // Every entry must be a result object whose failure is null; a missing or malformed entry is a failure too.
-    const bad = report.results.findIndex(result => result === null || typeof result !== 'object' || result.failure !== null)
-    if (bad !== -1) return `test failed: ${typeof report.results[bad]?.title === 'string' ? report.results[bad].title : `result ${bad + 1} is malformed`}`
+    // Every entry must be a result object that names its test (a non-empty title) and whose failure is null; a
+    // missing, unnamed or malformed entry is a failure too.
+    const named = result => result !== null && typeof result === 'object' && typeof result.title === 'string' && result.title !== ''
+    const bad = report.results.findIndex(result => !named(result) || result.failure !== null)
+    if (bad !== -1) return `test failed: ${named(report.results[bad]) ? report.results[bad].title : `result ${bad + 1} is malformed`}`
   }
   return null
 }

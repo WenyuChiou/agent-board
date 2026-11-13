@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -56,6 +56,27 @@ test('a report with a malformed result entry counts as failed, wherever the entr
   for (const results of [[null, { ...pass, failure: 'boom' }], [null], [pass, null], ['text'], [pass, {}]]) {
     assert.notEqual(failureReason(file, { code: 0, output: report(file, results) }), null, JSON.stringify(results))
   }
+})
+
+test('a result that names no test counts as failed even with exit 0 and a null failure', () => {
+  const file = 'tests/x.test.ts'
+  for (const results of [[{ failure: null }], [pass, { failure: null }], [{ title: '', failure: null }], [{ title: 3, failure: null }]]) {
+    assert.match(failureReason(file, { code: 0, output: report(file, results) }), /malformed/, JSON.stringify(results))
+  }
+})
+
+test('the CI step named Pane and hook tests runs the runner script, not claude plugin test .', async () => {
+  const lines = (await readFile(new URL('../.github/workflows/test.yml', import.meta.url), 'utf8')).split(/\r?\n/)
+  const start = lines.findIndex(line => /^\s*- name:\s*Pane and hook tests\s*$/.test(line))
+  assert.notEqual(start, -1, 'the Pane and hook tests step is missing')
+  const indent = lines[start].match(/^\s*/)[0].length
+  let end = lines.length
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^\s*- /.test(lines[i]) && lines[i].match(/^\s*/)[0].length <= indent) { end = i; break }
+  }
+  const runs = lines.slice(start + 1, end).map(line => line.match(/^\s*run:\s*(.+?)\s*$/)).filter(Boolean).map(match => match[1])
+  assert.deepEqual(runs, ['node scripts/plugin-tests.mjs'])
+  assert.ok(!runs.some(run => run.includes('claude plugin test')))
 })
 
 test('names with spaces or letters outside ASCII reach the test runner as one argument on both systems', () => {
