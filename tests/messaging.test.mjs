@@ -30,7 +30,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { createMessaging: openTestMessaging, moveLockAside } = await import('../scripts/board-messaging.ts')
 const { hookMailbox, parseMessageStore } = await import('../scripts/board-messaging.ts')
-const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
+const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, releaseMailboxMessage, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
 const { serveModel: realServeModel, serveAction: realServeAction } = await import('../hooks/serve.ts')
 const { RECEIVER_ROUTES } = await import('../hooks/receiver-routes.ts')
 const { sendDecision, SURFACE_IDS } = await import('../hooks/messaging.ts')
@@ -167,6 +167,13 @@ test('a mailbox message a hook accepted is never handed out again, even after a 
   for (let round = 1; round <= MAILBOX_REDELIVERIES + 1; round++) {
     assert.equal(takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', now + round * MAILBOX_LEASE_MS, '222222', 'a1b2c3d4e5f6').message, null)
   }
+  // A late hand-back with the hook's claim name does not queue it again, and no later hook takes it.
+  const released = releaseMailboxMessage(state, 'codex', 'mailbox-session', 'a1b2c3d4e5f6', now + 3)
+  assert.equal(released.messages[0].status, 'uncertain')
+  assert.equal(takeMailboxMessage(released, 'codex', 'mailbox-session', 'CLI', now + 4, '333333', 'a1b2c3d4e5f6').message, null)
+  // A message saved queued after it was accepted, as the earlier hand-back left it, is not handed out either.
+  const requeued = { ...state, messages: [{ ...state.messages[0], status: 'queued', claimed: 0, ref: undefined }] }
+  assert.equal(takeMailboxMessage(requeued, 'codex', 'mailbox-session', 'CLI', now + 5, '444444', 'a1b2c3d4e5f6').message, null)
 })
 
 test('a queued mailbox message shows busy on the card when a live poller connects, then moves to the poller in order without replay', async () => {

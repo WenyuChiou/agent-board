@@ -54,8 +54,9 @@ for the host; that does not prove the model read it, and the hook collects no AC
 stops waiting can hand its claim back, and a claim handed back is queued again. A claim the hook
 named that was neither accepted nor handed back can be handed out again after 30 seconds, with the
 same ACK code and a line saying it may be a repeat: at most three times for one message (a claim
-after a hand-back does not count), and never once it has an error (expired, dismissed, or marked
-disconnected). While a claim stays uncertain it can hold back the session's other messages; one
+after a hand-back does not count), and not while it has an error (`EXPIRED` and `DISMISSED` are
+final; a later receipt from the session can clear a disconnected mark). A message the hook accepted
+once is never handed out or queued again. While a claim stays uncertain it can hold back the session's other messages; one
 left uncertain expires at the board's next action or snapshot after more than 30 minutes without
 an update. A `board_inbox` claim is never handed out again.
 
@@ -689,7 +690,7 @@ Sending requires the running board hub (`BOARD_NOT_RUNNING`) and a target enroll
 in the same workspace (`WORKSPACE_UNKNOWN` or `WORKSPACE_MISMATCH` otherwise).
 Contested owners, peer pause, hop limit and pair budget can refuse delivery. Peer pause and pair budget
 also apply to a connected adapter's own sends. An unverified sender's message cannot be passed on.
-A message taken by a lease holder holds its session until `board_ack` or 30 minutes; a hook's does not once the hook has accepted it.
+A message taken by a lease holder holds its session until `board_ack` or 30 minutes; a hook's does not while it stays accepted, and can again if a later receipt from its session makes it uncertain.
 Inbox acceptance means the response write completed; ACK separately records acknowledgement.
 There is no parked wait, progress notification, host launcher or automatic MCP configuration yet.
 A lease needs a launcher that sets `AGENT_BOARD_AGENT`, `AGENT_BOARD_SESSION_ID`, `AGENT_BOARD_HOST_PID` and `AGENT_BOARD_HOST_STARTED`.

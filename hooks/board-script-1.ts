@@ -9458,7 +9458,7 @@ export const LINES = [
 "  const to = address(target.agent, target.session);",
 "  const isRetaken = (one) => isLapsed(one, now) && one.target === target.id && one.turn === target.turn;",
 "  const busy = state.messages.some((one) => one.to === to && [\"uncertain\", \"accepted\"].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isRetaken(one));",
-"  const canClaim = (one) => (one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE) && (one.target === target.id && one.turn === target.turn && (one.status === \"queued\" || isLapsed(one, now)) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === \"queued\");",
+"  const canClaim = (one) => !one.hasAccepted && (one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE) && (one.target === target.id && one.turn === target.turn && (one.status === \"queued\" || isLapsed(one, now)) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === \"queued\");",
 "  const messages = busy ? [] : state.messages.filter(canClaim).slice(0, 1);",
 "  if (messages.length === 0)",
 "    return { state, messages };",

@@ -1843,7 +1843,7 @@ export const LINES = [
 "  return { state: claimed.state, message: claimed.messages[0] ?? null };",
 "};",
 "var releaseMailboxMessage = (state, agent, session, ref, now) => {",
-"  const one = state.messages.find((message) => message.target === mailboxId(agent, session) && message.ref === ref && message.status === \"uncertain\" && message.error === \"\");",
+"  const one = state.messages.find((message) => message.target === mailboxId(agent, session) && message.ref === ref && message.status === \"uncertain\" && message.error === \"\" && !message.hasAccepted);",
 "  if (one === undefined)",
 "    return state;",
 "  const { ref: _ref, ...kept } = one;",
