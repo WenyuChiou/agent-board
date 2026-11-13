@@ -154,8 +154,12 @@ export const isFinished = (one: Pick<Message, 'status' | 'error'>): boolean => [
 export const isOpen = (one: Pick<Message, 'status' | 'error'>): boolean => !isFinished(one)
 // A finished message keeps its hash, not its text, and no more of its reply than an ACK line holds.
 const settled = (one: Message): Message => isFinished(one) && (one.text !== '' || one.reply.length > ACK_MAX) ? { ...one, text: '', reply: one.reply.slice(0, ACK_MAX) } : one
+// An earlier board's hand-back could save a message queued again after its host had accepted it. It is
+// never handed out now, so it loads as uncertain and as handed out (it was), and ages out from its last update.
+const restoreAccepted = (one: Message): Message => one.status === 'queued' && one.hasAccepted
+  ? { ...one, status: 'uncertain', claimed: one.claimed || one.updated } : one
 export const pruneMessages = (state: MessageState, now: number): MessageState => {
-  const kept = state.messages.filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(one => settled(
+  const kept = state.messages.map(restoreAccepted).filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(one => settled(
     (one.status === 'uncertain' || one.status === 'accepted' && (one.error !== '' || isMailboxTarget(one.target))) && !isFinished(one) && now - one.updated > OPEN_LIMIT_MS
       ? { ...one, status: 'uncertain' as const, error: 'EXPIRED', updated: now, ...(one.status === 'accepted' ? { hasAccepted: true } : {}) } : one))
   // Past the count, the oldest finished go first; their ids can then be used again. Two kinds wait for

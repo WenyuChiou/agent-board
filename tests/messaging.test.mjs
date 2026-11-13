@@ -176,6 +176,23 @@ test('a mailbox message a hook accepted is never handed out again, even after a 
   assert.equal(takeMailboxMessage(requeued, 'codex', 'mailbox-session', 'CLI', now + 5, '444444', 'a1b2c3d4e5f6').message, null)
 })
 
+test('a saved message queued again after it was accepted loads as uncertain, is never handed out, and ages out so the next send goes through', () => {
+  const now = Date.now()
+  let state = mailboxQueue(mailboxSeed(now), 'mailbox-requeued', 'board', now)
+  state = takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', now, 43_200_000, 'abcdef', 'a1b2c3d4e5f6').state
+  state = acceptMailboxMessage(state, 'codex', 'mailbox-session', 'mailbox-requeued', 'abcdef', now + 1)
+  // What an earlier board's hand-back saved: queued again, with the acceptance kept.
+  const { ref: _ref, ...accepted } = state.messages[0]
+  const saved = JSON.stringify({ version: 2, ...state, messages: [{ ...accepted, status: 'queued', claimed: 0, hasAccepted: true, updated: now + 2 }] })
+  const loaded = parseMessageStore(saved, now + 3)
+  assert.deepEqual([loaded.messages[0].status, loaded.messages[0].error, loaded.messages[0].hasAccepted, loaded.messages[0].updated], ['uncertain', '', true, now + 2])
+  assert.equal(takeMailboxMessage(loaded, 'codex', 'mailbox-session', 'CLI', now + 4, '222222', 'a1b2c3d4e5f6').message, null)
+  const aged = parseMessageStore(saved, now + 2 + OPEN_LIMIT_MS + 1)
+  assert.deepEqual([aged.messages[0].status, aged.messages[0].error], ['uncertain', 'EXPIRED'])
+  const next = queueMessage(aged, { id: 'mailbox-next', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'next' }, 'board', aged.mailboxes[0], now + 2 + OPEN_LIMIT_MS + 2)
+  assert.equal(next.message.status, 'queued')
+})
+
 test('a queued mailbox message shows busy on the card when a live poller connects, then moves to the poller in order without replay', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mailbox-live-poller-'))
   let hub
