@@ -1912,9 +1912,31 @@ test('an unlisted file that does not finish is a FAIL', async t => {
   const checks = await f.check()
   const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/sized.test.mjs'))
   assert.ok(failed, JSON.stringify(checks))
-  // The words pass through safeLine, which hides the account name: on CI that account is "runner".
-  assert.ok(failed.message.endsWith(safeLine('the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change.')), failed.message)
+  assert.match(failed.message, /the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change\.$/)
   assert.equal(f.runs.length, 1)
+})
+
+test('an account named like a listed file or the list keeps the WARN and the hint whole, while a failed test name still hides it', async t => {
+  const saved = { USERNAME: process.env.USERNAME, USER: process.env.USER }
+  const as = async (name, run) => {
+    process.env.USERNAME = name
+    process.env.USER = name
+    try { return await run() } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+  }
+  const listed = sizedFixture(t, { 'tests/board.test.mjs': syntheticTests(5) })
+  listed.write('tests/board.test.mjs', touchCase(syntheticTests(5)))
+  const warned = await as('board', () => listed.check())
+  assert.ok(has(warned, 'WARN', 'tests/board.test.mjs: not run here;'), JSON.stringify(warned))
+  assert.ok(has(warned, 'WARN', '(node --test --test-name-pattern "<title>" tests/board.test.mjs)'), JSON.stringify(warned))
+  const timedOut = sizedFixture(t, { 'tests/sized.test.mjs': syntheticTests(5) }, () => ({ error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: 'not ok 3 - leftToCi case\n', stderr: '' }))
+  timedOut.write('tests/sized.test.mjs', touchCase(syntheticTests(5)))
+  const failed = await as('leftToCi', () => timedOut.check())
+  assert.ok(has(failed, 'FAIL', 'tests/sized.test.mjs: unknown tests, unknown failed; failed: <user> case; the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change.'), JSON.stringify(failed))
 })
 
 test('every left-to-CI file exists and CI runs it', async () => {
@@ -2061,7 +2083,7 @@ test('missing or interrupted TAP remains a failed touched Node check', async t =
     ? { status: null, signal: 'SIGTERM', error: new Error('synthetic interruption'), stdout: '', stderr: '' }
     : f.run(program, args, options)
   const interrupted = await f.check({ run: interruptedRun })
-  assert.ok(has(interrupted, 'FAIL', safeLine('tests/missing-tap.test.mjs: unknown tests, unknown failed; the runner did not finish')), JSON.stringify(interrupted))
+  assert.ok(has(interrupted, 'FAIL', 'tests/missing-tap.test.mjs: unknown tests, unknown failed; the runner did not finish'), JSON.stringify(interrupted))
 })
 
 test('passing touched Node output keeps its existing message and outcome', async t => {

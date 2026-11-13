@@ -787,7 +787,8 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     // A listed file is never run here, so its WARN does not wait for the test lock, and a branch that touches only
     // listed files takes no lock: another preflight's run cannot turn it into a lock FAIL.
     for (const path of paths.filter(path => leftToCi.has(path))) {
-      add('WARN', `${path}: not run here; it is on preflight's list of files too long for its ten-minute limit (leftToCi in scripts/preflight.mjs), and CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" ${path}) and list them under Evidence.`)
+      // The path is one of the list's own literals and the words are fixed, so an account name must not change them.
+      add('WARN', '\ue001', `${path}: not run here; it is on preflight's list of files too long for its ten-minute limit (leftToCi in scripts/preflight.mjs), and CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" ${path}) and list them under Evidence.`)
     }
     const toRun = paths.filter(path => !leftToCi.has(path))
     let owner = null
@@ -823,7 +824,10 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
             const isPassed = !tested.error && tested.status === 0 && count === '0'
             const failedNames = isPassed ? [] : failedTapNames(output)
             const failedDetail = failedNames.length ? `; failed: ${failedNames.join('; ')}` : ''
-            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}${tested.error?.code === 'ETIMEDOUT' ? '; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change' : ''}.`)
+            // Only the failed test names come from the child, and failedTapNames already scrubs them. The path is a file of
+            // this repository and the rest are preflight's own words, which an account name must not change.
+            const shownPath = path.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]/g, '')
+            add(isPassed ? 'PASS' : 'FAIL', '\ue001', `${shownPath}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}${tested.error?.code === 'ETIMEDOUT' ? '; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change' : ''}.`)
           } finally {
             rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
           }
