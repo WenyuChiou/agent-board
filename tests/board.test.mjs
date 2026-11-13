@@ -12341,6 +12341,149 @@ test('the sidebar folds to a rail at the docked width', async () => {
   } finally { await board.close() }
 })
 
+test('under 560 px the sidebar opens as a drawer from the button at the top left', async () => {
+  const { board, model, html } = await groupedPage()
+  try {
+    // The button sits at the top left of the header, before the heading, labelled with the sidebar's own words, and says whether the drawer is open.
+    assert.match(html, /<button[^>]*id="drawer-btn"[^>]*aria-expanded="false"[^>]*aria-controls="side"/)
+    const topbar = html.slice(html.indexOf('<header class="head"'), html.indexOf('</header>'))
+    assert.ok(topbar.indexOf('id="drawer-btn"') < topbar.indexOf('class="brand"'), 'the button is at the top left, before the heading')
+    assert.ok(topbar.includes(EN.sideTitle), 'the button is labelled with the sidebar title')
+    // The drawer is the same aside the wide page shows, with a backdrop behind it and a Close button at its top.
+    assert.ok(html.includes('<aside class="side" id="side"'), 'the drawer is the sidebar itself')
+    assert.ok(html.includes('id="drawer-backdrop"'), 'there is a backdrop')
+    assert.ok(html.includes('id="drawer-close"'), 'there is a Close button')
+    // Reduced motion removes transitions so the drawer opens and closes immediately.
+    const reduced = mediaBlocks(html, '(prefers-reduced-motion:reduce)').join('\n')
+    assert.ok(reduced.includes('transition:none!important'), 'reduced motion disables transitions')
+    const dom = await pageDom(html, model, { width: 400 })
+    const shell = dom.node('shell')
+    const btn = dom.node('drawer-btn')
+    const side = dom.node('side')
+    // Shut at first: the sidebar is off screen and out of the tab order, the footer under the work.
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(btn.getAttribute('aria-expanded'), 'false')
+    assert.equal(side.inert, true)
+    assert.equal(dom.node('pfoot').parentNode, dom.node('main'))
+    // The button opens it: focus moves inside, and the footer moves to the foot of the drawer.
+    btn.click()
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    assert.equal(btn.getAttribute('aria-expanded'), 'true')
+    assert.equal(side.inert, false)
+    assert.equal(dom.active(), dom.node('drawer-close'))
+    assert.equal(dom.node('pfoot').parentNode, dom.node('side-foot'))
+    // The drawer shows the same views, agents and projects as the wide sidebar, with the same counts.
+    assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
+    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
+    assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => node.getAttribute('data-project')), ['client-repo', 'deep-project', 'docs-repo', 'shared-repo'])
+    // The button again shuts it, and focus goes back to the button.
+    btn.click()
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(btn.getAttribute('aria-expanded'), 'false')
+    assert.equal(side.inert, true)
+    assert.equal(dom.active(), btn)
+    assert.equal(dom.node('pfoot').parentNode, dom.node('main'))
+  } finally { await board.close() }
+})
+
+test('a pick in the drawer filters the board and closes the drawer', async () => {
+  const { board, model, html } = await groupedPage()
+  try {
+    // A view pick applies and closes the drawer, and focus goes back to the button.
+    const views = await pageDom(html, model, { width: 400 })
+    views.node('drawer-btn').click()
+    assert.equal(views.node('shell').getAttribute('data-drawer'), '1')
+    views.node('view-needs').click()
+    assert.equal(views.node('shell').getAttribute('data-view'), 'needs')
+    assert.equal(views.node('view-needs').getAttribute('aria-pressed'), 'true')
+    assert.equal(views.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(views.active(), views.node('drawer-btn'))
+    // An agent pick does the same, and the chips on the page show it.
+    const agents = await pageDom(html, model, { width: 400 })
+    agents.node('drawer-btn').click()
+    sideAgent(agents, 'codex').click()
+    assert.equal(sideAgent(agents, 'codex').getAttribute('aria-pressed'), 'true')
+    assert.equal(rowAgent(agents, 'codex').getAttribute('aria-pressed'), 'true')
+    assert.equal(agents.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(agents.active(), agents.node('drawer-btn'))
+    // A project pick does the same.
+    const projects = await pageDom(html, model, { width: 400 })
+    projects.node('drawer-btn').click()
+    const docs = projects.node('side-projects').querySelectorAll('[data-project]').find(node => node.getAttribute('data-project') === 'docs-repo')
+    docs.click()
+    assert.equal(docs.getAttribute('aria-pressed'), 'true')
+    assert.equal(projects.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(projects.active(), projects.node('drawer-btn'))
+  } finally { await board.close() }
+})
+
+test('Esc and the backdrop close the drawer and focus goes back to its button', async () => {
+  const { board, model, html } = await groupedPage()
+  try {
+    const dom = await pageDom(html, model, { width: 400 })
+    const shell = dom.node('shell')
+    const btn = dom.node('drawer-btn')
+    // Esc closes it and focus goes back to the button.
+    btn.click()
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    dom.key({ key: 'Escape' })
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // The backdrop does the same.
+    btn.click()
+    dom.node('drawer-backdrop').click()
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // The Close button does the same.
+    btn.click()
+    dom.node('drawer-close').click()
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // Tab stays inside: from the last control it wraps to the first, and back again.
+    btn.click()
+    assert.equal(dom.active(), dom.node('drawer-close'))
+    const last = dom.node('side-projects').querySelectorAll('[data-project]').at(-1)
+    last.focus()
+    dom.key({ key: 'Tab' })
+    assert.equal(dom.active(), dom.node('drawer-close'))
+    dom.key({ key: 'Tab', shiftKey: true })
+    assert.equal(dom.active(), last)
+  } finally { await board.close() }
+})
+
+test('from 560 px up the sidebar shows as before and there is no drawer button', async () => {
+  const html = await sourcePage()
+  const { board, model } = await groupedPage()
+  try {
+    // From 560px the sidebar shows (a rail of icons first, 232px from 800px) and the header, with its drawer button, gives way.
+    const wide = mediaBlocks(html, '(min-width:560px)').join('\n')
+    assert.ok(wide.includes('.side{display:flex'), 'the sidebar shows from 560px')
+    assert.ok(wide.includes('.head,.agents-in{display:none}'), 'the header and its drawer button give way to the sidebar')
+    // The drawer rules live below 560px only, hiding the offscreen sidebar from screen readers and pointer clicks when shut.
+    const narrow = mediaBlocks(html, '(max-width:559px)').join('\n')
+    assert.ok(narrow.includes('.shell[data-drawer="1"] .side{transform:none'), 'the drawer slides in below 560px')
+    assert.ok(narrow.includes('visibility:hidden'), 'the shut drawer stays hidden from screen readers and visible queries')
+    assert.ok(narrow.includes('.drawer-backdrop'), 'the backdrop is a narrow-window rule')
+    // At 560px and at 1280px the drawer never opens: the button does nothing and the sidebar stays live.
+    for (const width of [560, 1280]) {
+      const dom = await pageDom(html, model, { width })
+      const shell = dom.node('shell')
+      dom.node('drawer-btn').click()
+      assert.equal(shell.getAttribute('data-drawer'), '', `no drawer at ${width}px`)
+      assert.equal(dom.node('drawer-btn').getAttribute('aria-expanded'), 'false', `the button stays shut at ${width}px`)
+      assert.equal(dom.node('side').inert, false, `the sidebar stays live at ${width}px`)
+    }
+    // A resize from narrow to wide shuts a drawer left open.
+    const dom = await pageDom(html, model, { width: 400 })
+    dom.node('drawer-btn').click()
+    assert.equal(dom.node('shell').getAttribute('data-drawer'), '1')
+    dom.resize(700)
+    assert.equal(dom.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(dom.node('side').inert, false)
+    assert.equal(dom.node('pfoot').parentNode, dom.node('main'))
+  } finally { await board.close() }
+})
+
 test('the footer links to the project', async () => {
   const html = await sourcePage()
   const link = html.match(/<a class="ver-link"[^>]*>/)[0]
