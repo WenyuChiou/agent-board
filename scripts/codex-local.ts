@@ -339,7 +339,7 @@ export const codexDoctorOutput = (result: LocalPlan & {
   hooksTrusted: boolean | 'unknown'
   problem?: string
   capabilities: { lifecycle: string }
-}, s: Strings, command: string, trustCommand?: string): string => {
+}, s: Strings, command: string, trustCommand?: string, isCodexMissing = false): string => {
   const words = s.localSummary
   const host = s.agentNames[result.agent] ?? result.agent
   const hasHook = result.installed || result.reportHook === 'connect'
@@ -351,6 +351,7 @@ export const codexDoctorOutput = (result: LocalPlan & {
   if (isPending) lines.push(words.pending)
   if (result.agent === 'codex' && result.installed) lines.push(result.hooksTrusted === true ? words.trusted : result.hooksTrusted === false ? words.untrusted : words.trustUnknown)
   lines.push(s.codexDoctor)
+  if (isCodexMissing && result.agent === 'codex' && result.installed && result.hooksTrusted !== true && !result.conflicts.length && !isPending) lines.push(words.trust)
   lines.push(result.conflicts.length ? words.review(command)
     : !hasHook ? words.setup(command)
     : isPending ? words.skill(host)
@@ -1496,7 +1497,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const result = { ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor }
     if (args.includes('--json')) output(result)
     // Name the Codex this check just reached: on Windows, command -v and where.exe's first line can be an npm shim that cannot start.
-    else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup', ['--plain']), host ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable!]) : undefined))
+    else {
+      // Keep the missing-program placeholder readable even when the install arguments need code-point quoting.
+      const trustCommand = executable ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable])
+        : `${boardRun(process.argv[1]!, args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json' && arg !== '--plain'))} --codex-trust --codex-bin ${quote(s.setupSummary.codexPath)}`
+      process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup', ['--plain']), trustCommand, !executable))
+    }
     return true
   }
   if (!args.includes('--apply')) { outputPlan(plan); return true }
