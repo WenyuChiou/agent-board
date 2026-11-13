@@ -200,6 +200,26 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
     })
   })
 
+  test('a fold stays with the task it was opened on when an earlier task of the same title is removed', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('fold-follows-task', async ({ page, progress, startServer }) => {
+      const task = tag => ['### Twin fold task', `- [x] Synthetic ${tag} finished one`, `- [x] Synthetic ${tag} finished two`, `- [ ] Synthetic ${tag} current`].join('\n')
+      writeProgress(progress, `## Synthetic twins\n${task('first')}\n${task('second')}\n`)
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      const rows = board.main.locator('li.row').filter({ hasText: 'Twin fold task' })
+      await rows.nth(1).waitFor()
+      for (const index of [0, 1]) await rows.nth(index).locator('.row-btn').first().click()
+      // Only the second task's finished-steps fold is opened by the person.
+      await rows.nth(1).getByText('2 steps done', { exact: true }).click()
+      const openFolds = () => rows.evaluateAll(nodes => nodes.map(node => [...node.querySelectorAll('details')].filter(fold => fold.open).length))
+      assert.deepEqual(await openFolds(), [0, 1])
+      // The first task goes; the board redraws and the second now holds the first one's row key.
+      writeProgress(progress, `## Synthetic twins\n${task('second')}\n`)
+      await page.waitForFunction(() => [...document.querySelectorAll('li.row')].filter(row => row.innerText.includes('Twin fold task')).length === 1)
+      assert.deepEqual(await openFolds(), [1])
+    })
+  })
+
   test('setup is idempotent and a reported Muse question remains recoverable across reloads', { concurrency: false, timeout: 120_000 }, async () => {
     await browserFixture('report-hide-restore', async ({ page, progress, root, startServer }) => {
       const board = new BoardPage(page)
