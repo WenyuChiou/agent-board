@@ -2061,10 +2061,13 @@ test('preflight detects committed staged and untracked tests while skipping unto
   }
   await f.check({ run })
   assert.deepEqual(paths.sort(), ['tests/committed.test.mjs', 'tests/staged.test.mjs', 'tests/untracked.test.mjs'])
+  // A touched slow suite runs, unless it is on the left-to-CI list.
+  f.write('tests/exchange.test.mjs', '// changed\n')
   f.write('tests/board.test.mjs', '// changed\n')
   paths.length = 0
   await f.check({ run })
-  assert.ok(paths.includes('tests/board.test.mjs'))
+  assert.ok(paths.includes('tests/exchange.test.mjs'))
+  assert.equal(paths.includes('tests/board.test.mjs'), false)
 })
 
 test('preflight warns that touched TypeScript tests need the Claude runner', async t => {
