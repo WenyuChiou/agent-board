@@ -1870,9 +1870,9 @@ test('preflight runs a touched nested e2e test', async t => {
 })
 
 const syntheticTests = count => `import test from 'node:test'\nimport assert from 'node:assert/strict'\n${Array.from({ length: count }, (_, i) => `test('synthetic case ${i}', () => {})\n`).join('')}`
-const sizedFixture = (t, count) => {
+const sizedFixture = (t, text, path = 'tests/sized.test.mjs') => {
   const f = fixture(t)
-  f.write('tests/sized.test.mjs', syntheticTests(count))
+  f.write(path, text)
   f.commit()
   f.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
   const runs = []
@@ -1884,7 +1884,7 @@ const sizedFixture = (t, count) => {
 }
 
 test('preflight leaves a touched test file of more than 150 tests to CI and says it was not run', async t => {
-  const f = sizedFixture(t, 151)
+  const f = sizedFixture(t, syntheticTests(151))
   f.write('tests/sized.test.mjs', syntheticTests(151).replace("test('synthetic case 75', () => {})", "test('synthetic case 75', () => { assert.equal(1, 1) })"))
   const checks = await f.check()
   assert.ok(has(checks, 'WARN', 'tests/sized.test.mjs: not run here, since its 151 tests can take longer than preflight\'s ten minutes; CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" tests/sized.test.mjs) and list them under Evidence.'), JSON.stringify(checks))
@@ -1893,12 +1893,32 @@ test('preflight leaves a touched test file of more than 150 tests to CI and says
 })
 
 test('preflight still runs a touched test file of 150 tests whole', async t => {
-  const f = sizedFixture(t, 150)
+  const f = sizedFixture(t, syntheticTests(150))
   f.write('tests/sized.test.mjs', syntheticTests(150).replace("test('synthetic case 75', () => {})", "test('synthetic case 75', () => { assert.equal(1, 1) })"))
   const checks = await f.check()
   assert.ok(has(checks, 'PASS', 'tests/sized.test.mjs: 150 tests, 0 failed.'), JSON.stringify(checks))
   assert.equal(f.runs.length, 1)
   assert.equal(f.runs[0].includes('--test-name-pattern'), false)
+})
+
+test('preflight runs whole a touched test file whose fixture text holds more than 150 test lines', async t => {
+  // A template literal and a block comment hold test-like lines, after a regular expression with a backtick; one
+  // test is real.
+  const written = Array.from({ length: 151 }, (_, i) => `test('written case ${i}', () => {})\n`).join('')
+  const text = `import test from 'node:test'\nconst tick = /\`/\nconst written = \`\n${written}\`\n/*\ntest('commented', () => {})\n*/\ntest('the one real test', () => {})\n`
+  const f = sizedFixture(t, text)
+  f.write('tests/sized.test.mjs', text.replace("test('the one real test', () => {})", "test('the one real test', () => { tick.test('`') })"))
+  const checks = await f.check()
+  assert.ok(has(checks, 'PASS', 'tests/sized.test.mjs: 1 tests, 0 failed.'), JSON.stringify(checks))
+  assert.equal(f.runs.length, 1)
+})
+
+test('preflight runs whole a touched large test file in a folder CI does not list', async t => {
+  const f = sizedFixture(t, syntheticTests(151), 'tests/e2e/deeper/sized.test.mjs')
+  f.write('tests/e2e/deeper/sized.test.mjs', syntheticTests(151).replace("test('synthetic case 75', () => {})", "test('synthetic case 75', () => { assert.equal(1, 1) })"))
+  const checks = await f.check()
+  assert.ok(has(checks, 'PASS', 'tests/e2e/deeper/sized.test.mjs: 151 tests, 0 failed.'), JSON.stringify(checks))
+  assert.equal(f.runs.length, 1)
 })
 
 test('preflight removes parent credentials from the touched test environment', async t => {

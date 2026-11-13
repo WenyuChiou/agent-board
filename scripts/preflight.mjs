@@ -23,10 +23,57 @@ const splitPaths = text => text.split('\0').filter(Boolean)
 // changed tests out of the source text missed deleted lines, helpers and titles built at run time (#1392 review), so
 // preflight does not guess: it says the file was not run, and the author runs the tests they changed by name.
 export const largeTestFile = 150
-// Only declarations at the start of a line count. A miscount near the line decides only between running the file and
-// saying it was not run.
+// Only declarations at the start of a line count, and only outside strings, template literals, regular expressions
+// and comments, so a fixture that writes test files does not add its lines. A slash is read as a regular expression
+// after an operator or an opening bracket, and as a division after a name or a value; a miscount decides only
+// between running the file and saying it was not run.
 const testDeclaration = /^(?:test|it)(?:\.(?:skip|only|todo))?\s*\(/
-export const declaredTests = text => text.split(/\r?\n/).filter(line => testDeclaration.test(line)).length
+const beforeRegex = /[(,=:[!&|?{};+\-*%<>~^]/
+export const declaredTests = text => {
+  const stack = [{ mode: 'code', braces: 0 }]
+  let count = 0
+  let last = ''
+  for (let i = 0; i < text.length; i++) {
+    const top = stack.at(-1)
+    if ((i === 0 || text[i - 1] === '\n') && stack.length === 1 && testDeclaration.test(text.slice(i, i + 40))) count++
+    const c = text[i]
+    const next = text[i + 1]
+    // A line comment ends with its line; so does a quote or a regular expression left open by a misread.
+    if (top.mode === 'line' || (top.mode === 'quote' || top.mode === 'regex') && c === '\n') {
+      if (c === '\n') stack.pop()
+    } else if (top.mode === 'block') {
+      if (c === '*' && next === '/') { stack.pop(); i++ }
+    } else if (top.mode === 'quote') {
+      if (c === '\\') i++
+      else if (c === top.quote) { stack.pop(); last = 'x' }
+    } else if (top.mode === 'regex') {
+      if (c === '\\') i++
+      else if (c === '[') top.inClass = true
+      else if (c === ']') top.inClass = false
+      else if (c === '/' && !top.inClass) { stack.pop(); last = 'x' }
+    } else if (top.mode === 'template') {
+      if (c === '\\') i++
+      else if (c === '`') { stack.pop(); last = 'x' }
+      else if (c === '$' && next === '{') { stack.push({ mode: 'code', braces: 0 }); last = '{'; i++ }
+    } else if (c === '/' && next === '/') { stack.push({ mode: 'line' }); i++ }
+    else if (c === '/' && next === '*') { stack.push({ mode: 'block' }); i++ }
+    else if (c === '/' && (last === '' || beforeRegex.test(last))) stack.push({ mode: 'regex', inClass: false })
+    else if (c === "'" || c === '"') stack.push({ mode: 'quote', quote: c })
+    else if (c === '`') stack.push({ mode: 'template' })
+    else {
+      if (c === '{') top.braces++
+      else if (c === '}') {
+        if (top.braces > 0) top.braces--
+        else if (stack.length > 1) { stack.pop(); continue }
+      }
+      if (!/\s/.test(c)) last = c
+    }
+  }
+  return count
+}
+// The test files CI runs: tests/*.test.mjs, tests/e2e/*.test.mjs and tests/browser/*.test.mjs (listTests and
+// groupForTest in scripts/ci-impact.mjs). A large file anywhere else is run here whole, as before, since CI would not.
+const isRunByCi = path => /^tests\/(?:e2e\/|browser\/)?[^/]+\.test\.mjs$/.test(path)
 
 // Without a recorded or readable identity, a live PID cannot safely be identified as a replacement.
 export const isLiveMarker = ({ isAlive, recordedIdentity, identity = null }) =>
@@ -805,7 +852,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       try {
         for (const path of paths) {
           const declared = declaredTests(read(join(cwd, path)))
-          if (declared > largeTestFile) {
+          if (declared > largeTestFile && isRunByCi(path)) {
             add('WARN', `${path}: not run here, since its ${declared} tests can take longer than preflight's ten minutes; CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" ${path}) and list them under Evidence.`)
             continue
           }
