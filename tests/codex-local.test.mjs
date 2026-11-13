@@ -809,7 +809,7 @@ test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, G
   }
 }))
 
-test('a Codex hook mailbox is the CLI only when its history file names the terminal and no other client or background service marks the hook, so the app, the editor and a resumed session get no Queue (#826)', async () => mailboxFixture(async f => {
+test('a Codex hook mailbox is the CLI only when its history file names the terminal and no other client or background service marks the hook, so a session the app, the editor or the background service marks gets no Queue (#826)', async () => mailboxFixture(async f => {
   const { sendDecision } = await importTs('../hooks/messaging.ts')
   const { RECEIVER_ROUTES } = await importTs('../hooks/receiver-routes.ts')
   const history = join(f.home, 'codex-history')
