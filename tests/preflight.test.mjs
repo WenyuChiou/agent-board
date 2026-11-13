@@ -1912,7 +1912,8 @@ test('an unlisted file that does not finish is a FAIL', async t => {
   const checks = await f.check()
   const failed = checks.find(item => item.state === 'FAIL' && item.message.startsWith('tests/sized.test.mjs'))
   assert.ok(failed, JSON.stringify(checks))
-  assert.match(failed.message, /the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change\.$/)
+  // The words pass through safeLine, which hides the account name: on CI that account is "runner".
+  assert.ok(failed.message.endsWith(safeLine('the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change.')), failed.message)
   assert.equal(f.runs.length, 1)
 })
 
