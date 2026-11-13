@@ -51,7 +51,7 @@ export const visibleHtml = source => source.replace(/<(script|style)\b[^>]*>[\s\
 export const terminal = {
   screen: async (world, args = []) => successful(await run(world, ['--print', ...args])),
   keys: async (world, keys, args = []) => successful(await run(world, ['--keys', keys, ...args])),
-  watch: (world, { onFrame } = {}) => {
+  watch: (world, { onFrame, onClose } = {}) => {
     const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
     const child = spawnIsolated(process.execPath, ['--import', pathToFileURL(preload).href, world.script, '--watch'], { env: world.env, cwd: world.root, stdio: ['pipe', 'pipe', 'pipe'] })
     ownedChildren.add(child)
@@ -70,18 +70,33 @@ export const terminal = {
       onFrame?.(frame)
     })
     child.stderr.setEncoding('utf8').on('data', chunk => { errors += chunk })
-    const exited = new Promise(done => child.once('close', () => { ownedChildren.delete(child); done() }))
+    const exited = new Promise(done => child.once('close', () => {
+      ownedChildren.delete(child)
+      onClose?.({ exitCode: child.exitCode, signalCode: child.signalCode, errors })
+      done()
+    }))
     let isStopped = false
     const watchdog = setTimeout(() => child.kill(), 20000)
+    watchdog.unref?.()
     const stop = async () => {
       if (isStopped) return
       isStopped = true
       clearTimeout(watchdog)
+      child.stdin.destroy()
+      const pipeFallback = setTimeout(() => {
+        child.stdout.destroy()
+        child.stderr.destroy()
+      }, 1000)
+      pipeFallback.unref?.()
       try {
         if (child.exitCode === null) child.kill()
         await exited
         assert.ok(child.exitCode !== null || child.signalCode !== null)
-      } finally { child.stdin.destroy() }
+      } finally {
+        clearTimeout(pipeFallback)
+        child.stdout.destroy()
+        child.stderr.destroy()
+      }
     }
     world.cleanups.push(stop)
     return {
