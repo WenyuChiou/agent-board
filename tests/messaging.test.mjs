@@ -403,7 +403,7 @@ test('a Cursor mailbox card says the message waits for the chat to open, not for
   assert.ok(!labels.includes(EN.serveQueueNextTurn('Cursor')))
   page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
   assert.ok(page.text().includes(EN.serveNextOpenHint))
-  assert.ok(!page.text().includes(EN.serveNextTurnHint))
+  assert.ok(!page.text().includes(EN.serveNextTurnHint('Cursor')))
 })
 
 test('a DeepSeek mailbox card is a plain Send with no Copy, and an answer handed over says so without naming a next turn (#725)', async () => {
@@ -421,7 +421,7 @@ test('a DeepSeek mailbox card is a plain Send with no Copy, and an answer handed
   assert.ok(!labels.includes(EN.serveQueueNextTurn('DeepSeek')))
   assert.ok(!labels.includes(EN.pgCopyAnswer))
   page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
-  assert.ok(!page.text().includes(EN.serveNextTurnHint))
+  assert.ok(!page.text().includes(EN.serveNextTurnHint('DeepSeek')))
   page.inputs(page.cards()[0])[0].value = 'Blue'
   page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.serveSend('DeepSeek')).click()
   await page.flush()
@@ -516,7 +516,7 @@ test('the page offers Queue for next turn beside Copy, prefers a live poller, an
   const queueButton = page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.serveQueueNextTurn('Codex'))
   assert.ok(page.buttons(queueButton.parentNode).some(one => one.textContent === EN.pgCopyAnswer))
   page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
-  assert.ok(page.text().includes(EN.serveNextTurnHint))
+  assert.ok(page.text().includes(EN.serveNextTurnHint('Codex')))
   page.inputs(page.cards()[0])[0].value = 'Queue this answer'
   queueButton.click()
   await page.flush()
@@ -4367,7 +4367,7 @@ test('every receiver record against idle, working and ended shows its line, with
     assert.equal(card.send === 'connected' || card.send === 'mailbox', canSend, label)
     if (!canSend && state !== 'ended') assert.ok(labels.includes(s.pgCopyAnswer), label + ' ' + labels.join(' | '))
     if (!isGone) {
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint, chatOpen: s.serveNextOpenHint, none: s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, none: s.serveLineNone(name) }[route.line]
       assert.ok(page.text().includes(words), label + ' ' + words)
       assert.equal(page.text().includes(s.serveLineUnrecorded), !canSend && route.line !== 'none', label)
     }
@@ -4782,7 +4782,7 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     assert.equal(card.delivery !== undefined, canSend, `${record.source}/${surface.id}/${state}`)
     if (!(record.kind === 'mailbox' && state === 'ended')) {
       const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint, chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: s.serveLineNone(name) }[route.line]
       assert.equal(card.line, route.line, `${record.source}/${surface.id}/${state}`)
       assert.ok(card.lineText.includes(words), `${record.source}/${surface.id}/${state}: ${card.lineText}`)
     }
@@ -4897,6 +4897,44 @@ test('a board message goes only to the surface its route was checked for, and st
     assert.equal(taken.id, 'AB-BOUND-1')
     assert.equal(taken.status, 'uncertain')
   } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('next-turn route explains in plain words in EN, ZH_TW, and ZH_CN, and in-flight wording never claims a reply (#1400)', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const { ZH_TW } = await import('../hooks/i18n.ts')
+  const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
+  const now = Date.now()
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const seed = enrollMailbox({ messages: [] }, 'codex', 'mailbox-next-turn', 'CLI', now, 43_200_000)
+    const mailbox = seed.mailboxes[0]
+    const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=mailbox-next-turn state=waiting updated=${new Date(now).toISOString()} -->\n### Next turn wording\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+    const view = buildView(parseProgress(file), [], null, now, 0, {}, s)
+    const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+    const makeModel = messages => serveModel(view, [], s, new Set(), false, { connections: [], mailboxes: [mailbox], messages }, false, group)
+    const cardText = makeModel([]).asks[0].lineText
+    assert.equal(cardText, s.serveNextTurnHint('Codex'))
+    assert.ok(!cardText.includes('does not wake an idle session'))
+    let release
+    const page = await pageDom(servePage(s, 'synthetic-nonce'), makeModel([]), () => new Promise(done => { release = done }))
+    page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === s.pgWriteOwn).click()
+    page.inputs(page.cards()[0])[0].value = 'Answer for next turn'
+    const queueBtn = page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent.startsWith(s.serveQueueNextTurn('Codex')))
+    queueBtn.click()
+    // Do not call page.flush() before release(): surfaces.mjs flush() awaits all pending fetch promises.
+    await new Promise(done => setImmediate(done))
+    assert.equal(queueBtn.disabled, true)
+    assert.ok(queueBtn.textContent.startsWith(s.serveQueueNextTurn('Codex')))
+    assert.ok(page.text().includes(s.serveQueuingNextTurn('Codex')), page.text())
+    assert.ok(!page.text().includes(s.serveSending('Codex')), page.text())
+    release({ ok: true, json: async () => ({ ok: true, note: s.serveQueuedNextTurn('Codex'), receipt: { id: 'next-turn-1', status: 'queued', line: 'nextTurn', isMailbox: true } }) })
+    await page.flush()
+    assert.ok(page.text().includes(s.serveQueuedNextTurn('Codex')), page.text())
+    const queued = queueMessage(seed, { id: 'next-turn-1', target: mailbox.id, turn: 'session', text: 'Answer for next turn' }, 'board', mailbox, now, 'local', undefined, 'nextTurn').state
+    await page.redraw(makeModel(queued.messages))
+    assert.ok(page.text().includes(s.serveQueuedNextTurn('Codex')), page.text())
+    assert.ok(!page.text().includes(s.serveSending('Codex')), page.text())
+  }
 })
 
 test("a session's own MCP inbox takes a board message bound to another surface of that session, and a hook mailbox on another surface still does not (#1351)", () => {

@@ -765,7 +765,13 @@ export const startServer = (o: ServeOptions): void => {
           if (isLan) return json(res, 403, {})
           try {
             const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text, ...(action.answers === undefined ? {} : { answers: action.answers }) }, Date.now())
-            const notes = { queued: o.s.messagesQueued, uncertain: o.s.messagesUncertain, accepted: o.s.messagesAccepted, acknowledged: o.s.messagesAcknowledged, rejected: o.s.messagesRejected }
+            const receiptLine = 'line' in receipt ? receipt.line : undefined
+            const queuedNote = receiptLine === 'nextTurn'
+              ? o.s.serveQueuedNextTurn(agentLabel(action.connection.agent, o.s))
+              : receiptLine === 'chatOpen'
+                ? o.s.serveQueuedNextOpen(agentLabel(action.connection.agent, o.s))
+                : o.s.messagesQueued
+            const notes = { queued: queuedNote, uncertain: o.s.messagesUncertain, accepted: o.s.messagesAccepted, acknowledged: o.s.messagesAcknowledged, rejected: o.s.messagesRejected }
             const note = 'status' in receipt ? notes[receipt.status] : o.s.messagesFailed
             return json(res, 200, { note, receipt })
           } catch (error) {
