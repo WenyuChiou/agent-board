@@ -21,6 +21,7 @@ export const ZH_CN: Strings = {
   messagesAcceptedDisconnected: "连接中断。结果未确认；等候回复。",
   messagesAcknowledged: "已回复",
   messagesRejected: '已拒绝／未发送',
+  messagesSurfaceLost: '无法从这里转交：这个对话已不再读取此消息的界面，请复制后粘贴到对话中。',
   messagesFailed: '未能发送。对方可能已离线，请复制后粘贴到那边。',
   messagesConflict: '相同消息编号已有不同内容，已拒绝重发。',
   messagesBusy: '未发送：给这个对话的另一条消息还在等待。',
