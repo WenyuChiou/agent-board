@@ -255,7 +255,7 @@ test('--serve asks openInBrowser for the app window like the plain command and -
         encoding: 'utf8',
         timeout: 15000,
         windowsHide: true,
-        env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+        env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1', CI: '' },
       })
       assert.equal(result.status, 0, `${mode.join(' ') || 'plain'}: ${result.stderr}`)
       const match = /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/.exec(result.stdout)
