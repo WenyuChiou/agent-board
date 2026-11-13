@@ -1916,27 +1916,77 @@ test('an unlisted file that does not finish is a FAIL', async t => {
   assert.equal(f.runs.length, 1)
 })
 
-test('an account named like a listed file or the list keeps the WARN and the hint whole, while a failed test name still hides it', async t => {
+const asAccount = async (name, run) => {
   const saved = { USERNAME: process.env.USERNAME, USER: process.env.USER }
-  const as = async (name, run) => {
-    process.env.USERNAME = name
-    process.env.USER = name
-    try { return await run() } finally {
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[key]
-        else process.env[key] = value
-      }
+  process.env.USERNAME = name
+  process.env.USER = name
+  try { return await run() } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
     }
   }
+}
+
+test('an account named like a listed file or the list keeps the WARN and the hint whole, while a failed test name still hides it', async t => {
   const listed = sizedFixture(t, { 'tests/board.test.mjs': syntheticTests(5) })
   listed.write('tests/board.test.mjs', touchCase(syntheticTests(5)))
-  const warned = await as('board', () => listed.check())
+  const warned = await asAccount('board', () => listed.check())
   assert.ok(has(warned, 'WARN', 'tests/board.test.mjs: not run here;'), JSON.stringify(warned))
   assert.ok(has(warned, 'WARN', '(node --test --test-name-pattern "<title>" tests/board.test.mjs)'), JSON.stringify(warned))
   const timedOut = sizedFixture(t, { 'tests/sized.test.mjs': syntheticTests(5) }, () => ({ error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: 'not ok 3 - leftToCi case\n', stderr: '' }))
   timedOut.write('tests/sized.test.mjs', touchCase(syntheticTests(5)))
-  const failed = await as('leftToCi', () => timedOut.check())
+  const failed = await asAccount('leftToCi', () => timedOut.check())
   assert.ok(has(failed, 'FAIL', 'tests/sized.test.mjs: unknown tests, unknown failed; failed: <user> case; the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change.'), JSON.stringify(failed))
+})
+
+const didNotFinish = '; the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change.'
+
+test('a touched test file that is not committed has its name scrubbed in the RUN line and the result', async t => {
+  const f = sizedFixture(t, { 'tests/sized.test.mjs': syntheticTests(1) }, () => ({ status: 0, signal: null, stdout: '# tests 1\n# fail 0\n', stderr: '' }))
+  // One name only on this disk, one staged and not committed: neither is in the pull request yet.
+  f.write('tests/ghp_syntheticToken.test.mjs', syntheticTests(1))
+  f.write('tests/exchange.test.mjs', syntheticTests(1))
+  f.git('add', 'tests/exchange.test.mjs')
+  const lines = []
+  const checks = await asAccount('exchange', () => f.check({ onProgress: line => lines.push(line) }))
+  const all = JSON.stringify([checks, lines])
+  assert.equal(all.includes('ghp_syntheticToken'), false, all)
+  assert.ok(has(checks, 'PASS', 'tests/<token>.test.mjs: 1 tests, 0 failed.'), all)
+  assert.ok(has(checks, 'PASS', 'tests/<user>.test.mjs: 1 tests, 0 failed.'), all)
+  assert.deepEqual(lines.sort(), ['RUN tests/<token>.test.mjs', 'RUN tests/<user>.test.mjs'])
+})
+
+test('a dollar sign in a committed file name or a failed test name is shown as written', async t => {
+  const path = 'tests/a$$b.test.mjs'
+  const f = sizedFixture(t, { [path]: syntheticTests(5) }, () => ({ status: 1, signal: null, stdout: 'not ok 1 - costs $& and $$ more\n# tests 5\n# fail 1\n', stderr: '' }))
+  f.write(path, touchCase(syntheticTests(5)))
+  const checks = await f.check()
+  assert.ok(has(checks, 'FAIL', 'tests/a$$b.test.mjs: 5 tests, 1 failed; failed: costs $& and $$ more.'), JSON.stringify(checks))
+})
+
+test('a run ended by a signal with no timeout error is a FAIL with the list hint too', async t => {
+  const f = sizedFixture(t, { 'tests/sized.test.mjs': syntheticTests(5) }, () => ({ status: null, signal: 'SIGKILL', stdout: '', stderr: '' }))
+  f.write('tests/sized.test.mjs', touchCase(syntheticTests(5)))
+  const checks = await f.check()
+  assert.ok(has(checks, 'FAIL', `tests/sized.test.mjs: unknown tests, unknown failed${didNotFinish}`), JSON.stringify(checks))
+})
+
+test('an account named like a committed unlisted file keeps its name in the PASS and FAIL lines and in the RUN line', async t => {
+  const path = 'tests/exchange.test.mjs'
+  const results = [
+    ['PASS', { status: 0, signal: null, stdout: '# tests 5\n# fail 0\n', stderr: '' }, `${path}: 5 tests, 0 failed.`],
+    ['FAIL', { error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: '', stderr: '' }, `${path}: unknown tests, unknown failed${didNotFinish}`],
+  ]
+  for (const [state, result, words] of results) {
+    const f = sizedFixture(t, { [path]: syntheticTests(5) }, () => result)
+    f.write(path, touchCase(syntheticTests(5)))
+    const lines = []
+    const checks = await asAccount('exchange', () => f.check({ onProgress: line => lines.push(line) }))
+    assert.ok(has(checks, state, words), JSON.stringify(checks))
+    assert.equal(JSON.stringify(checks).includes('tests/<user>'), false, JSON.stringify(checks))
+    assert.deepEqual(lines, [`RUN ${path}`])
+  }
 })
 
 test('every left-to-CI file exists and CI runs it', async () => {

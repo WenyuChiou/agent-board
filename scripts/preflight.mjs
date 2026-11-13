@@ -614,9 +614,13 @@ const parseArgs = argv => {
 // lockPlatform accompanies the injected identity reader in module fixtures; the CLI has no override.
 export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, isFromMain = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessIdentity = processStartIdentity, lockPlatform = process.platform, onCheck, onProgress, onLockPublished } = {}) => {
   const checks = []
-  // `exact` replaces the \ue001 mark after redaction: a validated lock file name and fixed folder pattern, which an account name must not alter.
+  // Every piece of a line is one of three kinds (#1392). Preflight's own words and values it validated (a list
+  // literal, a commit id, a count, a lock file name) and a path committed at HEAD (`shown`) go in `exact`, which
+  // replaces the \ue001 mark after redaction, so an account name cannot alter them. Everything else (child output,
+  // a file name that exists only on this disk, an error's words) goes through safeLine, in `message` or by itself.
   const add = (state, message, exact = '') => {
-    const item = { state, message: safeLine(message).replace('\ue001', exact) }
+    // A function, so `$` in a file or test name is not read as a replacement pattern.
+    const item = { state, message: safeLine(message).replace('\ue001', () => exact) }
     checks.push(item)
     onCheck?.(item)
   }
@@ -694,6 +698,10 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   let added
   let mergeBase
   let newPaths
+  // Test paths committed at HEAD: the pull request publishes them, so showing one whole reveals nothing new.
+  let committed = new Set()
+  // The one way a line shows a test path: whole when committed, scrubbed when it exists only on this disk.
+  const shown = path => committed.has(path) ? path.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]/g, '') : safeLine(path)
   try {
     let hasFetchFailed = false
     if (!isFromMain && isNoFetch) add('WARN', 'using the local preflight because --no-fetch was supplied; origin/main freshness is unknown.')
@@ -772,6 +780,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       ...splitPaths(git('diff', '--name-only', '--no-renames', '-z', 'HEAD')), ...untracked,
       ...splitPaths(git('diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD')),
     ])
+    committed = new Set(splitPaths(git('ls-tree', '-r', '--name-only', '-z', 'HEAD', '--', 'tests')))
     added = addedLines(git('diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=0', mergeBase))
     for (const path of untracked.filter(path => path.startsWith('tests/') || path === 'CHANGELOG.md' || fragmentIssue(path) !== null)) {
       read(join(cwd, path)).split(/\r?\n/).forEach((text, i) => added.push({ path, line: i + 1, text }))
@@ -816,7 +825,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
             delete env.NODE_TEST_CONTEXT
             for (const name of Object.keys(env)) if (/^(GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY)$/i.test(name)) delete env[name]
             for (const name of homeNames) env[name] = name === 'CLAUDE_PROGRESS_FILE' ? join(temp, 'progress.md') : temp
-            onProgress?.(`RUN ${safeLine(path)}`)
+            onProgress?.(`RUN ${shown(path)}`)
             const tested = command(process.execPath, ['--test', '--test-reporter=tap', path], { env, timeout: 600000 })
             const output = `${tested.stdout ?? ''}\n${tested.stderr ?? ''}`
             const count = output.match(/^# fail (\d+)\s*$/m)?.[1]
@@ -824,10 +833,11 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
             const isPassed = !tested.error && tested.status === 0 && count === '0'
             const failedNames = isPassed ? [] : failedTapNames(output)
             const failedDetail = failedNames.length ? `; failed: ${failedNames.join('; ')}` : ''
-            // Only the failed test names come from the child, and failedTapNames already scrubs them. The path is a file of
-            // this repository and the rest are preflight's own words, which an account name must not change.
-            const shownPath = path.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]/g, '')
-            add(isPassed ? 'PASS' : 'FAIL', '\ue001', `${shownPath}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}${tested.error?.code === 'ETIMEDOUT' ? '; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change' : ''}.`)
+            // The failed test names come from the child, and failedTapNames already scrubs them; `shown` scrubs a path
+            // that is not committed; the counts are digits and the rest are preflight's own words. A run that did not
+            // finish, for any reason, gets the list hint with the same condition as its words.
+            const unfinished = tested.error || tested.signal ? '; the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change' : ''
+            add(isPassed ? 'PASS' : 'FAIL', '\ue001', `${shown(path)}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${unfinished}.`)
           } finally {
             rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
           }
