@@ -25,9 +25,9 @@ Queue only when its session state, surface and route have a live record. When th
 or route is unknown, the card offers Copy. One known gap: a Codex hook can read which client
 started a session, not which client runs a turn, so a terminal session continued in another client
 that leaves no mark in the hook's environment can keep the terminal's Queue; whether a message
-queued there reaches the model has no record (see the Codex CLI record's "Not covered"). A Codex
-terminal whose hook carries the Windows background service's mark gets no Queue from its mailbox
-(the card offers Copy unless another recorded route for that session offers Send). Internal
+queued there reaches the model has no record (see the Codex CLI record's "Not covered"). A mailbox
+last enrolled by a Codex terminal hook that carries the Windows background service's mark gets no
+Queue (the card offers Copy unless another recorded route for that session offers Send). Internal
 connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
@@ -43,7 +43,7 @@ line itself; callers cannot supply `line`.
 
 ## Next-turn mailbox
 
-A turn-start hook enrolls its session when the default message store already exists.
+A turn-start hook can enroll its session only when the default messages folder already exists.
 The page can queue a message for that exact session without waking it. A later turn-start
 hook of that session can claim one message, the oldest it is allowed to take. A message the page
 queues is saved with the surface its route was checked on. A hook that reads another surface does
@@ -59,16 +59,18 @@ final; a later receipt from the session can clear a disconnected mark). That inc
 hook accepted if a later receipt from its session made it uncertain with no error, and such a
 message can also be handed back; the board's own receivers send `uncertain` only with an error, so
 this takes another client (#1407). While a claim stays open as uncertain (not yet `EXPIRED` or
-`DISMISSED`), the session's queued messages wait. A claim is taken again only when every message of
-the session still in doubt (an open uncertain claim, or a lease holder's accepted delivery) is one of
-this mailbox's claims that can be handed out again (above); then a later hook whose surface the claim
-allows, or the session's `board_inbox`, takes the oldest of them it may take. An open uncertain claim expires at
-the board's next action or snapshot after more than 30 minutes without an update; an expired or
-dismissed one no longer holds the session. A `board_inbox` claim is never handed out again.
+`DISMISSED`), none of the session's queued messages is handed out. A claim is taken again only when
+every message of the session still in doubt (an open uncertain claim, or an accepted delivery, other
+than a hook's, that still awaits its ACK) is one of this mailbox's claims that can be handed out again (above); then a
+later hook whose surface the claim allows, or the session's `board_inbox`, can take the oldest of
+them it may take, when the mailbox is not contested and its request succeeds. An open uncertain
+claim left more than 30 minutes without an update expires the next time the store is loaded or saved
+(the board tries a save at every action and snapshot); an expired or dismissed one no longer holds
+the session. A `board_inbox` claim is never handed out again.
 
-A mailbox normally expires 12 hours after it was last enrolled or renewed; the session's hooks and MCP tools (such as `board_inbox` and `board_status`) can renew it, and session end can remove it sooner. Session end rejects queued messages with `DISCONNECTED`.
+A mailbox normally expires 12 hours after it was last enrolled or renewed; the session's hooks and MCP tools (such as `board_inbox` and `board_status`) can renew it, and session end can remove it sooner. A session-end hook that reaches the store removes the mailbox and rejects its queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create
-the messages folder and only find the default one; a board using `--messages-dir` has no hook mailboxes.
+the messages folder and only find the default one; a board using `--messages-dir` with another folder has no hook mailboxes.
 
 Supported turn starts: Codex `SessionStart` / `UserPromptSubmit`, Antigravity
 `SessionStart` / `PreInvocation`, Gemini CLI `SessionStart` / `BeforeAgent`, Muse Code
@@ -163,7 +165,7 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 | State | Evidence |
 | --- | --- |
 | queued | Stored locally and not handed out since. A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain (#1407) |
-| uncertain | Claimed durably before delivery, a disconnect/timeout after claiming (unless accepted), or an accepted message a later receipt reports uncertain (#1407) |
+| uncertain | Claimed durably with no acceptance on record: before delivery, or after a disconnect or timeout. Also an accepted message that a later receipt reports uncertain (for a hook's message, #1407), or that expired or was dismissed |
 | accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is not sent again while it stays accepted |
 | acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
 | rejected | Refused before claiming, or adapter reports a clean rejection |
@@ -293,7 +295,7 @@ A restart hands out nothing by itself; a later hook can still claim, as "Next-tu
 It applies the age limit, and it marks disconnected, as a disconnect would, the open messages whose
 target is gone: a live receiver's connection, or a mailbox whose session ended or which expired.
 Messages of a mailbox that is still enrolled get no mark. A restart or a disconnect gives an
-uncertain message no extra time. Expiry or dismissal lets the card send again.
+uncertain message no extra time. After expiry or dismissal that message no longer stops the card from sending.
 Stores are saved as version 2, which earlier releases cannot read: before going back to one,
 move both `messages.json` and `server.lock` out of the folder, since 0.24.0 and earlier take
 the lock before they read the store and keep it after refusing the file. Version 1 loads with `hops: 1`, `claimed: 0`, and an empty nonce. Such legacy messages cannot
@@ -696,7 +698,7 @@ Sending requires the running board hub (`BOARD_NOT_RUNNING`) and a target enroll
 in the same workspace (`WORKSPACE_UNKNOWN` or `WORKSPACE_MISMATCH` otherwise).
 Contested owners, peer pause, hop limit and pair budget can refuse delivery. Peer pause and pair budget
 also apply to a connected adapter's own sends. An unverified sender's message cannot be passed on.
-A message taken by a lease holder holds its session until `board_ack` or 30 minutes; a hook's does not while it stays accepted, and can again if a later receipt from its session makes it uncertain.
+A message taken by a lease holder holds its session while it stays open (until `board_ack`, dismissal, or expiry after 30 minutes without an update); a hook's does not while it stays accepted, and can again if a later receipt from its session makes it uncertain.
 Inbox acceptance means the response write completed; ACK separately records acknowledgement.
 There is no parked wait, progress notification, host launcher or automatic MCP configuration yet.
 A lease needs a launcher that sets `AGENT_BOARD_AGENT`, `AGENT_BOARD_SESSION_ID`, `AGENT_BOARD_HOST_PID` and `AGENT_BOARD_HOST_STARTED`.
