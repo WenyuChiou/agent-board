@@ -3968,9 +3968,16 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       return prevented
     },
     key: event => {
-      document.events.keydown?.(event)
+      const originalPrevent = event.preventDefault
+      const dispatched = {
+        ...event,
+        defaultPrevented: Boolean(event.defaultPrevented),
+        preventDefault() { this.defaultPrevented = true; originalPrevent?.call(this) },
+      }
+      document.events.keydown?.(dispatched)
       if (['Enter', ' '].includes(event.key) && document.activeElement?.tag === 'button') document.activeElement.click()
     },
+    body: document.body,
     active: () => document.activeElement,
     title: () => document.title,
     delays,
@@ -11896,8 +11903,13 @@ test('picking a view shows only that section', async () => {
   const { board, model, html } = await groupedPage()
   try {
     const dom = await pageDom(html, model, { width: 1280 })
-    // The page hides every section but the chosen one; Overview shows them all.
-    for (const view of ['needs', 'working', 'others', 'done']) assert.ok(html.includes(`.shell[data-view="${view}"] #board>[data-sec]:not([data-sec="${view}"])`), view)
+    // The page hides every section but the chosen one at every width (outside the 560px+ block); Overview shows them all.
+    const wideAt = html.indexOf('@media (min-width:560px)')
+    for (const view of ['needs', 'working', 'others', 'done']) {
+      const rule = `.shell[data-view="${view}"] #board>[data-sec]:not([data-sec="${view}"])`
+      const at = html.indexOf(rule)
+      assert.ok(at !== -1 && at < wideAt, `${view} view rule applies below 560px too`)
+    }
     for (const name of ['needs', 'working', 'others', 'done', 'all']) {
       dom.node(`view-${name}`).click()
       await dom.flush()
@@ -12448,6 +12460,43 @@ test('Esc and the backdrop close the drawer and focus goes back to its button', 
     assert.equal(dom.active(), dom.node('drawer-close'))
     dom.key({ key: 'Tab', shiftKey: true })
     assert.equal(dom.active(), last)
+    // Settings opened from inside the drawer owns Tab and Esc until it closes; the drawer stays open behind it.
+    dom.node('settings-toggle').click()
+    assert.equal(dom.node('settings').hidden, false)
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    assert.equal(dom.active(), dom.node('settings-close'))
+    let prevented = false
+    dom.key({ key: 'Tab', preventDefault: () => { prevented = true } })
+    assert.equal(prevented, false, 'Tab advances inside Settings instead of wrapping the inert drawer')
+    dom.key({ key: 'Escape', preventDefault() {} })
+    assert.equal(dom.node('settings').hidden, true)
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    assert.equal(dom.active(), dom.node('settings-toggle'))
+    dom.key({ key: 'Escape' })
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // Closing the board from inside the drawer clears the drawer, backdrop state and scroll lock.
+    const closer = await pageDom(html, model, { width: 400, post: () => ({ ok: true, json: async () => ({ ok: true }) }) })
+    closer.node('drawer-btn').click()
+    assert.equal(closer.node('shell').getAttribute('data-drawer'), '1')
+    assert.equal(closer.body.style.overflow, 'hidden')
+    closer.node('close').click()
+    await closer.settle()
+    assert.equal(closer.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(closer.body.style.overflow, '')
+    assert.equal(closer.node('side').hidden, true)
+    // A newer page taking over clears an open drawer too.
+    let isMoved = false
+    const moved = await pageDom(html, model, { width: 400, currentBoard: () => isMoved ? { moved: true } : {} })
+    moved.node('drawer-btn').click()
+    assert.equal(moved.node('shell').getAttribute('data-drawer'), '1')
+    assert.equal(moved.body.style.overflow, 'hidden')
+    isMoved = true
+    await moved.redraw(model)
+    await moved.settle()
+    assert.equal(moved.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(moved.body.style.overflow, '')
+    assert.equal(moved.node('side').hidden, true)
   } finally { await board.close() }
 })
 

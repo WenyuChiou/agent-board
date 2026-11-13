@@ -1191,6 +1191,11 @@ ${ICON_CSS}
 .drawer-btn>svg.i{width:18px;height:18px}
 .drawer-close{display:none}
 .drawer-backdrop{display:none}
+/* one view at a time; Overview shows them all */
+.shell[data-view="needs"] #board>[data-sec]:not([data-sec="needs"]),
+.shell[data-view="working"] #board>[data-sec]:not([data-sec="working"]),
+.shell[data-view="others"] #board>[data-sec]:not([data-sec="others"]),
+.shell[data-view="done"] #board>[data-sec]:not([data-sec="done"]){display:none}
 
 @media (min-width:560px){
   .shell{display:grid;grid-template-columns:232px minmax(0,1fr);align-items:start;transition:grid-template-columns var(--dur-layout) var(--ease-out)}
@@ -1201,11 +1206,6 @@ ${ICON_CSS}
   #offline:not(:empty){top:0;padding:var(--s3) var(--s5)}
   /* the can't-read line and the work share one width, so their edges line up */
   .col{max-width:1040px}
-  /* one view at a time; Overview shows them all */
-  .shell[data-view="needs"] #board>[data-sec]:not([data-sec="needs"]),
-  .shell[data-view="working"] #board>[data-sec]:not([data-sec="working"]),
-  .shell[data-view="others"] #board>[data-sec]:not([data-sec="others"]),
-  .shell[data-view="done"] #board>[data-sec]:not([data-sec="done"]){display:none}
   /* the rail: the views and the agents as 44px icons with their badges; names in the tooltip; the project link, the theme and Close the board in the footer */
   .shell[data-rail="1"] .side{padding:var(--s3) 10px;align-items:center}
   .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-logo){display:none}
@@ -3292,6 +3292,7 @@ const PAGE_SCRIPT = String.raw`
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) {
         isClosed = true;
+        if (drawerOpen) setDrawer(false, true);
         paintLight();
         var movedMain = document.querySelector('main');
         movedMain.textContent = '';
@@ -3398,6 +3399,9 @@ const PAGE_SCRIPT = String.raw`
     importBlock(text, true);
   });
   if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
+    // Let Settings own Escape and Tab while it sits modal above an open drawer.
+    var settings = document.getElementById('settings');
+    if (event.defaultPrevented || (settings && !settings.hidden)) return;
     // The drawer takes Esc to close and keeps Tab inside it; the page behind is not reachable while it is open.
     if (drawerOpen) {
       if (event.key === 'Escape') { setDrawer(false); return; }
@@ -3460,6 +3464,7 @@ const PAGE_SCRIPT = String.raw`
     say(w('pressPending'), '', 'close');
     var shut = function () {
       isClosed = true;
+      if (drawerOpen) setDrawer(false, true);
       paintLight();
       clearTimeout(timer);
       var main = document.querySelector('main');
