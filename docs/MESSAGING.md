@@ -31,9 +31,11 @@ Queue. Internal
 connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
-An offline card retains Copy. By default, the web UI and
-action API cannot spawn a CLI or resume a saved session. The existing copy-resume command
-remains available where the board already offered it.
+An offline card retains Copy. By default, only a recorded background-resume receiver
+(`reopen`, under [Background resume](#background-resume)) or an explicit `--allow-resume`
+opt-in may run an AI's own resume command from the local board; the LAN page and
+unrecorded routes keep Copy. The existing copy-resume command remains available where the
+board already offered it.
 
 The direct message API applies the same recorded-route check to board sends. A mailbox
 with a live receiver for the same session is refused rather than redirected; an unrecorded
@@ -83,6 +85,36 @@ start an ended Codex or Grok Build session. It is disabled by default, never ena
 setup, and works for closed sessions even with the message hub running. It is not live delivery.
 Reopening without the option replaces an idle server that had it enabled. LAN sends remain
 refused. Review the native agent's permissions before choosing this legacy mode.
+
+## Background resume
+
+For CLIs that have no external wake transport into an already-open session, a board message
+can run the AI's own resume command in the background (`reopen` route via the shared helper in
+`scripts/background-resume.ts`): `<ai> <resume flag> <conversation> <message>`. It reads the
+reply and the exact `ACK <code>` line from stdout and records the message receipt. Every
+background-resume receiver is bound by the owner's five limits:
+
+1. **Loopback only**: accepted only from the local board page on this computer (`127.0.0.1` /
+   `localhost`); requests off loopback or over `--lan` are refused.
+2. **Default permission mode only**: runs in the AI's own default permission mode and refuses
+   permission-widening or auto-approval flags (`--yolo`, `--full-auto`, `--dangerously-*`,
+   `--bypass-*`, `--permission-mode`, `--approval-mode`, `--ask-for-approval`, `--sandbox`, etc.).
+3. **Never mid-turn**: refused whenever the conversation has a turn running (`working` state, an
+   in-flight background resume, or an unknown session state).
+4. **One live record per AI before Send**: a card stays on Copy until a dated live run in
+   `docs/validation/` verifies the `reopen` route for that AI and surface.
+5. **Card wording**: before and after sending, the card explains that the turn runs in the
+   background and to open the AI's window to see it there.
+
+Each AI uses only routes permitted by its own terms and FAQ; the board never authenticates to
+or calls a vendor API directly:
+
+| AI / CLI | Background resume status | Policy / notes |
+| --- | --- | --- |
+| Antigravity (`agy`) | Out of scope | Disallowed on consumer plans (FAQ / terms section 6); uses own hooks / sidecar route (`#1396`). |
+| Cursor (`cursor-agent`) | Planned (`#1403`) | Pending vendor terms review, receiver wiring, and dated live record. |
+| Grok Build (`grok`) | Planned (`#1404`) | Pending vendor terms review, receiver wiring, and dated live record (separate from `--allow-resume`). |
+| Hermes Agent (`hermes`) | Planned (`#233`) | Pending vendor terms review, receiver wiring, and dated live record. |
 
 ## Local storage
 

@@ -85,9 +85,10 @@ export const sessionState = (view: View, agent: string, session: string): RowSta
 // One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route
 // the record has not shown live also says only Copy is offered.
 export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: Strings, state: RowState = 'idle', reason?: Exclude<SendDecision, { canSend: true }>['reason']): string => {
+  const name = isClaudeAgent(agent) ? 'Claude' : agentLabel(agent, s)
   if (reason === 'STATE_UNKNOWN') return s.serveLineStateUnknown
   if (reason === 'SHADOWED') return s.serveLineShadowed
-  const name = isClaudeAgent(agent) ? 'Claude' : agentLabel(agent, s)
+  if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
   const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name))
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
     : line === 'nextTurn' ? s.serveNextTurnHint(name)
@@ -845,6 +846,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
     return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
   }
   if (connected) return { type: 'refuse', note: s.boardLineChanged }
+  if (item.type === 'row' && item.row.auto === 'working') return { type: 'refuse', note: s.serveSendBusy(agentLabel(agent || 'claude', s)) }
   if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }
   if (isLan) return { type: 'refuse', note: s.serveLanSend(agentLabel(agent || 'claude', s)) }
   // A closed progress record is not a live receiver. Resuming a saved session is a
@@ -924,7 +926,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveLineStepEnd', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1710,11 +1712,13 @@ const PAGE_SCRIPT = String.raw`
       ? w('serveQueuingNextTurn', who)
       : line === 'chatOpen'
         ? w('serveQueuingNextOpen', who)
-        : line === 'stepEnd' && isClaudeAgent(delivery.agent)
-          ? w('claudeSendWorking')
-          : line === 'stepEnd'
-            ? w('serveLineStepEnd', who)
-            : w('serveSending', who);
+        : line === 'reopen'
+          ? w('serveReopenRunning', who)
+          : line === 'stepEnd' && isClaudeAgent(delivery.agent)
+            ? w('claudeSendWorking')
+            : line === 'stepEnd'
+              ? w('serveLineStepEnd', who)
+              : w('serveSending', who);
     busyOn(go);
     say(waitingText, 'wait', key);
     return call('/api/act', { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp }).then(function (data) {
@@ -1730,7 +1734,9 @@ const PAGE_SCRIPT = String.raw`
           ? w('serveQueuedNextTurn', who)
           : line === 'chatOpen'
             ? w('serveQueuedNextOpen', who)
-            : w('messagesQueued');
+            : line === 'reopen'
+              ? w('serveReopenRunning', who)
+              : w('messagesQueued');
       var noteText = data.note && !(data.ok && line === 'nextTurn' && data.note === w('messagesQueued')) ? data.note : fallback;
       say(noteText, tone, key, undefined, !data.ok);
       if (data.ok && results[key]) {
@@ -1815,15 +1821,21 @@ const PAGE_SCRIPT = String.raw`
     var labelText = isFailed && receipt.status === 'uncertain'
       ? w('messagesTimeout')
       : isAcceptedUnconfirmed ? w('messagesAcceptedUnconfirmed')
-      : receipt.status === 'accepted' && !receipt.isMailbox && receipt.error === 'DISCONNECTED'
-        ? w('messagesAcceptedDisconnected')
-        : receipt.status === 'queued' && line === 'stepEnd'
-          ? w('serveLineStepEnd', agentName(agent))
-          : receipt.status === 'queued' && line === 'nextTurn'
-            ? w('serveQueuedNextTurn', agentName(agent))
-            : receipt.status === 'queued' && line === 'chatOpen'
-              ? w('serveQueuedNextOpen', agentName(agent))
-              : w(labels[receipt.status]);
+      : receipt.status === 'accepted' && line === 'reopen'
+        ? w('serveReopenRunning', agentName(agent))
+        : receipt.status === 'acknowledged' && line === 'reopen'
+          ? w('serveReopenDone', agentName(agent))
+          : receipt.status === 'accepted' && !receipt.isMailbox && receipt.error === 'DISCONNECTED'
+            ? w('messagesAcceptedDisconnected')
+            : receipt.status === 'queued' && line === 'stepEnd'
+              ? w('serveLineStepEnd', agentName(agent))
+              : receipt.status === 'queued' && line === 'nextTurn'
+                ? w('serveQueuedNextTurn', agentName(agent))
+                : receipt.status === 'queued' && line === 'chatOpen'
+                  ? w('serveQueuedNextOpen', agentName(agent))
+                  : receipt.status === 'queued' && line === 'reopen'
+                    ? w('serveReopenRunning', agentName(agent))
+                    : w(labels[receipt.status]);
     var lineEl = el('p', 'receipt' + toneClass, labelText + (reply ? ' · ' + reply : ''));
     lineEl.setAttribute('role', isFailTone ? 'alert' : 'status');
     var last = key && sentLast[key];
@@ -1844,9 +1856,10 @@ const PAGE_SCRIPT = String.raw`
     input.setAttribute('data-key', [key, session || '', asked || '', delivery ? delivery.id + ':' + delivery.turn : ''].join('\u0001'));
     var draftKey = input.getAttribute('data-key');
     // The card's route, from its receiver's record, says what the button is called and whether Copy sits beside it:
-    // a route that waits for a turn or for the chat to open keeps Copy, one that goes in now or at a step's end does not.
+    // a route that waits for a turn or for the chat to open keeps Copy, one that goes in now, at a step's end,
+    // or runs in the background does not.
     var line = extras && extras.line;
-    var isWaiting = mode === 'mailbox' && line !== 'now' && line !== 'stepEnd';
+    var isWaiting = mode === 'mailbox' && line !== 'now' && line !== 'stepEnd' && line !== 'reopen';
     var go = mode === 'send' || mode === 'connected' || mode === 'mailbox'
       ? button(w(isWaiting ? (line === 'chatOpen' ? 'serveQueueNextOpen' : 'serveQueueNextTurn') : 'serveSend', mode === 'connected' && isClaudeAgent(agent) ? 'Claude' : agentName(agent)), function () {
         var text = input.value.trim();
@@ -2021,7 +2034,9 @@ const PAGE_SCRIPT = String.raw`
             ? w('serveQueuedNextTurn', agentName(parts.agent))
             : parts.line === 'chatOpen'
               ? w('serveQueuedNextOpen', agentName(parts.agent))
-              : w('messagesQueued'))
+              : parts.line === 'reopen'
+                ? w('serveReopenRunning', agentName(parts.agent))
+                : w('messagesQueued'))
       : state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text)
       : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
     parts.again.hidden = state.mode !== 'copied';
