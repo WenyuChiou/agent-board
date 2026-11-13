@@ -10619,7 +10619,7 @@ test('a question card puts choices before its copy button and the hide button la
   const dom = await pageDom(await sourcePage(), cardsModel())
   const card = cardWithKey(dom, 'ask')
   // The answers come first; what More holds follows: the command, the link, the resume command, then Already answered, hide.
-  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), [EN.pgCopyChoice, EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
   const answers = card.childNodes.flatMap(node => pressWalk(node)).find(node => node.className === 'answers')
   assert.deepEqual(answers.childNodes[0].childNodes.slice(0, 2).map(node => node.textContent), ['Yes', 'No'])
   assert.equal(answers.childNodes.at(-1).getAttribute('aria-label'), EN.pgCopyChoice)
@@ -10639,7 +10639,7 @@ test('a card with more than three actions shows three and the rest behind More',
   const card = cardWithKey(dom, 'ask')
   const actions = cardActionNodes(card)
   // Three answers show; the command, the link, the resume command and Already answered, hide wait behind More.
-  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), ['↑'])
+  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
   assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No', 'Maybe'])
   const more = cardMore(card)
   assert.equal(more.length, 1)
@@ -10715,7 +10715,7 @@ test('a card with nothing behind More shows no More button', async () => {
     const card = cardWithKey(dom, 'ask')
     // Already answered, hide alone still goes behind More.
     assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice').map(node => node.textContent), ['Yes', 'No'])
-    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
+    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
     assert.equal(cardMore(card).length, canHide ? 1 : 0)
     assert.equal(cardActionNodes(card).length, canHide ? 2 : 1)
     const row = cardWithKey(dom, 'row')
@@ -10732,13 +10732,13 @@ test('a question with four answers shows three and keeps the fourth behind More'
   const card = cardWithKey(dom, 'ask')
   const visibleChoices = () => pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent)
   assert.deepEqual(visibleChoices(), ['A', 'B', 'C'])
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
   const more = cardMore(card)[0]
   assert.ok(more)
   more.click()
   assert.equal(more.getAttribute('aria-expanded'), 'true')
   assert.deepEqual(visibleChoices(), ['A', 'B', 'C', 'D'])
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice, EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
 })
 
 test('More opens and closes by keyboard and keeps its state across a refresh', async () => {
@@ -13817,4 +13817,32 @@ test('the board script answers --version and rejects unknown flags without start
     // No server address or runtime files were written.
     assert.deepEqual(readdirSync(dir).sort(), ['agent-board.mjs', 'progress.md'])
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('the answer picker labels its confirm button Copy when the agent cannot receive (#1268)', async () => {
+  const { servePage } = await sourceBoard()
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const html = servePage(words, 'synthetic')
+    const copyModel = cardsModel()
+    copyModel.asks[0] = { ...copyModel.asks[0], send: 'none', answers: ['Yes', 'No'] }
+    const dom = await pageDom(html, copyModel)
+    const card = cardWithKey(dom, 'ask')
+    const button = pressWalk(card).find(node => node.className === 'answer-send')
+    assert.ok(button)
+    assert.equal(button.textContent, words.pgCopyChoice)
+    assert.equal(button.getAttribute('aria-label'), words.pgCopyChoice)
+    assert.equal(button.title, words.pgCopyChoice)
+    assert.equal(button.getAttribute('data-copy'), '1')
+    assert.notEqual(button.textContent, '↑')
+
+    const sendModel = cardsModel()
+    sendModel.asks[0] = { ...sendModel.asks[0], send: 'send', answers: ['Yes', 'No'] }
+    const sendDom = await pageDom(html, sendModel)
+    const sendBtn = pressWalk(cardWithKey(sendDom, 'ask')).find(node => node.className === 'answer-send')
+    assert.ok(sendBtn)
+    assert.equal(sendBtn.textContent, '↑')
+    assert.equal(sendBtn.getAttribute('aria-label'), words.pgSendChoice)
+    assert.equal(sendBtn.title, words.pgSendChoice)
+    assert.equal(sendBtn.getAttribute('data-copy'), null)
+  }
 })
