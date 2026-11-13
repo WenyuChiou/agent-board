@@ -4245,6 +4245,10 @@ export const register: Register = (on, options) => {
     // one's passes back.
     questionsRunning = null
     questionPassing = null
+    // The status line belongs to this session: a new session announces it
+    // even when it reads the same as the last one's, or a restart with an
+    // unchanged status never re-emits it (#1406).
+    lastStatus = undefined
     progressCutSettled = false
     questionFailures = 0
     questionRaces = 0

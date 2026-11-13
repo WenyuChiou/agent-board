@@ -1218,6 +1218,7 @@ export const buildView = (
         events: { hasSessionEnd: task.auto?.state === 'ended', lastEventAt: hasTime(lastActive) ? lastActive : 0, host: task.auto?.agent ?? '' },
         liveness: livenessOf(task.auto, gone),
         now,
+        staleMs,
         hasOpenAsk: task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)),
       })
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose

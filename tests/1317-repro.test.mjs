@@ -84,7 +84,7 @@ test('repro2: a newest duplicate without a claim must suppress the older dead cl
 test('repro3: an unchanged reused-pid claim must not re-run the start-time lookup on each read', async () => {
   const { parseProgress } = await import('../hooks/parse.ts')
   const { blockKey } = await import('../hooks/session-liveness.ts')
-  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const { goneBlocksOf, readingHostHash, cacheKey } = await import('../scripts/session-liveness.ts')
   const hostHash = readingHostHash()
   assert.notEqual(hostHash, null, 'this machine has a host hash')
   const livePid = process.pid
@@ -102,7 +102,7 @@ test('repro3: an unchanged reused-pid claim must not re-run the start-time looku
   const afterFirst = calls
   const second = [...goneBlocksOf(projects, hostHash, cache, 2000, lookup)]
   const third = [...goneBlocksOf(projects, hostHash, cache, 2000, lookup)]
-  console.log(JSON.stringify({ first, second, third, lookupCallsAfterFirstRead: afterFirst, lookupCallsAfterThirdRead: calls, cachedClaimStart: cache.get(livePid) }))
+  console.log(JSON.stringify({ first, second, third, lookupCallsAfterFirstRead: afterFirst, lookupCallsAfterThirdRead: calls, cachedClaimStart: cache.get(cacheKey(livePid, liveStarted - 60000)) }))
   assert.deepEqual(first, [key])
   assert.deepEqual(second, [key])
   assert.deepEqual(third, [key])
@@ -112,5 +112,5 @@ test('repro3: an unchanged reused-pid claim must not re-run the start-time looku
   // claim is checked once and cached (PM decision 5). The lookup is
   // injected, so this proves the property without Windows/PowerShell.
   assert.equal(calls, 1, 'the second and third unchanged reads re-ran the start-time lookup')
-  assert.deepEqual(cache.get(livePid), { claimed: liveStarted - 60000, actual: liveStarted })
+  assert.deepEqual(cache.get(cacheKey(livePid, liveStarted - 60000)), { claimed: liveStarted - 60000, actual: liveStarted })
 })

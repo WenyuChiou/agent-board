@@ -2287,7 +2287,9 @@ const PAGE_SCRIPT = String.raw`
     if (sameName(step, clean(fullTitle(ref)))) step = '';
     var isAnsweredWaiting = row.status === w('answeredWaiting');
     var detail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
-    var isUnsureRow = row.rowState === 'unsure';
+    // The same guard the terminal uses: a row the collapse already reads as
+    // ended keeps today's stopped wording, not the grey unsure label.
+    var isUnsureRow = row.rowState === 'unsure' && row.auto !== 'ended';
     var status = isUnsureRow ? w('rowUnsure', row.when) : ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
     var project = showProject ? clean(ref.repo || row.project) : '';

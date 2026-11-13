@@ -74,6 +74,10 @@ export type RowStateInput = {
   // A pending approval from the host's permission event only (D3, #1318).
   // False until D3 wires it; reply text never counts as an approval.
   hasApproval?: boolean
+  // The stale timeout the caller runs under (--stale-ms, else 12 h): the
+  // backstop below ends a quiet row past this, so --json agrees with the
+  // Stopped shelf and --status instead of always reading 12 h (#1406).
+  staleMs?: number
 }
 
 // A step that is still work: not done, not cancelled, and not the hook's own
@@ -84,6 +88,7 @@ const isOpenStep = (step: ProgressStep): boolean =>
 
 export const deriveRowState = (input: RowStateInput): RowState => {
   const { auto, steps, mirror, events, liveness, now, hasOpenAsk } = input
+  const staleMs = input.staleMs ?? STALE_MS
   if (auto === null) return 'manual'
   // A session-end event, or a block that already says ended, is ended whatever
   // else the row holds — including an open ask, which then leaves Needs you
@@ -92,12 +97,13 @@ export const deriveRowState = (input: RowStateInput): RowState => {
   // A claimed process proven gone is ended too: the same fact Phase 1 already
   // shows as ended through `isStopped`.
   if (liveness === 'dead') return 'ended'
-  // The 12 h backstop, unchanged: a working or waiting row quiet past STALE_MS
-  // already displays as ended today (`isStale`), and its open ask already
-  // leaves Needs you for the Older shelf — so 'ended' wins here too, before
-  // the answer branch below. It also bounds 'unsure': a placeholder row is
-  // unsure from 30 min to 12 h, and ended past that, as today.
-  if ((auto.state === 'working' || auto.state === 'waiting') && events.lastEventAt > 0 && now - events.lastEventAt > STALE_MS) return 'ended'
+  // The configured stale backstop, unchanged in shape: a working or waiting
+  // row quiet past staleMs already displays as ended today (`isStale`), and
+  // its open ask already leaves Needs you for the Older shelf — so 'ended'
+  // wins here too, before the answer branch below. It also bounds 'unsure':
+  // a placeholder row is unsure from 30 min to staleMs, and ended past that,
+  // as today.
+  if ((auto.state === 'working' || auto.state === 'waiting') && events.lastEventAt > 0 && now - events.lastEventAt > staleMs) return 'ended'
   if (input.hasApproval === true) return 'approval'
   if (mirror !== null && mirror.tasks.some(task => waitsOnYou(mirror, task))) return 'answer'
   if (hasOpenAsk) return 'answer'

@@ -171,6 +171,28 @@ test('a placeholder row quiet past 12 h is ended, not unsure', () => {
   }))).toBe('ended')
 })
 
+test('a configured stale timeout ends a working row past it, not past 12 h', () => {
+  // Greptile P1 on #1406: with --stale-ms 60000 a two-minute-old working
+  // block already reads Stopped elsewhere, so the derivation must agree.
+  expect(deriveRowState(input({
+    auto: auto('working', NOW - 2 * MIN),
+    steps: [step('Check the routes', 'doing')],
+    events: { hasSessionEnd: false, lastEventAt: NOW - 2 * MIN, host: 'codex' },
+    staleMs: MIN,
+  }))).toBe('ended')
+})
+
+test('a configured stale timeout longer than 12 h keeps a live row working', () => {
+  // The other half of the same P1: a timeout past 12 h must not end a live
+  // row the 12 h backstop would have ended.
+  expect(deriveRowState(input({
+    auto: auto('working', NOW - 13 * 60 * MIN),
+    steps: [step('Check the routes', 'doing')],
+    events: { hasSessionEnd: false, lastEventAt: NOW - 13 * 60 * MIN, host: 'codex' },
+    staleMs: 24 * 60 * MIN,
+  }))).toBe('working')
+})
+
 test('livenessOf reads dead, alive and unknown from the gone set', () => {
   const claimed = auto('working', NOW - 5 * MIN, { agent: 'claude', agentPid: 1234, agentStarted: NOW - 60 * MIN, host: HOST })
   expect(livenessOf(claimed, new Set([blockKey(claimed)]))).toBe('dead')

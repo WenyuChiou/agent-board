@@ -519,13 +519,13 @@ test('a closed Claude session question folds into Older unanswered when its proc
     await clock.advance(6100)
     const id = storedQuestion(world, 'Publish, OK?')
     expect(id.startsWith('question:')).toBe(true)
-    expect(seen.status.at(-1) ?? '').toContain('1 need you')
+    expect(seen.status.at(-1) ?? '').toContain('1 waiting on you')
     const notifiedBefore = seen.notified.length
     // Kill the process while leaving progress.md (and its mtime) untouched: the next
     // unchanged-file poll updates goneSessions, status line, reminders, and pane view.
     pidAlive = false
     await clock.advance(6100)
-    expect(seen.status.at(-1) ?? '').not.toContain('1 need you')
+    expect(seen.status.at(-1) ?? '').not.toContain('1 waiting on you')
     expect(seen.notified.slice(notifiedBefore)).toEqual([])
     const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
     expect(await ui.find({ type: 'Button', key: 'waiting::' })).toBeUndefined()

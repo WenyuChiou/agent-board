@@ -52,6 +52,34 @@ test('a waiting approval whose agent process is dead is in goneBlocksOf, and a l
   assert.deepEqual([...gone], [blockKey(projects[0].tasks[0].auto)])
 })
 
+test('two blocks sharing one live pid with different start times look the start up once', async () => {
+  // Greptile P2 on #1406: the cache was keyed by pid only, so one claim
+  // always missed and every unchanged poll repeated the lookup (a
+  // PowerShell launch on Windows). Each (pid, started) pair is cached now.
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { blockKey } = await import('../hooks/session-liveness.ts')
+  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const { processStartedMany } = await import('../scripts/local-lock.ts')
+  const host = readingHostHash()
+  assert.notEqual(host, null, 'this machine has a host hash')
+  const text = file(
+    block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: alivePid, started: aliveStarted, host }),
+    block('b2c3d4e5', 'claude', 'waiting', '- [?] Continue with the synthetic plan, OK?', { pid: alivePid, started: aliveStarted + 60_000, host }),
+  )
+  const projects = parseProgress(text)
+  const cache = new Map()
+  let lookups = 0
+  const lookupStart = (pids, timeoutMs) => {
+    lookups += 1
+    return processStartedMany(pids, timeoutMs)
+  }
+  const first = goneBlocksOf(projects, host, cache, 2000, lookupStart)
+  const second = goneBlocksOf(projects, host, cache, 2000, lookupStart)
+  assert.equal(lookups, 1, 'the second unchanged poll must not repeat the start lookup')
+  assert.deepEqual([...second], [...first])
+  assert.deepEqual([...first], [blockKey(projects[0].tasks[1].auto)], 'only the reused-pid block is gone')
+})
+
 test('a batched start-time lookup returns each live pid start time and null for a dead pid', async () => {
   const { cachedProcessStartedMany, processStartedMany } = await import('../scripts/local-lock.ts')
   const pid = deadPid()
@@ -91,14 +119,14 @@ test('a non-Claude session is never in goneBlocksOf, even when its block carries
 test('a dead pid deletes its cached ClaimStart, so a later session reusing the pid is looked up again', async () => {
   const { parseProgress } = await import('../hooks/parse.ts')
   const { blockKey } = await import('../hooks/session-liveness.ts')
-  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const { goneBlocksOf, readingHostHash, cacheKey } = await import('../scripts/session-liveness.ts')
   const host = readingHostHash()
   const pid = deadPid()
   const text = file(block('a1b2c3d4', 'claude', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid, started: aliveStarted, host }))
   const projects = parseProgress(text)
-  const cache = new Map([[pid, { claimed: aliveStarted, actual: aliveStarted }]])
+  const cache = new Map([[cacheKey(pid, aliveStarted), { claimed: aliveStarted, actual: aliveStarted }]])
   assert.deepEqual([...goneBlocksOf(projects, host, cache)], [blockKey(projects[0].tasks[0].auto)])
-  assert.equal(cache.has(pid), false)
+  assert.equal(cache.has(cacheKey(pid, aliveStarted)), false)
 })
 
 test('a dead duplicate keeps only its own blockKey gone, and a colliding short id keeps the live one out of goneBlocksOf', async () => {
@@ -128,7 +156,7 @@ test('a dead duplicate keeps only its own blockKey gone, and a colliding short i
 test('injected lookupStart runs once over three reads for both a reused pid and a failed lookup, and re-queries once when claim.started changes (#1092)', async () => {
   const { parseProgress } = await import('../hooks/parse.ts')
   const { blockKey } = await import('../hooks/session-liveness.ts')
-  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const { goneBlocksOf, readingHostHash, cacheKey } = await import('../scripts/session-liveness.ts')
   const host = readingHostHash()
 
   // Test 4: reused pid (actual !== claimed) cached once over 3 reads
@@ -144,7 +172,7 @@ test('injected lookupStart runs once over three reads for both a reused pid and 
     assert.deepEqual([...goneBlocksOf(reusedProjects, host, reusedCache, 2000, reusedLookup)], [reusedKey])
   }
   assert.equal(reusedCalls, 1)
-  assert.deepEqual(reusedCache.get(alivePid), { claimed: aliveStarted - 60_000, actual: aliveStarted })
+  assert.deepEqual(reusedCache.get(cacheKey(alivePid, aliveStarted - 60_000)), { claimed: aliveStarted - 60_000, actual: aliveStarted })
 
   // Test 5: failed lookup (null) cached once over 3 reads, then re-queries once on a new claim.started
   const timeoutCache = new Map()
@@ -159,7 +187,7 @@ test('injected lookupStart runs once over three reads for both a reused pid and 
     assert.deepEqual([...goneBlocksOf(firstClaim, host, timeoutCache, 2000, flakyLookup)], [])
   }
   assert.equal(timeoutCalls, 1)
-  assert.deepEqual(timeoutCache.get(alivePid), { claimed: aliveStarted - 60_000, actual: null })
+  assert.deepEqual(timeoutCache.get(cacheKey(alivePid, aliveStarted - 60_000)), { claimed: aliveStarted - 60_000, actual: null })
 
   // New session claim reusing the same pid triggers ONE fresh lookup and sees it alive cleanly.
   lookupResult = aliveStarted
@@ -168,7 +196,7 @@ test('injected lookupStart runs once over three reads for both a reused pid and 
     assert.deepEqual([...goneBlocksOf(nextClaim, host, timeoutCache, 2000, flakyLookup)], [])
   }
   assert.equal(timeoutCalls, 2)
-  assert.deepEqual(timeoutCache.get(alivePid), { claimed: aliveStarted, actual: aliveStarted })
+  assert.deepEqual(timeoutCache.get(cacheKey(alivePid, aliveStarted)), { claimed: aliveStarted, actual: aliveStarted })
 })
 
 // Fable Section 3 Test 11: board-cli archive of a stopped dead row keeps its unanswered question and reports kept count.

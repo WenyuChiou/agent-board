@@ -24,7 +24,7 @@ const loadSources = async () => {
   } finally { loader.deregister() }
 }
 
-const [{ parseProgress, STALE_MS }, { buildView }, { serveModel }, { boardText }, { boardStatus, boardCounts }, { boardDocument }, { STRINGS }, { queueMessage }, { mailboxId }] = await loadSources()
+const [{ parseProgress, STALE_MS }, { buildView }, { serveModel, servePage }, { boardText }, { boardStatus, boardCounts }, { boardDocument }, { STRINGS }, { queueMessage }, { mailboxId }] = await loadSources()
 const EN = STRINGS.en
 const NOW = Date.parse('2026-11-04T12:00:00Z')
 const MINUTE = 60_000
@@ -37,11 +37,11 @@ const MINUTE = 60_000
 const block = (id, agent, state, title, steps, at = NOW, extra = '') =>
   `<!-- auto session=${id} agent=${agent} state=${state} updated=${new Date(at).toISOString()} ${extra} -->\n### ${title}\n${steps}\n<!-- /auto session=${id} -->\n`
 const groupOptions = { now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] }
-const surfaces = (file, { messaging, pending = [] } = {}) => {
-  const view = buildView(parseProgress(file), [], null, NOW, 0, {}, EN)
+const surfaces = (file, { messaging, pending = [], staleMs = STALE_MS } = {}) => {
+  const view = buildView(parseProgress(file), [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, staleMs)
   const page = serveModel(view, pending, EN, new Set(), false, messaging, false, groupOptions)
   const terminal = boardText(view, pending, EN, { width: 100, isColor: false, messaging })
-  const status = boardStatus(file, NOW, EN, STALE_MS, '', '', pending, messaging)
+  const status = boardStatus(file, NOW, EN, staleMs, '', '', pending, messaging)
   const json = boardDocument(view, pending, [], EN, '/synthetic-home', false, NOW, groupOptions, undefined, messaging)
   return { view, page, terminal, status, json }
 }
@@ -165,6 +165,47 @@ test('one fixture, four surfaces: a stale working row sits on the stopped shelf 
   assert.equal(out.json.stopped[0].title, 'Stale work')
   assert.equal(out.json.stopped[0].state, 'ended', 'the 12 h backstop reads ended, as today')
   assert.equal(out.page.view.all.stopped.length, 1)
+})
+
+test('one fixture, four surfaces: a custom stale timeout ends the row on every surface (#1317)', () => {
+  // Greptile P1 on #1406: --stale-ms 60000 must end a two-minute-old working
+  // row in --json too, not only in --status and on the Stopped shelf.
+  const file = '## synthetic-api\n' +
+    block('a1000001', 'codex', 'working', 'Stale work', '- [~] Write a test', NOW - 2 * MINUTE) +
+    block('a1000002', 'codex', 'working', 'Fresh work', '- [~] Write a test', NOW - MINUTE)
+  const out = surfaces(file, { staleMs: MINUTE })
+  agree('custom stale timeout', out)
+  assert.equal(statusCounts(out.status).needs, 0)
+  assert.equal(statusCounts(out.status).working, 1)
+  assert.equal(out.json.counts.stopped, 1)
+  assert.equal(out.json.stopped[0].title, 'Stale work')
+  assert.equal(out.json.stopped[0].state, 'ended', 'the configured timeout, not 12 h, ends the row in --json')
+  assert.equal(out.page.view.all.stopped.length, 1)
+})
+
+test('one fixture, four surfaces: a working placeholder row quiet past 30 min keeps the stopped wording on the page (#1317)', () => {
+  // Greptile P2 on #1406: the row derives 'unsure' but its effective state is
+  // 'ended' (silence), so the page must not add the grey unsure label on the
+  // Stopped shelf — the terminal already keeps the stopped wording there.
+  // The label is drawn by the page's own script, so the test reads the served
+  // page as well as the model.
+  const file = '## synthetic-api\n' +
+    block('a1000001', 'antigravity', 'working', 'Silent window work', '- [ ] Waiting for the next instruction', NOW - 31 * MINUTE) +
+    block('a1000002', 'codex', 'working', 'Write a test', '- [~] Write a test', NOW - MINUTE)
+  const out = surfaces(file)
+  agree('working placeholder silence', out)
+  assert.equal(statusCounts(out.status).needs, 0)
+  assert.equal(statusCounts(out.status).working, 1)
+  assert.equal(out.page.view.all.stopped.length, 1)
+  const pageRow = out.page.stopped.find(row => row.title === 'Silent window work')
+  assert.equal(pageRow.rowState, 'unsure')
+  assert.equal(pageRow.auto, 'ended')
+  assert.equal(pageRow.status, EN.sessionStopped(EN.minutesAgo(31)), 'the model keeps the stopped wording for this row')
+  assert.ok(!out.terminal.includes(EN.rowUnsure(EN.minutesAgo(31))), `terminal must not show the unsure wording here:\n${out.terminal}`)
+  assert.ok(out.terminal.includes(EN.stoppedCount(1)), `terminal must count the stopped row:\n${out.terminal}`)
+  assert.equal(out.json.counts.stopped, 1)
+  assert.equal(out.json.stopped[0].state, 'unsure', 'the derivation is still unsure; only the page label is guarded')
+  assert.ok(servePage(EN, 'synthetic').includes(`var isUnsureRow = row.rowState === 'unsure' && row.auto !== 'ended';`), 'the served page must guard the unsure label with the ended state')
 })
 
 test('the page model carries no approval count, so only the tab title can add approvals (Q7, undecided)', () => {

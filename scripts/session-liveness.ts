@@ -30,8 +30,14 @@ export const readingHostHash = (): string | null => {
 
 // Start-time lookups, cached per `(pid, claimed)` in the board process (PM Q5:
 // a live pid's start time is checked once per claim, never once per poll,
-// including reused-pid mismatches and failed/timed-out lookups).
-const startedCache = new Map<number, ClaimStart>()
+// including reused-pid mismatches and failed/timed-out lookups). The key
+// carries the claimed start time: two blocks sharing one pid with different
+// starts are two claims, so one must not evict the other's lookup (#1406).
+// The cache key: one entry per (pid, claimed start), so two blocks sharing
+// a reused pid do not overwrite each other's start (#1406). The colon
+// disambiguates pid 12 from pid 123. Tests read the cache through this.
+export const cacheKey = (pid: number, started: number): string => `${pid}:${started}`
+const startedCache = new Map<string, ClaimStart>()
 
 const isAlivePid = (pid: number): boolean => {
   try {
@@ -51,7 +57,7 @@ const isAlivePid = (pid: number): boolean => {
 export const goneBlocksOf = (
   projects: readonly ProgressProject[],
   hostHash: string | null = readingHostHash(),
-  cache: Map<number, ClaimStart> = startedCache,
+  cache: Map<string, ClaimStart> = startedCache,
   timeoutMs: number = START_LOOKUP_TIMEOUT_MS,
   lookupStart: (pids: readonly number[], timeoutMs: number) => Map<number, ProcessStart> = processStartedMany,
 ): ReadonlySet<string> => {
@@ -64,22 +70,22 @@ export const goneBlocksOf = (
     if (alive === undefined) {
       alive = isAlivePid(claim.pid)
       alivePids.set(claim.pid, alive)
-      if (!alive) cache.delete(claim.pid)
+      if (!alive) for (const key of [...cache.keys()]) if (key.startsWith(`${claim.pid}:`)) cache.delete(key)
     }
     if (!alive || claim.started === undefined) continue
-    const held = cache.get(claim.pid)
+    const held = cache.get(cacheKey(claim.pid, claim.started))
     if (held === undefined || held.claimed !== claim.started) toLookup.add(claim.pid)
   }
   const freshStarts = toLookup.size > 0 ? lookupStart([...toLookup], timeoutMs) : new Map<number, ProcessStart>()
   for (const { claim } of claims) {
     if (!toLookup.has(claim.pid) || claim.started === undefined) continue
-    cache.set(claim.pid, { claimed: claim.started, actual: freshStarts.get(claim.pid) ?? null })
+    cache.set(cacheKey(claim.pid, claim.started), { claimed: claim.started, actual: freshStarts.get(claim.pid) ?? null })
   }
   return goneBlocks(projects, claim => {
     const alive = alivePids.get(claim.pid) ?? true
     if (!alive || claim.started === undefined) return { alive, actual: null }
     if (toLookup.has(claim.pid)) return { alive: true, actual: freshStarts.get(claim.pid) ?? null }
-    const held = cache.get(claim.pid)
+    const held = cache.get(cacheKey(claim.pid, claim.started))
     return { alive: true, actual: held !== undefined && held.claimed === claim.started ? held.actual : null }
   }, hostHash)
 }
