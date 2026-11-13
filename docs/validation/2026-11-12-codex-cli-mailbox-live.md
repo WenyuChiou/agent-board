@@ -23,7 +23,7 @@ Before this run the route had no record, so the card offered only Copy (#1354) a
 
 ## Result
 
-**PASS.** A message queued from the board while an interactive Codex CLI session was idle waited without waking it and reached the model at the session's next turn, through its turn-start hook. `accepted` is where a hook mailbox stops (`docs/MESSAGING.md`: a hook collects no ACK); the model's ACK line shows it read the message.
+**PASS.** A message queued from the board while an interactive Codex CLI session was idle waited without waking it and reached the model at the session's next turn, through its turn-start hook. In this run the store stayed `accepted`; a turn-start hook collects no ACK (`docs/MESSAGING.md`), and the model's ACK line shows it read the message.
 
 The record covers the idle route on the CLI surface only.
 
