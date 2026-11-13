@@ -27,6 +27,8 @@ Question: does a message queued from the board's page for an Antigravity desktop
 | 00:48:45 | turn 2 ended. The model's reply: an ACK line (its code is left out here), then "Got it—you chose Blue. Synthetic test complete; no files were changed." |
 | 00:49:11 | the row read "Handed to the session at its turn start. No reply is confirmed." |
 
+Message id prefix `AB-7ca6bcb5…` (the store's claim time for it matches the `accepted` row above to the second).
+
 ## Run 2: queued while a turn was running
 
 1. The board page restarted with the working routes file; Antigravity started again from the test home (the run 1 window had been closed).
@@ -45,6 +47,8 @@ Question: does a message queued from the board's page for an Antigravity desktop
 | 00:59:53 | turn 3 sent (`PreInvocation`); the hook claimed the message and the store marked it `accepted` 7 ms later: `line nextTurn`, surface `IDE`, `hops 1`, reply and error empty |
 | 00:59:59 | turn 3 ended. The model's reply began with an ACK line carrying the message's code (left out here), then "Received Green from Agent Board.", and asked whether to try a smaller range or another format |
 | 01:00 | the row read "Handed to the session at its turn start. No reply is confirmed." and was under Needs you with the model's question |
+
+Message id prefix `AB-66ca02ea…` (the store's claim time for it matches the `accepted` row above to the second).
 
 ## Result
 

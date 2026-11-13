@@ -470,7 +470,7 @@ describe('L0 discover and install from the README', () => {
     const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'appNext'], Cursor: ['page', 'untested'], OpenCode: ['page', 'notYet'] }
     // The route lines with a live note on any surface of a README row, whatever the receiver or the state: a route the
     // routes file records that no cell is worded for fails here until the cell is decided.
-    const noted = (routes, agent, surfaces) => [...new Set(routes.filter(one => one.agent === agent).flatMap(one => [one.routes.idle, one.routes.working])
+    const noted = (routes, agent, surfaces) => [...new Set(routes.filter(one => one.agent === agent).flatMap(one => [one.routes.idle, one.routes.working, one.routes.ended])
       .filter(route => route.line !== 'none' && surfaces.some(surface => route.surfaces.includes(surface) && isNote(routeRecord(route, surface)))).map(route => route.line))].sort().join('+')
     const ROW = {
       terminal: { 'Claude Code': ['claude', [S.claude]], Codex: ['codex', [S.cli, S.codexProxy, S.codexSession]], Antigravity: ['antigravity', [S.antigravityTui, S.antigravityStream]], Cursor: ['cursor', [S.cursor]] },
@@ -488,7 +488,7 @@ describe('L0 discover and install from the README', () => {
       const listedIds = new Set(['claude', 'codex', 'antigravity', 'cursor', 'opencode', 'grok', 'hermes'])
       const rowSurfaces = new Map()
       for (const [id, surfaces] of [...Object.values(ROW.terminal), ...Object.values(ROW.desktop)]) rowSurfaces.set(id, [...(rowSurfaces.get(id) ?? []), ...surfaces])
-      for (const one of routes.filter(route => listedIds.has(route.agent))) for (const route of [one.routes.idle, one.routes.working]) for (const surface of route.line === 'none' ? [] : route.surfaces) {
+      for (const one of routes.filter(route => listedIds.has(route.agent))) for (const route of [one.routes.idle, one.routes.working, one.routes.ended]) for (const surface of route.line === 'none' ? [] : route.surfaces) {
         if (isNote(routeRecord(route, surface))) assert.ok((rowSurfaces.get(one.agent) ?? []).includes(surface), `${one.agent} on ${surface}: a recorded route that no README row is checked against`)
       }
     }
@@ -497,6 +497,10 @@ describe('L0 discover and install from the README', () => {
     const none = { line: 'none', record: null, surfaces: [] }
     const openCodeTurn = { agent: 'opencode', kind: 'turn', routes: { idle: { line: 'nextTurn', record: 'docs/validation/synthetic-opencode.md', surfaces: [S.cli] }, working: none, ended: none } }
     assert.throws(() => checkCells([...RECEIVER_ROUTES, openCodeTurn]), /opencode on /)
+    // A recorded route for an ended session counts too: a reopen route needs its cell decided like the others.
+    const ended = (agent, record) => ({ agent, kind: 'turn', routes: { idle: none, working: none, ended: { line: 'reopen', record, surfaces: [S.cli] } } })
+    assert.throws(() => checkCells([...RECEIVER_ROUTES, ended('codex', 'docs/validation/synthetic-codex.md')]), /Codex: the terminal cell/)
+    assert.throws(() => checkCells([...RECEIVER_ROUTES, ended('opencode', 'docs/validation/synthetic-opencode.md')]), /opencode on /)
     const messaging = read('docs/MESSAGING.md')
     const appNote = 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md'
     for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Proposed', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Verified', `[${appNote}](../${appNote})`], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Proposed', 'Not tested']]) {

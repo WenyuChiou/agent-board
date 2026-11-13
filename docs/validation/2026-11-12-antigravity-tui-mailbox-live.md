@@ -27,6 +27,8 @@ Question: does a message queued from the board's page, while an interactive `agy
 | 17:33:42 | the hook claimed the message and it became `accepted`. The transcript holds the hook's message ("Agent Board message, sent from the board page ... Reply first with this line alone: ACK ...") with the text "Blue" |
 | 17:33:42-54 | the model's report command carried the step "Ask Blue or green? (Blue)": it used the answer. It printed no ACK line |
 
+Message id prefix `AB-cc5412ae…` (the store's claim time for it matches the `accepted` row above to the second).
+
 The mailbox registered as `IDE`, not `agy TUI`: before this change the turn-start hook labelled every Antigravity mailbox `IDE`.
 
 ## Run 2, with this change (`cbe3fc4d`)
@@ -42,6 +44,8 @@ Before queueing, the page's own data for the new row: `send: mailbox`, `line: ne
 | 19:38:33 | turn 2's prompt sent (the TUI took about 9 minutes to start this time; not chased) |
 | 19:38:35 | the hook claimed the message and it became `accepted` (`line nextTurn`, `hops 1`, reply and error empty). The transcript holds the hook's message with the text "Blue" |
 | 19:38:45 | the model finished the turn ("Synthetic test complete. No files were changed.") with no ACK line and without using "Blue" |
+
+Message id prefix `AB-d3964731…` (the store's claim time for it matches the `accepted` row above to the second).
 
 ## Result
 
