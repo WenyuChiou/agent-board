@@ -117,8 +117,9 @@ const isolatedEnv = (home, pathValue) => {
     OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
   }
   for (const key of Object.keys(env)) {
-    // The Codex app, the editor and Codex's background service mark the Codex they start, so tests
-    // run from inside one would read every hook as that client, not the terminal.
+    // Read from Codex 0.167's source, not seen in a live run: the Codex app, the editor and Codex's
+    // background service on Windows mark the Codex they start. With such a mark left in the
+    // environment, no hook in these tests would read as the terminal.
     if (key.toLowerCase() === 'path' || ['CODEX_INTERNAL_ORIGINATOR_OVERRIDE', 'CODEX_DAEMON_SHUTDOWN_SOCKET'].includes(key.toUpperCase())) delete env[key]
   }
   env[pathKey] = cleanPath
@@ -809,17 +810,19 @@ test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, G
   }
 }))
 
-test('a Codex hook mailbox is the CLI only when its history file names the terminal and no other client or background service marks the hook, so the app, the editor and a resumed session get no Queue (#826)', async () => mailboxFixture(async f => {
+test('a Codex hook mailbox is the CLI only when its history file names the terminal and no other client or background service marks the hook, so a session the app, the editor or the background service marks gets no Queue (#826)', async () => mailboxFixture(async f => {
   const { sendDecision } = await importTs('../hooks/messaging.ts')
   const { RECEIVER_ROUTES } = await importTs('../hooks/receiver-routes.ts')
   const history = join(f.home, 'codex-history')
   mkdirSync(history, { recursive: true })
   const file = join(history, `rollout-2026-11-12T00-00-00-${session}.jsonl`)
   const mailboxOf = () => f.state().mailboxes?.find(one => one.agent === 'codex' && one.session === session)
-  // The desktop app and the editor extension mark the Codex they start with the client variable,
+  // Read from Codex 0.167's source, not seen in a live run: the desktop app and the editor extension
+  // mark the Codex they start with the client variable,
   // and Codex's background service on Windows with the daemon variable; the terminal sets neither.
-  // A resumed session keeps the file of the client that started it, so the terminal → app,
-  // terminal → editor and app → terminal resumes are all here.
+  // A resumed session keeps the file of the client that started it (also read from the source), so
+  // a written file plus the variables stand in for terminal → app, terminal → editor and
+  // app → terminal. No case here resumes a real session.
   const cases = [
     ['codex-tui', undefined, undefined, 'CLI'], ['codex-tui', 'codex-tui', undefined, 'CLI'], ['Codex Desktop', undefined, undefined, 'unknown'],
     ['codex_vscode', undefined, undefined, 'unknown'], [null, undefined, undefined, 'unknown'],
@@ -1262,17 +1265,17 @@ const detectedSetupFixture = fn => fixture(f => {
 })
 
 test('a setup preview in a new home lists the agents installed on the PATH', () => detectedSetupFixture(f => {
-  f.fake('gemini')
+  f.fake('codex')
   f.fake('agy')
   const preview = f.run()
   assert.equal(preview.status, 0, preview.stderr)
   assert.equal(preview.stderr, '')
-  assert.match(preview.stdout, /^Gemini CLI:/m)
+  assert.match(preview.stdout, /^Codex:/m)
   assert.match(preview.stdout, /^Antigravity:/m)
-  assert.doesNotMatch(preview.stdout, /^(Codex|Cursor|OpenCode|Grok Build|Muse Code|Hermes Agent|OpenClaw|DeepSeek):/m)
+  assert.doesNotMatch(preview.stdout, /^(Gemini CLI|Cursor|OpenCode|Grok Build|Muse Code|Hermes Agent|OpenClaw|DeepSeek):/m)
   const json = f.run('--json')
   assert.equal(json.status, 0, json.stderr)
-  assert.deepEqual(JSON.parse(json.stdout).targets, ['gemini', 'antigravity'])
+  assert.deepEqual(JSON.parse(json.stdout).targets, ['codex', 'antigravity'])
   f.fake('claude')
   const claude = f.run()
   assert.equal(claude.status, 0, claude.stderr)
@@ -1384,8 +1387,8 @@ test('setup on Windows counts every command spelling and not a bare name', { ski
       return JSON.parse(result.stdout).targets
     } finally { rmSync(file) }
   }
-  for (const extension of ['.exe', '.cmd', '.bat', '.com', '.ps1']) assert.deepEqual(targetsWith(`gemini${extension}`), ['gemini'], extension)
-  assert.deepEqual(targetsWith('gemini'), [])
+  for (const extension of ['.exe', '.cmd', '.bat', '.com', '.ps1']) assert.deepEqual(targetsWith(`codex${extension}`), ['codex'], extension)
+  assert.deepEqual(targetsWith('codex'), [])
 }))
 
 test('a removed Antigravity is not listed again once its emptied hooks file is gone', () => fixture(f => {
@@ -1400,15 +1403,64 @@ test('a removed Antigravity is not listed again once its emptied hooks file is g
 }))
 
 test('a command on the PATH is listed once setup applies it, and again as already set up', () => detectedSetupFixture(f => {
-  f.fake('gemini')
+  f.fake('grok')
   const applied = f.run('--apply')
   assert.equal(applied.status, 0, applied.stderr)
-  assert.match(applied.stdout, /^Gemini CLI: created/m)
-  assert.equal(existsSync(join(f.root, 'install-gemini.json')), true)
+  assert.match(applied.stdout, /^Grok Build: created/m)
+  assert.equal(existsSync(join(f.root, 'install-grok.json')), true)
   const second = f.run()
   assert.equal(second.status, 0, second.stderr)
   assert.equal(second.stderr, '')
-  assert.match(second.stdout, /^Gemini CLI: already set up/m)
+  assert.match(second.stdout, /^Grok Build: already set up/m)
+}))
+
+test('setup no longer finds Gemini CLI, and still finds and sets up Antigravity in a home that has both (#1327)', () => fixture(f => {
+  f.save(join(f.home, '.gemini', 'settings.json'), '{}')
+  const only = setupAgent(f, '--json')
+  assert.equal(only.status, 0, only.stderr)
+  assert.deepEqual(JSON.parse(only.stdout).targets, [])
+  mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
+  const both = setupAgent(f, '--json')
+  assert.equal(both.status, 0, both.stderr)
+  assert.deepEqual(JSON.parse(both.stdout).targets, ['antigravity'])
+  const applied = setupAgent(f, '--lang', 'en', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.match(applied.stdout, /^Antigravity:/m)
+  assert.doesNotMatch(applied.stdout, /Gemini CLI/)
+  assert.equal(existsSync(join(f.root, 'install-antigravity.json')), true)
+  assert.equal(existsSync(join(f.root, 'install-gemini.json')), false)
+}))
+
+test('a gemini command on the PATH is not listed by setup (#1327)', () => detectedSetupFixture(f => {
+  f.fake('gemini')
+  const json = f.run('--json')
+  assert.equal(json.status, 0, json.stderr)
+  assert.deepEqual(JSON.parse(json.stdout).targets, [])
+  assert.deepEqual(readdirSync(f.home), [])
+}))
+
+for (const [lang, retired] of [['en', 'Gemini CLI is retired'], ['zh-TW', 'Gemini CLI 已退役'], ['zh-CN', 'Gemini CLI 已退役']]) {
+  test(`setup --agent gemini is refused as retired in ${lang} and changes no file (#1327)`, () => fixture(f => {
+    f.save(join(f.home, '.gemini', 'settings.json'), '{}')
+    const before = tree774(f.home)
+    for (const selector of ['gemini', 'codex,gemini', 'gemini,gemini']) for (const extra of [[], ['--apply'], ['--json']]) {
+      const result = setupAgent(f, '--lang', lang, '--agent', selector, ...extra)
+      assert.equal(result.status, 1, result.stdout)
+      assert.equal(result.stdout, '')
+      assert.ok(result.stderr.includes(retired), result.stderr)
+      assert.ok(result.stderr.includes('Antigravity CLI'), result.stderr)
+      assert.ok(result.stderr.includes('--agent antigravity'), result.stderr)
+      if (extra.includes('--json')) assert.equal(JSON.parse(result.stderr).error.code, 'RETIRED_AGENT')
+    }
+    assert.deepEqual(tree774(f.home), before)
+  }))
+}
+
+test('a report from an existing Gemini CLI install is still accepted after setup stopped offering it (#1327)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  const report = f.command(['--codex-report', '--agent', 'gemini', '--session', 'gemini-retired-session'], { title: 'Still reporting', state: 'working', steps: ['- [~] Keep going'] })
+  assert.equal(report.status, 0, report.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /agent=gemini/)
 }))
 
 const systemLanguageEnv = () => ({ LANG: '', NODE_OPTIONS: `--require ${JSON.stringify(resolve('tests/fixtures/system-lang-zh-tw.cjs'))}` })
@@ -2563,12 +2615,15 @@ test('setup still refuses a malformed host config that starts with a BOM', async
     assert.notEqual(applied.status, 0)
     assert.deepEqual(readFileSync(config), original)
     assert.equal(existsSync(f.root), false)
-    const common = setupAgent(f, '--lang', 'en', '--agent', host, '--json')
-    assertSetupStatus(common, 1)
-    assert.equal(common.stderr, '')
-    assert.equal(JSON.parse(common.stdout).applied, false)
-    assert.deepEqual(readFileSync(config), original)
-    assert.equal(existsSync(f.root), false)
+    // The independent installer no longer takes Gemini CLI by name (#1327); only the engine above reads its config.
+    if (host !== 'gemini') {
+      const common = setupAgent(f, '--lang', 'en', '--agent', host, '--json')
+      assertSetupStatus(common, 1)
+      assert.equal(common.stderr, '')
+      assert.equal(JSON.parse(common.stdout).applied, false)
+      assert.deepEqual(readFileSync(config), original)
+      assert.equal(existsSync(f.root), false)
+    }
   })
 })
 
@@ -7465,7 +7520,7 @@ test('Grok prompt hooks return a waiting session to working through the native s
   assert.ok(!readFileSync(f.progress, 'utf8').includes('PRIVATE_PAYLOAD'))
 }))
 
-test('auto setup does not mistake an Antigravity profile or the shared gemini directory for Gemini CLI', () => fixture(f => {
+test('auto setup finds an Antigravity profile and does not list Gemini CLI for the shared gemini directory', () => fixture(f => {
   mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
   const args = [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--json']
   const run = () => spawnSync(process.execPath, args, { env: f.env, encoding: 'utf8', windowsHide: true })
@@ -7474,7 +7529,7 @@ test('auto setup does not mistake an Antigravity profile or the shared gemini di
   assert.deepEqual(JSON.parse(result.stdout).targets, ['antigravity'])
   assert.equal(existsSync(join(f.home, '.gemini', 'settings.json')), false)
   f.save(join(f.home, '.gemini', 'settings.json'), '{}')
-  assert.deepEqual(JSON.parse(run().stdout).targets, ['gemini', 'antigravity'])
+  assert.deepEqual(JSON.parse(run().stdout).targets, ['antigravity'])
 }))
 
 test('all targets initialize one shared board and name each adapter capability', () => fixture(f => {
@@ -7482,20 +7537,21 @@ test('all targets initialize one shared board and name each adapter capability',
   const result = spawnSync(process.execPath, [installer, '--agent', 'all', '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply', '--json'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
   assert.equal(result.status, 0, `${JSON.stringify({ error: result.error?.code, signal: result.signal })}\n${result.stderr}`)
   const plans = JSON.parse(result.stdout).plans
-  assert.equal(plans.length, 10)
+  assert.equal(plans.length, 9)
+  assert.ok(!plans.some(plan => plan.agent === 'gemini'))
   assert.equal(new Set(plans.map(plan => plan.progress)).size, 1)
   assert.equal(plans.find(plan => plan.agent === 'hermes').capabilities.lifecycle, 'adapter-installed-unverified')
   for (const agent of ['openclaw', 'deepseek']) assert.equal(plans.find(plan => plan.agent === agent).capabilities.lifecycle, 'adapter-installed-unverified')
   assert.equal(plans.find(plan => plan.agent === 'antigravity').capabilities.lifecycle, 'adapter-installed-unverified')
-  assert.ok(existsSync(join(f.home, '.gemini', 'commands', 'agent-board.toml')))
+  assert.equal(existsSync(join(f.home, '.gemini', 'commands', 'agent-board.toml')), false)
   assert.ok(existsSync(join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')))
   assert.match(readFileSync(join(f.home, '.hermes', 'config.yaml'), 'utf8'), /^hooks:\n {2}on_session_start:\n/)
-  for (const agent of ['gemini', 'grok', 'muse']) {
+  for (const agent of ['grok', 'muse']) {
     const response = f.command(['--agent-status', '--agent', agent, '--state', 'waiting'], { session_id: `shared-${agent}-session-123`, prompt: 'PRIVATE_PAYLOAD' })
     assert.equal(response.status, 0, response.stderr)
   }
   const text = readFileSync(f.progress, 'utf8')
-  for (const agent of ['gemini', 'grok', 'muse']) assert.ok(text.includes(`agent=${agent} `))
+  for (const agent of ['grok', 'muse']) assert.ok(text.includes(`agent=${agent} `))
   assert.ok(!text.includes('PRIVATE_PAYLOAD'))
 }))
 
@@ -9462,7 +9518,7 @@ test('setup keeps each installer\'s board when the connector and independent ins
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const before = JSON.parse(f.install('--agent', 'antigravity').stdout)
   mkdirSync(join(f.home, '.codex'), { recursive: true })
-  f.save(join(f.home, '.gemini', 'settings.json'), '{}')
+  mkdirSync(join(f.home, '.cursor'), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
   legacyConnect(f, progress)
 
@@ -9470,7 +9526,7 @@ test('setup keeps each installer\'s board when the connector and independent ins
     const result = setupAgent(f, '--json', ...(apply ? ['--apply'] : []))
     assert.equal(result.status, 0, result.stderr + result.stdout)
     const plans = JSON.parse(result.stdout).plans
-    for (const agent of ['codex', 'gemini']) {
+    for (const agent of ['codex', 'cursor']) {
       const plan = plans.find(one => one.agent === agent)
       assert.equal(plan.managedBy, 'connector', agent)
       assert.equal(plan.progress, progress, agent)
@@ -9532,8 +9588,8 @@ test('setup previews the connector board without duplicate hooks or conflicts fo
   for (const folder of ['.codex', '.cursor', '.gemini/antigravity', '.grok/sessions', '.config/muse', '.config/opencode', '.hermes']) mkdirSync(join(f.home, folder), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
   legacyConnect(f, progress)
-  const agents = ['codex', 'cursor', 'gemini', 'grok', 'muse', 'opencode', 'hermes', 'antigravity']
-  const files = [f.hooks, join(f.home, '.cursor', 'hooks.json'), join(f.home, '.gemini', 'settings.json'), join(f.home, '.grok', 'hooks', 'agent-board.json'), join(f.home, '.config', 'opencode', 'plugin', 'agent-board.js'), join(f.home, '.gemini', 'config', 'hooks.json')]
+  const agents = ['codex', 'cursor', 'grok', 'muse', 'opencode', 'hermes', 'antigravity']
+  const files = [f.hooks, join(f.home, '.cursor', 'hooks.json'), join(f.home, '.grok', 'hooks', 'agent-board.json'), join(f.home, '.config', 'opencode', 'plugin', 'agent-board.js'), join(f.home, '.gemini', 'config', 'hooks.json')]
   const before = files.map(file => readFileSync(file, 'utf8'))
   const preview = setupAgent(f, '--agent', agents.join(','), '--json')
   assert.equal(preview.status, 0, preview.stderr + preview.stdout)
@@ -9558,14 +9614,13 @@ test('after setup apply each connected hook delivers one synthetic event to the 
   for (const folder of ['.codex', '.cursor', '.gemini/antigravity', '.grok/sessions', '.config/muse']) mkdirSync(join(f.home, folder), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
   legacyConnect(f, progress)
-  const agents = ['codex', 'cursor', 'gemini', 'grok', 'muse', 'antigravity']
+  const agents = ['codex', 'cursor', 'grok', 'muse', 'antigravity']
   const applied = setupAgent(f, '--agent', agents.join(','), '--apply', '--json')
   assert.equal(applied.status, 0, applied.stderr + applied.stdout)
   assert.equal(JSON.parse(applied.stdout).applied, true)
   const definitions = [
     ['codex', f.hooks, 'Stop'],
     ['cursor', join(f.home, '.cursor', 'hooks.json'), 'afterAgentResponse'],
-    ['gemini', join(f.home, '.gemini', 'settings.json'), 'AfterAgent'],
     ['grok', join(f.home, '.grok', 'hooks', 'agent-board.json'), 'Stop'],
     ['muse', join(f.home, '.config', 'muse', 'settings.json'), 'Stop'],
   ]
@@ -11809,8 +11864,8 @@ for (const agent of ['gemini', 'opencode']) {
     assert.deepEqual(plan.conflicts, [])
     assert.deepEqual(plan.changes.filter(change => change.file === old.old), [{ file: old.old, action: 'remove' }])
     assert.deepEqual(plan.changes.filter(change => change.file === old.now), [{ file: old.now, action: 'create' }])
-    const plain = setupAgent(f, '--lang', 'en', '--agent', agent)
-    assert.match(plain.stdout, /board\.(toml|md) \(the old \/board command; setup removes it\)/, plain.stdout)
+    const plain = agent === 'gemini' ? null : setupAgent(f, '--lang', 'en', '--agent', agent)
+    if (plain) assert.match(plain.stdout, /board\.(toml|md) \(the old \/board command; setup removes it\)/, plain.stdout)
     assert.equal(existsSync(old.old), true, 'a preview changes nothing')
     const applied = f.install('--agent', agent, '--apply', '--json')
     assert.equal(applied.status, 0, applied.stderr)
@@ -11828,8 +11883,8 @@ for (const agent of ['gemini', 'opencode']) {
     assert.deepEqual(plan.conflicts, [])
     assert.deepEqual(plan.keptEdited, [old.old])
     assert.equal(plan.changes.some(change => change.file === old.old), false)
-    const plain = setupAgent(f, '--lang', 'en', '--agent', agent)
-    assert.match(plain.stdout, /board\.(toml|md) \(your edited old \/board command; setup leaves it; the command is now \/agent-board\)/, plain.stdout)
+    const plain = agent === 'gemini' ? null : setupAgent(f, '--lang', 'en', '--agent', agent)
+    if (plain) assert.match(plain.stdout, /board\.(toml|md) \(your edited old \/board command; setup leaves it; the command is now \/agent-board\)/, plain.stdout)
     const applied = f.install('--agent', agent, '--apply', '--json')
     assert.equal(applied.status, 0, applied.stderr)
     assert.equal(readFileSync(old.old, 'utf8'), `${old.text}\nMy own line\n`)

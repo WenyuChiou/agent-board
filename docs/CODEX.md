@@ -88,7 +88,7 @@ a turn id. Stale turns are rejected and recent repeated events are no-ops. Retir
 ids and event keys are bounded to 128 and 256 per session. This protects lifecycle replay;
 it is not an authenticated message-delivery channel.
 
-A seventh hook, `PostToolUse` with the matcher `update_plan`, copies each plan Codex sets (its step text and status) into the session's steps through the same writer as `--report`, with no model call. It prints nothing. Gemini CLI's `AfterTool` hook with the matcher `^write_todos$` does the same for its todos. Grok Build's `PostToolUse` hook with the matcher `^todo_write$` does it from the tool's result, which holds the whole list after a merge call (nothing is written for a truncated, duplicate-id or empty result). OpenCode's plugin does it on the `todo.updated` event (top-level session only), and OpenClaw's plugin on `after_tool_call` for `update_plan` (skipped when the call failed or carries no plan); both send only each step's text and status, and neither adds a hook to the host's configuration.
+A seventh hook, `PostToolUse` with the matcher `update_plan`, copies each plan Codex sets (its step text and status) into the session's steps through the same writer as `--report`, with no model call. It prints nothing. Grok Build's `PostToolUse` hook with the matcher `^todo_write$` does it from the tool's result, which holds the whole list after a merge call (nothing is written for a truncated, duplicate-id or empty result). OpenCode's plugin does it on the `todo.updated` event (top-level session only), and OpenClaw's plugin on `after_tool_call` for `update_plan` (skipped when the call failed or carries no plan); both send only each step's text and status, and neither adds a hook to the host's configuration.
 
 A real resume/start and new prompt reactivate the same session's block. Changing reporters
 or starting a follow-up task is not evidence that a session ended: never mark a legacy
@@ -284,7 +284,6 @@ and cloud bots still need a host-proven binding; accepting their names does not 
 | Codex | Lifecycle hooks, thread and turn metadata | Host trust and live CLI/desktop verification |
 | Cursor | Lifecycle hooks, conversation and generation ids | IDE/CLI parity needs live checks |
 | OpenCode | Session status plugin and bound task tool | Status events have no turn id |
-| Legacy Gemini CLI | SessionStart, BeforeAgent, AfterAgent, SessionEnd | Separate enterprise/API compatibility; not Antigravity |
 | Grok Build | SessionStart, Stop, SessionEnd | Coarse status; no working-turn event |
 | Muse Code | Stop, SessionEnd | Coarse status; no working-turn event |
 | Hermes Agent | Board, skill and four shell hooks installed | Hermes asks once to trust the hooks; native execution unverified |

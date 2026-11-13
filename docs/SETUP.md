@@ -17,8 +17,10 @@ since commands and apps belong to the account running setup. It does not read
 conversations or credentials. A found command or app is a candidate, not an active
 session or account access. Run setup without `--apply` first: its preview lists each file;
 a bare `--apply` writes to the same agents and prints only how many files changed.
-A `.gemini` directory alone does not identify Gemini CLI: Antigravity uses that parent
-too. Finding nothing exits 0 without writing anything and names the next command to
+Gemini CLI is retired and setup never lists it. Gemini CLI and Antigravity share the
+`.gemini` directory; setup finds Antigravity by its own folders in it (`antigravity-cli`,
+`antigravity`, `antigravity-ide`), by `agy` or `antigravity` on the PATH, or by its app, and an
+install an earlier release wrote for Gemini CLI can still be removed. Finding nothing exits 0 without writing anything and names the next command to
 run. You can also select a known target with `--agent <name>`.
 `--agent all` previews all supported targets; it does not install the AI applications.
 
@@ -384,13 +386,13 @@ The App, CLI and IDE share the global path but load it independently. Already-op
 sessions may need reload. These hooks report activity; semantic task steps remain explicit
 agent reports. No permission handler, transcript reader or remote-control tunnel is installed.
 
-## Legacy Gemini CLI compatibility
+## Gemini CLI is retired
 
 Google's [consumer transition announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)
-ended free individual and Google AI Pro/Ultra Gemini CLI service on June 18, 2026. Supported
-enterprise and paid API-key use remains separate. The explicit `--agent gemini` target is
-retained for those hosts. It does not stand for Antigravity, and a binary starting does
-not prove its account can run a model.
+ended free individual and Google AI Pro/Ultra Gemini CLI service on June 18, 2026, and
+Antigravity CLI is Google's CLI now. Setup no longer finds or offers Gemini CLI, and
+`--agent gemini` is refused with a message that names `--agent antigravity`; no file changes.
+A Gemini CLI install from an earlier release keeps reporting to the board.
 
 ## Verify the result
 

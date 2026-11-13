@@ -158,9 +158,10 @@ export const EN: Strings = {
     "directRemoved": "The direct node command stops working; use {command} instead."
   },
   setupNoAgent: {
-    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, gemini, grok, muse, hermes, openclaw, antigravity, deepseek, all)."
+    "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
+    "retired": "agent-board: Gemini CLI is retired, so setup no longer sets it up. Google's CLI is Antigravity CLI now: run setup with --agent antigravity."
   },
   setupErrorMissingValue: 'agent-board: a setup option is missing its value. Options such as --agent, --home and --data-dir each take one; add it after the option and run setup again.',
   setupErrorConfig: (host: string): string => `agent-board: setup cannot read or safely update the settings for ${host}, so it left them as they were. Fix or move that agent's config file, then run setup again.`,
@@ -684,6 +685,7 @@ export const EN: Strings = {
   boardQueuedCount: (n: number): string => `${n} queued`,
   boardUsage: 'Usage: agent-board | agent-board setup | agent-board stop | agent-board --json [--days N] · --help all for all options (--watch, --tidy [--stopped | --agent name | --older days], --all, ...)',
   boardUsageAll: 'Usage: agent-board [--print] [--status] [--watch] [--serve (old)] [--stop] [--json] [--days <days>] [--project <name>] [--tidy] [--all] [--no-open] [--lan] [--port <port>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all lists idle and stopped tasks',
+  boardUnknownFlag: (flag: string): string => `agent-board: unknown option "${flag}". Try npx @wenyuchiou/agent-board --version, or --help.`,
   boardHidden: (text: string): string => `Hidden: “${text}”; it comes back when the question changes.`,
   boardShown: 'The hidden questions are shown again.',
   hideFailed: "Couldn't save that it was answered; it stays on the list.",
@@ -715,8 +717,9 @@ export const EN: Strings = {
   tailRepairFailed: 'The incomplete end could not be safely repaired; nothing changed. Check the progress file before retrying.',
   fileProgress: 'your progress file',
   fileQuestions: 'the question list',
-  fileNamed: (name: string): string => `${name}`,
+  fileNamed: (name: string): string => `“${name}”`,
   storageReadOnly: 'it is read-only or locked',
+  storageUnreadable: 'it cannot be read',
   storageBusy: 'another program is using it',
   storageFull: 'the disk is full',
   storageIsFolder: 'it is a folder, not a file',
@@ -779,6 +782,11 @@ export const EN: Strings = {
   serveMoved: 'The board moved to a newer tab, so this tab stopped updating; you can close it. To open the board again, run /agent-board in an agent\'s chat or agent-board in a terminal.',
   serveCloseBusy: 'A message is still on its way to an agent; close the board once it replies.',
   serveNotStarted: 'its server did not start.',
+  serveInvalidPort: (port: string): string => port === ''
+    ? 'missing or invalid --port (1–65535). Pass a port number after --port, or omit --port to pick one automatically.'
+    : `port ${port} is not a valid port (1–65535). Try another --port, or omit --port to pick one automatically.`,
+  servePortInUse: (port: number): string => `port ${port} is already in use. Try another --port, or omit --port to pick one automatically.`,
+  servePortDenied: (port: number): string => `port ${port} cannot be used (permission denied). Try another --port above 1023, or omit --port to pick one automatically.`,
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `The board could not open its message folder (${code}): ${folder}. Stop all board servers and check server.lock, server.owner and .message-claim-*.json together. Remove only ownership metadata verified to be stale, after confirming no hub is running. Keep messages.json and uncertain delivery evidence; do not resend uncertain messages.`
     : code === 'MESSAGE_STORE_CLOSED'

@@ -54,7 +54,7 @@ import type { PendingArchiveRecord } from '../hooks/journal'
 import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, RETENTION, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
-import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
+import { agentLabel, langOf, plainReadReason, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire, runQuestionsClosed } from '../hooks/questions'
@@ -74,6 +74,43 @@ const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hoo
 const flag = (name: string): string | undefined => {
   const at = args.indexOf(name)
   return at === -1 ? undefined : args[at + 1]
+}
+const BOOL_FLAGS = new Set([
+  '--all', '--allow-resume', '--agent-status', '--apply', '--chat', '--codex-doctor',
+  '--codex-event', '--codex-remove', '--codex-report', '--codex-setup', '--codex-trust',
+  '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
+  '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
+  '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
+  '--stop', '--stopped', '--tidy', '--version', '-v', '--watch',
+])
+const VALUE_FLAGS = new Set([
+  '--agent', '--codex-bin', '--codex-dir', '--data-dir', '--deepseek-dir', '--event',
+  '--grok-dir', '--hermes-dir', '--home', '--hook-deadline', '--hook-event', '--hook-started',
+  '--id', '--idle-minutes', '--keys', '--lang', '--legacy-connect-request', '--mailbox',
+  '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
+  '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
+  '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--removing',
+  '--session', '--stale-ms', '--state', '--surface', '--theme',
+])
+const unknownFlag = (argv: readonly string[]): string | undefined => {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!
+    if (arg === '--') break
+    if (!arg.startsWith('-')) continue
+    if (VALUE_FLAGS.has(arg)) { i += 1; continue }
+    if (arg === '--days') {
+      const next = argv[i + 1]
+      if (next !== undefined && !next.startsWith('--')) i += 1
+      continue
+    }
+    if (arg === '--lan') {
+      const next = argv[i + 1]
+      if (next !== undefined && /^[\d.]+$/.test(next)) i += 1
+      continue
+    }
+    if (!BOOL_FLAGS.has(arg)) return arg
+  }
+  return undefined
 }
 const idleMs = (): number => {
   const value = flag('--idle-minutes')
@@ -119,7 +156,7 @@ class BoardFileError extends Error {
   readonly isLocked: boolean
   // Set once a press took back everything it wrote before this failure (#248).
   isUnchanged = false
-  constructor(readonly file: string, readonly code: string, isRead = false) {
+  constructor(readonly file: string, readonly code: string, readonly isRead = false) {
     super(code)
     this.isLocked = isRead && writes === 0 && (code === 'EBUSY' || code === 'EAGAIN')
   }
@@ -140,7 +177,7 @@ const storageNote = (error: BoardFileError, isLan = false): string =>
   error.code === 'SETTINGS_LOCKED' ? s.settingsLocked(isLan ? basename(settingsLockName(error.file)) : settingsLockName(error.file))
     : error.isLocked ? s.boardLocked(plainFile(error.file))
     : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code))
-    : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
+    : s.boardStorageFailed(plainFile(error.file), error.isRead ? plainReadReason(s, error.code) : plainReason(s, error.code))
 
 const read = (file: string): string => {
   try {
@@ -814,7 +851,11 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
       })
     } catch (error) {
       if (error instanceof BoardFileError) throw error
-      throw fileError(file, error instanceof Error && error.message === 'LOCK_BUSY' ? { code: 'EBUSY' } : error, true)
+      // Only a busy lock is a lock error: it still reads as locked (#342). Any other
+      // failure to take the lock is a write failure, so it must not say the file
+      // cannot be read.
+      const isLockBusy = error instanceof Error && error.message === 'LOCK_BUSY'
+      throw fileError(file, isLockBusy ? { code: 'EBUSY' } : error, isLockBusy)
     }
   }
   let failure: unknown = { code: 'EAGAIN' }
@@ -2035,12 +2076,24 @@ const serveChildError = (message: string): void => {
   }
 }
 
+const parseServePort = (raw: string | undefined): number | null => {
+  if (raw === undefined || !/^[1-9]\d*$/.test(raw)) return null
+  const port = Number(raw)
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
+}
+
 const serveChild = (): void => {
   // Resolve the protected address before asynchronous callbacks can run.
   const file = serveFile()
   // A child that could not protect the folder cannot start a page: its address file would
   // be unprotected. The parent reuses a running page itself; a child on its own refuses.
   if (runtimeUnprotected) throw runtimeFolderFailure()
+  const requestedPort = args.includes('--port') ? parseServePort(flag('--port')) : 0
+  if (requestedPort === null) {
+    serveChildError(`PORT_INVALID ${flag('--port') ?? ''}\n`)
+    process.exitCode = 1
+    return
+  }
   // A page a test started stops once that test's process is gone, even after a killed run (#959).
   // Only tests set AGENT_BOARD_TEST_PID, to their own process id.
   const testPid = Number(process.env.AGENT_BOARD_TEST_PID)
@@ -2068,7 +2121,7 @@ const serveChild = (): void => {
         return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
       },
       get s() { return s },
-      port: Number(flag('--port') ?? 0) || 0,
+      port: requestedPort,
       ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
@@ -2136,6 +2189,15 @@ const serveChild = (): void => {
       onStop: () => {
         // The file goes only while it is still this server's: a newer one may have taken it over.
         unlinkIf(file, () => readRunning(file)?.pid === process.pid)
+        process.exit(0)
+      },
+      onListenError: (error) => {
+        unlinkIf(file, () => readRunning(file)?.pid === process.pid)
+        if (error.code === 'EADDRINUSE' || error.code === 'EACCES') {
+          serveChildError(`PORT_FAILED ${error.code} ${requestedPort}\n`)
+          process.exitCode = 1
+          return
+        }
         process.exit(0)
       },
     })
@@ -2249,12 +2311,14 @@ interface RunningServer {
   idleMs?: number | undefined
 }
 
-type ServeFailure = { storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
+type ServeFailure = { invalidPort?: string; portError?: { code: 'EADDRINUSE' | 'EACCES'; port: number }; storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
 
-// The note a failed start prints: the message folder's failure first, then the child's
+// The note a failed start prints: `--port` failures and message folder failures first, then the child's
 // own folder failure, then the generic line. The child prints its folder failure in the
 // command's language, so the parent matches the same words.
 const serveFailureNote = (failure: ServeFailure): string => {
+  if (failure.invalidPort !== undefined) return s.serveFailed(s.serveInvalidPort(failure.invalidPort))
+  if (failure.portError !== undefined) return s.serveFailed(failure.portError.code === 'EACCES' ? s.servePortDenied(failure.portError.port) : s.servePortInUse(failure.portError.port))
   if (failure.storeCode !== undefined) return s.serveStoreFailed(failure.storeCode, messagesDirectory())
   if (failure.isChildCheckTimeout) return s.serveFailed(s.serveRuntimeCheckTimeout)
   if (failure.isChildCheckDenied) return s.serveFailed(s.serveRuntimeDenied)
@@ -2284,6 +2348,13 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
   const found = await runningPage()
   if (found !== null) return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
+  if (args.includes('--port')) {
+    const requestedPort = parseServePort(flag('--port'))
+    if (requestedPort === null) {
+      if (failure !== undefined) failure.invalidPort = flag('--port') ?? ''
+      return null
+    }
+  }
   const rest = ['--lang', '--port', '--idle-minutes', '--stale-ms'].flatMap(name => {
     const value = flag(name)
     return value === undefined ? [] : [name, value]
@@ -2401,6 +2472,11 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   while (performance.now() < deadline) {
     const { url, stderr, readyBy } = await startPage()
     if (url !== null) return { url, port: Number(new URL(url).port), isKept: false, isNew: true }
+    const portFailed = /^PORT_FAILED (EADDRINUSE|EACCES) (\d+)\r?$/m.exec(stderr)
+    if (portFailed !== null) {
+      if (failure !== undefined) failure.portError = { code: portFailed[1] as 'EADDRINUSE' | 'EACCES', port: Number(portFailed[2]) }
+      return null
+    }
     // Another `--serve` started at the same moment may have written its address first: this
     // page stopped then, and that one is the page to show. When it took the message folder
     // first, this page stopped before that one had written its address, so it is given the
@@ -2488,7 +2564,7 @@ const serveBoard = async (): Promise<void> => {
     // The address comes from a file and goes to a shell on Windows: only the shape this server
     // writes is opened.
     if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && page !== 'open') {
-      const isOpen = await openThroughBoard(url, false, page === 'none')
+      const isOpen = await openThroughBoard(url, true, page === 'none')
       // With a page already open, no window is missing.
       if (!isOpen && page === 'none' && !isNoWindowHere()) {
         process.stderr.write(`${s.serveBrowserNone(url)}\n`)
@@ -2586,7 +2662,7 @@ const chat = (): void => {
     const code = (error as { code?: unknown } | null)?.code
     const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0]?.slice(0, 160) || error.name : 'UNKNOWN'
     // Nothing here writes, so the board's own advice (files "may already have changed") is not told.
-    const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
+    const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReadReason(s, error.code)) : s.chatFailed(reason)
     process.stdout.write(`${redact(told, homeOrNone(), isWin)}\n`)
   }
 }
@@ -2596,7 +2672,7 @@ const jsonFailureDocument = (error: unknown) => {
   const isWin = process.platform === 'win32'
   const code = (error as { code?: unknown } | null)?.code
   const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0] || error.name : 'UNKNOWN'
-  const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
+  const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReadReason(s, error.code)) : s.chatFailed(reason)
   return { schemaVersion: BOARD_JSON_SCHEMA, error: redact(clipped(plain(told), home, isWin), home, isWin) }
 }
 const jsonFailure = (error: unknown): void => {
@@ -2775,6 +2851,16 @@ const runWatchTerminal = async (): Promise<void> => {
 }
 
 const run = async (): Promise<void> => {
+  const badFlag = unknownFlag(args)
+  if (badFlag !== undefined) {
+    process.stderr.write(`${s.boardUnknownFlag(badFlag)}\n`)
+    process.exitCode = 2
+    return
+  }
+  if (args.includes('--version') || args.includes('-v')) {
+    process.stdout.write(`agent-board ${boardVersion}\n`)
+    return
+  }
   if (args.includes('--days')) {
     const daysIndex = args.indexOf('--days')
     const nextArg = args[daysIndex + 1]
@@ -2842,7 +2928,7 @@ const run = async (): Promise<void> => {
     return
   }
   if (await runCodexLocal(args, path, s)) return
-  if (args.includes('--help') && !args.includes('--chat')) {
+  if ((args.includes('--help') || args.includes('-h')) && !args.includes('--chat')) {
     process.stdout.write(args.includes('all') ? `${s.boardUsageAll}\n` : `${s.boardUsage}\n`)
   } else if (args[0] === 'stop' || args.includes('--stop')) {
     await stopBoard()

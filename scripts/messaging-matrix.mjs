@@ -22,7 +22,6 @@ const targets = [
   ['Hermes Agent', ['CLI', 'Chat Gateway']],
   ['OpenClaw', ['Gateway', 'WebChat', 'Desktop Control UI']],
   ['DeepSeek Harness', ['Cordis CLI', 'TUI', 'Desktop', 'Web']],
-  ['Gemini CLI', ['CLI']],
   ['Gemini', ['Web']],
   ['dot / Web Chats', ['dot', 'Claude.ai', 'ChatGPT', 'DeepSeek Web', 'Grok Web']],
 ]

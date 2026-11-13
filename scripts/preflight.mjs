@@ -16,6 +16,16 @@ const read = path => readFileSync(path, 'utf8')
 const isTest = path => /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|ts|tsx)$/.test(path)
 const splitPaths = text => text.split('\0').filter(Boolean)
 
+// A whole test file gets ten minutes here. tests/codex-local.test.mjs (441 tests) ran 449.9 s alone on CI's Ubuntu
+// runner (test.yml, #1130) and never finished in ten minutes on a Windows computer, where starting processes is
+// slower; tests/board.test.mjs is as large, and tests/messaging.test.mjs (191) also ran out of time there while other
+// work ran. These files are named here and left to CI, which runs them whole: the files CI already runs in parts
+// (selfPartedTests in scripts/ci-impact.mjs; a test keeps the two lists in step, since importing ci-impact.mjs here
+// would load hooks/messaging.ts), and messaging. A file joins the list only in a reviewed change, so preflight does
+// not guess which files are too long or which tests a change reaches (#1392 review): it says the file was not run,
+// and the author runs the tests they changed by name.
+export const leftToCi = new Set(['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs'])
+
 // Without a recorded or readable identity, a live PID cannot safely be identified as a replacement.
 export const isLiveMarker = ({ isAlive, recordedIdentity, identity = null }) =>
   isAlive && (recordedIdentity == null || identity === null || recordedIdentity === identity)
@@ -604,9 +614,13 @@ const parseArgs = argv => {
 // lockPlatform accompanies the injected identity reader in module fixtures; the CLI has no override.
 export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, isFromMain = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessIdentity = processStartIdentity, lockPlatform = process.platform, onCheck, onProgress, onLockPublished } = {}) => {
   const checks = []
-  // `exact` replaces the \ue001 mark after redaction: a validated lock file name and fixed folder pattern, which an account name must not alter.
+  // Every piece of a line is one of three kinds (#1392). Preflight's own words and values it validated (a list
+  // literal, a commit id, a count, a lock file name) and a path committed at HEAD (`shown`) go in `exact`, which
+  // replaces the \ue001 mark after redaction, so an account name cannot alter them. Everything else (child output,
+  // a file name that exists only on this disk, an error's words) goes through safeLine, in `message` or by itself.
   const add = (state, message, exact = '') => {
-    const item = { state, message: safeLine(message).replace('\ue001', exact) }
+    // A function, so `$` in a file or test name is not read as a replacement pattern.
+    const item = { state, message: safeLine(message).replace('\ue001', () => exact) }
     checks.push(item)
     onCheck?.(item)
   }
@@ -684,6 +698,10 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   let added
   let mergeBase
   let newPaths
+  // Test paths committed at HEAD: the pull request publishes them, so showing one whole reveals nothing new.
+  let committed = new Set()
+  // The one way a line shows a test path: whole when committed, scrubbed when it exists only on this disk.
+  const shown = path => committed.has(path) ? path.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]/g, '') : safeLine(path)
   try {
     let hasFetchFailed = false
     if (!isFromMain && isNoFetch) add('WARN', 'using the local preflight because --no-fetch was supplied; origin/main freshness is unknown.')
@@ -762,6 +780,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       ...splitPaths(git('diff', '--name-only', '--no-renames', '-z', 'HEAD')), ...untracked,
       ...splitPaths(git('diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD')),
     ])
+    committed = new Set(splitPaths(git('ls-tree', '-r', '--name-only', '-z', 'HEAD', '--', 'tests')))
     added = addedLines(git('diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=0', mergeBase))
     for (const path of untracked.filter(path => path.startsWith('tests/') || path === 'CHANGELOG.md' || fragmentIssue(path) !== null)) {
       read(join(cwd, path)).split(/\r?\n/).forEach((text, i) => added.push({ path, line: i + 1, text }))
@@ -774,8 +793,15 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   await check('touched Node tests', () => {
     const paths = [...changed].filter(path => isTest(path) && path.endsWith('.mjs') && existsSync(join(cwd, path)))
     if (!paths.length) add('PASS', 'no touched Node test files need running.')
+    // A listed file is never run here, so its WARN does not wait for the test lock, and a branch that touches only
+    // listed files takes no lock: another preflight's run cannot turn it into a lock FAIL.
+    for (const path of paths.filter(path => leftToCi.has(path))) {
+      // The path is one of the list's own literals and the words are fixed, so an account name must not change them.
+      add('WARN', '\ue001', `${path}: not run here; it is on preflight's list of files too long for its ten-minute limit (leftToCi in scripts/preflight.mjs), and CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" ${path}) and list them under Evidence.`)
+    }
+    const toRun = paths.filter(path => !leftToCi.has(path))
     let owner = null
-    try { owner = paths.length ? acquireTestLock(lockPath, onLockPublished, fallbackLockPath, readProcessIdentity, lockPlatform) : null } catch (error) {
+    try { owner = toRun.length ? acquireTestLock(lockPath, onLockPublished, fallbackLockPath, readProcessIdentity, lockPlatform) : null } catch (error) {
       add('FAIL', error.message?.startsWith('test lock directory ') ? error.message : 'test lock directory could not be used; check account directory access.')
       return
     }
@@ -791,7 +817,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     if (owner?.isFallback) add('PASS', "the home folder cannot hold the test lock, so the test lock was this account's shared fallback folder, and any home lock folder was still read.")
     if (owner?.path) {
       try {
-        for (const path of paths) {
+        for (const path of toRun) {
           const temp = mkdtempSync(join(tmpdir(), 'agent-board-preflight-'))
           try {
             const env = { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' }
@@ -799,7 +825,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
             delete env.NODE_TEST_CONTEXT
             for (const name of Object.keys(env)) if (/^(GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY)$/i.test(name)) delete env[name]
             for (const name of homeNames) env[name] = name === 'CLAUDE_PROGRESS_FILE' ? join(temp, 'progress.md') : temp
-            onProgress?.(`RUN ${safeLine(path)}`)
+            onProgress?.(`RUN ${shown(path)}`)
             const tested = command(process.execPath, ['--test', '--test-reporter=tap', path], { env, timeout: 600000 })
             const output = `${tested.stdout ?? ''}\n${tested.stderr ?? ''}`
             const count = output.match(/^# fail (\d+)\s*$/m)?.[1]
@@ -807,7 +833,11 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
             const isPassed = !tested.error && tested.status === 0 && count === '0'
             const failedNames = isPassed ? [] : failedTapNames(output)
             const failedDetail = failedNames.length ? `; failed: ${failedNames.join('; ')}` : ''
-            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
+            // The failed test names come from the child, and failedTapNames already scrubs them; `shown` scrubs a path
+            // that is not committed; the counts are digits and the rest are preflight's own words. A run that did not
+            // finish, for any reason, gets the list hint with the same condition as its words.
+            const unfinished = tested.error || tested.signal ? '; the runner did not finish; if the file is only too long for ten minutes, add it to leftToCi in a reviewed change' : ''
+            add(isPassed ? 'PASS' : 'FAIL', '\ue001', `${shown(path)}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${unfinished}.`)
           } finally {
             rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
           }
