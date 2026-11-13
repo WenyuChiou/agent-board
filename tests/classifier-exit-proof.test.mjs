@@ -5,7 +5,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { inspect } from 'node:util'
 import { reporterPs1 } from '../hooks/hook-reporters.ts'
-import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { assertClassifierExited, classifierExitState, observeClassifierExit, restartBudgetAtClassifier, spendBudgetBeforeClassifier } from './fixtures/classifier-exit-proof.mjs'
 
 test('classifier exit proof refuses missing, unstarted, live and malformed observations without exposing their contents', () => {
   const dir = mkdtempSync(join(tmpdir(), 'classifier-exit-proof-'))
@@ -29,6 +29,30 @@ test('classifier exit proof refuses missing, unstarted, live and malformed obser
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('classifier exit proof names whether the classifier exited, kept running, never started or left no proof', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'classifier-exit-state-'))
+  const file = join(dir, 'proof.json')
+  try {
+    assert.equal(classifierExitState(file), 'no-proof')
+    assert.throws(() => assertClassifierExited(file), error => /seen: no-proof/.test(error.message))
+    const cases = [
+      [{ started: true, exited: true }, 'exited'],
+      [{ started: true, exited: false }, 'running'],
+      [{ started: false, exited: false }, 'never-started'],
+      [{ started: false, exited: true }, 'unreadable'],
+      [{ started: true, exited: true, pid: 123456789 }, 'unreadable'],
+    ]
+    for (const [value, state] of cases) {
+      writeFileSync(file, JSON.stringify(value))
+      assert.equal(classifierExitState(file), state)
+    }
+    writeFileSync(file, 'PRIVATE_MALFORMED')
+    assert.equal(classifierExitState(file), 'unreadable')
+    writeFileSync(file, JSON.stringify({ started: false, exited: false }))
+    assert.throws(() => assertClassifierExited(file), error => /seen: never-started/.test(error.message) && !/PRIVATE_|123456789/.test(inspect(error)))
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('the classifier exit observer keeps its original kill, wait and receipt budget intact', () => {
   const source = reporterPs1()
   const observed = observeClassifierExit(source, "C:/synthetic observer's proof.json")
@@ -36,7 +60,22 @@ test('the classifier exit observer keeps its original kill, wait and receipt bud
   for (const line of source.split('\n').filter(line => /Kill\(\)|WaitForExit\(|ElapsedMilliseconds|REPORTER_TIMEOUT/.test(line))) {
     assert.ok(observed.includes(line), 'the observer preserves each original termination and budget operation')
   }
+  // The proof is set first in the finally, so every exit of Read-PromptReceipt leaves one, a never-started run included.
+  assert.ok(observed.indexOf('$script:classifierExitProof = [ordered]') < observed.indexOf('    if ($null -ne $process) {'))
+  assert.ok(observed.indexOf('$process.Kill()') < observed.indexOf('$process.WaitForExit(30000)'))
   assert.ok(observed.indexOf('$process.HasExited } } catch {}') < observed.indexOf('$process.Dispose()'))
   assert.ok(observed.indexOf("[IO.File]::WriteAllText('C:/synthetic") > observed.lastIndexOf('Remove-Item -LiteralPath'))
   assert.throws(() => observeClassifierExit('not a reporter', 'proof.json'))
+})
+
+test('the classifier budget seams change only where the clock starts or the first check, never the wait, kill or receipt', () => {
+  const source = reporterPs1(), lines = source.split('\n')
+  const restarted = restartBudgetAtClassifier(source)
+  assert.equal(restarted.split('$Clock.Restart()').length, 2)
+  assert.deepEqual(restarted.split('\n').filter(line => line !== '    $Clock.Restart()'), lines)
+  assert.ok(restarted.indexOf('$Clock.Restart()') < restarted.indexOf('$Clock.ElapsedMilliseconds -ge'))
+  const spent = spendBudgetBeforeClassifier(source).split('\n')
+  assert.equal(spent.length, lines.length)
+  const changed = spent.filter((line, index) => line !== lines[index])
+  assert.deepEqual(changed, ["    if ($Clock.ElapsedMilliseconds -ge 0) { throw 'REPORTER_TIMEOUT' }"])
 })
