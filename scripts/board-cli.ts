@@ -851,7 +851,11 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
       })
     } catch (error) {
       if (error instanceof BoardFileError) throw error
-      throw fileError(file, error instanceof Error && error.message === 'LOCK_BUSY' ? { code: 'EBUSY' } : error, true)
+      // Only a busy lock is a lock error: it still reads as locked (#342). Any other
+      // failure to take the lock is a write failure, so it must not say the file
+      // cannot be read.
+      const isLockBusy = error instanceof Error && error.message === 'LOCK_BUSY'
+      throw fileError(file, isLockBusy ? { code: 'EBUSY' } : error, isLockBusy)
     }
   }
   let failure: unknown = { code: 'EAGAIN' }

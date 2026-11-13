@@ -3424,7 +3424,7 @@ syncBuiltinESMExports()
       const lan = new URL(opened.json().url)
       const far = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': lan.searchParams.get('t') })
       assert.equal(far.status, 409, far.body)
-      assert.match(far.json().note, /^Couldn't safely read or update progress-journal-\d{4}-\d{2}\.md \(it cannot be read\)/)
+      assert.match(far.json().note, /^Couldn't safely read or update “progress-journal-\d{4}-\d{2}\.md” \(it cannot be read\)/)
       assert.ok(!far.json().note.includes(board.dir), far.json().note)
     }
   } finally {
