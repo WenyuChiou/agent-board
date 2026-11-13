@@ -62,7 +62,8 @@ export const runMergeCheck = ({ pr, head, cwd = process.cwd(), remote = 'origin'
     const created = git(['worktree', 'add', '--detach', dir, result.mainSha])
     if (!created.ok) return finish(`could not create a worktree on main: ${tail(created.err, 3)}`)
     added = true
-    const merged = git(['merge', '--no-commit', '--no-ff', result.headSha], dir)
+    // git merge asks for an identity even with --no-commit; CI and fresh accounts have none, and nothing is committed here.
+    const merged = git(['-c', 'user.name=merge-check', '-c', 'user.email=merge-check@invalid', 'merge', '--no-commit', '--no-ff', result.headSha], dir)
     if (!merged.ok) {
       const conflicts = git(['diff', '--name-only', '--diff-filter=U'], dir)
       git(['merge', '--abort'], dir)

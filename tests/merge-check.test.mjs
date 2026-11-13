@@ -52,6 +52,10 @@ const assertClean = clone => {
   assert.equal(output.includes('ab-merge-check-'), false)
 }
 
+// The merge check runs with no global or system git config, as on a CI runner or a fresh account: no identity.
+const noConfig = { ...process.env, GIT_CONFIG_GLOBAL: join(tmpdir(), 'ab-merge-test-no-global-config'), GIT_CONFIG_NOSYSTEM: '1' }
+const bare = (command, args, options) => spawnSync(command, args, { ...options, env: noConfig })
+
 const script = (condition, code) => ['-e', `const f=require('fs');process.exit(${condition}?${code}:${1 - code})`]
 const bothExist = "f.existsSync('m.txt')&&f.existsSync('h.txt')"
 const failsWhenBoth = { label: 'both files', command: process.execPath, args: script(bothExist, 1) }
@@ -74,7 +78,7 @@ test('a head and a main that each pass alone fail together on the latest main', 
     assert.equal(spawnSync(failsWhenBoth.command, failsWhenBoth.args, { cwd: mainOnly }).status, 0)
     git(s.clone, 'worktree', 'remove', '--force', headOnly)
     git(s.clone, 'worktree', 'remove', '--force', mainOnly)
-    const result = runMergeCheck({ pr: 1, head: s.head, cwd: s.clone, checks: [failsWhenBoth], log: line => lines.push(line) })
+    const result = runMergeCheck({ run: bare, pr: 1, head: s.head, cwd: s.clone, checks: [failsWhenBoth], log: line => lines.push(line) })
     assert.equal(result.ok, false)
     assert.match(result.reason, /both files failed/)
     assert.equal(result.mainSha, s.moved)
@@ -92,7 +96,7 @@ test('a conflict with main names the file and leaves nothing behind', async () =
     onMain: clone => commitFile(clone, 'a.txt', 'one\nMAIN\nthree\n', 'main edits a'),
   })
   try {
-    const result = runMergeCheck({ pr: 1, head: s.head, cwd: s.clone, checks: [failsWhenBoth], log: () => {} })
+    const result = runMergeCheck({ run: bare, pr: 1, head: s.head, cwd: s.clone, checks: [failsWhenBoth], log: () => {} })
     assert.equal(result.ok, false)
     assert.match(result.reason, /^conflict with main: .*a\.txt/)
     assertClean(s.clone)
@@ -105,7 +109,7 @@ test('a clean merge whose checks pass is ok, and the checks see the merged tree'
   const s = await setup(addFiles)
   try {
     const lines = []
-    const result = runMergeCheck({ pr: 1, head: s.head, cwd: s.clone, checks: [passesWhenBoth], log: line => lines.push(line) })
+    const result = runMergeCheck({ run: bare, pr: 1, head: s.head, cwd: s.clone, checks: [passesWhenBoth], log: line => lines.push(line) })
     assert.equal(result.ok, true)
     assert.match(lines.at(-1), /^PASS merge-check #1: head [0-9a-f]{8} merged onto main [0-9a-f]{8}; merged tree current$/)
     assertClean(s.clone)
@@ -117,7 +121,7 @@ test('a clean merge whose checks pass is ok, and the checks see the merged tree'
 test('a head that moved since approval is refused and leaves no worktree', async () => {
   const s = await setup(addFiles)
   try {
-    const result = runMergeCheck({ pr: 1, head: s.baseSha, cwd: s.clone, checks: [failsWhenBoth], log: () => {} })
+    const result = runMergeCheck({ run: bare, pr: 1, head: s.baseSha, cwd: s.clone, checks: [failsWhenBoth], log: () => {} })
     assert.equal(result.ok, false)
     assert.match(result.reason, /the pull request's head is now [0-9a-f]{8}, not [0-9a-f]{8}/)
     assertClean(s.clone)
@@ -130,7 +134,7 @@ test('a failing fetch is a failure, never a pass', async () => {
   const base = await mkdtemp(join(tmpdir(), 'ab-merge-test-'))
   try {
     git(base, 'init', '-b', 'main')
-    const result = runMergeCheck({ pr: 1, head: 'a'.repeat(40), cwd: base, checks: [], log: () => {} })
+    const result = runMergeCheck({ run: bare, pr: 1, head: 'a'.repeat(40), cwd: base, checks: [], log: () => {} })
     assert.equal(result.ok, false)
     assert.match(result.reason, /could not fetch/)
   } finally {
