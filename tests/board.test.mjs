@@ -14007,3 +14007,141 @@ test('#1363: a waiting card keeps one hide button named answeredHide across Copy
     assert.equal(shelfShowAgain(reloaded).length, 1, 'hidden shelf renders Show again when no active notice is present')
   }
 })
+
+test('busy or connected card shows one honest message status after Send instead of Sent above queued (#1362)', async () => {
+  const { servePage } = await sourceBoard()
+  const countMatches = (haystack, needle) => needle ? haystack.split(needle).length - 1 : 0
+  const findCard = (dom, key) => pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === key)
+
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const html = servePage(s, 'synthetic')
+    const base = redesignModel()
+    const replyText = 'Keep the old session cookie'
+    const claudeName = s.agentNames.claude
+    const codexName = s.agentNames.codex
+
+    // 1. Claude card starts waiting (claudeSendNow), user clicks Write & Send, then receipt moves queued -> accepted -> acknowledged, and Take back restores ask mode.
+    const claudeAsk = {
+      ...base.asks[0],
+      key: 'ask-busy-claude',
+      agent: 'claude',
+      send: 'connected',
+      where: 'in Claude',
+      line: 'now',
+      lineText: s.claudeSendNow,
+      delivery: { id: 'c-claude', turn: 't1', agent: 'claude' },
+      canHide: true,
+      unhideKey: 'hidden:c-claude',
+      isSending: false,
+      answers: ['Proceed'],
+    }
+    let currentClaude = { ...base, asks: [claudeAsk] }
+    let lastMsgId = ''
+    const claudeDom = await pageDom(html, currentClaude, {
+      currentModel: () => currentClaude,
+      post: async request => {
+        if (request.path === '/api/act' && request.body.type === 'message') {
+          lastMsgId = request.body.id
+          return { ok: true, json: async () => ({ ok: true, note: s.messagesQueued }) }
+        }
+        if (request.path === '/api/messages/dismiss') {
+          currentClaude = { ...base, asks: [claudeAsk] }
+          return { ok: true, json: async () => ({ ok: true }) }
+        }
+        return { ok: true, json: async () => ({ ok: true }) }
+      },
+    })
+    assert.ok(shownWords(findCard(claudeDom, claudeAsk.key)).includes(s.claudeSendNow))
+
+    pressWalk(findCard(claudeDom, claudeAsk.key)).find(n => n.tag === 'button' && n.textContent === s.pgWriteOwn).click()
+    pressWalk(findCard(claudeDom, claudeAsk.key)).find(n => n.tag === 'textarea').value = replyText
+    pressWalk(findCard(claudeDom, claudeAsk.key)).find(n => n.tag === 'button' && n.textContent === s.serveSend('Claude')).click()
+    await claudeDom.settle()
+
+    const afterSendWords = shownWords(findCard(claudeDom, claudeAsk.key))
+    assert.equal(countMatches(afterSendWords, s.messagesQueued), 1, `right after Send: single queued status (${afterSendWords})`)
+    assert.equal(afterSendWords.includes(s.claudeSendNow), false, 'pre-send line hides after Send')
+    assert.equal(afterSendWords.includes(s.pgSentTo(claudeName, replyText)), false, 'never pgSentTo on connected card')
+
+    currentClaude = {
+      ...base,
+      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, isSending: true, receipt: { id: lastMsgId, status: 'queued', text: replyText, when: '' } }],
+    }
+    await claudeDom.redraw(currentClaude)
+    const queuedWords = shownWords(findCard(claudeDom, claudeAsk.key))
+    assert.equal(countMatches(queuedWords, s.claudeSendWorking), 1, `queued receipt: single claudeSendWorking (${queuedWords})`)
+    assert.equal(queuedWords.includes(s.pgSentTo(claudeName, replyText)), false, 'no pgSentTo above queued receipt')
+    assert.equal(queuedWords.includes(s.claudeSendNow), false, 'no stale claudeSendNow')
+    assert.equal(queuedWords.includes(s.messagesQueued), false, 'no duplicate messagesQueued alongside receipt')
+    assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
+
+    // Take back restores the card back to ask mode cleanly.
+    pressWalk(findCard(claudeDom, claudeAsk.key)).find(n => n.tag === 'button' && n.textContent === s.messageTakeBack).click()
+    await claudeDom.settle()
+    assert.ok(shownWords(findCard(claudeDom, claudeAsk.key)).includes(s.claudeSendNow), 'Take back restores ask view')
+
+    // Send again via quick answer, then progress queued -> accepted -> acknowledged.
+    selectAnswer(findCard(claudeDom, claudeAsk.key), 'Proceed').click()
+    await claudeDom.settle()
+    currentClaude = {
+      ...base,
+      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, receipt: { id: lastMsgId, status: 'accepted', text: 'Proceed', when: 'just now' } }],
+    }
+    await claudeDom.redraw(currentClaude)
+    const acceptedWords = shownWords(findCard(claudeDom, claudeAsk.key))
+    assert.equal(countMatches(acceptedWords, s.claudeDelivered), 1, `delivered once (${acceptedWords})`)
+    assert.equal(acceptedWords.includes(s.claudeSendWorking), false, 'route note stays hidden on delivered receipt')
+    assert.equal(acceptedWords.includes(s.pgSentTo(claudeName, 'Proceed')), false)
+    assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
+
+    currentClaude = {
+      ...base,
+      asks: [{ ...claudeAsk, line: 'now', lineText: s.claudeSendNow, receipt: { id: lastMsgId, status: 'acknowledged', reply: 'Done', text: 'Proceed', when: '' } }],
+    }
+    await claudeDom.redraw(currentClaude)
+    const repliedWords = shownWords(findCard(claudeDom, claudeAsk.key))
+    assert.equal(countMatches(repliedWords, s.claudeReplied('Done')), 1, `replied once (${repliedWords})`)
+    assert.equal(repliedWords.includes(s.claudeDelivered), false)
+    assert.equal(repliedWords.includes(s.claudeSendNow), false)
+    assert.equal(repliedWords.includes(s.pgSentTo(claudeName, 'Proceed')), false)
+    assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
+
+    // 2. Busy stepEnd card for another agent (Codex): shows serveLineStepEnd once, never pgSentTo.
+    const codexAsk = {
+      ...base.asks[0],
+      key: 'ask-busy-codex',
+      agent: 'codex',
+      send: 'connected',
+      where: 'in Codex',
+      line: 'stepEnd',
+      lineText: s.serveLineStepEnd(codexName),
+      delivery: { id: 'c-codex', turn: 't1', agent: 'codex' },
+      canHide: true,
+      isSending: false,
+      answers: ['Ship it'],
+    }
+    let currentCodex = { ...base, asks: [codexAsk] }
+    const codexDom = await pageDom(html, currentCodex, {
+      currentModel: () => currentCodex,
+      post: async request => {
+        lastMsgId = request.body.id
+        return { ok: true, json: async () => ({ ok: true, note: s.messagesQueued }) }
+      },
+    })
+    selectAnswer(findCard(codexDom, codexAsk.key), 'Ship it').click()
+    await codexDom.settle()
+    const codexAfterSend = shownWords(findCard(codexDom, codexAsk.key))
+    assert.equal(countMatches(codexAfterSend, s.serveLineStepEnd(codexName)), 1, `busy codex after Send (${codexAfterSend})`)
+    assert.equal(codexAfterSend.includes(s.pgSentTo(codexName, 'Ship it')), false, 'never pgSentTo on busy stepEnd codex card')
+    assert.equal(codexAfterSend.includes(s.messagesQueued), false, 'no redundant Queued line beside serveLineStepEnd')
+
+    currentCodex = {
+      ...base,
+      asks: [{ ...codexAsk, receipt: { id: lastMsgId, status: 'queued', line: 'stepEnd', isMailbox: true } }],
+    }
+    await codexDom.redraw(currentCodex)
+    const codexReceiptWords = shownWords(findCard(codexDom, codexAsk.key))
+    assert.equal(countMatches(codexReceiptWords, s.serveLineStepEnd(codexName)), 1, `busy codex queued receipt (${codexReceiptWords})`)
+    assert.equal(codexReceiptWords.includes(s.pgSentTo(codexName, 'Ship it')), false)
+  }
+})
