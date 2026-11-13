@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -36,28 +37,26 @@ export const runMergeCheck = ({ pr, head, cwd = process.cwd(), remote = 'origin'
     const ok = !done.error && done.status === 0
     return { ok, out: String(done.stdout ?? '').trim(), err: done.error ? done.error.message : String(done.stderr ?? '').trim() }
   }
-  const fetchSha = ref => {
-    const fetched = git(['fetch', '--no-tags', remote, ref])
-    if (!fetched.ok) return { error: `could not fetch ${ref} from ${remote}: ${tail(fetched.err, 3)}` }
-    const parsed = git(['rev-parse', 'FETCH_HEAD'])
-    if (!parsed.ok || !/^[0-9a-f]{40}$/.test(parsed.out)) return { error: `could not read FETCH_HEAD after fetching ${ref}` }
-    return { sha: parsed.out }
-  }
-
   // build-released.ts --check reads the release tags, which CI's full-history checkout has; never overwrite a local tag.
   const tags = git(['fetch', '--no-tags', remote, 'refs/tags/agent-board--v*:refs/tags/agent-board--v*'])
   if (!tags.ok) return finish(`could not fetch the release tags from ${remote}: ${tail(tags.err, 3)}`)
-  const main = fetchSha('main')
-  if (main.error) return finish(main.error)
-  result.mainSha = main.sha
-  const fetchedHead = fetchSha(`pull/${pr}/head`)
-  if (fetchedHead.error) return finish(fetchedHead.error)
-  result.headSha = fetchedHead.sha
-  if (result.headSha !== head) return finish(`the pull request's head is now ${short(result.headSha)}, not ${short(head)}`)
 
+  // main and the head go to refs of this run alone, in one fetch: FETCH_HEAD is shared by every fetch in this
+  // checkout, so another fetch between two reads could make the head pass for main (#1438).
+  const space = `refs/merge-check/${process.pid}-${randomBytes(4).toString('hex')}`
+  const sources = { main: 'refs/heads/main', head: `refs/pull/${pr}/head` }
   let dir
   let added = false
   try {
+    const fetched = git(['fetch', '--no-tags', remote, `+${sources.main}:${space}/main`, `+${sources.head}:${space}/head`])
+    if (!fetched.ok) return finish(`could not fetch main and pull/${pr}/head from ${remote}: ${tail(fetched.err, 3)}`)
+    for (const name of ['main', 'head']) {
+      const parsed = git(['rev-parse', '--verify', `${space}/${name}^{commit}`])
+      if (!parsed.ok || !/^[0-9a-f]{40}$/.test(parsed.out)) return finish(`could not read the fetched ${sources[name]}`)
+      result[`${name}Sha`] = parsed.out
+    }
+    if (result.headSha !== head) return finish(`the pull request's head is now ${short(result.headSha)}, not ${short(head)}`)
+
     dir = mkdtempSync(join(tmpdir(), 'ab-merge-check-'))
     const created = git(['worktree', 'add', '--detach', dir, result.mainSha])
     if (!created.ok) return finish(`could not create a worktree on main: ${tail(created.err, 3)}`)
@@ -80,6 +79,7 @@ export const runMergeCheck = ({ pr, head, cwd = process.cwd(), remote = 'origin'
     result.ok = true
     return finish('')
   } finally {
+    for (const name of ['main', 'head']) git(['update-ref', '-d', `${space}/${name}`])
     if (added) {
       const removed = git(['worktree', 'remove', '--force', dir])
       if (!removed.ok) {

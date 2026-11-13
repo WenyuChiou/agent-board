@@ -51,6 +51,7 @@ const assertClean = clone => {
   // The native form expands Windows short names (RUNNER~1) in the temp folder, as git's own listing does.
   assert.equal(realpathSync.native(listed[0].slice(9)), realpathSync.native(clone))
   assert.equal(output.includes('ab-merge-check-'), false)
+  assert.equal(git(clone, 'for-each-ref', 'refs/merge-check'), '')
 }
 
 // The merge check runs with no global or system git config, as on a CI runner or a fresh account: no identity.
@@ -125,6 +126,24 @@ test('a head that moved since approval is refused and leaves no worktree', async
     const result = runMergeCheck({ run: bare, pr: 1, head: s.baseSha, cwd: s.clone, checks: [failsWhenBoth], log: () => {} })
     assert.equal(result.ok, false)
     assert.match(result.reason, /the pull request's head is now [0-9a-f]{8}, not [0-9a-f]{8}/)
+    assertClean(s.clone)
+  } finally {
+    await rm(s.base, { recursive: true, force: true })
+  }
+})
+
+test('another fetch in the same checkout cannot make the head pass for main', async () => {
+  const s = await setup(addFiles)
+  try {
+    // Every fetch of the check is followed by another fetch of the head, as a second merge check in this checkout would do.
+    const racing = (command, args, options) => {
+      const done = bare(command, args, options)
+      if (command === 'git' && args[0] === 'fetch') bare('git', ['fetch', '--no-tags', 'origin', 'refs/pull/1/head'], { cwd: options.cwd, encoding: 'utf8' })
+      return done
+    }
+    const result = runMergeCheck({ run: racing, pr: 1, head: s.head, cwd: s.clone, checks: [failsWhenBoth], log: () => {} })
+    assert.equal(result.mainSha, s.moved)
+    assert.equal(result.ok, false)
     assertClean(s.clone)
   } finally {
     await rm(s.base, { recursive: true, force: true })
