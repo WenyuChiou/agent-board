@@ -334,7 +334,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | stepEnd · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | none · no live note |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| Codex | CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Codex | CLI | 3 | Unknown | Verified | [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | nextTurn · no live note | none · no live note |
 | Codex | Daemon | 1 | &#91;P1&#93; | Implemented | Not tested | [scripts/codex-receiver.mjs](../scripts/codex-receiver.mjs) | None | None | None |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
@@ -365,7 +365,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 
 <!-- messaging-matrix:end -->
 
-The board reads these routes from `hooks/receiver-routes.ts`. `AGENT_BOARD_ROUTES`, a path to a JSON file of routes that replaces them, is for tests only (like `AGENT_BOARD_GROK`); do not set it in real use.
+The board reads these routes from `hooks/receiver-routes.ts`. `AGENT_BOARD_ROUTES`, a path to a JSON file of routes that replaces them, is for tests only (like `AGENT_BOARD_GROK`); do not set it in real use. The one other use is the maintainer's live check in the kept test home (`docs/validation/PARITY-CHECKLIST.md`): a route with no record offers only Copy, so the board page there alone is started with a file that opens that one route, and the run becomes its first record.
 
 ### What earlier runs saw
 

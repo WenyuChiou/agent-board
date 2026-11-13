@@ -4958,6 +4958,10 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.deepEqual(RECEIVER_ROUTES.find(one => one.agent === 'deepseek').routes.idle.surfaces, ['Web'])
   assert.equal(routeOf(RECEIVER_ROUTES, 'deepseek', 'mailbox', 'idle', 'Web').canSend, true)
   assert.equal(routeOf(RECEIVER_ROUTES, 'deepseek', 'mailbox', 'idle', 'TUI').canSend, false)
+  // The Codex note ran the interactive CLI with the session idle: only that route and surface gain Send (#826).
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'CLI').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'CLI').canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'TUI').canSend, false)
   assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'IDE').canSend, false)
   // The only Antigravity note ran headless `agy`, not the TUI, so no Antigravity surface has a recorded route.
   assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, false)
@@ -4970,6 +4974,7 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.ok(!rowOf('Antigravity', '2.0 Desktop App').includes('2026-11-10-agy-live.md'))
   assert.ok(rowOf('DeepSeek Harness', 'Web').includes('2026-11-08-deepseek-harness-live.md'))
   assert.ok(!rowOf('DeepSeek Harness', 'TUI').includes('2026-11-08-deepseek-harness-live.md'))
+  assert.ok(rowOf('Codex', 'CLI').includes('2026-11-12-codex-cli-mailbox-live.md'))
 })
 
 test('the line and Send of a route come from its record: no record gives none and Copy', () => {
