@@ -818,6 +818,11 @@ export const ZH_TW = {
   serveMoved: '看板已移到較新的分頁，這個分頁不再更新，可以關了。要再開看板，可在 agent 對話中輸入 /agent-board 或在終端機執行 agent-board。',
   serveCloseBusy: '還有一句正在傳給 agent，等它回完再關閉看板。',
   serveNotStarted: '伺服器沒有啟動。',
+  serveInvalidPort: (port: string): string => port === ''
+    ? '缺少或無效的 --port（需為 1–65535）。請在 --port 後提供連接埠號，或省略 --port 自動選擇。'
+    : `連接埠 ${port} 無效（需為 1–65535）。請改用其他 --port，或省略 --port 自動選擇。`,
+  servePortInUse: (port: number): string => `連接埠 ${port} 已被使用。請改用其他 --port，或省略 --port 自動選擇。`,
+  servePortDenied: (port: number): string => `連接埠 ${port} 無法使用（權限不足）。請改用 1023 以上的 --port，或省略 --port 自動選擇。`,
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `看板無法開啟訊息資料夾（${code}）：${folder}。請先停止所有看板 server，一併檢查 server.lock、server.owner 與 .message-claim-*.json。確認沒有 hub 執行後，僅移除已核實過期的持有者資料。請保留 messages.json 與不確定是否送達的紀錄，勿重送這些訊息。`
     : code === 'MESSAGE_STORE_CLOSED'

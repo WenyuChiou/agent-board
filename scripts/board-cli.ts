@@ -2072,12 +2072,24 @@ const serveChildError = (message: string): void => {
   }
 }
 
+const parseServePort = (raw: string | undefined): number | null => {
+  if (raw === undefined || !/^[1-9]\d*$/.test(raw)) return null
+  const port = Number(raw)
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
+}
+
 const serveChild = (): void => {
   // Resolve the protected address before asynchronous callbacks can run.
   const file = serveFile()
   // A child that could not protect the folder cannot start a page: its address file would
   // be unprotected. The parent reuses a running page itself; a child on its own refuses.
   if (runtimeUnprotected) throw runtimeFolderFailure()
+  const requestedPort = args.includes('--port') ? parseServePort(flag('--port')) : 0
+  if (requestedPort === null) {
+    serveChildError(`PORT_INVALID ${flag('--port') ?? ''}\n`)
+    process.exitCode = 1
+    return
+  }
   // A page a test started stops once that test's process is gone, even after a killed run (#959).
   // Only tests set AGENT_BOARD_TEST_PID, to their own process id.
   const testPid = Number(process.env.AGENT_BOARD_TEST_PID)
@@ -2105,7 +2117,7 @@ const serveChild = (): void => {
         return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
       },
       get s() { return s },
-      port: Number(flag('--port') ?? 0) || 0,
+      port: requestedPort,
       ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
@@ -2173,6 +2185,15 @@ const serveChild = (): void => {
       onStop: () => {
         // The file goes only while it is still this server's: a newer one may have taken it over.
         unlinkIf(file, () => readRunning(file)?.pid === process.pid)
+        process.exit(0)
+      },
+      onListenError: (error) => {
+        unlinkIf(file, () => readRunning(file)?.pid === process.pid)
+        if (error.code === 'EADDRINUSE' || error.code === 'EACCES') {
+          serveChildError(`PORT_FAILED ${error.code} ${requestedPort}\n`)
+          process.exitCode = 1
+          return
+        }
         process.exit(0)
       },
     })
@@ -2286,12 +2307,14 @@ interface RunningServer {
   idleMs?: number | undefined
 }
 
-type ServeFailure = { storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
+type ServeFailure = { invalidPort?: string; portError?: { code: 'EADDRINUSE' | 'EACCES'; port: number }; storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
 
-// The note a failed start prints: the message folder's failure first, then the child's
+// The note a failed start prints: `--port` failures and message folder failures first, then the child's
 // own folder failure, then the generic line. The child prints its folder failure in the
 // command's language, so the parent matches the same words.
 const serveFailureNote = (failure: ServeFailure): string => {
+  if (failure.invalidPort !== undefined) return s.serveFailed(s.serveInvalidPort(failure.invalidPort))
+  if (failure.portError !== undefined) return s.serveFailed(failure.portError.code === 'EACCES' ? s.servePortDenied(failure.portError.port) : s.servePortInUse(failure.portError.port))
   if (failure.storeCode !== undefined) return s.serveStoreFailed(failure.storeCode, messagesDirectory())
   if (failure.isChildCheckTimeout) return s.serveFailed(s.serveRuntimeCheckTimeout)
   if (failure.isChildCheckDenied) return s.serveFailed(s.serveRuntimeDenied)
@@ -2321,6 +2344,13 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
   const found = await runningPage()
   if (found !== null) return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
+  if (args.includes('--port')) {
+    const requestedPort = parseServePort(flag('--port'))
+    if (requestedPort === null) {
+      if (failure !== undefined) failure.invalidPort = flag('--port') ?? ''
+      return null
+    }
+  }
   const rest = ['--lang', '--port', '--idle-minutes', '--stale-ms'].flatMap(name => {
     const value = flag(name)
     return value === undefined ? [] : [name, value]
@@ -2438,6 +2468,11 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   while (performance.now() < deadline) {
     const { url, stderr, readyBy } = await startPage()
     if (url !== null) return { url, port: Number(new URL(url).port), isKept: false, isNew: true }
+    const portFailed = /^PORT_FAILED (EADDRINUSE|EACCES) (\d+)\r?$/m.exec(stderr)
+    if (portFailed !== null) {
+      if (failure !== undefined) failure.portError = { code: portFailed[1] as 'EADDRINUSE' | 'EACCES', port: Number(portFailed[2]) }
+      return null
+    }
     // Another `--serve` started at the same moment may have written its address first: this
     // page stopped then, and that one is the page to show. When it took the message folder
     // first, this page stopped before that one had written its address, so it is given the

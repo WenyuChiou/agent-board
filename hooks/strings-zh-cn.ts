@@ -774,6 +774,11 @@ export const ZH_CN: Strings = {
   serveMoved: '看板已移到更新的标签页，这个标签页不再更新，可以关了。要再打开看板，可在 agent 对话中输入 /agent-board 或在终端运行 agent-board。',
   serveCloseBusy: '还有一句正在发给 agent，等它回完再关闭看板。',
   serveNotStarted: '服务器没有启动。',
+  serveInvalidPort: (port: string): string => port === ''
+    ? '缺少或无效的 --port（需为 1–65535）。请在 --port 后提供端口号，或省略 --port 自动选择。'
+    : `端口 ${port} 无效（需为 1–65535）。请改用其他 --port，或省略 --port 自动选择。`,
+  servePortInUse: (port: number): string => `端口 ${port} 已被占用。请改用其他 --port，或省略 --port 自动选择。`,
+  servePortDenied: (port: number): string => `端口 ${port} 无法使用（权限不足）。请改用 1023 以上的 --port，或省略 --port 自动选择。`,
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `看板无法打开消息文件夹（${code}）：${folder}。请先停止所有看板 server，一并检查 server.lock、server.owner 与 .message-claim-*.json。确认没有 hub 运行后，仅移除已核实过期的持有者数据。请保留 messages.json 与不确定是否送达的记录，不要重发这些消息。`
     : code === 'MESSAGE_STORE_CLOSED'
