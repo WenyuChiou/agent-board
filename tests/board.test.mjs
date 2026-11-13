@@ -5826,11 +5826,18 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
     child.once('exit', (code, signal) => { open.delete('bash exit'); mark(`bash exit code=${code} signal=${signal}`); done({ code, signal }) })
     child.once('error', fail)
   })
+  const closed = [end(child.stdout, 'stdout'), end(child.stderr, 'stderr'), end(child.stdio[3], 'fd3'), end(child.stdio[4], 'fd4')]
+  // A pipe that fails while the command is still running is reported below; this only stops it counting as unhandled first.
+  for (const pipe of closed) pipe.catch(() => {})
   let timer
   try {
-    const [result] = await Promise.race([
-      Promise.all([exited, end(child.stdout, 'stdout'), end(child.stderr, 'stderr'), end(child.stdio[3], 'fd3'), end(child.stdio[4], 'fd4')]),
-      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
+    // The #1158 promise is that the pipes close once the command returns, so the 5 seconds count from
+    // that exit. How long the command itself takes is not this helper's to limit: the test's own limit
+    // and the phase log cover a command that hangs (#1439).
+    const result = await exited
+    await Promise.race([
+      Promise.all(closed),
+      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds after bash exit; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
     ])
     assert.equal(result.code, 0, stderr)
     return { stdout, stderr }
@@ -6000,7 +6007,9 @@ const endBrowserFixture = async (board, fixture, log, pid) => {
 const browserStartupTest = async body => {
   const board = serveIn()
   const fixture = browserFixture(board)
-  const log = phaseLog(23_000, () => launcherLines(fixture))
+  // The cleanup removes the fixture folder and the launcher log with it, so the lines are read first.
+  let launched
+  const log = phaseLog(23_000, () => launched ?? launcherLines(fixture))
   let pid
   let failure
   try {
@@ -6009,6 +6018,7 @@ const browserStartupTest = async body => {
     failure = error
   } finally {
     log.end()
+    launched = launcherLines(fixture)
     try { await endBrowserFixture(board, fixture, log, pid) } catch (error) { log.mark(`cleanup failed: ${error.message.split('\n')[0]}`); failure ??= error }
   }
   if (failure !== undefined) {
@@ -6025,6 +6035,49 @@ test('Windows server startup releases Cursor pipes while its page stays running'
     const server = JSON.parse(readFileSync(board.served, 'utf8'))
     assert.ok(processAlive(server.pid), 'the page must outlive the caller pipes')
   } finally { await board.end([]) }
+})
+
+// The helper times the #1158 promise (pipes close once the command returns), not the runner (#1439).
+// A stand-in for the board script is a tiny Node file, run the way Cursor runs the real one.
+const fakeBoard = (board, source) => {
+  const script = join(board.dir, 'fake-command.mjs')
+  writeFileSync(script, source)
+  return { ...board, script }
+}
+
+test('the Cursor shell helper accepts a command that runs longer than 5 seconds and then returns with its pipes closed', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  try {
+    const marks = []
+    const result = await cursorShell(fakeBoard(board, "console.log('done'); setTimeout(() => process.exit(0), 5600)"), [], {}, async () => {}, line => marks.push(line))
+    assert.equal(result.stdout.trim(), 'done')
+    assert.ok(marks.some(line => line.startsWith('bash exit code=0')), marks.join('\n'))
+  } finally { await board.end([]) }
+})
+
+test('the Cursor shell helper still fails, naming the pipe, when a command returns at once and a detached child holds fd3', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+  const board = serveIn()
+  try {
+    const marks = []
+    const holder = "import { spawn } from 'node:child_process'\nspawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' }).unref()"
+    await assert.rejects(
+      () => cursorShell(fakeBoard(board, holder), [], {}, async () => {}, line => marks.push(line)),
+      // Windows lets the detached child inherit every inheritable handle, so fd3 is named among the open pipes and bash exit is not.
+      error => /did not all reach EOF in 5 seconds after bash exit; still open: [^;]*fd3[^;]*;/.test(error.message) && !error.message.includes('still open: bash exit') && !/still open: [^;]*bash exit/.test(error.message),
+    )
+    assert.ok(marks.some(line => line.includes('bash exit code=0')), `bash had already exited: ${marks.join('\n')}`)
+  } finally { await board.end([]) }
+})
+
+test('a browser startup failure keeps the launcher lines the launcher log held before the cleanup removed it', async () => {
+  const line = 'powershell 4242 started, stdio "ignore"'
+  await assert.rejects(
+    () => browserStartupTest(async (board, fixture) => {
+      writeFileSync(fixture.launchLog, `${Date.now()} ${line}\n`)
+      throw new Error('the body failed')
+    }),
+    error => error.message.startsWith('the body failed') && error.message.includes(' launcher: ') && error.message.includes(line),
+  )
 })
 
 test('on Windows the page address reaches the shell exactly as served, with no wildcard escaping', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
