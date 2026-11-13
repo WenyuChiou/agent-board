@@ -112,8 +112,7 @@ const isHookDelivered = (one: Message): boolean => one.status === 'accepted' && 
 // receiver) is handed over once.
 export const MAILBOX_LEASE_MS = 30_000
 export const MAILBOX_REDELIVERIES = 3
-// A message the host accepted once is never handed out again, even if a later receipt calls it uncertain.
-const isLapsed = (one: Message, now: number): boolean => one.status === 'uncertain' && one.error === '' && !one.hasAccepted && one.ref !== undefined && isMailboxTarget(one.target)
+const isLapsed = (one: Message, now: number): boolean => one.status === 'uncertain' && one.error === '' && one.ref !== undefined && isMailboxTarget(one.target)
   && now - one.claimed >= MAILBOX_LEASE_MS && (one.redelivered ?? 0) < MAILBOX_REDELIVERIES
 
 export const FINISHED_KEEP_MS = 24 * 60 * 60 * 1000
@@ -154,12 +153,8 @@ export const isFinished = (one: Pick<Message, 'status' | 'error'>): boolean => [
 export const isOpen = (one: Pick<Message, 'status' | 'error'>): boolean => !isFinished(one)
 // A finished message keeps its hash, not its text, and no more of its reply than an ACK line holds.
 const settled = (one: Message): Message => isFinished(one) && (one.text !== '' || one.reply.length > ACK_MAX) ? { ...one, text: '', reply: one.reply.slice(0, ACK_MAX) } : one
-// An earlier board's hand-back could save a message queued again after its host had accepted it. It is
-// never handed out now, so it loads as uncertain and as handed out (it was), and ages out from its last update.
-const restoreAccepted = (one: Message): Message => one.status === 'queued' && one.hasAccepted
-  ? { ...one, status: 'uncertain', claimed: one.claimed || one.updated } : one
 export const pruneMessages = (state: MessageState, now: number): MessageState => {
-  const kept = state.messages.map(restoreAccepted).filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(one => settled(
+  const kept = state.messages.filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(one => settled(
     (one.status === 'uncertain' || one.status === 'accepted' && (one.error !== '' || isMailboxTarget(one.target))) && !isFinished(one) && now - one.updated > OPEN_LIMIT_MS
       ? { ...one, status: 'uncertain' as const, error: 'EXPIRED', updated: now, ...(one.status === 'accepted' ? { hasAccepted: true } : {}) } : one))
   // Past the count, the oldest finished go first; their ids can then be used again. Two kinds wait for
@@ -275,15 +270,17 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string): { state: MessageState; messages: Message[] } => {
   if (target.contested || target.expires <= now) return { state, messages: [] }
   const to = address(target.agent, target.session)
-  // A lapsed claim stops blocking only the binding that takes it again; any other still waits behind it.
-  const isRetaken = (one: Message): boolean => isLapsed(one, now) && one.target === target.id && one.turn === target.turn
-  const busy = state.messages.some(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one) && !isRetaken(one))
   // A message the board checked a route for goes only to a claimant on that same surface; on any other it stays queued.
   // The agent's own MCP pull is exempt: it asks for its messages itself, so nothing starts a turn on an unchecked surface.
-  // A message the host accepted once is never handed out again, by any path.
-  const canClaim = (one: Message): boolean => !one.hasAccepted && (one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE) && (one.target === target.id && one.turn === target.turn && (one.status === 'queued' || isLapsed(one, now))
-    || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to && one.status === 'queued')
-  const messages = busy ? [] : state.messages.filter(canClaim).slice(0, 1)
+  const canReach = (one: Message): boolean => one.surface === undefined || one.surface === target.surface || target.surface === MCP_SURFACE
+  const isOwn = (one: Message): boolean => one.target === target.id && one.turn === target.turn
+  // A session has at most one message in doubt. While one is, a claim can take only that same message again,
+  // and only on a surface it allows; a claimant it does not allow gets nothing, so nothing else goes out meanwhile.
+  const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one))
+  const canTake = (one: Message): boolean => one.status === 'queued' && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
+  const doubt = held[0]
+  const pick = held.length === 0 ? state.messages.find(canTake) : held.length === 1 && doubt !== undefined && isOwn(doubt) && canReach(doubt) && isLapsed(doubt, now) ? doubt : undefined
+  const messages = pick === undefined ? [] : [pick]
   if (messages.length === 0) return { state, messages }
   // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.
   const claimed = messages.map(({ ref: _ref, ...one }) => ({

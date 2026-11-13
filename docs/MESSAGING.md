@@ -52,12 +52,15 @@ without a surface, by an older board or from another agent's session, is not hel
 A turn-start hook marks a message `accepted` only after it has written the message to its output
 for the host; that does not prove the model read it, and the hook collects no ACK. A hook that
 stops waiting can hand its claim back, and a claim handed back is queued again. A claim the hook
-named that was neither accepted nor handed back can be handed out again after 30 seconds, with the
+named that is still uncertain with no error can be handed out again after 30 seconds, with the
 same ACK code and a line saying it may be a repeat: at most three times for one message (a claim
 after a hand-back does not count), and not while it has an error (`EXPIRED` and `DISMISSED` are
-final; a later receipt from the session can clear a disconnected mark). A message the hook accepted
-once is never handed out or queued again. While a claim stays uncertain it can hold back the session's other messages; one
-left uncertain expires at the board's next action or snapshot after more than 30 minutes without
+final; a later receipt from the session can clear a disconnected mark). That includes a message a
+hook accepted if a later receipt from its session made it uncertain with no error, and such a
+message can also be handed back; the board's own receivers send `uncertain` only with an error, so
+this takes another client (#1407). While a claim stays uncertain it holds back the session's other
+messages: only that claim can be taken again, by a later hook of that session whose surface it
+allows (above) or by its `board_inbox`. One left uncertain expires at the board's next action or snapshot after more than 30 minutes without
 an update. A `board_inbox` claim is never handed out again.
 
 A mailbox normally expires 12 hours after it was last enrolled or renewed; the session's hooks and MCP tools (such as `board_inbox` and `board_status`) can renew it, and session end can remove it sooner. Session end rejects queued messages with `DISCONNECTED`.
@@ -158,7 +161,7 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 | --- | --- |
 | queued | Stored locally; no external delivery yet |
 | uncertain | Claimed durably before delivery, or a disconnect/timeout after claiming (unless accepted) |
-| accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is never sent again |
+| accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is not sent again while it stays accepted |
 | acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
 | rejected | Refused before claiming, or adapter reports a clean rejection |
 

@@ -34,9 +34,8 @@ export const takeMailboxMessage = (state: MessageState, agent: string, session: 
 }
 // A hook that stopped waiting never showed what the board claimed for it, so it hands the claim back
 // and the message is queued again for a later hook (#990). The ACK code stays, for a message shown before.
-// A message the host accepted once is never queued again.
 export const releaseMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number): MessageState => {
-  const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && message.error === '' && !message.hasAccepted)
+  const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && message.error === '')
   if (one === undefined) return state
   const { ref: _ref, ...kept } = one
   return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, claimed: 0, updated: now } : message) }
