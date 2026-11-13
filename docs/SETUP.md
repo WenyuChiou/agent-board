@@ -17,8 +17,10 @@ since commands and apps belong to the account running setup. It does not read
 conversations or credentials. A found command or app is a candidate, not an active
 session or account access. Run setup without `--apply` first: its preview lists each file;
 a bare `--apply` writes to the same agents and prints only how many files changed.
-Gemini CLI is retired and setup never lists it; a `.gemini` directory belongs to
-Antigravity. Finding nothing exits 0 without writing anything and names the next command to
+Gemini CLI is retired and setup never lists it. Gemini CLI and Antigravity share the
+`.gemini` directory; setup finds Antigravity by its own folders in it (`antigravity-cli`,
+`antigravity`, `antigravity-ide`), by `agy` or `antigravity` on the PATH, or by its app, and an
+install an earlier release wrote for Gemini CLI can still be removed. Finding nothing exits 0 without writing anything and names the next command to
 run. You can also select a known target with `--agent <name>`.
 `--agent all` previews all supported targets; it does not install the AI applications.
 

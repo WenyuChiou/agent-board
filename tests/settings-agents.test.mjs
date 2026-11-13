@@ -459,6 +459,44 @@ test('Settings setup and removal match terminal setup byte for byte and refuse t
   assert.ok(existsSync(f.progress))
 })
 
+test('Settings shows an earlier Gemini CLI install with Remove only, and counts it before refusing the last install (#1327)', { timeout: 25_000 }, async () => {
+  const f = fixture()
+  mkdirSync(join(f.home, '.cursor'))
+  f.setup('--agent', 'cursor', '--apply')
+  // Setup no longer offers Gemini CLI; the board script's own setup still writes the install an earlier release wrote.
+  f.local('--codex-setup', '--agent', 'gemini', '--apply')
+  assert.ok(existsSync(join(f.data, 'install-gemini.json')))
+  const board = await f.start()
+  try {
+    let rows = (await board.call('GET', '/api/agents')).json().rows
+    const gemini = rows.find(row => row.agent === 'gemini')
+    assert.deepEqual({ state: gemini?.state, button: gemini?.button }, { state: EN.settingsAgentStart, button: 'remove' })
+    assert.equal(rows.find(row => row.agent === 'cursor').note, undefined, 'Cursor is not the last install')
+    const before = files(f.home)
+    for (const request of [() => board.call('GET', '/api/agents?agent=gemini&action=setup'), () => board.call('POST', '/api/agents/setup', { agent: 'gemini' })]) {
+      const refused = await request()
+      assert.equal(refused.status, 400, refused.text)
+      assert.deepEqual(files(f.home), before, 'a retired setup changes no file')
+    }
+    const preview = await board.call('GET', '/api/agents?agent=cursor&action=remove')
+    assert.equal(preview.status, 200, preview.text)
+    const removed = await board.call('POST', '/api/agents/remove', { agent: 'cursor' })
+    assert.equal(removed.status, 200, removed.text)
+    assert.ok(!existsSync(join(f.data, 'install-cursor.json')))
+    assert.ok(existsSync(join(f.data, 'install-gemini.json')))
+    rows = (await board.call('GET', '/api/agents')).json().rows
+    assert.equal(rows.find(row => row.agent === 'gemini').button, 'remove')
+    const afterRemove = files(f.home)
+    for (const request of [() => board.call('GET', '/api/agents?agent=gemini&action=remove'), () => board.call('POST', '/api/agents/remove', { agent: 'gemini' })]) {
+      const refused = await request()
+      assert.equal(refused.status, 409, refused.text)
+      assert.match(refused.json().note, /Close the board.*--codex-remove/)
+      assert.ok(refused.json().note.includes('gemini'))
+      assert.deepEqual(files(f.home), afterRemove, 'a last-install refusal changes no file')
+    }
+  } finally { await board.close() }
+})
+
 const settingsDom = (isLan, answer, words = EN) => {
   const nodes = new Map()
   let active = null
