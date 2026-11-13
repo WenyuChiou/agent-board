@@ -13619,8 +13619,8 @@ test('the board script answers --version and rejects unknown flags without start
       assert.equal(ran.stdout, '')
       assert.match(ran.stderr, /--bogus|-x/)
     }
-    // Known display options and flag values still run cleanly without opening a page.
-    const printed = runScript(['--print', '--no-color', '--theme', 'dark', '--project', '--bogus', '-h'])
+    // Known display and plugin options and flag values still run cleanly without opening a page.
+    const printed = runScript(['--print', '--quiet-board', '--no-color', '--theme', 'dark', '--project', '--bogus', '-h'])
     assert.equal(printed.status, 0, printed.stderr)
     // No server address or runtime files were written.
     assert.deepEqual(readdirSync(dir).sort(), ['agent-board.mjs', 'progress.md'])

@@ -10699,6 +10699,7 @@ export const LINES = [
 "  \"--plain\",",
 "  \"--plan-event\",",
 "  \"--print\",",
+"  \"--quiet-board\",",
 "  \"--recover-hooks\",",
 "  \"--remove\",",
 "  \"--report\",",

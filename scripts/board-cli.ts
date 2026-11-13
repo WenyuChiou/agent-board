@@ -79,9 +79,9 @@ const BOOL_FLAGS = new Set([
   '--all', '--allow-resume', '--agent-status', '--apply', '--chat', '--codex-doctor',
   '--codex-event', '--codex-remove', '--codex-report', '--codex-setup', '--codex-trust',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
-  '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--recover-hooks',
-  '--remove', '--report', '--serve', '--serve-child', '--status', '--stop', '--stopped',
-  '--tidy', '--version', '-v', '--watch',
+  '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
+  '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
+  '--stop', '--stopped', '--tidy', '--version', '-v', '--watch',
 ])
 const VALUE_FLAGS = new Set([
   '--agent', '--codex-bin', '--codex-dir', '--data-dir', '--deepseek-dir', '--event',
