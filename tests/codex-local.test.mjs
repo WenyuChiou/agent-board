@@ -18,7 +18,7 @@ import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-d
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
-import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { assertClassifierExited, classifierExitState, observeClassifierExit, restartBudgetAtClassifier, spendBudgetBeforeClassifier } from './fixtures/classifier-exit-proof.mjs'
 import { partTest } from '../scripts/ci-impact.mjs'
 
 // The Windows board job runs this file in two parts, and each part runs its share of the tests: the
@@ -4123,13 +4123,79 @@ test('a reporter sweeps scratch files older than a minute from the inbox and kee
   assert.equal(out.error, undefined, hookFailure(out))
   assert.equal(out.status, 0, hookFailure(out))
   const files = readdirSync(inbox)
-  for (const name of names) assert.equal(files.includes(name), false, name)
+  for (const name of names) assert.equal(files.includes(name), false, `${name}: ${hookLog(f)}`)
   assert.equal(files.includes('codex-prompt-1-2.tmp'), true)
   assert.equal(files.includes('notes.txt'), true)
   assert.equal(files.filter(name => name.endsWith('.json')).length, 1)
   assert.equal(files.includes('codex-prompt-1-3.tmp'), isWindows)
   if (isWindows) assert.match(hookLog(f), /CLEANUP_FAILED/)
   else assert.doesNotMatch(hookLog(f), /CLEANUP_FAILED/)
+}))
+
+// A run cut at its budget saves the metadata receipt, then sweeps as a finished run does (#1235). The hung classifier
+// makes the timeout certain on every system, so the sweep no longer depends on how fast the run was.
+test('a reporter whose prompt classifier timed out sweeps old scratch files after it saves the metadata receipt', () => fixture(async f => {
+  const isWindows = process.platform === 'win32'
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
+  const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
+  const old = new Date(Date.now() - 300000)
+  const names = ['tmp', 'receipt', 'fallback', 'timeout', 'complete'].map(suffix => `codex-prompt-1-1.${suffix}`)
+  for (const name of [...names, 'notes.txt']) { const file = join(inbox, name); f.save(file, 'stale'); utimesSync(file, old, old) }
+  f.save(join(inbox, 'codex-prompt-1-2.tmp'), 'fresh')
+  f.save(script, isWindows ? reporterPs1() : reporterSh(inbox))
+  f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
+  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'prompt'] : [script, 'codex', 'prompt']
+  try {
+    const out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, env, JSON.stringify({ session_id: 'synthetic-timeout-sweep', prompt: 'PRIVATE_RAW_PROMPT' }))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    const log = hookLog(f)
+    assert.match(log, /REPORTER_TIMEOUT/)
+    const files = readdirSync(inbox)
+    for (const name of names) assert.equal(files.includes(name), false, `${name}: ${log}`)
+    assert.equal(files.includes('codex-prompt-1-2.tmp'), true)
+    assert.equal(files.includes('notes.txt'), true)
+    const saved = files.filter(name => name.endsWith('.json'))
+    assert.equal(saved.length, 1)
+    assert.deepEqual(JSON.parse(readFileSync(join(inbox, saved[0]), 'utf8')), { session_id: 'synthetic-timeout-sweep' })
+    assert.doesNotMatch(log, /CLEANUP_FAILED|PRIVATE_/)
+  } finally {
+    if (existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+  }
+}))
+
+// The classifier is killed and waited for before the sweep starts, so it cannot be reading or writing a scratch file the sweep removes.
+// The sh reporter takes this path where uname is not Windows. On Windows it hands over to PowerShell, whose classifier helper
+// kills the classifier in its finally before the timeout reaches the sweep.
+test('a timed-out sh reporter has stopped its classifier before it sweeps the inbox', { skip: process.platform === 'win32' }, () => fixture(async f => {
+  const shellProgram = '/bin/sh'
+  const inbox = join(f.root, 'progress-inbox'), script = join(f.root, 'progress-report.sh')
+  const tools = join(f.home, 'tools'), pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs'), seen = join(f.home, 'classifier-at-sweep')
+  const find = spawnSync(shellProgram, ['-c', 'command -v find'], { encoding: 'utf8' })
+  assert.equal(find.status, 0, find.stderr)
+  const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
+  // Every find the sweep runs first records whether the classifier still lives.
+  const lives = `kill -0 "$(cat ${shellQuote(pidFile)})" 2>/dev/null`
+  f.save(join(tools, 'find'), `#!/bin/sh\nif ${lives}; then echo alive; else echo stopped; fi >> ${shellQuote(seen)}\nexec ${shellQuote(find.stdout.trim())} "$@"\n`)
+  chmodSync(join(tools, 'find'), 0o700)
+  const old = new Date(Date.now() - 300000), stale = join(inbox, 'codex-prompt-1-1.tmp')
+  f.save(stale, 'stale'); utimesSync(stale, old, old)
+  f.save(script, reporterSh(inbox))
+  f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  const env = { ...f.env, PATH: `${tools}${delimiter}${f.env.PATH}`, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+  try {
+    const out = await nativeProcess(shellProgram, [script, 'codex', 'prompt'], env, JSON.stringify({ session_id: 'synthetic-sweep-order', prompt: 'PRIVATE_RAW_PROMPT' }))
+    assert.equal(out.error, undefined, hookFailure(out))
+    assert.equal(out.status, 0, hookFailure(out))
+    assert.match(hookLog(f), /REPORTER_TIMEOUT/)
+    assert.equal(existsSync(pidFile), true, 'the classifier started')
+    assert.equal(existsSync(seen), true, 'the timed-out run swept')
+    assert.deepEqual([...new Set(readFileSync(seen, 'utf8').trim().split('\n'))], ['stopped'])
+    assert.equal(existsSync(stale), false)
+  } finally {
+    if (existsSync(pidFile)) await stopReporter(Number(readFileSync(pidFile, 'utf8')))
+  }
 }))
 
 test('PowerShell reporter retries a scratch file released after its first failed removal', { skip: process.platform !== 'win32' }, () => fixture(async f => {
@@ -4250,7 +4316,10 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
     const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
     const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
     const exitProof = join(f.home, 'classifier-exit.json')
-    f.save(script, isWindows ? observeClassifierExit(reporterPs1(), exitProof) : reporterSh(inbox))
+    // The Windows copy starts the clock again where the classifier's work begins: the first cmdlets of a fresh runner
+    // can otherwise spend the 2 s before Start(), and that run tests no classifier (#1080). The wait, the kill and the
+    // receipt after it stay the shipped code; a budget spent before Start() has its own test below.
+    f.save(script, isWindows ? observeClassifierExit(restartBudgetAtClassifier(reporterPs1()), exitProof) : reporterSh(inbox))
     f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
     const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
     const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'] : [script, 'cursor', 'prompt']
@@ -4298,7 +4367,7 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
 test('a classifier interrupted while publishing its PID marker still proves its owned process exited', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), pidFile = join(f.home, 'classifier.pid')
   const exitProof = join(f.home, 'classifier-exit.json'), preload = join(f.home, 'partial-classifier-pid.cjs')
-  f.save(script, observeClassifierExit(reporterPs1(), exitProof))
+  f.save(script, observeClassifierExit(restartBudgetAtClassifier(reporterPs1()), exitProof))
   f.save(preload, `const fs = require('node:fs')\nfs.writeFileSync(${JSON.stringify(pidFile)}, '')\nsetTimeout(() => fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)), 3000)\nsetInterval(() => {}, 1000)\n`)
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
@@ -4319,7 +4388,7 @@ test('a classifier interrupted while publishing its PID marker still proves its 
 test('a classifier that never writes anything still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, () => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), exitProof = join(f.home, 'classifier-exit.json')
   const preload = join(f.home, 'silent-classifier.cjs')
-  f.save(script, observeClassifierExit(reporterPs1(), exitProof))
+  f.save(script, observeClassifierExit(restartBudgetAtClassifier(reporterPs1()), exitProof))
   f.save(preload, 'setInterval(() => {}, 1000)\n')
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
@@ -4333,6 +4402,26 @@ test('a classifier that never writes anything still proves its owned process exi
   assert.equal(files.length, 1)
   assert.deepEqual(JSON.parse(readFileSync(join(inbox, files[0]), 'utf8')), { session_id: 'synthetic-silent-classifier' })
   assert.match(hookLog(f), /REPORTER_TIMEOUT/)
+}))
+
+// A fresh runner can spend the whole budget before the classifier's work begins (#1080). That run still saves the
+// metadata receipt and logs the timeout, and its proof says the classifier never started.
+test('a budget spent before the classifier starts saves the metadata receipt and proves the classifier never started', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const script = join(f.root, 'progress-report.ps1'), exitProof = join(f.home, 'classifier-exit.json')
+  f.save(script, observeClassifierExit(spendBudgetBeforeClassifier(reporterPs1()), exitProof))
+  const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], f.env,
+    JSON.stringify({ session_id: 'synthetic-budget-spent', prompt: 'PRIVATE_RAW_PROMPT' }))
+  assert.equal(out.error, undefined, hookFailure(out))
+  assert.equal(out.status, 0, hookFailure(out))
+  assert.equal(out.stdout.trim(), '{}')
+  assert.equal(classifierExitState(exitProof), 'never-started')
+  const inbox = join(f.root, 'progress-inbox')
+  const files = readdirSync(inbox)
+  assert.equal(files.length, 1)
+  assert.deepEqual(JSON.parse(readFileSync(join(inbox, files[0]), 'utf8')), { session_id: 'synthetic-budget-spent' })
+  const log = hookLog(f)
+  assert.match(log, /REPORTER_TIMEOUT/)
+  assert.doesNotMatch(log, /REPORTER_FAILED|PRIVATE_/)
 }))
 
 test('a delayed input and hung prompt classifier share one deadline without promoting a raw receipt', { skip: process.platform === 'win32' }, () => fixture(async f => {

@@ -372,6 +372,17 @@ test('generated PowerShell bounds application lookup to one executable', async (
   }
 })
 
+// CreateProcess takes at most 32,767 characters. The sh reporter puts the whole PowerShell script on powershell.exe's
+// command line, and the classifier observer these tests add is about 2,000 more: past the limit, PowerShell never
+// starts and no receipt is saved (#1419).
+test('the PowerShell script the sh reporter embeds leaves room on the Windows command line', async () => {
+  const { powershellReporter } = await import('../hooks/hook-reporters.ts')
+  const embedded = powershellReporter(true)
+  const line = 'powershell.exe -NoLogo -NoProfile -NonInteractive -Command "' + embedded.replace(/(\\*)"/g, '$1$1\\"') + '"'
+  assert.ok(line.length <= 30_000, `${line.length} characters`)
+  assert.match(powershellReporter(false), /^# Written by the Agent Board plugin/)
+})
+
 test('the sh reporter writes a prompt receipt with no prompt words from stdin or an argument', () => fixture(async home => {
   const { reporterSh, shellQuote } = await import('../hooks/connect-pure.ts')
   const { powershellReporter } = await import('../hooks/hook-reporters.ts')
