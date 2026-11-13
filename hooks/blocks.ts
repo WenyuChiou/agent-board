@@ -1,4 +1,4 @@
-import type { CutBlock, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressProject, ProgressTask } from '../types'
+import type { CutBlock, ProgressAuto, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressProject, ProgressTask } from '../types'
 import { prWords } from './github'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -13,7 +13,7 @@ import { sha256 } from './sha256'
 import { isOutranked, pickParent } from './runs'
 import { cutLine, oneLine, plain } from './step-words'
 import { isSilenceTask, isWorkingTask } from './grouping'
-import { isStale, observedTime } from './parse'
+import { isStopped, observedTime } from './parse'
 import type { JournalEntry } from './journal'
 
 // Each session's mod owns one block of the file, between its own markers, and rewrites
@@ -100,6 +100,11 @@ const markerOf = (mirror: ProgressMirror, parent?: string): string => {
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
     mirror.replied !== undefined && Number.isFinite(mirror.replied) ? `replied=${new Date(mirror.replied).toISOString()}` : '',
+    // The liveness claim (#1092): only Claude Code records one (PM Q4), and only
+    // when the mirror carries it. It never appears in visible text.
+    (mirror.agent || 'claude') === 'claude' && mirror.agentPid !== undefined && Number.isSafeInteger(mirror.agentPid) && mirror.agentPid > 0 ? `agentpid=${mirror.agentPid}` : '',
+    (mirror.agent || 'claude') === 'claude' && mirror.agentStarted !== undefined && Number.isSafeInteger(mirror.agentStarted) && mirror.agentStarted > 0 ? `agentstarted=${mirror.agentStarted}` : '',
+    (mirror.agent || 'claude') === 'claude' && mirror.host !== undefined && /^[0-9a-f]{64}$/.test(mirror.host) ? `host=${mirror.host}` : '',
     // A session an agent started for itself (#399); a person's has no such mark.
     mirror.isRun === true ? 'origin=run' : '',
     mirror.isRun === true && parent !== undefined && RESUME.test(parent) ? `parent=${parent}` : '',
@@ -508,9 +513,9 @@ export type ConfirmedTask = { text: string; ref: ConfirmRef; entries: Array<Omit
 
 // A person's completion changes only the exact task drawn, and only after its agent
 // stopped. Recheck here, inside each caller's read/change/write retry.
-export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS): ConfirmedTask | null => {
+export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): ConfirmedTask | null => {
   const task = confirmedTarget(text, ref, s)
-  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now, observedTime(task.auto, now, seen).updated, staleMs)) return null
+  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStopped(task.auto, now, observedTime(task.auto, now, seen).updated, staleMs, gone)) return null
   const lines = linesOf(text)
   const spans = scanBlocks(lines)
   const span = ref.session === null ? undefined : spans.find(one => one.session === ref.session)
@@ -675,7 +680,7 @@ export const takeManualDone = (
 // null when it cannot be found for sure: a block without its end marker, a heading that is
 // gone or has a twin, a heading inside some session's block, or a session id two blocks
 // share when the row's project and each block's first heading cannot tell them apart.
-export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS): Archived | null => {
+export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
@@ -717,7 +722,9 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       // as the row does (#1051, #1000).
       const isSilence = span.state === 'working' && task !== undefined && isSilenceTask(task.steps, updated, now)
       // The quiet-time path needs a readable time: unknown age never archives (#1000).
-      const stopped = isTwin || auto !== null && isStale(auto, now, updated, staleMs) || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
+      // A session whose agent process is gone has certainly stopped, so its archive
+      // goes through even when the silence check would keep the row for review (#1092).
+      const stopped = isTwin || isStopped(auto, now, updated, staleMs, gone) || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
       if (auto === null || !stopped) return null
     }
 

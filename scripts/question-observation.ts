@@ -18,6 +18,12 @@ export const reusableQuestionObservation = (): typeof observeQuestions => {
     const [ledger, projects, mine, , , isSettled = false, , proofs] = input
     // These lists can be rebuilt or edited without a new container. Compare every field,
     // including source times and producer evidence, before reusing an observation.
+    // Liveness needs no comparison here: observeQuestions takes no dead set (it is pure
+    // and byte-invariant to process death), and the caller passes `gone` to the view
+    // separately on every read, so a session that died since the last pass is folded
+    // by the view even when this observation is reused. (#1092: the branch's
+    // `input[11]` dead-set comparison is dropped — observeQuestions has no 12th
+    // parameter, so it compared nothing.)
     const sources = JSON.stringify([input[3], proofs, input[8] ?? [], input[9] ?? [], [...(input[10] ?? [])]])
     if (previous?.ledger === ledger && previous.projects === projects && previous.mine === mine
       && previous.isSettled === isSettled && previous.proofs === proofs && previous.sources === sources) return previous.result
