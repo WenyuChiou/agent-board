@@ -121,7 +121,7 @@ export const boardClient = address => {
             // reclaim: the board keeps a connection contested after the other one has left, and only a new registration that replaces
             // this one clears it. Asked again now and then; while another connection is live, the board marks it contested again.
             if (reclaim && isContested && Date.now() >= contestAfter) {
-              contestAfter = Date.now() + 10_000
+              contestAfter = Date.now() + (typeof reclaim === 'number' ? reclaim : 10_000)
               const again = await call('register', { agent, session, surface, turn, scope, connection: credentials.connection, secret: credentials.secret })
               // close() ran while the board was answering: the new connection is ended here, since close() only knew the old one.
               if (isClosed) { await call('disconnect', { connection: again.id, secret: again.secret, turn }).catch(() => undefined); return }

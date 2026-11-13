@@ -4358,7 +4358,7 @@ serveWebSocketProxy({ onMessage: (value, emit) => {
   let connector
   try {
     const first = await codexConnection(board)
-    connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread: codexCurrent, turn: 'turn1', surface: SURFACE_IDS.codexProxy })
+    connector = await connectCodexProxy({ boardUrl: board.address, executable: fake, thread: codexCurrent, turn: 'turn1', surface: SURFACE_IDS.codexProxy, reclaimMs: 300 })
     // Both are contested; the automatic receiver leaves. The proxy connection asks again and the board no longer finds it contested.
     await waitFor(async () => !(await board.call('/api/board')).body.messaging.connections.some(one => one.id === first.id))
     const joined = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === codexCurrent && one.surface === SURFACE_IDS.codexProxy && !one.contested))
@@ -4554,7 +4554,7 @@ test('the board token never appears in the receiver\'s stdin or the agent transc
   } finally { await receiver.close() }
 }, '', undefined, codexRoutes))
 
-test('a hard-killed receiver releases its lease on Windows', async () => fixture(async (board, dir) => {
+test('a hard-killed receiver leaves no Codex program behind on Windows', async () => fixture(async (board, dir) => {
   codexKnown(dir, codexThread, '99999999-2222-4333-8444-555555555555')
   const daemon = codexDaemon(dir, { pidFile: join(dir, 'proxy.pid') })
   const module = new URL('../scripts/codex-receiver.mjs', import.meta.url).href
@@ -4575,8 +4575,7 @@ setInterval(() => undefined, 1000)
     child.kill('SIGKILL')
     await exited
     await waitFor(async () => !isAlive())
-    // Without its poll the connection ends with its 15-second lease, and a new message is turned away meanwhile.
-    await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.length === 0)
+    // The connection then ends with its 15-second lease, as any connection whose polls stop does: 'an expired connector disappears and cannot take a queued message' covers that, so this test does not wait for it.
   } finally { if (child.exitCode === null && child.signalCode === null) child.kill(); await exited }
 }, '', undefined, codexRoutes))
 

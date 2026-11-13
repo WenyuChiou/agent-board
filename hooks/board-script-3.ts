@@ -8355,7 +8355,7 @@ export const LINES = [
 "            isRetried = false;",
 "            isContested = result.contested === true;",
 "            if (reclaim && isContested && Date.now() >= contestAfter) {",
-"              contestAfter = Date.now() + 1e4;",
+"              contestAfter = Date.now() + (typeof reclaim === \"number\" ? reclaim : 1e4);",
 "              const again = await call(\"register\", { agent, session, surface, turn, scope, connection: credentials.connection, secret: credentials.secret });",
 "              if (isClosed) {",
 "                await call(\"disconnect\", { connection: again.id, secret: again.secret, turn }).catch(() => {",
