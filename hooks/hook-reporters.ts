@@ -243,7 +243,7 @@ finish
 
 // Keep paths out of the source: Windows PowerShell5.1 can read a BOM-free script
 // using the system code page. The actual inbox is beside this installed script.
-export const powershellReporter = (fromShell: boolean): string => `# Written by the Agent Board plugin (/progress connect).
+const powershellSource = (fromShell: boolean): string => `# Written by the Agent Board plugin (/progress connect).
 ${fromShell ? "$Agent = [string]$env:AGENT_BOARD_SH_AGENT; $Event = [string]$env:AGENT_BOARD_SH_EVENT; $Payload = [string]$env:AGENT_BOARD_SH_PAYLOAD" : "param([string]$Agent = 'agent', [string]$Event = 'turn', [string]$Payload = '')"}
 $ErrorActionPreference = 'Stop'
 if ($Agent -notin @('codex','cursor','gemini','grok','muse','hermes','openclaw','opencode','antigravity','deepseek')) { $Agent = 'unknown' }
@@ -530,5 +530,11 @@ try {
 if ($Agent -eq 'cursor') { '{}' }
 exit 0
 `
+
+// The sh reporter puts this script on powershell.exe's command line, which Windows caps at 32,767 characters, so the
+// copy it embeds leaves out whole-line comments; the .ps1 file keeps them (#1419).
+export const powershellReporter = (fromShell: boolean): string => fromShell
+  ? powershellSource(true).split('\n').filter(line => !/^\s*#/.test(line)).join('\n')
+  : powershellSource(false)
 
 export const reporterPs1 = (): string => powershellReporter(false)
