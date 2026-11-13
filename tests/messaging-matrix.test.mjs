@@ -247,7 +247,7 @@ test('a routed receiver record requires known surface ids and explicit recorded 
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('the board and the matrix refuse the same malformed routes: a blank agent, a blank or two-line note, a note with no surface, a blank surface, a surface note outside the route or not in an object', async () => {
+test('the board and the matrix refuse the same malformed routes: a blank agent, a blank or two-line note, a note with no surface, a blank surface, a surface note outside the route or not in a plain object', async () => {
   const { isReceiverRoutes } = await import('../hooks/messaging.ts')
   const note = 'docs/validation/2026-01-02-synthetic.md'
   const entry = { agent: 'synthetic', kind: 'mailbox', routes: { idle: { line: 'nextTurn', record: note, surfaces: ['CLI', 'Web'] }, working: { line: 'nextTurn', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }
@@ -283,6 +283,8 @@ test('the board and the matrix refuse the same malformed routes: a blank agent, 
     assert.deepEqual([isReceiverRoutes([entry]), isReceiverRoutes([surfaceOnly])], [true, true])
     assert.deepEqual([await isReadByMatrix('good', entry), await isReadByMatrix('surface only', surfaceOnly)], [true, true])
     assert.deepEqual(bad.filter(([, one]) => isReceiverRoutes([one])).map(([name]) => name), [], 'routes the board takes')
+    // Only the board can be handed a Map (a record file writes plain data); routeRecord reads only a plain object's notes.
+    assert.equal(isReceiverRoutes([idle({ surfaceRecords: new Map([['CLI', note]]) })]), false, 'surface notes in a Map')
     const taken = []
     for (const [name, one] of bad) if (await isReadByMatrix(name, one)) taken.push(name)
     assert.deepEqual(taken, [], 'routes the matrix takes')

@@ -98,12 +98,15 @@ export const sendDecision = (
 // one when there is a record; and a surface's own notes, if any, in a plain object whose keys are surfaces the
 // route covers and whose values are notes. The board's routes file and the matrix's receiver records
 // (scripts/messaging-matrix.mjs) are checked by this one function, so the two cannot accept different routes.
+// A plain object: what routeRecord reads a surface's note from (a Map or a class instance would pass `typeof` and be ignored).
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(value))
 export const isRoute = (value: unknown): value is Route => {
   if (value === null || typeof value !== 'object') return false
   const { line, record, surfaces, surfaceRecords } = value as Record<string, unknown>
   return ROUTE_LINES.includes(line as RouteLine) && (record === null || isNote(record))
     && Array.isArray(surfaces) && surfaces.every(isNote) && (record === null || surfaces.length > 0)
-    && (surfaceRecords === undefined || surfaceRecords !== null && typeof surfaceRecords === 'object' && !Array.isArray(surfaceRecords)
+    && (surfaceRecords === undefined || isPlainObject(surfaceRecords)
       && Object.entries(surfaceRecords).every(([name, note]) => surfaces.includes(name) && isNote(note)))
 }
 // Whether a list read from outside (the tests' stand-in file) holds well-formed receiver routes: every entry
