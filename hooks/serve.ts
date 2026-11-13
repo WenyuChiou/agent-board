@@ -229,7 +229,7 @@ export type ServeRow = {
   dir?: string | null
   sessionId?: string
   // What a task is across redraws, for the page's fold state, from the task and not from what the page shows of it: a
-  // JSON list of its project, title, real first step and which of the tasks reading alike this is, never a joined string.
+  // hash of a JSON list of its project, title, real first step and which of the tasks reading alike this is, never a joined string.
   foldId?: string
   // A session's row on the computer's page: a hash of its agent and session, so a renamed task keeps its folds. The network
   // page gets none: a hash of a short session id can be guessed back (#1412).
@@ -518,13 +518,14 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     if (heldBy !== undefined) openBy.set(heldBy, (openBy.get(heldBy) ?? 0) + 1)
   }
   // A task's identity for the page's fold state: its project, title and real first step (before the view folds the steps into
-  // counts), as a JSON list so no two tasks join to the same text, and which of the tasks reading alike it is.
+  // counts), as a JSON list so no two tasks join to the same text, and which of the tasks reading alike it is; sent as a hash.
   const foldSeen = new Map<string, number>()
   const foldIdOf = (row: { project: string; title: string; firstStep?: string }): string => {
     const same = JSON.stringify([row.project, row.title, row.firstStep ?? ''])
     const place = (foldSeen.get(same) ?? 0) + 1
     foldSeen.set(same, place)
-    return JSON.stringify([same, place])
+    // A hash, so the first step's own words (a record an agent wrote, say) never go out a second time under another name.
+    return sha256(JSON.stringify([same, place])).slice(0, 32)
   }
   for (const item of items) {
     if (item.type === 'ask') {

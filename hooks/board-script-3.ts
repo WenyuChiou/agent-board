@@ -4496,7 +4496,7 @@ export const LINES = [
 "    const same = JSON.stringify([row.project, row.title, row.firstStep ?? \"\"]);",
 "    const place = (foldSeen.get(same) ?? 0) + 1;",
 "    foldSeen.set(same, place);",
-"    return JSON.stringify([same, place]);",
+"    return sha256(JSON.stringify([same, place])).slice(0, 32);",
 "  };",
 "  for (const item of items) {",
 "    if (item.type === \"ask\") {",
