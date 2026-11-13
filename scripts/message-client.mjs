@@ -77,8 +77,10 @@ export const boardClient = address => {
       }
       const receipt = (message, status, reply, error) => call('receipt', { ...credentials, id: message.id, nonce: message.nonce, status, ...(reply === undefined ? {} : { reply }), ...(error === undefined ? {} : { error }) })
       // Messages whose claim is being given back: a poll that hands one out again meanwhile leaves it alone, so the
-      // release that is still trying never gives back a claim that is being delivered.
-      const releasing = new Set()
+      // release that is still trying never gives back a claim that is being delivered. Such a claim is the board's
+      // newer one (the release took effect while its answer was on the way): nothing was started for it, so it is
+      // given back once that release ends, and never held with nothing started.
+      const releasing = new Set(), metWhileReleasing = new Map()
       // Giving a claim back sends no prompt, so it is tried a few times. A request that reached the board but lost its
       // answer is met by the next try as CLAIM_REQUIRED (queued again): that is done. One that still fails is reported.
       const release = async message => {
@@ -91,7 +93,12 @@ export const boardClient = address => {
             }
             await new Promise(done => setTimeout(done, 250 * attempt))
           }
-        } finally { releasing.delete(message.id) }
+        } finally {
+          releasing.delete(message.id)
+          const newer = metWhileReleasing.get(message.id)
+          metWhileReleasing.delete(message.id)
+          if (newer !== undefined && !isClosed) void release(newer)
+        }
       }
       const processMessage = async message => {
         let hasStarted = false
@@ -152,7 +159,10 @@ export const boardClient = address => {
               leaseUntil = again.expires
               isContested = again.contested === true
             }
-            if (!isClosed) for (const message of result.messages) if (!releasing.has(message.id)) void processMessage(message)
+            if (!isClosed) for (const message of result.messages) {
+              if (releasing.has(message.id)) metWhileReleasing.set(message.id, message)
+              else void processMessage(message)
+            }
           } catch (error) {
             if (!error.isRetryable || Date.now() >= leaseUntil) await close()
             // A busy store (#914) costs one short wait, not a whole poll period: one quick retry until a

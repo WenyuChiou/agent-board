@@ -4484,7 +4484,8 @@ test('a Codex receiver that leaves on a contest leaves its queued message queued
 }))
 
 // Passes every request to the board except a receiver's `released` receipts: `fail-once` refuses the first before the
-// board sees it, `lost-answer` lets the board apply the first and then loses its answer, `fail-always` refuses each one.
+// board sees it, `lost-answer` lets the board apply the first and then loses its answer, `fail-always` refuses each one,
+// `slow-answer` lets the board apply the first and answers it 3 s later.
 const releaseProxy = async (board, mode) => {
   const upstream = new URL(board.address)
   let releases = 0
@@ -4504,6 +4505,7 @@ const releaseProxy = async (board, mode) => {
       })
       const text = await answer.text()
       if (isRelease && mode === 'lost-answer' && releases === 1) { req.socket.destroy(); return }
+      if (isRelease && mode === 'slow-answer' && releases === 1) await pause(3000)
       res.writeHead(answer.status, { 'content-type': 'application/json' })
       res.end(text)
     } catch { res.writeHead(502); res.end('{}') }
@@ -4514,6 +4516,56 @@ const releaseProxy = async (board, mode) => {
     close: () => new Promise(done => { server.close(done); server.closeAllConnections() }),
   }
 }
+
+test('a claim handed out again while its release still waits for an answer is given back when that release ends, and goes once (#318)', () => codexFixture(async board => {
+  const proxy = await releaseProxy(board, 'slow-answer')
+  const id = 'AB-CX-SLOW', errors = [], started = []
+  let isBusy = true
+  // The first claim finds the session busy and is given back; the board applies that, a poll claims the message again
+  // before the answer arrives, and the next claim is delivered.
+  const connection = await boardClient(proxy.address).attach({
+    agent: 'codex', session: codexCurrent, surface: SURFACE_IDS.cli, turn: 'session', scope: 'session', verify: async () => true,
+    onError: error => errors.push(error.message),
+    deliver: async (one, accept, begin) => {
+      if (isBusy) { isBusy = false; throw Object.assign(new Error('SESSION_BUSY'), { isReleased: true }) }
+      begin(); started.push(one.id); await accept(); return 'ACK ' + one.nonce
+    },
+  })
+  try {
+    assert.equal(await codexSend(board, connection, id), 200)
+    await waitFor(async () => (await codexMessage(board, id))?.status === 'acknowledged')
+    assert.deepEqual(started, [codexId(id)])
+    assert.deepEqual(errors, [])
+  } finally { await connection.close(); await proxy.close() }
+}))
+
+test('a queued message an automatic receiver left waits 10 minutes for the next one, then is refused as before (#318)', async () => fixture(async (board, dir) => {
+  transportRow(dir, 'fixture', 'left-session')
+  const register = async () => (await board.call('/api/messages/register', { agent: 'fixture', session: 'left-session', surface: SURFACE_IDS.cli, turn: 'turn1', unclaimed: true })).body
+  const leave = one => board.call('/api/messages/disconnect', { connection: one.id, secret: one.secret, turn: 'turn1' })
+  const message = async id => (await board.call('/api/board')).body.messaging.messages.find(one => one.id === id)
+  const clock = ms => writeFileSync(join(dir, 'message-clock-offset'), String(ms))
+  // Nobody comes back: the message waits, then is refused.
+  const first = await register()
+  assert.equal((await board.call('/api/messages/send', { ...input, target: first.id, turn: 'turn1' })).status, 200)
+  await leave(first)
+  clock(9 * 60_000)
+  assert.deepEqual([(await message(input.id)).status, (await message(input.id)).error], ['queued', ''])
+  clock(10 * 60_000 + 1000)
+  assert.deepEqual([(await message(input.id)).status, (await message(input.id)).error], ['rejected', 'DISCONNECTED'])
+  // A receiver comes back in time: it takes the message over, and it stays queued past the first one's 10 minutes.
+  const second = await register()
+  const id = 'AB-TEST-002'
+  assert.equal((await board.call('/api/messages/send', { ...input, id, target: second.id, turn: 'turn1' })).status, 200)
+  await leave(second)
+  clock(15 * 60_000)
+  const third = await register()
+  assert.equal((await message(id)).target, third.id)
+  clock(21 * 60_000)
+  assert.equal((await message(id)).status, 'queued')
+}, `const originalNow = Date.now
+Date.now = () => originalNow() + (fs.existsSync(path.join(directory, 'message-clock-offset')) ? Number(fs.readFileSync(path.join(directory, 'message-clock-offset'), 'utf8')) : 0)
+`))
 
 test('a claim given back is tried again when its release fails, a lost answer counts as given back, and a release that keeps failing is reported (#318)', () => codexFixture(async board => {
   for (const [i, mode] of ['fail-once', 'lost-answer', 'fail-always'].entries()) {
