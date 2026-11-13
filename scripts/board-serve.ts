@@ -76,6 +76,7 @@ export type ServeOptions = {
   // stops then, rather than run on where no one can reach it.
   onReady: (url: string, port: number) => boolean
   onStop: () => void
+  onListenError?: (error: NodeJS.ErrnoException) => void
   idleMs: number
   // Opens the page in the person's browser at this address (with its one-time approval key) and
   // says whether a window opened. Absent: the board script opens the page itself, and that page
@@ -855,11 +856,14 @@ export const startServer = (o: ServeOptions): void => {
       if (!res.headersSent) json(res, 500, {})
     })
   })
-  server.on('error', () => {
+  let isListening = false
+  server.on('error', (error: NodeJS.ErrnoException) => {
     try { messaging.close() } catch {}
-    o.onStop()
+    if (!isListening && o.onListenError !== undefined) o.onListenError(error)
+    else o.onStop()
   })
   server.listen(o.port, '127.0.0.1', () => {
+    isListening = true
     port = (server.address() as AddressInfo).port
     const url = `http://127.0.0.1:${port}/?t=${token}`
     if (!o.onReady(url, port)) {

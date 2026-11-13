@@ -193,7 +193,7 @@ Question tags: [Confirm] yes or no · [Choose] pick an option · [Input] type a 
 
 Independent installations: update a clean checkout to the intended release, preview `node scripts/setup-agent.mjs`, then apply the approved plan. Edited files are conflicts, not overwritten. Existing host sessions may need reload. No unattended updater or startup service is installed.
 
-Preview and apply removal across all touched agents in a single run with `agent-board remove`, or specify `--agent` to remove only one (`codex`, `cursor`, `opencode`, `gemini`, `grok`, `muse`, `hermes`, `openclaw`, `antigravity`, `deepseek`):
+Preview and apply removal across all touched agents in a single run with `agent-board remove`, or specify `--agent` to remove only one (`codex`, `cursor`, `opencode`, `grok`, `muse`, `hermes`, `openclaw`, `antigravity`, `deepseek`):
 
 ```sh
 npx @wenyuchiou/agent-board remove
@@ -308,7 +308,7 @@ Independent local sessions with the same short report id can both keep reporting
 - **No native pane:** non-Claude hosts use the interactive web board or terminal board. A web panel is not a native host sidebar.
 - **A task cut off mid-write:** if a session stops while it writes its block (a crash or a forced shutdown), the block can lose its end marker. The board reads it as ending where its lines end, shows it as it was, and names it under Board health at the bottom of the pane. To close it by hand, add `<!-- /auto session=<id> -->` on the line after its last line; the id is in the block's start marker. If the session wrote its block again first, the lines left below the new block repeat its old steps: delete them by hand.
 - **An agent shows up twice:** it may be connected both ways, by the Claude plugin's `/progress connect` and by setup. `/progress connect status` lists what the plugin connected; remove one with `/progress connect remove`, or with `npx @wenyuchiou/agent-board@next remove --agent <name>`, which previews the removal, then the same command with `--apply`.
-- **A question will not go away:** answer it in its own chat, then press **Already answered, hide** (`h` on the terminal board). It is on the card itself for a question whose chat has stopped, for one the agent asks in its own window, and after you **Send** or **Queue** from the board; after **Copy**, the same button reads **Answered**; otherwise it is under **More**. After 3 days the question moves into **Earlier unanswered questions**, and after 7 days into **Older unanswered questions**.
+- **A question will not go away:** answer it in its own chat, then press **Already answered, hide** (`h` on the terminal board). It is on the card itself for a question whose chat has stopped, for one the agent asks in its own window, and after you **Copy**, **Send** or **Queue** from the board; otherwise it is under **More**. After 3 days the question moves into **Earlier unanswered questions**, and after 7 days into **Older unanswered questions**.
 
 ### Reporting a problem safely
 
