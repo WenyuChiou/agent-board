@@ -5,6 +5,16 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { spawnIsolated } from './lib/spawn.mjs'
 import { makeWorld } from './lib/world.mjs'
+import { registerHooks } from 'node:module'
+// The routes file uses the host's extensionless imports; resolve only those local paths, as tests/messaging.test.mjs does.
+registerHooks({ resolve(specifier, context, next) {
+  try { return next(specifier, context) } catch (error) {
+    if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+    return next(`${specifier}.ts`, context)
+  }
+} })
+const { RECEIVER_ROUTES } = await import('../../hooks/receiver-routes.ts')
+const { SURFACE_IDS: S, isNote, routeRecord } = await import('../../hooks/messaging.ts')
 
 // L0: what a newcomer meets first, before installing anything. Links and image files across the
 // three READMEs are #207's sync test; this journey keeps to the picture at the top.
@@ -71,11 +81,13 @@ const LISTED = ['Claude Code', 'Codex', 'Antigravity', 'Cursor', 'OpenCode', 'Gr
 const BOARD_COMMANDS = { 'Claude Code': '/agent-board', Codex: '$agent-board', Antigravity: '/agent-board', OpenCode: '/agent-board', 'Grok Build': '/agent-board', 'Hermes Agent': '/agent-board' }
 // What each README says per language: the reply cells of the support table, how each answer button is
 // described, and the words of the phone row. The cells follow docs/MESSAGING.md "Agent and surface support"
-// (Proposed or None is "Not yet", Implemented and not tested is "Not tested", no such surface is a dash).
+// (Proposed or None is "Not yet", Implemented and not tested is "Not tested", no such surface is a dash), and the
+// reply cells follow the routes file: a cell with a route says what happens when the card offers it, never
+// "idle" or "working", and links the matrix for each surface and state (#1386 review).
 const WORDS = {
-  en: { now: 'Sent when it is free', next: 'Idle: handed over from its next turn; working: you paste it', paste: 'You paste it', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it for that session's turns, does not wake an idle one, and can be rejected if its 12-hour mailbox expires or, for an agent whose hook reports the end of a session, if the session ends first/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: 'Ask it for the Agent Board skill' },
-  'zh-TW': { now: '它空下來就送出', next: '閒置時：下一輪起交給它；工作中：你自己貼上', paste: '你自己貼上', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留給那個對話的各個回合，不會叫醒閒置中的對話；它的信箱滿 12 小時過期，或是對話先結束（限 hook 會回報對話結束的 agent），都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '請它執行 Agent Board skill' },
-  'zh-CN': { now: '它空下来就发出', next: '空闲时：下一轮起交给它；工作中：你自己粘贴', paste: '你自己粘贴', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留给那个对话的各个回合，不会唤醒空闲中的对话；它的邮箱满 12 小时过期，或是对话先结束（限 hook 会报告对话结束的 agent），都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '让它执行 Agent Board skill' },
+  en: { now: 'Sent when it is free', next: 'When its card offers to queue it: handed over at its next turn; [by surface and state](docs/MESSAGING.md#agent-and-surface-support)', paste: 'You paste it', send: /- \*\*Send\*\* hands it to a connected session; a confirmation from that session means it was received/, queue: /- \*\*Queue for the agent's next turn\*\* holds it for that session's turns, does not wake an idle one, and can be rejected if its 12-hour mailbox expires or, for an agent whose hook reports the end of a session, if the session ends first/, copy: /- \*\*Copy answer\*\* puts it on your clipboard/, hide: '**Already answered, hide**', viewOnly: /cannot send an answer/, askNote: 'Ask it for the Agent Board skill' },
+  'zh-TW': { now: '它空下來就送出', next: '卡片可以排入下一回合時：下一回合交給它；[依介面和狀態看](docs/MESSAGING.md#agent-and-surface-support)（英文）', paste: '你自己貼上', send: /- \*\*傳送\*\*把它交給已連線的對話；對話回確認才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*會留給那個對話的各個回合，不會叫醒閒置中的對話；它的信箱滿 12 小時過期，或是對話先結束（限 hook 會回報對話結束的 agent），都可能被拒收/, copy: /- \*\*複製回答\*\*把它放進剪貼簿/, hide: '**已回覆，先隱藏**', viewOnly: /不能傳送回答/, askNote: '請它執行 Agent Board skill' },
+  'zh-CN': { now: '它空下来就发出', next: '卡片可以排入下一回合时：下一回合交给它；[按界面和状态看](docs/MESSAGING.md#agent-and-surface-support)（英文）', paste: '你自己粘贴', send: /- \*\*发送\*\*把它交给已连接的对话；对话回确认才代表收到/, queue: /- \*\*排入 agent 的下一回合\*\*会留给那个对话的各个回合，不会唤醒空闲中的对话；它的邮箱满 12 小时过期，或是对话先结束（限 hook 会报告对话结束的 agent），都可能被拒收/, copy: /- \*\*复制回答\*\*把它放进剪贴板/, hide: '**已回复，先隐藏**', viewOnly: /不能发送回复/, askNote: '让它执行 Agent Board skill' },
 }
 // Each agent's command-line reply in the terminal table, a key of WORDS.
 const REPLY = { 'Claude Code': 'now', Codex: 'next', Antigravity: 'next', Cursor: 'paste', OpenCode: 'paste', 'Grok Build': 'paste', 'Hermes Agent': 'paste' }
@@ -450,12 +462,25 @@ describe('L0 discover and install from the README', () => {
     // Words of the page and pane cells; "Not tested yet" is MESSAGING.md's Implemented with no live run, and
     // Antigravity's cell gives its desktop app's Verified next-turn route and its IDE's Not tested apart.
     const DESKTOP = {
-      en: { pane: '`/agent-board` (board page)', page: 'Board page', notYet: 'Not yet', untested: 'Not tested yet', appNext: 'Desktop app: handed over from its next turn; IDE: not tested yet', second: 'The second Quick start command' },
-      'zh-TW': { pane: '`/agent-board`（看板網頁）', page: '看板網頁', notYet: '尚未支援', untested: '尚未測試', appNext: '桌面 app：下一輪起交給它；IDE：尚未測試', second: '快速開始的第二個指令' },
-      'zh-CN': { pane: '`/agent-board`（看板网页）', page: '看板网页', notYet: '暂不支持', untested: '尚未测试', appNext: '桌面 app：下一轮起交给它；IDE：尚未测试', second: '快速开始的第二个命令' },
+      en: { pane: '`/agent-board` (board page)', page: 'Board page', notYet: 'Not yet', untested: 'Not tested yet', appNext: 'When its card offers to queue it: handed over at its next turn. Desktop app: checked in a live run; IDE: no run of its own, and it is treated like the app when its hook reports it as the app\'s surface; [by surface and state](docs/MESSAGING.md#agent-and-surface-support)', second: 'The second Quick start command' },
+      'zh-TW': { pane: '`/agent-board`（看板網頁）', page: '看板網頁', notYet: '尚未支援', untested: '尚未測試', appNext: '卡片可以排入下一回合時：下一回合交給它。桌面 app：實際跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[依介面和狀態看](docs/MESSAGING.md#agent-and-surface-support)（英文）', second: '快速開始的第二個指令' },
+      'zh-CN': { pane: '`/agent-board`（看板网页）', page: '看板网页', notYet: '暂不支持', untested: '尚未测试', appNext: '卡片可以排入下一回合时：下一回合交给它。桌面 app：实际跑过；IDE：没有单独跑过，它的 hook 把它报告成 app 的界面时，跟 app 一样处理；[按界面和状态看](docs/MESSAGING.md#agent-and-surface-support)（英文）', second: '快速开始的第二个命令' },
     }
     // Agents with a desktop app or IDE in docs/MESSAGING.md "Agent and surface support", and what that table says of each.
     const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'appNext'], Cursor: ['page', 'untested'], OpenCode: ['page', 'notYet'] }
+    // The route lines with a live note on any surface of a README row, whatever the receiver or the state: a route the
+    // routes file records that no cell is worded for fails here until the cell is decided.
+    const noted = (agent, surfaces) => [...new Set(RECEIVER_ROUTES.filter(one => one.agent === agent).flatMap(one => [one.routes.idle, one.routes.working])
+      .filter(route => route.line !== 'none' && surfaces.some(surface => route.surfaces.includes(surface) && isNote(routeRecord(route, surface)))).map(route => route.line))].sort().join('+')
+    const ROW = {
+      terminal: { 'Claude Code': ['claude', [S.claude]], Codex: ['codex', [S.cli, S.codexProxy, S.codexSession]], Antigravity: ['antigravity', [S.antigravityTui, S.antigravityStream]], Cursor: ['cursor', [S.cursor]] },
+      desktop: { Antigravity: ['antigravity', [S.antigravityIde]], Cursor: ['cursor', [S.cursor]] },
+    }
+    const CELL = { '': 'none', 'now+stepEnd': 'now', nextTurn: 'next', 'nextTurn+now': 'next' }
+    const EXPECT = { terminal: { none: 'paste', now: 'now', next: 'next' }, desktop: { none: 'untested', next: 'appNext' } }
+    for (const [agent, [id, surfaces]] of Object.entries(ROW.terminal)) assert.equal(REPLY[agent], EXPECT.terminal[CELL[noted(id, surfaces)]], `${agent}: the terminal cell follows the recorded routes (${noted(id, surfaces)})`)
+    for (const [agent, [id, surfaces]] of Object.entries(ROW.desktop)) assert.equal(DESK[agent][1], EXPECT.desktop[CELL[noted(id, surfaces)]], `${agent}: the desktop cell follows the recorded routes (${noted(id, surfaces)})`)
+    for (const agent of LISTED.filter(one => !ROW.terminal[one])) assert.equal(REPLY[agent], 'paste', `${agent} has no route, so its cell is paste`)
     const messaging = read('docs/MESSAGING.md')
     const appNote = 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md'
     for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Proposed', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Verified', `[${appNote}](../${appNote})`], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Proposed', 'Not tested']]) {
@@ -485,6 +510,7 @@ describe('L0 discover and install from the README', () => {
         assert.equal(command === desk.second, agent === 'Cursor', `${name}: only Cursor opens the board with the second Quick start command`)
         assert.equal(command.includes(words.askNote), agent === 'Hermes Agent', `${name}: only Hermes's command carries the note that a prompt asked for the skill`)
         assert.equal(reply, words[REPLY[agent]], `${name}: ${agent}'s command-line reply`)
+        assert.doesNotMatch(reply, /\b(idle|working)\b|閒置|工作中|空闲/i, `${name}: ${agent}'s cell says nothing of idle or working`)
       }
       const apps = rows(desktop, '| <img')
       assert.deepEqual(apps.map(cells => /alt="([^"]+)"/.exec(cells[0])?.[1]), Object.keys(DESK), `${name}: the desktop table lists the agents with an app or IDE, and no others`)
@@ -493,6 +519,7 @@ describe('L0 discover and install from the README', () => {
         assert.equal(open, desk[DESK[agent][0]], `${name}: how ${agent}'s app opens the board`)
         assert.equal(agent, /alt="([^"]+)"/.exec(icon)[1], `${name}: ${agent}'s desktop row name matches its icon`)
         assert.equal(reply, desk[DESK[agent][1]], `${name}: ${agent}'s app reply`)
+        assert.doesNotMatch(reply, /\b(idle|working)\b|閒置|工作中|空闲/i, `${name}: ${agent}'s app cell says nothing of idle or working`)
       }
       const bullets = { en: ["- Board page: run `npx @wenyuchiou/agent-board@next --html` in a terminal, the app's own included.", '- Not yet or Not tested yet: copy your answer from the board and paste it into the app.'], 'zh-TW': ['- 看板網頁：在終端機執行 `npx @wenyuchiou/agent-board@next --html`，app 自己的終端機也行。', '- 尚未支援或尚未測試：從看板複製回答，貼到 app 裡。'], 'zh-CN': ['- 看板网页：在终端运行 `npx @wenyuchiou/agent-board@next --html`，app 自带的终端也行。', '- 暂不支持或尚未测试：从看板复制回复，粘贴到 app 里。'] }
       assert.ok(desktopPart.includes(bullets[lang].join('\n')), `${name}: the two bullets under the desktop table, in order`)

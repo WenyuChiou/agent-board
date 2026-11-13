@@ -11,7 +11,7 @@ import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/message-client.mjs'
-import { observeSession } from '../hooks/messaging.ts'
+import { isNote, observeSession, routeRecord } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
@@ -4415,7 +4415,7 @@ test('every receiver record against idle, working and ended shows its line, with
     // A closed chat has no mailbox, so a mailbox card for an ended session has no route at all.
     const isGone = record.kind === 'mailbox' && state === 'ended'
     assert.equal(card.line, isGone ? 'none' : route.line, label)
-    const canSend = !isGone && route.line !== 'none' && route.record !== null
+    const canSend = !isGone && route.line !== 'none' && isNote(routeRecord(route, surface))
     assert.equal(card.canSend, canSend, label)
     const page = await pageDom(servePage(s, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
     page.cards().flatMap(one => page.buttons(one)).find(one => one.textContent === s.pgWriteOwn)?.click()
@@ -4865,6 +4865,15 @@ test('shape 22: a null, empty or none record keeps Copy', async () => {
     await shapeCopy(w)
   }
 })
+test('shape 22b: a route whose only note is one surface\'s own sends there and keeps Copy on its other surface (#1386 review)', async () => {
+  const route = { line: 'now', record: null, surfaces: ['Claude Code', 'CLI'], surfaceRecords: { 'Claude Code': shapeNote } }
+  const noted = await shapeCase()
+  shapeRoutes[0].routes.idle = route
+  await shapeSend(noted, 'now')
+  const bare = await shapeCase({ surface: 'CLI' })
+  shapeRoutes[0].routes.idle = route
+  await shapeCopy(bare)
+})
 test('shape 23: every recorded surface and state agrees with the card in three languages', async () => {
   const { readReceiverRecords } = await import('../scripts/messaging-matrix.mjs')
   const { agentLabel } = await import('../hooks/strings.ts')
@@ -4879,7 +4888,7 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
     const model = realServeModel(view, [], s, new Set(), false, target, false, group, RECEIVER_ROUTES)
     const card = model.asks[0] ?? [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)].find(one => one.title === 'Route table')
-    const canSend = state !== 'ended' && route.line !== 'none' && typeof route.record === 'string' && route.record !== '' && route.surfaces.includes(surface.id)
+    const canSend = state !== 'ended' && route.line !== 'none' && isNote(routeRecord(route, surface.id)) && route.surfaces.includes(surface.id)
     assert.equal(card.delivery !== undefined, canSend, `${record.source}/${surface.id}/${state}`)
     if (!(record.kind === 'mailbox' && state === 'ended')) {
       const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
