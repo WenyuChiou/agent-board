@@ -18,9 +18,10 @@ const splitPaths = text => text.split('\0').filter(Boolean)
 
 // A whole test file gets ten minutes here. tests/codex-local.test.mjs (441 tests) ran 449.9 s alone on CI's Ubuntu
 // runner (test.yml, #1130) and never finished in ten minutes on a Windows computer, where starting processes is
-// slower; tests/board.test.mjs is as large. In a file that declares more tests than this, preflight runs only the
-// tests whose lines the branch added or changed, and CI runs the whole file.
-export const largeTestFile = 300
+// slower; tests/board.test.mjs is as large, and tests/messaging.test.mjs (192) also ran out of time there while other
+// work ran. In a file that declares more tests than this, preflight runs only the tests whose lines the branch added
+// or changed, and CI runs the whole file.
+export const largeTestFile = 150
 // More changed tests than this is most of a file, or a new one: run it whole.
 const maxChangedTests = 60
 // A test may be declared inside a loop, so its line may be indented; `t.test(` subtests do not match.
