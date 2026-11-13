@@ -22,7 +22,9 @@ and receipts are never automatically retried, including after a store lock.
 
 Use the existing reply box on the session's card. A matching receiver enables Send or
 Queue only when its session state, surface and route have a live record. When the state
-or route is unknown, the card offers Copy. Internal connection ids stay hidden. There is no
+or route is unknown, the card offers Copy. One known gap: Codex tells a hook which client
+started a session but not which client runs its next turn, so a terminal session continued in
+another client can keep the terminal's Queue (see the Codex CLI record's "Not covered"). Internal connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
 An offline card retains Copy. By default, the web UI and

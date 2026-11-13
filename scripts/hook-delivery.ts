@@ -15,15 +15,20 @@ import { defaultMessagesDirectory } from './runtime-folder.ts'
 type Json = Record<string, unknown>
 
 // Codex's terminal, app and editor extension run the same hooks, and only the terminal has a
-// live record (docs/validation/2026-11-12-codex-cli-mailbox-live.md). The history file's first
-// record names the client that started the session (`codex-tui` for the terminal), but a session
-// resumed in another client keeps that file, so the client running now must agree: the desktop
-// app and the editor extension start Codex with CODEX_INTERNAL_ORIGINATOR_OVERRIDE set to their
-// own name, the terminal leaves it unset, and Codex passes its environment on to hooks. Anything
-// else, or no readable file, is a surface the board does not know, so the page offers no Queue.
+// live record (docs/validation/2026-11-12-codex-cli-mailbox-live.md, run with `--no-daemon`).
+// Codex 0.167 gives a turn-start hook no field naming the client of the turn, so the label says
+// only what the hook can see: the session was started in the terminal (the history file's first
+// record names `codex-tui`), and no other client's mark is in the hook's environment. Codex
+// copies its process environment into hooks; the desktop app and the editor extension start it
+// with CODEX_INTERNAL_ORIGINATOR_OVERRIDE set to their own name, and its background service on
+// Windows starts with CODEX_DAEMON_SHUTDOWN_SOCKET. Anything else, or no readable file, is a
+// surface the board does not know, so the page offers no Queue. A terminal session continued in
+// another client that sets neither mark still reads as the terminal; the owner accepted that gap
+// (the record's "Not covered" says so), since the next turn takes the message by the same hook.
 const CODEX_CLIENT_VARIABLE = 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE'
-export const codexSurface = (meta: CodexMeta | null, client: string | undefined): string =>
-  meta?.originator === 'codex-tui' && (client === undefined || client === 'codex-tui') ? SURFACE_IDS.cli : SURFACE_IDS.unknown
+const CODEX_DAEMON_VARIABLE = 'CODEX_DAEMON_SHUTDOWN_SOCKET'
+export const codexSurface = (meta: CodexMeta | null, client: string | undefined, daemon: string | undefined): string =>
+  meta?.originator === 'codex-tui' && (client === undefined || client === 'codex-tui') && daemon === undefined ? SURFACE_IDS.cli : SURFACE_IDS.unknown
 
 export type TurnDelivery = {
   mode: string
@@ -63,7 +68,7 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
       let message = null
       const transcript = raw.transcript_path
       const surface = agent === 'cursor' ? SURFACE_IDS.cursor : agent === 'antigravity' ? SURFACE_IDS.antigravityIde
-        : agent === 'codex' ? codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null, process.env[CODEX_CLIENT_VARIABLE])
+        : agent === 'codex' ? codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null, process.env[CODEX_CLIENT_VARIABLE], process.env[CODEX_DAEMON_VARIABLE])
         : SURFACE_IDS.cli
       try { message = await mailbox?.turn(agent, session, surface, Date.now()) ?? null } catch {}
       const owner = hash(`${agent}:${session}`)
