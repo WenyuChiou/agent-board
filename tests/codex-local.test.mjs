@@ -18,7 +18,7 @@ import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-d
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
-import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { assertClassifierExited, classifierStartMs, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
 import { partTest } from '../scripts/ci-impact.mjs'
 
 // The Windows board job runs this file in two parts, and each part runs its share of the tests: the
@@ -3913,6 +3913,27 @@ test('the PowerShell reporter calls no cmdlet between its input clock and the pa
   assert.doesNotMatch(source.slice(start, end), /\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/)
 })
 
+// The first cmdlet loads a module, 0.7 to 3.9 s on a fresh runner. On a prompt that must happen while the
+// classifier already runs, so the shared 2 s clock never ends before Start() (#1080).
+test('the PowerShell reporter calls no cmdlet between its input clock and the classifier start on a prompt', () => {
+  const source = reporterPs1()
+  const cmdlet = /\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/
+  const ownFunctions = /\bWrite-Exclusive\b|\bRead-PromptReceipt\b/g
+  const clock = source.indexOf('$clock = [Diagnostics.Stopwatch]::StartNew()')
+  const call = source.indexOf('$receipt = Read-PromptReceipt $tmp $clock', clock)
+  assert.ok(clock >= 0 && call > clock, 'the prompt path calls the classifier after the input clock')
+  assert.doesNotMatch(source.slice(clock, call).replace(ownFunctions, ''), cmdlet, 'main flow, clock to classifier call')
+  const bodyFrom = (signature, endMarker) => {
+    const begin = source.indexOf(signature), end = source.indexOf(endMarker, begin)
+    assert.ok(begin >= 0 && end > begin, `${signature} reaches ${endMarker}`)
+    return source.slice(source.indexOf('\n', begin), end)
+  }
+  assert.doesNotMatch(bodyFrom('function Write-Exclusive(', '\n}\n'), cmdlet, 'the exclusive write uses .NET only')
+  assert.doesNotMatch(bodyFrom('function Read-PromptReceipt(', '$isStarted = $process.Start()'), cmdlet, 'entry of the classifier function to Start()')
+  assert.ok(source.indexOf('ConvertFrom-Json', clock) > call, 'JSON parsing runs after the classifier is started')
+  assert.ok(source.indexOf('& $Prepare') > source.indexOf('$isStarted = $process.Start()'), 'the caller work runs after Start()')
+})
+
 test('legacy reporters bound an unfinished input and keep Cursor responses and errors local', () => legacyReporterProbe())
 
 test('a completed prompt survives watchdog cancellation before its trap is ready', { skip: process.platform === 'win32' }, () => fixture(async f => {
@@ -4245,7 +4266,7 @@ const timedOutClassifierCases = isWindows => {
   ]
 }
 for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of timedOutClassifierCases(process.platform === 'win32').entries()) {
-  test(`a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board, case ${index}`, () => fixture(async f => {
+  test(`a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board, case ${index}`, t => fixture(async f => {
     const isWindows = process.platform === 'win32'
     const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
     const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
@@ -4266,11 +4287,14 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
       assert.equal(out.error, undefined, hookFailure(out))
       assert.equal(out.status, 0, hookFailure(out))
       assert.equal(out.stdout.trim(), '{}')
-      // On Windows the 2 s budget is shared with the reporter's own JSON work, so on a loaded runner Node can be
-      // killed at the deadline before its preload writes a PID (#1080). The reporter's own record that it started
+      // On Windows the classifier starts before the reporter's JSON work, but a loaded runner can still kill Node
+      // at the deadline before its preload writes a PID (#1080). The reporter's own record that it started
       // and ended the process is the proof there, as in the interrupted-PID test below.
-      if (isWindows) assertClassifierExited(exitProof)
-      else {
+      if (isWindows) {
+        // The shipped clock is unchanged; this shows on every run how much of it the reporter used before Node started.
+        t.diagnostic(`classifier started ${classifierStartMs(exitProof)} ms into the 2000 ms clock, case ${index}`)
+        assertClassifierExited(exitProof)
+      } else {
         assert.equal(existsSync(pidFile), true, `exercise the real classifier process, case ${index}: ${hookLog(f)}`)
         assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
       }
@@ -4295,7 +4319,7 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
   }))
 }
 
-test('a classifier interrupted while publishing its PID marker still proves its owned process exited', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+test('a classifier interrupted while publishing its PID marker still proves its owned process exited', { skip: process.platform !== 'win32' }, t => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), pidFile = join(f.home, 'classifier.pid')
   const exitProof = join(f.home, 'classifier-exit.json'), preload = join(f.home, 'partial-classifier-pid.cjs')
   f.save(script, observeClassifierExit(reporterPs1(), exitProof))
@@ -4303,6 +4327,7 @@ test('a classifier interrupted while publishing its PID marker still proves its 
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
     JSON.stringify({ session_id: 'synthetic-partial-pid', prompt: 'PRIVATE_RAW_PROMPT' }))
+  t.diagnostic(`classifier started ${classifierStartMs(exitProof)} ms into the 2000 ms clock`)
   assertClassifierExited(exitProof)
   assert.equal(out.error, undefined, hookFailure(out))
   assert.equal(out.status, 0, hookFailure(out))
@@ -4316,7 +4341,7 @@ test('a classifier interrupted while publishing its PID marker still proves its 
 }))
 
 // A loaded machine can kill the classifier before its own code writes anything, so the proof must not need it (#1080).
-test('a classifier that never writes anything still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+test('a classifier that never writes anything still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, t => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), exitProof = join(f.home, 'classifier-exit.json')
   const preload = join(f.home, 'silent-classifier.cjs')
   f.save(script, observeClassifierExit(reporterPs1(), exitProof))
@@ -4324,6 +4349,7 @@ test('a classifier that never writes anything still proves its owned process exi
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
     JSON.stringify({ session_id: 'synthetic-silent-classifier', prompt: 'PRIVATE_RAW_PROMPT' }))
+  t.diagnostic(`classifier started ${classifierStartMs(exitProof)} ms into the 2000 ms clock`)
   assertClassifierExited(exitProof)
   assert.equal(out.error, undefined, hookFailure(out))
   assert.equal(out.status, 0, hookFailure(out))

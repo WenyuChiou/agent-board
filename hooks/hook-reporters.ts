@@ -246,7 +246,7 @@ function Write-Exclusive([string]$File, [string]$Text) {
   $stream = [IO.File]::Open($File, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
   $complete = $false
   try { $bytes = [Text.Encoding]::UTF8.GetBytes($Text); $stream.Write($bytes, 0, $bytes.Length); $complete = $true }
-  finally { $stream.Dispose(); if (-not $complete) { Remove-Item -LiteralPath $File -Force -ErrorAction SilentlyContinue } }
+  finally { $stream.Dispose(); if (-not $complete) { try { [IO.File]::Delete($File) } catch {} } }
 }
 function Write-HookError([string]$Code) {
   $temp = ''; $ownsTemp = $false
@@ -278,18 +278,19 @@ function Write-HookError([string]$Code) {
 }
 # The classifier gets only a completed file. Redirected streams are drained
 # asynchronously so a full pipe or a hung executable cannot escape the budget.
-function Read-PromptReceipt([string]$File, [Diagnostics.Stopwatch]$Clock) {
-  $process = $null; $isStarted = $false
+function Read-PromptReceipt([string]$File, [Diagnostics.Stopwatch]$Clock, [scriptblock]$Prepare) {
+  $process = $null; $isStarted = $false; $isPrepared = $false
   try {
     if ($Clock.ElapsedMilliseconds -ge ${HOOK_INPUT_TIMEOUT}) { throw 'REPORTER_TIMEOUT' }
-    $start = New-Object Diagnostics.ProcessStartInfo
-    # Get-Command searches every module before it reports a missing command, which can
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    # A command lookup by cmdlet searches every module before it reports a missing command, which can
     # take more than a second of the budget; a plain walk of PATH and PATHEXT finds the
     # same file. Only absolute folders count, so an empty or relative entry never makes
     # the walk look in the project folder. FileName needs one path, never an array.
     $node = $null
-    $extensions = ([string]$env:PATHEXT).Split([char]59) | Where-Object { $_ -ne '' }
-    if (-not $extensions) { $extensions = @('.COM', '.EXE', '.BAT', '.CMD') }
+    $extensions = [Collections.Generic.List[string]]::new()
+    foreach ($piece in ([string]$env:PATHEXT).Split([char]59)) { if ($piece -ne '') { $extensions.Add($piece) } }
+    if ($extensions.Count -eq 0) { foreach ($piece in @('.COM', '.EXE', '.BAT', '.CMD')) { $extensions.Add($piece) } }
     foreach ($folder in ([string]$env:PATH).Split([char]59)) {
       if ($Clock.ElapsedMilliseconds -ge ${HOOK_INPUT_TIMEOUT}) { throw 'REPORTER_TIMEOUT' }
       $folderPath = $folder.Trim().Trim([char]34)
@@ -310,13 +311,16 @@ function Read-PromptReceipt([string]$File, [Diagnostics.Stopwatch]$Clock) {
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     $start.EnvironmentVariables['AGENT_BOARD_PROMPT_INPUT'] = $File
-    $process = New-Object Diagnostics.Process
+    $process = [Diagnostics.Process]::new()
     $process.StartInfo = $start
     $isStarted = $process.Start()
     if (-not $isStarted) { return '' }
     $process.StandardInput.Close()
     $output = $process.StandardOutput.ReadToEndAsync()
     $errors = $process.StandardError.ReadToEndAsync()
+    # Node is running: the caller's JSON work now overlaps it instead of using the budget before it.
+    $isPrepared = $true
+    & $Prepare
     $remaining = ${HOOK_INPUT_TIMEOUT} - [int]$Clock.ElapsedMilliseconds
     if ($remaining -le 0 -or -not $process.WaitForExit($remaining)) { throw 'REPORTER_TIMEOUT' }
     $remaining = ${HOOK_INPUT_TIMEOUT} - [int]$Clock.ElapsedMilliseconds
@@ -327,6 +331,7 @@ function Read-PromptReceipt([string]$File, [Diagnostics.Stopwatch]$Clock) {
     return ''
   } catch {
     if ($_.Exception.Message -eq 'REPORTER_TIMEOUT') { throw }
+    if ($_.Exception.Message -eq 'INCOMPLETE_INPUT') { throw }
     return ''
   } finally {
     if ($null -ne $process) {
@@ -335,6 +340,8 @@ function Read-PromptReceipt([string]$File, [Diagnostics.Stopwatch]$Clock) {
       }
       $process.Dispose()
     }
+    # No classifier ran (no Node, a start that failed, or the budget gone): the caller's work still happens.
+    if (-not $isPrepared) { $isPrepared = $true; & $Prepare }
   }
 }
 $tmp = ''; $ownsTemp = $false; $receiptTmp = ''; $ownsReceipt = $false
@@ -359,52 +366,62 @@ try {
   }
   if ($Payload.Trim() -eq '') { throw 'INCOMPLETE_INPUT' }
   if ([Text.Encoding]::UTF8.GetByteCount($Payload) -gt 1048576) { throw 'INPUT_TOO_LARGE' }
-  try { $raw = ConvertFrom-Json -InputObject $Payload } catch { throw 'INCOMPLETE_INPUT' }
   if ($Event -eq 'prompt') {
-    # Only the timeout fallback reads this; a failure here must not lose a prompt the classifier would handle.
-    try {
-      $metadata = New-Object Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
-      $extra = $raw.PSObject.Properties['extra']
-      if ($null -ne $extra -and -not ($extra.Name -ceq 'extra')) { $extra = $null }
-      foreach ($key in @(${RECEIPT_KEYS.map(psQuote).join(',')},'workspace_roots')) {
-        $property = $raw.PSObject.Properties[$key]
-        if ($null -ne $property -and -not ($property.Name -ceq $key)) { $property = $null }
-        if ($null -eq $property -and $null -ne $extra -and $null -ne $extra.Value) {
-          $property = $extra.Value.PSObject.Properties[$key]
+    # Only .NET calls run before Node starts: the first cmdlet loads a module, which takes
+    # up to seconds on a fresh runner and would use the budget before the classifier exists.
+    $dir = ${fromShell ? '$env:AGENT_BOARD_SH_INBOX' : "[IO.Path]::Combine($PSScriptRoot, 'progress-inbox')"}
+    $null = [IO.Directory]::CreateDirectory($dir)
+    $name = '{0}-{1}-{2}-{3}' -f $Agent, $Event, [DateTimeOffset]::Now.ToUnixTimeMilliseconds(), $PID
+    $tmp = [IO.Path]::Combine($dir, $name + '.tmp')
+    Write-Exclusive $tmp $Payload
+    $ownsTemp = $true
+    $receipt = Read-PromptReceipt $tmp $clock {
+      try { $raw = ConvertFrom-Json -InputObject $Payload } catch { throw 'INCOMPLETE_INPUT' }
+      # Only the timeout fallback reads this; a failure here must not lose a prompt the classifier would handle.
+      try {
+        $metadata = New-Object Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
+        $extra = $raw.PSObject.Properties['extra']
+        if ($null -ne $extra -and -not ($extra.Name -ceq 'extra')) { $extra = $null }
+        foreach ($key in @(${RECEIPT_KEYS.map(psQuote).join(',')},'workspace_roots')) {
+          $property = $raw.PSObject.Properties[$key]
           if ($null -ne $property -and -not ($property.Name -ceq $key)) { $property = $null }
+          if ($null -eq $property -and $null -ne $extra -and $null -ne $extra.Value) {
+            $property = $extra.Value.PSObject.Properties[$key]
+            if ($null -ne $property -and -not ($property.Name -ceq $key)) { $property = $null }
+          }
+          if ($null -eq $property) { continue }
+          $value = $property.Value
+          if ($key -ceq 'workspace_roots') {
+            if ($value -is [array]) { $metadata[$key] = @($value | Where-Object { $_ -is [string] }) }
+          } elseif ($value -is [string]) { $metadata[$key] = $value }
         }
-        if ($null -eq $property) { continue }
-        $value = $property.Value
-        if ($key -ceq 'workspace_roots') {
-          if ($value -is [array]) { $metadata[$key] = @($value | Where-Object { $_ -is [string] }) }
-        } elseif ($value -is [string]) { $metadata[$key] = $value }
-      }
-      $hasSession = $false
-      foreach ($key in @(${SESSION_KEYS.map(psQuote).join(',')})) { if ($metadata.Contains($key)) { $hasSession = $true } }
-      if ($hasSession) {
-        $scan = [regex]::Replace($Payload, ${psQuote(PS_PATH_STRIP)}, '')
-        if (${BOARD_REQUEST_HINTS.map(hint => `$scan.IndexOf(${psQuote(hint)}, [StringComparison]::OrdinalIgnoreCase) -ge 0`).join(' -or ')}) { $metadata['board_request'] = $true }
-        $json = ConvertTo-Json -InputObject $metadata -Compress -Depth 4
-        $fallback = [regex]::Replace($json, '[^\\x20-\\x7e]', { param($match) '\\u' + ([int][char]$match.Value).ToString('x4') })
-      }
-    } catch { $fallback = ''; $hasFallbackFailure = $raw -is [Management.Automation.PSCustomObject] }
-  }
-  $dir = ${fromShell ? '$env:AGENT_BOARD_SH_INBOX' : "Join-Path $PSScriptRoot 'progress-inbox'"}
-  New-Item -ItemType Directory -Force -Path $dir | Out-Null
-  $name = '{0}-{1}-{2}-{3}' -f $Agent, $Event, [DateTimeOffset]::Now.ToUnixTimeMilliseconds(), $PID
-  $tmp = Join-Path $dir ($name + '.tmp')
-  Write-Exclusive $tmp $Payload
-  $ownsTemp = $true
-  $ready = $tmp
-  if ($Event -eq 'prompt') {
-    $receipt = Read-PromptReceipt $tmp $clock
+        $hasSession = $false
+        foreach ($key in @(${SESSION_KEYS.map(psQuote).join(',')})) { if ($metadata.Contains($key)) { $hasSession = $true } }
+        if ($hasSession) {
+          $scan = [regex]::Replace($Payload, ${psQuote(PS_PATH_STRIP)}, '')
+          if (${BOARD_REQUEST_HINTS.map(hint => `$scan.IndexOf(${psQuote(hint)}, [StringComparison]::OrdinalIgnoreCase) -ge 0`).join(' -or ')}) { $metadata['board_request'] = $true }
+          $json = ConvertTo-Json -InputObject $metadata -Compress -Depth 4
+          $script:fallback = [regex]::Replace($json, '[^\\x20-\\x7e]', { param($match) '\\u' + ([int][char]$match.Value).ToString('x4') })
+        }
+      } catch { $script:fallback = ''; $script:hasFallbackFailure = $raw -is [Management.Automation.PSCustomObject] }
+    }
     if ($clock.ElapsedMilliseconds -ge ${HOOK_INPUT_TIMEOUT}) { throw 'REPORTER_TIMEOUT' }
+    $ready = $tmp
     if ($receipt -ne '') {
       $receiptTmp = Join-Path $dir ($name + '.receipt')
       Write-Exclusive $receiptTmp $receipt
       $ownsReceipt = $true
       $ready = $receiptTmp
     }
+  } else {
+    try { $raw = ConvertFrom-Json -InputObject $Payload } catch { throw 'INCOMPLETE_INPUT' }
+    $dir = ${fromShell ? '$env:AGENT_BOARD_SH_INBOX' : "Join-Path $PSScriptRoot 'progress-inbox'"}
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $name = '{0}-{1}-{2}-{3}' -f $Agent, $Event, [DateTimeOffset]::Now.ToUnixTimeMilliseconds(), $PID
+    $tmp = Join-Path $dir ($name + '.tmp')
+    Write-Exclusive $tmp $Payload
+    $ownsTemp = $true
+    $ready = $tmp
   }
   Move-Item -LiteralPath $ready -Destination (Join-Path $dir ($name + '.json'))
   if ($ready -eq $tmp) { $ownsTemp = $false } else { $ownsReceipt = $false }
