@@ -654,6 +654,36 @@ test('approval gate: a ready pull request requires a qualifying review approval 
     prComments: [{ body: 'Review: APPROVE 0031e5df25a34216c69c7421d21c0c301d8c7c68 by R2 reviewer (antigravity)' }]
   })
   assert.ok(pr1189.problems.some(p => p.check === 'review' && p.message.includes('RULES.md, R2')))
+
+  // 8. A review bot's APPROVED review or Review: APPROVE comment never counts as a qualifying approval (#1343),
+  // while its REQUEST CHANGES / CHANGES_REQUESTED verdict still blocks.
+  for (const botReview of [
+    { state: 'APPROVED', commit_id: head, body: '', user: { login: 'greptile-apps[bot]', type: 'Bot' } },
+    { state: 'APPROVED', commit_id: head, body: '', user: { login: 'review-app[bot]' } },
+    { state: 'APPROVED', commit_id: head, body: '', user: { login: 'review-app', type: 'Bot' } },
+    { body: `Review: APPROVE ${head} by bot`, user: { login: 'greptile-apps[bot]', type: 'Bot' } },
+    { body: `Review: APPROVE ${head} by bot`, user: { login: 'review-app[bot]' } },
+  ]) {
+    assert.equal(reviewOf(botReview), null)
+    const blocked = checkPr({ ...basePr, prComments: [botReview] })
+    assert.ok(blocked.problems.some(p => p.check === 'review' && p.message.includes('needs a qualifying review approval')))
+  }
+  assert.deepEqual(
+    reviewOf({ state: 'CHANGES_REQUESTED', commit_id: head, body: '', user: { login: 'greptile-apps[bot]', type: 'Bot' } }),
+    { kind: 'REQUEST CHANGES', sha: head.toLowerCase(), reviewer: 'greptile-apps[bot]' },
+  )
+  assert.deepEqual(
+    reviewOf({ body: `Review: REQUEST CHANGES ${head}`, user: { login: 'greptile-apps[bot]', type: 'Bot' } }),
+    { kind: 'REQUEST CHANGES', sha: head.toLowerCase(), reviewer: 'greptile-apps[bot]' },
+  )
+  const humanApprovedAfterBot = checkPr({
+    ...basePr,
+    prComments: [
+      { body: `Review: APPROVE ${head} by Muse Spark` },
+      { state: 'APPROVED', commit_id: head, body: '', user: { login: 'greptile-apps[bot]', type: 'Bot' } },
+    ],
+  })
+  assert.equal(humanApprovedAfterBot.problems.filter(p => p.check === 'review').length, 0)
 })
 
 test('pr-check combines issue state and draft information without mutating inputs', () => {

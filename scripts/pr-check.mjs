@@ -750,11 +750,14 @@ const isFreshLine = line => {
 // name; on the risk tier, or with no tier named, a reviewer named like the author is the author approving (RULES R2).
 export const isLaneReviewer = (review, tier) => review?.isFresh === true && (tier === 'light' || tier === 'normal')
 
+const isBotUser = user => user?.type === 'Bot' || /\[bot\]$/i.test(user?.login ?? '')
+
 export const reviewOf = item => {
   if (!item) return null
+  const isBot = typeof item === 'object' && isBotUser(item.user)
   const body = typeof item === 'string' ? item : item.body ?? ''
   const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
-  if (match) {
+  if (match && !(match[1].toUpperCase() === 'APPROVE' && isBot)) {
     const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
     const isFresh = isFreshLine(body.slice(match.index).split(/\r?\n/, 1)[0])
     return {
@@ -764,7 +767,7 @@ export const reviewOf = item => {
       ...(isFresh ? { isFresh } : {}),
     }
   }
-  if (typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
+  if (!isBot && typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
     const reviewer = item.user?.login ?? null
     return { kind: 'APPROVE', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
   }
