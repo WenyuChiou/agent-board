@@ -698,7 +698,7 @@ Sending requires the running board hub (`BOARD_NOT_RUNNING`) and a target enroll
 in the same workspace (`WORKSPACE_UNKNOWN` or `WORKSPACE_MISMATCH` otherwise).
 Contested owners, peer pause, hop limit and pair budget can refuse delivery. Peer pause and pair budget
 also apply to a connected adapter's own sends. An unverified sender's message cannot be passed on.
-A message taken by a lease holder holds its session while it stays open (until `board_ack`, dismissal, or expiry after 30 minutes without an update); a hook's does not while it stays accepted, and can again if a later receipt from its session makes it uncertain.
+A message holds its session while it is open (not acknowledged, rejected, expired or dismissed) and either uncertain, or accepted by a connected adapter, or accepted with an ACK marked as awaited, which a `board_inbox` accept records and a hook's does not.
 Inbox acceptance means the response write completed; ACK separately records acknowledgement.
 There is no parked wait, progress notification, host launcher or automatic MCP configuration yet.
 A lease needs a launcher that sets `AGENT_BOARD_AGENT`, `AGENT_BOARD_SESSION_ID`, `AGENT_BOARD_HOST_PID` and `AGENT_BOARD_HOST_STARTED`.
