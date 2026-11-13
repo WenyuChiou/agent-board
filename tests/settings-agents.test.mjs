@@ -497,7 +497,44 @@ test('Settings shows an earlier Gemini CLI install with Remove only, and counts 
   } finally { await board.close() }
 })
 
-const settingsDom = (isLan, answer, words = EN) => {
+test('Settings removes an earlier Gemini CLI install while Cursor stays, leaving the same files as --codex-remove (#1327)', { timeout: 30_000 }, async () => {
+  const f = fixture()
+  mkdirSync(join(f.home, '.cursor'))
+  f.setup('--agent', 'cursor', '--apply')
+  const cursorOnly = files(f.home)
+  f.local('--codex-setup', '--agent', 'gemini', '--apply')
+  const withGemini = files(f.home)
+  const geminiAdded = Object.keys(withGemini).filter(name => !(name in cursorOnly))
+  assert.ok(geminiAdded.length > 1, 'the earlier Gemini install wrote its own files')
+  const baseline = join(f.root, 'baseline-home')
+  cpSync(f.home, baseline, { recursive: true })
+  let afterPage
+  const board = await f.start()
+  try {
+    const preview = await board.call('GET', '/api/agents?agent=gemini&action=remove')
+    assert.equal(preview.status, 200, preview.text)
+    assert.ok(preview.json().count > 0)
+    const removed = await board.call('POST', '/api/agents/remove', { agent: 'gemini' })
+    assert.equal(removed.status, 200, removed.text)
+    assert.ok(!existsSync(join(f.data, 'install-gemini.json')))
+    assert.ok(existsSync(join(f.data, 'install-cursor.json')))
+    assert.ok(existsSync(join(f.data, 'agent-board.mjs')))
+    const rows = (await board.call('GET', '/api/agents')).json().rows
+    assert.equal(rows.find(row => row.agent === 'gemini'), undefined, 'a removed retired agent has no row')
+    assert.equal(rows.find(row => row.agent === 'cursor').button, 'remove')
+    afterPage = files(f.home)
+  } finally { await board.close() }
+  for (const name of Object.keys(cursorOnly).filter(name => name.split(/[\\/]/)[0] === '.cursor')) {
+    assert.equal(afterPage[name], cursorOnly[name], `${name} is Cursor's and stays the same`)
+  }
+  // Twin homes use identical logical paths, so absolute commands and ownership hashes compare exactly.
+  renameSync(f.home, join(f.root, 'page-home'))
+  cpSync(baseline, f.home, { recursive: true })
+  f.local('--codex-remove', '--agent', 'gemini', '--apply')
+  assert.deepEqual(files(f.home), afterPage, 'page removal and --codex-remove --agent gemini --apply leave identical files and bytes')
+})
+
+const settingsDom =(isLan, answer, words = EN) => {
   const nodes = new Map()
   let active = null
   class Element {
