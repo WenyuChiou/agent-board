@@ -4496,7 +4496,11 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.equal(routeOf(withNotes({ CLI: '' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
   assert.equal(routeOf(withNotes({ CLI: 'docs/validation/other.md' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, true)
   assert.equal(isReceiverRoutes(withNotes({ CLI: 'docs/validation/other.md' })), true)
-  for (const bad of [{ CLI: '' }, { TUI: 'docs/validation/other.md' }, ['docs/validation/other.md'], null]) assert.equal(isReceiverRoutes(withNotes(bad)), false, JSON.stringify(bad))
+  for (const bad of [{ CLI: '' }, { CLI: '   ' }, { CLI: 'docs/a.md\ndocs/b.md' }, { TUI: 'docs/validation/other.md' }, ['docs/validation/other.md'], null]) assert.equal(isReceiverRoutes(withNotes(bad)), false, JSON.stringify(bad))
+  // A note of spaces names no file: the gate refuses it as it refuses an empty one, for a route and for a surface.
+  assert.equal(routeOf(withNotes({ CLI: '   ' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  const spaced = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: '   ', surfaces: ['CLI'] }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(spaced, 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
   // agy TUI's idle route cites the TUI's own note; the app's note covers IDE.
   const agyIdle = RECEIVER_ROUTES.find(one => one.agent === 'antigravity' && one.kind === 'mailbox').routes.idle
   assert.equal(routeRecord(agyIdle, 'agy TUI'), 'docs/validation/2026-11-12-antigravity-tui-mailbox-live.md')

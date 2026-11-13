@@ -46,8 +46,8 @@ npx @wenyuchiou/agent-board@next
 | | Agent | 打开看板 | 你的回复怎么送到 |
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | 它空下来就发出 |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 下一轮起交给它，一轮一条 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 下一轮起交给它，一轮一条 |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 下一轮起交给它 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 下一轮起交给它 |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 快速开始的第二个命令 | 你自己粘贴 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己粘贴 |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己粘贴 |
@@ -59,7 +59,7 @@ npx @wenyuchiou/agent-board@next
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board`（看板网页） | 暂不支持 |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板网页 | 暂不支持 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页 | 桌面 app：下一轮起交给它，一轮一条；IDE：尚未测试 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页 | 桌面 app：下一轮起交给它；IDE：尚未测试 |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板网页 | 尚未测试 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板网页 | 暂不支持 |
 
@@ -74,7 +74,7 @@ npx @wenyuchiou/agent-board@next
 回复 agent 的提问，和主动给它发消息，走的是同一条路，看你点哪个按钮：
 
 - **发送**把它交给已连接的对话；对话回确认才代表收到。没有确认也可能已经送到，先看一下那个 agent 再用**复制回答**，免得它收到两次。发送需要[开启消息功能](docs/MESSAGING.md#local-storage)（英文）。
-- **排入 agent 的下一回合**会留给那个对话的各个回合，一回合交一条，先排的先送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收。
+- **排入 agent 的下一回合**会留给那个对话的各个回合，先排的先送，不会唤醒空闲中的对话；对话先结束，或它的邮箱满 12 小时过期，都可能被拒收。
 - **复制回答**把它放进剪贴板，由你粘贴到那个 agent。
 - 已经在 agent 自己的窗口里回复了？点**已回复，先隐藏**就能收掉这张卡。
 

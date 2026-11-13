@@ -37,7 +37,8 @@ remains available where the board already offered it.
 
 The direct message API applies the same recorded-route check to board sends. A mailbox
 with a live receiver for the same session is refused rather than redirected; an unrecorded
-route returns `NO_RECORDED_ROUTE`. Retrying an existing message id returns that message
+route returns `NO_RECORDED_ROUTE`, unless the target is refused first as gone or expired
+(`OFFLINE`) or contested (`CONTESTED`). Retrying an existing message id returns that message
 when its contents match, even if the route has since changed. The server records the route
 line itself; callers cannot supply `line`.
 
@@ -225,7 +226,8 @@ answers `MESSAGE_STORE_BUSY`.
 
 The local hub accepts `POST /api/messages/dismiss` with only `{ "id": "<message-id>" }`,
 using the board token and the same browser-origin rules as sending. No receiver secret
-is needed; LAN requests are refused. A page button will come in a later change.
+is needed; LAN requests are refused. On the page, only a Claude card's message has the
+buttons: Take back while it is queued, and Dismiss once it is handed over or unconfirmed.
 Dismissal rejects a queued message before it can be handed out. An accepted or uncertain
 message becomes final `uncertain` with error `DISMISSED`: delivery may already have happened,
 but it no longer blocks the next message. Disconnect and restart preserve that result;
@@ -393,7 +395,7 @@ The board reads these routes from `hooks/receiver-routes.ts`. `AGENT_BOARD_ROUTE
 
 ### What earlier runs saw
 
-This table is written by hand and covers progress reporting too. Its runs have no `<date>-<host>-live.md` record, so none of them makes a surface Verified above; the notes for the Codex and Antigravity runs are in [2026-10-19-native-hooks.md](validation/2026-10-19-native-hooks.md).
+This table is written by hand and covers progress reporting too. Apart from the Antigravity desktop app's mailbox runs, which have their own record ([2026-11-13-antigravity-app-mailbox-live.md](validation/2026-11-13-antigravity-app-mailbox-live.md)) and make that route Verified above, its runs have no `<date>-<host>-live.md` record, so they make no surface Verified above; the notes for the Codex and Antigravity runs are in [2026-10-19-native-hooks.md](validation/2026-10-19-native-hooks.md).
 
 | Agent / surface | Progress integration in this repository | Connected-session messaging evidence |
 | --- | --- | --- |
@@ -423,8 +425,8 @@ An owned app-server or CLI stream is a separate surface from a CLI TTY, desktop 
 IDE. Earlier transport spikes and progress-hook runs do not verify those surfaces.
 
 Run `node scripts/messaging-matrix.mjs --write` after changing a record or its evidence.
-`node scripts/messaging-matrix.mjs --check` checks all four copies without writing and
-exits non-zero when any is stale or has missing markers.
+`node scripts/messaging-matrix.mjs --check` checks `docs/MESSAGING.md` without writing and
+exits non-zero when its table is stale or has missing markers.
 
 One machine's installation does not automatically attach every already-running agent.
 Each host needs its own authorized session binding and supported transport. A native
