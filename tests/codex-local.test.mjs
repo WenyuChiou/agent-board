@@ -843,6 +843,47 @@ test('a Codex hook mailbox is the CLI only when its history file names the termi
   }
 }))
 
+test('an Antigravity hook mailbox is agy TUI when its transcript lies in the CLI folder, and the app and the editor stay IDE', async () => mailboxFixture(async f => {
+  const { antigravitySurface } = await importTs('../scripts/hook-delivery.ts')
+  const brain = folder => [f.home, '.gemini', folder, 'brain', 'synthetic-conversation'].join('/')
+  const mailboxOf = () => f.state().mailboxes?.find(one => one.agent === 'antigravity' && one.session === session)
+  for (const [payload, surface, event = 'PreInvocation'] of [
+    [{ transcriptPath: `${brain('antigravity-cli')}/.system_generated/logs/transcript.jsonl` }, 'agy TUI'],
+    [{ transcriptPath: `${brain('antigravity-ide')}/.system_generated/logs/transcript.jsonl` }, 'IDE'],
+    [{ artifactDirectoryPath: brain('antigravity-cli') }, 'agy TUI'],
+    [{}, 'unknown'],
+    [{ transcriptPath: `${brain('antigravity-cli')}/.system_generated/logs/transcript.jsonl` }, 'agy TUI', 'SessionStart'],
+  ]) {
+    f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, messages: [] }))
+    await hookOrDeferred(() => f.call('antigravity', event, payload), () => mailboxOf() !== undefined)
+    assert.equal(mailboxOf()?.surface, surface, `${event} ${JSON.stringify(payload)}`)
+  }
+  // Either separator and any letter case; whole folder names only; the artifact folder decides when the transcript cannot.
+  assert.equal(antigravitySurface('C:\\Synthetic\\.Gemini\\Antigravity-CLI\\brain\\x\\transcript.jsonl', undefined), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity/brain/x/transcript.jsonl', undefined), 'IDE')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-cli-old/brain/x/transcript.jsonl', undefined), 'unknown')
+  assert.equal(antigravitySurface('/home/synthetic/antigravity-cli/brain/x/transcript.jsonl', undefined), 'unknown')
+  assert.equal(antigravitySurface(42, '/home/synthetic/.gemini/antigravity-ide/brain/x'), 'IDE')
+  assert.equal(antigravitySurface('', ''), 'unknown')
+  // `.` and `..` are resolved first, so a folder the path leaves again is not the surface; an inherited name is no folder.
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-cli/../antigravity/brain/x/transcript.jsonl', undefined), 'IDE')
+  assert.equal(antigravitySurface('C:\\Synthetic\\.gemini\\antigravity\\.\\..\\antigravity-cli\\brain\\x\\transcript.jsonl', undefined), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/constructor/brain/x/transcript.jsonl', undefined), 'unknown')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/__proto__/brain/x', '/home/synthetic/.gemini/toString/brain/x'), 'unknown')
+  // The transcript decides over the artifact folder when both name a known folder, either way round; a transcript
+  // string with no known folder leaves it to the artifact folder.
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-cli/brain/x/transcript.jsonl', '/home/synthetic/.gemini/antigravity-ide/brain/x'), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-ide/brain/x/transcript.jsonl', '/home/synthetic/.gemini/antigravity-cli/brain/x'), 'IDE')
+  assert.equal(antigravitySurface('/home/synthetic/project/transcript.jsonl', '/home/synthetic/.gemini/antigravity-cli/brain/x'), 'agy TUI')
+  // A path is read from its end: the last `.gemini` folder followed by a known name decides, one followed by another
+  // name is passed over, and a path that ends at `.gemini` names no surface.
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity/brain/.gemini/antigravity-cli/x/transcript.jsonl', undefined), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-cli/brain/.gemini/other/x/transcript.jsonl', undefined), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini', undefined), 'unknown')
+  // Letter case is ignored on every system by choice, also with forward slashes, where Linux and macOS tell the folders apart.
+  assert.equal(antigravitySurface('/home/synthetic/.Gemini/Antigravity-CLI/brain/x/transcript.jsonl', undefined), 'agy TUI')
+}))
+
 test('a held mailbox store claim reports deferral and the next turn delivers after release', async () => mailboxFixture(async f => {
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   f.seed()
