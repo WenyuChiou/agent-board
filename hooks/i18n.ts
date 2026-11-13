@@ -756,6 +756,7 @@ export const ZH_TW = {
   fileQuestions: '問題清單',
   fileNamed: (name: string): string => `「${name}」`,
   storageReadOnly: '檔案唯讀或被鎖住',
+  storageUnreadable: '無法讀取',
   storageBusy: '有別的程式正在用',
   storageFull: '磁碟滿了',
   storageIsFolder: '那是資料夾，不是檔案',

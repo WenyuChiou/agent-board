@@ -1555,7 +1555,7 @@ syncBuiltinESMExports()`)
       const out = play(fault)
       const said = out.stdout + out.stderr
       assert.equal(out.status, 1, said)
-      assert.ok(said.includes('progress-answered.json') && said.includes(code === 'EACCES' ? EN.storageReadOnly : EN.storageUnknown) && !said.includes(list), said)
+      assert.ok(said.includes('progress-answered.json') && said.includes(code === 'EACCES' ? EN.storageUnreadable : EN.storageUnknown) && !said.includes(list), said)
       assert.ok(!said.includes('Hidden:'), said)
       // The board is drawn after the press, with the question still on it.
       assert.ok(out.stdout.includes('Per-key limit'), said)
@@ -3410,7 +3410,7 @@ syncBuiltinESMExports()
   try {
     const seen = await board.call('GET', '/api/board')
     assert.equal(seen.status, 409, seen.body)
-    assert.match(seen.json().note, /^Couldn't safely read or update .*-journal-.*\(it is read-only or locked\)/)
+    assert.match(seen.json().note, /^Couldn't safely read or update .*-journal-.*\(it cannot be read\)/)
     // The page says that note, and "offline" only when the board sent none.
     const home = await board.call('GET', `/?t=${board.token}`, { headers: { 'x-board-token': '' } })
     const dom = await pageDom(home.body, null, { getBoard: async () => ({ ok: false, json: async () => seen.json() }) })
@@ -3424,7 +3424,7 @@ syncBuiltinESMExports()
       const lan = new URL(opened.json().url)
       const far = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': lan.searchParams.get('t') })
       assert.equal(far.status, 409, far.body)
-      assert.match(far.json().note, /^Couldn't safely read or update progress-journal-\d{4}-\d{2}\.md \(it is read-only or locked\)/)
+      assert.match(far.json().note, /^Couldn't safely read or update progress-journal-\d{4}-\d{2}\.md \(it cannot be read\)/)
       assert.ok(!far.json().note.includes(board.dir), far.json().note)
     }
   } finally {
@@ -5099,7 +5099,7 @@ syncBuiltinESMExports()
     writeFileSync(flag, '')
     const read = await board.call('GET', '/api/board')
     assert.equal(read.status, 409, read.body)
-    assert.equal(read.json().note, EN.boardStorageFailed(EN.fileNamed(journal), EN.storageReadOnly))
+    assert.equal(read.json().note, EN.boardStorageFailed(EN.fileNamed(journal), EN.storageUnreadable))
     assert.ok(!read.json().note.includes(board.dir), read.body)
   } finally {
     await board.close()

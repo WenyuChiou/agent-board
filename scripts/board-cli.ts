@@ -54,7 +54,7 @@ import type { PendingArchiveRecord } from '../hooks/journal'
 import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, RETENTION, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
-import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
+import { agentLabel, langOf, plainReadReason, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
 import type { TaskRef } from '../hooks/view'
 import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire, runQuestionsClosed } from '../hooks/questions'
@@ -156,7 +156,7 @@ class BoardFileError extends Error {
   readonly isLocked: boolean
   // Set once a press took back everything it wrote before this failure (#248).
   isUnchanged = false
-  constructor(readonly file: string, readonly code: string, isRead = false) {
+  constructor(readonly file: string, readonly code: string, readonly isRead = false) {
     super(code)
     this.isLocked = isRead && writes === 0 && (code === 'EBUSY' || code === 'EAGAIN')
   }
@@ -177,7 +177,7 @@ const storageNote = (error: BoardFileError, isLan = false): string =>
   error.code === 'SETTINGS_LOCKED' ? s.settingsLocked(isLan ? basename(settingsLockName(error.file)) : settingsLockName(error.file))
     : error.isLocked ? s.boardLocked(plainFile(error.file))
     : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code))
-    : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
+    : s.boardStorageFailed(plainFile(error.file), error.isRead ? plainReadReason(s, error.code) : plainReason(s, error.code))
 
 const read = (file: string): string => {
   try {
@@ -2623,7 +2623,7 @@ const chat = (): void => {
     const code = (error as { code?: unknown } | null)?.code
     const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0]?.slice(0, 160) || error.name : 'UNKNOWN'
     // Nothing here writes, so the board's own advice (files "may already have changed") is not told.
-    const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
+    const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReadReason(s, error.code)) : s.chatFailed(reason)
     process.stdout.write(`${redact(told, homeOrNone(), isWin)}\n`)
   }
 }
@@ -2633,7 +2633,7 @@ const jsonFailureDocument = (error: unknown) => {
   const isWin = process.platform === 'win32'
   const code = (error as { code?: unknown } | null)?.code
   const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0] || error.name : 'UNKNOWN'
-  const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
+  const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReadReason(s, error.code)) : s.chatFailed(reason)
   return { schemaVersion: BOARD_JSON_SCHEMA, error: redact(clipped(plain(told), home, isWin), home, isWin) }
 }
 const jsonFailure = (error: unknown): void => {

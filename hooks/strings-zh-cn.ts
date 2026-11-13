@@ -712,6 +712,7 @@ export const ZH_CN: Strings = {
   fileQuestions: '问题清单',
   fileNamed: (name: string): string => `“${name}”`,
   storageReadOnly: '文件只读或被锁定',
+  storageUnreadable: '无法读取',
   storageBusy: '有别的程序正在用',
   storageFull: '磁盘满了',
   storageIsFolder: '那是文件夹，不是文件',

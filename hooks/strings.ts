@@ -18,6 +18,15 @@ export const plainReason = (s: Strings, code: string): string =>
         : code === 'EISDIR' ? s.storageIsFolder
           : /^(ENOENT|ENOTDIR)$/.test(code) ? s.storageMissing : s.storageUnknown
 
+// A read that fails is not about read-only: a file that cannot be read says so, whatever
+// stopped the read. Writes keep plainReason, where read-only is the reason.
+export const plainReadReason = (s: Strings, code: string): string =>
+  /^(EACCES|EPERM|EROFS)$/.test(code) ? s.storageUnreadable
+    : /^(EBUSY|EAGAIN)$/.test(code) ? s.storageBusy
+      : code === 'ENOSPC' ? s.storageFull
+        : code === 'EISDIR' ? s.storageIsFolder
+          : /^(ENOENT|ENOTDIR)$/.test(code) ? s.storageMissing : s.storageUnknown
+
 // `zh-TW`, `zh_tw`, `繁體`, `Traditional Chinese` → zh-TW; `zh-CN`, `简体`, `Chinese` → zh-CN;
 // `en`, `English` → en; anything else → null.
 export const langOf = (value: unknown): Lang | null => {
