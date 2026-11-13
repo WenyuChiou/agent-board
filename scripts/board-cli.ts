@@ -34,7 +34,9 @@ import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
-import { isTimeout, privateFolderHandoff } from './private-folder'
+import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder'
+import { dockArguments, dockCommand, probeOf, windowPath, windowPlaceOf } from '../hooks/board-dock'
+import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
 import { isReceiverRoutes } from '../hooks/messaging'
 import type { ReceiverRoutes } from '../hooks/messaging'
@@ -817,6 +819,51 @@ const queuedMessaging = () => {
   } catch { return undefined }
 }
 
+// A window file this writer may replace: missing, or a regular file with this one name. A
+// symlink, a folder or a file with another hard link (whose other names would change too) is not.
+const isOwnWindowFile = (file: string): boolean => {
+  try {
+    const stat = lstatSync(file)
+    return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1
+  } catch (error) {
+    return (error as { code?: string } | null)?.code === 'ENOENT'
+  }
+}
+
+// The docked window's place (#1084), in a file of its own (`windowPath`), never in the settings
+// file: only this script writes it, so a setting another writer saves meanwhile is never put back
+// and a settings file the person secured is never replaced. The place goes to a temp file of this
+// process's own, flushed, then renamed over the window file, so a cut-off write never leaves half
+// a place, and no other writer's temp file is ever touched. A window file that is not this
+// writer's own (above), looked at again just before the rename, is left as it is: false, and the
+// page sends the place again later.
+const saveWindow = (place: Rect): boolean => {
+  const file = windowPath(path)
+  if (!isOwnWindowFile(file)) return false
+  const temp = `${file}.${process.pid}-${randomUUID()}.tmp`
+  let isOwned = false
+  try {
+    const fd = openSync(temp, 'wx', 0o600)
+    isOwned = true
+    try {
+      writeFileSync(fd, JSON.stringify(place))
+      fsyncSync(fd)
+    } finally { closeSync(fd) }
+    if (!isOwnWindowFile(file)) throw new Error('changed')
+    renameSync(temp, file)
+    isOwned = false
+  } catch {
+    if (isOwned) { try { unlinkSync(temp) } catch {} }
+    return false
+  }
+  return true
+}
+
+// The remembered place for the next open: none when the window file is missing or unreadable.
+const windowNow = (): string | null => {
+  try { return readFileSync(windowPath(path), 'utf8') } catch { return null }
+}
+
 const options = () => ({
   width: Math.max(40, Math.min(process.stdout.columns || 80, 120)),
   ...terminalLook(process.env, args, process.stdout.isTTY === true),
@@ -1058,6 +1105,61 @@ const watchWindowsLaunch = (child: ChildProcess, done: (isOpen: boolean) => void
   child.once('spawn', () => child.unref())
 }
 
+// The board's own browser profile (#1084), in the board's private runtime folder and made private
+// like the message store. Null when it cannot be: the window then opens as it did before.
+const browserProfile = (): string | null => {
+  try {
+    const runtime = process.env.XDG_RUNTIME_DIR
+    const dir = join(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'), 'browser')
+    privateFolder(dir)
+    return dir
+  } catch {
+    return null
+  }
+}
+
+// The window docked on the right, or at the place the person last gave it (#1084), in one
+// PowerShell run, as windowsStart: it first prints the screens' work areas, then reads the
+// browser's arguments back as one base64 line and starts the first program that starts: today's
+// plain app window when there is no dock (hooks/board-dock.ts, dockCommand).
+const dockLaunch = (programs: string[], target: string, done: (isOpen: boolean) => void): void => {
+  const list = programs.map(bin => isAddress(bin) ? psLiteral(bin) : psWildcardLiteral(bin)).join(', ')
+  const command = dockCommand(list, psWildcardLiteral(dirname(path)), LAUNCH_GRACE_MS)
+  let child: ChildProcess
+  try {
+    child = spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
+      cwd: dirname(path), stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+    })
+  } catch {
+    return done(false)
+  }
+  let isSettled = false
+  const finish = (isOpen: boolean): void => {
+    if (isSettled) return
+    isSettled = true
+    clearTimeout(timer)
+    done(isOpen)
+  }
+  // PowerShell's start, Add-Type's compile and the browser's grace: about 2 s on a slow machine.
+  const timer = setTimeout(() => { child.kill(); finish(false) }, 8000)
+  child.once('error', () => finish(false))
+  child.once('exit', code => finish(code === 0))
+  child.stdin?.on('error', () => {})
+  // The profile folder is made private while PowerShell starts.
+  const profile = browserProfile()
+  let output = ''
+  let isAnswered = false
+  child.stdout?.on('data', (chunk: Buffer) => {
+    if (isAnswered) return
+    output += chunk.toString('utf8')
+    const end = output.indexOf('\n')
+    if (end < 0) return
+    isAnswered = true
+    const argv = dockArguments(target, windowPlaceOf(windowNow()), probeOf(output.slice(0, end)), profile)
+    child.stdin?.end(`${Buffer.from(argv.map(windowsArgument).join(' '), 'utf16le').toString('base64')}\n`)
+  })
+}
+
 // A file or a page's address in the browser.
 // Over SSH no window would reach the person, and a board a test started never opens one on the
 // tester's screen (#959).
@@ -1120,11 +1222,15 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
   if (process.platform === 'win32') {
     const programs = [...new Set(candidates)].filter(isInstalled)
     if (programs.length === 0) return fallback()
-    try {
-      watchWindowsLaunch(windowsStart(programs, [`--app=${target}`], { graceMs: LAUNCH_GRACE_MS }), isOpen => isOpen ? done(true) : fallback())
-    } catch {
-      fallback()
+    const asToday = (): void => {
+      try {
+        watchWindowsLaunch(windowsStart(programs, [`--app=${target}`], { graceMs: LAUNCH_GRACE_MS }), isOpen => isOpen ? done(true) : fallback())
+      } catch {
+        fallback()
+      }
     }
+    // Docked first (#1084); a dock that cannot start, or a screen too narrow for one, opens as before.
+    dockLaunch(programs, target, isOpen => isOpen ? done(true) : asToday())
     return
   }
 
@@ -2136,6 +2242,7 @@ const serveChild = (): void => {
       // With no pick saved, the panel shows the setup language the board uses, not Automatic.
       language: () => settingsLangOf(settingsNow()) ?? langOf(BAKED.lang) ?? 'auto',
       setLanguage: saveLanguage,
+      setWindow: saveWindow,
       isLangOverridden: () => isLanguageOverridden(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG)),
       agents: createSettingsAgents({ args, progress: path, script: process.argv[1]!, words: () => s, readProgress: () => read(path) }),
       sweep: () => { tidyCount(false, true); moveOldMonths() },
