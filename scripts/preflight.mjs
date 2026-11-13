@@ -19,38 +19,14 @@ const splitPaths = text => text.split('\0').filter(Boolean)
 // A whole test file gets ten minutes here. tests/codex-local.test.mjs (441 tests) ran 449.9 s alone on CI's Ubuntu
 // runner (test.yml, #1130) and never finished in ten minutes on a Windows computer, where starting processes is
 // slower; tests/board.test.mjs is as large, and tests/messaging.test.mjs (192) also ran out of time there while other
-// work ran. In a file that declares more tests than this, preflight runs only the tests whose lines the branch added
-// or changed, and CI runs the whole file.
+// work ran. A touched file that declares more tests than this is left to CI, which runs it whole. Picking only the
+// changed tests out of the source text missed deleted lines, helpers and titles built at run time (#1392 review), so
+// preflight does not guess: it says the file was not run, and the author runs the tests they changed by name.
 export const largeTestFile = 150
-// More changed tests than this is most of a file, or a new one: run it whole.
-const maxChangedTests = 60
-// A test may be declared inside a loop, so its line may be indented; `t.test(` subtests do not match.
-const testStart = /^\s*(?:test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|[^'\\\r\n])*'|"(?:\\[^\r\n]|[^"\\\r\n])*"|`(?:\\[^\r\n]|[^`\\\r\n])*`)/
-const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-// A `${…}` part of a template title is unknown here, so it matches anything.
-const titlePattern = quoted => {
-  const title = quoted.slice(1, -1).replace(/\\(['"\\`])/g, '$1')
-  const parts = quoted[0] === '`' ? title.split(/\$\{[^}]*\}/) : [title]
-  return `^${parts.map(escapeRegExp).join('.*')}$`
-}
-
-// Which tests of a touched file to run: `whole` for an ordinary file, or the name patterns of the declared tests that
-// hold the branch's added or changed lines (a line belongs to the nearest test declared above it).
-export const touchedTestPlan = (text, changedLines) => {
-  const starts = []
-  text.split(/\r?\n/).forEach((line, index) => {
-    const match = line.match(testStart)
-    if (match) starts.push({ line: index + 1, pattern: titlePattern(match[1]) })
-  })
-  if (starts.length <= largeTestFile) return { whole: true, count: starts.length, patterns: [] }
-  const patterns = new Set()
-  for (const changed of changedLines) {
-    const start = starts.findLast(one => one.line <= changed)
-    if (start) patterns.add(start.pattern)
-  }
-  if (patterns.size > maxChangedTests) return { whole: true, count: starts.length, patterns: [] }
-  return { whole: false, count: starts.length, patterns: [...patterns] }
-}
+// Only declarations at the start of a line count. A miscount near the line decides only between running the file and
+// saying it was not run.
+const testDeclaration = /^(?:test|it)(?:\.(?:skip|only|todo))?\s*\(/
+export const declaredTests = text => text.split(/\r?\n/).filter(line => testDeclaration.test(line)).length
 
 // Without a recorded or readable identity, a live PID cannot safely be identified as a replacement.
 export const isLiveMarker = ({ isAlive, recordedIdentity, identity = null }) =>
@@ -828,9 +804,9 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     if (owner?.path) {
       try {
         for (const path of paths) {
-          const plan = touchedTestPlan(read(join(cwd, path)), added.filter(one => one.path === path).map(one => one.line))
-          if (!plan.whole && !plan.patterns.length) {
-            add('PASS', `${path}: none of its ${plan.count} tests changed; it is too large to run whole here, and CI runs it whole.`)
+          const declared = declaredTests(read(join(cwd, path)))
+          if (declared > largeTestFile) {
+            add('WARN', `${path}: not run here, since its ${declared} tests can take longer than preflight's ten minutes; CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" ${path}) and list them under Evidence.`)
             continue
           }
           const temp = mkdtempSync(join(tmpdir(), 'agent-board-preflight-'))
@@ -841,22 +817,14 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
             for (const name of Object.keys(env)) if (/^(GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY)$/i.test(name)) delete env[name]
             for (const name of homeNames) env[name] = name === 'CLAUDE_PROGRESS_FILE' ? join(temp, 'progress.md') : temp
             onProgress?.(`RUN ${safeLine(path)}`)
-            const names = plan.patterns.flatMap(pattern => ['--test-name-pattern', pattern])
-            const tested = command(process.execPath, ['--test', '--test-reporter=tap', ...names, path], { env, timeout: 600000 })
+            const tested = command(process.execPath, ['--test', '--test-reporter=tap', path], { env, timeout: 600000 })
             const output = `${tested.stdout ?? ''}\n${tested.stderr ?? ''}`
             const count = output.match(/^# fail (\d+)\s*$/m)?.[1]
             const total = output.match(/^# tests (\d+)\s*$/m)?.[1]
             const isPassed = !tested.error && tested.status === 0 && count === '0'
             const failedNames = isPassed ? [] : failedTapNames(output)
             const failedDetail = failedNames.length ? `; failed: ${failedNames.join('; ')}` : ''
-            const scope = plan.whole ? '' : `, only the ${plan.patterns.length} of its ${plan.count} tests this branch changed (CI runs it whole)`
-            // A title built at run time matches no pattern read from the source, so nothing ran: say so rather than pass.
-            // Node then reports no test, or (Node 24) the file itself as one passing test.
-            const file = path.split('/').pop()
-            const ran = [...output.matchAll(/^(?:not )?ok \d+ - (.*)$/gm)].map(match => match[1].trim().replace(/\\/g, '/'))
-            const isNoneRan = ran.every(name => name === file || name.endsWith(`/${file}`))
-            if (!plan.whole && isPassed && isNoneRan) add('WARN', `${path}: the ${plan.patterns.length} tests this branch changed could not be picked out by name, so none ran here; CI runs it whole.`)
-            else add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${scope}${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
+            add(isPassed ? 'PASS' : 'FAIL', `${path}: ${total ?? 'unknown'} tests, ${count ?? 'unknown'} failed${failedDetail}${tested.error || tested.signal ? '; the runner did not finish' : ''}.`)
           } finally {
             rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
           }

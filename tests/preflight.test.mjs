@@ -1869,10 +1869,10 @@ test('preflight runs a touched nested e2e test', async t => {
   assert.ok(has(await f.check(), 'PASS', 'tests/e2e/deeper/nested.test.mjs: 1 tests, 0 failed'))
 })
 
-const largeTestFile = (extra = '', changed = -1) => `import test from 'node:test'\nimport assert from 'node:assert/strict'\n${extra}${Array.from({ length: 301 }, (_, i) => `test('synthetic case ${i}', () => {${i === changed ? ' assert.equal(1, 1) ' : ''}})\n`).join('')}`
-const largeFixture = t => {
+const syntheticTests = count => `import test from 'node:test'\nimport assert from 'node:assert/strict'\n${Array.from({ length: count }, (_, i) => `test('synthetic case ${i}', () => {})\n`).join('')}`
+const sizedFixture = (t, count) => {
   const f = fixture(t)
-  f.write('tests/large.test.mjs', largeTestFile())
+  f.write('tests/sized.test.mjs', syntheticTests(count))
   f.commit()
   f.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
   const runs = []
@@ -1883,39 +1883,22 @@ const largeFixture = t => {
   return { ...f, runs, check: options => f.check({ run, ...options }) }
 }
 
-test('preflight runs only the changed tests of a touched test file too large to run whole, and says CI runs it whole', async t => {
-  const f = largeFixture(t)
-  f.write('tests/large.test.mjs', `${largeTestFile('', 150)}test(\`synthetic \${'added'} test\`, () => {})\n`)
+test('preflight leaves a touched test file of more than 150 tests to CI and says it was not run', async t => {
+  const f = sizedFixture(t, 151)
+  f.write('tests/sized.test.mjs', syntheticTests(151).replace("test('synthetic case 75', () => {})", "test('synthetic case 75', () => { assert.equal(1, 1) })"))
   const checks = await f.check()
-  assert.ok(has(checks, 'PASS', 'tests/large.test.mjs: 2 tests, 0 failed, only the 2 of its 302 tests this branch changed (CI runs it whole)'), JSON.stringify(checks))
-  assert.equal(f.runs.length, 1)
-  const patterns = f.runs[0].flatMap((arg, i) => f.runs[0][i - 1] === '--test-name-pattern' ? [arg] : [])
-  assert.deepEqual(patterns.sort(), ['^synthetic .* test$', '^synthetic case 150$'])
-})
-
-test('preflight leaves a touched test file too large to run whole to CI when none of its tests changed', async t => {
-  const f = largeFixture(t)
-  f.write('tests/large.test.mjs', largeTestFile('// A synthetic helper comment above every test.\n'))
-  const checks = await f.check()
-  assert.ok(has(checks, 'PASS', 'tests/large.test.mjs: none of its 301 tests changed; it is too large to run whole here, and CI runs it whole.'), JSON.stringify(checks))
+  assert.ok(has(checks, 'WARN', 'tests/sized.test.mjs: not run here, since its 151 tests can take longer than preflight\'s ten minutes; CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" tests/sized.test.mjs) and list them under Evidence.'), JSON.stringify(checks))
   assert.equal(f.runs.length, 0)
+  assert.equal(checks.some(item => item.state !== 'WARN' && item.message.startsWith('tests/sized.test.mjs')), false)
 })
 
-test('preflight picks a changed test declared inside a loop of a large file', async t => {
-  const f = largeFixture(t)
-  f.write('tests/large.test.mjs', `${largeTestFile()}for (const n of [1, 2]) {\n  test(\`looped case \${n}\`, () => {})\n}\n`)
+test('preflight still runs a touched test file of 150 tests whole', async t => {
+  const f = sizedFixture(t, 150)
+  f.write('tests/sized.test.mjs', syntheticTests(150).replace("test('synthetic case 75', () => {})", "test('synthetic case 75', () => { assert.equal(1, 1) })"))
   const checks = await f.check()
-  assert.ok(has(checks, 'PASS', 'tests/large.test.mjs: 3 tests, 0 failed, only the 2 of its 302 tests this branch changed (CI runs it whole)'), JSON.stringify(checks))
-  const patterns = f.runs[0].flatMap((arg, i) => f.runs[0][i - 1] === '--test-name-pattern' ? [arg] : [])
-  assert.deepEqual(patterns.sort(), ['^looped case .*$', '^synthetic case 300$'])
-})
-
-test('preflight warns when the changed tests of a large file cannot be picked out by name', async t => {
-  const f = largeFixture(t)
-  f.write('tests/large.test.mjs', `${largeTestFile()}test('synthetic ' + 'joined', () => {})\n`)
-  const checks = await f.check()
-  assert.ok(has(checks, 'WARN', 'tests/large.test.mjs: the 1 tests this branch changed could not be picked out by name, so none ran here; CI runs it whole.'), JSON.stringify(checks))
-  assert.equal(checks.some(item => item.state === 'PASS' && item.message.startsWith('tests/large.test.mjs')), false)
+  assert.ok(has(checks, 'PASS', 'tests/sized.test.mjs: 150 tests, 0 failed.'), JSON.stringify(checks))
+  assert.equal(f.runs.length, 1)
+  assert.equal(f.runs[0].includes('--test-name-pattern'), false)
 })
 
 test('preflight removes parent credentials from the touched test environment', async t => {
