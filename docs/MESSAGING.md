@@ -26,8 +26,9 @@ or route is unknown, the card offers Copy. One known gap: a Codex hook can read 
 started a session, not which client runs a turn, so a terminal session continued in another client
 that leaves no mark in the hook's environment can keep the terminal's Queue; whether a message
 queued there reaches the model has no record (see the Codex CLI record's "Not covered"). A Codex
-terminal whose hook carries the Windows background service's mark gets Copy. Internal connection
-ids stay hidden. There is no
+terminal whose hook carries the Windows background service's mark gets no Queue from its mailbox
+(the card offers Copy unless another recorded route for that session offers Send). Internal
+connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
 An offline card retains Copy. By default, the web UI and
@@ -278,7 +279,7 @@ receipt, so reconnecting the original receiver after a board restart may report 
 with a new connection id or turn, provided that connection is not contested. Board JSON
 omits nonces; only the receiver's claimed delivery supplies one. Receipts cannot set the
 hub's reserved `EXPIRED` or `DISMISSED` errors. Send and claim still require the current turn.
-Restart keeps claimed messages uncertain (an accepted message stays accepted, marked disconnected) and never redelivers them; repeated restarts
+Restart keeps claimed messages uncertain (an accepted message stays accepted, marked disconnected) and does not redeliver them by itself; a claim a turn-start hook named can still be claimed again by a later hook of that session, under the conditions in "Next-turn mailbox". Repeated restarts
 and disconnects do not reset their age limit. Expiry or dismissal lets the card send again.
 Stores are saved as version 2, which earlier releases cannot read: before going back to one,
 move both `messages.json` and `server.lock` out of the folder, since 0.24.0 and earlier take
