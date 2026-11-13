@@ -684,6 +684,7 @@ export const EN: Strings = {
   boardQueuedCount: (n: number): string => `${n} queued`,
   boardUsage: 'Usage: agent-board | agent-board setup | agent-board stop | agent-board --json [--days N] · --help all for all options (--watch, --tidy [--stopped | --agent name | --older days], --all, ...)',
   boardUsageAll: 'Usage: agent-board [--print] [--status] [--watch] [--serve (old)] [--stop] [--json] [--days <days>] [--project <name>] [--tidy] [--all] [--no-open] [--lan] [--port <port>] [--lang en|zh-TW|zh-CN] [--no-color] [--theme light|dark] · --all lists idle and stopped tasks',
+  boardUnknownFlag: (flag: string): string => `agent-board: unknown option "${flag}". Try npx @wenyuchiou/agent-board --version, or --help.`,
   boardHidden: (text: string): string => `Hidden: “${text}”; it comes back when the question changes.`,
   boardShown: 'The hidden questions are shown again.',
   hideFailed: "Couldn't save that it was answered; it stays on the list.",
