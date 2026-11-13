@@ -45,22 +45,23 @@ line itself; callers cannot supply `line`.
 
 A turn-start hook enrolls its session when the default message store already exists.
 The page can queue a message for that exact session without waking it. A later turn-start
-hook of that session can claim one message, oldest first. A message the page queued is bound to
-the surface its route was checked on: a hook claims it only when it reads that same surface, and
-a hook on another surface leaves it queued; the session's own MCP pull (`board_inbox`) may still
-claim it, since it asks for its messages itself. `accepted` means the hook wrote the message to its output for
-the host and its accept call succeeded; it does not prove the model read it, and no ACK is
-collected. A hook that stops waiting hands its claim back when it still can, and the message is
-queued again for a later hook. A claim the hook named and nobody accepted can be claimed again by
-a later hook once 30 seconds have passed, at most three times, with the same ACK code and a line
-saying it may be a repeat, and only while it is still uncertain with no error: not once it has
-expired, been dismissed, or been marked disconnected when the session ended. After the third time
-it is not handed out again. While it is open it stays uncertain and blocks that target, at most
-until it expires 30 minutes after its last claim. A `board_inbox` claim is never handed out again.
+hook of that session can claim one message, the oldest it is allowed to take. A message the page
+queues is saved with the surface its route was checked on. A hook that reads another surface does
+not claim such a message; the session's own MCP pull (`board_inbox`) still can. A message saved
+without a surface, by an older board or from another agent's session, is not held to one.
+A turn-start hook marks a message `accepted` only after it has written the message to its output
+for the host; that does not prove the model read it, and the hook collects no ACK. A hook that
+stops waiting can hand its claim back, and a claim handed back is queued again. A claim the hook
+named that was neither accepted nor handed back can be handed out again after 30 seconds, with the
+same ACK code and a line saying it may be a repeat: at most three times for one message (a claim
+after a hand-back does not count), and never once it has an error (expired, dismissed, or marked
+disconnected). While a claim stays uncertain it can hold back the session's other messages; one
+still uncertain 30 minutes after its last claim expires. A `board_inbox` claim is never handed
+out again.
 
-Mailboxes expire after 12 hours. Session end rejects queued messages with `DISCONNECTED`.
+A mailbox expires 12 hours after the last turn-start hook or `board_inbox` call of its session that reached the board. Session end rejects queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create
-the store and only find the default folder; a board using `--messages-dir` has no hook mailboxes.
+the messages folder and only find the default one; a board using `--messages-dir` has no hook mailboxes.
 
 Supported turn starts: Codex `SessionStart` / `UserPromptSubmit`, Antigravity
 `SessionStart` / `PreInvocation`, Gemini CLI `SessionStart` / `BeforeAgent`, Muse Code
@@ -281,8 +282,11 @@ receipt, so reconnecting the original receiver after a board restart may report 
 with a new connection id or turn, provided that connection is not contested. Board JSON
 omits nonces; only the receiver's claimed delivery supplies one. Receipts cannot set the
 hub's reserved `EXPIRED` or `DISMISSED` errors. Send and claim still require the current turn.
-A restart hands out nothing by itself. It applies the age limit, and it marks a message disconnected, as a disconnect would, only when its target is gone: a live receiver's connection never outlasts the board, and a mailbox is gone once its session ended or it expired. A claimed message whose mailbox is still enrolled is left as it was, uncertain or accepted; a claim a turn-start hook named can then still be claimed again by a later hook of that session, under the conditions in "Next-turn mailbox". Restarts
-and disconnects do not reset an uncertain message's age limit. An accepted message's 30 minutes count from its first disconnected mark, and later marks do not start them again. Expiry or dismissal lets the card send again.
+A restart hands out nothing by itself; a later hook can still claim, as "Next-turn mailbox" says.
+It applies the age limit, and it marks disconnected, as a disconnect would, the open messages whose
+target is gone: a live receiver's connection, or a mailbox whose session ended or which expired.
+Messages of a mailbox that is still enrolled get no mark. A restart or a disconnect gives an
+uncertain message no extra time. Expiry or dismissal lets the card send again.
 Stores are saved as version 2, which earlier releases cannot read: before going back to one,
 move both `messages.json` and `server.lock` out of the folder, since 0.24.0 and earlier take
 the lock before they read the store and keep it after refusing the file. Version 1 loads with `hops: 1`, `claimed: 0`, and an empty nonce. Such legacy messages cannot

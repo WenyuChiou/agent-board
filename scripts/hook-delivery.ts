@@ -30,9 +30,9 @@ type Json = Record<string, unknown>
 // another client that sets neither mark still reads as the terminal; the owner accepted that gap
 // (the record's "Not covered" says so). Whether such a client gives the model a message its hook
 // claims has no record.
-// The label is read again at every turn-start hook. A message the page queued is bound to the
-// surface it was queued on (claimMessages in hooks/messaging.ts), so a later hook that reads
-// another surface leaves it queued.
+// The label is read again at every turn-start hook. A hook that reads another surface does not
+// claim a message saved with a surface (claimMessages in hooks/messaging.ts); a message saved
+// without one, by an older board or from another agent's session, is not held to a surface.
 const CODEX_CLIENT_VARIABLE = 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE'
 const CODEX_DAEMON_VARIABLE = 'CODEX_DAEMON_SHUTDOWN_SOCKET'
 export const codexSurface = (meta: CodexMeta | null, client: string | undefined, daemon: string | undefined): string =>
