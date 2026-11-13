@@ -63,3 +63,60 @@ Under these conditions:
 - The daemon's self-update left it at 0.168.0 under a 0.167.0 CLI. Both versions' packages stay in the test home's Codex folder.
 - After the send, the Needs you slot showed another Codex "Blue or green?" card: the one from the in-process launch, whose session had ended. It read "Codex isn't connected to this board. Copy this and paste it there." and "1 min ago", while the board's data said 8 minutes.
 
+## Re-run on 85475c5a
+
+2026-11-13, 11:20 to 11:29 US Eastern. Same computer, test home and Codex CLI (0.167.0, interactive TUI, GPT-6.1-Sol); run by a Claude Code subagent (Claude Opus 5.5) for the maintainer's PM session. Board: PR #1306 at `85475c5a`, rebuilt the same way into a scratch file. At this head the receiver reads the thread (`thread/read`) right before `turn/start`, and marks a send `uncertain` with `TURN_JOINED` when the answer names a turn whose `turn/started` it heard before the answer.
+
+### Question
+
+Does the board still start a turn in an idle Codex CLI session from the page? And does the real daemon send `turn/started` before it answers `turn/start`? If it does, every send would read `uncertain TURN_JOINED`.
+
+### What changed from the first run
+
+- **No route switch.** The build's own records now give the `Codex daemon` route its idle record, so the page was started without `AGENT_BOARD_ROUTES` (the start script removes it from its environment). It kept its own `XDG_RUNTIME_DIR`.
+- **A second listener.** A read-only script joined the daemon through its own `codex app-server proxy`, subscribed to the one loaded thread that had turns (`thread/resume`, no turn started) and logged each notice with the time. It cannot see the answer to the receiver's `turn/start`, which goes only to the receiver.
+- **Opening the page.** The browser pane reached the page through a one-shot local redirect page, so the page's token never passed through the session. The redirect file deleted itself after 60 s.
+- **The terminal tab.** When a tab does not report a typed command within 2 s, the desktop app's terminal tool sends Ctrl-C, and it did so once, at the plain `codex` start. A Ctrl-C landing in a running turn would interrupt it, so turn 1's start script waited 5 s with Ctrl-C taken as input, then emptied the input buffer before starting Codex. For turn 1 the tab reported the command in time, so no Ctrl-C was sent.
+
+### Run
+
+| Time | Stage |
+|---|---|
+| 11:20 | Board rebuilt from `85475c5a`. The bundle holds `thread/read`, `TURN_JOINED` and the recorded idle route |
+| 11:20:46 | No daemon running (`daemon version`: connection refused) |
+| 11:21:24 | Plain `codex` started (no options, no prompt). By 11:22:07 the shared daemon was running (`daemon version`: running, app server 0.168.0, under the 0.167.0 CLI) with its `pid-update-loop`. No update prompt blocked the window this time |
+| 11:22:18 | That window closed |
+| 11:22:40 | #1306 page started with `--codex-send` and no route switch. Its receiver started `codex app-server proxy` |
+| 11:24:28 | Turn 1 in a new terminal tab: `codex -s read-only -a never "Synthetic test: ask me exactly one question, Red or purple?, and stop. Change no file."`. It asked "Red or purple?" and ended at 11:24 ("Worked for 4s") |
+| 11:25:54 | The listener subscribed. One loaded thread with turns, status `idle`. At 11:25:38 a second loaded thread with no turns was still there, the empty one from the 11:21 window; it was gone by 11:25:54 |
+| 11:26 | The page, under Needs you (the Codex filter was already selected): Codex, scratch-project, "Red or purple?", "Codex is waiting. It starts on this right away." Buttons: Red, purple, More, Write your own, and the send arrow (Send). Write your own's box offered "Send to Codex". No Copy-only card |
+| 11:26:20.8 | Red picked, Send pressed. Store: `queued` (11:26:20.803) |
+| 11:26:21.300 | Store: claimed, `uncertain` with no error (the claim, before delivery) |
+| 11:26:21.377 | Store: `accepted` |
+| 11:26:21.473 | Listener: `thread/status/changed` active, then `turn/started` for a new turn |
+| 11:26:22.98 | Listener: the delivery's user message item. The Codex window showed the board's delivery text as a new prompt: the header ("sent from the board page on this computer (not typed in this window)"), "If you have already answered message …, reply only ACK … and do nothing else.", the ACK line and the framed "Red" |
+| 11:26:26.05 | The model's reply: the `ACK <code>` line alone ("Worked for 5s") |
+| 11:26:27.390 | Listener: `turn/completed`, status `completed`, and the thread back to `idle` |
+| 11:26:27.392 | Store: `acknowledged`, reply the ACK line, line `now`, surface `Codex daemon`, one hop |
+| 11:26:31 | The page: the card had left Needs you. The session's row, under Other work: "1/2", "Last: Red or purple?", "just now", "Waiting for the next instruction", "Codex is waiting. It starts on this right away.", Send to Codex, Archive. Receipt text: "Replied" |
+| to 11:27:51 | 90 s after the send: no second turn in the Codex window, no key pressed there, and no further store change |
+| 11:27:33 to 11:27:56 | The daemon updated itself again: a 0.169.0 package was downloaded at 11:27:33, and the update loop restarted the daemon at 11:27:56. This came after the acknowledgement, so the send was handled by 0.168.0 |
+| 11:28:06 to 11:28:22 | Codex window closed (Ctrl-C), page stopped (`--stop`). Daemon stopped (`daemon stop`, now 0.169.0), since this run started it. Its leftover `pid-update-loop` was stopped by hand. The listener and the store watcher were stopped too |
+
+### Result
+
+**PASS.** At `85475c5a`, with the build's own route record and no switch, a message sent from the page started the idle Codex CLI session's turn about 0.6 s after Send. Nobody typed in the Codex window. The store went `queued` → `uncertain` (the claim) → `accepted` → `acknowledged`, the last once the turn ended `completed`. The send did not read `uncertain TURN_JOINED`.
+
+**Order.** On the receiver's connection, the answer to `turn/start` came before `turn/started`. The receiver takes its snapshot of heard turn starts the moment the answer is read, and it would have thrown `TURN_JOINED` if that turn's start had been in it. It recorded `accepted` instead. On the listener's separate connection, `turn/started` arrived 96 ms after the store wrote `accepted`. That is one send on one daemon version (0.168.0, Windows, through `codex app-server proxy`).
+
+### Not shown
+
+- That the daemon always answers before `turn/started`. One send was seen, and the daemon changed version (0.169.0) right after it. The order on the receiver's connection is inferred from its own outcome, since its messages were not logged with times.
+- A message sent while a turn is running (the `released` path and its later delivery), and a turn that a send really joins (`TURN_JOINED`). Only two model turns were allowed.
+- What the model did with "Red": its reply was the ACK line alone, as on the first run.
+- A command that needs approval in a delivered turn, a prompt typed into the TUI's composer, a closed window, the Codex desktop app, Linux and macOS, and a page started by `/agent-board` or the npm command.
+
+### Also seen
+
+- The empty thread from the plain `codex` window stayed loaded at least 3 min 20 s after its window closed (on the first run it took about 60 s). The run does not show why.
+- The daemon updated itself during the run again, from 0.168.0 to 0.169.0, under a 0.167.0 CLI. The 0.169.0 package now sits in the test home's Codex folder beside 0.168.0.
