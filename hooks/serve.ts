@@ -2005,8 +2005,12 @@ const PAGE_SCRIPT = String.raw`
     return list;
   }
   function plural(key, n) { return w(n === 1 ? key + 'One' : key, n); }
-  function folded(label, list) {
+  // A fold of finished or further steps stays open across a redraw (opened[ref]), like a clipped text: the page
+  // redraws whenever the board changes or the minute turns, and a fold the person opened must not close under them.
+  function folded(label, list, ref) {
     var box = el('details');
+    box.open = opened[ref] === true;
+    box.addEventListener('toggle', function () { opened[ref] = box.open; });
     return add(box, el('summary', '', label), list);
   }
   function sends(mode) { return mode === 'send' || mode === 'connected' || mode === 'mailbox'; }
@@ -2232,12 +2236,12 @@ const PAGE_SCRIPT = String.raw`
       if (row.context) add(inner, clipped(clean(row.contextLine || row.context), row.context, 'context', 'context:' + key));
       if (row.pr) add(inner, el('p', 'context', row.pr));
       var completed = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
-      if (completed.length) add(inner, folded(plural('pgDoneSteps', completed.length), stepList(completed, row)));
+      if (completed.length) add(inner, folded(plural('pgDoneSteps', completed.length), stepList(completed, row), 'done:' + key));
       var left = steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled' && one.status !== 'waiting'; });
       var primary = left.find(function (one) { return one.isCurrent; }) || left[0];
       if (primary) add(inner, stepList([primary], row));
       var rest = left.filter(function (one) { return one !== primary; });
-      if (rest.length) add(inner, folded(plural('pgMoreSteps', rest.length), stepList(rest, row)));
+      if (rest.length) add(inner, folded(plural('pgMoreSteps', rest.length), stepList(rest, row), 'more:steps:' + key));
       if (row.handoff) add(inner, el('p', 'context', row.handoff));
       if (row.runs) add(inner, el('p', 'context', row.runs));
       if (row.lineText) add(inner, el('p', 'context', row.lineText));
