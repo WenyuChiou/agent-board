@@ -37,6 +37,20 @@ test('runs at most two at once and reports each as it finishes', async () => {
   assert.equal(done.length, 5)
 })
 
+test('the run fails when one file fails, after every file has run', async () => {
+  const files = ['tests/a.test.ts', 'tests/b.test.ts', 'tests/c.test.ts']
+  const ran = []
+  const run = async file => {
+    ran.push(file)
+    return { code: 0, output: report(file, [file === 'tests/b.test.ts' ? { ...pass, failure: 'boom' } : pass]) }
+  }
+  assert.equal(await runner.main(files, run), 1)
+  assert.deepEqual([...ran].sort(), files)
+  ran.length = 0
+  assert.equal(await runner.main(files, async file => (ran.push(file), { code: 0, output: report(file, [pass]) })), 0)
+  assert.deepEqual([...ran].sort(), files)
+})
+
 test('a child counts as passed only with exit 0 and a whole, matching report with every test passed', () => {
   assert.equal(failureReason('tests/x.test.ts', { code: 0, output: report('tests/x.test.ts', [pass, pass]) }), null)
   assert.equal(failureReason('tests/x.test.ts', { code: 0, output: `noise\r\n${report('tests/x.test.ts', [pass])}` }), null)
