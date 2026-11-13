@@ -2564,7 +2564,7 @@ const serveBoard = async (): Promise<void> => {
     // The address comes from a file and goes to a shell on Windows: only the shape this server
     // writes is opened.
     if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && page !== 'open') {
-      const isOpen = await openThroughBoard(url, false, page === 'none')
+      const isOpen = await openThroughBoard(url, true, page === 'none')
       // With a page already open, no window is missing.
       if (!isOpen && page === 'none' && !isNoWindowHere()) {
         process.stderr.write(`${s.serveBrowserNone(url)}\n`)

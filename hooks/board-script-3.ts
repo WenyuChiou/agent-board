@@ -13199,7 +13199,7 @@ export const LINES = [
 "` : \"\"}${idleNote}${s.serveAt(url)}",
 "`);",
 "    if (!args.includes(\"--no-open\") && /^http:\\/\\/127\\.0\\.0\\.1:\\d+\\/\\?t=[\\w-]+$/.test(url) && page !== \"open\") {",
-"      const isOpen = await openThroughBoard(url, false, page === \"none\");",
+"      const isOpen = await openThroughBoard(url, true, page === \"none\");",
 "      if (!isOpen && page === \"none\" && !isNoWindowHere()) {",
 "        process.stderr.write(`${s.serveBrowserNone(url)}",
 "`);",
