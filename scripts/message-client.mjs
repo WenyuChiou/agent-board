@@ -18,6 +18,9 @@
  *   that route live, or null. The board offers Send only on a route with a record.
  */
 
+// How many times a receiver tries to give a claim back before it reports the failure.
+const RELEASE_TRIES = 3
+
 export const deliveryPrompt = message => {
   if (typeof message.prompt !== 'string' || !message.prompt) throw new Error('PROMPT_REQUIRED')
   return message.prompt
@@ -65,13 +68,31 @@ export const boardClient = address => {
       const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }), ...(unclaimed ? { unclaimed: true } : {}) })
       let credentials = { connection: registered.id, secret: registered.secret }, contestAfter = 0
       let isContested = false, isClosed = false, isPolling = false, isPollDue = false, isRetried = false, leaseUntil = registered.expires
-      const close = async () => {
+      // ended: the caller read its session as ended. Only then does an automatic receiver's queued message go back refused.
+      const close = async ({ ended = false } = {}) => {
         if (isClosed) return
         isClosed = true
         clearInterval(timer)
-        await call('disconnect', { ...credentials, turn }).catch(() => undefined)
+        await call('disconnect', { ...credentials, turn, ...(ended === true ? { ended: true } : {}) }).catch(() => undefined)
       }
       const receipt = (message, status, reply, error) => call('receipt', { ...credentials, id: message.id, nonce: message.nonce, status, ...(reply === undefined ? {} : { reply }), ...(error === undefined ? {} : { error }) })
+      // Messages whose claim is being given back: a poll that hands one out again meanwhile leaves it alone, so the
+      // release that is still trying never gives back a claim that is being delivered.
+      const releasing = new Set()
+      // Giving a claim back sends no prompt, so it is tried a few times. A request that reached the board but lost its
+      // answer is met by the next try as CLAIM_REQUIRED (queued again): that is done. One that still fails is reported.
+      const release = async message => {
+        releasing.add(message.id)
+        try {
+          for (let attempt = 1; ; attempt++) {
+            try { await receipt(message, 'released'); return } catch (error) {
+              if (error?.message === 'CLAIM_REQUIRED') return
+              if (error?.isRetryable !== true || attempt >= RELEASE_TRIES || isClosed) { onError(error); return }
+            }
+            await new Promise(done => setTimeout(done, 250 * attempt))
+          }
+        } finally { releasing.delete(message.id) }
+      }
       const processMessage = async message => {
         let hasStarted = false
         try {
@@ -84,7 +105,7 @@ export const boardClient = address => {
           if (typeof reply === 'string' && reply.trim()) await receipt(message, 'acknowledged', reply)
         } catch (error) {
           // A receiver that started nothing and says so (`isReleased`, e.g. the session turned busy) gives the claim back.
-          if (!hasStarted && error?.isReleased === true) { await receipt(message, 'released').catch(() => undefined); return }
+          if (!hasStarted && error?.isReleased === true) { await release(message); return }
           if (!hasStarted) await receipt(message, 'rejected', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : undefined).catch(() => undefined)
           else await receipt(message, 'uncertain', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : 'DELIVERY_UNCERTAIN').catch(() => undefined)
           // After delivery begins, a timeout or exception never authorizes redelivery.
@@ -131,7 +152,7 @@ export const boardClient = address => {
               leaseUntil = again.expires
               isContested = again.contested === true
             }
-            if (!isClosed) for (const message of result.messages) void processMessage(message)
+            if (!isClosed) for (const message of result.messages) if (!releasing.has(message.id)) void processMessage(message)
           } catch (error) {
             if (!error.isRetryable || Date.now() >= leaseUntil) await close()
             // A busy store (#914) costs one short wait, not a whole poll period: one quick retry until a

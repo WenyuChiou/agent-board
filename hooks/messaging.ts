@@ -330,9 +330,19 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   if (one.status === 'accepted' && status === 'accepted' && one.reply === reply) return state
   return { ...state, messages: state.messages.map(message => message === one ? settled({ ...one, status, reply, error, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
 }
-export const disconnectMessages = (state: MessageState, target: string, now: number): MessageState => ({
+// keepQueued: the connection that went is an automatic receiver whose leaving is no sign that its session ended (a
+// restarted daemon, a contest). A message it was never handed stays queued, text and all, for its next connection (#318).
+export const disconnectMessages = (state: MessageState, target: string, now: number, keepQueued = false): MessageState => ({
   ...state,
-  messages: state.messages.map(one => one.target !== target || isFinished(one) ? one : settled({
+  messages: state.messages.map(one => one.target !== target || isFinished(one) || keepQueued && one.status === 'queued' ? one : settled({
     ...one, status: one.status === 'queued' ? 'rejected' : one.status === 'accepted' ? 'accepted' : 'uncertain', error: 'DISCONNECTED', updated: one.error === 'DISCONNECTED' || one.status === 'uncertain' ? one.updated : now,
   })),
 })
+// The next automatic receiver of the same session takes over what an earlier one left queued: a message for a
+// connection that is gone (`isLive` false), on this connection's surface or on none.
+export const rebindMessages = (state: MessageState, target: Connection, isLive: (id: string) => boolean): MessageState => {
+  const to = address(target.agent, target.session)
+  const isLeft = (one: Message): boolean => one.status === 'queued' && one.to === to && !isMailboxTarget(one.target) && !isLive(one.target)
+    && (one.surface === undefined || one.surface === target.surface)
+  return state.messages.some(isLeft) ? { ...state, messages: state.messages.map(one => isLeft(one) ? { ...one, target: target.id, turn: target.turn } : one) } : state
+}

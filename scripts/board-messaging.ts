@@ -3,7 +3,7 @@ import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, 
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { acceptMailboxMessage, endMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
-import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
+import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, rebindMessages, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
@@ -101,7 +101,8 @@ const same = (a: string, b: string): boolean => {
   const left = Buffer.from(a), right = Buffer.from(b)
   return left.length === right.length && timingSafeEqual(left, right)
 }
-type Live = Connection & { secret: string }
+// keepsQueued: an automatic receiver (registered `unclaimed`); its leaving leaves its queued messages queued (#318).
+type Live = Connection & { secret: string; keepsQueued?: boolean }
 // On Windows a virus scanner or indexer can hold a file just written, and a rename onto it then
 // fails for a moment. A short wait clears it, so the store is called busy only if it stays busy.
 const RENAME_WAITS_MS = [10, 25, 50, 100]
@@ -278,7 +279,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
   // A connection goes only once its messages' new states are on disk.
   const expire = (now: number): void => {
     const gone = [...connections.values()].filter(one => one.expires <= now)
-    save(expireMailboxes(gone.reduce((next, one) => disconnectMessages(next, one.id, now), state), now), now)
+    save(expireMailboxes(gone.reduce((next, one) => disconnectMessages(next, one.id, now, one.keepsQueued === true), state), now), now)
     for (const one of gone) connections.delete(one.id)
   }
   const authenticated = (id: unknown, secret: unknown, now: number): Live => {
@@ -311,7 +312,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       expire(now)
       for (const [id, one] of expectations) expectations.set(id, observeSession(one, reports, now))
       return {
-        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, ...one }) => one), messages: state.messages.map(shownMessage),
+        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, keepsQueued: _keepsQueued, ...one }) => one), messages: state.messages.map(shownMessage),
         sessions: [
           ...[...expectations.values()].map(one => ({
             id: one.id, agent: one.agent, session: one.session, surface: one.surface,
@@ -378,7 +379,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         if (previous) {
           if (typeof body.secret !== 'string' || !same(previous.secret, body.secret)) throw new Error('CONNECTOR_NOT_CONNECTED')
           if (previous.agent !== agent || previous.session !== session) throw new Error('REPLACE_MISMATCH')
-          save(disconnectMessages(state, previous.id, now), now)
+          save(disconnectMessages(state, previous.id, now, previous.keepsQueued === true), now)
           connections.delete(previous.id)
         }
         if (connections.size >= 100) throw new Error('CONNECTION_LIMIT')
@@ -387,7 +388,9 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         if (body.unclaimed !== undefined && typeof body.unclaimed !== 'boolean') throw new Error('INVALID_CONNECTION_REQUEST')
         if (body.unclaimed === true && matches.length > 0) throw new Error('TARGET_CLAIMED')
         for (const live of matches) connections.set(live.id, { ...live, contested: true })
-        const one: Live = { id: randomBytes(16).toString('hex'), secret: randomBytes(24).toString('base64url'), agent, session, surface, turn, scope, origin, expires: now + LEASE_MS, contested: matches.length > 0 }
+        const one: Live = { id: randomBytes(16).toString('hex'), secret: randomBytes(24).toString('base64url'), agent, session, surface, turn, scope, origin, expires: now + LEASE_MS, contested: matches.length > 0, ...(body.unclaimed === true ? { keepsQueued: true } : {}) }
+        // It takes over what an earlier automatic receiver of this session left queued, before it can be polled.
+        if (one.keepsQueued === true) save(rebindMessages(state, one, id => connections.has(id)), now)
         connections.set(one.id, one)
         return { ...one, leaseMs: LEASE_MS }
       }
@@ -424,7 +427,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         save(next.state, now)
         return next.result
       }
-      messageFields(body, action === 'receipt' ? ['connection', 'secret', 'id', 'nonce', 'status', 'reply', 'error'] : action === 'poll' ? ['connection', 'secret', 'turn', 'receive'] : ['connection', 'secret', 'turn'])
+      messageFields(body, action === 'receipt' ? ['connection', 'secret', 'id', 'nonce', 'status', 'reply', 'error'] : action === 'poll' ? ['connection', 'secret', 'turn', 'receive'] : action === 'disconnect' ? ['connection', 'secret', 'turn', 'ended'] : ['connection', 'secret', 'turn'])
       const one = authenticated(body.connection, body.secret, now)
       if (action === 'receipt') {
         const { connection: _id, secret: _secret, ...receipt } = body
@@ -433,7 +436,9 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       }
       if (body.turn !== one.turn) throw new Error('STALE_TURN')
       if (action === 'disconnect') {
-        save(disconnectMessages(state, one.id, now), now)
+        // ended: the receiver read its session as ended, so what it leaves queued is refused as before.
+        if (body.ended !== undefined && typeof body.ended !== 'boolean') throw new Error('INVALID_CONNECTION_REQUEST')
+        save(disconnectMessages(state, one.id, now, one.keepsQueued === true && body.ended !== true), now)
         connections.delete(one.id)
         return { ok: true }
       }

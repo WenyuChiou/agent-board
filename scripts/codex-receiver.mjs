@@ -139,6 +139,9 @@ const loadedThreads = async daemon => {
 }
 
 const input = prompt => [{ type: 'text', text: prompt, text_elements: [] }]
+// Whether a user message item is this delivery's own: its echoed claim nonce, or the exact text it was sent with.
+const isOwnInput = (item, pending) => item.clientId === pending.nonce
+  || Array.isArray(item.content) && item.content.some(part => part?.type === 'text' && part.text === pending.prompt)
 // Nothing was started: the board queues the message again, with the same ACK code (the `released` receipt).
 const released = (code = 'SESSION_BUSY') => Object.assign(new Error(code), { isReleased: true })
 
@@ -168,6 +171,10 @@ export const startCodexReceiver = ({
     } else if (value.method === 'item/completed' && p.item?.type === 'agentMessage' && state.pending) {
       const line = ackLine(String(p.item.text ?? ''), state.pending.nonce)
       if (line !== null) { state.pending.acked.set(p.turnId, line); one.settle() }
+    } else if ((value.method === 'item/started' || value.method === 'item/completed') && p.item?.type === 'userMessage' && state.pending && typeof p.turnId === 'string') {
+      // A turn's first user message says who started it: this delivery (the daemon echoes the claim nonce as `clientId`,
+      // docs/validation/2026-11-06-send-to-codex.md), or someone else, whose turn the delivery then joined.
+      if (!state.pending.firstInput.has(p.turnId)) { state.pending.firstInput.set(p.turnId, isOwnInput(p.item, state.pending)); one.settle() }
     }
   }
 
@@ -176,12 +183,14 @@ export const startCodexReceiver = ({
     failures = 0
   }
 
-  const drop = async thread => {
+  // ended: the board read the session as ended. Any other loss (the daemon went, a contest) is no sign of that, so the
+  // board keeps what was queued for this connection and hands it to the next one (#318).
+  const drop = async (thread, ended = false) => {
     const one = attached.get(thread)
     if (!one) return
     attached.delete(thread)
     one.state.pending?.reject(new Error('OWNER_DISCONNECTED'))
-    await one.receiver?.close().catch(() => undefined)
+    await one.receiver?.close({ ended }).catch(() => undefined)
   }
 
   const attach = async thread => {
@@ -193,7 +202,10 @@ export const startCodexReceiver = ({
     // so ended turns are kept by id.
     one.settle = () => {
       const pending = state.pending
-      if (!pending?.turn || !pending.ended.has(pending.turn)) return
+      if (!pending?.turn) return
+      // The answer named a turn that began with someone else's message, heard after the answer (#1370).
+      if (pending.firstInput.get(pending.turn) === false) { pending.reject(new Error('TURN_JOINED')); return }
+      if (!pending.ended.has(pending.turn)) return
       const line = pending.acked.get(pending.turn)
       if (line === undefined) pending.reject(new Error('ACK_MISSING'))
       else {
@@ -239,8 +251,9 @@ export const startCodexReceiver = ({
           if (status !== 'idle' || !isIdle() || daemon === null) throw released()
           let timer
           const answer = new Promise((done, reject) => {
-            // begun: the turns whose start this connection heard while turn/start was out.
-            state.pending = { nonce: message.nonce, turn: null, begun: new Set(), acked: new Map(), ended: new Map(), done, reject }
+            // begun: the turns whose start this connection heard while turn/start was out. firstInput: for each turn, whether
+            // its first user message was this delivery.
+            state.pending = { nonce: message.nonce, prompt: message.prompt, turn: null, begun: new Set(), firstInput: new Map(), acked: new Map(), ended: new Map(), done, reject }
             timer = setTimeout(() => reject(new Error('ACK_TIMEOUT')), ackMs)
           })
           void answer.catch(() => undefined)
@@ -255,9 +268,10 @@ export const startCodexReceiver = ({
             begin()
             if (!result?.turn?.id) throw new Error('INVALID_TURN_RESPONSE')
             // turn/start has no idle-only form: on a running turn it adds the text to that turn and answers with its id. A turn
-            // whose start was heard before this answer arrived was already running, so the text joined it: uncertain, never an
-            // ordinary acceptance (#1370).
-            if (begunBefore.has(result.turn.id)) throw new Error('TURN_JOINED')
+            // whose start was heard before this answer arrived, or whose first user message is someone else's, was already
+            // running, so the text joined it: uncertain, never an ordinary acceptance (#1370). When that is heard only after
+            // the answer, settle() turns the acceptance into the same uncertain receipt.
+            if (begunBefore.has(result.turn.id) || pending.firstInput.get(result.turn.id) === false) throw new Error('TURN_JOINED')
             state.pending.turn = result.turn.id
             if (!state.pending.ended.has(result.turn.id)) state.turn = result.turn.id
             await accepted()
@@ -297,7 +311,7 @@ export const startCodexReceiver = ({
       }
       let loaded
       try { loaded = await loadedThreads(daemon) } catch (error) { onError(error); return }
-      for (const [thread, one] of [...attached]) if (one.isLost || one.receiver?.isClosed() || one.receiver?.isContested() || !loaded.has(thread) || !wanted.includes(thread)) await drop(thread)
+      for (const [thread, one] of [...attached]) if (one.isLost || one.receiver?.isClosed() || one.receiver?.isContested() || !loaded.has(thread) || !wanted.includes(thread)) await drop(thread, !wanted.includes(thread))
       for (const thread of wanted) {
         if (isClosed || attached.has(thread) || !loaded.has(thread)) continue
         // A thread with no turn yet has no saved history, and the daemon refuses to resume it (live check, 0.164.0): it is joined
