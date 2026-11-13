@@ -90,7 +90,7 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   const name = isClaudeAgent(agent) ? 'Claude' : agentLabel(agent, s)
   const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name))
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
-    : line === 'nextTurn' ? s.serveNextTurnHint
+    : line === 'nextTurn' ? s.serveNextTurnHint(name)
     : line === 'chatOpen' ? s.serveNextOpenHint
     : line === 'reopen' ? s.serveLineReopen(name)
     : s.serveLineNone(name)
@@ -924,7 +924,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveLineStepEnd', 'serveQueueNextTurn', 'serveQueueNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'serveLineStepEnd', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1017,15 +1017,17 @@ ${sheetCss}
 .answer-picks{display:flex;flex:1 1 auto;min-width:0;flex-wrap:wrap;gap:var(--s2);align-items:center}
 .btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)}
-button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
-.btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
-button.quiet:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
+.btn:hover:not(.primary):not(:disabled),.answers button:hover:not(.primary):not(:disabled),.acts button:hover:not(.primary):not(:disabled),.state button:hover:not(.primary):not(:disabled),.composer button:hover:not(.primary):not(:disabled){background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
+button.quiet:hover:not(:disabled),.side .pfoot .btn:hover:not(:disabled){background-color:var(--hover)}
+button.primary:hover:not(:disabled){background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
+button.primary:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:1;cursor:not-allowed}
 .answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);background:color-mix(in srgb,var(--act) 12%,var(--hover))}
 .answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-lg)}
 .answers button.answer-send[data-copy="1"]{flex:0 0 auto;width:auto;min-width:var(--hit);padding:0 14px;font-size:var(--text-sm)}
-.answers button.answer-send:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
+.answers button.answer-send:hover:not(:disabled){background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 .answers button.answer-send:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:.35;cursor:default}
+.answers button.answer-send[data-sending="1"]:disabled{opacity:1;cursor:not-allowed}
 .chev{display:inline-block;transition:transform var(--dur-base) var(--ease-out)}.chev::before{content:"▸"}
 .open>.shelf-head .chev{transform:rotate(90deg)}
 code{display:block;max-width:100%;overflow-x:auto;white-space:pre;font:var(--text-xs)/1.5 var(--font-mono);padding:6px var(--s2);border:1px solid var(--line);border-radius:var(--radius-s);background:var(--inset);color:var(--ink)}
@@ -1042,6 +1044,15 @@ textarea:focus{outline:none;border-color:var(--ink);box-shadow:var(--ring)}
 .receipt,.said-line{margin:0;font-size:var(--text-sm);color:var(--muted)}
 .receipt.t-alert{color:var(--alert)}.receipt-box{display:grid;gap:var(--s2)}
 .press-result{font-size:var(--text-sm)}.press-result .acts{margin-top:var(--s2)}.press-result:empty{display:none}.press-result.done{color:var(--done)}.press-result.alert{color:var(--alert)}
+.receipt,.press-result.wait,.press-result.done,.press-result.alert{position:relative;padding:var(--s2) var(--s3) var(--s2) calc(var(--s3) + 24px);border:1px solid var(--line);border-radius:var(--radius-s)}
+.receipt::before,.press-result.wait::before,.press-result.done::before,.press-result.alert::before{content:"";position:absolute;left:var(--s3);top:calc(var(--s2) + 2px);width:16px;height:16px;background:currentColor}
+.receipt.t-wait,.press-result.wait{color:var(--receipt-wait);background:var(--receipt-wait-bg);border-color:var(--receipt-wait-line)}
+.receipt.t-wait::before,.press-result.wait::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 4.8V8l2.4 1.6'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 4.8V8l2.4 1.6'/%3E%3C/svg%3E") center/contain no-repeat}
+.receipt.t-done,.press-result.done{color:var(--receipt-done);background:var(--receipt-done-bg);border-color:var(--receipt-done-line)}
+.receipt.t-done::before,.press-result.done::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='m5.4 8.2 1.8 1.8 3.6-3.8'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='m5.4 8.2 1.8 1.8 3.6-3.8'/%3E%3C/svg%3E") center/contain no-repeat}
+.receipt.t-alert,.press-result.alert{color:var(--receipt-fail);background:var(--receipt-fail-bg);border-color:var(--receipt-fail-line)}
+.receipt.t-alert::before,.press-result.alert::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 4.8v3.6M8 11.2h.01'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 4.8v3.6M8 11.2h.01'/%3E%3C/svg%3E") center/contain no-repeat}
+.state.t-wait .msg{color:inherit}
 .press-result textarea{margin-top:var(--s2);font-size:var(--text-sm)}
 .empty{display:grid;gap:var(--s1);padding:var(--s4)}
 .empty p{margin:0}.empty .sub{font-size:var(--text-xs);color:var(--muted)}.empty .btn{justify-self:start}
@@ -1646,11 +1657,14 @@ const PAGE_SCRIPT = String.raw`
   function busyOn(node) {
     if (!node) return;
     node.disabled = true;
+    if (node.setAttribute) node.setAttribute('data-sending', '1');
     if (!node.dotsNode) { node.dotsNode = add(el('span', 'dots'), el('i'), el('i'), el('i')); node.appendChild(node.dotsNode); }
   }
   function busyOff(node, stillOff) {
     if (!node) return;
     node.disabled = stillOff === true;
+    if (node.removeAttribute) node.removeAttribute('data-sending');
+    else if (node.setAttribute) node.setAttribute('data-sending', '');
     if (node.dotsNode) { node.dotsNode.remove(); node.dotsNode = null; }
   }
   // fp: the fingerprint the line was drawn with, which the server checks before it writes. go: the button
@@ -1658,7 +1672,7 @@ const PAGE_SCRIPT = String.raw`
   function act(key, type, text, waiting, session, asked, fp, go, line, unhideKey) {
     if (isUnreachable) return Promise.resolve();
     busyOn(go);
-    say(waiting || w('pressPending'), '', key);
+    say(waiting || w('pressPending'), 'wait', key);
     return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '', ...(line === undefined ? {} : { line: line }) }).then(function (data) {
       say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok);
       if (data.ok && type === 'hide' && unhideKey && results[key]) {
@@ -1686,15 +1700,39 @@ const PAGE_SCRIPT = String.raw`
     if (!result || !receipt || result.messageId !== receipt.id) return;
     clearResultSlot(key);
   }
-  function nativeAct(key, text, delivery, session, asked, fp, go) {
+  function nativeAct(key, text, delivery, session, asked, fp, go, line) {
     if (isUnreachable) return Promise.resolve(false);
     var slot = JSON.stringify([key, delivery.id, delivery.turn, session, asked, fp]);
     var attempt = messageAttempts[slot];
     if (!attempt || attempt.text !== text) attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
+    var who = agentName(delivery.agent);
+    var waitingText = line === 'nextTurn'
+      ? w('serveQueuingNextTurn', who)
+      : line === 'chatOpen'
+        ? w('serveQueuingNextOpen', who)
+        : line === 'stepEnd' && isClaudeAgent(delivery.agent)
+          ? w('claudeSendWorking')
+          : line === 'stepEnd'
+            ? w('serveLineStepEnd', who)
+            : w('serveSending', who);
     busyOn(go);
-    say(w('serveSending', agentName(delivery.agent)), '', key);
+    say(waitingText, 'wait', key);
     return call('/api/act', { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp }).then(function (data) {
-      say(data.note || w(data.ok ? 'messagesQueued' : 'messagesFailed'), data.ok ? 'done' : 'alert', key, undefined, !data.ok);
+      var receiptStatus = data.receipt && data.receipt.status;
+      var tone = !data.ok || receiptStatus === 'rejected'
+        ? 'alert'
+        : receiptStatus === 'accepted' || receiptStatus === 'acknowledged'
+          ? 'done'
+          : 'wait';
+      var fallback = !data.ok
+        ? w('messagesFailed')
+        : line === 'nextTurn'
+          ? w('serveQueuedNextTurn', who)
+          : line === 'chatOpen'
+            ? w('serveQueuedNextOpen', who)
+            : w('messagesQueued');
+      var noteText = data.note && !(data.ok && line === 'nextTurn' && data.note === w('messagesQueued')) ? data.note : fallback;
+      say(noteText, tone, key, undefined, !data.ok);
       if (data.ok && results[key]) {
         results[key].messageId = attempt.id;
         clearEnqueueResult(key, pg.sources[key] && pg.sources[key].receipt);
@@ -1736,12 +1774,14 @@ const PAGE_SCRIPT = String.raw`
     if (isStopped || isReplied || error === 'DISMISSED' || error === 'EXPIRED') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
     if (error === 'DISMISSED') return null;
     var isUnconfirmed = receipt.status === 'uncertain' || receipt.status === 'accepted' && error === 'DISCONNECTED';
-    var line = el('p', 'receipt' + (isStopped ? ' t-alert' : ''), isStopped ? (error === 'STOPPED' ? w('claudeStopped') : w('messagesRejected'))
+    var isFail = isStopped || receipt.status === 'uncertain' && receipt.hasAccepted !== true;
+    var toneClass = isFail ? ' t-alert' : receipt.status === 'queued' ? ' t-wait' : ' t-done';
+    var line = el('p', 'receipt' + toneClass, isStopped ? (error === 'STOPPED' ? w('claudeStopped') : w('messagesRejected'))
       : isReplied ? (receipt.reply ? w('claudeReplied', receipt.reply) : w('claudeGotIt'))
       : isUnconfirmed ? w('claudeUnconfirmed')
       : receipt.status === 'queued' ? w('claudeSendWorking')
       : w('claudeDelivered') + (receipt.when ? ' · ' + receipt.when : ''));
-    line.setAttribute('role', isStopped ? 'alert' : 'status');
+    line.setAttribute('role', isFail ? 'alert' : 'status');
     var last = key && sentLast[key];
     // The hub lets go of a finished message's words; this page may still hold them.
     var words = receipt.text || (last ? last.text : '');
@@ -1769,6 +1809,8 @@ const PAGE_SCRIPT = String.raw`
     var ack = 'ACK ' + receipt.id;
     if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
     var isFailed = receiptFailed(receipt);
+    var isFailTone = isFailed || receipt.status === 'uncertain' && receipt.hasAccepted !== true;
+    var toneClass = isFailTone ? ' t-alert' : receipt.status === 'queued' ? ' t-wait' : ' t-done';
     var isAcceptedUnconfirmed = receipt.status === 'uncertain' && receipt.hasAccepted === true;
     var labelText = isFailed && receipt.status === 'uncertain'
       ? w('messagesTimeout')
@@ -1777,9 +1819,13 @@ const PAGE_SCRIPT = String.raw`
         ? w('messagesAcceptedDisconnected')
         : receipt.status === 'queued' && line === 'stepEnd'
           ? w('serveLineStepEnd', agentName(agent))
-          : w(labels[receipt.status]);
-    var lineEl = el('p', 'receipt' + (isFailed ? ' t-alert' : ''), labelText + (reply ? ' · ' + reply : ''));
-    lineEl.setAttribute('role', isFailed ? 'alert' : 'status');
+          : receipt.status === 'queued' && line === 'nextTurn'
+            ? w('serveQueuedNextTurn', agentName(agent))
+            : receipt.status === 'queued' && line === 'chatOpen'
+              ? w('serveQueuedNextOpen', agentName(agent))
+              : w(labels[receipt.status]);
+    var lineEl = el('p', 'receipt' + toneClass, labelText + (reply ? ' · ' + reply : ''));
+    lineEl.setAttribute('role', isFailTone ? 'alert' : 'status');
     var last = key && sentLast[key];
     if (!isFailed || !last) return lineEl;
     return add(el('div', 'receipt-box'), lineEl, add(el('div', 'acts'), button(w('serveRetry'), function () { last.again(); }), button(w('serveCopyMessage'), function () { copy(last.text, key); }, '', true)));
@@ -1807,7 +1853,7 @@ const PAGE_SCRIPT = String.raw`
         if (!text) { say(w('pressEmpty'), 'alert', key); return; }
         // The same text goes again through the same path; the box keeps it until it was sent.
         var run = function () {
-          var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, text, delivery, session, asked, fp, go) : act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp, go);
+          var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, text, delivery, session, asked, fp, go, line) : act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp, go);
           return sent.then(function (ok) { if (ok) { clearDraft(draftKey); if (done) done(text); } return ok; });
         };
         sentLast[key] = { text: text, again: run };
@@ -1823,7 +1869,7 @@ const PAGE_SCRIPT = String.raw`
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go.click(); }
     });
     var footer = el('div', 'cf');
-    if (isSending === true && mode !== 'mailbox' && !results[key] && !(mode === 'connected' && isClaudeAgent(agent))) add(box, el('p', 'receipt', w('serveSendBusy', agentName(agent))));
+    if (isSending === true && mode !== 'mailbox' && !results[key] && !(mode === 'connected' && isClaudeAgent(agent))) add(box, el('p', 'receipt t-wait', w('serveSendBusy', agentName(agent))));
     if (where) add(footer, el('div', 'where', where));
     if (extras && extras.onCancel) add(footer, navButton(w('pgCancel'), extras.onCancel));
     add(box, input, add(footer, go));
@@ -1964,8 +2010,18 @@ const PAGE_SCRIPT = String.raw`
       parts.moreActs.appendChild(parts.hideBtn);
     }
     if (!isAfter || hasReceiptAfter) return;
-    parts.msg.textContent = state.mode === 'queued'
-      ? (parts.line === 'stepEnd' ? (isClaudeAgent(parts.agent) ? w('claudeSendWorking') : w('serveLineStepEnd', agentName(parts.agent))) : w('messagesQueued'))
+    var isQueuedState = state.mode === 'queued';
+    if (parts.afterRow) parts.afterRow.className = isQueuedState ? 'state receipt t-wait' : 'state';
+    if (parts.afterMk) parts.afterMk.hidden = isQueuedState;
+    parts.msg.className = isQueuedState ? 'msg' : 'msg ok';
+    parts.msg.textContent = isQueuedState
+      ? (parts.line === 'stepEnd'
+          ? (isClaudeAgent(parts.agent) ? w('claudeSendWorking') : w('serveLineStepEnd', agentName(parts.agent)))
+          : parts.line === 'nextTurn'
+            ? w('serveQueuedNextTurn', agentName(parts.agent))
+            : parts.line === 'chatOpen'
+              ? w('serveQueuedNextOpen', agentName(parts.agent))
+              : w('messagesQueued'))
       : state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text)
       : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
     parts.again.hidden = state.mode !== 'copied';
@@ -2146,13 +2202,15 @@ const PAGE_SCRIPT = String.raw`
     } else parts.reply = fx(el('div'), false);
     var after = el('div', 'state');
     after.setAttribute('role', 'status');
+    var afterMk = el('span', 'mk ok', '✓');
     parts.msg = el('span', 'msg ok');
     parts.again = button(w('pgCopyAgain'), function () {
       var state = cardState[key];
       if (state) copy(state.text, key);
     }, 'quiet', true);
+    parts.afterMk = afterMk;
     parts.afterRow = after;
-    add(after, add(el('span', 'mk ok', '✓')), parts.msg, parts.again);
+    add(after, afterMk, parts.msg, parts.again);
     parts.after = fx(after, false);
     add(body, parts.ask, parts.reply, parts.after);
     if (ask.receipt && ask.receipt.error === 'DISMISSED' && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
@@ -2175,7 +2233,7 @@ const PAGE_SCRIPT = String.raw`
     var mode = ask.send;
     if (mode !== 'connected' && mode !== 'mailbox' && mode !== 'send') { copy(answer, key, function () { setMode(key, 'copied', answer); }); return; }
     var run = function () {
-      var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, answer, ask.delivery, ask.session, ask.text, ask.fp, node || el('button')) : act(key, 'send', answer, w('serveSending', agentName(ask.agent)), ask.session, ask.text, ask.fp, node);
+      var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, answer, ask.delivery, ask.session, ask.text, ask.fp, node || el('button'), ask.line) : act(key, 'send', answer, w('serveSending', agentName(ask.agent)), ask.session, ask.text, ask.fp, node);
       return sent.then(function (ok) { if (ok) setMode(key, mode === 'connected' || mode === 'mailbox' || ask.line === 'stepEnd' ? 'queued' : 'sent', answer); return ok; });
     };
     sentLast[key] = { text: answer, again: run };
