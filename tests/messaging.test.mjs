@@ -4396,7 +4396,8 @@ test('a question asked while its session is working reads the working route, not
     if (route.line === 'now' && record.agent !== 'claude') assert.ok(!ask.lineText.includes('waiting'), label + ' ' + ask.lineText)
     checked += 1
   }
-  assert.ok(checked >= 10)
+  // Nine records since Gemini CLI's was retired (#1327).
+  assert.ok(checked >= 9)
   // A working Codex proxy keeps its recorded Send, and a working DeepSeek session, whose idle route is recorded, does not gain it.
   const routeOfRecord = (agent, kind, state) => RECEIVER_ROUTES.find(one => one.agent === agent && one.kind === kind).routes[state]
   assert.notEqual(routeOfRecord('codex', 'turn', 'working').record, null)
@@ -4448,7 +4449,7 @@ test('each receiver record names a validation note that exists, and the table th
   const { readReceiverRecords } = await import('../scripts/messaging-matrix.mjs')
   const root = join(import.meta.dirname, '..')
   const records = (await readReceiverRecords(root)).filter(one => one.routes !== undefined)
-  assert.ok(records.length >= 10)
+  assert.ok(records.length >= 9)
   for (const record of records) {
     for (const state of ['idle', 'working', 'ended']) {
       const route = record.routes[state]
