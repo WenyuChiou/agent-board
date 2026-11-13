@@ -447,16 +447,18 @@ describe('L0 discover and install from the README', () => {
       'zh-TW': ['Agent', '開看板', '你的回答怎麼送到'],
       'zh-CN': ['Agent', '打开看板', '你的回复怎么送到'],
     }
-    // Words of the page and pane cells; "Not tested yet" is MESSAGING.md's Implemented with no live run.
+    // Words of the page and pane cells; "Not tested yet" is MESSAGING.md's Implemented with no live run, and
+    // Antigravity's cell gives its desktop app's Verified next-turn route and its IDE's Not tested apart.
     const DESKTOP = {
-      en: { pane: '`/agent-board` (board page)', page: 'Board page', notYet: 'Not yet', untested: 'Not tested yet', second: 'The second Quick start command' },
-      'zh-TW': { pane: '`/agent-board`（看板網頁）', page: '看板網頁', notYet: '尚未支援', untested: '尚未測試', second: '快速開始的第二個指令' },
-      'zh-CN': { pane: '`/agent-board`（看板网页）', page: '看板网页', notYet: '暂不支持', untested: '尚未测试', second: '快速开始的第二个命令' },
+      en: { pane: '`/agent-board` (board page)', page: 'Board page', notYet: 'Not yet', untested: 'Not tested yet', appNext: 'Desktop app: handed over from its next turn, one per turn; IDE: not tested yet', second: 'The second Quick start command' },
+      'zh-TW': { pane: '`/agent-board`（看板網頁）', page: '看板網頁', notYet: '尚未支援', untested: '尚未測試', appNext: '桌面 app：下一輪起交給它，一輪一則；IDE：尚未測試', second: '快速開始的第二個指令' },
+      'zh-CN': { pane: '`/agent-board`（看板网页）', page: '看板网页', notYet: '暂不支持', untested: '尚未测试', appNext: '桌面 app：下一轮起交给它，一轮一条；IDE：尚未测试', second: '快速开始的第二个命令' },
     }
     // Agents with a desktop app or IDE in docs/MESSAGING.md "Agent and surface support", and what that table says of each.
-    const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'untested'], Cursor: ['page', 'untested'], OpenCode: ['page', 'notYet'] }
+    const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'appNext'], Cursor: ['page', 'untested'], OpenCode: ['page', 'notYet'] }
     const messaging = read('docs/MESSAGING.md')
-    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Proposed', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Implemented', 'Not tested'], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Proposed', 'Not tested']]) {
+    const appNote = 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md'
+    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Proposed', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Verified', `[${appNote}](../${appNote})`], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Proposed', 'Not tested']]) {
       assert.ok(messaging.split('\n').some(line => line.startsWith(`| ${host} | ${surface} | `) && line.includes(`| ${status} | ${live} |`)), `docs/MESSAGING.md: ${host} ${surface} is ${status}, ${live}`)
     }
     for (const [name, lang] of READMES) {

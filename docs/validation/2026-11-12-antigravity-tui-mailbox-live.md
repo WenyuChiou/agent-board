@@ -27,7 +27,7 @@ Question: does a message queued from the board's page, while an interactive `agy
 | 17:33:42 | the hook claimed the message and it became `accepted`. The transcript holds the hook's message ("Agent Board message, sent from the board page ... Reply first with this line alone: ACK ...") with the text "Blue" |
 | 17:33:42-54 | the model's report command carried the step "Ask Blue or green? (Blue)": it used the answer. It printed no ACK line |
 
-The mailbox registered as `IDE`, not `agy TUI`: before this change every Antigravity hook mailbox was `IDE`.
+The mailbox registered as `IDE`, not `agy TUI`: before this change the turn-start hook labelled every Antigravity mailbox `IDE`.
 
 ## Run 2, with this change (`cbe3fc4d`)
 
@@ -45,12 +45,12 @@ Before queueing, the page's own data for the new row: `send: mailbox`, `line: ne
 
 ## Result
 
-**PASS for the idle route on `agy TUI`.** In both runs a message queued while the session was idle waited, was handed to the session by its hook at the next turn and put into the model's context, and the store says `accepted`, which the card words as handed over, with no reply confirmed. Run 2 shows the hook registers the terminal as `agy TUI` and the page offers Queue there on the idle route alone.
+**PASS for the idle route on `agy TUI`.** In both runs a message queued while the session was idle waited, was handed to the session by its hook at the next turn and put into the model's context, and the store says `accepted`. In run 2 the hook registered the session as `agy TUI` and the page offered Queue there on the idle route alone.
 
 Not shown:
 - An ACK line: the model printed none in either run. Run 1's model used the text; run 2's did not.
-- A message queued while the session is working: the working route keeps Copy.
-- The desktop app and the editor: they keep Copy until each has its own record.
+- A message queued while the session is working: no run.
+- The desktop app and the editor: not run here. The desktop app's record is `docs/validation/2026-11-13-antigravity-app-mailbox-live.md`; the editor reads as the same `IDE` surface, so the app's routes cover it with no run of its own.
 
 ## Also seen
 

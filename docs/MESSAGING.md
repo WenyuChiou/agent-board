@@ -21,7 +21,7 @@ recover within that deadline. Idle polls do not rewrite the message file. Sendin
 and receipts are never automatically retried, including after a store lock.
 
 Use the existing reply box on the session's card. A matching receiver enables Send or
-Queue only when its session state, surface and route have a live record. When the state
+Queue only when the route for its session state and surface (as the hook labels it) has a live record. When the state
 or route is unknown, the card offers Copy. One known gap: a Codex hook can read which client
 started a session, not which client runs a turn, so a terminal session continued in another client
 that leaves no mark in the hook's environment can keep the terminal's Queue; whether a message
@@ -399,7 +399,7 @@ This table is written by hand and covers progress reporting too. Its runs have n
 | --- | --- | --- |
 | Codex | Independent setup and explicit reporter; isolated native app-server SessionStart, UserPromptSubmit and Stop observed | Authenticated owners forwarded two prompts each way with Antigravity and native ACKs; autonomous model tools, CLI TTY and desktop chat remain separate |
 | Antigravity CLI | Independent named hooks; all four native Windows events observed after the command-quoting fix | Same cross-host owner acceptance; native stream ACK, idle continuation, deduplication, conflict and offline rejection verified |
-| Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established |
+| Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | Next-turn hook mailbox recorded live for the desktop app, idle and working; the editor reads as the same surface, with no run of its own |
 | Gemini CLI (retired) | No longer offered by setup; Google's CLI is Antigravity CLI. An install from an earlier release still reports | The board no longer routes messages to it; its card offers Copy |
 | OpenCode | Independent setup, session-context progress tool and plugin events | Generic client API only; no native receiving adapter or real bidirectional acceptance yet |
 | OpenClaw | Independent metadata lifecycle plugin and native skill; separate optional Claude reporter | Its native session tools are not yet integrated into this hub; no real bidirectional acceptance |

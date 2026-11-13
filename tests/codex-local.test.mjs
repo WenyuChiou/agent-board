@@ -864,6 +864,11 @@ test('an Antigravity hook mailbox is agy TUI when its transcript lies in the CLI
   assert.equal(antigravitySurface('/home/synthetic/antigravity-cli/brain/x/transcript.jsonl', undefined), 'unknown')
   assert.equal(antigravitySurface(42, '/home/synthetic/.gemini/antigravity-ide/brain/x'), 'IDE')
   assert.equal(antigravitySurface('', ''), 'unknown')
+  // `.` and `..` are resolved first, so a folder the path leaves again is not the surface; an inherited name is no folder.
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-cli/../antigravity/brain/x/transcript.jsonl', undefined), 'IDE')
+  assert.equal(antigravitySurface('C:\\Synthetic\\.gemini\\antigravity\\.\\..\\antigravity-cli\\brain\\x\\transcript.jsonl', undefined), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/constructor/brain/x/transcript.jsonl', undefined), 'unknown')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/__proto__/brain/x', '/home/synthetic/.gemini/toString/brain/x'), 'unknown')
 }))
 
 test('a held mailbox store claim reports deferral and the next turn delivers after release', async () => mailboxFixture(async f => {

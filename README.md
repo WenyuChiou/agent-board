@@ -59,7 +59,7 @@ npx @wenyuchiou/agent-board@next
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` (board page) | Not yet |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page | Not yet |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | Not tested yet |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | Desktop app: handed over from its next turn, one per turn; IDE: not tested yet |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page | Not tested yet |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page | Not yet |
 

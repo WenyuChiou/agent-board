@@ -249,7 +249,7 @@ test('a routed receiver record requires known surface ids and explicit recorded 
 
 test('shape 23 matrix: each displayed surface names its registered id and only its own recorded routes', async () => {
   const records = (await readReceiverRecords(root)).filter(one => one.routes)
-  const { SURFACE_IDS } = await import('../hooks/messaging.ts')
+  const { SURFACE_IDS, routeRecord } = await import('../hooks/messaging.ts')
   assert.ok(SURFACE_IDS, 'the shared surface ids are exported')
   const ids = new Set(Object.values(SURFACE_IDS))
   let checked = 0
@@ -264,8 +264,9 @@ test('shape 23 matrix: each displayed surface names its registered id and only i
         assert.ok(row, `${record.source}: missing matrix row for ${surface.name}`)
         const cell = row.slice(2, -2).split(' | ')[7 + index]
         assert.ok(cell.startsWith(`${route.line} · `), `${record.source}: wrong ${state} line on ${surface.name}`)
-        for (const note of new Set(Object.values(record.routes).map(one => one.record).filter(Boolean))) {
-          assert.equal(cell.includes(note), note === route.record && route.surfaces.includes(surface.id), `${record.source}: wrong ${state} note on ${surface.name}`)
+        // A route's own note, or a surface's own note on it, shows on that surface's row only, and an unrecorded route shows none.
+        for (const note of new Set(Object.values(record.routes).flatMap(one => [one.record, ...Object.values(one.surfaceRecords ?? {})]).filter(Boolean))) {
+          assert.equal(cell.includes(note), note === routeRecord(route, surface.id) && route.surfaces.includes(surface.id), `${record.source}: wrong ${state} note on ${surface.name}`)
         }
         checked++
       }

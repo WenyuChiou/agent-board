@@ -59,7 +59,7 @@ npx @wenyuchiou/agent-board@next
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board`（看板網頁） | 尚未支援 |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁 | 尚未支援 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 尚未測試 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 桌面 app：下一輪起交給它，一輪一則；IDE：尚未測試 |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板網頁 | 尚未測試 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁 | 尚未支援 |
 

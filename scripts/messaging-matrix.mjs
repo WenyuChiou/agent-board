@@ -1,7 +1,7 @@
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { SURFACE_IDS } from '../hooks/messaging.ts'
+import { routeRecord, SURFACE_IDS } from '../hooks/messaging.ts'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const start = '<!-- messaging-matrix:start -->'
@@ -77,6 +77,8 @@ export const hasReceiverRecord = text => /^export\s+const\s+messagingReceiver\b|
 const lines = ['now', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
 const states = ['idle', 'working', 'ended']
 const isRoute = route => route && lines.includes(route.line) && (route.record === null || isText(route.record)) && Array.isArray(route.surfaces) && (route.record === null || route.surfaces.length > 0) && route.surfaces.every(isText)
+  && (route.surfaceRecords === undefined || route.surfaceRecords !== null && typeof route.surfaceRecords === 'object' && !Array.isArray(route.surfaceRecords)
+    && Object.entries(route.surfaceRecords).every(([surface, note]) => route.surfaces.includes(surface) && isText(note)))
 const isRoutes = record => record.routes === undefined || isText(record.agent) && ['live', 'mailbox', 'turn'].includes(record.kind) && record.routes !== null && typeof record.routes === 'object' && states.every(state => isRoute(record.routes[state]))
 const isText = value => typeof value === 'string' && value.trim() !== '' && !/[\r\n]/.test(value)
 const surfaceIds = new Set(Object.values(SURFACE_IDS))
@@ -135,12 +137,12 @@ const cell = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&l
 const link = (path, file) => `[${cell(path)}](${file.startsWith('docs/') ? '../' : ''}${path.split('/').map(encodeURIComponent).join('/')})`
 
 // A route's line, and the note that showed it live when the file is there.
-// A route recorded for some surfaces only shows its note on those rows; a row whose surface has its own live
-// note shows that one, since one route can be recorded by a different note on each surface it covers.
-const routeCell = (route, file, directory, s, surface, evidence) => {
+// A route recorded for some surfaces only shows its note on those rows, and a surface's own note on that route
+// (routeRecord, the note the send gate reads) where it names one.
+const routeCell = (route, file, directory, s, surface) => {
   if (!route) return s.none
-  if (route.record === null || !route.surfaces.includes(surface)) return `${route.line} · ${s.noRecord}`
-  const note = evidence ?? route.record
+  const note = routeRecord(route, surface)
+  if (note === null || !route.surfaces.includes(surface)) return `${route.line} · ${s.noRecord}`
   return `${route.line} · ${hasEarlierRun(directory, note) ? link(note, file) : s.noRecord}`
 }
 
@@ -159,7 +161,7 @@ export const renderMatrix = (records, file, directory = root) => {
       cell(row.host), cell(row.surface), row.tier, row.primitive === 'unknown' ? s.unknown : cell(row.primitive), s.statuses[row.status],
       row.evidence ? link(row.evidence, file) : row.earlier ? s.earlier + ' ' + link(row.earlier, file) : s.notTested,
       row.source ? link(row.source, file) : s.none,
-      ...states.map(state => routeCell(row.routes?.[state], file, directory, s, row.surfaceId, row.evidence)),
+      ...states.map(state => routeCell(row.routes?.[state], file, directory, s, row.surfaceId)),
     ].join(' | ') + ' |'),
     '', end,
   ].join('\n')

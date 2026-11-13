@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging.ts'
 import { isSessionEnd, isTurnStart, turnStartEnvelope } from '../hooks/hook-messages.ts'
 import { sessionPushNote } from '../hooks/others.ts'
@@ -38,19 +38,21 @@ const CODEX_DAEMON_VARIABLE = 'CODEX_DAEMON_SHUTDOWN_SOCKET'
 export const codexSurface = (meta: CodexMeta | null, client: string | undefined, daemon: string | undefined): string =>
   meta?.originator === 'codex-tui' && (client === undefined || client === 'codex-tui') && daemon === undefined ? SURFACE_IDS.cli : SURFACE_IDS.unknown
 
-// Antigravity's CLI, desktop app and editor run the same hooks and send no client name, but each
-// keeps its conversations in its own app data folder under `.gemini`, and the hook's transcript
-// path (else its artifact folder) lies inside it: `antigravity-cli` is the terminal (agy TUI),
-// `antigravity` and `antigravity-ide` the app and the editor. Whole folder names are compared, so
-// a look-alike folder is a surface the board does not know.
-const ANTIGRAVITY_FOLDERS: Record<string, string> = {
-  'antigravity-cli': SURFACE_IDS.antigravityTui, antigravity: SURFACE_IDS.antigravityIde, 'antigravity-ide': SURFACE_IDS.antigravityIde,
-}
+// Antigravity's CLI, desktop app and editor run the same hooks and send no client name, so the
+// surface comes from the folder name right after a `.gemini` folder in the hook's transcript path
+// (else its artifact folder): `antigravity-cli` gives agy TUI, `antigravity` and `antigravity-ide`
+// give IDE (only the CLI and the app were run). Whole folder names are compared, so a look-alike
+// folder is a surface the board does not know. A Map, so a folder named like a property every
+// object inherits (`constructor`) is no surface either.
+const ANTIGRAVITY_FOLDERS: ReadonlyMap<string, string> = new Map([
+  ['antigravity-cli', SURFACE_IDS.antigravityTui], ['antigravity', SURFACE_IDS.antigravityIde], ['antigravity-ide', SURFACE_IDS.antigravityIde],
+])
 const antigravityFolderSurface = (path: unknown): string => {
   if (typeof path !== 'string') return SURFACE_IDS.unknown
-  const parts = path.split(/[\\/]+/).map(part => part.toLowerCase())
+  // `.` and `..` are resolved first, so a folder the path leaves again does not name the surface.
+  const parts = posix.normalize(path.replace(/\\/g, '/')).split('/').map(part => part.toLowerCase())
   for (let at = parts.length - 2; at >= 0; at -= 1) {
-    const surface = parts[at] === '.gemini' ? ANTIGRAVITY_FOLDERS[parts[at + 1] ?? ''] : undefined
+    const surface = parts[at] === '.gemini' ? ANTIGRAVITY_FOLDERS.get(parts[at + 1] ?? '') : undefined
     if (surface !== undefined) return surface
   }
   return SURFACE_IDS.unknown

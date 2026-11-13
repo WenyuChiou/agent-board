@@ -18,13 +18,13 @@ Question: does a message queued from the board's page for an Antigravity desktop
 | Time | Stage |
 |---|---|
 | 00:46:37 | turn 1 sent. The app showed "Hook Json SessionStart"; the session record has `SessionStart`, then `PreInvocation` |
-| 00:46:37 | a new row under Other work, "Waiting for the next instruction", with "It waits for this session's next turn. It does not wake an idle session." and "Queue for Antigravity's next turn" |
+| 00:46:37 | a new row under Other work, "Waiting for the next instruction", with "It waits for this session's next turn. It does not wake an idle session." and "Queue for Antigravity's next turn" (the row came with `SessionStart`; whether the board had read `PreInvocation` yet was not checked) |
 | 00:47:03 | turn 1 ended (`Stop`); the model asked "Blue or green?" and stopped |
 | 00:47:59 | "Blue" queued; the row showed "Queued" |
 | 00:47:59-00:48:40 | no turn started: the app showed none after 30 seconds, and the session record has no event between `Stop` and turn 2 |
 | 00:48:40 | turn 2 sent (`PreInvocation`) |
 | 00:48:41 | the hook claimed the message and the store marked it `accepted` 6 ms later: `line nextTurn`, surface `IDE`, `hops 1`, reply and error empty |
-| 00:48:45 | turn 2 ended. The model's reply: "ACK b6c47a Got it—you chose Blue. Synthetic test complete; no files were changed." |
+| 00:48:45 | turn 2 ended. The model's reply: an ACK line (its code is left out here), then "Got it—you chose Blue. Synthetic test complete; no files were changed." |
 | 00:49:11 | the row read "Handed to the session at its turn start. No reply is confirmed." |
 
 ## Run 2: queued while a turn was running
@@ -43,16 +43,16 @@ Question: does a message queued from the board's page for an Antigravity desktop
 | 00:59:15 | turn 2 ended (`PostInvocation`, `Stop`). The model wrote no list and said its output had been blocked by a content filter. The message was not handed over during the turn |
 | 00:59:36 | the store row still `queued` |
 | 00:59:53 | turn 3 sent (`PreInvocation`); the hook claimed the message and the store marked it `accepted` 7 ms later: `line nextTurn`, surface `IDE`, `hops 1`, reply and error empty |
-| 00:59:59 | turn 3 ended. The model's reply began "ACK 337480 Received Green from Agent Board." and asked whether to try a smaller range or another format |
+| 00:59:59 | turn 3 ended. The model's reply began with an ACK line carrying the message's code (left out here), then "Received Green from Agent Board.", and asked whether to try a smaller range or another format |
 | 01:00 | the row read "Handed to the session at its turn start. No reply is confirmed." and was under Needs you with the model's question |
 
 ## Result
 
-**PASS for the idle and working routes in the Antigravity desktop app.** Each message waited without starting a turn, was not handed over during a running turn, was handed to the conversation by its hook at the next turn start, and reached the model, which answered with its ACK line and used the text. The store says `accepted`; a hook mailbox collects no ACK, so the card says the message was handed over with no reply confirmed.
+**PASS for the idle and working routes in the Antigravity desktop app.** Each message waited without starting a turn (the one queued during a turn was not handed over in that turn), was handed to the conversation by its hook at the next turn start, and reached the model, which answered with its ACK line and used the text. The store says `accepted`; the hook collects no ACK, so the store does not record the model's ACK line.
 
 Not shown:
-- Waking an idle conversation. The hook runs only when Antigravity starts a turn, so a queued message waits until the person types again; #1396 looks for a way to start a turn from the board.
-- The editor. The hook gives the desktop app and the editor the same surface, `IDE` (`antigravitySurface` in `scripts/hook-delivery.ts`), so the board cannot tell them apart; only the desktop app was run.
+- Waking an idle conversation. The hook hands a message over only at a turn start and starts no turn; #1396 looks for a way to start a turn from the board.
+- The editor. The hook gives the desktop app and the editor the same surface, `IDE` (`antigravitySurface` in `scripts/hook-delivery.ts`); only the desktop app was run.
 - A turn that calls tools. Both running turns were one model call each; whether the hook also hands a message over between the calls of one turn was not seen.
 
 ## Also seen

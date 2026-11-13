@@ -56,8 +56,13 @@ export const SURFACE_IDS = {
 } as const
 // The surface of an agent's own MCP pull (board_inbox); it is not a route surface a note can cover.
 export const MCP_SURFACE = 'mcp'
-// A note covers only the surfaces on which its route was recorded.
-export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[] }
+// A note covers only the surfaces on which its route was recorded. One route can be recorded by a different
+// note on each surface it covers: `surfaceRecords` names a surface's own note, and `record` covers the rest.
+export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[]; surfaceRecords?: Readonly<Record<string, string>> }
+// The note that covers a route on one surface. Only the route's own keys count, so a surface named like a
+// property every object inherits reads the route's note.
+export const routeRecord = (route: Route, surface: string): string | null =>
+  route.surfaceRecords !== undefined && Object.hasOwn(route.surfaceRecords, surface) ? route.surfaceRecords[surface] ?? null : route.record
 export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route> }
 type SendRefusal = 'NO_TARGET' | 'SHADOWED' | 'CONTESTED' | 'OFFLINE' | 'STATE_UNKNOWN' | 'SURFACE_UNKNOWN' | 'NO_RECORD'
 export type SendDecision =
@@ -82,13 +87,15 @@ export const sendDecision = (
   if (state === undefined) return { canSend: false, line: 'none', reason: 'STATE_UNKNOWN' }
   const route = routeOf(routes, target.agent, routeKind(target.scope), state)
   if (route === undefined) return { canSend: false, line: 'none', reason: 'NO_RECORD' }
-  if (route.line === 'none' || typeof route.record !== 'string' || route.record === '') return { canSend: false, line: route.line, reason: 'NO_RECORD' }
+  const record = routeRecord(route, target.surface)
+  if (route.line === 'none' || typeof record !== 'string' || record === '') return { canSend: false, line: route.line, reason: 'NO_RECORD' }
   if (target.surface === SURFACE_IDS.unknown || !Object.values(SURFACE_IDS).some(surface => surface === target.surface) || !Array.isArray(route.surfaces) || !route.surfaces.includes(target.surface)) return { canSend: false, line: route.line, reason: 'SURFACE_UNKNOWN' }
   return { canSend: true, line: route.line, target, state }
 }
 // Whether a list read from outside (the tests' stand-in file) holds well-formed receiver routes: every entry
-// names an agent and a kind, and every state has a known line and a record that is a string or null. Anything
-// else is refused whole, so a missing key cannot read as a record.
+// names an agent and a kind, and every state has a known line and a record that is a string or null; a surface's
+// own note, if any, is a non-empty string for a surface the route covers. Anything else is refused whole, so a
+// missing key cannot read as a record.
 export const isReceiverRoutes = (value: unknown): value is ReceiverRoutes[] => Array.isArray(value) && value.every(one => {
   if (one === null || typeof one !== 'object') return false
   const { agent, kind, routes } = one as Record<string, unknown>
@@ -96,10 +103,12 @@ export const isReceiverRoutes = (value: unknown): value is ReceiverRoutes[] => A
   return (['idle', 'working', 'ended'] as const).every(state => {
     const route = (routes as Record<string, unknown>)[state]
     if (route === null || typeof route !== 'object') return false
-    const { line, record, surfaces } = route as Record<string, unknown>
+    const { line, record, surfaces, surfaceRecords } = route as Record<string, unknown>
     return ROUTE_LINES.includes(line as RouteLine) && (record === null || typeof record === 'string')
       && Array.isArray(surfaces) && surfaces.every(name => typeof name === 'string')
       && (!(typeof record === 'string' && record !== '') || surfaces.length > 0)
+      && (surfaceRecords === undefined || surfaceRecords !== null && typeof surfaceRecords === 'object' && !Array.isArray(surfaceRecords)
+        && Object.entries(surfaceRecords).every(([name, note]) => surfaces.includes(name) && typeof note === 'string' && note !== ''))
   })
 })
 // A connection's scope names its kind of receiver: a session the host owns, a hook mailbox, or one turn.

@@ -13,8 +13,11 @@ export const messagingReceiver = {
   routes: {
     // The TUI record queued a message while its session was idle; the desktop app record queued one while the
     // conversation was idle and one while a turn ran. The editor reads as the same surface as the app and has no
-    // run of its own; a TUI session queued to during a turn keeps Copy. The TUI's own note is its surface evidence.
-    idle: { line: 'nextTurn', record: 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md', surfaces: [SURFACE_IDS.antigravityTui, SURFACE_IDS.antigravityIde] },
+    // run of its own, and no run queued to a TUI session during a turn. On the idle route agy TUI cites its own note.
+    idle: {
+      line: 'nextTurn', record: 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md', surfaces: [SURFACE_IDS.antigravityTui, SURFACE_IDS.antigravityIde],
+      surfaceRecords: { [SURFACE_IDS.antigravityTui]: 'docs/validation/2026-11-12-antigravity-tui-mailbox-live.md' },
+    },
     working: { line: 'nextTurn', record: 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md', surfaces: [SURFACE_IDS.antigravityIde] },
     ended: { line: 'none', record: null, surfaces: [] },
   },
