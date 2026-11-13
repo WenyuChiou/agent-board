@@ -617,25 +617,24 @@ test('the board script prints the board from the file it was written for, in its
   assert.ok(run('en', ['--lang', 'zh-CN']).startsWith('进度'))
 })
 
-test('a --serve whose server cannot start says so without mentioning a page', () => {
-  const lines = {
-    en: "Couldn't open the board page: its server did not start.",
-    'zh-TW': '開不了看板網頁：伺服器沒有啟動。',
-    'zh-CN': '打不开看板网页：服务器没有启动。',
-  }
-  for (const [lang, line] of Object.entries(lines)) {
-    let text = ''
-    try {
-      run(lang, ['--serve', '--no-open', '--port', '65536'])
-      assert.fail('a --serve that started no page exits non-zero (#1292)')
-    } catch (error) {
-      if (error.code === 'ERR_ASSERTION') throw error
-      assert.equal(error.status, 1, 'a --serve that started no page exits 1 (#1292)')
-      text = error.stdout
+test('a --serve with an invalid --port says why and what to try without mentioning a page (#1295)', () => {
+  const strings = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }
+  for (const [lang, locale] of Object.entries(strings)) {
+    for (const bad of ['65536', '0', 'abc', undefined]) {
+      const cliArgs = bad === undefined ? ['--serve', '--no-open', '--port'] : ['--serve', '--no-open', '--port', bad]
+      let text = ''
+      try {
+        run(lang, cliArgs)
+        assert.fail('a --serve that started no page exits non-zero (#1292)')
+      } catch (error) {
+        if (error.code === 'ERR_ASSERTION') throw error
+        assert.equal(error.status, 1, 'a --serve that started no page exits 1 (#1292)')
+        text = error.stdout
+      }
+      assert.equal(text.trim().split('\n').at(-1), locale.serveFailed(locale.serveInvalidPort(bad ?? '')))
+      assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
+      assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
     }
-    assert.equal(text.trim().split('\n').at(-1), line)
-    assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
-    assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
   }
 })
 
@@ -6143,6 +6142,32 @@ test('Windows page startup times out without leaving its child or ready files', 
     if (pid === undefined && existsSync(marker)) pid = Number(readFileSync(marker, 'utf8'))
     if (pid && processAlive(pid)) process.kill(pid)
     if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    await board.end([])
+  }
+})
+test('a --serve on a busy --port says why and what to try in all languages (#1295)', { timeout: 25_000 }, async () => {
+  const strings = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }
+  const blocker = createNetServer()
+  await new Promise((done, fail) => {
+    blocker.once('error', fail)
+    blocker.listen(0, '127.0.0.1', done)
+  })
+  const busyPort = blocker.address().port
+  const board = serveIn()
+  try {
+    for (const [lang, locale] of Object.entries(strings)) {
+      const began = performance.now()
+      const { status, out } = await board.serveFailing(['--lang', lang, '--port', String(busyPort)])
+      const elapsed = performance.now() - began
+      assert.equal(status, 1, 'busy --port exits 1 (#1295)')
+      assert.ok(elapsed < 10_000, `busy --port must fail quickly without 20s retry (${elapsed}ms)`)
+      assert.equal(out.trim().split('\n').at(-1), locale.serveFailed(locale.servePortInUse(busyPort)))
+      assert.ok(!out.includes('--serve'), 'busy --port failure gives no instructions for an existing page')
+      assert.ok(!out.includes('http://127.0.0.1:'), 'no page address was created')
+      assert.ok(locale.servePortDenied(80).includes('--port'), 'permission denied message names a next step')
+    }
+  } finally {
+    await new Promise(done => blocker.close(() => done()))
     await board.end([])
   }
 })

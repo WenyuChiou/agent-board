@@ -780,6 +780,11 @@ export const EN: Strings = {
   serveMoved: 'The board moved to a newer tab, so this tab stopped updating; you can close it. To open the board again, run /agent-board in an agent\'s chat or agent-board in a terminal.',
   serveCloseBusy: 'A message is still on its way to an agent; close the board once it replies.',
   serveNotStarted: 'its server did not start.',
+  serveInvalidPort: (port: string): string => port === ''
+    ? 'missing or invalid --port (1–65535). Pass a port number after --port, or omit --port to pick one automatically.'
+    : `port ${port} is not a valid port (1–65535). Try another --port, or omit --port to pick one automatically.`,
+  servePortInUse: (port: number): string => `port ${port} is already in use. Try another --port, or omit --port to pick one automatically.`,
+  servePortDenied: (port: number): string => `port ${port} cannot be used (permission denied). Try another --port above 1023, or omit --port to pick one automatically.`,
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `The board could not open its message folder (${code}): ${folder}. Stop all board servers and check server.lock, server.owner and .message-claim-*.json together. Remove only ownership metadata verified to be stale, after confirming no hub is running. Keep messages.json and uncertain delivery evidence; do not resend uncertain messages.`
     : code === 'MESSAGE_STORE_CLOSED'
