@@ -71,8 +71,12 @@ const sessionOf = agent => {
   const id = agent?.session?.header?.id
   return typeof id === 'string' && id !== '' ? id : undefined
 }
+// A take the board answers with deferred (its store was busy, so nothing was checked) is asked again through the
+// 250 ms timer this many times in a row: about 5 s, the 5000 ms a take itself is given, which outlasts the
+// stalls of a few seconds seen on a busy computer. After that the watcher and the ten-minute tick are all there is.
+const DEFERRED_ASKS = 20
 const mailboxReceiver = () => {
-  const roots = new Map(), busy = new Set(), failing = new Set(), again = new Set(), stashed = new Map()
+  const roots = new Map(), busy = new Set(), failing = new Set(), again = new Set(), stashed = new Map(), asks = new Map()
   let watcher = null, folder = null, pending = null, timer = null, ticks = 0
   const isDeliverable = message => {
     if (folder === null) return true
@@ -103,6 +107,15 @@ const mailboxReceiver = () => {
         failing.delete(session)
         if (typeof taken.watch === 'string') follow(taken.watch)
         message = taken.message
+        if (message == null && taken.deferred === true) {
+          const asked = (asks.get(session) ?? 0) + 1
+          asks.set(session, asked)
+          if (asked <= DEFERRED_ASKS && folder !== null) {
+            clearTimeout(pending)
+            pending = setTimeout(check, 250)
+            pending.unref?.()
+          }
+        } else asks.delete(session)
       }
       if (message == null) return
       if (typeof message.text !== 'string' || typeof message.id !== 'string' || typeof message.nonce !== 'string') throw new Error('MAILBOX_FAILED')
@@ -173,6 +186,7 @@ const mailboxReceiver = () => {
       roots.delete(session)
       failing.delete(session)
       again.delete(session)
+      asks.delete(session)
       stashed.delete(session)
       mailboxCall('end', session)
       if (roots.size > 0) return
