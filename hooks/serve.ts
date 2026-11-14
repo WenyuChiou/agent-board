@@ -6,6 +6,7 @@ import { groupBoard } from './grouping'
 import type { Bucket, Card, GroupedQuestion, GroupedTask, Quiet, RepoOf } from './grouping'
 import { AGENT_ALIASES, agentFade, agentMarkCss, agentRowCss, boardIcon, boardLogo, faviconLink, ICON_CSS, LOGO_CSS, LOGO_STATES, filterStore, GITHUB_PATH, htmlLang, motionCss, pageBaseCss, pageTokens, POWER_PATH, sheetCss, themeHead } from './page-look'
 import { settingsCss, settingsPanel, settingsScript, settingsToggle } from './page-settings'
+import { dockScript } from './board-dock'
 import type { SettingsLang } from './board-settings'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -18,7 +19,7 @@ import type { RowState as DerivedRowState } from './row-state'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
 import { deliveryTargets } from './hook-messages'
-import { address, isMailboxTarget, isOpen, sendDecision } from './messaging'
+import { address, isMailboxSurfaceLost, isMailboxTarget, isOpen, sendDecision, SURFACE_IDS } from './messaging'
 import { RECEIVER_ROUTES } from './receiver-routes'
 
 // The board's page: what `agent-board` shows in a browser for agents other than
@@ -32,8 +33,9 @@ import { RECEIVER_ROUTES } from './receiver-routes'
 // that Claude Code session; none: copied, then pasted into the agent's chat.
 export type SendMode = 'send' | 'connected' | 'mailbox' | 'open' | 'claude' | 'none'
 type Delivery = { id: string; turn: string; agent: string }
-type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean }
-type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly Omit<Message, 'nonce' | 'hash'>[] }
+type ShownMessage = Omit<Message, 'nonce' | 'hash'> & { isSurfaceLost?: boolean }
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean; isSurfaceLost?: true }
+type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly ShownMessage[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
   const matches = session === undefined ? [] : connections.filter(one => address(one.agent, one.session) === address(agent || 'claude', session))
@@ -44,7 +46,7 @@ const reachable = (agent: string, session: string | undefined, target: AgentTarg
   const found = liveTarget(agent, session, targets)
   return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
 }
-const rowReceipt = (agent: string, session: string | undefined, messages: readonly Omit<Message, 'nonce' | 'hash'>[], now: number, s: Strings, answers?: string): { receipt?: Receipt } => {
+const rowReceipt = (agent: string, session: string | undefined, messages: readonly ShownMessage[], now: number, s: Strings, answers?: string, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true): { receipt?: Receipt } => {
   // A kept question (no live session here) is found by the one message the board sent to answer it; a message
   // with no such link is no receipt for it. Only the board sets that link, so the question id alone names the
   // message. On a live question's card, an answer to another question is no receipt for this one (#725), while
@@ -53,7 +55,7 @@ const rowReceipt = (agent: string, session: string | undefined, messages: readon
   const one = to === undefined
     ? answers === undefined ? undefined : messages.filter(message => message.answers === answers).at(-1)
     : messages.filter(message => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1)
-  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
+  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 // The person's answer to this question reached its session: the session took it, or replied.
 const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
@@ -86,12 +88,13 @@ export const sessionState = (view: View, agent: string, session: string): RowSta
 // One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route
 // the record has not shown live also says only Copy is offered.
 export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: Strings, state: RowState = 'idle', reason?: Exclude<SendDecision, { canSend: true }>['reason']): string => {
+  const name = isClaudeAgent(agent) ? 'Claude' : agentLabel(agent, s)
   if (reason === 'STATE_UNKNOWN') return s.serveLineStateUnknown
   if (reason === 'SHADOWED') return s.serveLineShadowed
-  const name = isClaudeAgent(agent) ? 'Claude' : agentLabel(agent, s)
+  if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
   const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name))
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
-    : line === 'nextTurn' ? s.serveNextTurnHint
+    : line === 'nextTurn' ? s.serveNextTurnHint(name)
     : line === 'chatOpen' ? s.serveNextOpenHint
     : line === 'reopen' ? s.serveLineReopen(name)
     : s.serveLineNone(name)
@@ -421,42 +424,48 @@ const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): Ser
 
 // An answer that was sent, or queued for the session's next turn, no longer waits for the person (#1296). A message
 // that timed out or was refused waits again. The page, the terminal board, --status and --json all count from this.
-const isFailedReceipt = (receipt: Pick<Message, 'status' | 'error' | 'hasAccepted'> | undefined): boolean =>
-  receipt !== undefined && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
+const isFailedReceipt = (receipt: (Pick<Message, 'status' | 'error' | 'hasAccepted'> & { isSurfaceLost?: boolean }) | undefined): boolean =>
+  receipt !== undefined && (receipt.isSurfaceLost === true || receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
 // A question counts as handled by the message bound to it, not by any message to its session (#1296): with two
 // questions in one session, one queued answer hands over one. `holder` is true when a message still held for
 // the session's next turn answers this question. A message bound to no question answers one only when the session
 // has exactly one open question (`openInSession`); with two or more it answers none, and the card keeps waiting.
-const answersQuestion = (one: Omit<Message, 'nonce' | 'hash'>, to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
+const answersQuestion = (one: ShownMessage, to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
   to !== undefined && one.from === 'board' && one.to === to && (one.answers === undefined ? openInSession === 1 : one.answers === questionId)
-const holdsAnswer = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
+const holdsAnswer = (messages: readonly ShownMessage[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
   messages.some(one => answersQuestion(one, to, questionId, openInSession) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)))
 // Whether the board's latest message for this very question failed. A later message to the same session from
 // anyone else says nothing about the answer being counted.
-const answerFailed = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
-  isFailedReceipt(messages.filter(one => answersQuestion(one, to, questionId, openInSession)).at(-1))
+const answerFailed = (messages: readonly ShownMessage[], to: string | undefined, questionId: string | undefined, openInSession: number, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true): boolean => {
+  const last = messages.filter(one => answersQuestion(one, to, questionId, openInSession)).at(-1)
+  return last !== undefined && (isFailedReceipt(last) || isSurfaceLost(last))
+}
 // What the page on the local network is given of the messaging state: enough to tell which answers are queued, and no
 // connection, text or reply (that page shows counts only).
 export const handledOnly = (messaging: Messaging): Messaging => ({
   connections: [],
   mailboxes: [],
-  messages: messaging.messages.map(one => ({
-    id: one.id,
-    target: one.target,
-    turn: '',
-    from: one.from === 'board' ? 'board' : 'other',
-    to: one.to,
-    text: '',
-    origin: one.origin,
-    status: one.status,
-    updated: one.updated,
-    reply: '',
-    error: /^(TIMEOUT|EXPIRED|DISMISSED)/.exec(one.error)?.[0] ?? '',
-    ...(one.hasAccepted === true ? { hasAccepted: true } : {}),
-    hops: 0,
-    claimed: 0,
-    ...(one.answers === undefined ? {} : { answers: one.answers }),
-  })),
+  messages: messaging.messages.map(one => {
+    const isSurfaceLost = isMailboxSurfaceLost(one, messaging.mailboxes)
+    return {
+      id: one.id,
+      target: one.target,
+      turn: '',
+      from: one.from === 'board' ? 'board' : 'other',
+      to: one.to,
+      text: '',
+      origin: one.origin,
+      status: one.status,
+      updated: one.updated,
+      reply: '',
+      error: /^(TIMEOUT|EXPIRED|DISMISSED)/.exec(one.error)?.[0] ?? '',
+      ...(one.hasAccepted === true ? { hasAccepted: true } : {}),
+      ...(isSurfaceLost ? { isSurfaceLost: true as const } : {}),
+      hops: 0,
+      claimed: 0,
+      ...(one.answers === undefined ? {} : { answers: one.answers }),
+    }
+  }),
 })
 const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: ReadonlyMap<string, boolean>, failed: ReadonlySet<string>): string[] => {
   const sources = new Map<string, { isSending?: boolean; receipt?: Receipt }>()
@@ -480,10 +489,11 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
   const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes)
   const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], (agent, session) => sessionState(view, agent, session), routes, group?.now ?? 0)
+  const isMessageSurfaceLost = (one: ShownMessage): boolean => isMailboxSurfaceLost(one, messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
-  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId))
+  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId, isMessageSurfaceLost))
   const asks: ServeAsk[] = []
   // Per ask card: whether an answer to this very question is held (the page's `isSending` is per session).
   const held = new Map<string, boolean>()
@@ -532,13 +542,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const { heldBy } = holderOf(ask)
       const openInSession = heldBy === undefined ? 0 : openBy.get(heldBy) ?? 0
       held.set(item.key, sending.has(cardSendKey(item.key)) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, openInSession))
-      if (answerFailed(messaging?.messages ?? [], heldBy, ask.questionId, openInSession)) failed.add(item.key)
+      if (answerFailed(messaging?.messages ?? [], heldBy, ask.questionId, openInSession, isMessageSurfaceLost)) failed.add(item.key)
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         // A question the board knows gets the receipt of the answer sent to it, not of an earlier message
         // to the same session.
-        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId)),
+        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId, isMessageSurfaceLost)),
         key: item.key,
         ...(ask.questionId === undefined ? {} : { questionId: ask.questionId }),
         project: ask.project,
@@ -573,7 +583,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
-        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
+        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
       continue
@@ -601,7 +611,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const heldBy = connection !== undefined ? address(connection.agent, connection.session) : row.nativeSession === undefined ? undefined : address(row.agent || 'claude', row.nativeSession)
       const rowTurn = heldBy !== undefined && (openBy.get(heldBy) ?? 0) === 0 ? 1 : 0
       held.set(item.key, isSending(row.target) || holdsAnswer(messaging?.messages ?? [], heldBy, undefined, rowTurn))
-      if (answerFailed(messaging?.messages ?? [], heldBy, undefined, rowTurn)) failed.add(item.key)
+      if (answerFailed(messaging?.messages ?? [], heldBy, undefined, rowTurn, isMessageSurfaceLost)) failed.add(item.key)
       const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
       rows.push({
@@ -617,7 +627,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
           ...(row.rowState === undefined ? {} : { rowState: row.rowState }),
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
-        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s)),
+        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, undefined, isMessageSurfaceLost)),
         key: item.key,
         project: row.project,
         title: row.title,
@@ -655,7 +665,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         // A row says why only when a reply could otherwise be expected here.
         info: found ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
         ...lineOf,
-        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target))) ?? false),
+        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
         hasCopyBox: !(row.auto === 'ended' && row.question === null && send === 'none') && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined || found !== undefined && connection === undefined),
         // A Claude row has no target, so its closed session is the block's own state=ended.
@@ -855,6 +865,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
     return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
   }
   if (connected) return { type: 'refuse', note: s.boardLineChanged }
+  if (item.type === 'row' && item.row.auto === 'working') return { type: 'refuse', note: s.serveSendBusy(agentLabel(agent || 'claude', s)) }
   if (mode !== 'send' || target === null) return { type: 'refuse', note: infoOf(mode, agent, title, item.type === 'ask' ? item.ask.session : '', s) }
   if (isLan) return { type: 'refuse', note: s.serveLanSend(agentLabel(agent || 'claude', s)) }
   // A closed progress record is not a live receiver. Resuming a saved session is a
@@ -934,7 +945,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveLineStepEnd', 'serveQueueNextTurn', 'serveQueueNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesFailed', 'messagesTimeout',
+  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1027,15 +1038,17 @@ ${sheetCss}
 .answer-picks{display:flex;flex:1 1 auto;min-width:0;flex-wrap:wrap;gap:var(--s2);align-items:center}
 .btn,.answers button,.acts button,.state button,.composer button,.shelf-head,.pfoot .btn{font:inherit;font-size:var(--text-sm);display:inline-flex;align-items:center;max-width:100%;min-height:var(--hit);padding:0 14px;border:1px solid var(--btn-line);border-radius:var(--radius-m);background:var(--surface);color:var(--ink);cursor:pointer;text-align:left;overflow-wrap:anywhere;text-decoration:none;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
 button.primary{background:var(--act);border-color:var(--act);color:var(--on-act)}
-button.primary:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 button.quiet{border-color:transparent;background:transparent;color:var(--ink);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
-.btn:hover,.answers button:hover,.acts button:hover,.state button:hover,.composer button:hover{background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
-button.quiet:hover,.side .pfoot .btn:hover{background-color:var(--hover)}
+.btn:hover:not(.primary):not(:disabled),.answers button:hover:not(.primary):not(:disabled),.acts button:hover:not(.primary):not(:disabled),.state button:hover:not(.primary):not(:disabled),.composer button:hover:not(.primary):not(:disabled){background-color:color-mix(in srgb,var(--ink) 6%,var(--surface))}
+button.quiet:hover:not(:disabled),.side .pfoot .btn:hover:not(:disabled){background-color:var(--hover)}
+button.primary:hover:not(:disabled){background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
+button.primary:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:1;cursor:not-allowed}
 .answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);background:color-mix(in srgb,var(--act) 12%,var(--hover))}
 .answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-lg)}
 .answers button.answer-send[data-copy="1"]{flex:0 0 auto;width:auto;min-width:var(--hit);padding:0 14px;font-size:var(--text-sm)}
-.answers button.answer-send:hover{background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
+.answers button.answer-send:hover:not(:disabled){background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 .answers button.answer-send:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:.35;cursor:default}
+.answers button.answer-send[data-sending="1"]:disabled{opacity:1;cursor:not-allowed}
 .chev{display:inline-block;transition:transform var(--dur-base) var(--ease-out)}.chev::before{content:"▸"}
 .open>.shelf-head .chev{transform:rotate(90deg)}
 code{display:block;max-width:100%;overflow-x:auto;white-space:pre;font:var(--text-xs)/1.5 var(--font-mono);padding:6px var(--s2);border:1px solid var(--line);border-radius:var(--radius-s);background:var(--inset);color:var(--ink)}
@@ -1052,6 +1065,15 @@ textarea:focus{outline:none;border-color:var(--ink);box-shadow:var(--ring)}
 .receipt,.said-line{margin:0;font-size:var(--text-sm);color:var(--muted)}
 .receipt.t-alert{color:var(--alert)}.receipt-box{display:grid;gap:var(--s2)}
 .press-result{font-size:var(--text-sm)}.press-result .acts{margin-top:var(--s2)}.press-result:empty{display:none}.press-result.done{color:var(--done)}.press-result.alert{color:var(--alert)}
+.receipt,.press-result.wait,.press-result.done,.press-result.alert{position:relative;padding:var(--s2) var(--s3) var(--s2) calc(var(--s3) + 24px);border:1px solid var(--line);border-radius:var(--radius-s)}
+.receipt::before,.press-result.wait::before,.press-result.done::before,.press-result.alert::before{content:"";position:absolute;left:var(--s3);top:calc(var(--s2) + 2px);width:16px;height:16px;background:currentColor}
+.receipt.t-wait,.press-result.wait{color:var(--receipt-wait);background:var(--receipt-wait-bg);border-color:var(--receipt-wait-line)}
+.receipt.t-wait::before,.press-result.wait::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 4.8V8l2.4 1.6'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 4.8V8l2.4 1.6'/%3E%3C/svg%3E") center/contain no-repeat}
+.receipt.t-done,.press-result.done{color:var(--receipt-done);background:var(--receipt-done-bg);border-color:var(--receipt-done-line)}
+.receipt.t-done::before,.press-result.done::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='m5.4 8.2 1.8 1.8 3.6-3.8'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='m5.4 8.2 1.8 1.8 3.6-3.8'/%3E%3C/svg%3E") center/contain no-repeat}
+.receipt.t-alert,.press-result.alert{color:var(--receipt-fail);background:var(--receipt-fail-bg);border-color:var(--receipt-fail-line)}
+.receipt.t-alert::before,.press-result.alert::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 4.8v3.6M8 11.2h.01'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 4.8v3.6M8 11.2h.01'/%3E%3C/svg%3E") center/contain no-repeat}
+.state.t-wait .msg{color:inherit}
 .press-result textarea{margin-top:var(--s2);font-size:var(--text-sm)}
 .empty{display:grid;gap:var(--s1);padding:var(--s4)}
 .empty p{margin:0}.empty .sub{font-size:var(--text-xs);color:var(--muted)}.empty .btn{justify-self:start}
@@ -1574,6 +1596,7 @@ const PAGE_SCRIPT = String.raw`
     }).catch(function (error) { unreachable(); throw error; });
   }
   ${settingsScript}
+  ${dockScript}
   // The progress bar's style (#1085): the root's data-bar picks the colours, so a pick shows on every
   // bar at once. A pick in Settings goes to the board, which keeps it for the pane and the
   // terminal board too; one that does not land goes back to what it was.
@@ -1657,11 +1680,14 @@ const PAGE_SCRIPT = String.raw`
   function busyOn(node) {
     if (!node) return;
     node.disabled = true;
+    if (node.setAttribute) node.setAttribute('data-sending', '1');
     if (!node.dotsNode) { node.dotsNode = add(el('span', 'dots'), el('i'), el('i'), el('i')); node.appendChild(node.dotsNode); }
   }
   function busyOff(node, stillOff) {
     if (!node) return;
     node.disabled = stillOff === true;
+    if (node.removeAttribute) node.removeAttribute('data-sending');
+    else if (node.setAttribute) node.setAttribute('data-sending', '');
     if (node.dotsNode) { node.dotsNode.remove(); node.dotsNode = null; }
   }
   // fp: the fingerprint the line was drawn with, which the server checks before it writes. go: the button
@@ -1669,7 +1695,7 @@ const PAGE_SCRIPT = String.raw`
   function act(key, type, text, waiting, session, asked, fp, go, line, unhideKey) {
     if (isUnreachable) return Promise.resolve();
     busyOn(go);
-    say(waiting || w('pressPending'), '', key);
+    say(waiting || w('pressPending'), 'wait', key);
     return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '', ...(line === undefined ? {} : { line: line }) }).then(function (data) {
       say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok);
       if (data.ok && type === 'hide' && unhideKey && results[key]) {
@@ -1697,15 +1723,43 @@ const PAGE_SCRIPT = String.raw`
     if (!result || !receipt || result.messageId !== receipt.id) return;
     clearResultSlot(key);
   }
-  function nativeAct(key, text, delivery, session, asked, fp, go) {
+  function nativeAct(key, text, delivery, session, asked, fp, go, line) {
     if (isUnreachable) return Promise.resolve(false);
     var slot = JSON.stringify([key, delivery.id, delivery.turn, session, asked, fp]);
     var attempt = messageAttempts[slot];
     if (!attempt || attempt.text !== text) attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
+    var who = agentName(delivery.agent);
+    var waitingText = line === 'nextTurn'
+      ? w('serveQueuingNextTurn', who)
+      : line === 'chatOpen'
+        ? w('serveQueuingNextOpen', who)
+        : line === 'reopen'
+          ? w('serveReopenRunning', who)
+          : line === 'stepEnd' && isClaudeAgent(delivery.agent)
+            ? w('claudeSendWorking')
+            : line === 'stepEnd'
+              ? w('serveLineStepEnd', who)
+              : w('serveSending', who);
     busyOn(go);
-    say(w('serveSending', agentName(delivery.agent)), '', key);
+    say(waitingText, 'wait', key);
     return call('/api/act', { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp }).then(function (data) {
-      say(data.note || w(data.ok ? 'messagesQueued' : 'messagesFailed'), data.ok ? 'done' : 'alert', key, undefined, !data.ok);
+      var receiptStatus = data.receipt && data.receipt.status;
+      var tone = !data.ok || receiptStatus === 'rejected'
+        ? 'alert'
+        : receiptStatus === 'accepted' || receiptStatus === 'acknowledged'
+          ? 'done'
+          : 'wait';
+      var fallback = !data.ok
+        ? w('messagesFailed')
+        : line === 'nextTurn'
+          ? w('serveQueuedNextTurn', who)
+          : line === 'chatOpen'
+            ? w('serveQueuedNextOpen', who)
+            : line === 'reopen'
+              ? w('serveReopenRunning', who)
+              : w('messagesQueued');
+      var noteText = data.note && !(data.ok && line === 'nextTurn' && data.note === w('messagesQueued')) ? data.note : fallback;
+      say(noteText, tone, key, undefined, !data.ok);
       if (data.ok && results[key]) {
         results[key].messageId = attempt.id;
         clearEnqueueResult(key, pg.sources[key] && pg.sources[key].receipt);
@@ -1747,12 +1801,14 @@ const PAGE_SCRIPT = String.raw`
     if (isStopped || isReplied || error === 'DISMISSED' || error === 'EXPIRED') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
     if (error === 'DISMISSED') return null;
     var isUnconfirmed = receipt.status === 'uncertain' || receipt.status === 'accepted' && error === 'DISCONNECTED';
-    var line = el('p', 'receipt' + (isStopped ? ' t-alert' : ''), isStopped ? (error === 'STOPPED' ? w('claudeStopped') : w('messagesRejected'))
+    var isFail = isStopped || receipt.status === 'uncertain' && receipt.hasAccepted !== true;
+    var toneClass = isFail ? ' t-alert' : receipt.status === 'queued' ? ' t-wait' : ' t-done';
+    var line = el('p', 'receipt' + toneClass, isStopped ? (error === 'STOPPED' ? w('claudeStopped') : w('messagesRejected'))
       : isReplied ? (receipt.reply ? w('claudeReplied', receipt.reply) : w('claudeGotIt'))
       : isUnconfirmed ? w('claudeUnconfirmed')
       : receipt.status === 'queued' ? w('claudeSendWorking')
       : w('claudeDelivered') + (receipt.when ? ' · ' + receipt.when : ''));
-    line.setAttribute('role', isStopped ? 'alert' : 'status');
+    line.setAttribute('role', isFail ? 'alert' : 'status');
     var last = key && sentLast[key];
     // The hub lets go of a finished message's words; this page may still hold them.
     var words = receipt.text || (last ? last.text : '');
@@ -1779,19 +1835,39 @@ const PAGE_SCRIPT = String.raw`
     var reply = receipt.reply || '';
     var ack = 'ACK ' + receipt.id;
     if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
+    var isSurfaceLost = receipt.isSurfaceLost === true;
     var isFailed = receiptFailed(receipt);
+    var isFailTone = isFailed || receipt.status === 'uncertain' && receipt.hasAccepted !== true;
+    var toneClass = isFailTone ? ' t-alert' : receipt.status === 'queued' ? ' t-wait' : ' t-done';
     var isAcceptedUnconfirmed = receipt.status === 'uncertain' && receipt.hasAccepted === true;
-    var labelText = isFailed && receipt.status === 'uncertain'
+    var labelText = isSurfaceLost
+      ? w('messagesSurfaceLost')
+      : isFailed && receipt.status === 'uncertain'
       ? w('messagesTimeout')
       : isAcceptedUnconfirmed ? w('messagesAcceptedUnconfirmed')
-      : receipt.status === 'accepted' && !receipt.isMailbox && receipt.error === 'DISCONNECTED'
-        ? w('messagesAcceptedDisconnected')
-        : receipt.status === 'queued' && line === 'stepEnd'
-          ? w('serveLineStepEnd', agentName(agent))
-          : w(labels[receipt.status]);
-    var lineEl = el('p', 'receipt' + (isFailed ? ' t-alert' : ''), labelText + (reply ? ' · ' + reply : ''));
-    lineEl.setAttribute('role', isFailed ? 'alert' : 'status');
+      : receipt.status === 'accepted' && line === 'reopen'
+        ? w('serveReopenRunning', agentName(agent))
+        : receipt.status === 'acknowledged' && line === 'reopen'
+          ? w('serveReopenDone', agentName(agent))
+          : receipt.status === 'accepted' && !receipt.isMailbox && receipt.error === 'DISCONNECTED'
+            ? w('messagesAcceptedDisconnected')
+            : receipt.status === 'queued' && line === 'stepEnd'
+              ? w('serveLineStepEnd', agentName(agent))
+              : receipt.status === 'queued' && line === 'nextTurn'
+                ? w('serveQueuedNextTurn', agentName(agent))
+                : receipt.status === 'queued' && line === 'chatOpen'
+                  ? w('serveQueuedNextOpen', agentName(agent))
+                  : receipt.status === 'queued' && line === 'reopen'
+                    ? w('serveReopenRunning', agentName(agent))
+                    : w(labels[receipt.status]);
+    var lineEl = el('p', 'receipt' + toneClass, labelText + (reply ? ' · ' + reply : ''));
+    lineEl.setAttribute('role', isFailTone ? 'alert' : 'status');
     var last = key && sentLast[key];
+    var words = receipt.text || (last ? last.text : '');
+    if (isSurfaceLost) {
+      var acts = add(el('div', 'acts'), words ? button(w('serveCopyMessage'), function () { copy(words, key); }, '', true) : null, dismissButton(w('messageTakeBack'), receipt, key));
+      return add(el('div', 'receipt-box'), lineEl, acts);
+    }
     if (!isFailed || !last) return lineEl;
     return add(el('div', 'receipt-box'), lineEl, add(el('div', 'acts'), button(w('serveRetry'), function () { last.again(); }), button(w('serveCopyMessage'), function () { copy(last.text, key); }, '', true)));
   }
@@ -1809,16 +1885,17 @@ const PAGE_SCRIPT = String.raw`
     input.setAttribute('data-key', [key, session || '', asked || '', delivery ? delivery.id + ':' + delivery.turn : ''].join('\u0001'));
     var draftKey = input.getAttribute('data-key');
     // The card's route, from its receiver's record, says what the button is called and whether Copy sits beside it:
-    // a route that waits for a turn or for the chat to open keeps Copy, one that goes in now or at a step's end does not.
+    // a route that waits for a turn or for the chat to open keeps Copy, one that goes in now, at a step's end,
+    // or runs in the background does not.
     var line = extras && extras.line;
-    var isWaiting = mode === 'mailbox' && line !== 'now' && line !== 'stepEnd';
+    var isWaiting = mode === 'mailbox' && line !== 'now' && line !== 'stepEnd' && line !== 'reopen';
     var go = mode === 'send' || mode === 'connected' || mode === 'mailbox'
       ? button(w(isWaiting ? (line === 'chatOpen' ? 'serveQueueNextOpen' : 'serveQueueNextTurn') : 'serveSend', mode === 'connected' && isClaudeAgent(agent) ? 'Claude' : agentName(agent)), function () {
         var text = input.value.trim();
         if (!text) { say(w('pressEmpty'), 'alert', key); return; }
         // The same text goes again through the same path; the box keeps it until it was sent.
         var run = function () {
-          var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, text, delivery, session, asked, fp, go) : act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp, go);
+          var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, text, delivery, session, asked, fp, go, line) : act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp, go);
           return sent.then(function (ok) { if (ok) { clearDraft(draftKey); if (done) done(text); } return ok; });
         };
         sentLast[key] = { text: text, again: run };
@@ -1834,7 +1911,7 @@ const PAGE_SCRIPT = String.raw`
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go.click(); }
     });
     var footer = el('div', 'cf');
-    if (isSending === true && mode !== 'mailbox' && !results[key] && !(mode === 'connected' && isClaudeAgent(agent))) add(box, el('p', 'receipt', w('serveSendBusy', agentName(agent))));
+    if (isSending === true && mode !== 'mailbox' && !results[key] && !(mode === 'connected' && isClaudeAgent(agent))) add(box, el('p', 'receipt t-wait', w('serveSendBusy', agentName(agent))));
     if (where) add(footer, el('div', 'where', where));
     if (extras && extras.onCancel) add(footer, navButton(w('pgCancel'), extras.onCancel));
     add(box, input, add(footer, go));
@@ -1923,7 +2000,7 @@ const PAGE_SCRIPT = String.raw`
   function matchesAgent(id) { return !pg.filter || pg.filter === id; }
   function matches(id, project) { return matchesAgent(id) && (!pg.project || pg.project === project); }
   function receiptFailed(receipt) {
-    return !!receipt && (receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error || ''));
+    return !!receipt && (receipt.isSurfaceLost === true || receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error || ''));
   }
   // A sent answer is on its way: its card stays on the sheet with its line, but it no longer waits for the person.
   // A message that timed out or was refused waits for the person again.
@@ -1975,8 +2052,20 @@ const PAGE_SCRIPT = String.raw`
       parts.moreActs.appendChild(parts.hideBtn);
     }
     if (!isAfter || hasReceiptAfter) return;
-    parts.msg.textContent = state.mode === 'queued'
-      ? (parts.line === 'stepEnd' ? (isClaudeAgent(parts.agent) ? w('claudeSendWorking') : w('serveLineStepEnd', agentName(parts.agent))) : w('messagesQueued'))
+    var isQueuedState = state.mode === 'queued';
+    if (parts.afterRow) parts.afterRow.className = isQueuedState ? 'state receipt t-wait' : 'state';
+    if (parts.afterMk) parts.afterMk.hidden = isQueuedState;
+    parts.msg.className = isQueuedState ? 'msg' : 'msg ok';
+    parts.msg.textContent = isQueuedState
+      ? (parts.line === 'stepEnd'
+          ? (isClaudeAgent(parts.agent) ? w('claudeSendWorking') : w('serveLineStepEnd', agentName(parts.agent)))
+          : parts.line === 'nextTurn'
+            ? w('serveQueuedNextTurn', agentName(parts.agent))
+            : parts.line === 'chatOpen'
+              ? w('serveQueuedNextOpen', agentName(parts.agent))
+              : parts.line === 'reopen'
+                ? w('serveReopenRunning', agentName(parts.agent))
+                : w('messagesQueued'))
       : state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text)
       : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
     parts.again.hidden = state.mode !== 'copied';
@@ -2016,8 +2105,12 @@ const PAGE_SCRIPT = String.raw`
     return list;
   }
   function plural(key, n) { return w(n === 1 ? key + 'One' : key, n); }
-  function folded(label, list) {
+  // A fold of finished or further steps stays open across a redraw (opened[ref]), like a clipped text: the page
+  // redraws whenever the board changes or the minute turns, and a fold the person opened must not close under them.
+  function folded(label, list, ref) {
     var box = el('details');
+    box.open = opened[ref] === true;
+    box.addEventListener('toggle', function () { opened[ref] = box.open; });
     return add(box, el('summary', '', label), list);
   }
   function sends(mode) { return mode === 'send' || mode === 'connected' || mode === 'mailbox'; }
@@ -2157,16 +2250,18 @@ const PAGE_SCRIPT = String.raw`
     } else parts.reply = fx(el('div'), false);
     var after = el('div', 'state');
     after.setAttribute('role', 'status');
+    var afterMk = el('span', 'mk ok', '✓');
     parts.msg = el('span', 'msg ok');
     parts.again = button(w('pgCopyAgain'), function () {
       var state = cardState[key];
       if (state) copy(state.text, key);
     }, 'quiet', true);
+    parts.afterMk = afterMk;
     parts.afterRow = after;
-    add(after, add(el('span', 'mk ok', '✓')), parts.msg, parts.again);
+    add(after, afterMk, parts.msg, parts.again);
     parts.after = fx(after, false);
     add(body, parts.ask, parts.reply, parts.after);
-    if (ask.receipt && ask.receipt.error === 'DISMISSED' && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
+    if (ask.receipt && (ask.receipt.error === 'DISMISSED' || ask.receipt.isSurfaceLost === true) && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
     var receiptEl = ask.receipt ? receiptLine(ask.receipt, key, ask.agent, !!ask.delivery, ask.line) : null;
     if (receiptEl) {
       parts.hasReceipt = true;
@@ -2186,7 +2281,7 @@ const PAGE_SCRIPT = String.raw`
     var mode = ask.send;
     if (mode !== 'connected' && mode !== 'mailbox' && mode !== 'send') { copy(answer, key, function () { setMode(key, 'copied', answer); }); return; }
     var run = function () {
-      var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, answer, ask.delivery, ask.session, ask.text, ask.fp, node || el('button')) : act(key, 'send', answer, w('serveSending', agentName(ask.agent)), ask.session, ask.text, ask.fp, node);
+      var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, answer, ask.delivery, ask.session, ask.text, ask.fp, node || el('button'), ask.line) : act(key, 'send', answer, w('serveSending', agentName(ask.agent)), ask.session, ask.text, ask.fp, node);
       return sent.then(function (ok) { if (ok) setMode(key, mode === 'connected' || mode === 'mailbox' || ask.line === 'stepEnd' ? 'queued' : 'sent', answer); return ok; });
     };
     sentLast[key] = { text: answer, again: run };
@@ -2243,12 +2338,12 @@ const PAGE_SCRIPT = String.raw`
       if (row.context) add(inner, clipped(clean(row.contextLine || row.context), row.context, 'context', 'context:' + key));
       if (row.pr) add(inner, el('p', 'context', row.pr));
       var completed = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
-      if (completed.length) add(inner, folded(plural('pgDoneSteps', completed.length), stepList(completed, row)));
+      if (completed.length) add(inner, folded(plural('pgDoneSteps', completed.length), stepList(completed, row), 'done:' + key));
       var left = steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled' && one.status !== 'waiting'; });
       var primary = left.find(function (one) { return one.isCurrent; }) || left[0];
       if (primary) add(inner, stepList([primary], row));
       var rest = left.filter(function (one) { return one !== primary; });
-      if (rest.length) add(inner, folded(plural('pgMoreSteps', rest.length), stepList(rest, row)));
+      if (rest.length) add(inner, folded(plural('pgMoreSteps', rest.length), stepList(rest, row), 'more:steps:' + key));
       if (row.handoff) add(inner, el('p', 'context', row.handoff));
       if (row.runs) add(inner, el('p', 'context', row.runs));
       if (row.lineText) add(inner, el('p', 'context', row.lineText));

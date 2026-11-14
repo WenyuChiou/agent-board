@@ -3,7 +3,7 @@ import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, 
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { acceptMailboxMessage, endMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
-import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
+import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
@@ -175,6 +175,9 @@ const openMessaging = (directory: string, isDefault = false, gate?: MessageGate)
 // for the terminal board, --status and --json to count what the page counts (#1296). The file is replaced whole,
 // never edited in place, so a read sees one complete save. Nothing (undefined) when the folder holds no store or
 // the file cannot be read as one: those surfaces then count every question as waiting, as they did before.
+const shownMessages = (state: Pick<MessageState, 'messages' | 'mailboxes'>) =>
+  state.messages.map(one => ({ ...shownMessage(one), ...(isMailboxSurfaceLost(one, state.mailboxes) ? { isSurfaceLost: true as const } : {}) }))
+
 export const readQueuedMessaging = (directory: string, now: number) => {
   try {
     // The server refuses a store folder that is a link; so does this read, and every question then waits (#1276 review).
@@ -182,7 +185,7 @@ export const readQueuedMessaging = (directory: string, now: number) => {
     const found = readSettings(join(resolve(directory), 'messages.json'))
     if (found.kind !== 'ok') return undefined
     const state = expireMailboxes(parseMessageStore(found.text, now), now)
-    return { connections: [] as Connection[], mailboxes: state.mailboxes ?? [], messages: state.messages.map(shownMessage) }
+    return { connections: [] as Connection[], mailboxes: state.mailboxes ?? [], messages: shownMessages(state) }
   } catch { return undefined }
 }
 
@@ -311,7 +314,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       expire(now)
       for (const [id, one] of expectations) expectations.set(id, observeSession(one, reports, now))
       return {
-        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, ...one }) => one), messages: state.messages.map(shownMessage),
+        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, ...one }) => one), messages: shownMessages(state),
         sessions: [
           ...[...expectations.values()].map(one => ({
             id: one.id, agent: one.agent, session: one.session, surface: one.surface,
@@ -572,7 +575,10 @@ export const hookMailbox = (directory: string, budget: number) => {
         return null
       }
     },
-    accept: (agent: string, session: string, id: string, nonce: string, now: number) => call('mailbox-accept', { agent, session, id, nonce }, now),
+    // Whether the board took the accept: a caller that tells its host the message was delivered needs to know it did not (#1430).
+    accept: async (agent: string, session: string, id: string, nonce: string, now: number): Promise<boolean> => {
+      try { await access.call('mailbox-accept', { agent, session, id, nonce }, now); return true } catch { return false }
+    },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
   }
 }

@@ -119,3 +119,165 @@ test('a delayed enqueue response cannot restore Queued after its receipt is alre
     }
   })
 })
+
+const parseRgb = colour => {
+  const srgb = /^color\(\s*srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+)\s*)?\)$/i.exec(colour)
+  if (srgb) {
+    assert.ok(srgb[4] === undefined || Number(srgb[4]) === 1, `expected opaque background, got ${colour}`)
+    return [Math.round(Number(srgb[1]) * 255), Math.round(Number(srgb[2]) * 255), Math.round(Number(srgb[3]) * 255)]
+  }
+  const match = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+)\s*)?\)$/i.exec(colour)
+  assert.ok(match, `expected opaque rgb colour, got ${colour}`)
+  assert.ok(match[4] === undefined || Number(match[4]) === 1, `expected opaque background, got ${colour}`)
+  return [Number(match[1]), Number(match[2]), Number(match[3])]
+}
+const contrastRatio = (fg, bg) => {
+  const luminance = channels => channels.map(channel => {
+    const srgb = channel / 255
+    return srgb <= .04045 ? srgb / 12.92 : ((srgb + .055) / 1.055) ** 2.4
+  }).reduce((sum, channel, index) => sum + channel * [.2126, .7152, .0722][index], 0)
+  const a = luminance(parseRgb(fg)), b = luminance(parseRgb(bg))
+  return (Math.max(a, b) + .05) / (Math.min(a, b) + .05)
+}
+
+test('receipt states show distinct >= 4.5:1 colours and icons in both themes and next-turn wording stays honest in flight (#1400)', { concurrency: false, timeout: 120_000 }, async () => {
+  await browserFixture('receipt-contrast-and-next-turn', async ({ page, progress, root, startServer, evidence }) => {
+    page.setDefaultTimeout(15_000)
+    const sessionWait = '88888888-8888-4888-8888-888888888881'
+    const sessionDone = '88888888-8888-4888-8888-888888888882'
+    const sessionFail = '88888888-8888-4888-8888-888888888883'
+    const owner = session => createHash('sha256').update('codex:' + session).digest('hex')
+    const qWait = 'Deploy the synthetic build?'
+    const qDone = 'Merge the synthetic branch?'
+    const qFail = 'Run the synthetic clean?'
+    const cardBlock = (session, title, questionText) => {
+      const id = owner(session)
+      return `<!-- auto session=${id.slice(0, 8)} agent=codex owner=${id} state=waiting updated=${new Date().toISOString()} resume=${session} dir=${root.replaceAll('\\', '/')} -->
+### ${title}
+- [?] ${questionText}
+<!-- /auto session=${id.slice(0, 8)} -->`
+    }
+    writeProgress(progress, `## Synthetic receipt states\n${cardBlock(sessionWait, 'Wait card', qWait)}\n\n${cardBlock(sessionDone, 'Done card', qDone)}\n\n${cardBlock(sessionFail, 'Fail card', qFail)}\n`)
+    const url = await startServer({ messages: true })
+    const token = new URL(url).searchParams.get('t')
+    const postMsg = async (action, body) => {
+      const res = await fetch(new URL(`/api/messages/${action}`, url), {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-board-token': token }, body: JSON.stringify(body),
+      })
+      assert.equal(res.status, 200)
+      return res.json()
+    }
+    // Enroll wait + done cards on Codex CLI (idle route: nextTurn).
+    await postMsg('mailbox-turn', { agent: 'codex', session: sessionWait, surface: 'CLI' })
+    await postMsg('mailbox-turn', { agent: 'codex', session: sessionDone, surface: 'CLI' })
+    const failReceiver = await boardClient(url).attach({
+      agent: 'codex', session: sessionFail, turn: 'fail-turn', surface: 'Codex local proxy',
+      verify: async () => true,
+      deliver: async (_msg, _accept, _begin) => { throw new Error('SYNTHETIC_REJECT') },
+    })
+    try {
+      const board = new BoardPage(page)
+      await board.open(url)
+      await board.chooseTheme('light')
+      await page.waitForFunction(() => !document.documentElement.classList.contains('theming'))
+      const waitCard = board.question(qWait)
+      const doneCard = board.question(qDone)
+      const failCard = board.question(qFail)
+
+      // Next-turn route card hint uses plain words.
+      await waitCard.getByText('Codex reads this when you next type in its window.', { exact: true }).waitFor()
+      await waitCard.getByRole('button', { name: 'Write your own', exact: true }).click()
+      await waitCard.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Queue this answer.')
+
+      // Hold the first enqueue POST to verify in-flight wording, button label and contrast.
+      let releaseAct = () => {}, finishRoute = () => {}, holdAct = true
+      const actHeld = new Promise(done => { releaseAct = done })
+      const routeDone = new Promise(done => { finishRoute = done })
+      const actRoute = async route => {
+        if (holdAct && route.request().postDataJSON().type === 'message') {
+          holdAct = false
+          await actHeld
+          await route.continue()
+          finishRoute()
+          return
+        }
+        await route.fallback()
+      }
+      await page.route('**/api/act', actRoute)
+      const queueBtn = waitCard.locator('button.primary')
+      await queueBtn.click()
+      const inFlight = waitCard.locator('.press-result.wait')
+      await inFlight.waitFor()
+      const inFlightText = await inFlight.innerText()
+      assert.ok(inFlightText.includes("Queuing for Codex's next turn…"), inFlightText)
+      assert.ok(!inFlightText.includes('waiting for its reply'), inFlightText)
+      assert.equal(await queueBtn.isDisabled(), true)
+      assert.ok((await queueBtn.innerText()).startsWith("Queue for Codex's next turn"))
+      // Let --dur-fast (120ms) hover-to-disabled transition settle while cursor remains over button and request stays in flight.
+      await page.waitForTimeout(160)
+      const btnStyles = await queueBtn.evaluate(node => {
+        const s = getComputedStyle(node)
+        return { color: s.color, backgroundColor: s.backgroundColor }
+      })
+      assert.ok(contrastRatio(btnStyles.color, btnStyles.backgroundColor) >= 4.5, `disabled Queue button contrast too low: ${JSON.stringify(btnStyles)}`)
+      await page.screenshot({ path: join(evidence, 'receipt-in-flight-light.png'), fullPage: true })
+      releaseAct()
+      await routeDone
+      await page.unroute('**/api/act', actRoute)
+
+      // Card 1 settles in queued (waiting) state.
+      const waitReceipt = waitCard.locator('p.receipt.t-wait')
+      await waitReceipt.filter({ hasText: 'Queued for next turn · Codex reads this when you next type in its window.' }).waitFor()
+
+      // Card 2 settles in handed-over (delivered) state.
+      await doneCard.getByRole('button', { name: 'Write your own', exact: true }).click()
+      await doneCard.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Hand over this answer.')
+      await doneCard.getByRole('button', { name: "Queue for Codex's next turn", exact: true }).click()
+      await doneCard.locator('p.receipt.t-wait').waitFor()
+      const taken = await postMsg('mailbox-turn', { agent: 'codex', session: sessionDone, surface: 'CLI' })
+      assert.ok(taken.message?.id)
+      await postMsg('mailbox-accept', { agent: 'codex', session: sessionDone, id: taken.message.id, nonce: taken.message.nonce })
+      const doneReceipt = doneCard.locator('p.receipt.t-done')
+      await doneReceipt.filter({ hasText: 'Handed to the session at its turn start. No reply is confirmed.' }).waitFor()
+
+      // Card 3 settles in failed/rejected state.
+      await failCard.getByRole('button', { name: 'Write your own', exact: true }).click()
+      await failCard.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Trigger failure.')
+      await failCard.getByRole('button', { name: 'Send to Codex', exact: true }).click()
+      const failReceipt = failCard.locator('p.receipt.t-alert')
+      await failReceipt.filter({ hasText: 'Rejected / not sent' }).waitFor()
+
+      const report = {}
+      for (const theme of ['light', 'dark']) {
+        await board.chooseTheme(theme)
+        await page.waitForFunction(() => !document.documentElement.classList.contains('theming'))
+        await page.waitForTimeout(50)
+        const measured = {}
+        for (const [group, loc] of [['wait', waitReceipt], ['done', doneReceipt], ['fail', failReceipt]]) {
+          measured[group] = await loc.evaluate(node => {
+            const s = getComputedStyle(node)
+            const before = getComputedStyle(node, '::before')
+            return {
+              color: s.color,
+              backgroundColor: s.backgroundColor,
+              borderColor: s.borderTopColor,
+              iconMask: before.maskImage || before.webkitMaskImage || '',
+              content: before.content,
+            }
+          })
+          const ratio = contrastRatio(measured[group].color, measured[group].backgroundColor)
+          measured[group].contrast = Number(ratio.toFixed(2))
+          assert.ok(ratio >= 4.5, `${theme} ${group} contrast ${ratio.toFixed(2)}:1 < 4.5:1`)
+          assert.ok(measured[group].content !== 'none' && measured[group].iconMask && measured[group].iconMask !== 'none', `${theme} ${group} missing status icon`)
+        }
+        assert.equal(new Set(['wait', 'done', 'fail'].map(k => measured[k].color)).size, 3, `${theme}: foreground colours must differ`)
+        assert.equal(new Set(['wait', 'done', 'fail'].map(k => measured[k].backgroundColor)).size, 3, `${theme}: background colours must differ`)
+        report[theme] = measured
+        await page.locator('.sheet').first().screenshot({ path: join(evidence, `receipts-${theme}.png`) })
+      }
+      writeFileSync(join(evidence, 'receipt-contrast-report.json'), JSON.stringify(report, null, 2))
+    } finally {
+      await failReceiver.close()
+    }
+  })
+})

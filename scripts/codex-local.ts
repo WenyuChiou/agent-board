@@ -513,12 +513,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
-      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary } })
+      // deferred: the board's store was busy, so null here is "not checked", not "nothing waiting"; the plugin asks again (#1429).
+      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary }, deferred: message === null && mailbox.hasDeferred })
     } else if (action === 'accept') {
       const id = flag('--id'), nonce = flag('--nonce')
       if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
-      await mailbox.accept(agent, session, id, nonce, Date.now())
-      answer({ ok: true })
+      answer({ ok: await mailbox.accept(agent, session, id, nonce, Date.now()) })
     } else {
       await mailbox.end(agent, session, Date.now())
       answer({ ok: true })
