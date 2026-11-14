@@ -75,6 +75,12 @@ export const boardRequestWords = (strings: readonly Strings[]): string[] => [...
   [s.boardCommandPrompt, ...s.boardSkillPrompt('\u0000').split('\u0000').slice(1).flatMap(words => [words, words.split('\n\n')[0] ?? words]), ...s.boardChatSkillPrompt('\u0000').split('\u0000').slice(1)].filter(words => words.trim() !== ''),
 )
 
+// A board message the board itself delivered into a session opens with one of two header lines, and is no more the
+// person's words than a board command is (#318). Apart from boardRequestWords: those words are copied into every generated
+// hook, and a hook's bytes are compared when it is upgraded. Only the reader of the inbox adds these.
+export const deliveryRequestWords = (strings: readonly Strings[]): string[] =>
+  strings.flatMap(s => [s.messagesDeliveryBoard, s.messagesDeliveryAgent('\u0000').split('\u0000')[0]!])
+
 export const boardPromptText = (value: unknown, depth = 0): string => {
   if (typeof value === 'string') return value
   if (depth >= 16 || value === null || typeof value !== 'object') return ''

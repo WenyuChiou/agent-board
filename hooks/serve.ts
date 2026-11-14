@@ -15,10 +15,11 @@ import type { Tone } from './palette'
 import { cellCode } from './progress-bar'
 import { RESUME } from './parse'
 import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from './view'
+import type { RowState as DerivedRowState } from './row-state'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
 import { deliveryTargets } from './hook-messages'
-import { address, isMailboxSurfaceLost, isMailboxTarget, isOpen, sendDecision, SURFACE_IDS } from './messaging'
+import { address, isMailboxSurfaceLost, isMailboxTarget, isOpen, isRecordedRoute, sendDecision, SURFACE_IDS } from './messaging'
 import { RECEIVER_ROUTES } from './receiver-routes'
 
 // The board's page: what `agent-board` shows in a browser for agents other than
@@ -240,6 +241,9 @@ export type ServeRow = {
   when: string
   agent: string
   auto?: 'working' | 'waiting' | 'ended' | null
+  // The row's one derived state (#1317), from buildView; its age is `at`/`when`.
+  // Only 'unsure' changes the rendering yet; the rest are computed, not shown.
+  rowState?: DerivedRowState
   done: number
   total: number
   // One character per step for the progress bar (#1085, `hooks/progress-bar.ts` cellCode); '' with no steps.
@@ -304,6 +308,9 @@ type PageView = {
   // sheet with their line and leave the count, on the page and on every other surface (#1296).
   needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[]; handled: string[] }
   working: PageRef[]
+  // Rows whose derived state is 'unsure' (#1317). They stay on their shelf in
+  // the lists above; this only names them, and no count reads it.
+  unsure: PageRef[]
   quiet: Quiet
   all: PageBucket & { isHidden: boolean }
   own: PageBucket
@@ -480,8 +487,10 @@ const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: Readonl
 // `routes`: the receivers' records, which say on each card when a message arrives and whether Send is offered.
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
-  const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes)
-  const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], (agent, session) => sessionState(view, agent, session), routes, group?.now ?? 0)
+  const stateOfSession = (agent: string, session: string): RowState | undefined => sessionState(view, agent, session)
+  // A live connection hides its session's mailbox only on a route its record shows for the session's state now (#318).
+  const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes, live => isRecordedRoute(live, stateOfSession, routes))
+  const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], stateOfSession, routes, group?.now ?? 0)
   const isMessageSurfaceLost = (one: ShownMessage): boolean => isMailboxSurfaceLost(one, messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
@@ -616,6 +625,8 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
           ...(needs?.kind === 'stuck'
             ? { stuck: { reason: needs.reason } }
             : {}),
+          // The row's one derived state (#1317), with its age in `at`/`when`.
+          ...(row.rowState === undefined ? {} : { rowState: row.rowState }),
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, undefined, isMessageSurfaceLost)),
@@ -739,6 +750,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     agents: grouped.agents.map(one => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),
     needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref), held, failed) },
     working: grouped.working.map(ref),
+    unsure: grouped.unsure.map(ref),
     quiet: grouped.quiet,
     all: { ...bucket(grouped.all), isHidden: grouped.all.isHidden },
     own: bucket(grouped.own),
@@ -937,7 +949,7 @@ const PAGE_WORDS = [
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
   'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
-  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting',
+  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure',
   'archiveNow', 'cleanUp', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
@@ -1089,6 +1101,7 @@ div.row-btn{cursor:default}
 .row-btn[aria-expanded="true"] .r-chev{transform:rotate(90deg)}
 div.row-btn .r-chev{visibility:hidden}
 .r-meta .st{color:var(--ink)}
+.r-meta .st.t-quiet{color:var(--muted)}
 .r-meta .prog{display:inline-flex;align-items:center;gap:var(--s2);vertical-align:-1px}
 .r-meta .prog span{margin-left:0}
 .pbar{display:inline-flex;align-items:center;gap:2px;width:96px;height:8px;flex:none}
@@ -1385,6 +1398,28 @@ const PAGE_SCRIPT = String.raw`
   var GLYPH = { done: '✓', doing: '▸', todo: '•', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
   var boardEtag = '';
+  // A press is a press and a release on the same button. A redraw between them puts a new button under the pointer and
+  // the click is lost without a word (#1468), so while a pointer is down the board keeps what it shows and draws from
+  // the next answer. The flag clears after the click that follows the release has run.
+  // Each held pointer is kept by its id with the number of its press, so a second finger does not end the first
+  // finger's hold, and a release timer from an earlier press (a mouse reuses one id) cannot end a later press.
+  var heldPointers = {};
+  var pressCount = 0;
+  function isHeld() { return Object.keys(heldPointers).length > 0; }
+  function pointerReleased(event) {
+    var id = String(event && event.pointerId);
+    var press = heldPointers[id];
+    setTimeout(function () { if (heldPointers[id] === press) delete heldPointers[id]; }, 0);
+  }
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('pointerdown', function (event) { pressCount += 1; heldPointers[String(event.pointerId)] = pressCount; }, true);
+    document.addEventListener('pointerup', pointerReleased, true);
+    document.addEventListener('pointercancel', pointerReleased, true);
+    // A move with no button held means the release was lost (a context menu, a scrollbar drag): the board draws again.
+    document.addEventListener('pointermove', function (event) { if (!event.buttons) delete heldPointers[String(event.pointerId)]; }, true);
+  }
+  // Losing focus loses every release that was still to come.
+  if (typeof window.addEventListener === 'function') window.addEventListener('blur', function () { heldPointers = {}; });
   var opened = {};
   var liveDetails = [];
   // Read live <details>.open before redraw because HTML queues the toggle event asynchronously.
@@ -1806,13 +1841,20 @@ const PAGE_SCRIPT = String.raw`
       }, function () { say(w('pressFailed'), 'alert', key, undefined, true); });
     });
   }
+  // A finished message's attempt id is done with, so the next send of the same words is a new message. The rule
+  // lives here so a board kept from redrawing under a press still applies it (#1468).
+  function releaseFinishedAttempt(receipt, isClaude) {
+    var isDone = isClaude ? receipt.status === 'rejected' || receipt.status === 'acknowledged' || receipt.error === 'DISMISSED' || receipt.error === 'EXPIRED'
+      : receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox;
+    if (isDone) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+  }
   // The card's line for a message to a Claude session, by what its receipt says (#316).
   function claudeReceipt(receipt, key, canSend) {
     var error = receipt.error || '';
     var isStopped = receipt.status === 'rejected';
     var isReplied = receipt.status === 'acknowledged';
     // Whatever went nowhere can be sent again, under an id of its own.
-    if (isStopped || isReplied || error === 'DISMISSED' || error === 'EXPIRED') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+    releaseFinishedAttempt(receipt, true);
     if (error === 'DISMISSED') return null;
     var isUnconfirmed = receipt.status === 'uncertain' || receipt.status === 'accepted' && error === 'DISCONNECTED';
     var isFail = isStopped || receipt.status === 'uncertain' && receipt.hasAccepted !== true;
@@ -1843,7 +1885,7 @@ const PAGE_SCRIPT = String.raw`
     line = receipt.line;
     var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : !line || line === 'now' || line === 'stepEnd' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     // A mailbox message that was handed over gets no ACK, so its id is done with here: the next send is a new message.
-    if (receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+    releaseFinishedAttempt(receipt, false);
     // The server already took a nonce ACK off; a receipt kept from a version 1 store was
     // acknowledged with the message id instead.
     var reply = receipt.reply || '';
@@ -2142,8 +2184,11 @@ const PAGE_SCRIPT = String.raw`
     question.setAttribute('title', text);
     add(body, question);
     if (isStuck) add(body, el('p', 'note', clean(ask.stuck && ask.stuck.reason)));
-    else if (ask.note) add(body, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
-    else if (ask.context) add(body, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
+    else {
+      if (ask.note) add(body, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
+      var askTitle = clean(String(ask.task || ''));
+      if (ask.context && (!ask.note || askTitle && (pg.titleCounts && pg.titleCounts[askTitle] || 0) > 1)) add(body, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
+    }
     if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
     var mode = ask.send;
     var answers = el('div', 'answers');
@@ -2391,12 +2436,16 @@ const PAGE_SCRIPT = String.raw`
     if (sameName(step, clean(fullTitle(ref)))) step = '';
     var isAnsweredWaiting = row.status === w('answeredWaiting');
     var detail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
-    var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
+    // The same guard the terminal uses: a row the collapse already reads as
+    // ended keeps today's stopped wording, not the grey unsure label.
+    var isUnsureRow = row.rowState === 'unsure' && row.auto !== 'ended';
+    var status = isUnsureRow ? w('rowUnsure', row.when) : ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
+    var sameTitle = (pg.titleCounts && pg.titleCounts[title] || 0) > 1 ? clean(row.contextLine || row.context) : '';
     var project = showProject ? clean(ref.repo || row.project) : '';
     if (sameName(project, title)) project = '';
     var progress = isTask && row.total > 0 && (section === 'working' || section === 'stopped' || section === 'others') ? progressNode(row.cells || '', row.done, row.total, current ? clean(current.text) : '') : null;
-    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
+    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null, project ? el('span', '', project) : null, sameTitle ? el('span', '', sameTitle) : null, detail ? el('span', '', detail) : null);
     var titleNode = el('span', 'r-title', title);
     titleNode.setAttribute('title', title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
@@ -3369,6 +3418,17 @@ const PAGE_SCRIPT = String.raw`
     document.getElementById('shell').setAttribute('data-empty', !view.agents.length && !hasOwn ? '1' : '');
     if (!view.agents.length && !hasOwn) parts.push(freshPage(view));
     else {
+      var titleCounts = Object.create(null);
+      var seenKeys = Object.create(null);
+      view.needs.cards.concat(view.working, view.all.open, view.own.open, view.all.stopped, view.own.stopped, view.all.done, view.own.done).forEach(function (ref) {
+        var one = source(ref);
+        var id = one.session ? 's:' + one.session : String(ref.sourceKey || ref.key).replace(/^(?:stuck:|row:|ask:)+/, '').replace(/@[^@]*$/, '').replace(/::\d+$/, '');
+        if (seenKeys[id]) return;
+        seenKeys[id] = true;
+        var name = clean(String(one.title || one.task || ''));
+        if (name) titleCounts[name] = (titleCounts[name] || 0) + 1;
+      });
+      pg.titleCounts = titleCounts;
       var workingKeys = {};
       parts.push(needsSection(view));
       parts.push(sectionBlock(workingSection(view, workingKeys), 'working'));
@@ -3482,7 +3542,13 @@ const PAGE_SCRIPT = String.raw`
       connections = data.messaging && data.messaging.connections || [];
       latestApprovals = data.approvals || null;
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; }), latestApprovals], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
-      if (text !== last) {
+      // Under a press this answer is not drawn, and the next poll asks for the whole board again (#1468).
+      if (text !== last && isHeld()) {
+        boardEtag = '';
+        // Only the bookkeeping render would do: a finished message must not keep its id while nothing is drawn.
+        [].concat(data.model.asks || [], data.model.reminder || [], data.model.older || [], data.model.idle || [], data.model.stopped || [], (data.model.groups || []).flatMap(function (group) { return group.rows; }), data.model.turns || [], data.model.recent || [], data.model.finished || []).forEach(function (item) { if (item.receipt) releaseFinishedAttempt(item.receipt, isClaudeAgent(item.agent)); });
+      }
+      else if (text !== last) {
         last = text;
         render(data.model);
         if (presence) { presence.remove(); presence = null; }

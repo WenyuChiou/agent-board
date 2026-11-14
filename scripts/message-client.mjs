@@ -6,7 +6,7 @@
  * to one exact surface; a CLI run must never verify a desktop or IDE implicitly.
  * @typedef {Object} MessagingReceiverRecord
  * @property {string} host
- * @property {{ name: string, evidence: string | null, earlier?: string }[]} surfaces `evidence` is a
+ * @property {{ name: string, id?: string, evidence: string | null, earlier?: string }[]} surfaces `evidence` is a
  *   `docs/validation/<date>-<host>-live.md` file; `earlier` is a dated note on a run that doesn't count as one.
  * @property {1 | 2 | 3 | 4} tier
  * @property {'[P1]' | '[P2]' | '[P3]' | '[P4]' | '[P5]' | 'unknown'} primitive `unknown` when the roadmap names none for this surface.
@@ -60,16 +60,17 @@ export const boardClient = address => {
     expect: body => call('expect', body),
     // replaces: the { connection, secret } of this receiver's own earlier connection, from
     // credentials() before a restart, so the board ends it instead of marking both contested.
-    attach: async ({ agent, session, surface, turn, scope = 'turn', replaces, verify, canReceive, deliver, onError = () => undefined }) => {
+    attach: async ({ agent, session, surface, turn, scope = 'turn', replaces, unclaimed = false, reclaim = false, verify, canReceive, deliver, onError = () => undefined }) => {
       if (typeof verify !== 'function' || typeof deliver !== 'function' || canReceive !== undefined && typeof canReceive !== 'function' || !await verify()) throw new Error('HOST_NOT_CONNECTED')
-      const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }) })
-      const credentials = { connection: registered.id, secret: registered.secret }
-      let isClosed = false, isPolling = false, isPollDue = false, isRetried = false, leaseUntil = registered.expires
-      const close = async () => {
+      const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }), ...(unclaimed ? { unclaimed: true } : {}) })
+      let credentials = { connection: registered.id, secret: registered.secret }, contestAfter = 0
+      let isContested = false, isClosed = false, isPolling = false, isPollDue = false, isRetried = false, leaseUntil = registered.expires
+      // ended: the caller read its session as ended. Only then does an automatic receiver's queued message go back refused.
+      const close = async ({ ended = false } = {}) => {
         if (isClosed) return
         isClosed = true
         clearInterval(timer)
-        await call('disconnect', { ...credentials, turn }).catch(() => undefined)
+        await call('disconnect', { ...credentials, turn, ...(ended === true ? { ended: true } : {}) }).catch(() => undefined)
       }
       const receipt = (message, status, reply, error) => call('receipt', { ...credentials, id: message.id, nonce: message.nonce, status, ...(reply === undefined ? {} : { reply }), ...(error === undefined ? {} : { error }) })
       const processMessage = async message => {
@@ -97,7 +98,8 @@ export const boardClient = address => {
           // Ownership failures are terminal even if they happen to look like a
           // network exception. Only a verified host may recover its board poll.
           let isOwned = false
-          try { isOwned = await verify() } catch (error) { await close(); onError(error); return }
+          // Promise.resolve: the bundled board is searched for its entry call as `await name();` before a catch, and this must not be found first.
+          try { isOwned = await Promise.resolve(verify()) } catch (error) { await close(); onError(error); return }
           if (!isOwned || isClosed) { await close(); return }
           // Being busy does not revoke ownership or sending authority. Keep the
           // lease alive while leaving inbound messages durably queued, unclaimed.
@@ -115,6 +117,19 @@ export const boardClient = address => {
             leaseUntil = started + result.leaseMs
             if (Date.now() >= leaseUntil) throw new Error('CONNECTION_EXPIRED')
             isRetried = false
+            // Another connection for this session registered after this one: the board holds both back until one of them leaves.
+            isContested = result.contested === true
+            // reclaim: the board keeps a connection contested after the other one has left, and only a new registration that replaces
+            // this one clears it. Asked again now and then; while another connection is live, the board marks it contested again.
+            if (reclaim && isContested && Date.now() >= contestAfter) {
+              contestAfter = Date.now() + (typeof reclaim === 'number' ? reclaim : 10_000)
+              const again = await call('register', { agent, session, surface, turn, scope, connection: credentials.connection, secret: credentials.secret })
+              // close() ran while the board was answering: the new connection is ended here, since close() only knew the old one.
+              if (isClosed) { await call('disconnect', { connection: again.id, secret: again.secret, turn }).catch(() => undefined); return }
+              credentials = { connection: again.id, secret: again.secret }
+              leaseUntil = again.expires
+              isContested = again.contested === true
+            }
             if (!isClosed) for (const message of result.messages) void processMessage(message)
           } catch (error) {
             if (!error.isRetryable || Date.now() >= leaseUntil) await close()
@@ -134,14 +149,17 @@ export const boardClient = address => {
       const timer = setInterval(() => { void poll() }, 2000)
       void poll()
       return {
-        id: registered.id, agent, session, surface, turn, close,
+        get id() { return credentials.connection }, agent, session, surface, turn, close,
+        // True once this connection has ended for good (closed, lost ownership or lease expired), so a caller can attach again.
+        isClosed: () => isClosed,
+        isContested: () => isContested,
         // A function, so the secret never lands in a log of this object.
         credentials: () => ({ ...credentials }),
         send: async body => {
           let isOwned = false
           try { isOwned = !isClosed && await verify() } catch { /* An unverifiable owner cannot send. */ }
           if (!isOwned) { await close(); throw new Error('HOST_NOT_CONNECTED') }
-          return call('send', { ...body, source: registered.id, secret: registered.secret })
+          return call('send', { ...body, source: credentials.connection, secret: credentials.secret })
         },
       }
     },

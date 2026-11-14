@@ -53,12 +53,15 @@ export const boardStatus = (
   questionsText = '',
   pending: readonly PendingTurn[] = [],
   messaging?: QueuedMessaging,
+  // Blocks whose claimed live process is gone on this machine (#1092): their
+  // questions leave the waiting count, as a stale session's do.
+  gone: ReadonlySet<string> = new Set(),
 ): string => {
   const answered = parseAnswered(answeredText) ?? []
   const questions = parseQuestions(questionsText) ?? undefined
   // The view observes the pending turns too: with a ledger supplied, a new inbox question
   // is counted through the ledger, not through the remaining inbox (#1000).
-  const view = buildView(parseProgress(markdown), [], null, now, 0, {}, s, answered, {}, questions, undefined, pending, new Set(), undefined, staleMs)
+  const view = buildView(parseProgress(markdown), [], null, now, 0, {}, s, answered, {}, questions, undefined, pending, new Set(), undefined, staleMs, undefined, gone)
   const counts = boardCounts(view, pending, s, now, messaging)
 
   return s.boardStatusLine(counts.needs, counts.working) + (counts.queued > 0 ? ` · ${s.boardQueuedCount(counts.queued)}` : '')

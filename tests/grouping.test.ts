@@ -672,3 +672,74 @@ test('grouping on the synthetic big board adds up to the board\'s totals', () =>
   expect(result.all.open.some(task => task.title.startsWith('Helper run'))).toBe(false)
   expect(result.working.every(task => NOW - task.at <= 30 * MIN)).toBe(true)
 })
+
+test('two sessions in one folder with the same title keep separate working and waiting state (#1401)', () => {
+  const sameFolder = '/work/demo'
+  const asking = ask('antigravity', 'demo', 'Shared synthetic title', 'Ship release?', {
+    key: 'ask:demo::Shared synthetic title::1',
+    session: 'ask11111',
+    sessionId: 'synthetic-ask-twin',
+    dir: sameFolder,
+    at: ago(3 * MIN),
+  })
+  const twinWorking = row('antigravity', 'demo', 'Shared synthetic title', {
+    key: 'row:demo::Shared synthetic title',
+    session: 'wrk22222',
+    sessionId: 'synthetic-work-twin',
+    dir: sameFolder,
+    at: ago(2 * MIN),
+  })
+  const sameSessionRow = row('antigravity', 'demo', 'Shared synthetic title', {
+    key: 'row:demo::Shared synthetic title#2',
+    session: 'ask11111',
+    sessionId: 'synthetic-ask-twin',
+    dir: sameFolder,
+    at: ago(4 * MIN),
+  })
+
+  const split = groupBoard(board({ asks: [asking], groups: grouped([twinWorking]) }), NOW, none, EN)
+  expect(split.needs.n).toBe(1)
+  expect(split.working.map(task => task.key)).toEqual(['row:demo::Shared synthetic title'])
+  const agSplit = split.agents.find(group => group.agent === 'antigravity')
+  expect(agSplit?.counts).toEqual({ open: 2, needs: 1, stopped: 0, done: 0, older: 0 })
+  expect(agSplit?.open.map(task => task.key)).toEqual(['row:demo::Shared synthetic title'])
+
+  const same = groupBoard(board({ asks: [asking], groups: grouped([sameSessionRow, twinWorking]) }), NOW, none, EN)
+  expect(same.needs.n).toBe(1)
+  expect(same.working.map(task => task.key)).toEqual(['row:demo::Shared synthetic title'])
+  const agSame = same.agents.find(group => group.agent === 'antigravity')
+  expect(agSame?.counts).toEqual({ open: 2, needs: 1, stopped: 0, done: 0, older: 0 })
+  expect(agSame?.open.map(task => task.key)).toEqual(['row:demo::Shared synthetic title'])
+})
+
+test('two asking sessions with the same title and question keep separate cards (#1401)', () => {
+  const firstAsk = ask('antigravity', 'antigravity', 'Shared asking title', 'Deploy release now?', {
+    key: 'ask:antigravity::Shared asking title::1',
+    session: 'ask-one',
+    sessionId: 'synthetic-ask-one',
+    dir: null,
+    at: ago(4 * MIN),
+  })
+  const secondAsk = ask('antigravity', 'antigravity', 'Shared asking title', 'Deploy release now?', {
+    key: 'ask:antigravity::Shared asking title#2::1',
+    session: 'ask-two',
+    sessionId: 'synthetic-ask-two',
+    dir: null,
+    at: ago(2 * MIN),
+  })
+  const staleCopy = retained('antigravity', 'antigravity', 'Shared asking title', 'Deploy release now?', {
+    at: ago(3 * DAY),
+    dir: null,
+  })
+  const result = groupBoard(board({ asks: [firstAsk, secondAsk], older: [staleCopy] }), NOW, none, EN)
+  expect(result.needs.n).toBe(2)
+  expect(result.needs.questions).toBe(2)
+  expect(result.needs.cards.map(card => card.key)).toEqual([
+    'ask:antigravity::Shared asking title#2::1',
+    'ask:antigravity::Shared asking title::1',
+  ])
+  expect(result.needs.older).toEqual([])
+  const ag = result.agents.find(group => group.agent === 'antigravity')
+  expect(ag?.counts).toEqual({ open: 2, needs: 2, stopped: 0, done: 0, older: 0 })
+  expect(ag?.open).toEqual([])
+})
