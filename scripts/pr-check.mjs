@@ -792,24 +792,46 @@ const setupOnlyPaths = new Set(['scripts/setup-agent.mjs', 'scripts/setup-codex.
 const isDeliveryPath = path => path.startsWith('hooks/receivers/') || ['hooks/messaging.ts', 'scripts/board-messaging.ts', 'scripts/message-client.mjs', 'scripts/codex-receiver.mjs'].includes(path)
 // Not counted toward the size note: tests, generated files and the string tables.
 const isUncountedForSurface = path => path.startsWith('tests/') || isGeneratedPath(path) || /^hooks\/strings-[^/]+\.ts$/.test(path) || path === 'hooks/i18n.ts'
-// The body without its fenced code blocks (``` or ~~~), so an example `Surface:` line inside one is not read.
-const outsideFences = text => {
+// The body's lines as a reader sees them, so an example `Surface:` line is not read: no fenced code (``` or ~~~ after at most
+// three spaces, closed only by a line of the same character at least as long, as CommonMark has it) and no HTML comment (an
+// unclosed `<!--` hides the rest). A comment marker inside a fence, and a fence marker inside a comment, are plain text.
+const visibleLines = text => {
+  const shown = []
   let fence = null
-  return text.split(/\r?\n/).filter(line => {
-    const mark = line.match(/^[ \t]*(`{3,}|~{3,})/)?.[1][0]
-    if (mark !== undefined && (fence === null || mark === fence)) {
-      fence = fence === null ? mark : null
-      return false
+  let isComment = false
+  for (const raw of text.split(/\r?\n/)) {
+    if (fence !== null) {
+      const close = raw.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/)?.[1]
+      if (close !== undefined && close[0] === fence[0] && close.length >= fence.length) fence = null
+      continue
     }
-    return fence === null
-  }).join('\n')
+    const open = isComment ? undefined : raw.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+    if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
+      fence = open[1]
+      continue
+    }
+    let rest = raw
+    let kept = ''
+    while (rest !== '') {
+      const at = rest.indexOf(isComment ? '-->' : '<!--')
+      if (at === -1) {
+        if (!isComment) kept += rest
+        break
+      }
+      if (!isComment) kept += rest.slice(0, at)
+      rest = rest.slice(at + (isComment ? 3 : 4))
+      isComment = !isComment
+    }
+    shown.push(kept)
+  }
+  return shown
 }
 export const surface = ({ body = '', title = '', number = null, paths = [], numstat, tier = tierOf(body) } = {}) => {
   const output = result()
   if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= SURFACE_FROM)) return output
   const fail = (message, fix) => output.problems.push(problem('surface', message, fix))
   const how = 'name the one failure surface on a line of its own in the body, for example `Surface: delivery` (delivery, setup-writes, data, wording, rules-text or launch, or `none` when the only reason for the tier is the lane under risk-tier review; CONTRIBUTING.md rule 2).'
-  const found = [...outsideFences(stripComments(body)).matchAll(/^Surface:[ \t]*(.*)$/gmi)].map(match => match[1].trim())
+  const found = visibleLines(body).flatMap(line => line.match(/^Surface:[ \t]*(.*)$/i)?.[1].trim() ?? [])
   // The template's own `Surface: <...>` line is a placeholder, not a value.
   const filled = found.filter(value => value !== '' && !value.startsWith('<'))
   if (filled.length > 1) {
@@ -823,8 +845,8 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   }
   const [named, ...reasonParts] = line.split(/,[ \t]*cannot split:/i)
   const reason = reasonParts.join(',').trim()
-  if (reasonParts.length && !reason) {
-    fail('the `Surface:` line says `cannot split:` with no reason.', 'write the reason after `cannot split:`, for the maintainer or the owner to accept or refuse before the first review.')
+  if (reasonParts.length && (!reason || reason.startsWith('<'))) {
+    fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.','write the reason after `cannot split:`, for the maintainer or the owner to accept or refuse before the first review.')
     return output
   }
   const values = named.split('+').map(value => value.replace(/`/g, '').trim().toLowerCase())

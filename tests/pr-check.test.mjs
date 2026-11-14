@@ -1758,7 +1758,7 @@ test('pr-check accepts two surfaces with cannot split and says it waits for an a
   const checked = surfaceRun('Surface: delivery + setup-writes, cannot split: main breaks between steps', { paths: ['hooks/connect.ts', 'hooks/messaging.ts'] })
   assert.deepEqual(checked.problems, [])
   assert.match(checked.info.join('\n'), /cannot split: main breaks between steps" waits for the maintainer's or the owner's answer before the first review/)
-  for (const empty of ['Surface: delivery + data, cannot split:', 'Surface: delivery + data, cannot split:   ']) {
+  for (const empty of ['Surface: delivery + data, cannot split:', 'Surface: delivery + data, cannot split:   ', 'Surface: delivery + data, cannot split: <reason>']) {
     assert.match(surfaceRun(empty).problems[0]?.message ?? '', /`cannot split:` with no reason/, empty)
   }
 })
@@ -1773,6 +1773,13 @@ test('pr-check reads one Surface line outside code fences and skips the template
   const placeholder = 'Surface: <risk tier only: one of delivery, setup-writes, data, wording, launch or rules-text>'
   assert.match(surfaceRun(placeholder).problems[0]?.message ?? '', /template's placeholder/)
   assert.deepEqual(surfaceRun(`${placeholder}\nSurface: data`).problems, [])
+  // A longer fence holds shorter fence lines; only a fence of the same character at least as long closes it.
+  const nested = 'Surface: rules-text\n````md\n```\nSurface: delivery\n```\n````'
+  assert.deepEqual(surfaceRun(nested, { paths: ['CONTRIBUTING.md'] }).problems, [])
+  // A comment marker inside a fence is text, and so is a fence marker inside a comment.
+  assert.deepEqual(surfaceRun('```html\n<!-- not closed\n```\nSurface: data').problems, [])
+  assert.deepEqual(surfaceRun('<!--\n```\n-->\nSurface: data').problems, [])
+  assert.deepEqual(surfaceRun('<!-- note --> \nSurface: data <!-- why -->').problems, [])
 })
 
 test('pr-check leaves the Surface line to risk pull requests above SURFACE_FROM that are not releases', () => {
