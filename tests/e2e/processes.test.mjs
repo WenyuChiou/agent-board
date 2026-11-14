@@ -149,13 +149,20 @@ import { basename } from 'node:path'
 import { syncBuiltinESMExports } from 'node:module'
 const original = fs.unlinkSync
 fs.unlinkSync = (file, ...rest) => {
-  if (basename(String(file)) === 'server.lock') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8000)
+  if (basename(String(file)) === 'server.lock') {
+    fs.writeFileSync(new URL('./stalled', import.meta.url), '')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8000)
+  }
   return original(file, ...rest)
 }
 syncBuiltinESMExports()
 `)
     world.env.NODE_OPTIONS = `${world.env.NODE_OPTIONS} --import=${pathToFileURL(stall).href}`
-    await serve.start(world)
+    const server = await serve.start(world)
+    await server.stop()
+    // Only the server's own shutdown, which runs once it has taken /api/close, removes server.lock: the
+    // marker shows teardown ended a server that took the close, not one a lost request left serving.
+    assert.equal(world.exists('stalled'), true, 'the server did not reach its own shutdown')
   } finally { await world.close() }
 })
 
@@ -168,7 +175,12 @@ test('a process that has exited but is not yet collected reads as gone on Linux 
   try {
     const [line] = await once(createInterface({ input: parent.stdout }), 'line')
     const child = Number(line)
-    await within((async () => { while (!isZombie(child)) await new Promise(done => setTimeout(done, 25)) })(), 5000, 'the background child did not exit')
+    // The deadline sits inside the loop, so a child that is never seen in state Z fails the test and stops the polling.
+    const deadline = Date.now() + 5000
+    while (!isZombie(child)) {
+      assert.ok(Date.now() < deadline, 'the background child did not exit')
+      await new Promise(done => setTimeout(done, 25))
+    }
     assert.doesNotThrow(() => process.kill(child, 0), 'signal 0 still reaches the exited child')
     assert.equal(isZombie(parent.pid), false)
   } finally {
