@@ -8,7 +8,7 @@
 //   turn       the running turn's id when the thread is active
 //   start      what turn/start does on an idle thread: 'ack' (answers, ACKs, completes), 'silent' (answers, nothing else),
 //              'error' (an error answer), 'empty' (an answer with no turn), 'mute' (no answer at all), 'die' (the proxy exits once
-//              the request is in), 'endFirst' (the turn's ACK and end go out before the answer, which comes last). On a running turn it answers with that turn's id
+//              the request is in), 'endFirst' (the turn's ACK and end go out before the answer, which comes last), 'ownFirst' (the turn starts, takes the delivery's own user message, ACKs and completes, all before the answer). On a running turn it answers with that turn's id
 //              and starts nothing, as the real daemon does (the text joins the turn).
 //   joinOnStart when true, the person's own turn starts just before the first turn/start is handled, so the call joins it
 //   joinLate   like joinOnStart, but that turn's notices (its start, its first user message) go out only after the answer
@@ -88,6 +88,16 @@ serveWebSocketProxy({
       if (config.start === 'die') process.exit(0)
       if (config.start === 'endFirst' && !running) {
         const id = 'turn-delivery'
+        emit({ method: 'item/completed', params: { threadId, turnId: id, item: { type: 'agentMessage', text: ackOf(value.params.input[0].text) } } })
+        emit({ method: 'turn/completed', params: { threadId, turn: { id, status: 'completed' } } })
+        emit({ method: 'thread/status/changed', params: { threadId, status: { type: 'idle' } } })
+        emit({ id: value.id, result: { turn: { id } } })
+        return
+      }
+      if (config.start === 'ownFirst' && !running) {
+        const id = 'turn-delivery'
+        emit({ method: 'turn/started', params: { threadId, turn: { id } } })
+        emit({ ...userMessage(threadId, id, value.params.input, value.params.clientUserMessageId) })
         emit({ method: 'item/completed', params: { threadId, turnId: id, item: { type: 'agentMessage', text: ackOf(value.params.input[0].text) } } })
         emit({ method: 'turn/completed', params: { threadId, turn: { id, status: 'completed' } } })
         emit({ method: 'thread/status/changed', params: { threadId, status: { type: 'idle' } } })

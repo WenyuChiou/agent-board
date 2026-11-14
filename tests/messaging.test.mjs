@@ -4847,6 +4847,17 @@ const codexTable = [
     } finally { await receiver.close() }
     return [{ daemon, id }]
   } },
+  { name: 'the delivery\'s own turn starts, takes its message, ACKs and completes before the turn/start answer: acknowledged once', fixture: 'shared', final: ['acknowledged'], run: async ({ board, dir }) => {
+    const { daemon, id } = codexCase(dir, 0, { start: 'ownFirst' })
+    const receiver = codexReceiver(board, daemon)
+    try {
+      await codexSend(board, await codexConnection(board), id)
+      await waitFor(async () => (await codexMessage(board, id))?.status === 'acknowledged')
+      await pause(1000)
+      assert.deepEqual([(await codexMessage(board, id)).status, codexStarts(daemon)], ['acknowledged', 1])
+    } finally { await receiver.close() }
+    return [{ daemon, id }]
+  } },
 ]
 
 test('the Codex receiver ends every single event as the decision table says, and keeps N, O and R (#318)', async t => {

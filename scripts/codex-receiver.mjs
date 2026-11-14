@@ -295,9 +295,10 @@ export const startCodexReceiver = ({
             if (!result?.turn?.id) throw new Error('INVALID_TURN_RESPONSE')
             // turn/start has no idle-only form: on a running turn it adds the text to that turn and answers with its id. A turn
             // whose start was heard before this answer arrived, or whose first user message is someone else's, was already
-            // running, so the text joined it: uncertain, never an ordinary acceptance (#1370). When that is heard only after
-            // the answer, settle() turns the acceptance into the same uncertain receipt.
-            if (begunBefore.has(result.turn.id) || pending.firstInput.get(result.turn.id) === false) throw new Error('TURN_JOINED')
+            // running, so the text joined it: uncertain, never an ordinary acceptance (#1370). A turn that began before the
+            // answer but whose first user message is this delivery's is our own turn, not a joined one. When someone else's
+            // message is heard only after the answer, settle() turns the acceptance into the same uncertain receipt.
+            if (pending.firstInput.get(result.turn.id) === false || (begunBefore.has(result.turn.id) && pending.firstInput.get(result.turn.id) !== true)) throw new Error('TURN_JOINED')
             state.pending.turn = result.turn.id
             if (!state.pending.ended.has(result.turn.id)) state.turn = result.turn.id
             await accepted()
