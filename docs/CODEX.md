@@ -96,18 +96,23 @@ block `ended` merely to avoid duplicate cards. Finish a completed task as `done`
 unfinished work waiting. `ended` is reserved for observed session termination or an explicit
 decision to stop that work permanently.
 
-Hooks keep only selected metadata. They ignore prompts, tool inputs and
+Hooks keep only selected metadata. Most ignore prompts, tool inputs and
 permission decisions, and call no model. Codex, Grok Build, Cursor CLI, OpenCode and Antigravity CLI keep one thing
 of the last assistant reply: its closing question, found as the Claude Code plugin finds a turn's (the last sentence
 ending in a question mark on the last line, cut to one line). It shows under Needs you until a later work event
 closes it. A board-only prompt keeps it waiting. The hook marks its question and approval steps done when they end,
 then reuses their lines for later asks; ending a session leaves its question waiting. OpenCode fetches its last
-assistant message on idle and passes its text to the board script. Antigravity's hooks carry no reply text, so
-the board reads the last 256 KiB of the transcript its hook names (`transcript.jsonl`, or `transcript_full.jsonl`,
-which agy 1.5.2 names, with the same line shape), and ignores an earlier reply if a newer user prompt
-has appeared. This format is undocumented and was checked live on agy 1.5.2. Nothing of any reply but its closing question
-is saved. A Stop the hook wrapper copied raw to its queue has no question; one the reporter queued itself keeps its
-one line. For Codex, what they open from `transcript_path` is the
+assistant message on idle and passes its text to the board script. Antigravity's hooks carry no reply or title text, so
+to replace the generic `Local antigravity task` title, the board performs a bounded read of the matching conversation's
+title from the client's local summary file (`agyhub_summaries_proto.pb` or `jetbox_summaries_proto.pb`, skipping
+foreign protobuf entries by wire length without decoding them, or `cache/conversation_metadata.json`, where the CLI JSON file
+is parsed whole in memory and only the matching entry's title is kept) or, while untitled, only the clipped first
+line (at most 48 display columns) of the first `USER_INPUT` entry from the first 256 KiB of its own
+`transcript.jsonl` / `transcript_full.jsonl` (regular file only); and for closing questions, the last 256 KiB of that
+transcript, ignoring an earlier reply if a newer user prompt has appeared. Nothing of hook stdin prompts, remaining prompt
+lines, later prompts or replies other than the closing question is saved. These local client formats are undocumented and
+were checked live on agy 1.5.2 and Antigravity desktop/CLI builds. A Stop the hook wrapper copied raw to its queue has no
+question; one the reporter queued itself keeps its one line. For Codex, what they open from `transcript_path` is the
 first record of the session's own Codex history file (the `rollout-<time>-<session id>.jsonl` file named for the
 session; another session's file is never opened), at a session's start and at each prompt. The
 file is read in pieces of 4 KiB until the one that holds the first line break, so up to 4 KiB
