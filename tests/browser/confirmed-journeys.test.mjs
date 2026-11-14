@@ -181,6 +181,25 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
     })
   })
 
+  test('a fold of finished or further steps the person opened stays open when the board redraws', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('fold-stays-open', async ({ page, progress, startServer }) => {
+      const steps = ['- [x] Synthetic first finished step', '- [x] Synthetic second finished step', '- [ ] Synthetic current step', '- [ ] Synthetic second open step', '- [ ] Synthetic third open step']
+      writeProgress(progress, `## Synthetic folds\n### Keep the folds open\n${steps.join('\n')}\n`)
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      const task = await board.openTask('Keep the folds open')
+      const folds = ['2 steps done', '2 more steps'].map(label => task.getByText(label, { exact: true }))
+      for (const fold of folds) await fold.click()
+      const openFolds = () => Promise.all(folds.map(fold => fold.evaluate(node => node.parentElement.open)))
+      assert.deepEqual(await openFolds(), [true, true])
+      // Another task in the file changes the board, and the page draws every row again.
+      writeProgress(progress, readFileSync(progress, 'utf8') + '\n### Synthetic task added later\n- [ ] Synthetic later step\n')
+      await board.task('Synthetic task added later').waitFor()
+      assert.deepEqual(await openFolds(), [true, true])
+      assert.equal(await task.getByText('Synthetic third open step').first().isVisible(), true)
+    })
+  })
+
   test('setup is idempotent and a reported Muse question remains recoverable across reloads', { concurrency: false, timeout: 120_000 }, async () => {
     await browserFixture('report-hide-restore', async ({ page, progress, root, startServer }) => {
       const board = new BoardPage(page)
