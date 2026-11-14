@@ -275,6 +275,46 @@ test('a worktree add that fails after registering the worktree is a FAIL and lea
   }
 })
 
+test('a sweep whose ref listing fails is a FAIL and leaves nothing of this run behind', async () => {
+  const s = await setup(addFiles)
+  try {
+    const listFails = (command, args, options) => {
+      const done = bare(command, args, options)
+      return args[0] === 'for-each-ref' && args.at(-1) === 'refs/merge-check/' ? { ...done, status: 128, stderr: 'synthetic ref listing failure' } : done
+    }
+    const result = runMergeCheck({ run: listFails, pr: 1, head: s.head, cwd: s.clone, checks: [passesWhenBoth], log: () => {} })
+    assert.equal(result.ok, false)
+    assert.match(result.reason, /^could not list earlier runs' refs to tidy: synthetic ref listing failure/)
+    assertClean(s.clone)
+  } finally {
+    removeLeftovers(s.clone)
+    await rm(s.base, { recursive: true, force: true })
+  }
+})
+
+test('on Windows the npx check runs as one quoted npx.cmd command line through a shell', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
+  const s = await setup(addFiles)
+  try {
+    const npxCheck = { label: 'npx check', command: 'npx', args: ['--yes', 'bun@1.4.2', 'scripts/build-board.ts', '--check'] }
+    const calls = []
+    const recording = (command, args, options) => {
+      if (command === 'git') return bare(command, args, options)
+      calls.push({ command, args, options })
+      return { status: 0, stdout: '', stderr: '' }
+    }
+    const result = runMergeCheck({ run: recording, pr: 1, head: s.head, cwd: s.clone, checks: [npxCheck], log: () => {} })
+    assert.equal(result.ok, true, result.reason)
+    assert.equal(calls.length, 1)
+    assert.match(calls[0].command, /^"[^"]*npx\.cmd" --yes bun@1\.4\.2 scripts\/build-board\.ts --check$/)
+    assert.deepEqual(calls[0].args, [])
+    assert.equal(calls[0].options.shell, true)
+    assertClean(s.clone)
+  } finally {
+    removeLeftovers(s.clone)
+    await rm(s.base, { recursive: true, force: true })
+  }
+})
+
 test('a head that moves while the checks run is a FAIL', async () => {
   const s = await setup(addFiles)
   try {

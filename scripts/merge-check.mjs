@@ -57,18 +57,23 @@ const listedWorktrees = git => {
 }
 
 // A hard kill cannot be caught, so every run first removes what runs whose process is gone left behind (never a live one's).
+// Returns '' when the sweep ran, else why it could not (a listing that fails must not pass for an empty one).
 const sweepStale = git => {
   const refs = git(['for-each-ref', '--format=%(refname)', 'refs/merge-check/'])
-  for (const ref of refs.ok ? refs.out.split(/\r?\n/).filter(Boolean) : []) {
+  if (!refs.ok) return `could not list earlier runs' refs to tidy: ${tail(refs.err, 3)}`
+  const worktrees = listedWorktrees(git)
+  if (!worktrees) return 'could not list worktrees to tidy'
+  for (const ref of refs.out.split(/\r?\n/).filter(Boolean)) {
     if (deadPid(ref.match(/^refs\/merge-check\/(\d+)-/)?.[1])) git(['update-ref', '-d', ref])
   }
-  for (const path of listedWorktrees(git) ?? []) {
+  for (const path of worktrees) {
     if (!deadPid(basename(path).match(/^ab-merge-check-(\d+)-/)?.[1])) continue
     if (!git(['worktree', 'remove', '--force', path]).ok) git(['worktree', 'prune'])
   }
   for (const name of readdirSync(tmpdir())) {
     if (deadPid(name.match(/^ab-merge-hooks-(\d+)-/)?.[1])) rmSync(join(tmpdir(), name), { recursive: true, force: true })
   }
+  return ''
 }
 
 const removeFolder = path => {
@@ -163,8 +168,7 @@ export const runMergeCheck = ({ pr, head, cwd = process.cwd(), remote = 'origin'
 
   const inspect = () => {
     state.hooksDir = mkdtempSync(join(tmpdir(), `ab-merge-hooks-${process.pid}-`))
-    sweepStale(git)
-    return fetchRefs() || mergeHead() || runChecks() || headStillApproved()
+    return sweepStale(git) || fetchRefs() || mergeHead() || runChecks() || headStillApproved()
   }
 
   const stop = () => cleanup(git, state)
