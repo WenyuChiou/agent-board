@@ -384,7 +384,10 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       // The question shows on its Stopped row (the step it stopped at) and in the Older line on the Needs you sheet.
       const stoppedRow = await board.openTask(title)
       await stoppedRow.locator('.r-meta').getByText(words).waitFor()
+      // The press must reach the board and be taken: a lost or refused press fails here, not as a row that never leaves (#1468).
+      const pressed = page.waitForResponse(answer => new URL(answer.url()).pathname === '/api/act')
       await stoppedRow.getByRole('button', { name: 'Archive', exact: true }).click()
+      assert.equal((await pressed).status(), 200)
       await board.task(title).waitFor({ state: 'detached' })
       await page.getByText('1 older question still unanswered (its chat has stopped)', { exact: true }).waitFor()
       await page.getByRole('button', { name: 'See all', exact: true }).click()
@@ -403,6 +406,47 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       assert.ok(!readFileSync(progress, 'utf8').includes(title))
       assert.match(monthlyArchive(progress), /Keep the four-day question recoverable/)
       await assertNoIdentifiers(page, root, ['a61ce001', 'a61ce002', 'a61ce003'])
+    })
+  })
+
+  test('a press held while the board redraws still archives the row it was pressed on (#1468)', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('press-during-redraw', async ({ page, progress, startServer }) => {
+      const old = new Date(Date.now() - 4 * 86400000).toISOString()
+      const title = 'Archive under a moving board'
+      const working = step => block('a62ce003', 'antigravity', 'working', 'Synthetic presses', 'Keep the board moving', [step])
+      const stopped = block('a62ce001', 'codex', 'ended', 'Synthetic presses', title, ['- [ ] Completed synthetic inspection'], 'Synthetic browser fixture only.', old)
+      writeProgress(progress, [stopped, working('- [~] Inspect the first synthetic step')].join('\n'))
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
+      const row = await board.openTask(title)
+      const archive = row.getByRole('button', { name: 'Archive', exact: true })
+      // The opened row settles a moment after it opens; press only once the button has stayed put for a second,
+      // so the only thing that can move it under the pointer is the redraw this test makes.
+      let lastBox = ''
+      let still = 0
+      for (const until = Date.now() + 10_000; still < 10; await new Promise(done => setTimeout(done, 100))) {
+        if (Date.now() > until) throw new Error('the Archive button kept moving after its row opened')
+        const box = JSON.stringify(await archive.boundingBox())
+        still = box === lastBox ? still + 1 : 0
+        lastBox = box
+      }
+      await archive.hover()
+      await page.mouse.down()
+      // The file changes while the button is held, and the board's next answer carries the new model.
+      const moved = page.waitForResponse(answer => new URL(answer.url()).pathname === '/api/board' && answer.status() === 200)
+      writeProgress(progress, [stopped, working('- [~] Inspect the second synthetic step')].join('\n'))
+      await moved
+      // The page asks again only after it has handled the last answer, so the next answer means that one was handled.
+      await page.waitForResponse(answer => new URL(answer.url()).pathname === '/api/board')
+      // Under the press the board keeps what it showed.
+      assert.equal(await page.getByText('Inspect the second synthetic step').count(), 0)
+      const pressed = page.waitForResponse(answer => new URL(answer.url()).pathname === '/api/act')
+      await page.mouse.up()
+      assert.equal((await pressed).status(), 200)
+      await board.task(title).waitFor({ state: 'detached' })
+      // Once the pointer is up the board draws again, with the step that changed under the press.
+      await page.getByText('Inspect the second synthetic step').first().waitFor()
     })
   })
 })

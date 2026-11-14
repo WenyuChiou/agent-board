@@ -1385,6 +1385,17 @@ const PAGE_SCRIPT = String.raw`
   var GLYPH = { done: '✓', doing: '▸', todo: '•', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
   var boardEtag = '';
+  // A press is a press and a release on the same button. A redraw between them puts a new button under the pointer and
+  // the click is lost without a word (#1468), so while a pointer is down the board keeps what it shows and draws from
+  // the next answer. The flag clears after the click that follows the release has run.
+  var isPointerDown = false;
+  function pointerReleased() { setTimeout(function () { isPointerDown = false; }, 0); }
+  document.addEventListener('pointerdown', function () { isPointerDown = true; }, true);
+  document.addEventListener('pointerup', pointerReleased, true);
+  document.addEventListener('pointercancel', pointerReleased, true);
+  window.addEventListener('blur', pointerReleased);
+  // A move with no button held means the release was lost (a context menu, a scrollbar drag): the board draws again.
+  document.addEventListener('pointermove', function (event) { if (isPointerDown && !event.buttons) isPointerDown = false; }, true);
   var opened = {};
   var timer = null;
   var isClosed = false;
@@ -3461,7 +3472,9 @@ const PAGE_SCRIPT = String.raw`
       connections = data.messaging && data.messaging.connections || [];
       latestApprovals = data.approvals || null;
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; }), latestApprovals], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
-      if (text !== last) {
+      // Under a press this answer is not drawn, and the next poll asks for the whole board again (#1468).
+      if (text !== last && isPointerDown) boardEtag = '';
+      else if (text !== last) {
         last = text;
         render(data.model);
         if (presence) { presence.remove(); presence = null; }
