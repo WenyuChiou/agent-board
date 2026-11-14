@@ -510,6 +510,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (action === 'take') {
       const surface = flag('--surface')
       const message = await mailbox.turn(agent, session, surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui ? surface : SURFACE_IDS.unknown, Date.now())
+      if (message === null && mailbox.error !== null) throw new Error(mailbox.error)
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line

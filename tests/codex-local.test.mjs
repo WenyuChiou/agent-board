@@ -7716,6 +7716,72 @@ test('a deferred take asks again for its own session only, and a session closed 
   for (const agent of [a, b, reopened]) hooks.get('agent/disposed')({ agent })
 }))
 
+test('hook delivery and DeepSeek take report corrupt messages.json as an error instead of deferred, while a held claim stays deferred (#1448)', () => mailboxFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  f.save(join(f.directory, 'messages.json'), '{not json')
+  const failedHook = f.call('codex', 'UserPromptSubmit')
+  assert.equal(failedHook.status, 0, failedHook.stderr)
+  assert.equal(failedHook.stdout, '')
+  assert.match(failedHook.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
+  assert.doesNotMatch(failedHook.stderr, /deferred/)
+
+  const claim = claimMessageStore(f.directory)
+  let isHeld = true
+  try {
+    const deferredHook = f.call('codex', 'UserPromptSubmit')
+    assert.equal(deferredHook.status, 0, deferredHook.stderr)
+    assert.match(deferredHook.stderr, /board: mailbox deferred/)
+
+    const deferredTake = spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--mailbox', 'take', '--session', 'deepseek-error-session'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    assert.equal(deferredTake.status, 0, deferredTake.stderr)
+    const parsed = JSON.parse(deferredTake.stdout)
+    assert.equal(parsed.message, null)
+    assert.equal(parsed.deferred, true)
+  } finally {
+    if (isHeld) { claim.release(); isHeld = false }
+  }
+
+  const failedTake = spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--mailbox', 'take', '--session', 'deepseek-error-session'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.notEqual(failedTake.status, 0)
+  assert.equal(failedTake.stdout, '')
+  assert.match(failedTake.stderr, /INVALID_MESSAGE_STORE/)
+
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { randomUUID } = await import('node:crypto')
+  const { watch } = await import('node:fs')
+  const children = []
+  const spawnMailbox = (command, args, options = {}) => {
+    const child = spawn(command, args, { ...options, env: f.env })
+    children.push(child)
+    child.on('close', () => { child.isClosed = true })
+    return child
+  }
+  const settled = () => children.every(child => child.isClosed)
+  const takes = () => children.filter(child => child.spawnargs.includes('take'))
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), f.progress, f.home, f.script)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
+  const agent = { session: { header: { id: 'deepseek-error-session' } }, status: 'idle', received: [], followup() { throw new Error('UNUSED') } }
+  const hooks = new Map()
+  const log = join(f.home, '.agent-board', 'hook-errors.log')
+  try {
+    apply({ on: (name, fn) => hooks.set(name, fn) })
+    hooks.get('agent/created')({ agent })
+    for (const end = Date.now() + 15_000; (takes().length < 1 || !settled()) && Date.now() < end; await new Promise(done => setTimeout(done, 50))) {}
+    assert.equal(takes().length, 1)
+    assert.equal(settled(), true)
+    await new Promise(done => setTimeout(done, 600))
+    assert.equal(takes().length, 1, 'a non-deferred store failure must not ask again repeatedly')
+    const logged = existsSync(log) ? readFileSync(log, 'utf8') : ''
+    assert.equal(logged.split('MAILBOX_FAILED').length - 1, 1, logged)
+    hooks.get('agent/disposed')({ agent })
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end; await new Promise(done => setTimeout(done, 50))) {}
+  } finally {
+    for (const child of children) if (!child.isClosed) child.kill()
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
+  }
+}))
+
 // The DeepSeek receiver with a stub board script. A take is answered by plan(call) (an object, or 'fail'); with no
 // answer from the plan it is held until the test calls its answer. Watchers opened are listed, the log is read back.
 const deepseekStub = async (f, tag, queued) => {

@@ -95,7 +95,10 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
   // Only the live event has a host reading stdout. A queued event and recovery never claim.
   if (mode !== '--codex-report' && report !== undefined && hookDeadline - Date.now() >= 300) {
     let mailbox: ReturnType<typeof hookMailbox> | undefined
-    try { mailbox = hookMailbox(defaultMessagesDirectory(progress, home, process.env, process.platform), hookDeadline - Date.now()) } catch {}
+    let setupError: string | null = null
+    try { mailbox = hookMailbox(defaultMessagesDirectory(progress, home, process.env, process.platform), hookDeadline - Date.now()) } catch (error) {
+      setupError = error instanceof Error && error.message ? error.message : 'MAILBOX_FAILED'
+    }
     if (isSessionEnd(agent, event)) {
       try { await mailbox?.end(agent, session, Date.now()) } catch {}
     } else if (isTurnStart(agent, event)) {
@@ -146,7 +149,9 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
         }
         return true
       }
+      const failed = mailbox?.error ?? setupError
       if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
+      else if (failed !== null) process.stderr.write(`${s.localAgentMailboxFailed(failed)}\n`)
     }
   }
   return false

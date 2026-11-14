@@ -633,6 +633,8 @@ export const LINES = [
 "    if (action === \"take\") {",
 "      const surface = flag(\"--surface\");",
 "      const message = await mailbox.turn(agent, session, surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui ? surface : SURFACE_IDS.unknown, Date.now());",
+"      if (message === null && mailbox.error !== null)",
+"        throw new Error(mailbox.error);",
 "      const line = message === null ? \"\" : message.text.replace(/\\s+/g, \" \").trim();",
 "      const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line;",
 "      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary }, deferred: message === null && mailbox.hasDeferred });",

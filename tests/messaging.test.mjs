@@ -402,6 +402,56 @@ test('a hook-only target takes one message per turn, oldest first, and an accept
   assert.equal(mailboxTake(state, now + 7).message.id, 'third')
 })
 
+test('hookMailbox defers only when the store is busy or times out, and exposes store errors (#1448)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-error-'))
+  try {
+    const missing = hookMailbox(join(dir, 'missing'), 500)
+    assert.equal(await missing.turn('codex', 's-missing', 'CLI', Date.now()), null)
+    assert.equal(missing.hasDeferred, false)
+    assert.equal(missing.error, null)
+
+    const corrupt = join(dir, 'corrupt')
+    mkdirSync(corrupt)
+    writeFileSync(join(corrupt, 'messages.json'), '{not json')
+    const corruptBox = hookMailbox(corrupt, 500)
+    assert.equal(await corruptBox.turn('codex', 's-corrupt', 'CLI', Date.now()), null)
+    assert.equal(corruptBox.hasDeferred, false)
+    assert.equal(corruptBox.error, 'INVALID_MESSAGE_STORE')
+
+    const unsafe = join(dir, 'unsafe')
+    mkdirSync(unsafe)
+    mkdirSync(join(unsafe, 'messages.json'))
+    const unsafeBox = hookMailbox(unsafe, 500)
+    assert.equal(await unsafeBox.turn('codex', 's-unsafe', 'CLI', Date.now()), null)
+    assert.equal(unsafeBox.hasDeferred, false)
+    assert.equal(unsafeBox.error, 'UNSAFE_MESSAGE_FILE')
+
+    const badOwner = join(dir, 'bad-owner')
+    mkdirSync(badOwner)
+    writeFileSync(join(badOwner, 'server.lock'), String(process.pid))
+    writeFileSync(join(badOwner, 'server.owner'), '{bad owner')
+    const badOwnerBox = hookMailbox(badOwner, 500)
+    assert.equal(await badOwnerBox.turn('codex', 's-owner', 'CLI', Date.now()), null)
+    assert.equal(badOwnerBox.hasDeferred, false)
+    assert.equal(badOwnerBox.error, 'INVALID_SERVER_OWNER')
+
+    writeFileSync(join(badOwner, 'server.owner'), JSON.stringify({ pid: process.pid + 1, url: 'http://127.0.0.1:9999/?t=synthetic' }))
+    assert.equal(await badOwnerBox.turn('codex', 's-owner', 'CLI', Date.now()), null)
+    assert.equal(badOwnerBox.hasDeferred, false)
+    assert.equal(badOwnerBox.error, 'INVALID_SERVER_OWNER')
+
+    const busy = join(dir, 'busy')
+    mkdirSync(busy)
+    const claim = claimMessageStore(busy)
+    try {
+      const busyBox = hookMailbox(busy, 500)
+      assert.equal(await busyBox.turn('codex', 's-busy', 'CLI', Date.now()), null)
+      assert.equal(busyBox.hasDeferred, true)
+      assert.equal(busyBox.error, null)
+    } finally { claim.release() }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('an uncertain mailbox message still blocks its target and is never handed out again', () => {
   const now = Date.now()
   const first = mailboxTake(mailboxQueue(mailboxSeed(now), 'uncertain-first'), now + 1)

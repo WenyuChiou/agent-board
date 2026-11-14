@@ -81,6 +81,7 @@ export const ZH_TW = {
   localAgentStepFormat: '一行 Markdown 任務：「- [x] 完成」、「- [~] 進行中」、「- [ ] 下一步」、「- [?] 等使用者回答」、「- [!] 卡住」、「- [>] 在別處執行或已交棒」、「- [-] 取消」。需要使用者時，把步驟標成 [?]，寫一行對方能直接回答的話：是非題用「…可以嗎？」結尾，選擇題寫成「A 還是 B？」，指令放在反引號裡，等別人時用「等」開頭。',
   localAgentAntigravityContext: (command: string): string => `原生 hook 已將 Agent Board 綁定到目前的 Antigravity 對話。每個實際任務步驟之後與最後回覆之前，將最少任務摘要以 JSON 從 stdin 傳給 \`${command}\`。格式為 {"title":"任務摘要","project":"專案","state":"working","steps":["- [x] 已完成","- [~] 目前步驟"]}。等待使用者時回報 state "waiting"，把待回答問句完整寫成「- [?] 你的問題？」並保留已完成步驟；所有步驟完成才用 "done"。只回報摘要，不傳原始對話或機密。僅使用 hook 提供給目前對話的命令；不得猜測或替換 session id、讀取對話紀錄或繞過工具權限。原生 hooks 更新活動狀態，任務步驟與問句由你明確回報。需要使用者時，把步驟標成 [?]，寫一行對方能直接回答的話：是非題用「…可以嗎？」結尾，選擇題寫成「A 還是 B？」，指令放在反引號裡，等別人時用「等」開頭。`,
   localAgentMailboxDeferred: 'board: mailbox deferred',
+  localAgentMailboxFailed: (error: string): string => `board: mailbox failed (${error})`,
   localAgentLifecycle: "等待下一個工作指令",
   localAgentLifecycleWorking: "正在處理你的請求",
   localHostReview: '安裝檔案後仍須在原生 host 核對 hooks／plugin 是否啟用，並分開驗收 CLI、App、IDE 的實際事件；既有 session 可能需要重新載入。此安裝不繞過信任、不讀對話、不啟用遠端控制，也不代表已建立傳訊連線。',
