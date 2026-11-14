@@ -12366,3 +12366,78 @@ test('asking Antigravity row and working twin with the same title show start tim
   assert.ok(visible.includes(rAsk.context), visible)
   assert.ok(visible.includes(rWork.context), visible)
 }))
+
+test('upgrading a pre-#1401 Antigravity record preserves its legacy start time, and two asking twins with identical questions keep two web cards (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recOf = id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`), 'utf8'))
+  const recFileOf = id => join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`)
+
+  for (const [id, legacyTitle, expectedStamp] of [
+    ['synthetic-legacy-upgrade-en-1401', 'Local antigravity task · 2026-10-15 08:09:10.123', '2026-10-15 08:09:10.123'],
+    ['synthetic-legacy-upgrade-tw-1401', 'antigravity 本機任務 · 2026-10-15 08:09:11.456', '2026-10-15 08:09:11.456'],
+    ['synthetic-legacy-upgrade-cn-1401', 'antigravity 本地任务 · 2026-10-15 08:09:12.789', '2026-10-15 08:09:12.789'],
+  ]) {
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+      conversationId: id,
+    }).status, 0)
+    const legacy = recOf(id)
+    delete legacy.startedAt
+    delete legacy.titleSource
+    delete legacy.context
+    legacy.title = legacyTitle
+    writeFileSync(recFileOf(id), `${JSON.stringify(legacy, null, 2)}\n`)
+    if (id.endsWith('-en-1401')) {
+      f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+        { id, title: 'Upgraded Antigravity Title' },
+      ]))
+    }
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+      conversationId: id,
+    }).status, 0)
+    const upgraded = recOf(id)
+    assert.equal(upgraded.title, id.endsWith('-en-1401') ? 'Upgraded Antigravity Title' : 'Local antigravity task')
+    assert.equal(upgraded.context, `Started ${expectedStamp}`)
+  }
+
+  const askOneId = 'synthetic-ag-two-asks-one-1401'
+  const askTwoId = 'synthetic-ag-two-asks-two-1401'
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: askOneId, title: 'Shared Closing Question' },
+    { id: askTwoId, title: 'Shared Closing Question' },
+  ]))
+  for (const id of [askOneId, askTwoId]) {
+    const transcript = join(f.home, '.gemini', 'antigravity', 'brain', id, 'transcript.jsonl')
+    f.save(transcript, [
+      JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Check deployment readiness' }),
+      JSON.stringify({ source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Ship release now, OK?' }),
+    ].join('\n') + '\n')
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+      conversationId: id,
+      transcriptPath: transcript,
+    }).status, 0)
+    if (id === askOneId) await new Promise(done => setTimeout(done, 15))
+  }
+  const rOne = recOf(askOneId)
+  const rTwo = recOf(askTwoId)
+  assert.notEqual(rOne.context, rTwo.context)
+
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { serveModel, servePage } = await importTs('../hooks/serve.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+
+  const view = buildView(parseProgress(readFileSync(f.progress, 'utf8')), [], null, Date.now(), 0, {}, STRINGS.en)
+  const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  assert.ok(screen.includes(rOne.context), screen)
+  assert.ok(screen.includes(rTwo.context), screen)
+  const model = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
+    now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },
+  })
+  assert.equal(model.view?.needs.cards.length, 2)
+  const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), model)
+  const visible = dom.visible()
+  assert.ok(visible.includes(rOne.context), visible)
+  assert.ok(visible.includes(rTwo.context), visible)
+}))

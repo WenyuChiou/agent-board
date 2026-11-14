@@ -128,6 +128,18 @@ const distinctStarted = (at: number): string => {
   const date = new Date(at)
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}.${pad3(date.getMilliseconds())}`
 }
+
+// Recover the original millisecond start time encoded in a pre-#1401 generic local task title
+// ("Local antigravity task · YYYY-MM-DD HH:MM:SS.mmm") so upgrading never resets Started times.
+const legacyStartedAt = (title: string, agent: LocalAgent): number | undefined => {
+  const prefix = Object.values(STRINGS).map(one => `${one.localAgentTask(agent)} · `).find(text => title.startsWith(text))
+  if (prefix === undefined) return undefined
+  const stamp = title.slice(prefix.length)
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\.(\d{3})$/.exec(stamp)
+  if (match === null) return undefined
+  const at = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]), Number(match[7])).getTime()
+  return Number.isFinite(at) && distinctStarted(at) === stamp ? at : undefined
+}
 const readBytes = (file: string): Buffer | null => {
   try { return readFileSync(file) } catch (error) {
     if ((error as { code?: string }).code === 'ENOENT') return null
@@ -822,7 +834,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // fallback name, and keep its millisecond start time as secondary context text.
       const antigravityState = (() => {
         if (mode !== '--agent-status' || agent !== 'antigravity') return null
-        const startedAt = previous?.startedAt ?? sourceAt
+        const startedAt = previous === null
+          ? sourceAt
+          : previous.startedAt ?? legacyStartedAt(previous.title, agent) ?? (Number.isFinite(Date.parse(previous.updated)) ? Date.parse(previous.updated) : undefined) ?? sourceAt
         const isGeneric = previous !== null && isGenericTitle(previous.title)
         const isExplicit = previous !== null && !isGeneric && previous.titleSource !== 'fallback' && previous.titleSource !== 'prompt' && previous.titleSource !== 'summary'
         const context = isExplicit && previous.context ? previous.context : s.localAgentStarted(distinctStarted(startedAt))

@@ -283,15 +283,22 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
     return at.isRun ? own : at
   }
 
-  // Copies under one task share a card only in the same folder. The newest stays where the first
-  // stood, and a pending question keeps an older copy of itself off the older line.
-  const listed = new Map<string, { list: GroupedQuestion[]; index: number }>()
+  // Copies under one task share a card only in the same folder and session (when session ids are
+  // known, #1401). The newest stays where the first stood, and a pending question keeps an older copy
+  // of itself off the older line.
+  const listed = new Map<string, Array<{ list: GroupedQuestion[]; index: number }>>()
   const list = (question: GroupedQuestion, into: GroupedQuestion[]): void => {
     const note = 'note' in question.source && typeof question.source.note === 'string' ? plain(question.source.note) : ''
     const id = JSON.stringify([question.agent, question.project, question.task, plain(question.text), note, folderOf(question.source.dir ?? '')])
-    const held = listed.get(id)
+    const entries = listed.get(id)
+    const held = entries?.find(one => {
+      const current = one.list[one.index]
+      return current !== undefined && sameTaskSession(current.source, question.source)
+    })
     if (held === undefined) {
-      listed.set(id, { list: into, index: into.length })
+      const entry = { list: into, index: into.length }
+      if (entries === undefined) listed.set(id, [entry])
+      else entries.push(entry)
       into.push(question)
     } else if (held.list === into && question.at > (held.list[held.index]?.at ?? 0)) held.list[held.index] = question
   }

@@ -946,7 +946,8 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       seenTaskTitles.add(taskKey)
       titleCounts.set(item.row.title, (titleCounts.get(item.row.title) ?? 0) + 1)
     } else if (item.type === 'ask' && !item.key.startsWith('older:') && item.ask.task !== '') {
-      const taskKey = item.ask.session !== '' ? `s:${item.ask.session}` : item.ask.key.replace(/::\d+$/, '')
+      const session = item.ask.target?.session || item.ask.sessionId || item.ask.session
+      const taskKey = session !== '' ? `s:${session}` : item.ask.key.replace(/::\d+$/, '')
       if (seenTaskTitles.has(taskKey)) continue
       seenTaskTitles.add(taskKey)
       titleCounts.set(item.ask.task, (titleCounts.get(item.ask.task) ?? 0) + 1)
