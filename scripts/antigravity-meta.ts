@@ -286,9 +286,9 @@ export const readAntigravityFirstPrompt = (
       const parsed: unknown = JSON.parse(line)
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
       const entry = parsed as Record<string, unknown>
-      if (entry.type !== 'USER_INPUT' || typeof entry.content !== 'string') continue
-      const clipped = sanitizeTitle(firstPromptLine(entry.content), ANTIGRAVITY_ROW_TITLE_WIDTH)
-      if (clipped !== null) return clipped
+      if (entry.type !== 'USER_INPUT') continue
+      if (typeof entry.content !== 'string') return null
+      return sanitizeTitle(firstPromptLine(entry.content), ANTIGRAVITY_ROW_TITLE_WIDTH)
     }
     return null
   } catch { return null }

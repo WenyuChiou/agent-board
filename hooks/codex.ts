@@ -239,6 +239,10 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
     session, turn: turn ?? previous?.turn ?? null, state,
     title: previous?.title ?? s.codexTask,
     project: previous?.project ?? s.codexProject,
+    ...(previous?.context === undefined ? {} : { context: previous.context }),
+    ...(previous?.startedAt === undefined ? {} : { startedAt: previous.startedAt }),
+    ...(previous?.titleSource === undefined ? {} : { titleSource: previous.titleSource }),
+    ...(previous?.activity === undefined ? {} : { activity: previous.activity }),
     // The hook never reads the prompt, so reported steps remain unchanged here (#243).
     steps,
     ...(approval === undefined ? {} : { approval }),

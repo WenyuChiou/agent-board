@@ -12694,3 +12694,40 @@ test('upgrading a pre-#1401 Antigravity record preserves its legacy start time, 
   assert.ok(visible.includes(rOne.context), visible)
   assert.ok(visible.includes(rTwo.context), visible)
 }))
+
+test('readAntigravityFirstPrompt stops at an empty first USER_INPUT and codexEvent preserves context (#1401)', () => fixture(async f => {
+  const { readAntigravityFirstPrompt } = await importTs('../scripts/antigravity-meta.ts')
+  const { codexEvent, codexReport } = await importTs('../hooks/codex.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const emptyFirstId = 'synthetic-ag-empty-first-1401'
+  const emptyFirstPath = join(f.home, '.gemini', 'antigravity', 'brain', emptyFirstId, 'transcript.jsonl')
+  f.save(emptyFirstPath, [
+    JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\n</USER_REQUEST>' }),
+    JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Private second prompt must never become title' }),
+  ].join('\n') + '\n')
+  assert.equal(readAntigravityFirstPrompt(emptyFirstPath, emptyFirstId, f.home), null)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: emptyFirstId,
+    transcriptPath: emptyFirstPath,
+  }).status, 0)
+  const rec = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${emptyFirstId}`).digest('hex')}.json`), 'utf8'))
+  assert.equal(rec.title, 'Local antigravity task')
+  assert.equal(rec.titleSource, 'fallback')
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('Private second prompt'))
+
+  const reported = codexReport(null, 'synthetic-context-1401', {
+    title: 'Context task',
+    project: 'agent-board',
+    context: 'Keep this context',
+    state: 'working',
+    steps: ['- [~] Working'],
+  }, '2026-11-14T03:00:00.000Z', STRINGS.en)
+  const afterEvent = codexEvent(reported, {
+    session_id: 'synthetic-context-1401',
+    hook_event_name: 'UserPromptSubmit',
+    turn_id: 'turn-context-1',
+  }, '2026-11-14T03:00:01.000Z', STRINGS.en)
+  assert.equal(afterEvent.context, 'Keep this context')
+}))
