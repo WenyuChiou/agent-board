@@ -682,7 +682,9 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
           lastError = null
           return { message: null }
         }
-        lastError = 'BOARD_NOT_RUNNING'
+        // Nothing at the messages folder means no board has run here, which is not a failure: the open a named take asks
+        // first (#1366) reads as empty there, as an unnamed take does (#1448). Its caller still tells it apart by isAbsent.
+        lastError = action === 'mailbox-open' && isAbsent ? null : 'BOARD_NOT_RUNNING'
         throw new Error('BOARD_NOT_RUNNING')
       }
       if (hasDeferred) lastError = null

@@ -3681,7 +3681,7 @@ export const LINES = [
 "          lastError = null;",
 "          return { message: null };",
 "        }",
-"        lastError = \"BOARD_NOT_RUNNING\";",
+"        lastError = action === \"mailbox-open\" && isAbsent ? null : \"BOARD_NOT_RUNNING\";",
 "        throw new Error(\"BOARD_NOT_RUNNING\");",
 "      }",
 "      if (hasDeferred)",
