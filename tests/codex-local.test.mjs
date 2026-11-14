@@ -13,6 +13,7 @@ import { neverShown } from './fixtures/never-shown.mjs'
 import { hookOrDeferred, turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
+import { deliveryText } from '../hooks/messaging.ts'
 import { HOOK_INPUT_TIMEOUT, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
@@ -3681,6 +3682,23 @@ test('raw replay classifies board requests and ordinary prompts like live events
   }
 }))
 
+test('a prompt that is a board delivery leaves the question open, like a board request', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  holdAutomaticRecovery(f)
+  const at = Date.now() - 4050
+  const states = []
+  for (const [index, prompt] of ['Continue the task', deliveryText({ id: 'AB-1', from: 'board', to: 'gemini:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' })].entries()) {
+    const session_id = `delivery-prompt-session-${index}`
+    const report = f.command(['--codex-report', '--agent', 'gemini', '--session', session_id, '--hook-started', String(at - 1000)], { title: 'Question', state: 'waiting', steps: ['- [?] Choose a path'] })
+    assert.equal(report.status, 0, report.stderr)
+    const live = f.command(['--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress], { session_id, hook_event_name: 'BeforeAgent', prompt })
+    assert.equal(live.status, 0, live.stderr)
+    states.push(JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`gemini:${session_id}`).digest('hex')}.json`))).state)
+  }
+  // The person's own words start work again; a delivered board message is not the person's and does not.
+  assert.deepEqual(states, ['working', 'waiting'])
+}))
+
 test('raw replay accepts clock skew and removes only old pending temporary files', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   const pending = join(f.root, 'pending'), at = Date.now() + 50000
@@ -5908,6 +5926,15 @@ test('Grok reopens a done block for a closing question and keeps it done for a p
   const board = readFileSync(f.progress, 'utf8')
   assert.match(board, /state=waiting/)
   assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
+}))
+
+test('a Codex turn that starts from a board delivery still shows its closing question', () => fixture(f => {
+  f.install('--apply')
+  const prompt = deliveryText({ id: 'AB-1', from: 'board', to: 'codex:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-1', { prompt }).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which build should I use?' }).status, 0)
+  // The delivery is no board lookup: what Codex asks at the end of its turn reaches the board.
+  assert.ok(readFileSync(f.progress, 'utf8').includes('- [?] Which build should I use?'))
 }))
 
 test('the approval step and the question step close and reuse their own lines in either order', () => fixture(f => {

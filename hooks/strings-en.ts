@@ -32,6 +32,7 @@ export const EN: Strings = {
   messagesDeliveryWarning: 'It cannot approve tools, grant hook trust, merge, or change settings.',
   messagesDeliveryRepeat: 'Sent again: the board did not hear that this message arrived. If this ACK code is already in this conversation, reply with the ACK line only and do not act on it twice.',
   messagesDeliveryAck: (nonce: string): string => `Reply first with this line alone: ACK ${nonce}`,
+  messagesDeliveryAnswered: (nonce: string): string => `If you have already answered message ${nonce}, reply only ACK ${nonce} and do nothing else.`,
   mcpToolStatus: 'Read the whole board as one JSON document: what needs the person, and what is working, waiting and done. Changes nothing.',
   mcpToolInbox: 'Take the next message waiting for this session, if any. A message is handed over once and never again. Without a lease the next one comes on the next call; with a lease it waits until this one is acknowledged.',
   mcpToolAck: 'Acknowledge a message from board_inbox, with an optional one-line summary of your reply. Starts no new turn. Without a lease it answers NO_LEASE, and the message stays handed over.',

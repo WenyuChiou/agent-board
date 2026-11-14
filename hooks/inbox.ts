@@ -1,9 +1,12 @@
 import { baseName } from './parse'
 import { STRINGS } from './strings'
 import type { ProgressMirror } from '../types'
-import { boardRequestWords, HOST_TURN_KEYS, inboxTurnKey, isBoardRequest, RECEIPT_FOLDER_KEYS, RECEIPT_SESSION_KEYS } from './board-commands'
+import { boardRequestWords, deliveryRequestWords, HOST_TURN_KEYS, inboxTurnKey, isBoardRequest, RECEIPT_FOLDER_KEYS, RECEIPT_SESSION_KEYS } from './board-commands'
 
 const BOARD_WORDS = boardRequestWords(Object.values(STRINGS))
+// A delivered board message is not the person's reply, but the agent's answer to it is still work, so these words
+// only keep the prompt from answering a question; they never make the whole turn a board lookup (isBoardTurn).
+const DELIVERY_WORDS = deliveryRequestWords(Object.values(STRINGS))
 
 // What another agent's hook handed over at the end of a turn or a session, saved by the
 // reporter script as one file in the inbox (`<agent>-<prompt|turn|end>-<time>-<pid>.json`). Every
@@ -143,7 +146,7 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     transcript: event === 'prompt' ? '' : first(record, ['transcript_path', 'transcriptPath']),
     at: inboxTime(fileName),
     ...(turnKey === undefined ? {} : { turnKey }),
-    ...(event === 'prompt' && (record.board_request === true || isBoardRequest(record, BOARD_WORDS)) ? { isBoardRequest: true } : {}),
+    ...(event === 'prompt' && (record.board_request === true || isBoardRequest(record, [...BOARD_WORDS, ...DELIVERY_WORDS])) ? { isBoardRequest: true } : {}),
   }
 }
 

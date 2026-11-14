@@ -18,7 +18,7 @@ import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from '
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
 import { deliveryTargets } from './hook-messages'
-import { address, isMailboxSurfaceLost, isMailboxTarget, isOpen, sendDecision, SURFACE_IDS } from './messaging'
+import { address, isMailboxSurfaceLost, isMailboxTarget, isOpen, isRecordedRoute, sendDecision, SURFACE_IDS } from './messaging'
 import { RECEIVER_ROUTES } from './receiver-routes'
 
 // The board's page: what `agent-board` shows in a browser for agents other than
@@ -480,8 +480,10 @@ const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: Readonl
 // `routes`: the receivers' records, which say on each card when a message arrives and whether Send is offered.
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
-  const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes)
-  const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], (agent, session) => sessionState(view, agent, session), routes, group?.now ?? 0)
+  const stateOfSession = (agent: string, session: string): RowState | undefined => sessionState(view, agent, session)
+  // A live connection hides its session's mailbox only on a route its record shows for the session's state now (#318).
+  const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes, live => isRecordedRoute(live, stateOfSession, routes))
+  const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], stateOfSession, routes, group?.now ?? 0)
   const isMessageSurfaceLost = (one: ShownMessage): boolean => isMailboxSurfaceLost(one, messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)

@@ -27,6 +27,7 @@ import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
+import { explicitCodexExecutable, resolveCodexExecutable } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
@@ -79,7 +80,7 @@ const flag = (name: string): string | undefined => {
 }
 const BOOL_FLAGS = new Set([
   '--all', '--allow-resume', '--agent-status', '--apply', '--chat', '--codex-doctor',
-  '--codex-event', '--codex-remove', '--codex-report', '--codex-setup', '--codex-trust',
+  '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
@@ -2170,6 +2171,17 @@ const openPageState = async (server: RunningServer): Promise<PageState> => {
   return answer.wantsKeyedPage === true && !(process.env.SSH_CONNECTION || process.env.SSH_TTY) ? 'unkeyed' : 'open'
 }
 
+// The Codex program the receiver runs (#318). The receiver is off unless the page was started with `--codex-send`: whether a
+// command that needs approval still reaches the person while the board is joined is not proven on a real Codex yet (#318).
+// Then AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else, it turns the receiver off), else the one
+// on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names its own, so it never reaches the real ~/.codex.
+const codexReceiverExecutable = (): string | null => {
+  if (!args.includes('--codex-send')) return null
+  const given = process.env.AGENT_BOARD_CODEX_BIN
+  if (given !== undefined) return explicitCodexExecutable(given)
+  return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
+}
+
 // The detached Windows child reports startup failures through a private file too; redirecting
 // its standard handles would make Start-Process inherit the caller's extra pipes again.
 const serveChildError = (message: string): void => {
@@ -2220,6 +2232,12 @@ const serveChild = (): void => {
       routes: routesStandIn(),
       messagesDirectory: messagesDirectory(),
       isDefaultMessagesDirectory: flag('--messages-dir') === undefined,
+      codex: {
+        // Read now, not the page's cache: a tick has no page poll behind it, so a cache would keep an ended session attached and miss a new one.
+        // A file that is missing or cannot be read throws, so the tick keeps every thread: only a row read as ended or gone ends one.
+        threads: () => parseProgress(readFileSync(path, 'utf8')).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
+        executable: codexReceiverExecutable(),
+      },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests
         // still read current bytes instead of accepting an older page's baseline.
@@ -2228,7 +2246,7 @@ const serveChild = (): void => {
       },
       get s() { return s },
       port: requestedPort,
-      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
+      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: args.includes('--codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       pending: (isFresh = true) => pending(undefined, isFresh),
@@ -2383,7 +2401,7 @@ const runningPage = async (isStarting = false): Promise<{ page: Running; isKept:
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
   const requestedStale = staleTimeoutMs()
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (!args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
@@ -2467,6 +2485,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
+  if (args.includes('--codex-send')) rest.push('--codex-send')
   // The child runs with cwd set to the board's folder, so a relative path would resolve
   // against the board's folder instead of this command's folder. Pass the board and the
   // messages folder the parent resolved, as absolute paths, so the child serves the same

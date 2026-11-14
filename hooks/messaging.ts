@@ -39,6 +39,9 @@ export type Message = {
   // The surface the board checked the route for (set only by the board). Another surface of the same session
   // cannot claim the message, since the record shown for the first says nothing of it.
   surface?: string
+  // When an automatic receiver left with this message still queued. The board refuses the message a fixed time after
+  // this, working from the store alone; the next receiver of the session takes it over and clears the stamp (#318).
+  leftAt?: number
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
@@ -50,7 +53,7 @@ export const ROUTE_LINES: readonly RouteLine[] = ['now', 'stepEnd', 'nextTurn', 
 export type RowState = 'idle' | 'working' | 'ended'
 export type RouteKind = 'live' | 'mailbox' | 'turn'
 export const SURFACE_IDS = {
-  claude: 'Claude Code', codexProxy: 'Codex local proxy', codexSession: 'Codex owned session',
+  claude: 'Claude Code', codexProxy: 'Codex local proxy', codexSession: 'Codex owned session', codexDaemon: 'Codex daemon',
   antigravityStream: 'Antigravity owned CLI stream', antigravityTui: 'agy TUI', antigravityIde: 'IDE',
   cursor: 'IDE (Composer)', cli: 'CLI', web: 'Web', tui: 'TUI', unknown: 'unknown',
 } as const
@@ -73,6 +76,13 @@ export type SendDecision =
 
 const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteKind, state: RowState): Route | undefined =>
   records.find(one => one.agent === (agent === '' ? 'claude' : agent) && one.kind === kind)?.routes[state]
+// Whether a connection's own route, for its session's state now, has a live note that covers its surface. Only such a
+// live connection takes the place of the session's mailbox: an unrecorded route never stands in for a recorded one (#318).
+export const isRecordedRoute = (one: Connection, stateOfSession: (agent: string, session: string) => RowState | undefined, routes: readonly ReceiverRoutes[]): boolean => {
+  const state = stateOfSession(one.agent, one.session)
+  const route = state === undefined ? undefined : routeOf(routes, one.agent, routeKind(one.scope), state)
+  return route !== undefined && route.line !== 'none' && isNote(routeRecord(route, one.surface)) && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface)
+}
 
 export const sendDecision = (
   targetId: string, connections: readonly Connection[], mailboxes: readonly Connection[],
@@ -82,8 +92,9 @@ export const sendDecision = (
   const target = connections.find(one => one.id === targetId) ?? mailboxes.find(one => one.id === targetId)
   if (target === undefined) return { canSend: false, line: 'none', reason: 'NO_TARGET' }
   const live = connections.filter(one => address(one.agent, one.session) === address(target.agent, target.session) && one.expires > now)
-  if (mailboxes.includes(target) && live.length > 0) return { canSend: false, line: 'none', reason: 'SHADOWED' }
-  if (target.contested || live.length > 1) return { canSend: false, line: 'none', reason: 'CONTESTED' }
+  const isMailbox = mailboxes.includes(target)
+  if (isMailbox && live.some(one => isRecordedRoute(one, stateOfSession, routes))) return { canSend: false, line: 'none', reason: 'SHADOWED' }
+  if (target.contested || !isMailbox && live.length > 1) return { canSend: false, line: 'none', reason: 'CONTESTED' }
   if (target.expires <= now) return { canSend: false, line: 'none', reason: 'OFFLINE' }
   const state = stateOfSession(target.agent, target.session)
   if (state === undefined) return { canSend: false, line: 'none', reason: 'STATE_UNKNOWN' }
@@ -213,7 +224,9 @@ export const deliveryText = (message: Message, s: Strings = ZH_TW): string => [
     ? s.messagesDeliveryBoard
     : s.messagesDeliveryAgent(message.framingNonce ? senderLabel(message.from) : agentOf(message.from)),
   s.messagesDeliveryWarning,
-  ...(message.redelivered ? [s.messagesDeliveryRepeat] : []),
+  // A Codex thread has run one message twice (L2), so it is told what to do when it has answered already; a message
+  // sent again says that in its own line.
+  ...(message.redelivered ? [s.messagesDeliveryRepeat] : agentOf(message.to) === 'codex' ? [s.messagesDeliveryAnswered(message.nonce)] : []),
   s.messagesDeliveryAck(message.nonce),
   `<<<AB-${message.framingNonce ?? message.nonce}`,
   message.text,
@@ -342,9 +355,25 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   if (one.status === 'accepted' && status === 'accepted' && one.reply === reply) return state
   return { ...state, messages: state.messages.map(message => message === one ? settled({ ...one, status, reply, error, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
 }
-export const disconnectMessages = (state: MessageState, target: string, now: number): MessageState => ({
+// keepQueued: the connection that went is an automatic receiver whose leaving is no sign that its session ended (a
+// restarted daemon, a contest). A message it was never handed stays queued, text and all, for its next connection, and
+// carries the time it was left, which is the clock for refusing it (#318).
+export const disconnectMessages = (state: MessageState, target: string, now: number, keepQueued = false): MessageState => ({
   ...state,
-  messages: state.messages.map(one => one.target !== target || isFinished(one) ? one : settled({
-    ...one, status: one.status === 'queued' ? 'rejected' : one.status === 'accepted' ? 'accepted' : 'uncertain', error: 'DISCONNECTED', updated: one.error === 'DISCONNECTED' || one.status === 'uncertain' ? one.updated : now,
-  })),
+  messages: state.messages.map(one => {
+    if (one.target !== target || isFinished(one)) return one
+    if (keepQueued && one.status === 'queued') return one.leftAt === undefined ? { ...one, leftAt: now } : one
+    const { leftAt: _leftAt, ...rest } = one
+    return settled({
+      ...rest, status: one.status === 'queued' ? 'rejected' : one.status === 'accepted' ? 'accepted' : 'uncertain', error: 'DISCONNECTED', updated: one.error === 'DISCONNECTED' || one.status === 'uncertain' ? one.updated : now,
+    })
+  }),
 })
+// The next automatic receiver of the same session takes over what an earlier one left queued: a message for a
+// connection that is gone (`isLive` false), on this connection's surface or on none. The takeover clears the leave stamp.
+export const rebindMessages = (state: MessageState, target: Connection, isLive: (id: string) => boolean): MessageState => {
+  const to = address(target.agent, target.session)
+  const isLeft = (one: Message): boolean => one.status === 'queued' && one.to === to && !isMailboxTarget(one.target) && !isLive(one.target)
+    && (one.surface === undefined || one.surface === target.surface)
+  return state.messages.some(isLeft) ? { ...state, messages: state.messages.map(one => { if (!isLeft(one)) return one; const { leftAt: _leftAt, ...rest } = one; return { ...rest, target: target.id, turn: target.turn } }) } : state
+}

@@ -17,6 +17,7 @@ import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
 import { agentLabel } from '../hooks/strings'
 import type { ReceiverRoutes } from '../hooks/messaging'
+import { isRecordedRoute } from '../hooks/messaging'
 import type { SendDecision } from '../hooks/messaging'
 import { RECEIVER_ROUTES } from '../hooks/receiver-routes'
 import { cardSendKey, handledOnly, lanAddress, localHosts, pagePolicy, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
@@ -24,6 +25,7 @@ import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { isFolder, runSendPlan } from './background-resume'
 import { createMessaging } from './board-messaging'
+import { startCodexReceiver } from './codex-receiver.mjs'
 import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
 import { isBarStyle } from '../hooks/progress-bar'
@@ -40,6 +42,9 @@ export type ServeOptions = {
   routes?: readonly ReceiverRoutes[]
   messagesDirectory: string
   isDefaultMessagesDirectory?: boolean
+  // The Codex receiver (#318): the Codex session ids the board knows, the Codex program to run (null: none found,
+  // so nothing runs). A running turn is never steered (#1409).
+  codex?: { threads: () => string[]; executable: string | null }
   reports?: (isFresh?: boolean) => ProgressBinding[]
   s: Strings
   port: number
@@ -260,18 +265,28 @@ export const startServer = (o: ServeOptions): void => {
     lan = null
   }
 
+  let codexReceiver: ReturnType<typeof startCodexReceiver> | null = null
+
   const stop = (): void => {
     if (isStopping) return
     isStopping = true
     for (const id of [...approvals.keys()]) settleApproval(id, null)
     for (const one of approvals.values()) one.timers.forEach(clearTimeout)
     approvals.clear()
-    // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
-    try { messaging.close() } catch {}
-    closeLan()
-    server.close()
-    server.closeAllConnections()
-    o.onStop()
+    const finish = (): void => {
+      // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
+      try { messaging.close() } catch {}
+      closeLan()
+      server.close()
+      server.closeAllConnections()
+      o.onStop()
+    }
+    if (codexReceiver === null) {
+      finish()
+      return
+    }
+    // The receiver says goodbye to the board before it goes, and the Codex program it runs is ended; the wait is short.
+    void Promise.race([codexReceiver.close().catch(() => undefined), new Promise(done => setTimeout(done, 1500))]).then(finish)
   }
 
   // On the same port as the computer's page when it is free there, else on any.
@@ -626,8 +641,11 @@ export const startServer = (o: ServeOptions): void => {
       }
       if (url.pathname === '/api/act') {
         const state = isLan ? undefined : messaging.snapshot(Date.now())
+        const view = o.view()
+        // The press picks its target as the card did: a live connection hides the mailbox only on a recorded route (#318).
+        const targets = deliveryTargets(state?.connections ?? [], state?.mailboxes, live => isRecordedRoute(live, (agent, session) => sessionState(view, agent, session), o.routes ?? RECEIVER_ROUTES))
         // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
-        const action = serveAction(boardItems(o.view(), o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, deliveryTargets(state?.connections ?? [], state?.mailboxes), true, o.allowResume, o.routes)
+        const action = serveAction(boardItems(view, o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, targets, true, o.allowResume, o.routes)
         if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})
@@ -763,6 +781,12 @@ export const startServer = (o: ServeOptions): void => {
     }
     // Preparing a private address can block; inactivity starts once that address is ready.
     lastSeen = Date.now()
+    if (o.codex?.executable) {
+      // The address and token stay in this process: the Codex program is given neither.
+      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable })
+      // A process that exits another way (Windows sends no SIGTERM) still ends the Codex program it started.
+      process.once('exit', () => codexReceiver?.kill())
+    }
     // The idle timer starts only once the server is listening: a listen failure
     // throws before this point, and a timer made earlier would keep the failed
     // child alive instead of letting it exit.
