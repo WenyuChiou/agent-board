@@ -66,7 +66,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     // broken: faults that last until a test mends them (deletes the entry), by the name of the call: a host method, a board
     // action, or 'report' (the plugin's --agent-status report, which gives a session its card). reports: every call the plugin
     // made of its worker, with whether the report was saved.
-    const calls = { promptAsync: [], status: [], sent: [], lookups: 0, board: [], atWake: [], faults: {}, prompts: [], answers: [], cwds: [], gets: 0, broken: {}, reports: [], hold: {}, noFolder: false }
+    const calls = { promptAsync: [], status: [], sent: [], lookups: 0, board: [], atWake: [], faults: {}, prompts: [], answers: [], cwds: [], gets: 0, broken: {}, reports: [], hold: {}, noFolder: false, reached: [] }
     // The plugin's interval timers: nothing runs them but tick().
     const intervals = new Set()
     const fakeSetInterval = (run, ms) => { const one = { run, ms, unref() {} }; intervals.add(one); return one }
@@ -126,6 +126,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       calls.board.push(action)
       calls.cwds.push({ action, cwd: args[1][args[1].indexOf('--cwd') + 1] })
       const broken = calls.broken[action]
+      if (broken !== undefined) calls.reached.push(`${action} ${broken}`)
       // The board script cannot even be started.
       if (!isSpawn && broken === 'throw') throw new Error('spawn failed')
       if (isSpawn) {
@@ -222,6 +223,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     for (const [name, real] of Object.entries(client.session)) client.session[name] = async options => {
       const fault = calls.broken[name]
       if (fault === undefined) return real(options)
+      calls.reached.push(`${name} ${fault}`)
       const token = {}
       running.add(token)
       try {
@@ -243,6 +245,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       let payload = {}
       try { payload = JSON.parse(options.input) } catch {}
       const fault = mode === '--agent-status' ? calls.broken.report : undefined
+      if (fault !== undefined) calls.reached.push(`report ${fault}`)
       calls.reports.push({ mode, session: payload.session_id, state: payload.state, isSaved: fault === undefined })
       if (fault === 'throw') throw new Error('spawn failed')
       if (fault === 'hang') return { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }), status: null, stdout: '', stderr: '' }
@@ -707,10 +710,52 @@ test('B4 a marked message with no receipt reads "sent, not confirmed" at 30 minu
   const late = b.prune(marked, T0 + 31 * MIN)
   assert.deepEqual([late.messages[0].status, late.messages[0].error, late.messages[0].text], ['uncertain', 'UNCONFIRMED', 'Synthetic text for the board cases'])
   const nonce = taken.message.nonce
+  // A late accept is recorded, and the message stays "sent, not confirmed": it does not hold the next message again (#1366 review).
   const accepted = b.act(late, 'mailbox-accept', { agent: 'opencode', session: 's1', id: 'm1', nonce, awaitsAck: true }, T0 + 32 * MIN).state
-  assert.deepEqual([accepted.messages[0].status, accepted.messages[0].error], ['accepted', ''])
+  assert.deepEqual([accepted.messages[0].status, accepted.messages[0].error, accepted.messages[0].hasAccepted, accepted.messages[0].updated], ['uncertain', 'UNCONFIRMED', true, late.messages[0].updated])
   const acked = b.act(late, 'mailbox-ack', { agent: 'opencode', session: 's1', id: 'm1', nonce, reply: `ACK ${nonce} done` }, T0 + 32 * MIN).state
   assert.equal(acked.messages[0].status, 'acknowledged')
+})
+
+test('B15 an accept saved after the wake read "sent, not confirmed" does not hold the next message of the session, which is handed out (#1366 review)', async () => {
+  const b = await mailbox()
+  const taken = b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0)
+  const nonce = taken.message.nonce
+  const marked = b.act(taken.state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + SEC).state
+  const late = b.prune(marked, T0 + 31 * MIN)
+  const accepted = b.act(late, 'mailbox-accept', { agent: 'opencode', session: 's1', id: 'm1', nonce, awaitsAck: true }, T0 + 32 * MIN).state
+  const box = accepted.mailboxes.find(one => one.agent === 'opencode' && one.session === 's1')
+  const queued = b.messaging.queueMessage(accepted, { id: 'm2', target: box.id, turn: 'session', text: 'Synthetic second message' }, 'board', box, T0 + 32 * MIN).state
+  // The pruning that follows leaves it as it is, and the next message goes out.
+  const next = b.take(b.prune(queued, T0 + 33 * MIN), 'opencode', 's1', refOf(2), T0 + 33 * MIN)
+  assert.equal(next.message?.id, 'm2')
+  const first = next.state.messages.find(one => one.id === 'm1')
+  assert.deepEqual([first.status, first.error, first.hasAccepted, first.text], ['uncertain', 'UNCONFIRMED', true, 'Synthetic text for the board cases'])
+  // A day after it read "sent, not confirmed" (not after the accept) it expires and its text goes.
+  const gone = b.prune(next.state, T0 + 31 * MIN + 1441 * MIN).messages.find(one => one.id === 'm1')
+  assert.deepEqual([gone.status, gone.error, gone.text], ['uncertain', 'EXPIRED', ''])
+})
+
+test('B16 a deletion that follows a saved attempt, before the reply reaches the receiver, keeps the wake as "sent, not confirmed" for the day (#1366 review)', async () => {
+  const b = await mailbox()
+  const taken = b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0)
+  const marked = b.act(taken.state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + SEC).state
+  const ended = b.act(marked, 'mailbox-end', { agent: 'opencode', session: 's1' }, T0 + 2 * SEC).state
+  assert.equal((ended.mailboxes ?? []).length, 0)
+  assert.deepEqual([ended.messages[0].status, ended.messages[0].error], ['uncertain', ''])
+  // At the open limit it reads "sent, not confirmed" with its text, instead of expiring then.
+  const late = b.prune(ended, T0 + 31 * MIN)
+  assert.deepEqual([late.messages[0].status, late.messages[0].error, late.messages[0].text], ['uncertain', 'UNCONFIRMED', 'Synthetic text for the board cases'])
+  assert.equal(b.prune(late, T0 + 31 * MIN + 1439 * MIN).messages[0].error, 'UNCONFIRMED')
+  const gone = b.prune(late, T0 + 31 * MIN + 1441 * MIN).messages[0]
+  assert.deepEqual([gone.status, gone.error, gone.text], ['uncertain', 'EXPIRED', ''])
+  // One that already read "sent, not confirmed" when the session was deleted keeps its day as well.
+  const after = b.act(late, 'mailbox-end', { agent: 'opencode', session: 's1' }, T0 + 32 * MIN).state
+  assert.deepEqual([after.messages[0].error, after.messages[0].text], ['UNCONFIRMED', 'Synthetic text for the board cases'])
+  assert.equal(b.prune(after, T0 + 31 * MIN + 1439 * MIN).messages[0].text, 'Synthetic text for the board cases')
+  // A message nobody marked is still turned away by the deletion.
+  const unmarked = b.act(b.take(b.seed('opencode', 's2'), 'opencode', 's2', refOf(3), T0).state, 'mailbox-end', { agent: 'opencode', session: 's2' }, T0 + SEC).state
+  assert.deepEqual([unmarked.messages[0].status, unmarked.messages[0].error], ['uncertain', 'DISCONNECTED'])
 })
 
 test('B9 a started wake holds the next message to its session only until it reads "sent, not confirmed", as an open message did before (#1366 review)', async () => {
@@ -1416,24 +1461,36 @@ test('R32 on a new plugin instance, a first status lookup that fails, or that sa
 test('R33 for every call the receiver makes and every fault it can meet, with the session idle or busy and the board store holding no folder, no mailbox or a mailbox, the invariants V1 to V5 hold two ticks after the fault is mended (round 4, round 6)', async () => {
   // The faults each call can meet (see the fixture). Every call of the stand-in host and board, and the progress report, has a
   // row, or is ack, which the model calls after the wake, so a call cannot be added to them without one.
+  // hang: the call never answers, and the receiver's own deadline for it ends the wait.
   const FAULTS = {
-    get: ['throw', 'empty'],
-    messages: ['throw'],
-    status: ['throw', 'error'],
-    promptAsync: ['lose', 'error'],
-    take: ['throw', 'lose'],
-    attempt: ['error', 'lose'],
-    release: ['error', 'lose'],
-    accept: ['error', 'lose'],
-    open: ['throw', 'error'],
-    end: ['throw'],
-    report: ['throw'],
+    get: ['throw', 'empty', 'hang'],
+    messages: ['throw', 'hang'],
+    status: ['throw', 'error', 'hang'],
+    promptAsync: ['lose', 'error', 'hang'],
+    take: ['throw', 'lose', 'hang'],
+    attempt: ['error', 'lose', 'hang'],
+    release: ['error', 'lose', 'hang'],
+    accept: ['error', 'lose', 'hang'],
+    open: ['throw', 'error', 'hang'],
+    end: ['throw', 'error', 'hang'],
+    report: ['throw', 'hang'],
   }
   const NOT_A_ROW = { ack: 'the model calls it after the wake (R6, R23, R35)' }
-  // A call made only for a message waiting is run with a message; an end is made only when the session ends, so it is met with none.
+  // A call made only for a message waiting is run with a message; an end is made when the session is deleted, with its message waiting.
   const WITH_A_MESSAGE = ['promptAsync', 'attempt', 'release', 'accept', 'end']
+  // The calls the receiver makes only in some states of the session, so a fault on them can be met only there: a busy session
+  // takes nothing and is never woken (V2); only an idle event makes the plugin look up the reply (messages); only a busy session
+  // with no mailbox in the file opens one (open); a busy session is asked about only while something is owed, which is not the
+  // case when the board has no folder or the session's mailbox is open and nothing waits (status); an end is made when the
+  // session is deleted, in either state. The host's get and messages hang for over two seconds, so they hang for one store only.
+  const ALL = ['none', 'empty', 'mailbox']
+  const WHERE = {
+    messages: { idle: ALL }, take: { idle: ALL }, promptAsync: { idle: ALL }, attempt: { idle: ALL }, release: { idle: ALL }, accept: { idle: ALL },
+    open: { busy: ['none', 'empty'] }, status: { idle: ALL, busy: ['mailbox'] },
+    'get hang': { idle: ['mailbox'], busy: ['mailbox'] }, 'messages hang': { idle: ['mailbox'] },
+  }
   // By design nobody can know whether these wakes arrived: the message stays a started wake, with one call, never repeated.
-  const UNKNOWN = ['promptAsync lose']
+  const UNKNOWN = ['promptAsync lose', 'promptAsync hang']
   const session = 'ses_r33', id = 'r33-message'
   // V1 a known session's mailbox is in the board's file with its time left, V2 nothing wakes a busy session, V3 a message arrives
   // at most once, V4 a message waiting for an idle session is woken, V5 an owed accept or release is saved. Read from the board's
@@ -1456,8 +1513,10 @@ test('R33 for every call the receiver makes and every fault it can meet, with th
   const problems = []
   const settle = async (f, ticks) => { for (let round = 0; round < ticks; round++) { f.tick(); await f.quiet() } }
   for (const [call, faults] of Object.entries(FAULTS)) for (const fault of faults) for (const state of ['idle', 'busy']) for (const start of WITH_A_MESSAGE.includes(call) ? ['mailbox'] : ['none', 'empty', 'mailbox']) {
+    const where = { ...WHERE[call], ...WHERE[`${call} ${fault}`] }
+    if (!(where[state] ?? (WHERE[call] === undefined ? ALL : [])).includes(start)) continue
     const name = `${call} ${fault}, ${state}, store ${start}`
-    const isBusy = state === 'busy', hasMessage = start === 'mailbox'
+    const isBusy = state === 'busy', hasMessage = start === 'mailbox', isEnd = call === 'end'
     await fixture(async f => {
       // none: the board has not made its folder; empty: it has, with no mailbox; mailbox: the session is known and its mailbox is open.
       if (start === 'none') f.calls.noFolder = true
@@ -1467,13 +1526,23 @@ test('R33 for every call the receiver makes and every fault it can meet, with th
       if (call === 'release' && !isBusy) f.calls.prompts.push(f.prompts.refuse)
       f.calls.broken[call] = fault
       if (isBusy) f.calls.busy = { [session]: { type: 'busy' } }
-      await (isBusy ? f.reported({ session, type: 'busy' }) : hasMessage ? f.idle(session) : f.created(session))
+      // An end is made by deleting the session, once it is in the state under test; the reply lookup only by an idle event.
+      if (isEnd && isBusy) { await f.reported({ session, type: 'busy' }); await f.quiet() }
+      await (isEnd ? f.deleted(session) : isBusy ? f.reported({ session, type: 'busy' }) : hasMessage || call === 'messages' ? f.idle(session) : f.created(session))
       await f.quiet()
       // A tick while the fault lasts, then the fault is mended and the board's folder appears.
       await settle(f, 1)
+      // The fault was injected: the call was made while it lasted (an unreached fault would leave the row testing nothing).
+      if (!f.calls.reached.includes(`${call} ${fault}`)) problems.push(`${name}: the fault was never reached`)
       delete f.calls.broken[call]
       if (start === 'none') f.makeFolder()
       await settle(f, 2)
+      if (isEnd) {
+        // The deleted session's mailbox is gone, its waiting message is turned away, and nothing wakes it.
+        if (f.mailbox(session) !== undefined) problems.push(`${name}: the deleted session's mailbox is still on the board`)
+        if (f.message(id)?.status !== 'rejected' || f.calls.promptAsync.length > 0) problems.push(`${name}: the waiting message was not turned away, or a wake was made: ${JSON.stringify(f.message(id))}`)
+        return
+      }
       problems.push(...assertInvariants(f, { name, isBusy, hasMessage, isUnknown: UNKNOWN.includes(`${call} ${fault}`) }))
       if (isBusy) {
         delete f.calls.busy
@@ -1660,3 +1729,25 @@ test('T4 a mailbox removed from the store under a known session is opened again 
     }, { watch: false })
   }
 })
+
+test('T5 a session deleted while its take is running leaves no mailbox: the end waits for the take, and a take the board applies after it does not enrol the mailbox again (#1366 review)', () => fixture(async f => {
+  const session = 'ses_t5'
+  await f.created(session)
+  await f.quiet()
+  assert.ok(f.mailbox(session), 'the session has a mailbox')
+  // The board applies the next take only after a moment, as a script that started first but ran later would.
+  f.calls.faults.take = ['slow']
+  const takes = f.count('take')
+  await f.idle(session)
+  await f.until(() => f.count('take') > takes, 'a take is running')
+  await f.deleted(session)
+  await f.until(() => f.count('end') >= 1 && f.settled(), 'the end was made')
+  await f.quiet()
+  assert.equal(f.mailbox(session), undefined, 'no mailbox is left on the board')
+  assert.equal(f.count('end'), 1)
+  // Nothing is owed: a tick asks the board for nothing more.
+  const calls = f.calls.board.length
+  f.tick()
+  await f.quiet()
+  assert.equal(f.calls.board.length, calls)
+}, { watch: false }))

@@ -247,6 +247,7 @@ const boardReceiver = (client, directory, replay) => {
     try { await step(session) } catch { hookError('MAILBOX_FAILED') }
     finally {
       taking.delete(session)
+      if (ending.has(session)) closeMailbox(session)
       if (again.delete(session)) deliver(session)
     }
   }
@@ -324,8 +325,10 @@ const boardReceiver = (client, directory, replay) => {
   const stopIfIdle = () => { if (roots.size === 0 && ending.size === 0 && pending.size === 0) stop() }
   // The session's mailbox is closed on the board. A write that failed is asked again at the tick, a few times: the mailbox's
   // own lifetime (12 hours) is the last resort. A session that comes back stops it. Reported once.
+  // An end never runs beside a take of the same session: a take that the board applies after the end would enrol the mailbox
+  // again, and the end, once saved, is not asked for again (#1366 review). It waits, and the take's step asks for it when it is over.
   const closeMailbox = async session => {
-    if (closing.has(session) || opening.has(session)) return
+    if (closing.has(session) || opening.has(session) || taking.has(session)) return
     closing.add(session)
     const answer = await boardCall('end', session, directory)
     closing.delete(session)

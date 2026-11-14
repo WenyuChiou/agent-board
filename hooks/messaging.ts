@@ -365,11 +365,17 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
     return state
   }
   if (one.status === 'accepted' && status === 'accepted' && one.reply === reply) return state
+  // An accept that reaches the board after the wake read "sent, not confirmed" is recorded, and the message stays as it is:
+  // it must not hold the session's next message for another 30 minutes (#1366 review). Its day-long retention does not restart.
+  if (one.status === 'uncertain' && one.error === UNCONFIRMED && status === 'accepted' && one.to.startsWith('opencode:')) return one.hasAccepted === true ? state : { ...state, messages: state.messages.map(message => message === one ? { ...one, hasAccepted: true } : message) }
   return { ...state, messages: state.messages.map(message => message === one ? settled({ ...one, status, reply, error, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
 }
+// A wake the plugin started (marked by an attempt) whose reply may still be on its way: a disconnection does not change it, so
+// it reads "sent, not confirmed" at the open limit and keeps its text for the day, as it would without the disconnection.
+const isMarkedWake = (one: Message): boolean => isAtMostOnce(one) && one.attempted !== undefined && one.status === 'uncertain' && (one.error === '' || one.error === UNCONFIRMED)
 export const disconnectMessages = (state: MessageState, target: string, now: number): MessageState => ({
   ...state,
-  messages: state.messages.map(one => one.target !== target || isFinished(one) ? one : settled({
+  messages: state.messages.map(one => one.target !== target || isFinished(one) || isMarkedWake(one) ? one : settled({
     ...one, status: one.status === 'queued' ? 'rejected' : one.status === 'accepted' ? 'accepted' : 'uncertain', error: 'DISCONNECTED', updated: one.error === 'DISCONNECTED' || one.status === 'uncertain' ? one.updated : now,
   })),
 })
