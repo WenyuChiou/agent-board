@@ -24,7 +24,7 @@ const splitPaths = text => text.split('\0').filter(Boolean)
 // would load hooks/messaging.ts), and messaging. A file joins the list only in a reviewed change, so preflight does
 // not guess which files are too long or which tests a change reaches (#1392 review): it says the file was not run,
 // and the author runs the tests they changed by name.
-export const leftToCi = new Set(['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs'])
+export const leftToCi = new Set(['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs'])
 
 // Without a recorded or readable identity, a live PID cannot safely be identified as a replacement.
 export const isLiveMarker = ({ isAlive, recordedIdentity, identity = null }) =>

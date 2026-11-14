@@ -6,9 +6,14 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
-import { test } from 'node:test'
+import { test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
+import { partTest } from '../scripts/ci-impact.mjs'
+
+// CI's board jobs run this file in parts, each part its share of the tests: the file alone took 157.7 and 164.0 s
+// on Windows Node 24 once the fault matrix grew (#1366 rounds 16 and 17), most of a part's time (scripts/ci-impact.mjs).
+const test = partTest(nodeTest)
 
 const importTs = async path => {
   const resolver = registerHooks({ resolve(specifier, context, next) {
@@ -1467,7 +1472,10 @@ test('R32 on a new plugin instance, a first status lookup that fails, or that sa
   }
 })
 
-test('R33 for every call the receiver makes and every fault it can meet, with the session idle or busy and the board store holding no folder, no mailbox or a mailbox, the invariants V1 to V5 hold two ticks after the fault is mended (round 4, round 6)', async () => {
+// R33: for every call the receiver makes and every fault it can meet, with the session idle or busy and the board store
+// holding no folder, no mailbox or a mailbox, the invariants V1 to V5 hold two ticks after the fault is mended (round 4,
+// round 6). One test per call, so CI's parts share the matrix out instead of one part running all of it (#1366 round 18).
+{
   // The faults each call can meet (see the fixture). Every call of the stand-in host and board, and the progress report, has a
   // row, or is ack, which the model calls after the wake, so a call cannot be added to them without one.
   // hang: the call never answers, and the receiver's own deadline for it ends the wait.
@@ -1522,54 +1530,61 @@ test('R33 for every call the receiver makes and every fault it can meet, with th
     }
     return problems
   }
-  let methods
-  await fixture(async f => { methods = f.methods })
-  for (const call of [...methods.host, ...methods.board, 'report']) assert.ok(call in FAULTS || call in NOT_A_ROW, `${call} has no row`)
-  const problems = []
   const settle = async (f, ticks) => { for (let round = 0; round < ticks; round++) { f.tick(); await f.quiet() } }
-  for (const [call, faults] of Object.entries(FAULTS)) for (const fault of faults) for (const state of ['idle', 'busy']) for (const start of WITH_A_MESSAGE.includes(call) ? ['mailbox'] : ['none', 'empty', 'mailbox']) {
-    const where = { ...WHERE[call], ...WHERE[`${call} ${fault}`] }
-    if (!(where[state] ?? (WHERE[call] === undefined ? ALL : [])).includes(start)) continue
-    const name = `${call} ${fault}, ${state}, store ${start}`
-    const isBusy = state === 'busy', hasMessage = start === 'mailbox', isEnd = call === 'end'
-    await fixture(async f => {
-      // none: the board has not made its folder; empty: it has, with no mailbox; mailbox: the session is known and its mailbox is open.
-      if (start === 'none') f.calls.noFolder = true
-      if (start === 'empty') f.makeFolder()
-      if (hasMessage) { await f.created(session); await f.quiet(); f.queue(session, id, 'Synthetic text for the matrix') }
-      // A release is called only for a wake the host refused.
-      if (call === 'release' && !isBusy) f.calls.prompts.push(f.prompts.refuse)
-      f.calls.broken[call] = fault
-      if (isBusy) f.calls.busy = { [session]: { type: 'busy' } }
-      // An end is made by deleting the session, once it is in the state under test; the reply lookup only by an idle event.
-      if (isEnd && isBusy) { await f.reported({ session, type: 'busy' }); await f.quiet() }
-      await (isEnd ? f.deleted(session) : isBusy ? f.reported({ session, type: 'busy' }) : hasMessage || call === 'messages' ? f.idle(session) : f.created(session))
-      await f.quiet()
-      // A tick while the fault lasts, then the fault is mended and the board's folder appears.
-      await settle(f, 1)
-      // The fault was injected: the call was made while it lasted (an unreached fault would leave the row testing nothing).
-      if (!f.calls.reached.includes(`${call} ${fault}`)) problems.push(`${name}: the fault was never reached`)
-      delete f.calls.broken[call]
-      if (start === 'none') f.makeFolder()
-      await settle(f, 2)
-      if (isEnd) {
-        // The deleted session's mailbox is gone, its waiting message is turned away, and nothing wakes it.
-        if (f.mailbox(session) !== undefined) problems.push(`${name}: the deleted session's mailbox is still on the board`)
-        if (f.message(id)?.status !== 'rejected' || f.calls.promptAsync.length > 0) problems.push(`${name}: the waiting message was not turned away, or a wake was made: ${JSON.stringify(f.message(id))}`)
-        return
-      }
-      problems.push(...assertInvariants(f, { name, isBusy, hasMessage, isUnknown: UNKNOWN.includes(`${call} ${fault}`) }))
-      if (isBusy) {
-        delete f.calls.busy
-        await f.idle(session)
+  test('R33 every call of the stand-in host and board, and the progress report, has a row of faults, or is the ack the model calls (round 4)', async () => {
+    let methods
+    await fixture(async f => { methods = f.methods })
+    for (const call of [...methods.host, ...methods.board, 'report']) assert.ok(call in FAULTS || call in NOT_A_ROW, `${call} has no row`)
+  })
+  for (const [call, faults] of Object.entries(FAULTS)) test(`R33 ${call}: for every fault it can meet, with the session idle or busy and the board store holding no folder, no mailbox or a mailbox, the invariants V1 to V5 hold two ticks after the fault is mended (round 4, round 6)`, async () => {
+    const problems = []
+    let cells = 0
+    for (const fault of faults) for (const state of ['idle', 'busy']) for (const start of WITH_A_MESSAGE.includes(call) ? ['mailbox'] : ['none', 'empty', 'mailbox']) {
+      const where = { ...WHERE[call], ...WHERE[`${call} ${fault}`] }
+      if (!(where[state] ?? (WHERE[call] === undefined ? ALL : [])).includes(start)) continue
+      cells++
+      const name = `${call} ${fault}, ${state}, store ${start}`
+      const isBusy = state === 'busy', hasMessage = start === 'mailbox', isEnd = call === 'end'
+      await fixture(async f => {
+        // none: the board has not made its folder; empty: it has, with no mailbox; mailbox: the session is known and its mailbox is open.
+        if (start === 'none') f.calls.noFolder = true
+        if (start === 'empty') f.makeFolder()
+        if (hasMessage) { await f.created(session); await f.quiet(); f.queue(session, id, 'Synthetic text for the matrix') }
+        // A release is called only for a wake the host refused.
+        if (call === 'release' && !isBusy) f.calls.prompts.push(f.prompts.refuse)
+        f.calls.broken[call] = fault
+        if (isBusy) f.calls.busy = { [session]: { type: 'busy' } }
+        // An end is made by deleting the session, once it is in the state under test; the reply lookup only by an idle event.
+        if (isEnd && isBusy) { await f.reported({ session, type: 'busy' }); await f.quiet() }
+        await (isEnd ? f.deleted(session) : isBusy ? f.reported({ session, type: 'busy' }) : hasMessage || call === 'messages' ? f.idle(session) : f.created(session))
         await f.quiet()
+        // A tick while the fault lasts, then the fault is mended and the board's folder appears.
+        await settle(f, 1)
+        // The fault was injected: the call was made while it lasted (an unreached fault would leave the row testing nothing).
+        if (!f.calls.reached.includes(`${call} ${fault}`)) problems.push(`${name}: the fault was never reached`)
+        delete f.calls.broken[call]
+        if (start === 'none') f.makeFolder()
         await settle(f, 2)
-        problems.push(...assertInvariants(f, { name: `${name}, then idle`, isBusy: false, hasMessage, isUnknown: false }))
-      }
-    }, { timing: { settleMs: 40 }, watch: false })
-  }
-  assert.deepEqual(problems, [])
-})
+        if (isEnd) {
+          // The deleted session's mailbox is gone, its waiting message is turned away, and nothing wakes it.
+          if (f.mailbox(session) !== undefined) problems.push(`${name}: the deleted session's mailbox is still on the board`)
+          if (f.message(id)?.status !== 'rejected' || f.calls.promptAsync.length > 0) problems.push(`${name}: the waiting message was not turned away, or a wake was made: ${JSON.stringify(f.message(id))}`)
+          return
+        }
+        problems.push(...assertInvariants(f, { name, isBusy, hasMessage, isUnknown: UNKNOWN.includes(`${call} ${fault}`) }))
+        if (isBusy) {
+          delete f.calls.busy
+          await f.idle(session)
+          await f.quiet()
+          await settle(f, 2)
+          problems.push(...assertInvariants(f, { name: `${name}, then idle`, isBusy: false, hasMessage, isUnknown: false }))
+        }
+      }, { timing: { settleMs: 40 }, watch: false })
+    }
+    assert.ok(cells > 0, `${call}: no cell can meet its faults`)
+    assert.deepEqual(problems, [])
+  })
+}
 
 test('R34 a session whose lookup keeps failing is looked up 20 times at the ticks, then let go, and that is logged once (round 4)', () => fixture(async f => {
   f.calls.getFails = true

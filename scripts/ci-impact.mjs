@@ -160,8 +160,10 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/setup-terminal.test.mjs': 70_000, // slowest 36.0 s
   // Grew with #1339's lock tests (several wait out the 2 s bounded lock wait): 43.4 s on Windows Node 24 (run 43190652904).
   'tests/settings-symlink.test.mjs': 85_000, // slowest 43.4 s
-  // New with #1366, never measured before: 92.7 s on Windows Node 24 (run 43467343580), 64.6 s of it the R33 fault loop.
-  'tests/opencode-receiver.test.mjs': 175_000, // slowest 92.7 s
+  // New with #1366 and self-parted since its round 18, so this is one part's share. The whole file took 164.0 s on
+  // Windows Node 24 (run 43644841624); dealt out six ways by its tests' times there, R33 one test per call, the largest
+  // share is 40.6 s, about 44 s with the file's start. An estimate until a parted run is timed: 44 x 1.3 / 0.7.
+  'tests/opencode-receiver.test.mjs': 85_000, // one part's share, about 44 s
   // New with #1438 (merge-check runs git in temporary repositories): 46.1 and 46.4 s on Windows Node 24 (#1464).
   'tests/merge-check.test.mjs': 90_000, // slowest 46.4 s
 })
@@ -392,8 +394,9 @@ const parsePart = part => {
 
 // The files that split their own tests with partTest: on Windows codex-local took about 8 minutes and
 // board about 5, each far longer than any other file (#899). messaging joined when the Windows exchange
-// job used 75-80% of its 10 minutes (#1445).
-export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs']
+// job used 75-80% of its 10 minutes (#1445). opencode-receiver joined when its fault matrix took it to 157.7 and
+// 164.0 s, and the Windows board part that held it to 448.6 s of its 480 s (#1366, runs 43641832826, 43644841624).
+export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
 
 export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
   const { index, total } = parsePart(part)
