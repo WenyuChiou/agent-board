@@ -340,7 +340,7 @@ jobs:
         run: claude plugin validate --strict .
 
       - name: Pane and hook tests
-        run: claude plugin test .
+        run: node scripts/plugin-tests.mjs
 
 
   installers:
