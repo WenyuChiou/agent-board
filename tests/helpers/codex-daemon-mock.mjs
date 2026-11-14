@@ -18,6 +18,12 @@
 //   approval   when true, the daemon asks its client for an approval during the turn
 //   beginFlag  a file whose appearance starts the person's own turn ('turn-person') on an idle thread
 //   endFlag    a file whose appearance ends the running turn
+//   userAgent  what initialize says the daemon is (default: a version that unloads a thread 60 s after its last subscriber left)
+//   person     file whose presence stands for a person's own client being open on the thread: without it, the thread is listed only
+//              while this connection is subscribed to it (thread/resume until thread/unsubscribe), as the real daemon does
+//   closeFlag  a file whose appearance sends thread/closed for the loaded thread (the list still shows it)
+//   ackDelay   ms before a delivery turn ends (default 50)
+//   approval   'hold': the delivery turn waits on an approval for ever, until turn/interrupt (turn/completed 'interrupted')
 //   pidFile    file that gets this process's id
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { serveWebSocketProxy, serverFrame } from './ws-proxy-mock.mjs'
@@ -27,7 +33,7 @@ const log = value => appendFileSync(config.log, JSON.stringify(value) + '\n')
 if (config.pidFile) writeFileSync(config.pidFile, String(process.pid))
 log({ argv: process.argv.slice(2), env: process.env })
 let running = config.status === 'active' ? config.turn : null
-let emitNow, hasRaced = false
+let emitNow, hasRaced = false, isSubscribed = false
 const thread = id => ({ id, status: { type: running ? 'active' : 'idle' } })
 const ackOf = text => 'ACK ' + text.match(/ACK ([0-9a-f]{6})/)[1]
 // A user message item, as the daemon reports one: the claim nonce a client gave comes back as `clientId`.
@@ -52,9 +58,20 @@ serveWebSocketProxy({
     emitNow = emit
     log(value)
     const threadId = value.params?.threadId
-    if (value.method === 'initialize') emit({ id: value.id, result: {} })
-    if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: config.loaded, nextCursor: null } })
+    if (value.method === 'initialize') emit({ id: value.id, result: { userAgent: config.userAgent ?? 'codex_cli_rs/0.169.0 (synthetic)' } })
+    if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: !config.person || isSubscribed || existsSync(config.person) ? config.loaded : [], nextCursor: null } })
+    if (value.method === 'thread/unsubscribe') {
+      emit({ id: value.id, result: { status: isSubscribed ? 'unsubscribed' : 'notSubscribed' } })
+      isSubscribed = false
+    }
+    if (value.method === 'turn/interrupt') {
+      emit({ id: value.id, result: {} })
+      emit({ method: 'turn/completed', params: { threadId, turn: { id: running, status: 'interrupted' } } })
+      emit({ method: 'thread/status/changed', params: { threadId, status: { type: 'idle' } } })
+      running = null
+    }
     if (value.method === 'thread/resume') {
+      isSubscribed = true
       if (config.resumeRace && running) {
         // The answer says active, and the turn's end and the idle notice follow in the same write, so the client handles
         // them before the code that awaited the answer continues.
@@ -71,6 +88,8 @@ serveWebSocketProxy({
       if (running) emit({ method: 'turn/started', params: { threadId, turn: { id: running } } })
     }
     if (value.method === 'thread/read') {
+      // resumeRace: before the receiver has joined, the read still says idle (it reads without joining), and the turn is running by the time of the resume.
+      if (config.resumeRace && running && !isSubscribed) { emit({ id: value.id, result: { thread: { id: threadId, status: { type: 'idle' } } } }); return }
       if (config.readActive && !running && !hasRaced) {
         hasRaced = true
         running = 'turn-person'
@@ -123,12 +142,18 @@ serveWebSocketProxy({
       emit({ method: 'turn/started', params: { threadId, turn: { id: running } } })
       emit({ method: 'thread/status/changed', params: { threadId, status: { type: 'active' } } })
       emit({ ...own, params: { ...own.params, turnId: running } })
-      if (config.start === 'ack') setTimeout(() => finish('turn-delivery', threadId, ackOf(value.params.input[0].text)), 50)
+      if (config.approval === 'hold') {
+        emit({ method: 'thread/status/changed', params: { threadId, status: { type: 'active', activeFlags: ['waitingOnApproval'] } } })
+        emit({ id: 998, method: 'item/commandExecution/requestApproval', params: { threadId, turnId: running } })
+        return
+      }
+      if (config.start === 'ack') setTimeout(() => finish('turn-delivery', threadId, ackOf(value.params.input[0].text)), config.ackDelay ?? 50)
     }
   },
 })
 const watcher = setInterval(() => {
   if (!emitNow) return
+  if (config.closeFlag && existsSync(config.closeFlag)) { unlinkSync(config.closeFlag); emitNow({ method: 'thread/closed', params: { threadId: config.loaded[0] } }) }
   if (!running && config.beginFlag && existsSync(config.beginFlag)) { unlinkSync(config.beginFlag); begin(config.loaded[0]) }
   if (!running || !config.endFlag || !existsSync(config.endFlag)) return
   unlinkSync(config.endFlag)
