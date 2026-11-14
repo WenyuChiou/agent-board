@@ -24,7 +24,7 @@ export const messagingReceiver = {
 
 // Connects only to an already-running Codex control socket. `proxy` does not start,
 // resume or search saved threads. No credential file or transcript is opened here.
-export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, surface = SURFACE_IDS.codexProxy, socket, onError }) => {
+export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, surface = SURFACE_IDS.codexProxy, socket, reclaimMs = 10_000, onError }) => {
   if (!isAbsolute(executable) || !/^[a-f0-9-]{36}$/i.test(thread) || !/^[A-Za-z0-9_-]{1,128}$/.test(turn)) throw new Error('EXPLICIT_BINDING_REQUIRED')
   const args = ['app-server', 'proxy', ...(socket ? ['--sock', socket] : [])]
   const child = /\.m?js$/i.test(executable) ? spawn(process.execPath, [executable, ...args], { windowsHide: true }) : spawn(executable, args, { windowsHide: true })
@@ -108,7 +108,7 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
     if (!await verify()) throw new Error('TARGET_MISMATCH')
     await request('thread/resume', { threadId: thread, excludeTurns: true })
     session = await boardClient(boardUrl).attach({
-      agent: 'codex', session: thread, turn, surface, verify, onError,
+      agent: 'codex', session: thread, turn, surface, verify, onError, reclaim: reclaimMs,
       deliver: async (message, accepted, begin) => {
         if (message.turn !== turn || !await verify()) throw new Error('TARGET_MISMATCH')
         let ackEntry
@@ -133,7 +133,8 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
         }
       },
     })
-    return { ...session, close: async () => {
+    // id is read through the session: a reclaimed connection has a new one.
+    return { ...session, get id() { return session.id }, close: async () => {
       try { await session.close() }
       finally { websocket.close(); lost(); child.kill(); await exited }
     } }

@@ -157,7 +157,7 @@ An agent block is the part of the file one session owns. The pane's Claude Code 
 Start marker, on a line of its own, starting in column 0:
 
 ```
-<!-- auto session=<8 chars> agent=<name> state=<working|waiting|done|ended> updated=<ISO 8601> [replied=<ISO 8601>] [resume=<full session id>] [dir=<percent-encoded folder>] [pr=<n> ci=<none|pending|pass|fail>] [origin=run] [parent=<session id>] -->
+<!-- auto session=<8 chars> agent=<name> state=<working|waiting|done|ended> updated=<ISO 8601> [replied=<ISO 8601>] [resume=<full session id>] [dir=<percent-encoded folder>] [pr=<n> ci=<none|pending|pass|fail>] [origin=run] [parent=<session id>] [agentpid=<n> agentstarted=<epoch ms> host=<64 hex>] -->
 ```
 
 End marker, same placement:
@@ -185,6 +185,9 @@ An attribute is `name=value`, where the name is letters, digits, `_` or `-`, and
 | `owner` | No | Full SHA-256 of `<agent>:<full-session-id>` for a local reporter. Prevents accidental short-id collisions and pasted replacements of its block; it is not an authentication credential. Older readers ignore it. |
 | `origin` | No | `run` is retained on legacy run blocks and weak Codex hints. Strong Codex runs and Claude print-mode sessions write no new block. A conversation a person started and typed into carries no `origin`. Any other value reads as a person's. A legacy run is never a row of its own; see [Runs an agent started](#runs-an-agent-started). |
 | `parent` | No | With `origin=run`, the session that started the run: its full session id (`resume`) or its block id (`session`), the same characters `resume` allows. Without `origin=run`, or with a value that is not an id, it is ignored. A run with no parent, or whose parent is not in the file, counts on the folded "Background runs" line. |
+| `agentpid` | No | The agent process id (Claude Code only, #1092): a positive integer. The board reads it to tell a closed agent window from a live session, without waiting 12 h. Other agents write none. A value that is not a positive integer is ignored. It never appears in visible text, `--json`, the page, the LAN page or any transmitted content. |
+| `agentstarted` | No | The agent process start time in epoch milliseconds (Claude Code only, #1092): when the process that wrote `agentpid` started. The board compares it with the live process's start time, so a reused pid is not mistaken for the agent still running. A value that is not a positive integer is ignored. It never appears in visible text, `--json`, the page, the LAN page or any transmitted content. |
+| `host` | No | A SHA-256 hash (64 hex characters) of the host the agent runs on (Claude Code only, #1092): the platform and hostname, hashed, never the hostname itself. The board checks the pid only when this hash matches the reading machine; a block from another machine (a remote reporter, or WSL and Windows sharing one file) keeps the 12 h rule. A value that is not 64 hex characters is ignored. It never appears in visible text, `--json`, the page, the LAN page or any transmitted content. |
 
 An inbox prompt receipt keeps no prompt text. When the host supplies an identity
 for the turn, the receipt keeps its hash. A board lookup can restore a question
@@ -239,6 +242,8 @@ A task with all steps done is shown as finished whatever its `state` says, but o
 ### Stopped sessions
 
 A block in state `working` or `waiting` whose `updated` is more than 12 hours old is treated as `ended`: the pane says the session stopped. Its unresolved `[?]` steps leave Waiting on you and stay with the task under Stopped. The pane's own session stays live, including immediately after a resume. Questions from another ended or done session do the same; a done task keeps them in its recent-completion entry while shown there. Resolve on the pane closes one question. Nothing in the file changes. Writing the block again (new `updated`) brings it back. This covers agents that crash or whose terminal closes before they can write `state=ended`.
+
+A block that carries `agentpid`, `agentstarted` and `host` (Claude Code only, #1092) is treated as `ended` as soon as the board reads it and finds that agent process gone on this machine, without waiting 12 hours: the process id is checked with a signal that never touches the process, and a live pid is compared with its recorded start time, so a reused pid is not mistaken for the agent still running. A block from another machine (a different host hash), a block with no pid, and any lookup the board cannot complete all keep the 12-hour rule. A session that reports again (a resume, a new process id) is live again and its question is raised again. Nothing in the file changes.
 
 If the writer's timestamp is more than five minutes ahead, the row marks it as a future time and counts silence from the first local observation of that exact agent, session and update. The pane, `--watch` and the page keep this observation in `progress-seen.json`; repeated polls, restarts and the local clock catching up keep the original baseline. A different writer timestamp starts a new observation. Read-only surfaces use the existing observation; if none has been established they show unknown age rather than inventing one. Automatic archival still uses the original writer timestamp and the rules below. Question identity, source snapshots and question-age baselines keep their own original values.
 

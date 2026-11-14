@@ -79,7 +79,10 @@ const summaries = [
     "board": "Open the board: {command}",
     "thisWill": "This will:",
     "question": "Set these up? [Y/n] ",
+    "sidecarTerms": "Antigravity sidecar: Google's terms may not cover it. Setup only writes its files; you switch it on yourself, in Antigravity's Automations page.",
+    "sidecarQuestion": "Also write the Antigravity sidecar, so the board can start a turn in an idle conversation? Google's terms may not cover it, and you switch it on yourself in Automations. [y/N] ",
     "filesPart": "{host} files",
+    "sidecarPart": "Antigravity sidecar files",
     "trustPart": "Approve the board's hooks in {host}",
     "installPlugin": "Install the Claude Code plugin",
     "enablePlugin": "Claude Code: the plugin is installed but turned off in your user settings. Run {command} to turn it back on.",
@@ -137,7 +140,10 @@ const summaries = [
     "board": "開啟看板：{command}",
     "thisWill": "會做這幾件事：",
     "question": "要設定這些嗎？[Y/n] ",
+    "sidecarTerms": "Antigravity sidecar：Google 的條款可能不涵蓋它。setup 只寫入它的檔案，要由你自己在 Antigravity 的 Automations 頁面開啟。",
+    "sidecarQuestion": "要一併寫入 Antigravity sidecar，讓看板能在閒置的對話裡開始一輪嗎？Google 的條款可能不涵蓋它，而且要由你自己在 Automations 開啟。[y/N] ",
     "filesPart": "{host} 設定檔案",
+    "sidecarPart": "Antigravity sidecar 檔案",
     "trustPart": "在 {host} 核准看板的 hooks",
     "installPlugin": "安裝 Claude Code 外掛",
     "enablePlugin": "Claude Code：外掛已安裝，但在使用者設定裡被停用了。請執行 {command} 重新啟用。",
@@ -195,7 +201,10 @@ const summaries = [
     "board": "打开看板：{command}",
     "thisWill": "会做这几件事：",
     "question": "要设置这些吗？[Y/n] ",
+    "sidecarTerms": "Antigravity sidecar：Google 的条款可能不涵盖它。setup 只写入它的文件，要由你自己在 Antigravity 的 Automations 页面开启。",
+    "sidecarQuestion": "要一并写入 Antigravity sidecar，让看板能在空闲的对话里开始一轮吗？Google 的条款可能不涵盖它，而且要由你自己在 Automations 开启。[y/N] ",
     "filesPart": "{host} 设置文件",
+    "sidecarPart": "Antigravity sidecar 文件",
     "trustPart": "在 {host} 批准看板的 hooks",
     "installPlugin": "安装 Claude Code 插件",
     "enablePlugin": "Claude Code：插件已安装，但在用户设置里被禁用了。请运行 {command} 重新启用。",
@@ -306,8 +315,9 @@ const hermesHome = home => {
 // On a POSIX terminal the answer is read from /dev/tty. fd 0 can be non-blocking (code in this process
 // opened process.stdin, or a parent shared a non-blocking pipe); a read before the answer is typed then
 // fails with EAGAIN, so setup waits and reads again.
-const askYes = () => {
-  process.stdout.write(words('question'))
+// `isDefaultYes` false: only an explicit yes counts, so an empty answer or a closed input is a no.
+const askYes = (key = 'question', isDefaultYes = true) => {
+  process.stdout.write(words(key))
   let fd = 0
   let isOwn = false
   if (process.platform !== 'win32' && isatty(0)) {
@@ -316,7 +326,8 @@ const askYes = () => {
   const chunks = []
   let size = 0
   try {
-    const bytes = Buffer.alloc(256)
+    // One byte at a time, so the answer ends at its own line break and a later question reads the next line.
+    const bytes = Buffer.alloc(1)
     while (size < 4096) {
       let count
       try { count = readSync(fd, bytes, 0, bytes.length, null) } catch (error) {
@@ -333,7 +344,7 @@ const askYes = () => {
   } finally {
     if (isOwn) try { closeSync(fd) } catch {}
   }
-  return size > 0 && /^\s*(y|yes|是|好|對|对)?\s*$/i.test(Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0])
+  return size > 0 && (isDefaultYes ? /^\s*(y|yes|是|好|對|对)?\s*$/i : /^\s*(y|yes|是|好|對|对)\s*$/i).test(Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0])
 }
 
 // npm supplies .cmd shims on Windows; quote each argument for cmd rather than enabling a shell for every program.
@@ -346,6 +357,10 @@ const runProgram = (program, argv) => {
   }
   return spawnSync(program, argv, options)
 }
+
+// Whether a plan writes either of the Antigravity sidecar's files (#1396): the person asked for them by the flag or the
+// question, or an earlier setup's copy of one is being brought up to date.
+const hasSidecar = plans => plans.some(plan => !plan.conflicts.length && plan.changes.some(change => change.action !== 'remove' && /sidecars[\\/]agent-board[\\/]sidecar\.(?:json|mjs)$/.test(change.file)))
 
 const main = () => {
   const at = args.indexOf('--agent')
@@ -367,7 +382,8 @@ const main = () => {
   // A retired agent is offered nowhere and refused by name, but a remove still takes away what an earlier setup wrote for it (#1327).
   if (!isRemove && selector.split(',').some(agent => retiredAgents.includes(agent))) fail('RETIRED_AGENT', retiredTarget)
   const removable = [...targets, ...retiredAgents]
-  const touched = removable.filter(agent => existsSync(join(data, `install-${agent}.json`)))
+  // An Antigravity the connector manages can hold only the sidecar's files, under a record of their own (#1396).
+  const touched = removable.filter(agent => existsSync(join(data, `install-${agent}.json`)) || agent === 'antigravity' && existsSync(join(data, 'install-antigravity-sidecar.json')))
   // --home can name another account's home; PATH and apps belong to the running account.
   const selected = isRemove
     ? (selector === 'all' ? [...removable] : selector === 'auto' ? touched : selector.split(','))
@@ -404,9 +420,9 @@ const main = () => {
   // Only inside a test run (as AGENT_BOARD_SETUP_TTY), a stand-in helper can report what a real one cannot on cue.
   const script = process.env.AGENT_BOARD_TEST_PID && process.env.AGENT_BOARD_SETUP_HELPER ? process.env.AGENT_BOARD_SETUP_HELPER : fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
   let removing = selected
-  const run = (agent, isApplying) => {
+  const run = (agent, isApplying, extra = []) => {
     const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')] : common
-    const result = spawnSync(process.execPath, [script, ...runArgs, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
+    const result = spawnSync(process.execPath, [script, ...runArgs, ...extra, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
     const fallback = () => {
       const cause = isCode(result.error?.code) ? result.error.code : 'UNKNOWN'
       const reason = result.error?.message || (result.stderr ?? '').trim().split(/\r?\n/).filter(Boolean).pop() || 'The setup helper did not return a result.'
@@ -442,7 +458,8 @@ const main = () => {
     return plan.changes.length ? run(selected[i], true) : { ...plan, applied: true }
   })
   if (isJson) {
-    process.stdout.write(`${JSON.stringify({ targets: selected, plans: results, applied: apply && available.length > 0 }, null, 2)}\n`)
+    // Structured output carries the terms line too, whenever a plan writes the sidecar's files.
+    process.stdout.write(`${JSON.stringify({ targets: selected, plans: results, applied: apply && available.length > 0, ...(!isRemove && hasSidecar(results) ? { sidecarNotice: words('sidecarTerms') } : {}) }, null, 2)}\n`)
     return
   }
   const shortPath = file => {
@@ -508,6 +525,8 @@ const main = () => {
     return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
   })
   lines.push(...agentLines)
+  // The sidecar's files are in this run's plan, by the flag or the question: say what they are and who switches them on.
+  if (!isRemove && hasSidecar(results)) lines.push(words('sidecarTerms'))
   if (hasClaude && !isRemove) lines.push(`Claude Code: ${words('claude')}`)
   if (isRemove && results.length) {
     const progress = results[0]?.progress || join(data, 'progress.md')
@@ -564,6 +583,22 @@ const main = () => {
       ...approvals.map(agent => words('trustPart', { host: names[agent] })),
       ...(isPluginNeeded ? [words('installPlugin')] : []),
     ]
+    const report = (part, isDone, next) => process.stdout.write(`${words(isDone ? 'partDone' : 'partFailed', { part, command: next })}\n`)
+    // The sidecar is a second, separate question that defaults to no. A yes only writes its files (the person
+    // switches it on in Antigravity's Automations); with the flag, its files were part of the plan above. It is
+    // asked of an installed Antigravity that has no sidecar yet, whether or not the main question was asked.
+    const offerSidecar = () => {
+      if (args.includes('--antigravity-sidecar') || existsSync(join(home, '.gemini', 'config', 'sidecars', 'agent-board', 'sidecar.json')) || !askYes('sidecarQuestion', false)) return
+      let isDone = true
+      try {
+        const applied = run('antigravity', true, ['--antigravity-sidecar'])
+        isDone = applied.applied === true && !applied.conflicts.length && hasSidecar([applied])
+      } catch { isDone = false }
+      if (!isDone) process.exitCode = 1
+      process.stdout.write('\n')
+      report(words('sidecarPart'), isDone, setupCommand(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']))
+      if (isDone) process.stdout.write(`${words('sidecarTerms')}\n`)
+    }
     // With nothing to do there is nothing to ask; the plain preview below says so.
     let hasConsent = false
     if (will.length) {
@@ -573,7 +608,6 @@ const main = () => {
     }
     if (hasConsent) {
       const completed = []
-      const report = (part, isDone, next) => process.stdout.write(`${words(isDone ? 'partDone' : 'partFailed', { part, command: next })}\n`)
       for (const [i, agent] of selected.entries()) {
         const plan = plans[i]
         // A skipped agent's preview line already names its files and the command to apply it.
@@ -621,6 +655,7 @@ const main = () => {
           }
         }
       }
+      if (completed.includes('antigravity')) offerSidecar()
       const next = []
       const sessions = []
       for (const agent of completed) {
@@ -642,6 +677,12 @@ const main = () => {
       }
       if (next.length) process.stdout.write(`\n${words('next')}\n${next.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n`)
       return
+    }
+    // Nothing else to do, but an installed Antigravity without the sidecar still gets its question.
+    if (!will.length && available.includes('antigravity') && !plans[selected.indexOf('antigravity')].changes.length) {
+      process.stdout.write(`${lines.join('\n')}\n\n`)
+      lines.length = 0
+      offerSidecar()
     }
     // A no: the preview is already on screen, so only the next steps follow.
     if (will.length) lines.length = 0

@@ -77,6 +77,7 @@ Every person and every agent reads this page first. The longer pages ([CONTRIBUT
 
 ## R6. When something fails
 
+- Before it fails: a risk-tier pull request changes one failure surface and names it on its `Surface:` line, with the exceptions [CONTRIBUTING rule 2](../../CONTRIBUTING.md#pull-requests) lists (two surfaces with a `cannot split:` reason the maintainer or the owner accepted, `none` for a lane's pull request that changes no surface, no line on a release), so review rounds do not chase new cases across surfaces.
 - When the cause is still unknown after two fix attempts, stop and write a `Question:` on the issue.
 - When two review rounds in a row find new cases of the same kind, the author stops patching after the second, and the maintainer gets a Fable diagnosis of the design ([team-process.md](team-process.md#from-claim-to-merge)).
 - A raised timeout, a skipped test or an added retry is never the fix for a flaky test.

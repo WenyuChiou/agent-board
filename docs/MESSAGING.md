@@ -39,8 +39,10 @@ unrecorded routes keep Copy. The existing copy-resume command remains available 
 board already offered it.
 
 The direct message API applies the same recorded-route check to board sends. A mailbox
-with a live receiver for the same session is refused rather than redirected; an unrecorded
-route returns `NO_RECORDED_ROUTE`, unless the target is refused first as gone or expired
+is refused rather than redirected when a live receiver of the same session has a recorded
+route, for the session's state and on its own surface; a live receiver without one leaves
+the mailbox's own route in place, on the card too. An unrecorded route returns
+`NO_RECORDED_ROUTE`, unless the target is refused first as gone or expired
 (`OFFLINE`) or contested (`CONTESTED`). Retrying an existing message id returns that message
 when its contents match, even if the route has since changed. The server records the route
 line itself; callers cannot supply `line`.
@@ -118,10 +120,66 @@ or calls a vendor API directly:
 
 | AI / CLI | Background resume status | Policy / notes |
 | --- | --- | --- |
-| Antigravity (`agy`) | Out of scope | Disallowed on consumer plans (FAQ / terms section 6); uses own hooks / sidecar route (`#1396`). |
+| Antigravity (`agy`) | Planned (`#1396`) | The documented sidecar route, described below: setup writes its files only on the person's yes, and only the person enables it, in Antigravity's Automations page. `agy` background resume stays out of scope (FAQ / terms section 6). |
 | Cursor (`cursor-agent`) | Planned (`#1403`) | Pending vendor terms review, receiver wiring, and dated live record. |
 | Grok Build (`grok`) | Planned (`#1404`) | Pending vendor terms review, receiver wiring, and dated live record (separate from `--allow-resume`). |
 | Hermes Agent (`hermes`) | Planned (`#233`) | Pending vendor terms review, receiver wiring, and dated live record. |
+
+## Antigravity sidecar (#1396, setup half)
+
+Antigravity's desktop app runs a sidecar kept in `~/.gemini/config/sidecars/agent-board/` (`sidecar.json`
+and `sidecar.mjs`) only after the person switches it on in the app's Automations page. Setup writes
+those two files only on the person's yes (the `--antigravity-sidecar` flag, or the one question that
+defaults to no) and says that Google's terms may not cover it; it never switches the sidecar on, and an
+agent must not. `remove` takes both files away. The agy TUI runs no sidecars, and a closed app stops them.
+The sidecar touches no Antigravity sign-in, port or token: it uses only Antigravity's own `agentapi`,
+whose path the app gives it, and it never sees a message's text. The board half (the 10-second wait after
+a turn ends, the receipts, the card) is #1396 PR B; until it lands, a board answers the sidecar's poll
+with an error and the sidecar does nothing.
+
+The contract, as the sidecar speaks it. It finds the board the way the hooks do, from `server.lock` and
+`server.owner` in the messages folder; with no board it only checks those files every 30 s. While a board
+answers it polls every 2 s. **Each poll is the board's sign that the sidecar is alive**; the board decides
+in PR B how old a poll may be.
+
+| Call | Body | Answer |
+| --- | --- | --- |
+| `POST /api/messages/wake-poll` | `{"agent":"antigravity"}` | `{"wakes":[{"id","conversation","nonce"}]}` |
+| `POST /api/messages/wake-attempt` | `{"id","nonce"}` | `{"ok":true}`, or `{"ok":false,"code"}` |
+| `POST /api/messages/wake-report` | `{"id","nonce","status":"sent" or "failed","error"?}` | `{"ok":true}`, or `{"ok":false,"code":"NOT_STARTED"}` |
+
+For each wake the sidecar asks `wake-attempt` once and goes on only on `{"ok":true}`. It then checks that `conversation` is a UUID (one that is not is reported `failed`), and runs
+`agentapi send-message --title=Agent Board <conversation> "Agent Board: a message from the board is attached to this turn. Follow it."`
+(that is the English line; the sidecar sends the line in the setup language; one argument list, no shell, a 60 s limit). Exit 0 reports `sent`; anything else reports `failed` with a
+short code. The turn-start hook then hands the queued message over as it does for any hook mailbox.
+
+What each side may rely on (PR B writes the board's half to this):
+
+- A wake's `id` and `nonce` match a message id, `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`. One that does not is printed
+  as `INVALID_WAKE`; the sidecar asks nothing about it and runs nothing.
+- The board, not the sidecar, promises at most one wake per message. Before it runs `agentapi` the sidecar asks
+  `wake-attempt`; the board saves that the wake has started and only then answers `{"ok":true}`, once per
+  message. From then on `wake-poll` never returns that message again, whatever happens to `agentapi` or to the
+  report.
+- The sidecar runs `agentapi` only on that answer. Any other answer (`WAKE_STARTED` for a wake already started,
+  `NOT_HELD` for one the board does not hold), an error, or no answer runs nothing and reports nothing. It does
+  not ask again.
+- The sidecar keeps no record of wakes. A poll may return a wake it returned before, or the same wake twice, and
+  a restarted or second sidecar may ask for it; the attempt decides.
+- A wake handed out and never attempted may be returned by any later poll. The board returns at most one wake per
+  poll; the sidecar handles every entry it is given, in order.
+- A wake is tried once. One reported `failed`, or started and never reported, is not sent again; the message
+  stays queued and the turn-start hook hands it over at the conversation's next turn.
+- A report is repeatable: the same `id`, `nonce` and `status`. When a `wake-report` gets no answer, the sidecar
+  sends the same body again, up to three times in all, a second or two apart. The board treats a repeated report
+  of one wake as the same report and answers `{"ok":true}` again; a different `status` for a wake already
+  reported does not change it. A report still unanswered after the third try is only printed
+  (`report lost`), and that wake stays uncertain on the board: a card says the wake is unconfirmed, never
+  delivered, and the message is not sent again unseen. A report for a wake that was never started is answered
+  `NOT_STARTED`.
+- Where the connector already manages Antigravity's hooks, setup still writes the two sidecar files, on the same
+  yes, under a record of their own (`install-antigravity-sidecar.json`); it takes over none of the connector's
+  hooks, and `remove` takes the sidecar files out.
 
 ## Local storage
 
@@ -192,7 +250,7 @@ each disconnect frees its place. It has to run as your account or an administrat
 it, and the store frees itself within 30 minutes. Connector secrets and URLs must not be posted to
 issues. Messaging opens no listener beyond the existing loopback board; all LAN
 `/api/messages/*` requests are refused and LAN board JSON omits messaging and receipts.
-Setup installs no background receiver. Reopen with the same command and directory. Closing the board
+Setup installs no background receiver, with one exception: the Antigravity sidecar (below), which setup writes only on the person's yes and which Antigravity itself starts only after the person enables it. Reopen with the same command and directory. Closing the board
 disconnects its receivers; they must reconnect explicitly to the new board URL. Closing
 only the browser tab leaves the local service and receivers running. Local idle shutdown
 is disabled by default; `--idle-minutes 30` opts in. The LAN listener's separate timeout
@@ -203,7 +261,7 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 
 | State | Evidence |
 | --- | --- |
-| queued | Stored locally and not handed out since. A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain (#1407) |
+| queued | Stored locally and not handed out since. A message an automatic Codex receiver left behind stays queued with the time it was left (see Codex daemon receiver). A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain (#1407) |
 | uncertain | Claimed durably with no acceptance on record: before delivery, or after a disconnect or timeout. Also an accepted message that a later receipt reports uncertain (for a hook's message, #1407), or that expired or was dismissed |
 | accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is not sent again while it stays accepted |
 | acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
@@ -403,7 +461,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Codex | CLI | 3 | Unknown | Verified | [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | nextTurn · no live note | none · no live note |
-| Codex | Daemon | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Codex | Daemon | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | [scripts/codex-receiver.mjs](../scripts/codex-receiver.mjs) | now · [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | stepEnd · no live note | none · no live note |
 | Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
 | Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) | none · no live note | now · [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | none · no live note |
@@ -611,6 +669,22 @@ adapter actually registers.
 Tests: `node --test tests/messaging.test.mjs`. They cover synthetic routing, idempotence,
 conflicts, offline/expired bindings, stale turns, crash uncertainty, fake approvals, and a
 mock Codex proxy. A real `AB-TEST-001` ACK must be verified separately with consent.
+
+## Codex daemon receiver (Send to Codex)
+
+`scripts/codex-receiver.mjs` is run by the board's page server, not by the person. It is off unless the page is started with `--codex-send` (`agent-board --serve --codex-send`, one command). It joins as the surface `Codex daemon`. Its idle route is recorded by [validation/2026-11-13-codex-cli-wake-live.md](validation/2026-11-13-codex-cli-wake-live.md): the card of an idle Codex session the receiver has joined offers Send, line `now`. Its busy route has no note, so under the recorded-route rule above a working Codex card keeps the choice it has without the receiver (Queue for next turn or Copy), never Send, and the hub refuses a send through the receiver while the session works (`NO_RECORDED_ROUTE`). Sending into a running turn is #1409. The tests hand the board a table that shows the busy route live too. Every 3 seconds it reads the Codex sessions the board knows. If the Codex program is on `PATH` (or `AGENT_BOARD_CODEX_BIN` names it by full path; set to anything else it turns the receiver off), it starts `codex app-server proxy` once and asks `thread/loaded/list` which threads the running daemon has loaded.
+
+- **Why it is off by default.** #318 asks for proof, on a real Codex CLI, that a command needing approval still reaches the person while the board is joined, and not to join that way if it does not. That run has not been done (it needs a logged-in Codex). The receiver never answers an approval request, but the delivery turn it starts may send its approvals to the board's connection. Until the run is done, the page joins only when asked. The default changes when someone runs a command that needs approval in a delivered turn on a real Codex, sees the approval in their own client, and records it in a `docs/validation/` note. Without the flag a Codex card keeps its existing Copy and "Queue for next turn" choices.
+- **Only a loaded thread.** For each known thread the daemon has loaded, it calls `thread/resume` with `excludeTurns: true`, which only subscribes the connection, and registers a `session`-scope connection. A thread the daemon has not loaded is never resumed from disk, and a thread with no turn yet (no saved history) is joined after its first turn. Until then the message waits for the session's next step.
+- **Idle:** `turn/start` with the claim nonce as `clientUserMessageId`. `accepted` is that call's answer. Nothing goes through Codex's queue.
+- **Busy:** the connection keeps its lease with `receive: false`, the message stays in the board, and `turn/start` follows when the thread's status is idle again. A running turn is never steered.
+- **Joining a session.** The receiver registers only for a session no other connection holds (`TARGET_CLAIMED` otherwise, tried again on a later tick), so it never marks a person's own connection contested. If another connection registers later and this one is contested, it leaves and joins again once it can. A board file that is missing or cannot be read keeps every receiver as it is; only a row read as ended, or gone from a file that was read, ends one. A receiver that leaves for any other reason (a contest, a daemon that went away) does not take its queued messages with it: a message it was never handed stays `queued`, text and all, on the session's card, and the receiver's next connection for that session takes it over. The time it was left is written on the message in the same save as the leaving, and the next connection's takeover clears it. The board refuses the message (`rejected`, `DISCONNECTED`) 10 minutes after that time, as any receiver's is, working from the saved message alone: a restart of the board does not restart the 10 minutes, and a save that fails at the deadline is tried again at the next request. It waits that long because a session that ended meanwhile has no receiver left to say so. A receiver that leaves because the session's row was read as ended has its queued message `rejected` at once. Nothing can be queued to a contested connection.
+- **A turn that starts at the same moment.** The daemon has no idle-only `turn/start` (the call has no precondition, and on a running turn it adds the text to that turn and answers with that turn's id). Right before `turn/start` the receiver reads the thread again (`thread/read`). If the thread is busy, or a turn began after the board's poll, the receiver holds the claim: nothing is started, and nothing is given back (a claim changes owner one way only). The same fresh read and the same join check run again when the thread reads idle, and `turn/start` follows then. The cost: a connection lost while a claim is held shows `uncertain` (`DISCONNECTED`) for a message that was never started, and a held claim falls under the board's 30-minute limit on an unanswered message (`uncertain`, `EXPIRED`), after which the receiver stops waiting and starts nothing. A turn can still start between that read and `turn/start`. The message is `uncertain` (`TURN_JOINED`) when the connection heard that turn start before the answer named it, or when the turn's first user message is not this delivery's (the daemon echoes the claim nonce as `clientId` on that item, [validation/2026-11-06-send-to-codex.md](validation/2026-11-06-send-to-codex.md)). If that first user message arrives only after the answer, the message reads `accepted` until it arrives. A daemon that sends no user message item for the turn leaves a join heard only after the answer undetected. That window is not closed (#1370). The read and the join check run only against the mock, not a real daemon.
+- **Receipt.** `acknowledged` needs an `ACK <nonce>` line in an agent message of the delivery turn and that turn ending `completed`. A turn that ends without the line is `uncertain` (`ACK_MISSING`), and one that failed or was stopped after it is `uncertain` (`TURN_NOT_COMPLETED`). A turn that ends with no status, or one the receiver does not know, is `uncertain` too (`TURN_STATUS_UNKNOWN`): only an explicit `completed` counts. An unclear answer to `turn/start` is `uncertain`, and nothing else is tried. An error answer of the daemon to `turn/start`, or to the `thread/read` before it, is `rejected` (`OWNER_REJECTED`): nothing was done. A `thread/read` answer with no status is `rejected` too (`INVALID_OWNER_RESPONSE`).
+- **No shell, no token.** The Codex program is run by its path (on Windows an npm `codex.cmd` is run through the Node script beside it, or refused). It gets neither the board address nor `AGENT_BOARD_*` variables. Approval requests that the daemon makes of its clients are never answered.
+- **Ending.** The page says goodbye to the board and ends the Codex program when it stops. A process that is killed should leave no program behind, since the proxy ends with its pipes. That is shown only with the stand-in proxy (`tests/helpers/codex-daemon-mock.mjs`): a hard kill with the real proxy on Windows has not been run.
+
+Tests: `node --test tests/messaging.test.mjs` (the Codex daemon receiver tests use `tests/helpers/codex-daemon-mock.mjs`). What a real run showed and what it did not: [validation/2026-11-06-send-to-codex.md](validation/2026-11-06-send-to-codex.md).
 
 ## Codex exclusive-owner adapter
 
