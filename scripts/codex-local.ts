@@ -552,7 +552,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         await mailbox.open(agent, session, surfaceOf(flag('--surface')), Date.now())
         answer({ ok: true, enrolled: true, watch: directory })
       } catch (error) {
-        answer(codeOf(error) === 'BOARD_NOT_RUNNING' && !existsSync(directory) ? { ok: true, enrolled: false, watch: directory } : { ok: false, code: codeOf(error), watch: directory })
+        answer(mailbox.hasNoFolder ? { ok: true, enrolled: false, watch: directory } : { ok: false, code: codeOf(error), watch: directory })
       }
     } else if (action === 'release' || action === 'attempt') {
       // OpenCode's plugin only. release hands a claim back (--unsent: the host was never called, so even a started wake goes back);
@@ -594,7 +594,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         await mailbox.endOrThrow(agent, session, Date.now())
         answer({ ok: true })
       } catch (error) {
-        answer(codeOf(error) === 'BOARD_NOT_RUNNING' && !existsSync(directory) ? { ok: true } : { ok: false, code: codeOf(error) })
+        answer(mailbox.hasNoFolder ? { ok: true } : { ok: false, code: codeOf(error) })
       }
     } else {
       await mailbox.end(agent, session, Date.now())

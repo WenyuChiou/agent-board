@@ -503,6 +503,9 @@ export const createMessaging = (directory: string, isDefault = false, gate?: Mes
 const mailboxAccess = (directory: string, budget: number, storeBudget = budget, writesRelease = false) => {
   const root = resolve(directory)
   let hasDeferred = false
+  // The one place that decides "no folder": the first look at the root said ENOENT. Nothing at that path, so no board has run here;
+  // a link (even a dead one), a file in its place or any other failure is not that, and no caller looks at the disk again.
+  let isAbsent = false
   // A claim Windows would not let go of is still this hook's own, checked again before every write.
   // The next call reuses it, so the accept for a message already handed out is not refused by it.
   let held: MessageStoreClaim | null = null
@@ -523,10 +526,15 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
   }
   const call = async (action: string, body: Record<string, unknown>, now: number): Promise<Record<string, unknown>> => {
     hasDeferred = false
+    isAbsent = false
     const wait = budget
     try {
       const started = Date.now()
-      const folder = lstatSync(root)
+      let folder: ReturnType<typeof lstatSync>
+      try { folder = lstatSync(root) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') isAbsent = true
+        throw error
+      }
       if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING')
       // Only a real mailbox can hold a message back; with no folder there is nothing to defer.
       hasDeferred = true
@@ -590,7 +598,7 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
       throw error
     }
   }
-  return { call, isDeferred: () => hasDeferred }
+  return { call, isDeferred: () => hasDeferred, isAbsent: () => isAbsent }
 }
 export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(directory, budget).call
 // A turn-start hook has little time, so its waits are short (150 ms for the board, 120 ms for the store). An
@@ -608,11 +616,12 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
     // the plugin existed refuses with UNKNOWN_FIELD, so a claim it took could never go back: it waits out 30 minutes and its text
     // is cleared. Such a board is told by open, which claims nothing, so nothing is taken there (#1366 review). An open that
     // fails any other way (a lost reply, a busy board) shows nothing either, so nothing is taken: the plugin asks again.
-    // With no messages folder at all no board has run here, so nothing waits: that take is empty, not a failure.
+    // Only a missing folder (nothing at that path) means no board has run here, so nothing waits: that take is empty. A link,
+    // a file in its place or any other failure is a failure, so the plugin logs it.
     if (named !== undefined) {
       try { await access.call('mailbox-open', { agent, session, surface }, now) } catch (error) {
         if ((error as Error).message === 'UNKNOWN_FIELD') throw new Error('BOARD_OLDER')
-        if (!existsSync(resolve(directory))) return null
+        if (access.isAbsent()) return null
         throw error
       }
     }
@@ -631,6 +640,8 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
   }
   return {
     get hasDeferred() { return access.isDeferred() },
+    // True only when the last call found nothing at the messages folder's path.
+    get hasNoFolder() { return access.isAbsent() },
     // An in-process plugin may name the claim (a 12-hex ref), so it can hand the claim back with release.
     turn: (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => takeTurn(agent, session, surface, now, named).catch(() => null),
     // The same take for a caller that must tell a failed take from an empty mailbox; a deferred claim is handed back first.

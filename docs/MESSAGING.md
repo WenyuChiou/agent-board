@@ -99,6 +99,8 @@ yet, a file it cannot read), asks the host and the board again. Only an idle ses
 the session's mailbox. A busy session opens or renews it with `--mailbox open` instead, which claims nothing, so the board
 can queue a message for it during that turn (its first event is often `chat.message`), and so a turn longer than 12 hours
 keeps it; the answer names the board folder to watch, and says `enrolled: false` while no folder exists yet.
+Only a missing folder (nothing at that path) reads as empty, for a take, an open and an end alike; a link, a file in its place
+or any other failure is logged as a failure.
 A claim the plugin did not mark is handed to the next take from the same mailbox at once, without waiting for its
 30-second lease, and the old ref then answers `CLAIM_LOST` to an attempt; the lease still gives it back to queued, as often
 as needed, with no repeat line, and it is never expired while the mailbox is open. A session the plugin does not know yet

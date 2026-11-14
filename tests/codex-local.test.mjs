@@ -1136,6 +1136,37 @@ test('--mailbox open for OpenCode opens or renews the session mailbox and leaves
   assert.equal(readFileSync(file, 'utf8'), before)
 }))
 
+// Only nothing at the folder's path reads as "no board has run here"; every other state of that path is a failure the plugin must log (#1366).
+test('--mailbox open and --mailbox end for OpenCode answer ok true only when nothing is at the messages folder, and ok false for a dead link, a link to a folder or a file in its place (#1366 review)', async () => mailboxFixture(async f => {
+  const run = (mode, name) => spawnSync(process.execPath, [f.script, '--mailbox', mode, '--agent', 'opencode', '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--session', name, '--surface', 'CLI'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const answerOf = result => JSON.parse(result.stdout.trim().split('\n').pop())
+  const link = (target, path) => symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir')
+  const cases = [
+    ['a dead link', () => { const gone = join(f.home, 'gone'); mkdirSync(gone); link(gone, f.directory); rmSync(gone, { recursive: true }) }, false],
+    ['a link to a real folder', () => { const real = join(f.home, 'real'); mkdirSync(real); writeFileSync(join(real, 'marker'), 'kept'); link(real, f.directory) }, false],
+    ['a file in its place', () => writeFileSync(f.directory, 'not a folder'), false],
+    ['no folder', () => {}, true],
+  ]
+  // Every case runs, so a failure names all the cases that are wrong, not only the first.
+  const wrong = []
+  for (const [label, arrange, isEmpty] of cases) {
+    rmSync(f.directory, { recursive: true, force: true })
+    mkdirSync(dirname(f.directory), { recursive: true })
+    arrange()
+    const opened = run('open', `${session}-${label}`), ended = run('end', `${session}-${label}`)
+    assert.equal(opened.status, 0, `${label}: ${opened.stderr}`)
+    assert.equal(ended.status, 0, `${label}: ${ended.stderr}`)
+    const open = answerOf(opened), end = answerOf(ended)
+    if (open.ok !== isEmpty) wrong.push(`${label}: open ${JSON.stringify(open)}`)
+    if (end.ok !== isEmpty) wrong.push(`${label}: end ${JSON.stringify(end)}`)
+    if (isEmpty) assert.equal(open.enrolled, false, label)
+    else if (open.ok === false) assert.match(open.code, /^[A-Z][A-Z0-9_]*$/, label)
+    if (label === 'a link to a real folder') assert.deepEqual(readdirSync(join(f.home, 'real')), ['marker'], 'the target folder is left untouched')
+    if (isEmpty) assert.ok(!existsSync(f.directory), 'no folder was created')
+  }
+  assert.deepEqual(wrong, [])
+}))
+
 test('the codex-local fixture removes its own prefix\'s folders older than six hours and keeps newer ones', async () => {
   const older = mkdtempSync(join(tmpdir(), 'codex local-'))
   const newer = mkdtempSync(join(tmpdir(), 'codex local-'))

@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { registerHooks, createRequire } from 'node:module'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, watch, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
@@ -1922,6 +1922,34 @@ test('A21 a named take with no messages folder is an empty take, not a failure: 
     const missing = join(dir, 'messages')
     assert.equal(await hookMailbox(missing, 1000, 200, 200).turnOrThrow('opencode', 's1', 'CLI', Date.now(), refOf(1)), null)
     assert.ok(!existsSync(missing), 'the take wrote no folder')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('A22 a named take is empty only when nothing is at the messages folder; a dead link, a link to a folder, a file in its place and a folder with no board all behave as their own case (#1366 review)', async () => {
+  const { hookMailbox } = await importTs('../scripts/board-messaging.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'agent-board-folder-state-'))
+  const link = (target, path) => symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir')
+  try {
+    const path = join(dir, 'messages')
+    const take = () => hookMailbox(path, 1000, 200, 200).turnOrThrow('opencode', 's1', 'CLI', Date.now(), refOf(1))
+    const cases = [
+      ['a dead link', () => { const gone = join(dir, 'gone'); mkdirSync(gone); link(gone, path); rmSync(gone, { recursive: true }) }, 'fails'],
+      ['a link to a real folder', () => { const real = join(dir, 'real'); mkdirSync(real); writeFileSync(join(real, 'marker'), 'kept'); link(real, path) }, 'fails'],
+      ['a file in its place', () => writeFileSync(path, 'not a folder'), 'fails'],
+      ['no folder', () => {}, 'empty'],
+      ['a folder with no board and no store', () => mkdirSync(path), 'empty'],
+    ]
+    // Every case runs, so a failure names all the cases that are wrong, not only the first.
+    const wrong = []
+    for (const [label, arrange, expected] of cases) {
+      rmSync(path, { recursive: true, force: true })
+      arrange()
+      const outcome = await take().then(message => message === null ? 'empty' : 'message', error => error.message === 'BOARD_OLDER' ? 'older' : 'fails')
+      if (outcome !== expected) wrong.push(`${label}: ${outcome}`)
+      if (label === 'a link to a real folder') assert.deepEqual(readdirSync(join(dir, 'real')), ['marker'], 'the target folder is left untouched')
+      if (label === 'no folder') assert.ok(!existsSync(path), 'the take wrote no folder')
+    }
+    assert.deepEqual(wrong, [])
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
