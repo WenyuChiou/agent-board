@@ -74,7 +74,7 @@ export type QuestionProofs = { retired: string[]; consumed: string[] }
 // `line` (0-based) and `raw` (the line as written) let a press tick exactly this line.
 // A question answered in its own agent's window (`<!-- native=… options=[…] -->` after the step): the board lists the options and where to answer, and offers no reply box.
 export type NativeAsk = { agent: string; options: string[] }
-export type ProgressStep = { text: string; status: ProgressStepStatus; depth: number; line: number; raw: string; questionToken?: string; native?: NativeAsk }
+export type ProgressStep = { text: string; status: ProgressStepStatus; depth: number; line: number; raw: string; questionToken?: string; native?: NativeAsk; options?: string[] }
 
 // working: Claude is mid-turn · waiting: idle with open steps · done: every step done ·
 // ended: the session closed with open steps

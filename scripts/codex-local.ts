@@ -36,7 +36,8 @@ import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
 import { currentPart } from '../hooks/retention'
-import { lastQuestion } from '../hooks/digest'
+import { lastQuestionWithOptions } from '../hooks/digest'
+import type { AskedQuestion } from '../hooks/digest'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -82,7 +83,7 @@ const hash = (text: string): string => createHash('sha256').update(text).digest(
 // Antigravity hooks name their own transcript but do not carry the reply text.
 // agy 1.5.2 names transcript_full.jsonl, which has the same line shape as transcript.jsonl.
 const antigravityTranscripts = new Set(['transcript.jsonl', 'transcript_full.jsonl'])
-const antigravityQuestion = (path: unknown): string | null => {
+const antigravityQuestion = (path: unknown): AskedQuestion | null => {
   if (typeof path !== 'string' || !isAbsolute(path) || !antigravityTranscripts.has(basename(path))) return null
   try {
     if (!lstatSync(path).isFile()) return null
@@ -112,7 +113,7 @@ const antigravityQuestion = (path: unknown): string | null => {
           if (entry.content.trim() !== '') reply = entry.content
         }
       }
-      return reply === null ? null : lastQuestion(reply)
+      return reply === null ? null : lastQuestionWithOptions(reply)
     } finally { closeSync(fd) }
   } catch { return null }
 }
@@ -676,9 +677,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const message = typeof raw.last_assistant_message === 'string' ? raw.last_assistant_message : typeof raw.lastAssistantMessage === 'string' ? raw.lastAssistantMessage : typeof hermesReply === 'string' ? hermesReply : ''
       const hasResponse = agent === 'codex' && raw.hook_event_name === 'Stop' && message.trim() !== ''
         || agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' && typeof raw.text === 'string' && raw.text.trim() !== ''
-      const question = mode === '--codex-event' && agent === 'codex' && raw.hook_event_name === 'Stop' ? lastQuestion(String(raw.last_assistant_message ?? ''))
-        : mode === '--codex-event' && agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' ? lastQuestion(String(raw.text ?? ''))
-          : mode === '--agent-status' && status === 'waiting' && (agent === 'grok' || agent === 'opencode' || agent === 'hermes') ? lastQuestion(message)
+      const asked = mode === '--codex-event' && agent === 'codex' && raw.hook_event_name === 'Stop' ? lastQuestionWithOptions(String(raw.last_assistant_message ?? ''))
+        : mode === '--codex-event' && agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' ? lastQuestionWithOptions(String(raw.text ?? ''))
+          : mode === '--agent-status' && status === 'waiting' && (agent === 'grok' || agent === 'opencode' || agent === 'hermes') ? lastQuestionWithOptions(message)
             : mode === '--agent-status' && status === 'waiting' && agent === 'antigravity' && (event === undefined || event === 'Stop') ? antigravityQuestion(raw.transcriptPath) : null
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
@@ -689,8 +690,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
           turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
           ...(hasResponse ? { has_response: true } : {}),
-          ...(question === null ? {} : { question }),
-        } : { ...(question === null ? {} : { question }) },
+          ...(asked === null ? {} : { question: asked.question, ...(asked.options.length >= 2 ? { options: asked.options } : {}) }),
+        } : { ...(asked === null ? {} : { question: asked.question, ...(asked.options.length >= 2 ? { options: asked.options } : {}) }) },
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
@@ -797,7 +798,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
                 : placeholder
               : step
           )
-      const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
+      const payloadOptions = Array.isArray(payload.options) ? payload.options.filter((one): one is string => typeof one === 'string') : []
+      const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision, false, payloadOptions, previous?.askedOptions)
       // Keep the recovery format. Causality uses the host event's milliseconds,
       // which the display clock can round or carry forward.
       const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, board_request: true } : payload, clock, s, sourceAt, { lastAppliedAt: original?.appliedAt, observedAt })
@@ -807,6 +809,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           ...(previous ?? codexReport(null, session, { title: s.localAgentTask(agent), project: agent, state, steps: question.steps }, clock, s)),
           state: state as CodexReport['state'], steps: question.steps, updated: clock, asked: question.asked,
           ...(question.askedRevision === undefined ? {} : { askedRevision: question.askedRevision }),
+          askedOptions: question.askedOptions,
         }, session) : codexReport(previous, session, given, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)
@@ -834,7 +837,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? { folder: name, folderDigest, folderCanonicalDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
-      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
       if (entry === current) {
         reportCut = cut
@@ -893,7 +896,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A replay can skip writes only after a board completion reached the cache too.
       // A new hook event is not a replay even when the block reads the same: its record keeps the event.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? []) === JSON.stringify(report.askedOptions ?? []) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }
@@ -901,6 +904,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
         ...report, title: encoded(report.title), project: encoded(report.project), steps: report.steps.map(encoded),
+        ...(report.askedOptions === undefined ? {} : { askedOptions: report.askedOptions.map(encoded) }),
       }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project), 'latin1')
       saveFullText()
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
@@ -936,6 +940,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.
       && (entry.mode !== '--codex-event' || [undefined, entry.session].includes(object(entry.payload).session_id as string | undefined))
+      && (object(entry.payload).options === undefined || Array.isArray(object(entry.payload).options) && (object(entry.payload).options as unknown[]).every(value => typeof value === 'string'))
     // Raw Codex events can precede a newer turn too. Milliseconds settle events in
     // the same second; older records and pending entries retain their timestamp fallback.
     const isOverdue = (entry: Pending): boolean => {

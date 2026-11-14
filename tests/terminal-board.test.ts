@@ -312,6 +312,27 @@ test('a yes/no or two-option question is answered with one key on the terminal b
   expect(routesOf(null)).toEqual({})
 })
 
+test('a question over a list offers each list item on the terminal board and picks by number (#1277)', () => {
+  const s = STRINGS.en
+  const file = `## api
+<!-- auto session=ab12cd34 agent=codex state=waiting updated=${at(5)} -->
+### Pick storage
+- [?] Which database should I use?
+<!-- options=["Postgres","SQLite"] -->
+<!-- /auto session=ab12cd34 -->
+`
+  const view = viewOf(file)
+  expect(view.waiting[0]).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+  const items = boardItems(view, [])
+  const choose = items.findIndex(item => item.type === 'ask' && item.ask.kind === 'choose')
+  expect(choose).toBeGreaterThan(-1)
+  const drawn = pinned({ ...emptyBoardState, selected: choose }, items)
+  expect(boardKey(drawn, '2', items, s).action).toEqual({ type: 'copy', text: 'SQLite' })
+  const out = boardScreen(view, [], drawn, s, { width: 80, isColor: false })
+  expect(out).toContain('Postgres')
+  expect(out).toContain('SQLite')
+})
+
 test('the terminal board lists what waits on you, then what is working, then the rest by project, with agent names and ages in one column', () => {
   const s = STRINGS.en
   const view = viewOf(BOARD)

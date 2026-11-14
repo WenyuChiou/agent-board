@@ -99,7 +99,7 @@ import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
 import { chosenLang, langOf, plainReadReason, plainReason, resolveLang, STRINGS } from './strings'
-import { answerTurns, applyDigest, applyLateDigest, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, noteChatReply, parseDigest, replyData, requestData, settleChatReply, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, retainApproval, markApproval, raiseApproval, toolQuestions, turnTools } from './digest'
+import { answerTurns, applyDigest, applyLateDigest, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isPersonsAnswer, isWork, lastQuestion, lastQuestionWithOptions, markAsked, needsRefresh, noteChatReply, parseDigest, replyData, requestData, settleChatReply, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, retainApproval, markApproval, raiseApproval, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
 import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
@@ -2155,7 +2155,8 @@ const summarize = async (
     effort: 'low',
     prompt: s.digestPrompt(requestData(mirror.firstPrompt), requestData(prompt), replyData(answer), mirror.title, mirror.context, steps),
   })
-  const question = isQuestionDropped ? null : lastQuestion(answer)
+  const found = isQuestionDropped ? null : lastQuestionWithOptions(answer)
+  const question = found?.question ?? null
   if (asked?.isAnswered !== true && question === null) {
     if (onSilence === 'retry') throw new Error(NO_SUMMARY)
     if (onSilence === 'keep') return null
@@ -2166,12 +2167,16 @@ const summarize = async (
   if (isQuestionDropped) {
     digest.ask = ''
     digest.why = ''
+    digest.options = []
   }
   // A late reply with only a question has no work to fold after the newer prompt answered it.
   if (isQuestionDropped && digest.done === '' && digest.next === '') return null
   if (digest.ask === '' && question !== null) {
     digest.ask = clip(question, 48)
     digest.why = question
+  }
+  if (digest.ask !== '' && found !== null && found.options.length >= 2 && !(digest.options && digest.options.length >= 2)) {
+    digest.options = found.options
   }
   if (digest.done === '' && digest.next === '' && digest.ask === '' && mirror.source !== 'turns' && (mirror.backgroundJobs ?? 0) === 0) return null
 
@@ -4486,13 +4491,13 @@ export const register: Register = (on, options) => {
       await saveBackground($, one => ({ ...one, backgroundReleases: [], backgroundReleaseCount: 0 })).catch(() => undefined)
     // A board message's ACK stays off the board, but a question its reply ends on waits on the
     // person like any turn's, so answering from the board can go on past one round (#1050).
-    const question = e.isAborted ? null : lastQuestion(isDelivery ? e.answer.replace(/^\s*ACK \S+[ \t]*/, '') : e.answer)
+    const asked = e.isAborted ? null : lastQuestionWithOptions(isDelivery ? e.answer.replace(/^\s*ACK \S+[ \t]*/, '') : e.answer)
     if (mirror !== null && mirror.tasks.length > 0) {
       const branch = await branchName($)
       const hasReport = !isDelivery && !e.isAborted && e.answer.trim() !== ''
       await saveMine($, one => ({ ...(hasReport ? settleChatReply(one) : one), branch }), true)
       // A turn that ended on a question waits on the person even if Claude did not mark it.
-      if (question !== null && (mirror.source === 'tasks' || isDelivery)) await saveMine($, one => markAsked(one, question, hasRunningTurnBackgroundJob))
+      if (asked !== null && (mirror.source === 'tasks' || isDelivery)) await saveMine($, one => markAsked(one, asked.question, hasRunningTurnBackgroundJob, asked.options))
       await settle($)
       if (!mirror.isTitleFinal) {
         $.clock.after(1, () => {
