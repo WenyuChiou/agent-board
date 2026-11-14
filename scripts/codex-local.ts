@@ -609,9 +609,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (args.includes('--apply') && !sidecarConflicts.length) {
       withInstallLock(home, () => {
         for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
+        // Each file is read again just before its change and checked after it, so an edit made while setup runs
+        // is never overwritten or removed, and a change that did not land is not reported as applied.
         for (const change of sidecarChanges) {
-          if (change.action === 'remove') unlinkSync(change.file)
-          else atomic(change.file, change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!)
+          const unchanged = (): void => { if (readLocal(change.file) !== before.get(change.file)) throw new Error('INSTALL_CHANGED') }
+          const text = change.action === 'remove' ? null : change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!
+          if (text === null) { unchanged(); unlinkSync(change.file) }
+          else atomic(change.file, text, unchanged)
+          if (readLocal(change.file) !== text) throw new Error('INSTALL_CHANGED')
         }
       })
       if (isRemoving) try { rmdirSync(sidecarDirectory) } catch {}

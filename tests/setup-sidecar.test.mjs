@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { antigravitySidecarSource } from '../hooks/antigravity-sidecar.ts'
 
 // Setup writes the Antigravity sidecar's two files only when the person says yes (the flag, or the one
@@ -197,4 +197,53 @@ test('a zh-TW setup writes the zh-TW wake line into the sidecar', () => withHome
   const source = readFileSync(join(dir, 'sidecar.mjs'), 'utf8')
   assert.ok(source.includes('const WAKE_LINE = "Agent Board：看板的訊息已附在這一輪，請照著處理。"'), source.split('\n').find(line => line.startsWith('const WAKE_LINE')))
   assert.ok(!source.includes('a message from the board is attached'), 'no English line in a zh-TW sidecar')
+}))
+
+// A preload the installer's processes load through NODE_OPTIONS: it plays a person who edits sidecar.mjs at one
+// moment of the apply, so the tests can show that setup reads each file again before its change and checks it after.
+const seam = (home, body) => {
+  const file = join(home, 'seam.mjs')
+  writeFileSync(file, `import fs from 'node:fs'\nimport { syncBuiltinESMExports } from 'node:module'\n${body}\nsyncBuiltinESMExports()\n`)
+  return { NODE_OPTIONS: `--import ${pathToFileURL(file).href}` }
+}
+const EDIT = '// the person edited this file\n'
+
+test('an edit to sidecar.mjs made after setup planned is kept: setup fails instead of writing over it', () => withHome(({ home, run, dir }) => {
+  connectorHome(home)
+  // The edit lands when setup opens its temporary copy of sidecar.mjs, after the plan and the batch check.
+  const env = seam(home, `const open = fs.openSync
+let done = false
+fs.openSync = (file, ...rest) => {
+  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.lastIndexOf('sidecar.mjs.') : -1
+  if (!done && at >= 0) { done = true; fs.writeFileSync(file.slice(0, at) + 'sidecar.mjs', ${JSON.stringify(EDIT)}) }
+  return open(file, ...rest)
+}`)
+  const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env })
+  assert.notEqual(install.status, 0, install.stdout)
+  assert.equal(readFileSync(join(dir, 'sidecar.mjs'), 'utf8'), EDIT)
+}))
+
+test('an edit to sidecar.mjs made while remove runs is kept: remove fails instead of deleting it', () => withHome(({ home, run, dir }) => {
+  connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  // The edit lands right after remove took out sidecar.json, before it reaches sidecar.mjs.
+  const env = seam(home, `const unlink = fs.unlinkSync
+fs.unlinkSync = file => {
+  unlink(file)
+  if (typeof file === 'string' && file.endsWith('sidecar.json')) fs.writeFileSync(file.slice(0, -'sidecar.json'.length) + 'sidecar.mjs', ${JSON.stringify(EDIT)})
+}`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
+  assert.notEqual(removed.status, 0, removed.stdout)
+  assert.equal(readFileSync(join(dir, 'sidecar.mjs'), 'utf8'), EDIT)
+}))
+
+test('setup fails when sidecar.mjs does not hold the text it wrote right after the write', () => withHome(({ home, run }) => {
+  connectorHome(home)
+  const env = seam(home, `const rename = fs.renameSync
+fs.renameSync = (from, to) => {
+  rename(from, to)
+  if (typeof to === 'string' && to.endsWith('sidecar.mjs')) fs.writeFileSync(to, ${JSON.stringify(EDIT)})
+}`)
+  const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env })
+  assert.notEqual(install.status, 0, install.stdout)
 }))
