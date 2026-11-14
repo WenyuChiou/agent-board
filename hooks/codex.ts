@@ -394,23 +394,17 @@ const localBlockSpans = (lines: readonly string[], owner: string, agent: string,
   return owned
 }
 
-// `codex-local` passes UTF-8 bytes pre-encoded as latin1 strings, so whitespace cleanup must match only ASCII space/tabs/newlines (never `\s`/`.trim()`, which corrupts `0xA0` inside CJK/Cyrillic UTF-8 byte sequences).
-const stepOptionsLine = (options: readonly string[] | undefined): string => {
+// Validate character length and comment markers on UTF-8 strings before optional latin1 byte encoding (`codex-local`).
+const stepOptionsLine = (options: readonly string[] | undefined, encode: (value: string) => string = value => value): string => {
   if (options === undefined) return ''
-  const normalized = options.map(one => one.replace(/[ \t\r\n]+/g, ' ').replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, ''))
-  if (
-    normalized.length < 2 ||
-    normalized.length > 9 ||
-    normalized.some(one => one === '' || one.length > 120 || one.includes('<!--') || one.includes('-->'))
-  ) {
-    return ''
-  }
-  return `<!-- options=${escapeOptionsJson(normalized)} -->`
+  const valid = validOptions(options)
+  if (valid === null) return ''
+  return `<!-- options=${escapeOptionsJson(valid.map(encode))} -->`
 }
 
 // A report's step lines. The step a PermissionRequest added, while it still waits, is followed by the native line.
 const NATIVE_CODEX = '<!-- native=codex -->'
-const stepLines = (report: CodexReport, owner: string, isAsking: boolean, nativeApproval = report.approval): string[] =>
+const stepLines = (report: CodexReport, owner: string, isAsking: boolean, nativeApproval = report.approval, encode: (value: string) => string = value => value): string[] =>
   report.steps.flatMap((step, index) => {
     const kind = index === report.approval ? 'approval' : index === report.asked ? 'asked' : undefined
     const revision = kind === 'approval' ? report.approvalRevision : kind === 'asked' ? report.askedRevision : undefined
@@ -419,7 +413,7 @@ const stepLines = (report: CodexReport, owner: string, isAsking: boolean, native
       ? [`<!-- question=${sha256(`${owner}:${kind}`)}:${revision} -->`] : []
     const isNative = index === nativeApproval && (!isAsking || step.startsWith('- [?]'))
     const options = !isNative && index === report.asked && step.startsWith('- [?]')
-      ? stepOptionsLine(report.askedOptions)
+      ? stepOptionsLine(report.askedOptions, encode)
       : ''
     return [step, ...(isNative ? [NATIVE_CODEX] : []), ...token, ...(options === '' ? [] : [options])]
   })
@@ -448,7 +442,7 @@ export const boardConfirmedReport = (text: string, previous: CodexReport, owner:
 }
 
 // The full digest prevents an eight-character collision or a pasted block from acquiring ownership.
-export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false, contextLine?: string): string => {
+export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false, contextLine?: string, encode: (value: string) => string = value => value): string => {
   if (!/^[a-f0-9]{64}$/.test(owner)) throw new Error('INVALID_OWNER')
   const id = owner.slice(0, 8)
   const agent = report.agent ?? 'codex'
@@ -460,7 +454,7 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${replied}${resume}${run} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const note = contextLine ?? (report.context === undefined ? undefined : STRINGS['zh-TW'].contextNote(report.context))
-  const block = [marker, `### ${report.title}`, ...(note === undefined ? [] : [note]), ...stepLines(report, owner, true), `<!-- /auto session=${id} -->`].join(eol)
+  const block = [marker, `### ${report.title}`, ...(note === undefined ? [] : [note]), ...stepLines(report, owner, true, report.approval, encode), `<!-- /auto session=${id} -->`].join(eol)
   // Use the board's scanner: Markdown examples are not task ownership, and a
   // missing close must never reach past the next project or another agent's block.
   // Keep raw CR bytes in these lines so offsets preserve even mixed line endings.

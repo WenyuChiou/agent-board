@@ -367,10 +367,13 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
     return `t${seq}`
   }
   const finished = digest.done === '' ? done : [...done, task(id(), digest.done, 'completed', null)]
+  const baseAsked = digest.ask === '' ? null : task(id(), digest.ask, 'in_progress', digest.why || digest.ask)
   const askedTask =
-    digest.ask === ''
+    baseAsked === null
       ? null
-      : renewQuestion(task(id(), digest.ask, 'in_progress', digest.why || digest.ask), mirror.questionSequence)
+      : options !== null
+        ? renewQuestion(baseAsked, mirror.questionSequence)
+        : baseAsked
   const open = [
     ...(askedTask === null ? [] : [askedTask]),
     ...(digest.next === '' || digest.next === digest.ask ? [] : [{ ...task(hasBackgroundJob && given.next === '' ? 'background' : id(), digest.next, digest.handoffTo ? 'completed' : 'pending', null), ...(digest.handoffTo ? { handoffTo: digest.handoffTo } : {}) }]),

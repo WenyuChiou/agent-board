@@ -5979,6 +5979,17 @@ test('Codex, Cursor and --agent-status persist list choice options for a closing
   const opencodeBoard = readFileSync(f.progress, 'utf8')
   assert.ok(opencodeBoard.includes('<!-- options=["Alpha","Beta"] -->'), opencodeBoard)
 
+  // A multibyte choice within 120 characters but over 120 UTF-8 bytes stays offered by local reporters (#4576126769).
+  const cjk41 = '甲'.repeat(41)
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: grokId, hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'waiting'], {
+    sessionId: grokId,
+    hookEventName: 'Stop',
+    lastAssistantMessage: `你要選哪個長選項？\n1. ${cjk41}\n2. Option B`,
+  }).status, 0)
+  const grokLongCjk = readFileSync(f.progress, 'utf8')
+  assert.ok(grokLongCjk.includes(`<!-- options=["${cjk41}","Option B"] -->`), grokLongCjk)
+
   // A subsequent --agent-status waiting question without choices clears the prior question's options.
   assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: grokId, hookEventName: 'UserPromptSubmit' }).status, 0)
   assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'waiting'], {
@@ -5989,6 +6000,7 @@ test('Codex, Cursor and --agent-status persist list choice options for a closing
   const grokFollowup = readFileSync(f.progress, 'utf8')
   assert.ok(grokFollowup.includes('- [?] What folder should I use?'), grokFollowup)
   assert.ok(!grokFollowup.includes('<!-- options=["中文選項甲丠","Option B"] -->'), grokFollowup)
+  assert.ok(!grokFollowup.includes(cjk41), grokFollowup)
 }))
 
 test('a Codex turn that starts from a board delivery still shows its closing question', () => fixture(f => {
