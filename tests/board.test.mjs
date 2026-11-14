@@ -10603,6 +10603,54 @@ test('reopening a board replaces an explicit resume opt-in when that flag is rem
   } finally { await board.end(urls) }
 })
 
+test('a replaced server tells an open tab the board moved instead of dropping offline, and closes once notified', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  try {
+    const first = board.urlOf(await board.serve([]))
+    assert.ok(first)
+    urls.push(first)
+    const firstAddress = new URL(first)
+    const pageHeaders = { 'x-board-token': firstAddress.searchParams.get('t'), 'x-board-page': 'tab-1', 'x-board-visible': '1' }
+    const polled = await fetchAt('127.0.0.1', Number(firstAddress.port), 'GET', '/api/board', pageHeaders)
+    assert.equal(polled.status, 200)
+    assert.ok(polled.json().model)
+
+    const second = board.urlOf(await board.serve(['--codex-send']))
+    assert.ok(second)
+    assert.notEqual(second, first)
+    urls.push(second)
+
+    const moved = await fetchAt('127.0.0.1', Number(firstAddress.port), 'GET', '/api/board', pageHeaders)
+    assert.equal(moved.status, 200)
+    assert.deepEqual(moved.json(), { moved: true })
+
+    // Once its open tab has been told `{ moved: true }`, the old server closes on its own.
+    let closedOwn = false
+    for (let tries = 0; tries < 30; tries++) {
+      try {
+        await fetchAt('127.0.0.1', Number(firstAddress.port), 'GET', '/api/ping', { 'x-board-token': firstAddress.searchParams.get('t') })
+        await delay(50)
+      } catch {
+        closedOwn = true
+        break
+      }
+    }
+    assert.ok(closedOwn, 'replaced server closes once its open tab has been notified')
+
+    const secondAddress = new URL(second)
+    const ping = await fetchAt('127.0.0.1', Number(secondAddress.port), 'GET', '/api/ping', { 'x-board-token': secondAddress.searchParams.get('t') })
+    assert.equal(ping.json().codexSend, true)
+
+    // When `--port` explicitly reuses the running port, replacement closes immediately without holding that port.
+    const samePort = String(secondAddress.port)
+    const third = board.urlOf(await board.serve(['--port', samePort, '--allow-resume']))
+    assert.ok(third)
+    assert.equal(new URL(third).port, samePort)
+    urls.push(third)
+  } finally { await board.end(urls) }
+})
+
 const redesignPage = () => run('en', ['--chat'], {}, FILE, `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`)
 const themeScript = html => html.match(/<head>[\s\S]*?<script[^>]*>([\s\S]*?)<\/script>/)[1]
 const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '' }, system = 'light') => {
@@ -14424,4 +14472,59 @@ test('a finished message seen only under a held press still frees its id, so the
   await dom.settle()
   assert.equal(ids.length, 2)
   assert.notEqual(ids[1], ids[0])
+})
+
+test('serveModel projects a live in-flight receiver claim as queued instead of flickering uncertain (#1335)', async () => {
+  const { serveModel, buildView, parseProgress } = await sourceBoard()
+  const now = Date.parse('2026-11-14T12:00:00Z')
+  const text = [
+    '## Work',
+    '<!-- auto session=thread-1 agent=codex state=working updated=2026-11-14T12:00:00Z -->',
+    '### Ship feature',
+    '- [ ] Check status',
+    '<!-- /auto session=thread-1 -->',
+    '',
+    '<!-- auto session=thread-2 agent=codex state=waiting updated=2026-11-14T12:00:00Z -->',
+    '### Review PR',
+    '- [?] Deploy now, OK?',
+    '<!-- /auto session=thread-2 -->',
+    '',
+  ].join('\n')
+  const view = buildView(parseProgress(text), [], null, now, 0, {}, EN)
+  const firstRow = model => [...model.groups.flatMap(g => g.rows), ...model.idle, ...model.stopped][0]
+  const baseMessage = {
+    id: 'm1',
+    target: 'conn-1',
+    turn: 'turn-1',
+    from: 'board',
+    to: 'codex:thread-1',
+    text: 'Continue',
+    origin: 'local',
+    status: 'uncertain',
+    updated: now,
+    reply: '',
+    error: '',
+    hops: 0,
+    claimed: now,
+  }
+  const askMessage = { ...baseMessage, id: 'm2', target: 'conn-2', to: 'codex:thread-2', ...(view.waiting[0]?.questionId ? { answers: view.waiting[0].questionId } : {}) }
+  const liveConnection = { id: 'conn-1', agent: 'codex', session: 'thread-1', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
+  const askConnection = { id: 'conn-2', agent: 'codex', session: 'thread-2', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
+  const inFlight = serveModel(view, [], EN, new Set(), false, { connections: [liveConnection, askConnection], messages: [baseMessage, askMessage] }, false, { now, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+  assert.equal(firstRow(inFlight)?.receipt?.status, 'queued')
+  assert.equal(inFlight.asks[0]?.receipt?.status, 'queued')
+
+  const cases = [
+    { name: 'error', connections: [liveConnection], message: { ...baseMessage, error: 'ACK_MISSING' } },
+    { name: 'disconnected', connections: [], message: { ...baseMessage, error: 'DISCONNECTED' } },
+    { name: 'no connection', connections: [], message: baseMessage },
+    { name: 'contested', connections: [{ ...liveConnection, contested: true }], message: baseMessage },
+    { name: 'expired connection', connections: [{ ...liveConnection, expires: now }], message: baseMessage },
+    { name: 'later uncertain receipt', connections: [liveConnection], message: { ...baseMessage, updated: now + 10 } },
+    { name: 'mailbox claim', connections: [liveConnection], message: { ...baseMessage, target: 'mailbox:codex:thread-1' } },
+  ]
+  for (const entry of cases) {
+    const model = serveModel(view, [], EN, new Set(), false, { connections: entry.connections, messages: [entry.message] }, false, { now, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+    assert.equal(firstRow(model)?.receipt?.status, 'uncertain', entry.name)
+  }
 })
