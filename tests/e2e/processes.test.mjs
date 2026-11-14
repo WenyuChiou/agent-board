@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { once } from 'node:events'
 import { realpathSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { test } from 'node:test'
@@ -146,7 +145,13 @@ test('a process that has exited but is not yet collected reads as gone on Linux 
   const parent = spawnIsolated('/bin/sh', ['-c', 'sleep 0.2 & echo $!; exec sleep 5'], { env, cwd: world.root, stdio: ['ignore', 'pipe', 'ignore'] })
   const closed = new Promise(done => parent.once('close', done))
   try {
-    const [line] = await once(createInterface({ input: parent.stdout }), 'line')
+    // A shell that ends, or fails to start, before it prints fails the read instead of leaving it waiting.
+    const lines = createInterface({ input: parent.stdout })
+    const line = await within(new Promise((done, reject) => {
+      lines.once('line', done)
+      lines.once('close', () => reject(new Error('the shell ended before it printed its child pid')))
+      parent.once('error', reject)
+    }), 5000, 'the shell did not print its child pid')
     const child = Number(line)
     // The deadline sits inside the loop, so a child that is never seen in state Z fails the test and stops the polling.
     const deadline = Date.now() + 5000
