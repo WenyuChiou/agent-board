@@ -9,7 +9,7 @@ import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkIssue, checkPr,
   duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
   main, naming, needsBundle, outsideClaim, privateData, report, reportMarkdown, reviewOf, rulesPage, sections,
-  stripComments, testTitles, tierOf, titleKnown, verdict,
+  stripComments, SURFACE_FROM, surface, testTitles, tierOf, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -1709,4 +1709,93 @@ test('a reused branch name does not hide the earlier pull request, a CRLF or ind
     assert.equal(problems.length, flagged ? 1 : 0, what)
     if (flagged) assert.equal(problems[0].check, 'finding-link', what)
   }
+})
+
+const riskBody = line => `Fixes #1\nAuthor: codex, fix/x\nTier: risk\n${line === undefined ? '' : `${line}\n`}`
+const surfaceRun = (line, extra = {}) => surface({ body: riskBody(line), title: 'fix(x): y', number: SURFACE_FROM + 1, ...extra })
+
+test('pr-check fails a risk pull request with no Surface line, an unknown value, or two values without cannot split', () => {
+  const missing = surfaceRun()
+  assert.equal(missing.problems.length, 1)
+  assert.equal(missing.problems[0].check, 'surface')
+  assert.match(missing.problems[0].message, /no `Surface:` line/)
+  assert.match(missing.problems[0].fix, /Surface: delivery/)
+  assert.match(surfaceRun('Surface: speed').problems[0].message, /"speed", which is not a surface/)
+  assert.match(surfaceRun('Surface: delivery + data').problems[0].message, /2 surfaces without a reason/)
+  assert.deepEqual(surfaceRun('Surface: `wording`').problems, [])
+  assert.deepEqual(surfaceRun('Surface: launch').problems, [])
+  assert.deepEqual(surfaceRun('Surface: none').problems, [])
+  assert.equal(surfaceRun('Surface: none + delivery').problems.length, 1)
+  assert.match(surfaceRun('Surface: none', { paths: ['CONTRIBUTING.md'] }).problems[0].message, /not `rules-text`/)
+  assert.deepEqual(surfaceRun('<!--\nSurface: data\n-->').problems.map(item => item.check), ['surface'])
+  // A local --body-file run has no number and is checked as a new pull request.
+  assert.equal(surfaceRun(undefined, { number: null }).problems.length, 1)
+})
+
+test('pr-check fails a rules or security file unless the Surface is rules-text', () => {
+  for (const path of ['SECURITY.md', 'AGENTS.md', 'CONTRIBUTING.md', 'docs/dev/RULES.md']) {
+    assert.match(surfaceRun('Surface: wording', { paths: [path, 'hooks/x.ts'] }).problems[0]?.message ?? '', /rules or security file/, path)
+  }
+  assert.deepEqual(surfaceRun('Surface: rules-text', { paths: ['AGENTS.md'] }).problems, [])
+})
+
+test('pr-check notes more than 300 changed lines, not counting tests, generated files or string tables', () => {
+  const big = [{ path: 'hooks/a.ts', added: 200, deleted: 101 }]
+  assert.match(surfaceRun('Surface: data', { numstat: big }).info.join('\n'), /301 changed lines/)
+  const uncounted = [{ path: 'hooks/a.ts', added: 300, deleted: 0 }, { path: 'tests/a.test.mjs', added: 900, deleted: 0 }, { path: 'hooks/strings-en.ts', added: 900, deleted: 0 }, { path: 'hooks/i18n.ts', added: 900, deleted: 0 }, { path: 'hooks/board-script.ts', added: 900, deleted: 0 }]
+  assert.deepEqual(surfaceRun('Surface: data', { numstat: uncounted }).info, [])
+  assert.deepEqual(surfaceRun('Surface: data', { numstat: big }).problems, [])
+})
+
+test('pr-check notes a delivery change that touches setup files and a setup-writes change that touches delivery files', () => {
+  assert.match(surfaceRun('Surface: delivery', { paths: ['hooks/connect.ts'] }).info.join('\n'), /setup files/)
+  assert.match(surfaceRun('Surface: setup-writes', { paths: ['hooks/receivers/x.ts'] }).info.join('\n'), /message delivery files/)
+  assert.deepEqual(surfaceRun('Surface: delivery', { paths: ['scripts/codex-local.ts'] }).info, [])
+  assert.deepEqual(surfaceRun('Surface: setup-writes', { paths: ['scripts/codex-local.ts'] }).info, [])
+})
+
+test('pr-check accepts two surfaces with cannot split and says it waits for an answer', () => {
+  const checked = surfaceRun('Surface: delivery + setup-writes, cannot split: main breaks between steps', { paths: ['hooks/connect.ts', 'hooks/messaging.ts'] })
+  assert.deepEqual(checked.problems, [])
+  assert.match(checked.info.join('\n'), /cannot split: main breaks between steps" waits for the maintainer's or the owner's answer before the first review/)
+  for (const empty of ['Surface: delivery + data, cannot split:', 'Surface: delivery + data, cannot split:   ', 'Surface: delivery + data, cannot split: <reason>']) {
+    assert.match(surfaceRun(empty).problems[0]?.message ?? '', /`cannot split:` with no reason/, empty)
+  }
+  // A filled reason may start with `<`; only the template's own `<reason>` is a placeholder.
+  assert.deepEqual(surfaceRun('Surface: delivery + data, cannot split: <30 seconds of a broken main still blocks a release').problems, [])
+  // The exception covers two surfaces, not three.
+  assert.match(surfaceRun('Surface: delivery + data + launch, cannot split: main breaks between steps').problems[0]?.message ?? '', /3 surfaces; `cannot split:` covers two at most/)
+})
+
+test('pr-check reads one Surface line outside code fences and skips the template placeholder', () => {
+  assert.match(surfaceRun('Surface: none\nSurface: delivery').problems[0]?.message ?? '', /2 `Surface:` lines/)
+  assert.equal(surfaceRun('Surface: data\nSurface: data').problems.length, 1)
+  const example = '```\nSurface: delivery\n```\nSurface: rules-text'
+  assert.deepEqual(surfaceRun(example, { paths: ['CONTRIBUTING.md'] }).problems, [])
+  assert.deepEqual(surfaceRun('~~~md\nSurface: data\n```\nSurface: wording\n~~~\nSurface: launch').problems, [])
+  assert.match(surfaceRun('```\nSurface: delivery\n```').problems[0]?.message ?? '', /no `Surface:` line/)
+  const placeholder = 'Surface: <risk tier only: one of delivery, setup-writes, data, wording, launch or rules-text>'
+  assert.match(surfaceRun(placeholder).problems[0]?.message ?? '', /template's placeholder/)
+  assert.deepEqual(surfaceRun(`${placeholder}\nSurface: data`).problems, [])
+  // A longer fence holds shorter fence lines; only a fence of the same character at least as long closes it.
+  const nested = 'Surface: rules-text\n````md\n```\nSurface: delivery\n```\n````'
+  assert.deepEqual(surfaceRun(nested, { paths: ['CONTRIBUTING.md'] }).problems, [])
+  // A comment marker inside a fence is text, and so is a fence marker inside a comment.
+  assert.deepEqual(surfaceRun('```html\n<!-- not closed\n```\nSurface: data').problems, [])
+  assert.deepEqual(surfaceRun('<!--\n```\n-->\nSurface: data').problems, [])
+  assert.deepEqual(surfaceRun('<!-- note --> \nSurface: data <!-- why -->').problems, [])
+  // A comment marker inside a code span on one line is text too.
+  assert.deepEqual(surfaceRun('Note: `<!--` opens a comment, and ``a ` <!-- b`` too.\nSurface: data').problems, [])
+  assert.deepEqual(surfaceRun('A lone ` tick, then <!-- a comment -->\nSurface: data').problems, [])
+  // The tier is read as a reader sees it, so a comment marker in a fenced example does not hide `Tier: risk` from this check.
+  const hidden = surface({ body: 'Fixes #1\nAuthor: codex, fix/x\n```\n<!--\n```\nTier: risk\nSurface: speed\n', title: 'fix(x): y', number: SURFACE_FROM + 1 })
+  assert.match(hidden.problems[0]?.message ?? '', /"speed", which is not a surface/)
+})
+
+test('pr-check leaves the Surface line to risk pull requests above SURFACE_FROM that are not releases', () => {
+  assert.deepEqual(surface({ body: 'Fixes #1\nTier: normal\n', title: 'fix(x): y', number: SURFACE_FROM + 1 }).problems, [])
+  assert.deepEqual(surfaceRun(undefined, { number: SURFACE_FROM }).problems, [])
+  assert.equal(surfaceRun(undefined, { number: SURFACE_FROM + 1 }).problems.length, 1)
+  assert.deepEqual(surfaceRun(undefined, { title: 'chore(release): Agent Board 1.0.0' }).problems, [])
+  assert.equal(checkPr({ ...syntheticPr(), number: SURFACE_FROM + 1, body: `${body}Tier: risk\n` }).problems.filter(item => item.check === 'surface').length, 1)
 })
