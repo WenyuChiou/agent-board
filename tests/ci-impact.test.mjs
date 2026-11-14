@@ -483,6 +483,40 @@ test('a Windows job runs at most two test files at once, and a serial job still 
   }
 })
 
+test('the summary command writes the recorded run time and its share of the job limit', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-summary-'))
+  try {
+    const script = fileURLToPath(new URL('../scripts/ci-impact.mjs', import.meta.url))
+    const timings = join(dir, 'timings.json'), summary = join(dir, 'summary.md')
+    const run = (...args) => spawnSync(process.execPath, [script, 'summary', ...args], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: timings, GITHUB_STEP_SUMMARY: summary } })
+    await writeFile(timings, JSON.stringify({ version: 1, part: '2/2', serial: false, totalMs: 312_000, files: [] }))
+    const ok = run('600')
+    assert.equal(ok.status, 0)
+    assert.equal(await readFile(summary, 'utf8'), '- part 2/2: tests ran 312s, 52% of the 600s job limit\n')
+    assert.notEqual(run().status, 0)
+    await rm(timings)
+    assert.match(run('600').stdout, /no test timings recorded/)
+    // A half-written or odd timings file warns and leaves the job green (#1445).
+    for (const text of ['{"version":1,"totalMs":31', '{}', 'null', '{"totalMs":null}', '{"totalMs":{"toString":null}}', '{"totalMs":\n::error::x']) {
+      await writeFile(timings, text)
+      const bad = run('600')
+      assert.equal(bad.status, 0, text)
+      assert.match(bad.stdout, /^::warning::/m, text)
+      // The warning stays one line, so text from the file never starts a runner command of its own.
+      assert.doesNotMatch(bad.stdout, /^::error::/m, text)
+    }
+    assert.equal(await readFile(summary, 'utf8'), '- part 2/2: tests ran 312s, 52% of the 600s job limit\n')
+    // An odd part name reads as the whole run, and a summary file that cannot be written warns.
+    await writeFile(timings, JSON.stringify({ totalMs: 60_000, part: { toString: null } }))
+    assert.match(run('600').stdout, /^part 1\/1: tests ran 60s, 10% of the 600s job limit$/m)
+    const unwritable = spawnSync(process.execPath, [script, 'summary', '600'], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: timings, GITHUB_STEP_SUMMARY: dir } })
+    assert.equal(unwritable.status, 0)
+    assert.match(unwritable.stdout, /^::warning::no summary line: /m)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a self-parted test file runs whole in every part and keeps its share, so the parts together run each of its tests once', async () => {
   const { testRuns, partTest, selfPartedTests } = await import('../scripts/ci-impact.mjs')
   const files = ['tests/a.test.mjs', 'tests/board.test.mjs', 'tests/b.test.mjs', 'tests/codex-local.test.mjs']
@@ -516,7 +550,7 @@ test('the budgeted slow files go to different parts, and the parts together run 
     for (const share of shares) assert.ok(share.filter(path => slow.includes(path)).length <= Math.ceil(slow.length / total), total + ' parts: ' + share.join(' '))
     const others = shares.flat().filter(path => !selfPartedTests.includes(path))
     assert.deepEqual([...others].sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
-    for (const share of shares) for (const path of selfPartedTests) assert.ok(share.includes(path))
+    for (const share of shares) for (const path of selfPartedTests.filter(one => files.includes(one))) assert.ok(share.includes(path))
   }
 })
 
@@ -839,14 +873,21 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   const ubuntu = '{"os":"ubuntu-latest","node":22,"part":"1/1"}', ubuntu24 = '{"os":"ubuntu-latest","node":24,"part":"1/1"}'
   assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 6)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 6)},${parts(24, 6)}]' }}`))
   assert.ok(text.includes(`journeys_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 2)}]' || '[${ubuntu},${ubuntu24},${parts(22, 2)},${parts(24, 2)}]' }}`))
+  // The local exchange job takes the journeys' split: its Windows run used 75-80% of ten minutes (#1445).
+  assert.ok(text.includes(`messaging_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 2)}]' || '[${ubuntu},${ubuntu24},${parts(22, 2)},${parts(24, 2)}]' }}`))
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
     assert.ok(block, group)
-    const matrix = group === 'board' || group === 'journeys' ? `${group}_matrix` : 'node_matrix'
+    const matrix = group === 'board' || group === 'journeys' || group === 'messaging' ? `${group}_matrix` : 'node_matrix'
     assert.ok(block.includes(`include: \${{ fromJSON(needs.impact.outputs.${matrix}) }}`), group)
-    if (group === 'board' || group === 'journeys') {
+    if (group === 'board' || group === 'journeys' || group === 'messaging') {
       assert.ok(block.includes('CI_TEST_PART: ${{ matrix.part }}') && block.includes('timeout-minutes: 10'), group)
+    }
+    if (group === 'board' || group === 'journeys') {
       assert.ok(block.includes("CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}"), group)
+    }
+    if (group === 'messaging') {
+      assert.ok(block.includes("format(', part {0}', matrix.part)") && block.includes('node scripts/ci-impact.mjs summary 600'), group)
     }
     assert.doesNotMatch(block, /node: \[/, group)
     assert.doesNotMatch(block, /^\s+os: \[/m, group)
