@@ -1915,6 +1915,16 @@ test('A20 an open whose reply is lost takes nothing either, so an older board ne
   } finally { if (server) await new Promise(done => server.close(done)); hub?.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('A21 a named take with no messages folder is an empty take, not a failure: no board has run there, so the plugin logs nothing (#1366 review)', async () => {
+  const { hookMailbox } = await importTs('../scripts/board-messaging.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'agent-board-no-folder-'))
+  try {
+    const missing = join(dir, 'messages')
+    assert.equal(await hookMailbox(missing, 1000, 200, 200).turnOrThrow('opencode', 's1', 'CLI', Date.now(), refOf(1)), null)
+    assert.ok(!existsSync(missing), 'the take wrote no folder')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('R40 a failed attempt and a failed release each leave a line in the hook error log, once, not at every tick (#1366 review)', () => fixture(async f => {
   f.calls.faults.attempt = ['fail']
   f.calls.faults.release = ['fail', 'fail']
