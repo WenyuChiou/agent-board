@@ -8,15 +8,20 @@
 //
 // The contract with the board (the board half is PR B; until then a board answers `wake-poll` with an
 // error, which the sidecar reads as "no wakes"):
-//   POST /api/messages/wake-poll   {agent:'antigravity'}  ->  {wakes:[{id, conversation, nonce}]}
-//   POST /api/messages/wake-report {id, nonce, status:'sent'|'failed', error?}  ->  {ok:true}
-// A wake `id` and `nonce` match a message id ([A-Za-z0-9][A-Za-z0-9_-]{0,127}). The sidecar handles every
-// wake a poll returns, in order, and never runs a wake twice. A report that gets no answer is sent again
-// (the same body, up to three times in all), so the board treats a repeated report of one wake as the same
-// report; a report still unanswered after that is only logged, and that wake stays uncertain on the board.
+//   POST /api/messages/wake-poll    {agent:'antigravity'}  ->  {wakes:[{id, conversation, nonce}]}
+//   POST /api/messages/wake-attempt {id, nonce}  ->  {ok:true} once per message, else {ok:false, code}
+//   POST /api/messages/wake-report  {id, nonce, status:'sent'|'failed', error?}  ->  {ok:true}
+// A wake `id` and `nonce` match a message id ([A-Za-z0-9][A-Za-z0-9_-]{0,127}). The board, not the sidecar,
+// promises at most one wake per message: before it runs anything the sidecar asks `wake-attempt` once, and it
+// runs `agentapi` only on the answer {ok:true}. Any other answer, an error or no answer runs nothing and reports
+// nothing. The sidecar keeps no record of wakes, so a repeated wake, a restart or a second sidecar is decided by
+// that answer. A report that gets no answer is sent again (the same body, up to three times in all), so the
+// board treats a repeated report of one wake as the same report; a report still unanswered after that is only
+// logged, and that wake stays unconfirmed on the board.
 // It reaches the board the way the hooks do: the messages folder's server.lock and server.owner. Every
 // poll is also the board's sign that the sidecar is alive. It reads no Antigravity port or token.
 
+// The English line; setup sends the selected language's line (antigravityWakeLine in the strings tables), and this one stays the default.
 export const ANTIGRAVITY_WAKE_LINE = 'Agent Board: a message from the board is attached to this turn. Follow it.'
 export const ANTIGRAVITY_SIDECAR_ID = 'agent-board'
 // While a board is up the sidecar polls every `fast` ms; with no board (or no answer) it backs off to `slow`.
@@ -34,7 +39,7 @@ export const antigravitySidecarConfig = (node: string, progress: string, home: s
 }, null, 2)}\n`
 
 // Plain ESM for node. It holds no backtick and no dollar-brace, so it can sit in a String.raw template.
-export const antigravitySidecarSource = (): string => String.raw`// Written by Agent Board setup (#1396). Runs only after you switch it on in Antigravity's Automations page.
+export const antigravitySidecarSource = (wakeLine: string = ANTIGRAVITY_WAKE_LINE): string => String.raw`// Written by Agent Board setup (#1396). Runs only after you switch it on in Antigravity's Automations page.
 // It never receives the text of a board message; it sends one fixed line and reports sent or failed.
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -43,7 +48,7 @@ import http from 'node:http'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-const WAKE_LINE = ${JSON.stringify(ANTIGRAVITY_WAKE_LINE)}
+const WAKE_LINE = ${JSON.stringify(wakeLine)}
 const FAST_MS = ${ANTIGRAVITY_POLL_MS.fast}
 const SLOW_MS = ${ANTIGRAVITY_POLL_MS.slow}
 const args = process.argv.slice(2)
@@ -126,7 +131,11 @@ const cycle = async () => {
   for (const wake of Array.isArray(result?.wakes) ? result.wakes : []) {
     // Nothing to report back to without a usable id and nonce, so this one is logged, never dropped silently.
     if (!isToken(wake?.id) || !isToken(wake?.nonce)) { console.log(stamp() + ' wake INVALID_WAKE (cannot be reported)'); continue }
-    const outcome = typeof wake.conversation === 'string' && UUID.test(wake.conversation) ? await send(exe, wake.conversation) : 'INVALID_CONVERSATION'
+    // The board marks the wake started before it answers ok, once per message; only that answer runs agentapi. Asked once, never again.
+    let attempt
+    try { attempt = await post(board, 'wake-attempt', { id: wake.id, nonce: wake.nonce }) } catch { attempt = { ok: false, code: 'NO_ANSWER' } }
+    if (attempt?.ok !== true) { console.log(stamp() + ' wake not run: ' + (isToken(attempt?.code) ? attempt.code : 'REFUSED')); continue }
+    const outcome =typeof wake.conversation === 'string' && UUID.test(wake.conversation) ? await send(exe, wake.conversation) : 'INVALID_CONVERSATION'
     const isReported = await report(board, { id: wake.id, nonce: wake.nonce, status: outcome === 'sent' ? 'sent' : 'failed', ...(outcome === 'sent' ? {} : { error: outcome }) })
     console.log(stamp() + ' wake ' + outcome + (isReported ? '' : ' (report lost)'))
   }

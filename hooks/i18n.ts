@@ -79,6 +79,7 @@ export const ZH_TW = {
   localAgentStarted: (when: string): string => `開始於 ${when}`,
   localAgentSkillDescription: '開啟本機互動看板，追蹤目前已接線 session 的實際任務進度。',
   antigravitySidecarDescription: 'Agent Board：看板有訊息要給閒置的 Antigravity 對話時，替它開始新的一輪。只有你能在 Automations 頁面開啟。',
+  antigravityWakeLine: 'Agent Board：看板的訊息已附在這一輪，請照著處理。',
   openclawProgressTool: '把這項任務的實際進度回報給本機看板。每個實際步驟或狀態改變後，把每個步驟以一行 Markdown 任務送出。回覆以向使用者提問收尾時，結束回合前先把問題以「- [?] <問題>」步驟（state 為 waiting）送出：看板不讀回覆文字，這個步驟是問題到達使用者的唯一途徑。需要使用者時，把步驟標成 [?]，寫一行對方能直接回答的話：是非題用「…可以嗎？」結尾，選擇題寫成「A 還是 B？」，指令放在反引號裡，等別人時用「等」開頭。',
   deepseekBoardTool: '開啟本機看板，或把這項任務的實際進度回報給看板。action 選 open 會啟動看板網頁，並回傳它印出的那一行：網頁連結，或沒有網頁的原因。action 選 report 要給 title、state 和 steps：每個實際步驟或狀態改變後，把每個步驟以一行 Markdown 任務送出。回覆以向使用者提問收尾時，結束回合前先把問題以「- [?] <問題>」步驟（state 為 waiting）送出：看板不讀回覆文字，這個步驟是問題到達使用者的唯一途徑。需要使用者時，把步驟標成 [?]，寫一行對方能直接回答的話：是非題用「…可以嗎？」結尾，選擇題寫成「A 還是 B？」，指令放在反引號裡，等別人時用「等」開頭。',
   localAgentStepFormat: '一行 Markdown 任務：「- [x] 完成」、「- [~] 進行中」、「- [ ] 下一步」、「- [?] 等使用者回答」、「- [!] 卡住」、「- [>] 在別處執行或已交棒」、「- [-] 取消」。需要使用者時，把步驟標成 [?]，寫一行對方能直接回答的話：是非題用「…可以嗎？」結尾，選擇題寫成「A 還是 B？」，指令放在反引號裡，等別人時用「等」開頭。',

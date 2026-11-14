@@ -145,27 +145,38 @@ in PR B how old a poll may be.
 | Call | Body | Answer |
 | --- | --- | --- |
 | `POST /api/messages/wake-poll` | `{"agent":"antigravity"}` | `{"wakes":[{"id","conversation","nonce"}]}` |
-| `POST /api/messages/wake-report` | `{"id","nonce","status":"sent" or "failed","error"?}` | `{"ok":true}` |
+| `POST /api/messages/wake-attempt` | `{"id","nonce"}` | `{"ok":true}`, or `{"ok":false,"code"}` |
+| `POST /api/messages/wake-report` | `{"id","nonce","status":"sent" or "failed","error"?}` | `{"ok":true}`, or `{"ok":false,"code":"NOT_STARTED"}` |
 
-For each wake the sidecar checks that `conversation` is a UUID, then runs
+For each wake the sidecar asks `wake-attempt` once and goes on only on `{"ok":true}`. It then checks that `conversation` is a UUID (one that is not is reported `failed`), and runs
 `agentapi send-message --title=Agent Board <conversation> "Agent Board: a message from the board is attached to this turn. Follow it."`
-(one argument list, no shell, a 60 s limit). Exit 0 reports `sent`; anything else reports `failed` with a
+(that is the English line; the sidecar sends the line in the setup language; one argument list, no shell, a 60 s limit). Exit 0 reports `sent`; anything else reports `failed` with a
 short code. The turn-start hook then hands the queued message over as it does for any hook mailbox.
 
 What each side may rely on (PR B writes the board's half to this):
 
-- A wake's `id` and `nonce` match a message id, `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`. A poll may return any number of
-  wakes; the sidecar handles every one, in order, and bounds nothing itself. Each wake can take up to 60 s, so the
-  board bounds a batch and gives a wake it claimed a lease long enough for the batch before it counts it lost.
-- The sidecar never runs a wake twice. If it cannot report one (its `id` or `nonce` does not match, which it
-  prints as `INVALID_WAKE`), the wake stays claimed on the board and the board's own lease decides what it
-  becomes; it is never reported as sent.
+- A wake's `id` and `nonce` match a message id, `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`. One that does not is printed
+  as `INVALID_WAKE`; the sidecar asks nothing about it and runs nothing.
+- The board, not the sidecar, promises at most one wake per message. Before it runs `agentapi` the sidecar asks
+  `wake-attempt`; the board saves that the wake has started and only then answers `{"ok":true}`, once per
+  message. From then on `wake-poll` never returns that message again, whatever happens to `agentapi` or to the
+  report.
+- The sidecar runs `agentapi` only on that answer. Any other answer (`WAKE_STARTED` for a wake already started,
+  `NOT_HELD` for one the board does not hold), an error, or no answer runs nothing and reports nothing. It does
+  not ask again.
+- The sidecar keeps no record of wakes. A poll may return a wake it returned before, or the same wake twice, and
+  a restarted or second sidecar may ask for it; the attempt decides.
+- A wake handed out and never attempted may be returned by any later poll. The board returns at most one wake per
+  poll; the sidecar handles every entry it is given, in order.
+- A wake is tried once. One reported `failed`, or started and never reported, is not sent again; the message
+  stays queued and the turn-start hook hands it over at the conversation's next turn.
 - A report is repeatable: the same `id`, `nonce` and `status`. When a `wake-report` gets no answer, the sidecar
   sends the same body again, up to three times in all, a second or two apart. The board treats a repeated report
   of one wake as the same report and answers `{"ok":true}` again; a different `status` for a wake already
   reported does not change it. A report still unanswered after the third try is only printed
   (`report lost`), and that wake stays uncertain on the board: a card says the wake is unconfirmed, never
-  delivered, and the message is not sent again unseen.
+  delivered, and the message is not sent again unseen. A report for a wake that was never started is answered
+  `NOT_STARTED`.
 - Where the connector already manages Antigravity's hooks, setup still writes the two sidecar files, on the same
   yes, under a record of their own (`install-antigravity-sidecar.json`); it takes over none of the connector's
   hooks, and `remove` takes the sidecar files out.

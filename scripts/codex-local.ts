@@ -589,7 +589,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const sidecarOnlyFiles = [join(sidecarDirectory, 'sidecar.json'), join(sidecarDirectory, 'sidecar.mjs')]
   const runSidecarOnly = (progressFile: string, isRemoving: boolean, connector: boolean): void => {
     const recorded = object(jsonInitial(sidecarRecord).files ?? {}) as Record<string, string>
-    const desired = [antigravitySidecarConfig(process.execPath, progressFile, home, fileWords.antigravitySidecarDescription), antigravitySidecarSource()]
+    const desired = [antigravitySidecarConfig(process.execPath, progressFile, home, fileWords.antigravitySidecarDescription), antigravitySidecarSource(fileWords.antigravityWakeLine)]
     const sidecarChanges: { file: string; action: string }[] = []
     const sidecarConflicts: string[] = []
     sidecarOnlyFiles.forEach((file, i) => {
@@ -1410,7 +1410,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const sidecarFiles = [join(sidecarDir, 'sidecar.json'), join(sidecarDir, 'sidecar.mjs')]
     if (args.includes('--antigravity-sidecar') || sidecarFiles.some(file => Object.hasOwn(manifest.files, file))) {
       files[sidecarFiles[0]!] = antigravitySidecarConfig(process.execPath, progress, home, fileWords.antigravitySidecarDescription)
-      files[sidecarFiles[1]!] = antigravitySidecarSource()
+      files[sidecarFiles[1]!] = antigravitySidecarSource(fileWords.antigravityWakeLine)
     }
   }
   if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)}}\n'''\n`

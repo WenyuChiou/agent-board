@@ -182,3 +182,19 @@ test('the flag writes the sidecar files for a connector-managed Antigravity and 
   assert.ok(existsSync(join(dir, 'sidecar.json')))
   assert.ok(!existsSync(join(home, '.gemini', 'config', 'hooks.json')))
 }))
+
+test('the sidecar sends its wake line in the setup language: zh-TW for a zh-TW setup, the English line by default', () => withHome(({ run, dir }) => {
+  const english = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'])
+  assert.equal(english.status, 0, english.stderr)
+  const englishSource = readFileSync(join(dir, 'sidecar.mjs'), 'utf8')
+  assert.ok(englishSource.includes('const WAKE_LINE = "Agent Board: a message from the board is attached to this turn. Follow it."'), 'the default is the English line')
+  assert.equal(englishSource, antigravitySidecarSource())
+}))
+
+test('a zh-TW setup writes the zh-TW wake line into the sidecar', () => withHome(({ run, dir }) => {
+  const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { lang: 'zh-TW' })
+  assert.equal(install.status, 0, install.stderr)
+  const source = readFileSync(join(dir, 'sidecar.mjs'), 'utf8')
+  assert.ok(source.includes('const WAKE_LINE = "Agent Board：看板的訊息已附在這一輪，請照著處理。"'), source.split('\n').find(line => line.startsWith('const WAKE_LINE')))
+  assert.ok(!source.includes('a message from the board is attached'), 'no English line in a zh-TW sidecar')
+}))
