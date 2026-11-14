@@ -12,7 +12,7 @@ import { connectDataRoots, connectRecordPath, recoveryUnreadableCode } from '../
 import { boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
 import { codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
-import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
+import { applyDigest, applyLateDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, lastQuestionInProseWithOptions, lastQuestionWithOptions, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, progressReport, unwrittenEntries } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, nameReply, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
@@ -5252,4 +5252,82 @@ test('Settings language request on a server started with --lang en preserves pre
   expect(isOverriddenAfterReset).toBe(false)
   const resetHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverriddenAfterReset)
   expect(resetHtml).not.toContain('id="settings-lang-override"')
+})
+
+test('a closing question over or after a choice list extracts each short label across formats (#1277)', () => {
+  expect(lastQuestionWithOptions('Which database should I use?\n1. Postgres\n2. SQLite\n3. MySQL')).toEqual({
+    question: 'Which database should I use?',
+    options: ['Postgres', 'SQLite', 'MySQL'],
+  })
+  expect(lastQuestionWithOptions('Done.\n\nShould I use Postgres or SQLite?\n- Postgres\n- SQLite')).toEqual({
+    question: 'Should I use Postgres or SQLite?',
+    options: ['Postgres', 'SQLite'],
+  })
+  expect(lastQuestionWithOptions('Which component should I edit?\n  a) `parser`.\n  b) **renderer** — DOM')).toEqual({
+    question: 'Which component should I edit?',
+    options: ['parser', 'renderer — DOM'],
+  })
+  expect(lastQuestionWithOptions('Which path should I take?\nA. Fast path\nB. Safe path')).toEqual({
+    question: 'Which path should I take?',
+    options: ['Fast path', 'Safe path'],
+  })
+  expect(lastQuestionWithOptions('你想先做哪一個？\n1、文件\n2、測試')).toEqual({
+    question: '你想先做哪一個？',
+    options: ['文件', '測試'],
+  })
+  // List placed before the closing question (blank-line separated and same paragraph)
+  expect(lastQuestionWithOptions('Options:\n\n1. Postgres\n2. SQLite\n\nWhich database should I use?')).toEqual({
+    question: 'Which database should I use?',
+    options: ['Postgres', 'SQLite'],
+  })
+  expect(lastQuestionWithOptions('- Parser\n- Tests\nWhich one first?')).toEqual({
+    question: 'Which one first?',
+    options: ['Parser', 'Tests'],
+  })
+  expect(lastQuestionInProseWithOptions('Done.\n\n- 文件\n- 測試\n\n你想先做哪一個？', true)).toEqual({
+    question: '你想先做哪一個？',
+    options: ['文件', '測試'],
+  })
+  // Follow-up pick question after a list extracts its choices, while yes/no stays without options.
+  expect(lastQuestionWithOptions('Available targets:\n- staging\n- prod\nWhich option?')).toEqual({
+    question: 'Which option?',
+    options: ['staging', 'prod'],
+  })
+  expect(lastQuestionWithOptions('Done.\n- parser\n- tests\n\nShip it?')).toEqual({
+    question: 'Ship it?',
+    options: [],
+  })
+  // Negative lists keep options empty or reject non-question headings/nested/result lists
+  expect(lastQuestionWithOptions('What changed?\n- Updated the parser.\n- Added tests.')).toBeNull()
+  expect(lastQuestionWithOptions('Which deployment option do you prefer?\n- Docker — 70%\n- Binary — 30%')).toBeNull()
+  expect(lastQuestionWithOptions('Which database should I use?\n- Postgres\n  - SQLite')).toBeNull()
+  expect(lastQuestionWithOptions('What changed?\n- Updated the parser.\n- Added tests.\n\nReady to commit?')).toEqual({
+    question: 'Ready to commit?',
+    options: [],
+  })
+})
+
+test('digest, markAsked and board views preserve list choices cleanly and drop them when settled (#1277)', () => {
+  const AT = Date.parse('2026-10-30T12:00:00Z')
+  const base = emptyMirror('a1b2c3d4', 'demo', AT, '/work/demo', 'codex')
+  const opts = ['Postgres', 'SQLite']
+  const asked = markAsked(base, 'Which database should I use?', false, opts)
+  const block = `## demo\n${renderAutoBlock(asked).join('\n')}\n`
+  const view = buildView(parseProgress(block), [], null, AT, 0, {}, STRINGS.en)
+  expect(view.waiting[0]).toMatchObject({ kind: 'choose', options: opts })
+  const page = serveModel(view, [], STRINGS.en)
+  expect(page.asks[0]).toMatchObject({ kind: 'choose', answers: opts })
+
+  // Existing waiting step without ask/options inherits list choices from markAsked
+  const withStep = applyTaskCreate(base, { subject: 'Pick one?', metadata: { waiting: 'you' } }, '1', AT)
+  const enriched = markAsked(withStep, 'Pick one?', false, opts)
+  expect(enriched.tasks[0]?.options).toEqual(opts)
+
+  // applyDigest stores options for ask and clears them when settled; applyLateDigest preserves existing ask options
+  const digested = applyDigest(base, { title: 'Pick DB', context: '', done: '', next: 'Continue', ask: 'Storage', why: 'Which database?', options: opts }, AT + 1000)
+  expect(digested.tasks[0]?.options).toEqual(opts)
+  const late = applyLateDigest(digested, { title: 'Pick DB', context: '', done: 'Checked docs', next: 'Working', ask: 'Late ask', why: 'Late why?', options: ['LateA', 'LateB'] }, AT + 1500, STRINGS.en)
+  expect(late.tasks.find(t => t.waiting === 'you')?.options).toEqual(opts)
+  const settled = applyDigest(digested, { title: 'Pick DB', context: '', done: 'Picked Postgres', next: 'Writing schema', ask: '', why: '' }, AT + 2000)
+  expect(settled.tasks.some(t => t.options.length > 0)).toBe(false)
 })

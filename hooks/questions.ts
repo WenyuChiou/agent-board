@@ -186,7 +186,26 @@ export const cutOffScopes = (projects: readonly ProgressProject[], cut: readonly
 // are all its readers need. The whole task held every step's words and line once per waiting
 // step, so a real board's ledger grew past the host's 4 MiB write limit, and every edit above a
 // block wrote a new copy of each of its questions (#419).
-export const sourceData = (task: ProgressTask): string => JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status) })
+export const sourceData = (task: ProgressTask): string => {
+  const stepOptions = Object.fromEntries(task.steps.flatMap(step => step.status === 'waiting' && (step.options ?? []).length >= 2 ? [[sha256(questionWords(step.text)).slice(0, 8), step.options!]] : []))
+  return JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status), ...(Object.keys(stepOptions).length === 0 ? {} : { stepOptions }) })
+}
+
+export const sourceOptions = (source: QuestionSource): string[] | undefined => {
+  const parsed = parsedJson(source.data)
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+  const record = parsed as Record<string, unknown>
+  const raw = source.kind === 'own'
+    ? (record.task !== null && typeof record.task === 'object' && !Array.isArray(record.task) ? (record.task as Record<string, unknown>).options : undefined)
+    : source.kind === 'inbox'
+      ? record.options
+      : record.stepOptions !== null && typeof record.stepOptions === 'object' && !Array.isArray(record.stepOptions)
+        ? (record.stepOptions as Record<string, unknown>)[sha256(questionWords(source.text)).slice(0, 8)]
+        : undefined
+  if (!Array.isArray(raw)) return undefined
+  const list = raw.filter((one): one is string => typeof one === 'string' && one.trim() !== '')
+  return list.length >= 2 ? list : undefined
+}
 
 type SourceSnapshot = { auto: ProgressAuto | null; steps: ProgressStepStatus[] }
 const parsedJson = (text: string): unknown => {

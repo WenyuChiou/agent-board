@@ -2,7 +2,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { boardCounts } from './board-status'
 import type { QueuedMessaging } from './board-status'
-import { lastQuestionInProse, normalizeReply } from './digest'
+import { lastQuestionInProseWithOptions, normalizeReply } from './digest'
 import { withoutStamp } from './done-stamp'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail, turnOrder } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
@@ -23,7 +23,7 @@ import type { TidyPreview } from './tidy'
 
 // A turn another agent's hook left that no Claude Code session has summed up yet. The
 // board only peeks at it: taking it is a Claude Code session's job, so the two never race.
-export type PendingTurn = { id?: string; session?: string; dir?: string; fullText?: string; sources?: string[]; sourceRevisions?: string[]; isClosed?: boolean; agent: string; project: string; text: string; isQuestion: boolean; at: number; sourceAt?: number; hasSummary?: boolean; replied?: number; isAnsweredWaiting?: boolean }
+export type PendingTurn = { id?: string; session?: string; dir?: string; fullText?: string; sources?: string[]; sourceRevisions?: string[]; isClosed?: boolean; agent: string; project: string; text: string; options?: string[]; isQuestion: boolean; at: number; sourceAt?: number; hasSummary?: boolean; replied?: number; isAnsweredWaiting?: boolean }
 
 // A reply's last line of prose, its code blocks left out: where a reply usually says what
 // came of the turn.
@@ -56,15 +56,17 @@ export const peekInbox = (
     if (isBoardTurn(turn)) continue
     const normalized = normalizeReply(turn.answer)
     const prose = normalized === null ? null : scrub(normalized)
-    const question = prose === null ? null : lastQuestionInProse(prose, true)
+    const asked = prose === null ? null : lastQuestionInProseWithOptions(prose, true)
+    const question = asked?.question ?? null
     const summary = prose === null ? s.turnUnreadable : question ?? closing(prose)
     const text = (summary ?? turn.prompt).trim()
     if (question !== null) {
+      const options = asked?.options ?? []
       // Words deduplicate retries, not independent ledger identities. An end or later
       // statement cannot prove a previous question answered before anyone captured it.
       const key = JSON.stringify([turn.id, turn.session, turn.project, question.replace(/\s+/g, ' ').trim()])
       const previous = questions.get(key)
-      questions.set(key, { id: turn.id, session: turn.session, fullText: prose!, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
+      questions.set(key, { id: turn.id, session: turn.session, fullText: prose!, sources: [...new Set([...(previous?.sources ?? []), file.name])], sourceRevisions: [...new Set([...(previous?.sourceRevisions ?? []), sha256(JSON.stringify([file.name, file.body]))])], agent: turn.agent, project: turn.project, dir: turn.cwd, text, ...(options.length >= 2 ? { options } : {}), isQuestion: true, at: previous?.at ?? file.at, sourceAt: turn.at ?? file.at, hasSummary: true, ...(turn.event === 'end' ? { isClosed: true } : {}) })
       latest.delete(turn.id)
     } else if (turn.event !== 'end' && text !== '') {
       latest.set(turn.id, { id: turn.id, ...(prose === null ? {} : { fullText: prose }), agent: turn.agent, project: turn.project, dir: turn.cwd, text, isQuestion: false, at: file.at, sourceAt: turn.at ?? file.at, hasSummary: summary !== undefined && summary !== null })

@@ -1,5 +1,6 @@
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
 import { cleanContext, cleanTitle, clip, markAnswered, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
+import { cleanOptions } from './parse'
 import { answeredStep, oneLine } from './step-words'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -8,7 +9,8 @@ import type { Strings } from './i18n'
 // the question it ended on, as the model sums the turn up. Also the question a turn ends
 // on when the session does keep a list, and the handoff line a compaction leaves.
 
-export type Digest = { title: string; context: string; done: string; next: string; ask: string; why: string; handoffTo?: string }
+export type AskedQuestion = { question: string; options: string[] }
+export type Digest = { title: string; context: string; done: string; next: string; ask: string; why: string; options?: string[]; handoffTo?: string }
 
 const EMPTY = /^(?:-+|—+|–+|none|n\/a|無|无|沒有|没有)$/i
 
@@ -33,7 +35,8 @@ export const parseDigest = (answer: string): Digest | null => {
   const done = field(lines, 'DONE')
   const next = field(lines, 'NEXT')
   const normalized = normalizeReplyValue(field(lines, 'ASK'))
-  const ask = normalized.text === null ? '' : normalized.isStructured ? lastQuestionInProse(normalized.text, true) ?? '' : normalized.text
+  const asked = normalized.text === null ? null : normalized.isStructured ? lastQuestionInProseWithOptions(normalized.text, true) : null
+  const ask = normalized.text === null ? '' : normalized.isStructured ? asked?.question ?? '' : normalized.text
   const handoffTo = field(lines, 'HANDOFF').replace(/\s+/g, ' ').trim()
   if ([title, context, done, next, ask].every(value => value === '')) return null
   const split = ask.search(/\s[—–-]{1,2}\s/)
@@ -47,6 +50,7 @@ export const parseDigest = (answer: string): Digest | null => {
     next: clip(next, 60),
     ask: clip(label.trim(), 48),
     why: clip(why.trim(), 120),
+    ...(asked !== null && asked.options.length >= 2 ? { options: asked.options } : {}),
     ...(handoffTo === '' ? {} : { handoffTo: clip(handoffTo, 120) }),
   }
 }
@@ -110,10 +114,12 @@ export const recordStepWords = (text: string, s: Strings): string | null => {
 // The question a reply ends on, if its last paragraph asks one: the last sentence there
 // with a question mark, without code or markdown. A reply that ends on a statement asks
 // nothing, even if it asked something earlier.
-export const lastQuestion = (answer: string, isFull = false): string | null => {
+export const lastQuestionWithOptions = (answer: string, isFull = false): AskedQuestion | null => {
   const prose = normalizeReply(answer)
-  return prose === null ? null : lastQuestionInProse(prose, isFull)
+  return prose === null ? null : lastQuestionInProseWithOptions(prose, isFull)
 }
+
+export const lastQuestion = (answer: string, isFull = false): string | null => lastQuestionWithOptions(answer, isFull)?.question ?? null
 
 // A web link, without the punctuation or closing quote that follows it in a sentence
 // (`… at https://x.dev/a?`, `“Review https://x.dev/a?”`).
@@ -131,6 +137,11 @@ const isChoice = (item: string): boolean => {
 
   return label !== '' && label.length <= 60 && !/[?？。！]|[.!]\s/.test(label) && !/[.!;；:：]$/.test(label) && !/\d\s*[%％]/.test(label)
 }
+const choiceLabel = (raw: string): string | null => {
+  const item = withoutEmphasis(raw).replace(/\u0001/g, '"').replace(/\s+/g, ' ').trim()
+  if (!isChoice(item)) return null
+  return /^[^\s.]+\.$/.test(item) ? item.slice(0, -1) : item
+}
 // Words only the agent says to the person. With them an open `what` asks to pick too; a yes or
 // no (`Do you want the details?`) over a list does not.
 const ASKS_YOU = /\b(?:do you (?:want|prefer|need)|would you (?:like|prefer|rather)|want me to)\b|要我|[你您](?:要|想|希望|偏好|需要)/i
@@ -146,6 +157,7 @@ const IS_PAST = /\b(?:did|was|were|had|have|has)\b|了|過|过|剛|刚|之前|�
 // several (`先做哪些工作？`) it is a timeline's heading, answered by its list.
 // The one word must not be a verb in the past (`Which finished first?`, `Which ran first?`).
 const ASKS_ORDER = /^which (?:one|(?!(?:ran|went|came|began|broke|built|won|got|made|took|wrote|did|was|were|had|left|lost|fell|sent|spent|ate|saw|ended)\b)(?![\p{L}-]*ed\b)[\p{L}-]+) (?:first|next)[?？]$|^(?:先|下一步|接下來|接下来)[^，,。.]{0,4}哪(?:個|个|一)[^，,。.？?]{0,8}[？?]$/iu
+const ASKS_FOLLOWUP_PICK = /^(?:which(?:\s+(?:one|option|choice))?|what(?:\s+(?:one|option|choice))?\s+do\s+you\s+(?:want|prefer)|(?:請|请)?(?:問|问)?(?:要?(?:選|选|用|挑))?哪(?:一?[個个項项種种])?)[?？]$/i
 const asksToPick = (question: string, isHeading: boolean): boolean => {
   // A heading, bold line or `Q:` over a list is a section the list answers (an FAQ, a survey's
   // results), whoever its words name.
@@ -155,31 +167,63 @@ const asksToPick = (question: string, isHeading: boolean): boolean => {
   return PICKS.test(question) && ASKS_ME.test(question) || ASKS_ORDER.test(question)
 }
 const IS_HEADING = /^\s*(?:#|>|(?:Q|問|问)\s*[:：.])|^\s*([*_]{1,3})\S.*\1\s*$/i
+const IS_SECTION_HEADING = /^\s*(?:#|>|(?:Q|問|问)\s*[:：.])/i
 
-// The question line over a list of choices that ends the reply, or null. Blank lines may sit
-// between the question and the list and between the choices; any other line ends the list.
+// Shared contiguous choice-list scanner walking upward from `endExclusive`: blank lines may sit
+// between items; every item must share one indent and be a short non-sentence choice label.
+const scanChoiceList = (lines: readonly string[], endExclusive: number): { before: number; options: string[] } | null => {
+  let at = endExclusive
+  // Every choice sits at one indent: an item nested under another explains it.
+  let indent: string | undefined
+  const collected: string[] = []
+  while (at > 0) {
+    const line = lines[at - 1] ?? ''
+    if (line.trim() === '') {
+      at -= 1
+      continue
+    }
+    const item = LIST_ITEM.exec(line)
+    if (item === null || item[1] !== (indent ??= item[1])) break
+    const label = choiceLabel(item[2] ?? '')
+    if (label === null) return null
+    collected.push(label)
+    at -= 1
+  }
+
+  return collected.length < 2 ? null : { before: at, options: collected.reverse().slice(0, 9) }
+}
+
+// The question line over a list of choices that ends the reply, or null, along with its choices.
+// Blank lines may sit between the question and the list and between the choices; any other line ends the list.
 // A question introduced by a label (`Survey results:`, `The CI timeline:`) or a caption with no
 // end mark (`Completed intake form with the customer's answers`) heads a section of a report,
 // so it is null too. A sentence the agent ends before it (`Done.`) leaves the question its own.
-const lineOverChoices = (prose: string): string | null => {
+const lineOverChoices = (prose: string): { line: string; options: string[] } | null => {
   const lines = prose.split(/\r?\n/)
-  let at = lines.length
-  let count = 0
-  // Every choice sits at one indent: an item nested under another explains it.
-  let indent: string | undefined
-  while (at > 0) {
-    const line = lines[at - 1] ?? ''
-    const item = LIST_ITEM.exec(line)
-    if (line.trim() !== '' && (item === null || item[1] !== (indent ??= item[1]) || !isChoice(withoutEmphasis(item[2] ?? '').trim()))) break
-    if (item !== null) count += 1
-    at -= 1
-  }
-  const line = lines[at - 1] ?? ''
-  const lead = lines.slice(0, Math.max(at - 1, 0)).filter(one => one.trim() !== '').at(-1) ?? ''
+  const scan = scanChoiceList(lines, lines.length)
+  if (scan === null) return null
+  const line = lines[scan.before - 1] ?? ''
+  const lead = lines.slice(0, Math.max(scan.before - 1, 0)).filter(one => one.trim() !== '').at(-1) ?? ''
 
   const isCaption = lead.trim() !== '' && !/[.。!！?？)）」』"”'…]\s*$/.test(withoutEmphasis(lead).trim())
 
-  return count < 2 || LIST_ITEM.test(line) || isCaption ? null : line
+  return LIST_ITEM.test(line) || isCaption ? null : { line, options: scan.options }
+}
+
+// A list placed immediately before the closing question (same paragraph or immediately preceding paragraph)
+// offers its items as choices only when the closing line asks to pick and the list does not summarize past work.
+const choicesBeforeQuestion = (lines: readonly string[], questionLineIndex: number, question: string): string[] => {
+  const questionLine = lines[questionLineIndex] ?? ''
+  if (questionLineIndex <= 0 || LIST_ITEM.test(questionLine) || IS_SECTION_HEADING.test(questionLine)) return []
+  if (!asksToPick(question, false) && (IS_PAST.test(question) || !ASKS_FOLLOWUP_PICK.test(question))) return []
+  const scan = scanChoiceList(lines, questionLineIndex)
+  if (scan === null) return []
+  const lead = lines.slice(0, scan.before).filter(one => one.trim() !== '').at(-1) ?? ''
+  const leadText = withoutEmphasis(lead).replace(/\u0001/g, '"').trim()
+  if (leadText !== '' && LIST_ITEM.test(lead)) return []
+  if (leadText !== '' && /[:：?？]$/.test(leadText) && (IS_PAST.test(leadText) || /\b(?:changed|changes|results|timeline|summary|survey|answered|diffs?|edits?)\b|改了|哪些|結果|结果|調查|调查/i.test(leadText))) return []
+
+  return scan.options
 }
 
 const OPENERS: Record<string, string> = { '“': '”', '‘': '’', '「': '」', '『': '』' }
@@ -223,7 +267,7 @@ const isQuoted = (line: string, mark: number): boolean => {
 }
 
 // For callers that already normalized the reply: do not parse it a second time.
-export const lastQuestionInProse = (answer: string, isFull = false): string | null => {
+export const lastQuestionInProseWithOptions = (answer: string, isFull = false): AskedQuestion | null => {
   // A straight quote in code (`name"`) is a character the reply shows, not a quotation: it stands
   // in as another mark until the question is put back together.
   const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, (_, code: string) => code.replace(/"/g, '\u0001'))
@@ -241,14 +285,16 @@ export const lastQuestionInProse = (answer: string, isFull = false): string | nu
   let tail = hidden(lines.at(-1) ?? '')
   const isOverList = !/[?？]/.test(tail)
   let isHeading = false
+  let options: string[] = []
   if (isOverList) {
-    const line = lineOverChoices(prose)
-    if (line === null) return null
-    isHeading = IS_HEADING.test(line)
-    tail = hidden(withoutEmphasis(line).trim())
+    const over = lineOverChoices(prose)
+    if (over === null) return null
+    isHeading = IS_HEADING.test(over.line)
+    tail = hidden(withoutEmphasis(over.line).trim())
     // The line must end on its question mark: a question the same line goes on to answer
     // (`Why did it fail? The cache was stale.`) asks nothing.
     if (!/[?？]$/.test(tail)) return null
+    options = over.options
   }
   // Keep closing wrappers after the question mark so choice parsing can distinguish
   // a wrapped question from a word's own leading apostrophe, such as '90s.
@@ -259,9 +305,19 @@ export const lastQuestionInProse = (answer: string, isFull = false): string | nu
   // The question itself must be put to the person, not the line it ends: `You asked for a
   // summary. What changed?` over a list asks nothing.
   if (isOverList && !asksToPick(question, isHeading)) return null
+  if (question === '') return null
+  if (!isOverList) {
+    const rawLines = prose.split(/\r?\n/)
+    let tailIndex = rawLines.length - 1
+    while (tailIndex >= 0 && withoutEmphasis((rawLines[tailIndex] ?? '').replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')).trim() === '') tailIndex -= 1
+    options = choicesBeforeQuestion(rawLines, tailIndex, question)
+  }
 
-  return question === '' ? null : isFull ? question : clip(question, 120)
+  return { question: isFull ? question : clip(question, 120), options }
 }
+
+export const lastQuestionInProse = (answer: string, isFull = false): string | null =>
+  lastQuestionInProseWithOptions(answer, isFull)?.question ?? null
 
 const task = (id: string, subject: string, status: ProgressMirrorTask['status'], why: string | null): ProgressMirrorTask => ({
   id,
@@ -293,6 +349,7 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
     ask: hasRunningTurnBackgroundJob ? '' : clip(given.ask, 48),
     why: hasRunningTurnBackgroundJob ? '' : clip(given.why, 120),
   }
+  const options = hasRunningTurnBackgroundJob ? [] : cleanOptions(given.options ?? [], 9)
   const done = mirror.source === 'turns' ? mirror.tasks.filter(one => one.status === 'completed') : []
   let seq = Math.max(0, ...mirror.tasks.map(one => Number(one.id.replace(/^t/, '')) || 0))
   const id = (): string => {
@@ -301,7 +358,7 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
   }
   const finished = digest.done === '' ? done : [...done, task(id(), digest.done, 'completed', null)]
   const open = [
-    ...(digest.ask === '' ? [] : [task(id(), digest.ask, 'in_progress', digest.why || digest.ask)]),
+    ...(digest.ask === '' ? [] : [{ ...task(id(), digest.ask, 'in_progress', digest.why || digest.ask), options: options.length >= 2 ? options : [] }]),
     ...(digest.next === '' || digest.next === digest.ask ? [] : [{ ...task(hasBackgroundJob && given.next === '' ? 'background' : id(), digest.next, digest.handoffTo ? 'completed' : 'pending', null), ...(digest.handoffTo ? { handoffTo: digest.handoffTo } : {}) }]),
   ]
 
@@ -320,15 +377,17 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
 // A summary of an earlier report can add finished work without replacing the
 // original question or introducing an ask from before the person's reply.
 export const applyLateDigest = (mirror: ProgressMirror, digest: Digest, now: number, s: Strings, hasRunningTurnBackgroundJob = false): ProgressMirror => {
-  const next = applyDigest(mirror, { ...digest, ask: '', why: '' }, now, s, hasRunningTurnBackgroundJob)
+  const next = applyDigest(mirror, { ...digest, ask: '', why: '', options: [] }, now, s, hasRunningTurnBackgroundJob)
   return { ...next, updated: mirror.updated, autoAsk: mirror.autoAsk, tasks: [...next.tasks, ...mirror.tasks.filter(one => waitsOnYou(mirror, one))] }
 }
 
 // A turn that ended on a question, in a session whose list says nothing waits on the
 // person: the step in progress (else the next one) waits on them, with the question as its
 // note, until they answer.
-export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTurnBackgroundJob = false): ProgressMirror => {
+export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTurnBackgroundJob = false, options: readonly string[] = []): ProgressMirror => {
   if (hasRunningTurnBackgroundJob) return mirror
+  const cleaned = cleanOptions(options, 9)
+  const validOptions = cleaned.length >= 2 ? cleaned : []
   const waiting = mirror.tasks.filter(one => waitsOnYou(mirror, one))
   if (waiting.length > 0) {
     const words = question.replace(/\s+/g, ' ').trim()
@@ -336,12 +395,14 @@ export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTu
     if (matching.length !== 1) return mirror
     const target = matching[0]
     if (target === undefined) return mirror
-    const renewed = renewQuestion(target, mirror.questionSequence)
+    const resolvedOptions = (target.options ?? []).length > 0 || target.ask !== null ? target.options : validOptions
+    const updated = resolvedOptions.length === (target.options ?? []).length ? target : { ...target, options: resolvedOptions }
+    const renewed = renewQuestion(updated, mirror.questionSequence)
     return { ...mirror, questionSequence: renewed.questionRevision, tasks: mirror.tasks.map(one => one.id === target.id ? renewed : one) }
   }
   // Finished work stays finished when the closing reply asks a new question.
   const target = mirror.tasks.find(one => one.status === 'in_progress') ?? mirror.tasks.find(one => one.status === 'pending') ?? task('auto-question', question, 'pending', null)
-  const renewed = renewQuestion({ ...target, waiting: 'you', why: target.id === 'auto-question' ? null : question, ask: null, options: [], command: null, link: null }, mirror.questionSequence)
+  const renewed = renewQuestion({ ...target, waiting: 'you', why: target.id === 'auto-question' ? null : question, ask: null, options: validOptions, command: null, link: null }, mirror.questionSequence)
 
   return {
     ...mirror,

@@ -5902,6 +5902,58 @@ test('Grok reopens a done block for a closing question and keeps it done for a p
   assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
 }))
 
+test('Codex, Cursor and --agent-status persist list choice options for a closing question and clear them when settled (#1277)', () => fixture(f => {
+  // 1. Codex Stop with a question over a numbered list, followed by a plain turn settling it
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-list-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-list-1', { last_assistant_message: 'Which database should I use?\n1. Postgres\n2. SQLite' }).status, 0)
+  const codexAsked = readFileSync(f.progress, 'utf8')
+  assert.match(codexAsked, /- \[\?\] Which database should I use\?\n<!-- question=[a-f0-9]{64}:\d+ -->\n<!-- options=\["Postgres","SQLite"\] -->/)
+  assert.equal(f.event('UserPromptSubmit', 'turn-list-2').status, 0)
+  assert.equal(f.event('Stop', 'turn-list-2', { last_assistant_message: 'Done using Postgres.' }).status, 0)
+  const codexSettled = readFileSync(f.progress, 'utf8')
+  assert.ok(codexSettled.includes('- [x] Which database should I use?'))
+  assert.doesNotMatch(codexSettled, /<!-- options=/)
+
+  // 2. Codex Stop with yes/no after a summary list keeps options empty
+  assert.equal(f.event('UserPromptSubmit', 'turn-list-3').status, 0)
+  assert.equal(f.event('Stop', 'turn-list-3', { last_assistant_message: '- parser\n- tests\n\nShip it?' }).status, 0)
+  const confirmAsked = readFileSync(f.progress, 'utf8')
+  assert.ok(confirmAsked.includes('- [?] Ship it?'))
+  assert.doesNotMatch(confirmAsked, /<!-- options=/)
+
+  // 3. Cursor afterAgentResponse with list before closing question
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const cursorId = 'synthetic-cursor-list-choices'
+  const cursorSend = (event, generation, extra = {}) => f.command(['--codex-event', '--agent', 'cursor'], { conversation_id: cursorId, generation_id: generation, hook_event_name: event, ...extra })
+  assert.equal(cursorSend('beforeSubmitPrompt', 'gen-1').status, 0)
+  assert.equal(cursorSend('afterAgentResponse', 'gen-1', { text: 'Pick the next step:\n\n- Parser\n- Tests\n\nWhich one first?' }).status, 0)
+  assert.ok(readFileSync(f.progress, 'utf8').includes('<!-- options=["Parser","Tests"] -->'))
+
+  // 4. --agent-status extracts CJK/ASCII list choices cleanly and also honors explicit payload options
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const grokId = 'synthetic-grok-list-choices'
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: grokId, hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'waiting'], {
+    sessionId: grokId,
+    hookEventName: 'Stop',
+    lastAssistantMessage: '你要選哪個方案？\n1. 中文選項甲丠\n2. Option B',
+  }).status, 0)
+  const grokBoard = readFileSync(f.progress, 'utf8')
+  assert.ok(grokBoard.includes('- [?] 你要選哪個方案？\n'), grokBoard)
+  assert.ok(grokBoard.includes('<!-- options=["中文選項甲丠","Option B"] -->'), grokBoard)
+
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const opencodeId = 'synthetic-opencode-explicit-options'
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'working'], { session_id: opencodeId, prompt_submitted: true }).status, 0)
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'waiting'], {
+    session_id: opencodeId,
+    last_assistant_message: 'Which option should I use?\n1. Alpha\n2. Beta',
+  }).status, 0)
+  const opencodeBoard = readFileSync(f.progress, 'utf8')
+  assert.ok(opencodeBoard.includes('<!-- options=["Alpha","Beta"] -->'), opencodeBoard)
+}))
+
 test('the approval step and the question step close and reuse their own lines in either order', () => fixture(f => {
   f.install('--apply')
   const question = { last_assistant_message: 'Which folder should I use?' }

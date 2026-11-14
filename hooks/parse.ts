@@ -20,7 +20,7 @@ const TASK = /^###\s+(.+?)\s*#*\s*$/
 const NOTE = /^\s*>\s?(.*)$/
 const STEP = /^([ \t]*)[-*+]\s+\[([ xX~?>!-])\]\s+(.*)$/
 const FENCE = /^\s*(```|~~~)/
-const MARKER_PREFIXES = ['auto session=', '/auto session=', 'question=']
+const MARKER_PREFIXES = ['auto session=', '/auto session=', 'question=', 'options=']
 export const isCutMarker = (line: string): boolean => {
   if (!line.startsWith('<!--') || line.includes('-->')) return false
   // A loop, not a trailing-whitespace regex: a long run of spaces would make the regex quadratic.
@@ -34,23 +34,52 @@ export const AUTO_START = /^<!--\s*auto\s+(.*?)\s*-->\s*$/
 export const AUTO_END = /^<!--\s*\/auto\b.*?-->\s*$/
 export const QUESTION = /^<!--\s*question=([a-f0-9]{64}:[1-9]\d*)\s*-->\s*$/
 // `<!-- native=claude options=["a","b"] -->`: the question above is answered in that agent's own window.
+// `<!-- options=["a","b"] -->`: choices extracted for the waiting question step above (#1277).
 // Any line of this shape is read as the annotation, so a malformed one is dropped and never turns into text.
 export const NATIVE = /^<!--\s*native=(\S*)(?:\s+options=(.*?))?\s*-->\s*$/
+export const OPTIONS = /^<!--\s*options=(.*?)\s*-->\s*$/
 const NATIVE_AGENTS: readonly string[] = ['claude', 'codex']
+
+export const cleanOptions = (options: readonly string[], limit = 9, maxChars = 120): string[] =>
+  options.map(one => one.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxChars)).filter(one => one !== '').slice(0, limit)
+
+// A comment must not hold `--` or `>`, so both are written as JSON escapes.
+export const escapeOptionsJson = (options: readonly string[]): string =>
+  JSON.stringify(options).replace(/-/g, '\\u002d').replace(/>/g, '\\u003e')
+
+export const optionsComment = (options: readonly string[], limit = 9, maxChars = 120): string => {
+  const cleaned = cleanOptions(options, limit, maxChars)
+  return cleaned.length < 2 ? '' : `<!-- options=${escapeOptionsJson(cleaned)} -->`
+}
+
+const parseOptionsJson = (raw: string, limit: number): string[] | null => {
+  try {
+    const list: unknown = JSON.parse(raw)
+    if (!Array.isArray(list) || !list.every((one): one is string => typeof one === 'string')) return null
+
+    return list.slice(0, limit).map(one => one.slice(0, 120))
+  } catch {
+    return null
+  }
+}
 
 // Null for an unreadable line: an unknown agent, or options that are not a list of strings.
 export const nativeOf = (line: string): NativeAsk | null => {
   const found = NATIVE.exec(line)
   if (found === null || found[1] === undefined || !NATIVE_AGENTS.includes(found[1])) return null
   if (found[2] === undefined) return { agent: found[1], options: [] }
-  try {
-    const list: unknown = JSON.parse(found[2])
-    if (!Array.isArray(list) || !list.every((one): one is string => typeof one === 'string')) return null
+  const options = parseOptionsJson(found[2], 8)
+  return options === null ? null : { agent: found[1], options }
+}
 
-    return { agent: found[1], options: list.slice(0, 8).map(one => one.slice(0, 120)) }
-  } catch {
-    return null
-  }
+// Null for an unreadable line or fewer than two non-empty choices.
+export const optionsOf = (line: string): string[] | null => {
+  const found = OPTIONS.exec(line)
+  if (found === null || found[1] === undefined) return null
+  const parsed = parseOptionsJson(found[1], 9)
+  if (parsed === null) return null
+  const cleaned = cleanOptions(parsed, 9)
+  return cleaned.length >= 2 ? cleaned : null
 }
 const DUE = /(?:截止|\bdue)[:：\s]*((?:\d{4}[-/])?\d{1,2}[-/]\d{1,2})/i
 
@@ -167,7 +196,7 @@ export const readable = (lines: readonly string[], isDiagnostic = false): Array<
       if (end < 0) return null
       isComment = false
       line = line.slice(end + 3)
-    } else if (AUTO_START.test(raw) || AUTO_END.test(raw) || QUESTION.test(raw) || NATIVE.test(raw)) {
+    } else if (AUTO_START.test(raw) || AUTO_END.test(raw) || QUESTION.test(raw) || NATIVE.test(raw) || OPTIONS.test(raw)) {
       return raw
     }
     if (isCutMarker(raw)) {
@@ -289,6 +318,12 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
       const native = nativeOf(line)
       const previous = task?.steps.at(-1)
       if (native !== null && openSession !== null && task?.auto?.session === openSession && previous?.status === 'waiting') previous.native = native
+      return
+    }
+    if (OPTIONS.test(line)) {
+      const options = optionsOf(line)
+      const previous = task?.steps.at(-1)
+      if (options !== null && openSession !== null && task?.auto?.session === openSession && previous?.status === 'waiting') previous.options = options
       return
     }
 

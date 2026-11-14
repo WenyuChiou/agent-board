@@ -414,3 +414,26 @@ test('undated manual completed tasks in progress.md are not fabricated as today 
   const finished = collectFinished(manualUndated, [], [], 1, NOW, undefined, '/synthetic-home', false)
   assert.equal(finished.length, 0, 'undated tasks should not be fabricated as today')
 })
+
+test('a waiting step with <!-- options=... --> exposes each choice in boardDocument and --json (#1277)', () => {
+  const source = `## synthetic-api
+${block('c0123456', 'codex', 'waiting', 'Pick storage', '- [?] Which database should I use?\n<!-- options=["Postgres","SQLite"] -->', NOW - MINUTE)}
+${block('c0123457', 'cursor', 'waiting', 'Open question', '- [?] What should the output folder be named?', NOW - 2 * MINUTE)}
+`
+  const view = viewOf(source)
+  const document = documentOf(view)
+  assert.equal(document.needs[0]?.kind, 'question')
+  assert.deepEqual(document.needs[0]?.options, ['Postgres', 'SQLite'])
+  assert.deepEqual(document.needs[1]?.options, [])
+
+  const cliNow = Date.now()
+  const cliSource = `## synthetic-api
+${block('c0123456', 'codex', 'waiting', 'Pick storage', '- [?] Which database should I use?\n<!-- options=["Postgres","SQLite"] -->', cliNow - MINUTE)}
+${block('c0123457', 'cursor', 'waiting', 'Open question', '- [?] What should the output folder be named?', cliNow - 2 * MINUTE)}
+`
+  const ran = jsonRun(['--json'], { files: { 'progress.md': cliSource } })
+  assert.equal(ran.status, 0, ran.stderr)
+  const cliDoc = JSON.parse(ran.stdout)
+  assert.deepEqual(cliDoc.needs[0]?.options, ['Postgres', 'SQLite'])
+  assert.deepEqual(cliDoc.needs[1]?.options, [])
+})

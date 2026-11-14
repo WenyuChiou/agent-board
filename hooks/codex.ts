@@ -2,7 +2,7 @@ import { LANGS } from './i18n'
 import type { Strings } from './i18n'
 import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
-import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
+import { baseName, cleanOptions, escapeOptionsJson, parseAttrs, parseProgress, RESUME } from './parse'
 import { scanBlocks, sectionOfProject } from './blocks'
 import { cutLine } from './step-words'
 import type { BlockSpan } from './blocks'
@@ -31,6 +31,7 @@ export type CodexReport = Origin & {
   // Separate durable incarnations: a reused approval must not retire a closing question.
   approvalRevision?: string
   askedRevision?: string
+  askedOptions?: string[]
   updated: string
   // ISO timestamp when a prompt replied to a waiting question in chat (#401).
   replied?: string
@@ -151,22 +152,40 @@ export const localAgentLifecycleStep = (state: string, s: Strings): string =>
 
 // A later report keeps the same line as completion evidence, or reuses its slot
 // with a fresh revision when it asks again.
-export const questionSteps = (held: readonly string[], previousAsked: number | undefined, state: unknown, value: unknown, isBoardPrompt = false, previousRevision?: string, isSettlingReply = false): { steps: string[]; asked: number | undefined; askedRevision: string | undefined } => {
+export const questionSteps = (
+  held: readonly string[],
+  previousAsked: number | undefined,
+  state: unknown,
+  value: unknown,
+  isBoardPrompt = false,
+  previousRevision?: string,
+  isSettlingReply = false,
+  valueOptions: readonly string[] = [],
+  previousOptions?: readonly string[],
+): { steps: string[]; asked: number | undefined; askedRevision: string | undefined; askedOptions: string[] | undefined } => {
   const steps = [...held]
   let asked = previousAsked !== undefined && Number.isInteger(previousAsked) && previousAsked >= 0 && previousAsked < steps.length ? previousAsked : undefined
   let askedRevision = previousRevision
-  if (isBoardPrompt) return { steps, asked, askedRevision }
-  if ((state === 'working' || isSettlingReply) && asked !== undefined) steps[asked] = steps[asked]!.replace(/^- \[\?\] /, '- [x] ')
+  const prevOptions = cleanOptions(previousOptions ?? [], 9)
+  let askedOptions: string[] | undefined = asked !== undefined && steps[asked]?.startsWith('- [?] ') && prevOptions.length >= 2 ? prevOptions : undefined
+  if (isBoardPrompt) return { steps, asked, askedRevision, askedOptions }
+  if ((state === 'working' || isSettlingReply) && asked !== undefined) {
+    steps[asked] = steps[asked]!.replace(/^- \[\?\] /, '- [x] ')
+    askedOptions = undefined
+  }
   const question = state === 'waiting' && typeof value === 'string' ? cutLine(value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
   if (question !== '' && (asked !== undefined || steps.length < 40)) {
+    const nextCleaned = cleanOptions(valueOptions, 9)
+    const nextOptions = nextCleaned.length >= 2 ? nextCleaned : undefined
     // Hosts may deliver the same closing question again after Stop or an idle status.
     // A repeated question after a real reply is a new incarnation, even in the same words.
-    if (asked === undefined || steps[asked] !== `- [?] ${question}`) askedRevision = nextRevision(askedRevision)
+    if (asked === undefined || steps[asked] !== `- [?] ${question}` || JSON.stringify(askedOptions ?? []) !== JSON.stringify(nextOptions ?? [])) askedRevision = nextRevision(askedRevision)
     // A model that already reported the question as its own [?] step keeps that one line.
     if (asked === undefined) asked = steps.includes(`- [?] ${question}`) ? steps.indexOf(`- [?] ${question}`) : steps.length
     steps[asked] = `- [?] ${question}`
+    askedOptions = nextOptions
   }
-  return { steps, asked, askedRevision }
+  return { steps, asked, askedRevision, askedOptions }
 }
 
 // Hooks describe lifecycle, not task completion. Only an explicit report can say done.
@@ -223,7 +242,8 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
       )
   const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
   const approvalSteps = held.map((step, index) => event !== 'SessionStart' && index === earlier ? step.replace(/^- \[\?\] /, '- [x] ') : step)
-  const { steps, asked, askedRevision } = questionSteps(approvalSteps, previous?.asked, isWorkStop ? state : 'ended', isWorkStop ? input.question : undefined, false, previous?.askedRevision, isSettlingReply)
+  const valueOptions = Array.isArray(input.options) ? input.options.filter((one): one is string => typeof one === 'string') : []
+  const { steps, asked, askedRevision, askedOptions } = questionSteps(approvalSteps, previous?.asked, isWorkStop ? state : 'ended', isWorkStop ? input.question : undefined, false, previous?.askedRevision, isSettlingReply, isWorkStop ? valueOptions : [], previous?.askedOptions)
   let approval = earlier
   let approvalRevision = previous?.approvalRevision
   if (event === 'PermissionRequest') {
@@ -242,6 +262,7 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
     ...(asked === undefined ? {} : { asked }),
     ...(approvalRevision === undefined ? {} : { approvalRevision }),
     ...(askedRevision === undefined ? {} : { askedRevision }),
+    ...(askedOptions === undefined ? {} : { askedOptions }),
     updated: now,
     ...(replied === undefined ? {} : { replied }),
     ...(isBoardTurn ? { isBoardTurn: true } : {}),
@@ -283,8 +304,11 @@ export const validateCodexReport = (report: CodexReport, session: string): Codex
   const owned = new Set([report.approval, report.asked].filter((index): index is number =>
     index !== undefined && Number.isInteger(index) && index >= 0 && Array.isArray(report.steps) && index < report.steps.length))
   if (Array.isArray(report.steps) && report.steps.length > 40 + owned.size) throw new Error('INVALID_STEPS')
-  return { ...report, session: line(session), title: line(report.title), project: line(report.project),
-    steps: reportSteps(report.state, report.steps, 40 + owned.size) }
+  const steps = reportSteps(report.state, report.steps, 40 + owned.size)
+  const rawOptions = Array.isArray(report.askedOptions) ? cleanOptions(report.askedOptions.filter((one): one is string => typeof one === 'string'), 9) : []
+  const askedOptions = report.asked !== undefined && steps[report.asked]?.startsWith('- [?] ') && rawOptions.length >= 2 ? rawOptions : undefined
+  const { askedOptions: _drop, ...rest } = report
+  return { ...rest, session: line(session), title: line(report.title), project: line(report.project), steps, ...(askedOptions === undefined ? {} : { askedOptions }) }
 }
 
 export const codexReport = (previous: CodexReport | null, session: string, input: Record<string, unknown>, now: string, s: Strings): CodexReport => {
@@ -353,6 +377,16 @@ const localBlockSpans = (lines: readonly string[], owner: string, agent: string,
   return owned
 }
 
+// `codex-local` passes UTF-8 bytes pre-encoded as latin1 strings, so whitespace cleanup must match only ASCII space/tabs/newlines (never `\s`/`.trim()`, which corrupts `0xA0` inside CJK/Cyrillic UTF-8 byte sequences).
+const stepOptionsLine = (options: readonly string[] | undefined): string => {
+  if (options === undefined) return ''
+  const sanitized = options
+    .map(one => one.replace(/<!--|-->/g, ' ').replace(/[ \t\r\n]+/g, ' ').replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, ''))
+    .filter(one => one !== '')
+    .slice(0, 9)
+  return sanitized.length < 2 ? '' : `<!-- options=${escapeOptionsJson(sanitized)} -->`
+}
+
 // A report's step lines. The step a PermissionRequest added, while it still waits, is followed by the native line.
 const NATIVE_CODEX = '<!-- native=codex -->'
 const stepLines = (report: CodexReport, owner: string, isAsking: boolean, nativeApproval = report.approval): string[] =>
@@ -362,7 +396,11 @@ const stepLines = (report: CodexReport, owner: string, isAsking: boolean, native
     // Old caches remain tokenless until a genuinely new ask. Never invent closure evidence.
     const token = kind !== undefined && /^[1-9]\d*$/.test(revision ?? '')
       ? [`<!-- question=${sha256(`${owner}:${kind}`)}:${revision} -->`] : []
-    return [step, ...(index === nativeApproval && (!isAsking || step.startsWith('- [?]')) ? [NATIVE_CODEX] : []), ...token]
+    const isNative = index === nativeApproval && (!isAsking || step.startsWith('- [?]'))
+    const options = !isNative && index === report.asked && step.startsWith('- [?]')
+      ? stepOptionsLine(report.askedOptions)
+      : ''
+    return [step, ...(isNative ? [NATIVE_CODEX] : []), ...token, ...(options === '' ? [] : [options])]
   })
 
 // A board completion is authoritative only for this exact owned task. Lifecycle

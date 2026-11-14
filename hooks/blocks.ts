@@ -6,7 +6,7 @@ import { stamped, stampOf, withoutStamp } from './done-stamp'
 import { localDay } from './journal'
 import { splitLines } from './lines'
 import { fallbackTitle, isAnswered, questionToken, retainedCancelledOf } from './mirror'
-import { AUTO_END, AUTO_START, autoOf, doneKey, isCutMarker, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
+import { AUTO_END, AUTO_START, autoOf, doneKey, escapeOptionsJson, isCutMarker, isTaskComplete, optionsComment, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
@@ -144,7 +144,7 @@ export const nativeLine = (task: ProgressMirrorTask): string => {
   if (task.native === undefined || task.waiting !== 'you') return ''
   const options = task.native.options.slice(0, 8).map(one => one.replace(/\s+/g, ' ').trim().slice(0, 120)).filter(one => one !== '')
 
-  return `<!-- native=${task.native.agent}${options.length === 0 ? '' : ` options=${JSON.stringify(options).replace(/-/g, '\\u002d').replace(/>/g, '\\u003e')}`} -->`
+  return `<!-- native=${task.native.agent}${options.length === 0 ? '' : ` options=${escapeOptionsJson(options)}`} -->`
 }
 
 export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, parent?: string): string[] => {
@@ -164,7 +164,8 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
       const token = questionToken(task)
       const native = nativeLine(task)
-      return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native])]
+      const options = native === '' && task.waiting === 'you' ? optionsComment(task.options ?? []) : ''
+      return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native]), ...(options === '' ? [] : [options])]
     }),
     ...retainedCancelledOf(mirror).map(text => `- [-] ${text}`),
     `<!-- /auto session=${id} -->`,

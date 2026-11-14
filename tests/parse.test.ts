@@ -186,3 +186,40 @@ test('a project heading matches the repo it names', () => {
   expect(isHereProject('Persona_Framework — PFC', ['persona_framework'])).toBe(true)
   expect(isHereProject('alpha', ['persona_framework'])).toBe(false)
 })
+
+test('options markers attach cleaned choice lists to waiting steps inside owned auto blocks and round-trip safely', () => {
+  const stepText = 'Which database should I use?'
+  const block = [
+    '## synthetic-api',
+    '<!-- auto session=ab12cd34 agent=codex state=waiting updated=2026-10-30T12:00:00.000Z -->',
+    '### Pick storage',
+    `- [?] ${stepText}`,
+    '<!-- options=["Postgres","SQLite","MySQL"] -->',
+    '- [x] Done step',
+    '<!-- options=["IgnoreA","IgnoreB"] -->',
+    '<!-- /auto session=ab12cd34 -->',
+    '### Hand kept',
+    `- [?] ${stepText}`,
+    '<!-- options=["HandA","HandB"] -->',
+  ].join('\n')
+  const parsed = parseProgress(block)
+  expect(parsed[0]?.tasks[0]?.steps[0]?.options).toEqual(['Postgres', 'SQLite', 'MySQL'])
+  expect(parsed[0]?.tasks[0]?.steps[1]?.options).toBeUndefined()
+  expect(parsed[0]?.tasks[1]?.steps[0]?.options).toBeUndefined()
+  expect(readable(block.split('\n')).filter(line => line?.includes('<!-- options='))).toEqual(['<!-- options=["Postgres","SQLite","MySQL"] -->', '<!-- options=["IgnoreA","IgnoreB"] -->', '<!-- options=["HandA","HandB"] -->'])
+  expect(readable(['<!-- options=cut', '## Next', '### Keep']).slice(1)).toEqual(['## Next', '### Keep'])
+  expect(isCutMarker('<!-- options=["Postgres"')).toBe(true)
+  expect(isCutMarker('<!--   options=')).toBe(true)
+
+  const evil = ['a --> b', 'c -- d']
+  const escapedBlock = [
+    '## synthetic-api',
+    '<!-- auto session=ab12cd34 agent=codex state=waiting updated=2026-10-30T12:00:00.000Z -->',
+    '### Escape test',
+    `- [?] ${stepText}`,
+    `<!-- options=${JSON.stringify(evil).replace(/--/g, '\\u002d\\u002d').replace(/>/g, '\\u003e')} -->`,
+    '<!-- /auto session=ab12cd34 -->',
+  ].join('\n')
+  const reparsed = parseProgress(escapedBlock)
+  expect(reparsed[0]?.tasks[0]?.steps[0]?.options).toEqual(['a b', 'c -- d'])
+})
