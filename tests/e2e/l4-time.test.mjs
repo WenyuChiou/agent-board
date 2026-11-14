@@ -8,7 +8,7 @@ import { EN } from '../../hooks/strings-en.ts'
 import { hookTimeout } from '../../hooks/hook-safety.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
-import { print, run, serve, terminal } from './lib/surfaces.mjs'
+import { json, print, run, serve, terminal } from './lib/surfaces.mjs'
 import { keptHookEvents } from './lib/faults.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { fileOpsPerPoll } from './lib/soak-report.mjs'
@@ -83,6 +83,68 @@ describe('L4 time and scale', () => {
       }
       assert.equal(model.stopped[0].when, EN.daysAgo(30))
       assert.ok(!JSON.stringify(model.stopped).includes(EN.justNow), JSON.stringify(model.stopped))
+    } finally { await world.close() }
+  })
+
+  test('L4 a row quiet past 30 min with no live process says unsure with its age, and a real report clears it (#1317)', async () => {
+    const world = makeWorld()
+    try {
+      const title = 'Closed window work'
+      // The Antigravity closed-window case (comment 6845661117): Stop was the
+      // last event, only the hook's placeholder is open, and nothing ever
+      // arrives when the window closes. The conversation still exists, so the
+      // row must read 'unsure', never 'ended'.
+      block(world, { session: 'a4000002', agent: 'antigravity', state: 'waiting', title, steps: ['- [ ] Waiting for the next instruction'] })
+      const server = await serve.start(world)
+      world.jump('31m')
+      let report
+      for (let attempt = 0; ; attempt++) {
+        report = (await server.get('/api/board')).json()
+        if (Math.abs(report.now - world.now) <= 2000) break
+        assert.ok(attempt < 50, 'The page server never took the clock jump')
+        await new Promise(done => setTimeout(done, 100))
+      }
+      const unsure = EN.rowUnsure(EN.minutesAgo(31))
+      const model = report.model
+      const pageRow = model.groups.flatMap(group => group.rows).find(row => row.title === title)
+      assert.ok(pageRow, 'the unsure row stays on its shelf, outside Needs you')
+      assert.equal(pageRow.status, unsure)
+      assert.equal(pageRow.rowState, 'unsure')
+      assert.equal(pageRow.when, EN.minutesAgo(31))
+      assert.equal(model.view.n, 0, 'an unsure row counts in no Needs-you number')
+      assert.equal(model.view.working.length, 0, 'an unsure row is not working now')
+      assert.equal(model.view.unsure.length, 1, 'the page model names the unsure row')
+      const screens = {
+        terminal: await terminal.screen(world, ['--all']),
+        print: await print(world),
+        page: await server.page(),
+      }
+      for (const [surface, text] of Object.entries(screens)) {
+        assert.ok(text.includes(title) && text.includes(unsure), `${surface} must show the unsure row with its age:\n${text}`)
+        // Q4: the lifecycle step text stays; the unsure line is added, not a replacement.
+        assert.ok(text.includes('Waiting for the next instruction'), `${surface} must keep the lifecycle step text:\n${text}`)
+      }
+      const pageCard = server.dom.cards().find(card => card.className.split(' ').includes('row') && card.textContent.includes(title))
+      assert.ok(pageCard, `page must show the unsure row:\n${screens.page}`)
+      assert.ok(pageCard.textContent.includes(unsure), `page row must say unsure with its age: ${pageCard.textContent}`)
+      const document = await json(world)
+      const jsonRow = document.waiting.find(one => one.title === title)
+      assert.ok(jsonRow, '--json must list the unsure row')
+      assert.equal(jsonRow.state, 'unsure')
+      assert.equal(jsonRow.isUnsure, true)
+      assert.equal(jsonRow.age, EN.minutesAgo(31))
+      assert.equal(document.counts.needs, 0)
+      assert.equal(document.counts.working, 0)
+
+      // A real report clears it: the session writes again, with real work.
+      block(world, { session: 'a4000002', agent: 'antigravity', state: 'working', title, steps: ['- [~] Check the routes'] })
+      const cleared = await print(world)
+      assert.ok(cleared.includes(title), 'the row stays after its report')
+      assert.ok(!cleared.includes(unsure), `a real report must clear the unsure line:\n${cleared}`)
+      const clearedDoc = await json(world)
+      const clearedJson = [...clearedDoc.working, ...clearedDoc.waiting].find(one => one.title === title)
+      assert.equal(clearedJson.state, 'working')
+      assert.equal(clearedJson.isUnsure, false)
     } finally { await world.close() }
   })
 

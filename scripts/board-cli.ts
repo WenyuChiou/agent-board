@@ -11,6 +11,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
 import { withLocalLock } from './local-lock'
+import { goneBlocksOf } from './session-liveness'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
 import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -27,6 +28,7 @@ import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
+import { explicitCodexExecutable, resolveCodexExecutable } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
@@ -58,7 +60,8 @@ import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReadReason, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
-import type { TaskRef } from '../hooks/view'
+import type { TaskRef, View } from '../hooks/view'
+import type { Strings } from '../hooks/i18n'
 import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire, runQuestionsClosed } from '../hooks/questions'
 import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
@@ -79,7 +82,7 @@ const flag = (name: string): string | undefined => {
 }
 const BOOL_FLAGS = new Set([
   '--all', '--allow-resume', '--agent-status', '--apply', '--chat', '--codex-doctor',
-  '--codex-event', '--codex-remove', '--codex-report', '--codex-setup', '--codex-trust',
+  '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
@@ -587,6 +590,25 @@ const keepAskedQuestions = (projects: ReturnType<typeof parseProgress>, ref: Tas
 }
 let progressProjectCache: { source: string; projects: ReturnType<typeof parseProgress> } | null = null
 let progressHealthCache: { source: string; isCutSettled: boolean; frozen: ReadonlySet<string>; isSnapshot: boolean; tail: ReturnType<typeof progressTail>; lines: string[] } | null = null
+// Sole `buildView` caller in `board-cli.ts` (#1092): passes `gone` (from `goneBlocksOf`) so every
+// board view built by the CLI treats processes gone on this machine as stopped consistently.
+const viewFor = (
+  projects: readonly ProgressProject[],
+  hereProjects: readonly string[],
+  now: number,
+  todayCount: number,
+  doneSeenMap: Readonly<Record<string, number>>,
+  s: Strings,
+  answeredList: readonly string[],
+  seenMap: Readonly<Record<string, number>>,
+  questions: QuestionLedger | undefined,
+  proofs: QuestionProofs | null,
+  turns: readonly PendingTurn[],
+  frozen: ReadonlySet<string>,
+  observe: typeof observeQuestions = observeQuestions,
+  gone: ReadonlySet<string> = goneBlocksOf(projects),
+): View => buildView(projects, hereProjects, null, now, todayCount, doneSeenMap, s, answeredList, seenMap, questions, proofs, turns, frozen, observe, staleTimeoutMs(), undefined, gone)
+
 const observeWriterQuestions = reusableQuestionObservation()
 const observeViewQuestions = reusableQuestionObservation()
 const readBoardView = (source: string, now: number) => {
@@ -654,6 +676,10 @@ const readBoardView = (source: string, now: number) => {
   const previewProofs = proofs
   if (record !== null) lastQuestions = record
   const frozen = progressHealthCache.frozen
+  // Blocks whose claimed live process is gone on this machine (#1092): worked out once
+  // per read, from the pid each block carries, and passed to `viewFor` as data.
+  // The start-time lookup runs only for live pids, once per claim.
+  const gone = goneBlocksOf(projects)
   let questions: QuestionLedger | null = null
   // Chat and a one-shot read never write. Interactive readers persist before accepting hides.
   if (proofs !== null && isWritingQuestions) {
@@ -749,7 +775,7 @@ const readBoardView = (source: string, now: number) => {
   const dropped = inboxDropped(droppedLogCache.text, prunedSince(now))
   const pruned = prunedNote({ ...prunedTotal(pageState.pruned, now), turns: dropped.age + dropped.cap }, s)
   // Proof writes above refresh this snapshot; drawing need not list the directory again.
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, viewQuestions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
+  return { ...viewFor(projects, [basename(process.cwd())], now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, viewQuestions, proofs, turns, frozen, observeViewQuestions, gone), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const view = (source = read(path), now = Date.now()) => {
@@ -1392,7 +1418,10 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     try {
       wrote = rewrite(path, text => {
         if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-        const next = confirmTask(text, action.ref, now, s, lastSeen, staleTimeoutMs())
+        // The gone set comes from the text this retry reads, so a session that
+        // resumed since the press was drawn is never confirmed as gone (#1092).
+        const gone = goneBlocksOf(parseProgress(text))
+        const next = confirmTask(text, action.ref, now, s, lastSeen, staleTimeoutMs(), gone)
         if (next === null) return null
         const lines = next.entries.map(entry => journalLine(entry, now, s))
         rewrite(journal, past => {
@@ -1474,7 +1503,8 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         retentionFailed = true
         return { text, entries: [] }
       }
-      return takeTask(text, action.ref, now, s, lastSeen, staleTimeoutMs())
+      const gone = goneBlocksOf(current)
+      return takeTask(text, action.ref, now, s, lastSeen, staleTimeoutMs(), gone)
     }, now)
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
@@ -1487,7 +1517,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       const latest = readQuestions(questionsPath(path))
       const proofs = readQuestionProofs()
       const frozen = cutOffScopes(after, cutOffSpans(source, isCutSettledAt(now)))
-      const kept = latest === null || proofs === null ? 0 : keptQuestionCount(buildView(after, [], null, now, 0, {}, s, parseAnswered(read(answeredPath(path))) ?? [], {}, latest, proofs, pending(), frozen, undefined, staleTimeoutMs()), action.ref, s)
+      const kept = latest === null || proofs === null ? 0 : keptQuestionCount(viewFor(after, [], now, 0, {}, s, parseAnswered(read(answeredPath(path))) ?? [], {}, latest, proofs, pending(), frozen), action.ref, s)
       return done(kept > 0 ? s.archivedKeptQuestions(action.title, kept) : s.archivedOne(action.title))
     } catch {
       return done(s.archivedOne(action.title))
@@ -1514,7 +1544,9 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       const source = read(path)
       const projects = parseProgress(source)
       const frozen = cutOffScopes(projects, cutOffSpans(source, isCutSettledAt(now)))
-      const fresh = buildView(projects, [], null, now, 0, {}, s, answered ?? [], {}, latest, proofs, pending(), frozen, undefined, staleTimeoutMs())
+      // A session whose agent is gone stops immediately (#1092): the hide check reads
+      // the same gone set as the board read, so its question is found under Older.
+      const fresh = viewFor(projects, [], now, 0, {}, s, answered ?? [], {}, latest, proofs, pending(), frozen, undefined, goneBlocksOf(projects))
       if (isHidden && keys.some(key => ![...fresh.waiting, ...(fresh.reminder ?? []), ...(fresh.older ?? []), ...fresh.hidden].some(item => item.canHide !== false && item.hideKey === key))) return null
       const aliases = observeQuestions(latest, projects, null, answered ?? [], now, true, 'preview', undefined, [], [], frozen).ledger
       return answered === null ? null : answeredJson(withAnswered(answered, isHidden ? keys : keys.flatMap(key => acknowledgementKeys(aliases, key)), isHidden))
@@ -1730,7 +1762,9 @@ const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind:
       if (fresh === undefined) return null
       const freshProjects = parseProgress(text)
       if (fresh.asks && !keepAskedQuestions(freshProjects, fresh.ref, now, cutOffScopes(freshProjects, cutOffSpans(text, isCutSettledAt(now))))) return null
-      const again = takeTask(text, fresh.ref, now, s, {}, staleMs)
+      // The gone set comes from the text this retry reads, as in the archive press.
+      const gone = goneBlocksOf(freshProjects)
+      const again = takeTask(text, fresh.ref, now, s, {}, staleMs, gone)
       if (again === null) return null
       if (isLast) return { text: again.text, entries: again.entries }
       if (read(path) !== text) return AGAIN
@@ -2170,6 +2204,17 @@ const openPageState = async (server: RunningServer): Promise<PageState> => {
   return answer.wantsKeyedPage === true && !(process.env.SSH_CONNECTION || process.env.SSH_TTY) ? 'unkeyed' : 'open'
 }
 
+// The Codex program the receiver runs (#318). The receiver is off unless the page was started with `--codex-send`: whether a
+// command that needs approval still reaches the person while the board is joined is not proven on a real Codex yet (#318).
+// Then AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else, it turns the receiver off), else the one
+// on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names its own, so it never reaches the real ~/.codex.
+const codexReceiverExecutable = (): string | null => {
+  if (!args.includes('--codex-send')) return null
+  const given = process.env.AGENT_BOARD_CODEX_BIN
+  if (given !== undefined) return explicitCodexExecutable(given)
+  return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
+}
+
 // The detached Windows child reports startup failures through a private file too; redirecting
 // its standard handles would make Start-Process inherit the caller's extra pipes again.
 const serveChildError = (message: string): void => {
@@ -2220,6 +2265,12 @@ const serveChild = (): void => {
       routes: routesStandIn(),
       messagesDirectory: messagesDirectory(),
       isDefaultMessagesDirectory: flag('--messages-dir') === undefined,
+      codex: {
+        // Read now, not the page's cache: a tick has no page poll behind it, so a cache would keep an ended session attached and miss a new one.
+        // A file that is missing or cannot be read throws, so the tick keeps every thread: only a row read as ended or gone ends one.
+        threads: () => parseProgress(readFileSync(path, 'utf8')).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
+        executable: codexReceiverExecutable(),
+      },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests
         // still read current bytes instead of accepting an older page's baseline.
@@ -2228,7 +2279,7 @@ const serveChild = (): void => {
       },
       get s() { return s },
       port: requestedPort,
-      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
+      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: args.includes('--codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       pending: (isFresh = true) => pending(undefined, isFresh),
@@ -2383,7 +2434,7 @@ const runningPage = async (isStarting = false): Promise<{ page: Running; isKept:
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
   const requestedStale = staleTimeoutMs()
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (!args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
 }
 
@@ -2467,6 +2518,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
+  if (args.includes('--codex-send')) rest.push('--codex-send')
   // The child runs with cwd set to the board's folder, so a relative path would resolve
   // against the board's folder instead of this command's folder. Pass the board and the
   // messages folder the parent resolved, as absolute paths, so the child serves the same
@@ -3024,7 +3076,10 @@ const run = async (): Promise<void> => {
     } catch {
       turns = []
     }
-    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), answeredText, questionsText, turns, queuedMessaging())}\n`)
+    // A session whose agent is gone leaves the waiting count too (#1092): the
+    // status line reads the same gone set as the board read.
+    const statusText = read(path)
+    process.stdout.write(`${boardStatus(statusText, Date.now(), s, staleTimeoutMs(), answeredText, questionsText, turns, queuedMessaging(), goneBlocksOf(parseProgress(statusText)))}\n`)
     return
   }
   const request = flag('--legacy-connect-request')

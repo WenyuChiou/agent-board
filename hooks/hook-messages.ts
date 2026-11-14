@@ -48,9 +48,15 @@ export const acceptMailboxMessage = (state: MessageState, agent: string, session
 export const endMailbox = (state: MessageState, agent: string, session: string, now: number): MessageState => ({
   ...disconnectMessages(state, mailboxId(agent, session), now), mailboxes: state.mailboxes?.filter(one => one.id !== mailboxId(agent, session)),
 })
-export const deliveryTargets = (connections: readonly Connection[], mailboxes: readonly Connection[] = []): Connection[] => [
-  ...connections, ...mailboxes.filter(one => !connections.some(live => address(live.agent, live.session) === address(one.agent, one.session))),
-]
+// `shadows`: whether a live connection takes the place of its session's mailbox (only on a route its record shows, #318).
+// One that does not is left out while the mailbox is there, so the card keeps the mailbox's own route.
+export const deliveryTargets = (connections: readonly Connection[], mailboxes: readonly Connection[] = [], shadows: (live: Connection) => boolean = () => true): Connection[] => {
+  const isSame = (a: Connection, b: Connection): boolean => address(a.agent, a.session) === address(b.agent, b.session)
+  return [
+    ...connections.filter(live => shadows(live) || !mailboxes.some(one => isSame(one, live))),
+    ...mailboxes.filter(one => !connections.some(live => isSame(live, one) && shadows(live))),
+  ]
+}
 export const isTurnStart = (agent: string, event: string): boolean => ({
   codex: ['SessionStart', 'UserPromptSubmit'], antigravity: ['SessionStart', 'PreInvocation'],
   gemini: ['SessionStart', 'BeforeAgent'], muse: ['UserPromptSubmit'], cursor: ['sessionStart'],

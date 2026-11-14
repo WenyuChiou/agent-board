@@ -3,6 +3,7 @@ import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
 import { cutOffTest, matchesSpan, scanBlocks, shortId, stepWords } from './blocks'
 import { questionToken, waitsOnYou } from './mirror'
+import { withoutProcessIdentity } from './session-liveness'
 import { sha256 } from './sha256'
 import type { TaskRef } from './view'
 
@@ -185,7 +186,10 @@ export const cutOffScopes = (projects: readonly ProgressProject[], cut: readonly
 // A question's copy of its block or hand-kept task: the marker fields and each step's mark, which
 // are all its readers need. The whole task held every step's words and line once per waiting
 // step, so a real board's ledger grew past the host's 4 MiB write limit, and every edit above a
-// block wrote a new copy of each of its questions (#419).
+// block wrote a new copy of each of its questions (#419). The process identity is stripped
+// (finding 5): the pid, start time and host belong only in the progress file itself (PM Q3),
+// never in the ledger — a record written before this change still carries them until its next
+// observation refreshes its source.
 export const sourceData = (task: ProgressTask): string => {
   const counts = new Map<string, number>()
   const indexed = task.steps.map(step => {
@@ -199,7 +203,7 @@ export const sourceData = (task: ProgressTask): string => {
       ? [[(counts.get(words) ?? 0) > 1 ? `${hash}:${occurrence}` : hash, step.options!]]
       : []
   ))
-  return JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status), ...(Object.keys(stepOptions).length === 0 ? {} : { stepOptions }) })
+  return JSON.stringify({ auto: task.auto === null ? null : withoutProcessIdentity(task.auto), steps: task.steps.map(step => step.status), ...(Object.keys(stepOptions).length === 0 ? {} : { stepOptions }) })
 }
 
 export const sourceOptions = (source: QuestionSource, occurrence?: number): string[] | undefined => {
@@ -900,8 +904,8 @@ export const observeQuestions = (
     const key = blockKey(task.auto)
     const places = locations.get(key) ?? []
     const scope = scopeOf(project.name, task.auto.agent, task.auto.session, task.auto.resume)
-    // The alias is read only through a frozen lookup below, so with nothing frozen it is
-    // never built; an empty alias can never match a frozen scope.
+    // The alias is read only through a frozen lookup below, so with nothing set
+    // it is never built; an empty alias can never match a frozen scope.
     places.push({ project: project.name, scope, alias: frozen.size === 0 ? '' : questionScope(project.name, task.auto.agent, task.auto.session) })
     locations.set(key, places)
     scopeCounts.set(scope, (scopeCounts.get(scope) ?? 0) + 1)

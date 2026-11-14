@@ -365,3 +365,25 @@ test('the status line counts a new inbox question when a valid questions ledger 
   assert.ok(countLine.includes('● 3 waiting'), `terminal waiting count line: ${countLine}`)
   assert.ok(countLine.includes('▸ 3 in progress'), `terminal active count line: ${countLine}`)
 })
+
+test('the status line drops a waiting approval whose agent window is closed, and keeps a live one (#1092)', async () => {
+  const { boardStatus } = await import('../hooks/board-status.ts')
+  const { parseProgress, STALE_MS } = await import('../hooks/parse.ts')
+  const { blockKey } = await import('../hooks/session-liveness.ts')
+  const { STRINGS } = await import('../hooks/strings.ts')
+  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const host = readingHostHash()
+  const child = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' })
+  const deadPid = child.pid
+  const livePid = process.pid
+  const started = Math.round(performance.timeOrigin)
+  const file = '## Synthetic project\n' +
+    `<!-- auto session=dead0001 agent=claude state=waiting updated=${new Date(NOW - 5 * 60_000).toISOString()} agentpid=${deadPid} agentstarted=${started} host=${host} -->\n### Dead approval\n- [?] Deploy the synthetic build, OK?\n<!-- /auto session=dead0001 -->\n` +
+    `<!-- auto session=babe0002 agent=claude state=waiting updated=${new Date(NOW - 5 * 60_000).toISOString()} agentpid=${livePid} agentstarted=${started} host=${host} -->\n### Live question\n- [?] Continue with the synthetic plan, OK?\n<!-- /auto session=babe0002 -->\n`
+  const projects = parseProgress(file)
+  const gone = goneBlocksOf(projects)
+  assert.deepEqual([...gone], [blockKey(projects[0].tasks[0].auto)])
+  const s = STRINGS.en
+  assert.equal(boardStatus(file, NOW, s, STALE_MS, '', '', [], undefined, gone), '1 need you · 0 working')
+  assert.equal(boardStatus(file, NOW, s, STALE_MS, '', '', []), '2 need you · 0 working')
+})
