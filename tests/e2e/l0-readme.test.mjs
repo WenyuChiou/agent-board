@@ -473,7 +473,7 @@ describe('L0 discover and install from the README', () => {
     const noted = (routes, agent, surfaces) => [...new Set(routes.filter(one => one.agent === agent).flatMap(one => [one.routes.idle, one.routes.working, one.routes.ended])
       .filter(route => route.line !== 'none' && surfaces.some(surface => route.surfaces.includes(surface) && isNote(routeRecord(route, surface)))).map(route => route.line))].sort().join('+')
     const ROW = {
-      terminal: { 'Claude Code': ['claude', [S.claude]], Codex: ['codex', [S.cli, S.codexProxy, S.codexSession]], Antigravity: ['antigravity', [S.antigravityTui, S.antigravityStream]], Cursor: ['cursor', [S.cursor]] },
+      terminal: { 'Claude Code': ['claude', [S.claude]], Codex: ['codex', [S.cli, S.codexProxy, S.codexSession, S.codexDaemon]], Antigravity: ['antigravity', [S.antigravityTui, S.antigravityStream]], Cursor: ['cursor', [S.cursor]] },
       desktop: { Antigravity: ['antigravity', [S.antigravityIde]], Cursor: ['cursor', [S.cursor]] },
     }
     const CELL = { '': 'none', 'now+stepEnd': 'now', nextTurn: 'next', 'nextTurn+now': 'next' }
