@@ -98,6 +98,10 @@ const mailboxReceiver = () => {
         if (!isDeliverable(message)) return
       } else {
         const taken = await mailboxCall('take', session)
+        // A session that closed while its take ran (or was added again as a new agent) changes nothing: no
+        // watcher, no failure log and no count or timer, since its id can come back as a new session, which
+        // starts with every ask. A message it took runs out its claim and goes out again.
+        if (roots.get(session) !== agent) return
         // A board script that is missing, fails or does not answer keeps the card from offering Send. It is
         // logged once, until a call works again, so a timer that keeps asking does not fill the log.
         if (taken === null || typeof taken !== 'object') {
@@ -107,9 +111,6 @@ const mailboxReceiver = () => {
         failing.delete(session)
         if (typeof taken.watch === 'string') follow(taken.watch)
         message = taken.message
-        // A session that closed while its take ran keeps no count and no timer: its id can come back as a new
-        // session, which starts with every ask. A message it took runs out its claim and goes out again.
-        if (roots.get(session) !== agent) return
         if (message == null && taken.deferred === true) {
           const asked = (asks.get(session) ?? 0) + 1
           asks.set(session, asked)
@@ -120,7 +121,12 @@ const mailboxReceiver = () => {
             retry.unref?.()
             retries.set(session, retry)
           }
-        } else asks.delete(session)
+        } else {
+          // A plain answer ends the run of asks; an earlier timer still armed would start a take it no longer needs.
+          asks.delete(session)
+          clearTimeout(retries.get(session))
+          retries.delete(session)
+        }
       }
       if (message == null) return
       if (typeof message.text !== 'string' || typeof message.id !== 'string' || typeof message.nonce !== 'string') throw new Error('MAILBOX_FAILED')
@@ -138,7 +144,9 @@ const mailboxReceiver = () => {
     } catch { hookError('MAILBOX_FAILED') }
     finally {
       busy.delete(session)
-      if (again.delete(session)) deliver(agent)
+      // A message that came in meanwhile goes to the session's current agent: the one whose take this was may
+      // have been replaced by a new agent with the same id, which only set the flag.
+      if (again.delete(session)) { const current = roots.get(session); if (current !== undefined) deliver(current) }
     }
   }
   // The board rewrites messages.json whenever it queues a message: a session with one waiting takes it.

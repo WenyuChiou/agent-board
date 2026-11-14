@@ -7713,6 +7713,96 @@ test('a deferred take asks again for its own session only, and a session closed 
   for (const agent of [a, b, reopened]) hooks.get('agent/disposed')({ agent })
 }))
 
+// The DeepSeek receiver with a stub board script. A take is answered by plan(call) (an object, or 'fail'); with no
+// answer from the plan it is held until the test calls its answer. Watchers opened are listed, the log is read back.
+const deepseekStub = async (f, tag, queued) => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { EventEmitter } = await import('node:events')
+  const { randomUUID } = await import('node:crypto')
+  const progress = join(f.home, `deepseek-${tag}-progress.md`)
+  f.save(progress, '')
+  const directory = join(f.home, `deepseek-${tag}-mailbox`)
+  f.save(join(directory, 'messages.json'), JSON.stringify({ messages: queued.map(id => ({ status: 'queued', to: 'deepseek:' + id })) }))
+  const stub = { directory, takes: [], watched: [], plan: () => undefined, hooks: new Map() }
+  const spawnMailbox = (_node, args) => {
+    const child = new EventEmitter()
+    child.stdout = Object.assign(new EventEmitter(), { setEncoding() {} })
+    child.kill = () => {}
+    const action = args[args.indexOf('--mailbox') + 1]
+    const call = { action, session: args[args.indexOf('--session') + 1] }
+    call.answer = body => {
+      if (body !== 'fail') child.stdout.emit('data', JSON.stringify(body) + '\n')
+      child.emit('close', body === 'fail' ? 1 : 0)
+    }
+    if (action !== 'take') setImmediate(() => call.answer({ ok: true }))
+    else {
+      stub.takes.push(call)
+      const body = stub.plan(call)
+      if (body !== undefined) setImmediate(() => call.answer(body))
+    }
+    return child
+  }
+  const watch = dir => { stub.watched.push(dir); return Object.assign(new EventEmitter(), { close() {} }) }
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, join(f.home, `deepseek-${tag}-board.mjs`))
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
+  apply({ on: (name, fn) => stub.hooks.set(name, fn) })
+  stub.session = id => ({ session: { header: { id } }, status: 'idle', received: [], followup() { throw new Error('UNUSED') } })
+  stub.log = () => existsSync(join(f.home, '.agent-board', 'hook-errors.log')) ? readFileSync(join(f.home, '.agent-board', 'hook-errors.log'), 'utf8') : ''
+  stub.until = async (check, label, limit = 5000) => {
+    for (const end = Date.now() + limit; Date.now() < end; await new Promise(done => setTimeout(done, 20))) if (check()) return true
+    if (label !== undefined) assert.fail(label)
+    return false
+  }
+  return stub
+}
+
+test('a take that returns after its last session was removed opens no watcher and logs no failure (#1442)', () => fixture(async f => {
+  const s = await deepseekStub(f, 'late', [])
+  for (const [id, late] of [['late-a', { watch: s.directory, message: null }], ['late-b', 'fail']]) {
+    const agent = s.session(id)
+    s.hooks.get('agent/created')({ agent })
+    await s.until(() => s.takes.some(call => call.session === id), `no take for ${id}`)
+    s.hooks.get('agent/disposed')({ agent })
+    s.takes.find(call => call.session === id).answer(late)
+    // Settled: nothing the late answer starts is slower than this.
+    await new Promise(done => setTimeout(done, 300))
+    assert.deepEqual(s.watched, [], `${id}: a watcher was opened for a closed session`)
+    assert.doesNotMatch(s.log(), /MAILBOX_FAILED/, `${id}: a closed session's take was logged as failed`)
+  }
+}))
+
+test('a session added again with the same id gets its waiting message without a watcher event or tick while the old take is out (#1442)', () => fixture(async f => {
+  const s = await deepseekStub(f, 'again', ['again-s'])
+  const old = s.session('again-s')
+  const fresh = s.session('again-s')
+  fresh.followup = message => { fresh.received.push(message); fresh.status = 'running' }
+  // The first take (the old agent's) is held; the next one finds the message.
+  s.plan = () => s.takes.length === 1 ? undefined : { watch: s.directory, message: { id: 'again-message', nonce: 'again-nonce', text: 'Synthetic waiting message' } }
+  s.hooks.get('agent/created')({ agent: old })
+  await s.until(() => s.takes.length === 1, 'the old agent took')
+  s.hooks.get('agent/created')({ agent: fresh })
+  s.takes[0].answer({ watch: s.directory, message: null })
+  const isGiven = await s.until(() => fresh.received.length === 1, undefined, 3000)
+  assert.equal(isGiven, true, `the new agent was not given the waiting message, ${s.takes.length} takes`)
+  s.hooks.get('agent/disposed')({ agent: fresh })
+}))
+
+test('a deferred answer then a plain one before 250 ms leaves no timer that starts another take (#1442)', () => fixture(async f => {
+  const s = await deepseekStub(f, 'timer', ['timer-s'])
+  const agent = s.session('timer-s')
+  s.plan = () => s.takes.length === 1 ? { watch: s.directory, message: null, deferred: true } : { watch: s.directory, message: null }
+  s.hooks.get('agent/created')({ agent })
+  await s.until(() => s.takes.length === 1, 'the first take ran')
+  // The deferred answer arms the 250 ms timer; a plain answer follows well inside it.
+  await new Promise(done => setTimeout(done, 40))
+  s.hooks.get('agent/status')({ agent, status: 'idle' })
+  await s.until(() => s.takes.length === 2, 'the second take ran')
+  await new Promise(done => setTimeout(done, 900))
+  assert.equal(s.takes.length, 2, 'the earlier timer started a take after a plain answer')
+  s.hooks.get('agent/disposed')({ agent })
+}))
+
 test('a mailbox accept the board did not take prints ok false, and ok true once it did (#1430)', async () => mailboxFixture(async f => {
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   f.seed('deepseek')
