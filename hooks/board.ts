@@ -936,6 +936,22 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
   const routes = o.routes ?? {}
   const items = boardItems(view, pending, state.isIdleOpen ?? false, state.isOlderOpen ?? false)
   const shelved = new Set([...view.idle, ...view.stopped].map(row => row.key))
+  const titleCounts = new Map<string, number>()
+  const seenTaskTitles = new Set<string>()
+  for (const item of items) {
+    if (item.type === 'row') {
+      const session = item.row.target?.session || item.row.confirm?.session || item.row.archive?.session || ''
+      const taskKey = session !== '' ? `s:${session}` : item.row.key
+      if (seenTaskTitles.has(taskKey)) continue
+      seenTaskTitles.add(taskKey)
+      titleCounts.set(item.row.title, (titleCounts.get(item.row.title) ?? 0) + 1)
+    } else if (item.type === 'ask' && !item.key.startsWith('older:') && item.ask.task !== '') {
+      const taskKey = item.ask.session !== '' ? `s:${item.ask.session}` : item.ask.key.replace(/::\d+$/, '')
+      if (seenTaskTitles.has(taskKey)) continue
+      seenTaskTitles.add(taskKey)
+      titleCounts.set(item.ask.task, (titleCounts.get(item.ask.task) ?? 0) + 1)
+    }
+  }
   const at = chosen(state, items)
   const lines: string[] = [
     countLine(view, pending, s, c, o.messaging),
@@ -1011,6 +1027,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       lines.push(`${mark} ${titled(2, `${s.chip(s.ask[ask.kind])}${ask.text}`, [name, ask.when === s.questionAgeUnknown ? '' : ask.when].filter(part => part !== '').join(' · '), isHere)}`)
       if (result?.key === item.key) resultLines('    ')
       lines.push(`    ${c('project', cut(ask.project + (ask.task ? ` › ${ask.task}` : ''), o.width - 6))}`)
+      if (ask.task && !ask.note && ask.context && (titleCounts.get(ask.task) ?? 0) > 1) lines.push(`    ${c('quiet', cut(ask.context, o.width - 6))}`)
       if (isOpen || isHere) {
         if (ask.canHide === false) lines.push(`    ${c('quiet', cut(s.questionReviewOnly, o.width - 6))}`)
         if (ask.note) lines.push(`    ${cut(ask.note, o.width - 6)}`)
@@ -1057,6 +1074,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const quiet = status.startsWith(lead) ? lead : ''
       lines.push(`    ${bar.width === 0 ? '' : `${bar.text} `}${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
       if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
+      if (!isOpen && row.context && (titleCounts.get(row.title) ?? 0) > 1) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
       if (isOpen) rowDetails(row)
       return
     }

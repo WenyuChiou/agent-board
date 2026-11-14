@@ -297,10 +297,22 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
   }
   const pending: GroupedQuestion[] = []
   const older: GroupedQuestion[] = []
-  const carded = new Set<string>()
+  const sessionsOf = (item: { session?: string | null; sessionId?: string | null }): string[] =>
+    [item.session ?? '', item.sessionId ?? ''].filter(one => one !== '')
+  // When both a question and a row name a session, only matching sessions share a card (#1401):
+  // two sessions that happen to share a conversation title in the same folder keep their own rows.
+  const sameTaskSession = (left: { session?: string | null; sessionId?: string | null }, right: { session?: string | null; sessionId?: string | null }): boolean => {
+    const a = sessionsOf(left)
+    const b = sessionsOf(right)
+    return a.length === 0 || b.length === 0 || a.some(id => b.includes(id))
+  }
+  const carded = new Map<string, GroupingAsk[]>()
   for (const ask of model.asks) {
     list({ ...tag(ownerOf(ask), ask.project, ask.dir, ask.at), key: ask.key, task: ask.task, text: ask.text, stage: 'pending', source: ask }, pending)
-    carded.add(identity(ask.agent, ask.isOwn === true, ask.project, ask.task, ask.dir))
+    const id = identity(ask.agent, ask.isOwn === true, ask.project, ask.task, ask.dir)
+    const held = carded.get(id)
+    if (held === undefined) carded.set(id, [ask])
+    else held.push(ask)
   }
   for (const turn of model.turns) {
     if (turn.isQuestion) list({ ...tag(ownerOf(turn), turn.project, turn.dir, turn.at), key: turn.key, task: '', text: turn.text, stage: 'pending', source: turn }, pending)
@@ -326,27 +338,38 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
   const tasks: GroupedTask[] = []
   const stuck: Card[] = []
   const rowKeys = new Set<string>()
-  const rowIds = new Set(rows.filter(({ row }) => row.isRun !== true).map(({ row }) => identity(row.agent, row.isOwn === true, row.project, row.title, row.dir)))
+  const rowIds = new Map<string, GroupingRow[]>()
+  for (const { row } of rows) {
+    if (row.isRun === true) continue
+    const id = identity(row.agent, row.isOwn === true, row.project, row.title, row.dir)
+    const held = rowIds.get(id)
+    if (held === undefined) rowIds.set(id, [row])
+    else held.push(row)
+  }
   for (const [index, { row, shelf, isIdle }] of rows.entries()) {
     if (row.isRun === true || taken.has(index) || rowKeys.has(row.key)) continue
     rowKeys.add(row.key)
     const tagged = tag({ agent: row.agent, isOwn: row.isOwn === true }, row.project, row.dir, row.at)
     if (row.stuck !== undefined) stuck.push({ ...tagged, type: 'stuck', key: `stuck:${row.key}`, task: row.title, reason: row.stuck.reason, source: row })
-    tasks.push({ ...tagged, key: row.key, title: row.title, shelf, isIdle, hasCard: row.stuck !== undefined || carded.has(identity(row.agent, row.isOwn === true, row.project, row.title, row.dir)), source: row })
+    const id = identity(row.agent, row.isOwn === true, row.project, row.title, row.dir)
+    const hasCard = row.stuck !== undefined || (carded.get(id)?.some(ask => sameTaskSession(ask, row)) ?? false)
+    tasks.push({ ...tagged, key: row.key, title: row.title, shelf, isIdle, hasCard, source: row })
   }
   // The producer gives a task that waits on the person a question and no row. It is one open task
   // however many questions it has, and its card stands for it. A helper run's question is not a task.
   const waiting = new Map<string, { ask: GroupingAsk; at: number }>()
   for (const ask of model.asks) {
     const id = identity(ask.agent, ask.isOwn === true, ask.project, ask.task, ask.dir)
-    if (ask.isRun === true || rowIds.has(id)) continue
-    const held = waiting.get(id)
-    if (held === undefined) waiting.set(id, { ask, at: timeOf(ask.at) })
+    if (ask.isRun === true || (rowIds.get(id)?.some(row => sameTaskSession(ask, row)) ?? false)) continue
+    const token = ask.session || ask.sessionId || ''
+    const waitId = token === '' ? id : `${id}@${token}`
+    const held = waiting.get(waitId)
+    if (held === undefined) waiting.set(waitId, { ask, at: timeOf(ask.at) })
     else held.at = Math.max(held.at, timeOf(ask.at))
   }
-  for (const [id, { ask, at }] of waiting) {
+  for (const [waitId, { ask, at }] of waiting) {
     const tagged = tag({ agent: ask.agent, isOwn: ask.isOwn === true }, ask.project, ask.dir, at)
-    tasks.push({ ...tagged, key: `waiting:${id}`, title: ask.task, shelf: 'open', isIdle: false, hasCard: true, source: ask })
+    tasks.push({ ...tagged, key: `waiting:${waitId}`, title: ask.task, shelf: 'open', isIdle: false, hasCard: true, source: ask })
   }
   // A finished task whose agent the model did not say is under no agent: it counts in All only.
   const repeats = new Map<string, number>()

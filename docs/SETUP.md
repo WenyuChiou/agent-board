@@ -376,15 +376,21 @@ command once one is possible.
 Codex's commands carry no wrapper from this installer. No PowerShell profile or
 execution-policy setting is changed.
 
-The reporter binds the native `conversationId`, ignoring transcript paths, prompts,
-workspace paths, tool inputs and model text. Its own session record retains at most 16
+The reporter binds the native `conversationId`, ignoring hook stdin prompts,
+workspace paths, tool inputs and full model text. To name the conversation row instead
+of `Local antigravity task`, it reads only a matching title from the client's local
+summary file (`agyhub_summaries_proto.pb`, `jetbox_summaries_proto.pb` or
+`cache/conversation_metadata.json`, bounded regular read, skipping foreign entries) or,
+while untitled, only the clipped first line of the first `USER_INPUT` entry from the
+start of that conversation's own `transcript.jsonl`. Its own session record retains at most 16
 event/state/timestamp observations. SessionStart and Stop mean waiting; PreInvocation
 and PostInvocation mean working. PostInvocation may precede tools, so only Stop settles
 the loop. Stop never marks the conversation ended; no undocumented SessionEnd is added.
 
 The App, CLI and IDE share the global path but load it independently. Already-open
-sessions may need reload. These hooks report activity; semantic task steps remain explicit
-agent reports. No permission handler, transcript reader or remote-control tunnel is installed.
+sessions may need reload. These hooks report activity and closing questions from the
+conversation transcript as noted above; semantic task steps remain explicit
+agent reports. No permission handler or remote-control tunnel is installed.
 
 ## Gemini CLI is retired
 
