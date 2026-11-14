@@ -5339,4 +5339,33 @@ test('digest, markAsked and board views preserve list choices cleanly and drop t
   expect(late.tasks.find(t => t.waiting === 'you')?.options).toEqual(opts)
   const settled = applyDigest(digested, { title: 'Pick DB', context: '', done: 'Picked Postgres', next: 'Writing schema', ask: '', why: '' }, AT + 2000)
   expect(settled.tasks.some(t => t.options.length > 0)).toBe(false)
+
+  // Re-asking a plain waiting question replaces inferred options, even with the same count,
+  // while an explicit ask keeps its own explicit options (even empty) (#1277)
+  const firstAsked = markAsked(base, 'Which one?', false, ['Postgres', 'SQLite'])
+  const reAsked = markAsked(firstAsked, 'Which one?', false, ['MySQL', 'SQLite'])
+  expect(reAsked.tasks[0]?.options).toEqual(['MySQL', 'SQLite'])
+
+  const explicitEmpty = applyTaskCreate(base, { subject: 'Which storage?', metadata: { waiting: 'you', ask: 'choose', options: [] } }, '1', AT + 3000)
+  const keptExplicit = markAsked(explicitEmpty, 'Which storage?', false, ['Postgres', 'SQLite'])
+  expect(keptExplicit.tasks[0]?.options).toEqual([])
+})
+
+test('bare globs keep * and HTML comment bodies are stripped from extracted options (#1277)', () => {
+  expect(lastQuestionWithOptions('Which file glob should we run?\n- src/*.ts\n- tests/*.ts')).toEqual({
+    question: 'Which file glob should we run?',
+    options: ['src/*.ts', 'tests/*.ts'],
+  })
+  expect(lastQuestionWithOptions('Which glob pair should we test?\n- src/*.ts and tests/*.ts\n- *.js and *.mjs')).toEqual({
+    question: 'Which glob pair should we test?',
+    options: ['src/*.ts and tests/*.ts', '*.js and *.mjs'],
+  })
+  expect(lastQuestionWithOptions('Which option should I pick?\n- **Fast path**\n- **Postgres**.')).toEqual({
+    question: 'Which option should I pick?',
+    options: ['Fast path', 'Postgres'],
+  })
+  expect(lastQuestionWithOptions('Which database should we use?\n- Postgres <!-- private note -->\n- SQLite <!-- another note -->')).toEqual({
+    question: 'Which database should we use?',
+    options: ['Postgres', 'SQLite'],
+  })
 })

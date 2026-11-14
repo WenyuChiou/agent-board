@@ -21,7 +21,7 @@ const TASK = /^###\s+(.+?)\s*#*\s*$/
 const NOTE = /^\s*>\s?(.*)$/
 const STEP = /^([ \t]*)[-*+]\s+\[([ xX~?>!-])\]\s+(.*)$/
 const FENCE = /^\s*(```|~~~)/
-const MARKER_PREFIXES = ['auto session=', '/auto session=', 'question=', 'options=']
+const MARKER_PREFIXES = ['auto session=', '/auto session=', 'question=']
 export const isCutMarker = (line: string): boolean => {
   if (!line.startsWith('<!--') || line.includes('-->')) return false
   // A loop, not a trailing-whitespace regex: a long run of spaces would make the regex quadratic.
@@ -29,7 +29,7 @@ export const isCutMarker = (line: string): boolean => {
   while (end > 0 && (line[end - 1] === ' ' || line[end - 1] === '\t' || line[end - 1] === '\r')) end--
   const marker = line.slice(0, end).replace(/^<!--[ \t]*/, '')
   // A bare comment opening is still how people hide examples.
-  return marker !== '' && MARKER_PREFIXES.some(prefix => prefix.startsWith(marker) || marker.startsWith(prefix))
+  return marker !== '' && (marker.startsWith('options=') || MARKER_PREFIXES.some(prefix => prefix.startsWith(marker) || marker.startsWith(prefix)))
 }
 export const AUTO_START = /^<!--\s*auto\s+(.*?)\s*-->\s*$/
 export const AUTO_END = /^<!--\s*\/auto\b.*?-->\s*$/
@@ -42,7 +42,7 @@ export const OPTIONS = /^<!--\s*options=(.*?)\s*-->\s*$/
 const NATIVE_AGENTS: readonly string[] = ['claude', 'codex']
 
 export const cleanOptions = (options: readonly string[], limit = 9, maxChars = 120): string[] =>
-  options.map(one => one.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxChars)).filter(one => one !== '').slice(0, limit)
+  options.map(one => one.replace(/<!--[\s\S]*?-->/g, ' ').replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxChars)).filter(one => one !== '').slice(0, limit)
 
 // A comment must not hold `--` or `>`, so both are written as JSON escapes.
 export const escapeOptionsJson = (options: readonly string[]): string =>

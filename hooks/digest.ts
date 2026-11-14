@@ -70,14 +70,15 @@ export const requestData = (text: string): string => text.slice(0, 1200).replace
 // Markdown's `_` marks emphasis at the edge of a word; inside one (`snake_case`, `ghp_16C7`,
 // `sk_live_abc`) it is part of the word and stays. Inline code (`C#`, `__init__.py`) stays literal via placeholders.
 const restoreInline = (line: string): string =>
-  line.replace(/\u0001/g, '"').replace(/\u0002/g, '*').replace(/\u0003/g, '_')
+  line.replace(/\u0001/g, '"').replace(/\u0002/g, '*').replace(/\u0003/g, '_').replace(/\u0004/g, '<!--')
 
 const withoutEmphasis = (line: string): string =>
   line
+    .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/^\s*(?:>+\s?)+/, '')
     .replace(/^\s*#+(?:\s+|$)/, '')
     .replace(/\s+#+\s*$/, '')
-    .replace(/\*+/g, '')
+    .replace(/(?<![A-Za-z0-9/\\.*])(\*{1,3})(?!\*)(?=\S)(?!\.[A-Za-z0-9]|\/)([^*\r\n]*?[^\s*/\\])\1(?![A-Za-z0-9/\\*]|\.[A-Za-z0-9])/g, '$2')
     .replace(/_+/g, (run, at: number, whole: string) => (/[A-Za-z0-9]/.test(whole[at - 1] ?? '') && /[A-Za-z0-9]/.test(whole[at + run.length] ?? '') ? run : ''))
 
 // JSON objects and arrays are data, not prose. Only a top-level, nonempty string can
@@ -275,7 +276,8 @@ export const lastQuestionInProseWithOptions = (answer: string, isFull = false): 
   // A straight quote, asterisk or underscore in code (`name"`, `src/*.ts`) is content, not quote or emphasis.
   const prose = answer
     .replace(/```[\s\S]*?```/g, '\n\n')
-    .replace(/`([^`]*)`/g, (_, code: string) => code.replace(/"/g, '\u0001').replace(/\*/g, '\u0002').replace(/_/g, '\u0003'))
+    .replace(/`([^`]*)`/g, (_, code: string) => code.replace(/"/g, '\u0001').replace(/\*/g, '\u0002').replace(/_/g, '\u0003').replace(/<!--/g, '\u0004'))
+    .replace(/<!--[\s\S]*?-->/g, '')
   const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '')
   const last = paragraphs.at(-1)
   if (last === undefined) return null
@@ -400,8 +402,9 @@ export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTu
     if (matching.length !== 1) return mirror
     const target = matching[0]
     if (target === undefined) return mirror
-    const resolvedOptions = (target.options ?? []).length > 0 || target.ask !== null ? target.options : validOptions
-    const updated = resolvedOptions.length === (target.options ?? []).length ? target : { ...target, options: resolvedOptions }
+    const resolvedOptions = target.ask !== null ? target.options : validOptions
+    const sameOptions = resolvedOptions.length === (target.options ?? []).length && resolvedOptions.every((one, index) => one === target.options?.[index])
+    const updated = sameOptions ? target : { ...target, options: resolvedOptions }
     const renewed = renewQuestion(updated, mirror.questionSequence)
     return { ...mirror, questionSequence: renewed.questionRevision, tasks: mirror.tasks.map(one => one.id === target.id ? renewed : one) }
   }

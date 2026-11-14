@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { splitLines } from '../hooks/lines'
-import { currentStepIndex, isCutMarker, isHereProject, parseProgress, progressTail, readable } from '../hooks/parse'
+import { cleanOptions, currentStepIndex, isCutMarker, isHereProject, parseProgress, progressTail, readable } from '../hooks/parse'
 
 test('splitting progress.md into lines gives the same lines as the regular expression for every mix of CR and LF', () => {
   const alphabet = ['a', '\r', '\n']
@@ -222,4 +222,15 @@ test('options markers attach cleaned choice lists to waiting steps inside owned 
   ].join('\n')
   const reparsed = parseProgress(escapedBlock)
   expect(reparsed[0]?.tasks[0]?.steps[0]?.options).toEqual(['a b', 'c -- d'])
+})
+
+test('short comment openings like <!-- opt stay hidden while <!-- options= stays a cut marker (#1277)', () => {
+  expect(isCutMarker('<!-- opt')).toBe(false)
+  expect(isCutMarker('<!-- o')).toBe(false)
+  expect(isCutMarker('<!-- options=')).toBe(true)
+
+  const parsed = parseProgress('## P\n### T\n- [x] a\n<!-- opt\n## Hidden\n### Hidden task\n- [ ] secret\n-->')
+  expect(parsed.map(project => project.name)).toEqual(['P'])
+  expect(parsed[0]?.tasks.map(task => task.title)).toEqual(['T'])
+  expect(cleanOptions(['Postgres <!-- private note -->', 'SQLite <!-- hidden -->'])).toEqual(['Postgres', 'SQLite'])
 })
