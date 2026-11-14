@@ -425,7 +425,7 @@ const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): Ser
 // An answer that was sent, or queued for the session's next turn, no longer waits for the person (#1296). A message
 // that timed out or was refused waits again. The page, the terminal board, --status and --json all count from this.
 const isFailedReceipt = (receipt: (Pick<Message, 'status' | 'error' | 'hasAccepted'> & { isSurfaceLost?: boolean }) | undefined): boolean =>
-  receipt !== undefined && (receipt.isSurfaceLost === true || receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
+  receipt !== undefined && (receipt.isSurfaceLost === true || receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.error !== '')
 // A question counts as handled by the message bound to it, not by any message to its session (#1296): with two
 // questions in one session, one queued answer hands over one. `holder` is true when a message still held for
 // the session's next turn answers this question. A message bound to no question answers one only when the session
@@ -433,7 +433,7 @@ const isFailedReceipt = (receipt: (Pick<Message, 'status' | 'error' | 'hasAccept
 const answersQuestion = (one: ShownMessage, to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
   to !== undefined && one.from === 'board' && one.to === to && (one.answers === undefined ? openInSession === 1 : one.answers === questionId)
 const holdsAnswer = (messages: readonly ShownMessage[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
-  messages.some(one => answersQuestion(one, to, questionId, openInSession) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)))
+  messages.some(one => answersQuestion(one, to, questionId, openInSession) && isOpen(one) && !(one.status === 'uncertain' && one.error !== '') && !(one.status === 'accepted' && isMailboxTarget(one.target)))
 // Whether the board's latest message for this very question failed. A later message to the same session from
 // anyone else says nothing about the answer being counted.
 const answerFailed = (messages: readonly ShownMessage[], to: string | undefined, questionId: string | undefined, openInSession: number, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true): boolean => {
@@ -458,7 +458,7 @@ export const handledOnly = (messaging: Messaging): Messaging => ({
       status: one.status,
       updated: one.updated,
       reply: '',
-      error: /^(TIMEOUT|EXPIRED|DISMISSED)/.exec(one.error)?.[0] ?? '',
+      error: /^(TIMEOUT|EXPIRED|DISMISSED)/.exec(one.error)?.[0] ?? (one.status === 'uncertain' && one.error !== '' ? 'UNCERTAIN' : ''),
       ...(one.hasAccepted === true ? { hasAccepted: true } : {}),
       ...(isSurfaceLost ? { isSurfaceLost: true as const } : {}),
       hops: 0,
@@ -1863,8 +1863,8 @@ const PAGE_SCRIPT = String.raw`
   // A finished message's attempt id is done with, so the next send of the same words is a new message. The rule
   // lives here so a board kept from redrawing under a press still applies it (#1468).
   function releaseFinishedAttempt(receipt, isClaude) {
-    var isDone = isClaude ? receipt.status === 'rejected' || receipt.status === 'acknowledged' || receipt.error === 'DISMISSED' || receipt.error === 'EXPIRED'
-      : receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox || receipt.status === 'uncertain' && !receiptFailed(receipt) && Boolean(receipt.error);
+    var isDone = isClaude ? receipt.status === 'rejected' || receipt.status === 'acknowledged' || receipt.status === 'uncertain' && Boolean(receipt.error)
+      : receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox || receipt.status === 'uncertain' && Boolean(receipt.error);
     if (isDone) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
   }
   // The card's line for a message to a Claude session, by what its receipt says (#316).
@@ -2334,7 +2334,7 @@ const PAGE_SCRIPT = String.raw`
     add(after, afterMk, parts.msg, parts.again);
     parts.after = fx(after, false);
     add(body, parts.ask, parts.reply, parts.after);
-    if (ask.receipt && (ask.receipt.error === 'DISMISSED' || ask.receipt.isSurfaceLost === true) && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
+    if (ask.receipt && (ask.receipt.error === 'DISMISSED' || ask.receipt.isSurfaceLost === true || !isClaudeAgent(ask.agent) && (ask.receipt.status === 'rejected' || ask.receipt.status === 'uncertain' && Boolean(ask.receipt.error))) && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
     var receiptEl = ask.receipt ? receiptLine(ask.receipt, key, ask.agent, !!ask.delivery, ask.line) : null;
     if (receiptEl) {
       parts.hasReceipt = true;

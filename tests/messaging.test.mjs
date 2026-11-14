@@ -5275,7 +5275,7 @@ test('1139 a timeout before Antigravity acceptance remains uncertain', async t =
 })
 
 test('1486 a Codex card clears sending and accepts another message after a delivery turn ends uncertain', async () => {
-  const { servePage } = await import('../hooks/serve.ts')
+  const { servePage, handledOnly } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
   const now = Date.now(), connection = { ...target, session: 'session1', expires: now + 120000 }
   const askFile = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=session1 state=waiting updated=${new Date(now).toISOString()} -->\n### Ask delivery\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
@@ -5283,9 +5283,12 @@ test('1486 a Codex card clears sending and accepts another message after a deliv
   const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
   const askView = buildView(parseProgress(askFile), [], null, now, 0, {}, EN)
   const rowView = buildView(parseProgress(rowFile), [], null, now, 0, {}, EN)
-  const modelOf = (view, messages) => serveModel(view, [], EN, new Set(), false, { connections: [connection], messages }, false, group)
+  const modelOf = (view, messages, isLan = false) => serveModel(view, [], EN, new Set(), isLan, { connections: isLan ? [] : [connection], messages }, false, group)
 
-  for (const error of ['TURN_NOT_COMPLETED', 'ACK_MISSING']) {
+  for (const error of ['TURN_NOT_COMPLETED', 'ACK_MISSING', 'INTERRUPT_TIMED_OUT', 'TIMEOUT']) {
+    const hasAccepted = error === 'TURN_NOT_COMPLETED' || error === 'ACK_MISSING'
+    const isTimeout = /TIMEOUT/.test(error)
+    const expectedReceipt = hasAccepted ? EN.messagesAcceptedUnconfirmed : isTimeout ? EN.messagesTimeout : EN.messagesUncertain
     const rowPage = await pageDom(servePage(EN, 'synthetic'), modelOf(rowView, []), async () => ({ ok: true, json: async () => ({ ok: true }) }))
     const initialRowCard = rowPage.cards().find(one => rowPage.inputs(one).length)
     rowPage.inputs(initialRowCard)[0].value = 'Continue'
@@ -5295,19 +5298,17 @@ test('1486 a Codex card clears sending and accepts another message after a deliv
 
     const sent = queueMessage({ messages: [] }, { id: firstId, target: connection.id, turn: connection.turn, text: 'Continue' }, 'board', connection, now).state
     const claimed = claimMessages(sent, connection, now + 1, 'abcdef').state
-    const accepted = messageReceipt(claimed, connection, { id: firstId, nonce: 'abcdef', status: 'accepted' }, now + 2)
-    const settled = messageReceipt(accepted, connection, { id: firstId, nonce: 'abcdef', status: 'uncertain', error }, now + 3)
+    const beforeSettle = hasAccepted ? messageReceipt(claimed, connection, { id: firstId, nonce: 'abcdef', status: 'accepted' }, now + 2) : claimed
+    const settled = messageReceipt(beforeSettle, connection, { id: firstId, nonce: 'abcdef', status: 'uncertain', error }, now + 3)
 
     // Still-claimed (no error yet) keeps isSending true, while settled uncertain clears it on both ask and row cards.
-    assert.equal(modelOf(askView, claimed.messages).asks[0].isSending, true)
     assert.equal(modelOf(rowView, claimed.messages).groups[0].rows[0].isSending, true)
-    const askModel = modelOf(askView, settled.messages)
     const rowModel = modelOf(rowView, settled.messages)
-    assert.equal(askModel.asks[0].isSending, false, `${error}: ask.isSending`)
     assert.equal(rowModel.groups[0].rows[0].isSending, false, `${error}: row.isSending`)
 
     await rowPage.redraw(rowModel)
-    assert.ok(rowPage.text().includes(EN.messagesAcceptedUnconfirmed), rowPage.text())
+    assert.ok(rowPage.text().includes(expectedReceipt), rowPage.text())
+    if (isTimeout) assert.ok(rowPage.text().includes(EN.serveRetry), rowPage.text())
     assert.ok(!rowPage.text().includes(EN.serveSendBusy('Codex')), `${error} row card must not show serveSendBusy`)
     const rowCard = rowPage.cards().find(one => rowPage.inputs(one).length)
     const rowSend = rowPage.buttons(rowCard).find(one => one.textContent === EN.serveSend('Codex'))
@@ -5320,13 +5321,44 @@ test('1486 a Codex card clears sending and accepts another message after a deliv
     const secondId = rowPage.requests[1].body.id
     assert.notEqual(secondId, firstId, `${error} retry after settled uncertain must allocate a fresh message id`)
 
-    const askPage = await pageDom(servePage(EN, 'synthetic'), askModel, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    // Live question card flow: send from askPage, redraw with settled uncertain receipt on that same askPage,
+    // verify cardState/holdsAnswer/messageAttempts all clear so a second answer can be sent.
+    const askModelBefore = modelOf(askView, [])
+    const askPage = await pageDom(servePage(EN, 'synthetic'), askModelBefore, async () => ({ ok: true, json: async () => ({ ok: true }) }))
     askPage.cards().flatMap(card => askPage.buttons(card)).find(one => one.textContent === EN.pgWriteOwn)?.click()
-    assert.ok(askPage.text().includes(EN.messagesAcceptedUnconfirmed), askPage.text())
+    const initialAskCard = askPage.cards().find(one => askPage.inputs(one).length)
+    askPage.inputs(initialAskCard)[0].value = 'Continue'
+    askPage.buttons(initialAskCard).find(one => one.textContent === EN.serveSend('Codex')).click()
+    await askPage.flush()
+    assert.equal(askPage.requests.length, 1)
+    const askFirstId = askPage.requests[0].body.id
+
+    const askSent = queueMessage({ messages: [] }, { id: askFirstId, target: connection.id, turn: connection.turn, text: 'Continue', answers: askModelBefore.asks[0].id }, 'board', connection, now).state
+    const askClaimed = claimMessages(askSent, connection, now + 1, 'abcdef').state
+    const askBeforeSettle = hasAccepted ? messageReceipt(askClaimed, connection, { id: askFirstId, nonce: 'abcdef', status: 'accepted' }, now + 2) : askClaimed
+    const askSettled = messageReceipt(askBeforeSettle, connection, { id: askFirstId, nonce: 'abcdef', status: 'uncertain', error }, now + 3)
+
+    assert.equal(modelOf(askView, askClaimed.messages).asks[0].isSending, true)
+    const askModel = modelOf(askView, askSettled.messages)
+    assert.equal(askModel.asks[0].isSending, false, `${error}: ask.isSending`)
+    assert.deepEqual(askModel.view.needs.handled, [], `${error}: settled uncertain must not remain in needs.handled`)
+    assert.deepEqual(modelOf(askView, handledOnly(askSettled).messages, true).view.needs.handled, [], `${error}: LAN handledOnly must match`)
+    assert.equal(askModel.view.needs.cards.length, 1, `${error}: question must stay in needs.cards`)
+    assert.equal(askModel.view.needs.n, 1, `${error}: needs.n must stay 1`)
+
+    await askPage.redraw(askModel)
+    assert.ok(askPage.text().includes(expectedReceipt), askPage.text())
+    if (isTimeout) assert.ok(askPage.text().includes(EN.serveRetry), askPage.text())
     assert.ok(!askPage.text().includes(EN.serveSendBusy('Codex')), `${error} ask card must not show serveSendBusy`)
+    askPage.cards().flatMap(card => askPage.buttons(card)).find(one => one.textContent === EN.pgWriteOwn)?.click()
     const askCard = askPage.cards().find(one => askPage.inputs(one).length)
+    askPage.inputs(askCard)[0].value = 'Continue'
     const askSend = askPage.buttons(askCard).find(one => one.textContent === EN.serveSend('Codex'))
     assert.equal(askSend.disabled, false, `${error} ask send button must be enabled`)
+    askSend.click()
+    await askPage.flush()
+    assert.equal(askPage.requests.length, 2)
+    assert.notEqual(askPage.requests[1].body.id, askFirstId, `${error} ask retry after settled uncertain must allocate a fresh message id`)
 
     // Sending again from the board must neither fail with PAIR_BUSY nor be held behind the settled uncertain message.
     const nextQueued = queueMessage(settled, { id: secondId, target: connection.id, turn: connection.turn, text: 'Continue' }, 'board', connection, now + 4)
