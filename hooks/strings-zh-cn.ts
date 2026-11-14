@@ -40,6 +40,7 @@ export const ZH_CN: Strings = {
   localAgentTask: (agent: string): string => `${agent} 本地任务`,
   localAgentStarted: (when: string): string => `开始于 ${when}`,
   localAgentSkillDescription: '打开本地交互看板，跟踪当前已接线 session 的实际任务进度。',
+  antigravitySidecarDescription: 'Agent Board：看板有消息要发给空闲的 Antigravity 对话时，替它开始新的一轮。只有你能在 Automations 页面开启。',
   openclawProgressTool: '把这项任务的实际进度报告给本地看板。每个实际步骤或状态改变后，把每个步骤以一行 Markdown 任务送出。回复以向用户提问收尾时，结束回合前先把问题以“- [?] <问题>”步骤（state 为 waiting）送出：看板不读回复文字，这个步骤是问题到达用户的唯一途径。需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。',
   deepseekBoardTool: '打开本地看板，或把这项任务的实际进度报告给看板。action 选 open 会启动看板网页，并返回它打印的那一行：网页链接，或没有网页的原因。action 选 report 要给 title、state 和 steps：每个实际步骤或状态改变后，把每个步骤以一行 Markdown 任务发送。回复以向用户提问收尾时，结束回合前先把问题以“- [?] <问题>”步骤（state 为 waiting）发送：看板不读回复文字，这个步骤是问题到达用户的唯一途径。需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。',
   localAgentStepFormat: '一行 Markdown 任务：“- [x] 完成”、“- [~] 进行中”、“- [ ] 下一步”、“- [?] 等用户回答”、“- [!] 卡住”、“- [>] 在别处运行或已交接”、“- [-] 取消”。需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。',

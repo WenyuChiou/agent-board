@@ -152,6 +152,24 @@ For each wake the sidecar checks that `conversation` is a UUID, then runs
 (one argument list, no shell, a 60 s limit). Exit 0 reports `sent`; anything else reports `failed` with a
 short code. The turn-start hook then hands the queued message over as it does for any hook mailbox.
 
+What each side may rely on (PR B writes the board's half to this):
+
+- A wake's `id` and `nonce` match a message id, `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`. A poll may return any number of
+  wakes; the sidecar handles every one, in order, and bounds nothing itself. Each wake can take up to 60 s, so the
+  board bounds a batch and gives a wake it claimed a lease long enough for the batch before it counts it lost.
+- The sidecar never runs a wake twice. If it cannot report one (its `id` or `nonce` does not match, which it
+  prints as `INVALID_WAKE`), the wake stays claimed on the board and the board's own lease decides what it
+  becomes; it is never reported as sent.
+- A report is repeatable: the same `id`, `nonce` and `status`. When a `wake-report` gets no answer, the sidecar
+  sends the same body again, up to three times in all, a second or two apart. The board treats a repeated report
+  of one wake as the same report and answers `{"ok":true}` again; a different `status` for a wake already
+  reported does not change it. A report still unanswered after the third try is only printed
+  (`report lost`), and that wake stays uncertain on the board: a card says the wake is unconfirmed, never
+  delivered, and the message is not sent again unseen.
+- Where the connector already manages Antigravity's hooks, setup still writes the two sidecar files, on the same
+  yes, under a record of their own (`install-antigravity-sidecar.json`); it takes over none of the connector's
+  hooks, and `remove` takes the sidecar files out.
+
 ## Local storage
 
 Opening the installed board page (`agent-board`; `--serve` is the old spelling, still accepted) also starts its local message hub:

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { antigravitySidecarSource } from '../hooks/antigravity-sidecar.ts'
@@ -27,7 +28,7 @@ const makeEnv = home => {
 const withHome = (body) => {
   const home = mkdtempSync(join(tmpdir(), 'setup-sidecar-test-'))
   try {
-    const run = (args, extra = {}) => spawnSync(process.execPath, [installer, '--home', home, '--lang', 'en', ...args], { cwd: home, env: { ...makeEnv(home), ...extra.env }, input: extra.input, encoding: 'utf8', windowsHide: true, timeout: 60000 })
+    const run = (args, extra = {}) => spawnSync(process.execPath, [installer, '--home', home, '--lang', extra.lang ?? 'en', ...args], { cwd: home, env: { ...makeEnv(home), ...extra.env }, input: extra.input, encoding: 'utf8', windowsHide: true, timeout: 60000 })
     const dir = join(home, '.gemini', 'config', 'sidecars', 'agent-board')
     body({ home, run, dir })
   } finally { rmSync(home, { recursive: true, force: true }) }
@@ -81,4 +82,103 @@ test('in a terminal the sidecar question defaults to no: an empty second answer 
   assert.ok(asked.stdout.includes(TERMS), asked.stdout)
   assert.ok(asked.stdout.includes('[y/N]'), asked.stdout)
   assert.ok(!existsSync(dir), 'a no writes nothing')
+}))
+
+// No Claude Code on PATH, so the only thing a terminal run can offer is Antigravity's own files and the sidecar question.
+const TTY = { AGENT_BOARD_SETUP_TTY: '1', AGENT_BOARD_TEST_PID: String(process.pid), [Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH']: '' }
+
+test('in a terminal a yes to both questions writes the sidecar files and says the terms line', () => withHome(({ run, dir }) => {
+  const asked = run(['--agent', 'antigravity'], { input: 'y\ny\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.ok(existsSync(join(dir, 'sidecar.json')) && existsSync(join(dir, 'sidecar.mjs')), asked.stdout)
+  assert.ok(asked.stdout.includes('Automations'), asked.stdout)
+}))
+
+test('an install made without the sidecar is asked the sidecar question alone on the next setup, and a yes writes its files', () => withHome(({ run, dir }) => {
+  assert.equal(run(['--agent', 'antigravity', '--apply']).status, 0)
+  assert.ok(!existsSync(dir))
+  const asked = run(['--agent', 'antigravity'], { input: 'y\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.ok(asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.ok(existsSync(join(dir, 'sidecar.json')) && existsSync(join(dir, 'sidecar.mjs')), asked.stdout)
+  // With the files in place the question is not asked again.
+  const again = run(['--agent', 'antigravity'], { input: 'y\n', env: TTY })
+  assert.equal(again.status, 0, again.stderr)
+  assert.ok(!again.stdout.includes('[y/N]'), again.stdout)
+}))
+
+test('a no to the lone sidecar question writes nothing and leaves the question for the next setup', () => withHome(({ run, dir }) => {
+  assert.equal(run(['--agent', 'antigravity', '--apply']).status, 0)
+  const asked = run(['--agent', 'antigravity'], { input: '\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.ok(asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.ok(!existsSync(dir), 'an empty answer is a no')
+  assert.ok(run(['--agent', 'antigravity'], { input: '\n', env: TTY }).stdout.includes('[y/N]'), 'asked again')
+}))
+
+test('structured output carries the terms line whenever a run writes the sidecar, also a run that only updates sidecar.mjs', () => withHome(({ home, run, dir }) => {
+  const first = JSON.parse(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply', '--json']).stdout)
+  assert.ok(first.sidecarNotice.includes(TERMS), JSON.stringify(first.sidecarNotice))
+  // An earlier setup wrote an older sidecar.mjs: its record holds that file's hash, so the next run only updates it.
+  const record = join(home, '.agent-board', 'install-antigravity.json')
+  const old = '// an older sidecar\n'
+  writeFileSync(join(dir, 'sidecar.mjs'), old)
+  const text = JSON.parse(readFileSync(record, 'utf8'))
+  text.files[join(dir, 'sidecar.mjs')] = createHash('sha256').update(old).digest('hex')
+  writeFileSync(record, JSON.stringify(text))
+  const later = JSON.parse(run(['--agent', 'antigravity', '--apply', '--json']).stdout)
+  assert.deepEqual(later.plans[0].changes.map(change => basename(change.file)).filter(name => name.startsWith('sidecar')), ['sidecar.mjs'])
+  assert.ok(later.sidecarNotice.includes(TERMS), JSON.stringify(later))
+  assert.ok(!run(['--agent', 'antigravity', '--apply']).stdout.includes(TERMS), 'a run that writes no sidecar file says nothing of it')
+}))
+
+test('the Automations description follows the setup language in all three languages', () => withHome(({ run, dir }) => {
+  const seen = new Set()
+  const words = { en: 'starts a new turn', 'zh-TW': '看板有訊息', 'zh-CN': '看板有消息' }
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const done = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { lang })
+    assert.equal(done.status, 0, done.stderr)
+    const description = JSON.parse(readFileSync(join(dir, 'sidecar.json'), 'utf8')).description
+    assert.ok(description.includes(words[lang]), `${lang}: ${description}`)
+    seen.add(description)
+  }
+  assert.equal(seen.size, 3, 'a different line in each language')
+}))
+
+// The connector's record says it hooked Antigravity, so setup leaves that agent's hooks to it.
+const connectorHome = home => {
+  const root = join(home, '.agent-board')
+  mkdirSync(root, { recursive: true })
+  mkdirSync(join(home, '.gemini', 'antigravity'), { recursive: true })
+  const progress = join(home, '.claude', 'progress.md')
+  const record = { version: 1, revision: 1, disabled: false, owned: {}, notified: [], connectedProgress: progress, setup: { agents: [{ agent: 'antigravity', label: 'Antigravity', hook: 'configured', board: 'none' }], problems: [], node: process.version } }
+  writeFileSync(join(root, 'legacy-connect.json'), JSON.stringify(record))
+  return { root, progress }
+}
+
+test('where the connector manages Antigravity, a yes writes the sidecar files without taking over its hooks, and remove takes them out', () => withHome(({ home, run, dir }) => {
+  const { root, progress } = connectorHome(home)
+  const asked = run(['--agent', 'antigravity'], { input: 'y\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.ok(existsSync(join(dir, 'sidecar.json')) && existsSync(join(dir, 'sidecar.mjs')), asked.stdout)
+  const config = JSON.parse(readFileSync(join(dir, 'sidecar.json'), 'utf8'))
+  assert.equal(config.args[config.args.indexOf('--progress-file') + 1], progress)
+  assert.ok(!existsSync(join(home, '.gemini', 'config', 'hooks.json')), 'the connector keeps its hooks')
+  assert.ok(!existsSync(join(root, 'install-antigravity.json')), 'no install record of the agent itself')
+  const preview = JSON.parse(run(['--agent', 'antigravity', '--json']).stdout)
+  assert.equal(preview.plans[0].managedBy, 'connector')
+  assert.deepEqual(preview.plans[0].changes, [])
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'])
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  assert.ok(!existsSync(join(dir, 'sidecar.json')) && !existsSync(join(dir, 'sidecar.mjs')), 'both files are gone')
+  assert.ok(!existsSync(join(root, 'install-antigravity-sidecar.json')))
+}))
+
+test('the flag writes the sidecar files for a connector-managed Antigravity and the structured output carries the terms line', () => withHome(({ home, run, dir }) => {
+  connectorHome(home)
+  const applied = JSON.parse(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply', '--json']).stdout)
+  assert.equal(applied.plans[0].managedBy, 'connector')
+  assert.ok(applied.sidecarNotice.includes(TERMS), JSON.stringify(applied))
+  assert.ok(existsSync(join(dir, 'sidecar.json')))
+  assert.ok(!existsSync(join(home, '.gemini', 'config', 'hooks.json')))
 }))

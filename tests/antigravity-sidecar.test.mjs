@@ -152,7 +152,7 @@ test('the folder it looks in is the one the board and its hooks use', async () =
 test('the board token never appears in sidecar.json, in the arguments to agentapi, or in anything the sidecar prints', async () => {
   const f = await fixture({ answer: wakeAnswer([{ id: 'w1', conversation: UUID, nonce: 'n1' }, { id: 'w2', conversation: 'bad', nonce: 'n2' }]) })
   try {
-    const config = antigravitySidecarConfig(process.execPath, join(f.dir, 'progress.md'), f.dir)
+    const config = antigravitySidecarConfig(process.execPath, join(f.dir, 'progress.md'), f.dir, 'desc')
     const result = await f.run([], { FAKE_EXIT: '2' })
     assert.ok(f.requests.length > 0 && f.requests.every(one => one.token === TOKEN))
     for (const [name, text] of [['sidecar.json', config], ['agentapi arguments', JSON.stringify(f.calls())], ['output', result.output], ['sidecar source', antigravitySidecarSource()]]) {
@@ -163,7 +163,7 @@ test('the board token never appears in sidecar.json, in the arguments to agentap
 })
 
 test('sidecar.json only names the files setup wrote: node, sidecar.mjs, the progress file and home, restart always, never enabled', () => {
-  const config = JSON.parse(antigravitySidecarConfig('/node', '/p/progress.md', '/home/a'))
+  const config = JSON.parse(antigravitySidecarConfig('/node', '/p/progress.md', '/home/a', 'desc'))
   assert.deepEqual(config.args, ['sidecar.mjs', '--progress-file', '/p/progress.md', '--home', '/home/a'])
   assert.equal(config.command, '/node')
   assert.equal(config.restart_policy, 'always')
@@ -174,4 +174,51 @@ test('the poll interval is 2 s while a board answers and 30 s otherwise', () => 
   const source = antigravitySidecarSource()
   assert.match(source, /const FAST_MS = 2000\n/)
   assert.match(source, /const SLOW_MS = 30000\n/)
+})
+
+test('a poll that returns six wakes sends and reports all six, in order', async () => {
+  const ids = ['w1', 'w2', 'w3', 'w4', 'w5', 'w6']
+  const f = await fixture({ answer: wakeAnswer(ids.map(id => ({ id, conversation: UUID, nonce: 'n-' + id }))) })
+  try {
+    const result = await f.run()
+    assert.equal(result.code, 0, result.output)
+    assert.equal(f.calls().length, 6)
+    assert.deepEqual(f.requests.filter(one => one.action === 'wake-report').map(one => one.body.id), ids)
+  } finally { f.close() }
+})
+
+test('a wake id of 128 characters is handled like a message id, and one of 129 is printed as unreportable and runs nothing', async () => {
+  const long = 'a' + 'b'.repeat(127)
+  const f = await fixture({ answer: wakeAnswer([{ id: long, conversation: UUID, nonce: 'n1' }, { id: long + 'c', conversation: UUID, nonce: 'n2' }]) })
+  try {
+    const result = await f.run()
+    assert.equal(result.code, 0, result.output)
+    assert.equal(f.calls().length, 1)
+    assert.deepEqual(f.requests.filter(one => one.action === 'wake-report').map(one => one.body), [{ id: long, nonce: 'n1', status: 'sent' }])
+    assert.ok(result.output.includes('INVALID_WAKE'), result.output)
+  } finally { f.close() }
+})
+
+test('a wake-report that gets no answer is sent again with the same body, and agentapi runs once', async () => {
+  let reports = 0
+  const f = await fixture({ answer: action => action === 'wake-poll' ? [200, { wakes: [{ id: 'w1', conversation: UUID, nonce: 'n1' }] }] : ++reports < 3 ? [500, { error: 'BUSY' }] : [200, { ok: true }] })
+  try {
+    const result = await f.run(['--report-retry-ms', '10'])
+    assert.equal(result.code, 0, result.output)
+    const sent = { id: 'w1', nonce: 'n1', status: 'sent' }
+    assert.deepEqual(f.requests.filter(one => one.action === 'wake-report').map(one => one.body), [sent, sent, sent])
+    assert.equal(f.calls().length, 1)
+    assert.ok(!result.output.includes('report lost'), result.output)
+  } finally { f.close() }
+})
+
+test('a wake-report that never gets an answer is tried three times in all, then printed as lost and not tried again', async () => {
+  const f = await fixture({ answer: action => action === 'wake-poll' ? [200, { wakes: [{ id: 'w1', conversation: UUID, nonce: 'n1' }] }] : [500, { error: 'BUSY' }] })
+  try {
+    const result = await f.run(['--report-retry-ms', '10'])
+    assert.equal(result.code, 0, result.output)
+    assert.equal(f.requests.filter(one => one.action === 'wake-report').length, 3)
+    assert.equal(f.calls().length, 1)
+    assert.ok(result.output.includes('wake sent (report lost)'), result.output)
+  } finally { f.close() }
 })

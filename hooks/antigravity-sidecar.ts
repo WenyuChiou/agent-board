@@ -10,6 +10,10 @@
 // error, which the sidecar reads as "no wakes"):
 //   POST /api/messages/wake-poll   {agent:'antigravity'}  ->  {wakes:[{id, conversation, nonce}]}
 //   POST /api/messages/wake-report {id, nonce, status:'sent'|'failed', error?}  ->  {ok:true}
+// A wake `id` and `nonce` match a message id ([A-Za-z0-9][A-Za-z0-9_-]{0,127}). The sidecar handles every
+// wake a poll returns, in order, and never runs a wake twice. A report that gets no answer is sent again
+// (the same body, up to three times in all), so the board treats a repeated report of one wake as the same
+// report; a report still unanswered after that is only logged, and that wake stays uncertain on the board.
 // It reaches the board the way the hooks do: the messages folder's server.lock and server.owner. Every
 // poll is also the board's sign that the sidecar is alive. It reads no Antigravity port or token.
 
@@ -21,11 +25,12 @@ export const ANTIGRAVITY_SEND_TIMEOUT_MS = 60000
 // What setup prints whenever it writes the sidecar files, and the one line its question carries.
 export const ANTIGRAVITY_TERMS_LINE = "Google's terms may not cover running this sidecar."
 
-export const antigravitySidecarConfig = (node: string, progress: string, home: string): string => `${JSON.stringify({
+// `description` is the Automations page's line for this sidecar, in the words the board was set up in (the strings tables).
+export const antigravitySidecarConfig = (node: string, progress: string, home: string, description: string): string => `${JSON.stringify({
   command: node,
   args: ['sidecar.mjs', '--progress-file', progress, '--home', home],
   restart_policy: 'always',
-  description: 'Agent Board: wakes an idle Antigravity conversation when the board has a message for it. Switched on only by you, in Automations.',
+  description,
 }, null, 2)}\n`
 
 // Plain ESM for node. It holds no backtick and no dollar-brace, so it can sit in a String.raw template.
@@ -44,6 +49,7 @@ const SLOW_MS = ${ANTIGRAVITY_POLL_MS.slow}
 const args = process.argv.slice(2)
 const arg = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1] }
 const sendLimit = Number(arg('--send-timeout-ms') ?? ${ANTIGRAVITY_SEND_TIMEOUT_MS})
+const reportRetryMs = Number(arg('--report-retry-ms') ?? 1000)
 const home = arg('--home') ?? homedir()
 const progress = arg('--progress-file')
 
@@ -88,7 +94,16 @@ const post = (board, action, body) => new Promise((done, fail) => {
 })
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const isToken = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value)
+const isToken = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
+const stamp = () => new Date().toISOString()
+// Reports are safe to repeat: the same id, nonce and status. Three tries, then the wake stays uncertain on the board.
+const report = async (board, body) => {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try { await post(board, 'wake-report', body); return true } catch {}
+    if (attempt < 3) await new Promise(done => setTimeout(done, reportRetryMs * attempt))
+  }
+  return false
+}
 // One argument list, no shell, no output kept: Antigravity's own executable sends the one fixed line.
 const send = (exe, conversation) => new Promise(done => {
   let isDone = false, timer
@@ -108,11 +123,12 @@ const cycle = async () => {
   if (!board) return false
   let result
   try { result = await post(board, 'wake-poll', { agent: 'antigravity' }) } catch { return false }
-  for (const wake of (Array.isArray(result?.wakes) ? result.wakes : []).slice(0, 5)) {
-    if (!isToken(wake?.id) || !isToken(wake?.nonce)) continue
+  for (const wake of Array.isArray(result?.wakes) ? result.wakes : []) {
+    // Nothing to report back to without a usable id and nonce, so this one is logged, never dropped silently.
+    if (!isToken(wake?.id) || !isToken(wake?.nonce)) { console.log(stamp() + ' wake INVALID_WAKE (cannot be reported)'); continue }
     const outcome = typeof wake.conversation === 'string' && UUID.test(wake.conversation) ? await send(exe, wake.conversation) : 'INVALID_CONVERSATION'
-    try { await post(board, 'wake-report', { id: wake.id, nonce: wake.nonce, status: outcome === 'sent' ? 'sent' : 'failed', ...(outcome === 'sent' ? {} : { error: outcome }) }) } catch {}
-    console.log(new Date().toISOString() + ' wake ' + outcome)
+    const isReported = await report(board, { id: wake.id, nonce: wake.nonce, status: outcome === 'sent' ? 'sent' : 'failed', ...(outcome === 'sent' ? {} : { error: outcome }) })
+    console.log(stamp() + ' wake ' + outcome + (isReported ? '' : ' (report lost)'))
   }
   return true
 }
