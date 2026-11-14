@@ -37,6 +37,7 @@ import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
 import { currentPart } from '../hooks/retention'
 import { lastQuestion } from '../hooks/digest'
+import { ANTIGRAVITY_TRANSCRIPTS, resolveAntigravityTitle } from './antigravity-meta'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -81,9 +82,8 @@ const hash = (text: string): string => createHash('sha256').update(text).digest(
 
 // Antigravity hooks name their own transcript but do not carry the reply text.
 // agy 1.5.2 names transcript_full.jsonl, which has the same line shape as transcript.jsonl.
-const antigravityTranscripts = new Set(['transcript.jsonl', 'transcript_full.jsonl'])
 const antigravityQuestion = (path: unknown): string | null => {
-  if (typeof path !== 'string' || !isAbsolute(path) || !antigravityTranscripts.has(basename(path))) return null
+  if (typeof path !== 'string' || !isAbsolute(path) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(path))) return null
   try {
     if (!lstatSync(path).isFile()) return null
     const fd = openSync(path, 'r')
@@ -127,6 +127,18 @@ const pad3 = (value: number): string => String(value).padStart(3, '0')
 const distinctStarted = (at: number): string => {
   const date = new Date(at)
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}.${pad3(date.getMilliseconds())}`
+}
+
+// Recover the original millisecond start time encoded in a pre-#1401 generic local task title
+// ("Local antigravity task · YYYY-MM-DD HH:MM:SS.mmm") so upgrading never resets Started times.
+const legacyStartedAt = (title: string, agent: LocalAgent): number | undefined => {
+  const prefix = Object.values(STRINGS).map(one => `${one.localAgentTask(agent)} · `).find(text => title.startsWith(text))
+  if (prefix === undefined) return undefined
+  const stamp = title.slice(prefix.length)
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\.(\d{3})$/.exec(stamp)
+  if (match === null) return undefined
+  const at = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]), Number(match[7])).getTime()
+  return Number.isFinite(at) && distinctStarted(at) === stamp ? at : undefined
 }
 const readBytes = (file: string): Buffer | null => {
   try { return readFileSync(file) } catch (error) {
@@ -684,6 +696,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         : mode === '--codex-event' && agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' ? lastQuestion(String(raw.text ?? ''))
           : mode === '--agent-status' && status === 'waiting' && (agent === 'grok' || agent === 'opencode' || agent === 'hermes') ? lastQuestion(message)
             : mode === '--agent-status' && status === 'waiting' && agent === 'antigravity' && (event === undefined || event === 'Stop') ? antigravityQuestion(raw.transcriptPath) : null
+      const antigravityTitle = mode === '--agent-status' && agent === 'antigravity'
+        ? resolveAntigravityTitle(session, raw.transcriptPath, raw.artifactDirectoryPath, home)
+        : null
       return {
         version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, ...(isDelivery ? { isDelivery } : {}), isPrompt,
         ...(filesByFolder(mode, agent) ? { folder } : {}),
@@ -694,7 +709,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
           ...(hasResponse ? { has_response: true } : {}),
           ...(question === null ? {} : { question }),
-        } : { ...(question === null ? {} : { question }) },
+        } : {
+          ...(antigravityTitle === null ? {} : antigravityTitle),
+          ...(question === null ? {} : { question }),
+        },
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
@@ -783,10 +801,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const text = bytes.toString('utf8')
       const previous = original === null || mode === '--codex-report' || isRun ? original : boardConfirmedReport(text, original, owner)
       const clock = previous === null ? now : new Date(Math.max(displayAt, Date.parse(previous.updated))).toISOString()
-      // A mirrored plan keeps the block's own title, unless it is still the generic one a lifecycle event wrote.
+      const isGenericTitle = (title: string): boolean => Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(title) || title.startsWith(`${one.localAgentTask(agent)} · `))
+      // A mirrored plan keeps the block's own title, unless it is still the generic or fallback one a lifecycle event wrote.
       const given = typeof payload.planTitle !== 'string' ? payload : {
         state: payload.state, steps: payload.steps,
-        title: previous !== null && !Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(previous.title)) ? previous.title : payload.planTitle,
+        title: previous !== null && !isGenericTitle(previous.title) && previous.titleSource !== 'fallback' ? previous.title : payload.planTitle,
         ...(typeof payload.planProject === 'string' ? { project: previous?.project ?? payload.planProject } : {}),
       }
       // A reply that ends on a question waits for the person, even after the agent reported its own steps done.
@@ -814,21 +833,40 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         }, session) : codexReport(previous, session, given, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)
-      // An Antigravity session keeps no folder (its hook binds only the conversation
-      // id), so a new one would otherwise read as every other unreported Antigravity
-      // session. A session that still carries only the generic title is re-titled
-      // the same way on its next lifecycle event (#814). The distinct part is the
-      // session's start time in local time, to the millisecond: second precision
-      // would let two sessions started in the same second share a title, and a
-      // hash prefix is not shown on a default view. The title is set once and kept
-      // by later events (stillGeneric only matches the generic title), and an
-      // explicit report title still wins; no new data is retained, and the
-      // translated fallback needs no new string.
-      const stillGeneric = previous !== null && Object.values(STRINGS).some(one => one.localAgentTask(agent) === previous.title)
-      const distinctAntigravity = mode === '--agent-status' && agent === 'antigravity' && (previous === null || stillGeneric)
-      const initial = (filesByFolder(mode, agent) && !previous) || distinctAntigravity ? validateCodexReport({
-        ...base, title: sessionTitle(name, s.localAgentTask(agent), distinctAntigravity ? distinctStarted(sourceAt) : ''), project: previous?.project ?? (name || agent),
-      }, session) : base
+      // Antigravity hooks carry no folder or title (#814, #1401): name each row by the client's
+      // conversation summary title, else the clipped first line of its first prompt, else the
+      // fallback name, and keep its millisecond start time as secondary context text.
+      const antigravityState = (() => {
+        if (mode !== '--agent-status' || agent !== 'antigravity') return null
+        const startedAt = previous === null
+          ? sourceAt
+          : previous.startedAt ?? legacyStartedAt(previous.title, agent) ?? (Number.isFinite(Date.parse(previous.updated)) ? Date.parse(previous.updated) : undefined) ?? sourceAt
+        const isGeneric = previous !== null && isGenericTitle(previous.title)
+        const isExplicit = previous !== null && !isGeneric && previous.titleSource !== 'fallback' && previous.titleSource !== 'prompt' && previous.titleSource !== 'summary'
+        const context = isExplicit && previous.context ? previous.context : s.localAgentStarted(distinctStarted(startedAt))
+        const incoming = typeof payload.title === 'string' && (payload.titleSource === 'summary' || payload.titleSource === 'prompt') ? { title: payload.title, source: payload.titleSource } : null
+        const picked: { title: string; titleSource: CodexReport['titleSource'] } = isExplicit
+          ? { title: previous.title, titleSource: previous.titleSource }
+          : incoming?.source === 'summary'
+            ? { title: incoming.title, titleSource: 'summary' }
+            : previous?.titleSource === 'summary' && !isGeneric
+              ? { title: previous.title, titleSource: 'summary' }
+              : incoming?.source === 'prompt'
+                ? { title: incoming.title, titleSource: 'prompt' }
+                : previous?.titleSource === 'prompt' && !isGeneric
+                  ? { title: previous.title, titleSource: 'prompt' }
+                  : { title: sessionTitle(name, s.localAgentTask(agent)), titleSource: 'fallback' }
+        return { ...picked, startedAt, context }
+      })()
+      const initial = antigravityState !== null ? validateCodexReport({
+        ...base, ...antigravityState, project: previous?.project ?? (name || agent),
+      }, session) : filesByFolder(mode, agent) && !previous ? validateCodexReport({
+        ...base, title: sessionTitle(name, s.localAgentTask(agent)), project: previous?.project ?? (name || agent),
+      }, session) : mode === '--codex-report' ? {
+        ...base, titleSource: typeof payload.planTitle === 'string'
+          ? (previous !== null && !isGenericTitle(previous.title) && previous.titleSource !== 'fallback' && previous.titleSource !== undefined ? previous.titleSource : 'plan' as const)
+          : 'report' as const,
+      } : base
       const priorActivity = previous?.activity ?? []
       // Only a weak hint needs a parent; a strong run keeps its record without a block.
       const parent = origin.origin !== 'run' ? undefined : isRun ? origin.parent : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner, owner.slice(0, 8), session]) ?? undefined
@@ -897,15 +935,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A replay can skip writes only after a board completion reached the cache too.
       // A new hook event is not a replay even when the block reads the same: its record keeps the event.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }
       // Encode only the new report; existing bytes, including partial UTF-8, pass through unchanged.
       const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
-        ...report, title: encoded(report.title), project: encoded(report.project), steps: report.steps.map(encoded),
-      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project), 'latin1')
+        ...report, title: encoded(report.title), project: encoded(report.project), ...(report.context === undefined ? {} : { context: encoded(report.context) }), steps: report.steps.map(encoded),
+      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project, report.context === undefined ? undefined : encoded(s.contextNote(report.context))), 'latin1')
       saveFullText()
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
       try { atomic(progress, next, checkDeadline) } catch (error) {

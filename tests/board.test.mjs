@@ -3986,6 +3986,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     restore: persisted => windowEvents.pageshow?.({ persisted }),
     sent,
     setNow: value => { clockNow = value },
+    pointer: (name, event) => document.events[name]?.(event),
     hideTab: () => { document.hidden = true; document.events.visibilitychange?.() },
     showTab: () => { document.hidden = false; document.events.visibilitychange?.() },
     flush,
@@ -14285,4 +14286,35 @@ test('busy or connected card shows one honest message status after Send instead 
     assert.equal(countMatches(codexReceiptWords, s.serveLineStepEnd(codexName)), 1, `busy codex queued receipt (${codexReceiptWords})`)
     assert.equal(codexReceiptWords.includes(s.pgSentTo(codexName, 'Ship it')), false)
   }
+})
+
+test('a finished message seen only under a held press still frees its id, so the same words sent again are a new message (#1468)', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const base = redesignModel()
+  const ask = { ...base.asks[0], key: 'ask-held', agent: 'claude', send: 'connected', line: 'now', delivery: { id: 'c-held', turn: 't1', agent: 'claude' }, canHide: true, isSending: false, answers: ['Proceed'] }
+  const ids = []
+  let current = { ...base, asks: [ask] }
+  const dom = await pageDom(html, current, {
+    currentModel: () => current,
+    post: async request => {
+      if (request.path === '/api/act' && request.body.type === 'message') ids.push(request.body.id)
+      return { ok: true, json: async () => ({ ok: true }) }
+    },
+  })
+  const card = () => pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === ask.key)
+  selectAnswer(card(), 'Proceed').click()
+  await dom.settle()
+  // The reply comes back and a newer receipt follows it, all while a press is held: nothing is drawn.
+  dom.pointer('pointerdown', { pointerId: 1 })
+  current = { ...base, asks: [{ ...ask, receipt: { id: ids[0], status: 'acknowledged', text: 'Proceed' } }] }
+  await dom.redraw(current)
+  // The press ends with no release seen (a move with no button), then the board draws the ask again.
+  dom.pointer('pointermove', { pointerId: 1, buttons: 0 })
+  current = { ...base, asks: [{ ...ask, line: 'stepEnd' }] }
+  await dom.redraw(current)
+  selectAnswer(card(), 'Proceed').click()
+  await dom.settle()
+  assert.equal(ids.length, 2)
+  assert.notEqual(ids[1], ids[0])
 })

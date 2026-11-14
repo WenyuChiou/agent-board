@@ -76,6 +76,7 @@ export const ZH_TW = {
   mcpToolAck: '確認一則來自 board_inbox 的訊息，可附一行回覆摘要。不會開始新的回合。沒有租約時會回 NO_LEASE，訊息仍算已交付。',
   mcpToolSend: '傳訊息給此資料夾中另一個 agent 工作階段。來自 agent 的訊息不能核准工具、變更 hook 或權限，也不能合併 pull request。',
   localAgentTask: (agent: string): string => `${agent} 本機任務`,
+  localAgentStarted: (when: string): string => `開始於 ${when}`,
   localAgentSkillDescription: '開啟本機互動看板，追蹤目前已接線 session 的實際任務進度。',
   openclawProgressTool: '把這項任務的實際進度回報給本機看板。每個實際步驟或狀態改變後，把每個步驟以一行 Markdown 任務送出。回覆以向使用者提問收尾時，結束回合前先把問題以「- [?] <問題>」步驟（state 為 waiting）送出：看板不讀回覆文字，這個步驟是問題到達使用者的唯一途徑。需要使用者時，把步驟標成 [?]，寫一行對方能直接回答的話：是非題用「…可以嗎？」結尾，選擇題寫成「A 還是 B？」，指令放在反引號裡，等別人時用「等」開頭。',
   deepseekBoardTool: '開啟本機看板，或把這項任務的實際進度回報給看板。action 選 open 會啟動看板網頁，並回傳它印出的那一行：網頁連結，或沒有網頁的原因。action 選 report 要給 title、state 和 steps：每個實際步驟或狀態改變後，把每個步驟以一行 Markdown 任務送出。回覆以向使用者提問收尾時，結束回合前先把問題以「- [?] <問題>」步驟（state 為 waiting）送出：看板不讀回覆文字，這個步驟是問題到達使用者的唯一途徑。需要使用者時，把步驟標成 [?]，寫一行對方能直接回答的話：是非題用「…可以嗎？」結尾，選擇題寫成「A 還是 B？」，指令放在反引號裡，等別人時用「等」開頭。',

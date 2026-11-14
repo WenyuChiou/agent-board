@@ -21,6 +21,9 @@ export type CodexReport = Origin & {
   state: 'working' | 'waiting' | 'done' | 'ended'
   title: string
   project: string
+  context?: string
+  startedAt?: number
+  titleSource?: 'report' | 'plan' | 'summary' | 'prompt' | 'fallback'
   steps: string[]
   // The index of the step a PermissionRequest added (#1048): while it waits, the block carries a native line after it.
   // The hook closes and reuses the line so the question ledger can see the change.
@@ -236,6 +239,10 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
     session, turn: turn ?? previous?.turn ?? null, state,
     title: previous?.title ?? s.codexTask,
     project: previous?.project ?? s.codexProject,
+    ...(previous?.context === undefined ? {} : { context: previous.context }),
+    ...(previous?.startedAt === undefined ? {} : { startedAt: previous.startedAt }),
+    ...(previous?.titleSource === undefined ? {} : { titleSource: previous.titleSource }),
+    ...(previous?.activity === undefined ? {} : { activity: previous.activity }),
     // The hook never reads the prompt, so reported steps remain unchanged here (#243).
     steps,
     ...(approval === undefined ? {} : { approval }),
@@ -283,7 +290,13 @@ export const validateCodexReport = (report: CodexReport, session: string): Codex
   const owned = new Set([report.approval, report.asked].filter((index): index is number =>
     index !== undefined && Number.isInteger(index) && index >= 0 && Array.isArray(report.steps) && index < report.steps.length))
   if (Array.isArray(report.steps) && report.steps.length > 40 + owned.size) throw new Error('INVALID_STEPS')
-  return { ...report, session: line(session), title: line(report.title), project: line(report.project),
+  const context = typeof report.context === 'string' && report.context.trim() !== '' ? line(report.context) : undefined
+  const startedAt = typeof report.startedAt === 'number' && Number.isFinite(report.startedAt) ? report.startedAt : undefined
+  const { context: _context, startedAt: _startedAt, titleSource: _titleSource, ...rest } = report
+  return { ...rest, session: line(session), title: line(report.title), project: line(report.project),
+    ...(context === undefined ? {} : { context }),
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(report.titleSource === undefined ? {} : { titleSource: report.titleSource }),
     steps: reportSteps(report.state, report.steps, 40 + owned.size) }
 }
 
@@ -300,10 +313,13 @@ export const codexReport = (previous: CodexReport | null, session: string, input
     if (kind === 'approval') approval = carried
     else asked = carried
   }
+  const context = typeof input.context === 'string' && input.context.trim() !== '' ? line(input.context) : previous?.context
   return {
     session: line(session), turn: previous?.turn ?? null,
     state: input.state as CodexReport['state'],
     title: line(input.title), project: input.project === undefined ? previous?.project ?? s.codexProject : line(input.project),
+    ...(context === undefined ? {} : { context }),
+    ...(previous?.startedAt === undefined ? {} : { startedAt: previous.startedAt }),
     steps, updated: now,
     ...(approval === undefined ? {} : { approval }),
     ...(asked === undefined ? {} : { asked }),
@@ -319,6 +335,7 @@ export const codexReport = (previous: CodexReport | null, session: string, input
 export const limitReport = <T extends CodexReport>(report: T): { report: T; entries: Omit<JournalEntry, 'at'>[]; cut: number } => {
   const short = (text: string): string => cutLine(text).text
   const title = short(report.title)
+  const context = report.context === undefined ? undefined : short(report.context)
   const steps = report.steps.map(step => `${step.slice(0, 6)}${short(step.slice(6))}`)
   // Only a field that was shortened is journaled: the title once, and each cut step with
   // its task. Journaling every step of a cut title would flood the journal on each resend.
@@ -327,7 +344,7 @@ export const limitReport = <T extends CodexReport>(report: T): { report: T; entr
     ...report.steps.flatMap((step, index) => steps[index] !== step ? [{ project: report.project, task: report.title, step: step.slice(6) }] : []),
   ]
   return {
-    report: { ...report, title, steps }, entries,
+    report: { ...report, title, ...(context === undefined ? {} : { context }), steps }, entries,
     cut: Number(title !== report.title) + steps.filter((step, index) => step !== report.steps[index]).length,
   }
 }
@@ -378,14 +395,18 @@ export const boardConfirmedReport = (text: string, previous: CodexReport, owner:
   const at = Date.parse(attrs.updated ?? '')
   if (!Number.isFinite(at) || at < Date.parse(previous.updated)) return previous
   const steps = previous.steps.map(step => step.replace(/^(- \[)[ ~?>!](\] .*)$/, '$1x$2'))
-  const expected = [`### ${previous.title}`, ...stepLines({ ...previous, steps }, owner, false, previous.approval !== undefined && previous.steps[previous.approval]?.startsWith('- [?]') ? previous.approval : -1)].join('\n')
-  if (lines.slice(span.start + 1, span.end).join('\n') !== expected) return previous
+  const actual = lines.slice(span.start + 1, span.end)
+  const bodyStart = previous.context !== undefined ? 2 : 1
+  const hasMatchingContext = previous.context === undefined || actual.length >= 2 && Object.values(STRINGS).some(one => one.contextNote(previous.context!) === actual[1])
+  if (!hasMatchingContext || actual[0] !== `### ${previous.title}`) return previous
+  const expectedSteps = stepLines({ ...previous, steps }, owner, false, previous.approval !== undefined && previous.steps[previous.approval]?.startsWith('- [?]') ? previous.approval : -1)
+  if (actual.slice(bodyStart).join('\n') !== expectedSteps.join('\n')) return previous
   if (previous.state === 'done' && at === Date.parse(previous.updated) && JSON.stringify(steps) === JSON.stringify(previous.steps)) return previous
   return { ...previous, state: 'done', steps, updated: new Date(at).toISOString() }
 }
 
 // The full digest prevents an eight-character collision or a pasted block from acquiring ownership.
-export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false): string => {
+export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false, contextLine?: string): string => {
   if (!/^[a-f0-9]{64}$/.test(owner)) throw new Error('INVALID_OWNER')
   const id = owner.slice(0, 8)
   const agent = report.agent ?? 'codex'
@@ -396,7 +417,8 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const replied = report.replied ? ` replied=${report.replied}` : ''
   const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${replied}${resume}${run} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
-  const block = [marker, `### ${report.title}`, ...stepLines(report, owner, true), `<!-- /auto session=${id} -->`].join(eol)
+  const note = contextLine ?? (report.context === undefined ? undefined : STRINGS['zh-TW'].contextNote(report.context))
+  const block = [marker, `### ${report.title}`, ...(note === undefined ? [] : [note]), ...stepLines(report, owner, true), `<!-- /auto session=${id} -->`].join(eol)
   // Use the board's scanner: Markdown examples are not task ownership, and a
   // missing close must never reach past the next project or another agent's block.
   // Keep raw CR bytes in these lines so offsets preserve even mixed line endings.
