@@ -273,7 +273,9 @@ To add a task of your own, write a `### title` with `- [ ] step` lines in `progr
 
 Select one target or a comma-separated list, such as `--agent opencode,openclaw,grok,deepseek`.
 They share the selected progress file. Each target's preview still lists its own persistent
-changes; no receiving connection or model call is added by setup.
+changes. The OpenCode and DeepSeek Harness plugins also receive a message the board queued for
+their session ([MESSAGING.md](MESSAGING.md)); for OpenClaw and Grok Build setup adds no receiving connection,
+and it adds no model call for any target.
 
 | Target | Native configuration | Override |
 | --- | --- | --- |

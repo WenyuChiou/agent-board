@@ -627,6 +627,8 @@ test('the time check passes the Windows times that failed pull requests after #1
   }
   // #1339 added lock tests, several of which wait out the 2 s bounded wait: settings-symlink's Windows Node 24 time since (run 43190652904).
   slowest['tests/settings-symlink.test.mjs'] = 43_400
+  // #1366's new receiver tests, first timed on Windows Node 24 in run 43467343580.
+  slowest['tests/opencode-receiver.test.mjs'] = 92_700
   for (const [path, ms] of Object.entries(slowest)) assert.ok(budgetOf(path) * 7 / 10 >= ms * 13 / 10, path + ': ' + budgetOf(path))
 })
 

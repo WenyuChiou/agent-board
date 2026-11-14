@@ -78,21 +78,21 @@ const flag = (name: string): string | undefined => {
   return at === -1 ? undefined : args[at + 1]
 }
 const BOOL_FLAGS = new Set([
-  '--all', '--allow-resume', '--agent-status', '--apply', '--chat', '--codex-doctor',
+  '--all', '--allow-resume', '--agent-status', '--apply', '--awaits-ack', '--chat', '--codex-doctor',
   '--codex-event', '--codex-remove', '--codex-report', '--codex-setup', '--codex-trust',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
-  '--stop', '--stopped', '--tidy', '--version', '-v', '--watch',
+  '--stop', '--stopped', '--tidy', '--unsent', '--version', '-v', '--watch',
 ])
 const VALUE_FLAGS = new Set([
-  '--agent', '--codex-bin', '--codex-dir', '--data-dir', '--deepseek-dir', '--event',
+  '--agent', '--codex-bin', '--codex-dir', '--cwd', '--data-dir', '--deepseek-dir', '--event',
   '--grok-dir', '--hermes-dir', '--home', '--hook-deadline', '--hook-event', '--hook-started',
   '--id', '--idle-minutes', '--keys', '--lang', '--legacy-connect-request', '--mailbox',
   '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
   '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
-  '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--removing',
-  '--session', '--stale-ms', '--state', '--surface', '--theme',
+  '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--ref', '--removing',
+  '--session', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
 ])
 const unknownFlag = (argv: readonly string[]): string | undefined => {
   for (let i = 0; i < argv.length; i += 1) {

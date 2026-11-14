@@ -935,7 +935,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
+  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesSentUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1829,8 +1829,11 @@ const PAGE_SCRIPT = String.raw`
     var isFailTone = isFailed || receipt.status === 'uncertain' && receipt.hasAccepted !== true;
     var toneClass = isFailTone ? ' t-alert' : receipt.status === 'queued' ? ' t-wait' : ' t-done';
     var isAcceptedUnconfirmed = receipt.status === 'uncertain' && receipt.hasAccepted === true;
+    // A wake the board saw start and nothing confirmed after 30 minutes (OpenCode): it is not sent again, and its words stay to copy.
+    var isSentUnconfirmed = receipt.status === 'uncertain' && receipt.error === 'UNCONFIRMED';
     var labelText = isSurfaceLost
       ? w('messagesSurfaceLost')
+      : isSentUnconfirmed ? w('messagesSentUnconfirmed')
       : isFailed && receipt.status === 'uncertain'
       ? w('messagesTimeout')
       : isAcceptedUnconfirmed ? w('messagesAcceptedUnconfirmed')
@@ -1856,6 +1859,9 @@ const PAGE_SCRIPT = String.raw`
     if (isSurfaceLost) {
       var acts = add(el('div', 'acts'), words ? button(w('serveCopyMessage'), function () { copy(words, key); }, '', true) : null, dismissButton(w('messageTakeBack'), receipt, key));
       return add(el('div', 'receipt-box'), lineEl, acts);
+    }
+    if (isSentUnconfirmed) {
+      return words ? add(el('div', 'receipt-box'), lineEl, add(el('div', 'acts'), button(w('serveCopyMessage'), function () { copy(words, key); }, '', true))) : lineEl;
     }
     if (!isFailed || !last) return lineEl;
     return add(el('div', 'receipt-box'), lineEl, add(el('div', 'acts'), button(w('serveRetry'), function () { last.again(); }), button(w('serveCopyMessage'), function () { copy(last.text, key); }, '', true)));

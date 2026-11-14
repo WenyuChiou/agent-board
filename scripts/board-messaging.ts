@@ -2,7 +2,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
-import { acceptMailboxMessage, endMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
+import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
 import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
@@ -24,6 +24,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
   for (const one of messages) {
     messageId(one.id)
     if (one.framingNonce !== undefined && (typeof one.framingNonce !== 'string' || !/^[0-9a-f]{32}$/.test(one.framingNonce)) || one.awaitsAck !== undefined && typeof one.awaitsAck !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
+    if (one.attempted !== undefined && !(Number.isFinite(one.attempted) && one.attempted > 0)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
@@ -65,7 +66,7 @@ const peerSender = (from: unknown): string => {
   } catch { throw new Error('INVALID_SENDER') }
 }
 
-const mailboxAction = (state: MessageState, action: string, body: Record<string, unknown>, now: number) => {
+export const mailboxAction = (state: MessageState, action: string, body: Record<string, unknown>, now: number) => {
   const agent = messageId(body.agent), session = messageId(body.session)
   if (action === 'mcp-enroll') {
     messageFields(body, ['agent', 'session', 'surface', 'owner', 'folderDigest', 'until'])
@@ -82,9 +83,27 @@ const mailboxAction = (state: MessageState, action: string, body: Record<string,
     return { state: next.state, result: { message: next.message } }
   }
   if (action === 'mailbox-release') {
+    messageFields(body, ['agent', 'session', 'ref', 'unsent'])
+    if (!isClaimRef(body.ref)) throw new Error('INVALID_REF')
+    if (body.unsent !== undefined && body.unsent !== true) throw new Error('INVALID_REF')
+    const next = releaseMailboxMessage(state, agent, session, body.ref, now, body.unsent === true)
+    // OpenCode's plugin must be told when a release changed nothing: a started wake (WAKE_STARTED) or a claim the
+    // board no longer holds (NOT_HELD). The other hooks have always been answered ok, and still are.
+    if (agent === 'opencode' && next === state) throw new Error(state.messages.some(one => one.target === mailboxId(agent, session) && one.ref === body.ref && one.attempted !== undefined && one.status === 'uncertain' && one.error === '') ? 'WAKE_STARTED' : 'NOT_HELD')
+    return { state: next, result: { ok: true } }
+  }
+  if (action === 'mailbox-attempt') {
     messageFields(body, ['agent', 'session', 'ref'])
     if (!isClaimRef(body.ref)) throw new Error('INVALID_REF')
-    return { state: releaseMailboxMessage(state, agent, session, body.ref, now), result: { ok: true } }
+    if (agent !== 'opencode') throw new Error('INVALID_MAILBOX_CALL')
+    return { state: attemptMailboxMessage(state, agent, session, body.ref, now), result: { ok: true } }
+  }
+  // OpenCode's plugin takes only while a session is idle, so a busy session opens or renews its mailbox with this, which
+  // claims nothing (#1366): the board can then queue a message for it, and a turn longer than the mailbox's life keeps it.
+  if (action === 'mailbox-open') {
+    messageFields(body, ['agent', 'session', 'surface'])
+    if (agent !== 'opencode') throw new Error('INVALID_MAILBOX_CALL')
+    return { state: enrollMailbox(state, agent, session, messageText(body.surface, 100), now, STALE_MS), result: { ok: true } }
   }
   messageFields(body, action === 'mailbox-end' ? ['agent', 'session'] : action === 'mailbox-ack' ? ['agent', 'session', 'id', 'nonce', 'reply'] : ['agent', 'session', 'id', 'nonce', 'awaitsAck'])
   const target = state.mailboxes?.find(one => one.id === mailboxId(agent, session))
@@ -419,7 +438,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         save(dismissMessage(state, messageId(body.id), now), now)
         return { ok: true }
       }
-      if (['mailbox-turn', 'mailbox-release', 'mailbox-accept', 'mailbox-end', 'mailbox-ack', 'mcp-enroll'].includes(action)) {
+      if (['mailbox-turn', 'mailbox-release', 'mailbox-attempt', 'mailbox-open', 'mailbox-accept', 'mailbox-end', 'mailbox-ack', 'mcp-enroll'].includes(action)) {
         const next = mailboxAction(state, action, body, now)
         save(next.state, now)
         return next.result
@@ -460,7 +479,7 @@ export const createMessaging = (directory: string, isDefault = false, gate?: Mes
   }
 }
 
-const mailboxAccess = (directory: string, budget: number, storeBudget = budget) => {
+const mailboxAccess = (directory: string, budget: number, storeBudget = budget, writesRelease = false) => {
   const root = resolve(directory)
   let hasDeferred = false
   // A claim Windows would not let go of is still this hook's own, checked again before every write.
@@ -518,7 +537,8 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
         })
       }
       // Only a running board claims after the hook stopped waiting; the store is written by the hook itself.
-      if (action === 'peer-send' || action === 'mailbox-release') throw new Error('BOARD_NOT_RUNNING')
+      // An in-process plugin hands a claim back through the store itself (writesRelease); a hook that stopped waiting leaves that to a running board.
+      if (action === 'peer-send' || (action === 'mailbox-release' || action === 'mailbox-attempt') && !writesRelease) throw new Error('BOARD_NOT_RUNNING')
       // A kept claim that is no longer on disk is gone, and a fresh one is taken.
       const kept = held
       held = null
@@ -552,33 +572,58 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
   return { call, isDeferred: () => hasDeferred }
 }
 export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(directory, budget).call
-export const hookMailbox = (directory: string, budget: number) => {
+// A turn-start hook has little time, so its waits are short (150 ms for the board, 120 ms for the store). An
+// in-process receiver that has seconds to spare may pass longer ones, so a busy board or store is waited for.
+export const hookMailbox = (directory: string, budget: number, boardWait = 150, storeWait = 120) => {
   const deadline = Date.now() + budget
-  const access = mailboxAccess(directory, Math.min(150, budget), Math.min(120, budget))
-  const call = async (action: string, body: Record<string, string>, now: number): Promise<Message | null> => {
+  const access = mailboxAccess(directory, Math.min(boardWait, budget), Math.min(storeWait, budget))
+  const call = async (action: string, body: Record<string, unknown>, now: number): Promise<Message | null> => {
     try { return (await access.call(action, body, now)).message as Message ?? null } catch { return null }
+  }
+  // The take itself; a failure is thrown, so a caller that must tell it from an empty mailbox can.
+  const takeTurn = async (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => {
+    const ref = named ?? randomBytes(6).toString('hex')
+    try { return (await access.call('mailbox-turn', { agent, session, surface, ref }, now)).message as Message ?? null } catch (error) {
+      // A board started before claims had names refuses the field until it restarts: ask it as before.
+      if ((error as Error).message === 'UNKNOWN_FIELD') {
+        if (deadline - Date.now() < boardWait) throw error
+        return (await access.call('mailbox-turn', { agent, session, surface }, Date.now())).message as Message ?? null
+      }
+      // The board may have claimed a message after this hook stopped waiting: hand it back (#990).
+      // Its own budget is what the hook has left; a claim not handed back waits out the lease.
+      const left = deadline - Date.now()
+      if (access.isDeferred() && left > 0) try { await mailboxAccess(directory, Math.min(boardWait, left)).call('mailbox-release', { agent, session, ref }, Date.now()) } catch {}
+      throw error
+    }
   }
   return {
     get hasDeferred() { return access.isDeferred() },
-    turn: async (agent: string, session: string, surface: string, now: number): Promise<Message | null> => {
-      const ref = randomBytes(6).toString('hex')
-      try { return (await access.call('mailbox-turn', { agent, session, surface, ref }, now)).message as Message ?? null } catch (error) {
-        // A board started before claims had names refuses the field until it restarts: ask it as before.
-        if ((error as Error).message === 'UNKNOWN_FIELD') {
-          if (deadline - Date.now() < 150) return null
-          try { return (await access.call('mailbox-turn', { agent, session, surface }, Date.now())).message as Message ?? null } catch { return null }
-        }
-        // The board may have claimed a message after this hook stopped waiting: hand it back (#990).
-        // Its own budget is what the hook has left; a claim not handed back waits out the lease.
-        const left = deadline - Date.now()
-        if (access.isDeferred() && left > 0) try { await mailboxAccess(directory, Math.min(150, left)).call('mailbox-release', { agent, session, ref }, Date.now()) } catch {}
-        return null
-      }
+    // An in-process plugin may name the claim (a 12-hex ref), so it can hand the claim back with release.
+    turn: (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => takeTurn(agent, session, surface, now, named).catch(() => null),
+    // The same take for a caller that must tell a failed take from an empty mailbox; a deferred claim is handed back first.
+    turnOrThrow: takeTurn,
+    // An in-process plugin's acceptance, explicit acknowledgement and send; a refusal keeps its code for the caller, so only a saved acceptance reads as done.
+    acceptOrThrow: async (agent: string, session: string, id: string, nonce: string, now: number, awaitsAck = false): Promise<void> => { await access.call('mailbox-accept', { agent, session, id, nonce, ...(awaitsAck ? { awaitsAck: true } : {}) }, now) },
+    ack: async (agent: string, session: string, id: string, nonce: string, reply: string, now: number): Promise<void> => { await access.call('mailbox-ack', { agent, session, id, nonce, reply }, now) },
+    send: async (body: { agent: string; session: string; text: string; id: string; from: string; folderDigest: string }, now: number): Promise<void> => { await access.call('peer-send', body, now) },
+    // A plugin that took a message and cannot hand it over gives the claim back at once instead of holding it.
+    release: async (agent: string, session: string, ref: string, now: number, isUnsent = false): Promise<void> => {
+      const left = deadline - Date.now()
+      await mailboxAccess(directory, Math.min(boardWait, left), Math.min(storeWait, left), true).call('mailbox-release', { agent, session, ref, ...(isUnsent ? { unsent: true } : {}) }, now)
     },
+    // An OpenCode plugin marks the wake it is about to start, in the store it can write itself when no board runs (#724).
+    attempt: async (agent: string, session: string, ref: string, now: number): Promise<void> => {
+      const left = deadline - Date.now()
+      await mailboxAccess(directory, Math.min(boardWait, left), Math.min(storeWait, left), true).call('mailbox-attempt', { agent, session, ref }, now)
+    },
+    // An OpenCode plugin opens or renews a busy session's mailbox without taking anything (#1366).
+    open: async (agent: string, session: string, surface: string, now: number): Promise<void> => { await access.call('mailbox-open', { agent, session, surface }, now) },
     // Whether the board took the accept: a caller that tells its host the message was delivered needs to know it did not (#1430).
     accept: async (agent: string, session: string, id: string, nonce: string, now: number): Promise<boolean> => {
       try { await access.call('mailbox-accept', { agent, session, id, nonce }, now); return true } catch { return false }
     },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
+    // The same end for a caller that must tell a write that failed from one that worked.
+    endOrThrow: async (agent: string, session: string, now: number): Promise<void> => { await access.call('mailbox-end', { agent, session }, now) },
   }
 }

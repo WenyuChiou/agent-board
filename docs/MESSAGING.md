@@ -76,6 +76,48 @@ them it may take, when the mailbox is not contested and its request succeeds. An
 claim left more than 30 minutes without an update expires the next time the store is loaded or saved
 (the board tries a save at every action and snapshot); an expired or dismissed one no longer holds
 the session. A `board_inbox` claim is never handed out again.
+OpenCode's claims follow the rules below instead of the 30-second hand-out and the 30-minute expiry.
+A receiver that runs inside the host (OpenCode, DeepSeek) waits up to two seconds for a busy board or store, where a
+turn-start hook waits well under a second. A take that still fails is reported as a failure, not as an empty mailbox.
+OpenCode's receiver asks the host whether the session is idle before each take and hands a claim back when the session
+turns busy, so a long turn does not use it up.
+
+OpenCode's wake costs a model turn, so the board promises at most one wake per message. Its plugin tells the board a
+wake is about to start (`--mailbox attempt --ref`, answered only for the current claim) before it calls the host, and
+from then on the board never hands that message out again, whatever happens to the host call.
+
+A message left waiting after a lost answer or a failed lookup goes out at the session's next event, the next board write,
+or the plugin's 30-second tick, whichever comes first, if the session is idle then. No step of the plugin keeps a timer
+of its own for it. The plugin keeps no copy of what a session owes the board: at each tick it reads the board's file and works
+it out for each session it knows, so an answer to an open or a take never says "done". A session owes a mailbox when the
+file holds none for it, or less than the lifetime (12 hours) minus ten minutes of its time is left, and it owes a take when
+a message is queued, or claimed and not marked as a wake, for it. A session that owes nothing, and no step to the board,
+costs no board call and no question to the host. One that owes something, or whose file could not be read (no board folder
+yet, a file it cannot read), asks the host and the board again. Only an idle session takes, and a take also opens or renews
+the session's mailbox. A busy session opens or renews it with `--mailbox open` instead, which claims nothing, so the board
+can queue a message for it during that turn (its first event is often `chat.message`), and so a turn longer than 12 hours
+keeps it; the answer names the board folder to watch, and says `enrolled: false` while no folder exists yet.
+A claim the plugin did not mark is handed to the next take from the same mailbox at once, without waiting for its
+30-second lease, and the old ref then answers `CLAIM_LOST` to an attempt; the lease still gives it back to queued, as often
+as needed, with no repeat line, and it is never expired while the mailbox is open. A session the plugin does not know yet
+is written down before its metadata lookup is awaited; if that lookup fails, throws or never answers, or the session's
+progress report fails, the tick makes them again through the plugin's own path, so the session also gets its card, up to
+20 times, and a session given up is logged once. This receiver implements receiving only: sending from OpenCode is #1413.
+
+The plugin takes a marked message back (`--mailbox release --unsent`) in three cases: the host answered 400 or 404, which
+proves it was not sent; the session changed after the attempt was saved, before the host was called; and an attempt
+the board did not answer `ok`, whether or not it saved the mark, since the host was never called. Any other error answer
+or a call that never answered may come after the turn started, so the message stays a started wake. `--unsent` also takes
+back one that read "sent, not confirmed" meanwhile, and a release that failed is owed to the board until it is saved.
+
+A started wake the host never confirms (the model's `agent_board_ack`), and one the host took with a 204 answer that the
+model never acknowledged, read "sent, not confirmed" on the card after 30 minutes and keep their text, so you can copy it;
+an accept or an ack that comes later is still taken. From then on the message no longer holds the session's next message,
+and a day later it expires like any other open message. A repeated `attempt` is answered ok only while the message is
+still an active started wake. Each workspace the host loads the plugin for has its own receiver. `release` answers
+`NOT_HELD` for a ref the board does not hold and `WAKE_STARTED` for a marked one without `--unsent`; `end` answers
+`ok: false` with a code when its write fails, and the tick asks again, a few times. The plugin reads no message of the
+conversation to decide any of this.
 
 A mailbox normally expires 12 hours after it was last enrolled or renewed; the session's hooks and MCP tools (such as `board_inbox` and `board_status`) can renew it, and session end can remove it sooner. A session-end hook that reaches the store removes the mailbox and rejects its queued messages with `DISCONNECTED`.
 Storage and connection failures leave progress hooks running normally. Hooks never create
@@ -244,7 +286,11 @@ messages, and accepted messages with an error become final `uncertain` / `EXPIRE
 30 minutes. They no longer block delivery, are never handed out again, and reject later
 receipts with `MESSAGE_EXPIRED`. A connected adapter's accepted delivery stays open while
 it waits for the turn; after disconnect, the 30-minute limit applies. The page continues
-to show expired messages as no reply confirmed.
+to show expired messages as no reply confirmed. The one exception is a wake the OpenCode
+plugin started: at 30 minutes it reads "sent, not confirmed" (`uncertain` / `UNCONFIRMED`)
+instead, keeps its text and takes a late accept or ACK, and becomes `EXPIRED` a day later.
+Only the board writes `UNCONFIRMED`; a receipt that sends it, like one that sends `EXPIRED`
+or `DISMISSED`, fails with `INVALID_RECEIPT`.
 
 The store holds at most 1,000 open messages (`MESSAGE_LIMIT`); finished ones do not count,
 so a store full of finished messages still accepts new ones, short of the 2,000-record
@@ -278,7 +324,7 @@ and an unknown id fails with `NOT_FOUND`.
 
 Open messages are queued, accepted, or uncertain without `EXPIRED` or `DISMISSED`. Each target
 `agent:session` permits at most three (`TARGET_BUSY`), and each source/target pair permits
-one (`PAIR_BUSY`). An accepted mailbox message with no ACK marked as awaited ("stdio MCP") is not counted in either. Sourceless sends count as source `board`. The hub assigns `hops: 1`
+one (`PAIR_BUSY`). An accepted mailbox message with no ACK marked as awaited ("stdio MCP") is not counted in either, nor is an OpenCode wake that reads "sent, not confirmed". Sourceless sends count as source `board`. The hub assigns `hops: 1`
 without a source; an authenticated source inherits one plus the hops of the message most
 recently claimed by its `agent:session`, or one if none. A third hop fails with `HOP_LIMIT`.
 Clients cannot set hops. Two live registrations for one agent/session mark both contested:
@@ -426,9 +472,9 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| OpenCode | CLI TUI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| OpenCode | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| OpenCode | Web UI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| OpenCode | CLI TUI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · no live note | stepEnd · no live note | none · no live note |
+| OpenCode | Desktop App | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · no live note | stepEnd · no live note | none · no live note |
+| OpenCode | Web UI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · no live note | stepEnd · no live note | none · no live note |
 
 <!-- messaging-matrix:end -->
 

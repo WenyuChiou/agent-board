@@ -61,7 +61,7 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁 | 尚未支援 |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 卡片有「排入」時可排給它。桌面 app：實際跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板網頁 | 尚未測試 |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁 | 尚未支援 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁 | 尚未測試 |
 
 - 看板網頁：在終端機執行 `npx @wenyuchiou/agent-board@next --html`，app 自己的終端機也行。
 - 尚未支援或尚未測試：從看板複製回答，貼到 app 裡。
