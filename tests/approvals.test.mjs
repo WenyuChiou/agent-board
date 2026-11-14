@@ -106,7 +106,7 @@ const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, 
 }
 
 // The page the board opened: it trades the key for its secret and asks for the board as a page does.
-const openPage = async (board, { visible = '1', pageId = 'p-synthetic', pairWithPage = false } = {}) => {
+const openPage = async (board, { visible = '1', pageId = 'p-synthetic', pairWithPage = true } = {}) => {
   const opened = await board.call('/api/open', { asApp: true })
   assert.equal(opened.status, 200)
   const key = board.lastKey()
@@ -656,12 +656,12 @@ test('a page secret is dropped on page-gone (persisted or not), ignores restore,
   assert.equal((await board.call('/api/board', undefined, pLate.headers)).status, 200)
   assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-late' })).status, 200)
   const qNew = await openPage(board, { pageId: 'q-new', pairWithPage: true })
-  assert.equal((await board.call('/api/board', undefined, qNew.headers)).moved, undefined)
+  assert.equal((await board.call('/api/board', undefined, qNew.headers)).body.moved, undefined)
   assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
   // Late poll of retired p-late (both before and when Q was opened earlier): answers moved, Q stays active & unmoved.
   assert.equal((await board.call('/api/board', undefined, pLate.headers)).body.moved, true)
   assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
-  assert.equal((await board.call('/api/board', undefined, qNew.headers)).moved, undefined)
+  assert.equal((await board.call('/api/board', undefined, qNew.headers)).body.moved, undefined)
   const qAsk = runHook(board, request('npm run synthetic-q-survives-late-poll'))
   const qCard = await qNew.show('npm run synthetic-q-survives-late-poll')
   // I6: qNew's secret is accepted only under its paired page id q-new (rejected under another page id or missing x-board-page).
@@ -680,7 +680,7 @@ test('a page secret is dropped on page-gone (persisted or not), ignores restore,
   const qBeforeGone = await openPage(board, { pageId: 'q-before-gone', pairWithPage: true })
   assert.equal((await board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': 'p-before' })).status, 200)
   assert.equal((await board.call('/api/board', undefined, pBefore.headers)).body.moved, true)
-  assert.equal((await board.call('/api/board', undefined, qBeforeGone.headers)).moved, undefined)
+  assert.equal((await board.call('/api/board', undefined, qBeforeGone.headers)).body.moved, undefined)
   const qAsk2 = runHook(board, request('npm run synthetic-q-opened-first'))
   const qCard2 = await qBeforeGone.show('npm run synthetic-q-opened-first')
   assert.equal((await qBeforeGone.press(qCard2, 'allow', { confirmed: true })).status, 200)
@@ -739,7 +739,7 @@ test('a key used though no window opened turns approvals off, so whoever paired 
   const board = await startBoard({
     open: async (url, self) => {
       const key = /#k=([\w-]+)$/.exec(url)?.[1]
-      stolen = (await self.call('/api/approvals/pair', { key }, { origin: self.origin })).body.secret ?? ''
+      stolen = (await self.call('/api/approvals/pair', { key }, { origin: self.origin, 'x-board-page': 'p-stolen' })).body.secret ?? ''
       return false
     },
   })
@@ -761,6 +761,39 @@ test('a key used though no window opened turns approvals off, so whoever paired 
   assert.equal(press.status, 403)
   assert.equal((await waiting.done).decision, null)
   assert.equal((await board.call('/api/board', undefined, headers)).body.approvals?.note, EN.approvalOff)
+})
+
+test('a pairing request without a valid page id is refused without binding a secret (#1436 review)', async () => {
+  const board = await startBoard()
+  const opened = await board.call('/api/open', { asApp: true })
+  assert.equal(opened.status, 200)
+  const key = board.lastKey()
+  assert.ok(key)
+
+  const missing = await board.call('/api/approvals/pair', { key }, { origin: board.origin })
+  assert.equal(missing.status, 403)
+  assert.equal(missing.body.note, EN.approvalNoSecret)
+  assert.equal(missing.body.secret, undefined)
+
+  const invalid = await board.call('/api/approvals/pair', { key }, { origin: board.origin, 'x-board-page': 'bad page!' })
+  assert.equal(invalid.status, 403)
+  assert.equal(invalid.body.note, EN.approvalNoSecret)
+  assert.equal(invalid.body.secret, undefined)
+
+  const valid = await board.call('/api/approvals/pair', { key }, { origin: board.origin, 'x-board-page': 'p-valid' })
+  assert.equal(valid.status, 200)
+  assert.ok(valid.body.secret)
+  const headers = { origin: board.origin, 'x-board-page': 'p-valid', 'x-board-visible': '1', 'x-board-approve': valid.body.secret }
+  const waiting = runHook(board, request('npm run synthetic-paired-valid'))
+  let card
+  for (let tries = 0; tries < 100 && card === undefined; tries++) {
+    card = (await board.call('/api/board', undefined, headers)).body.approvals?.cards?.find(one => one.command === 'npm run synthetic-paired-valid')
+    if (card === undefined) await pause(50)
+  }
+  assert.ok(card, 'valid page pairing can view and approve after empty/invalid attempts were refused')
+  await board.call('/api/approvals/drawn', { items: [{ id: card.id, turn: card.turn, state: card.state }] }, headers)
+  assert.equal((await board.call('/api/approvals/press', { id: card.id, turn: card.turn, state: 'shown', behavior: 'allow', reason: '', confirmed: true }, headers)).status, 200)
+  assert.deepEqual((await waiting.done).decision, ALLOW)
 })
 
 test('the card shows every field of the tool input but its description, after the command', () => {

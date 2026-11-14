@@ -599,7 +599,7 @@ export const startServer = (o: ServeOptions): void => {
           turnApprovalsOff()
           return json(res, 403, { note: o.s.approvalOff })
         }
-        if (page !== '' && retired.has(page)) return json(res, 403, { note: o.s.approvalNoSecret })
+        if (page === '' || retired.has(page)) return json(res, 403, { note: o.s.approvalNoSecret })
         const secret = randomBytes(24).toString('base64url')
         known.secret = secret
         const seq = page !== '' ? (pages.get(page)?.seq ?? ++pageSeq) : 0
