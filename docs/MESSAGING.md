@@ -282,8 +282,9 @@ IDs are scoped to this message store. A claim is never automatically replayed, e
 mailbox claim as above. Before each action or snapshot, finished messages older than 24 hours
 are deleted. Finished means
 acknowledged, rejected, or uncertain with error `EXPIRED` or `DISMISSED`. A message drops its
-text the moment it finishes (except an OpenCode started wake that expires before OpenCode took it, which keeps
-its text until it is deleted, for a release the plugin still owes) and keeps only a SHA-256 hash of it (of the text as a JSON
+text the moment it finishes (except an OpenCode started wake that expires with no accept recorded, which keeps
+its text until it is deleted, for a release the plugin may still owe: OpenCode never took it, or its answer was lost
+and it may have) and keeps only a SHA-256 hash of it (of the text as a JSON
 string), which is what an exact retry is compared with, and the first 200 characters of its
 reply; a repeated receipt is compared with those. Uncertain messages, accepted mailbox
 messages, and accepted messages with an error become final `uncertain` / `EXPIRED` after

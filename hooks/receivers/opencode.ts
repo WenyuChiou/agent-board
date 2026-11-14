@@ -362,9 +362,12 @@ const boardReceiver = (client, directory, replay) => {
     if (one.tries >= 20) { pending.delete(session); hookError('HOST_METADATA_FAILED'); stopIfIdle(); return }
     one.tries += 1
     replaying.add(session)
+    const events = one.events
     try {
       const live = typeof client?.session?.status === 'function' ? await hostState(session) : 'unknown'
-      if (pending.get(session) === one) await replay(session, live === 'idle' ? 'waiting' : live === 'busy' ? 'working' : one.state)
+      // An event that came while the host was asked is newer than its answer, so its state is the one replayed (#1366 review).
+      const state = one.events !== events || live === 'unknown' ? one.state : live === 'idle' ? 'waiting' : 'working'
+      if (pending.get(session) === one) await replay(session, state)
     } catch {} finally { replaying.delete(session) }
   }
   // The one recovery path, every 30 seconds. Each known session is judged from the board's file alone (owed): a busy one whose
@@ -401,8 +404,8 @@ const boardReceiver = (client, directory, replay) => {
       return
     }
     const one = pending.get(session)
-    if (one === undefined) pending.set(session, { state, tries: 0 })
-    else one.state = state
+    if (one === undefined) pending.set(session, { state, tries: 0, events: 0 })
+    else { one.state = state; one.events += 1 }
     run()
   }
   const drop = session => { if (pending.delete(session)) stopIfIdle() }

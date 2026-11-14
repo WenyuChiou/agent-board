@@ -606,9 +606,10 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
     const ref = named ?? randomBytes(6).toString('hex')
     // A plugin that names its claim also marks its wake (attempt) and gives it back as unsent, which a board started before
     // the plugin existed refuses with UNKNOWN_FIELD, so a claim it took could never go back: it waits out 30 minutes and its text
-    // is cleared. Such a board is told by open, which claims nothing, so nothing is taken there (#1366 review).
+    // is cleared. Such a board is told by open, which claims nothing, so nothing is taken there (#1366 review). An open that
+    // fails any other way (a lost reply, a busy board) shows nothing either, so nothing is taken: the plugin asks again.
     if (named !== undefined) {
-      try { await access.call('mailbox-open', { agent, session, surface }, now) } catch (error) { if ((error as Error).message === 'UNKNOWN_FIELD') throw new Error('BOARD_OLDER') }
+      try { await access.call('mailbox-open', { agent, session, surface }, now) } catch (error) { throw (error as Error).message === 'UNKNOWN_FIELD' ? new Error('BOARD_OLDER') : error }
     }
     try { return (await access.call('mailbox-turn', { agent, session, surface, ref }, now)).message as Message ?? null } catch (error) {
       // A board started before claims had names refuses the field until it restarts: ask it as before.

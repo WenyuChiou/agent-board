@@ -1837,6 +1837,17 @@ test('B19 a started wake whose unsent release is still owed keeps its text throu
   assert.deepEqual([sent.status, sent.error, sent.text], ['uncertain', 'EXPIRED', ''])
 })
 
+test('B20 a started wake whose answer was lost (OpenCode may have it) is kept like an owed one: its text stays through expiry and goes only with the deleted record (#1366 review)', async () => {
+  const b = await mailbox()
+  const text = 'Synthetic text for the board cases'
+  // The plugin marked the wake and called OpenCode, but the answer never came: no accept and no release follow.
+  const marked = b.act(b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0).state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + SEC).state
+  const expired = b.prune(b.prune(marked, T0 + 31 * MIN), T0 + 31 * MIN + 1441 * MIN)
+  assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].text], ['uncertain', 'EXPIRED', text])
+  // A day after it finished the record is deleted, and its text with it.
+  assert.equal(b.prune(expired, T0 + 31 * MIN + 2882 * MIN).messages.find(one => one.id === expired.messages[0].id), undefined)
+})
+
 test('A19 a board started before the plugin existed is told by open before anything is taken: the message stays queued and no claim is made (#1366 review)', async () => {
   const { createMessaging, hookMailbox } = await importTs('../scripts/board-messaging.ts')
   const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
@@ -1872,6 +1883,44 @@ test('A19 a board started before the plugin existed is told by open before anyth
   } finally { if (server) await new Promise(done => server.close(done)); hub?.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('A20 an open whose reply is lost takes nothing either, so an older board never gets a claim it cannot give back; the next take goes through (#1366 review)', async () => {
+  const { createMessaging, hookMailbox } = await importTs('../scripts/board-messaging.ts')
+  const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'agent-board-lost-open-'))
+  let hub, server
+  try {
+    const now = Date.now()
+    const enrolled = enrollMailbox({ messages: [] }, 'opencode', 's1', 'CLI', now, 43_200_000)
+    const target = enrolled.mailboxes.find(one => one.id === mailboxId('opencode', 's1'))
+    const seeded = queueMessage(enrolled, { id: 'lost-open-message', target: target.id, turn: 'session', text: 'Synthetic text behind a lost open reply' }, 'board', target, now).state
+    writeFileSync(join(dir, 'messages.json'), JSON.stringify({ version: 2, ...seeded }))
+    hub = createMessaging(dir)
+    const asked = []
+    let lose = true
+    // The first open's reply never arrives (the connection drops); the board itself would have refused it as an older one.
+    server = createServer(async (req, res) => {
+      try {
+        let text = ''
+        for await (const chunk of req) text += chunk
+        const body = JSON.parse(text), action = req.url.split('/').at(-1)
+        asked.push(action)
+        if (action === 'mailbox-open' && lose) { lose = false; req.socket.destroy(); return }
+        res.end(JSON.stringify(hub.act(action, body, Date.now())))
+      } catch (error) { if (!res.destroyed) { res.statusCode = 409; res.end(JSON.stringify({ error: error.message })) } }
+    })
+    await new Promise(done => server.listen(0, '127.0.0.1', done))
+    const url = `http://127.0.0.1:${server.address().port}`
+    hub.recordOwner(server.address().port, `${url}/?t=synthetic`)
+    await assert.rejects(hookMailbox(dir, 4000, 2000, 2000).turnOrThrow('opencode', 's1', 'CLI', Date.now(), refOf(1)), error => error.message !== 'BOARD_OLDER')
+    assert.ok(!asked.includes('mailbox-turn'), asked.join())
+    const kept = hub.snapshot(Date.now()).messages.find(one => one.id === 'lost-open-message')
+    assert.deepEqual([kept.status, kept.ref, kept.claimed], ['queued', undefined, 0])
+    const taken = await hookMailbox(dir, 4000, 2000, 2000).turnOrThrow('opencode', 's1', 'CLI', Date.now(), refOf(2))
+    assert.equal(taken?.id, 'lost-open-message')
+  } finally { if (server) await new Promise(done => server.close(done)); hub?.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('R40 a failed attempt and a failed release each leave a line in the hook error log, once, not at every tick (#1366 review)', () => fixture(async f => {
   f.calls.faults.attempt = ['fail']
   f.calls.faults.release = ['fail', 'fail']
@@ -1892,5 +1941,34 @@ test('R40 a failed attempt and a failed release each leave a line in the hook er
   assert.equal(f.message('r40-message').status, 'queued', 'the saved release took it back')
   f.tick()
   await f.until(() => f.message('r40-message').status === 'accepted' && f.settled(), 'the release was saved and the message woken once')
+  assert.equal(f.calls.promptAsync.length, 1)
+}, { watch: false }))
+
+test('R41 a busy chat.message that comes while a session still written down is looked up again wins over the older idle answer: nothing is woken into the running turn (#1366 review)', () => fixture(async f => {
+  f.queue('ses_r41', 'r41-message', 'Synthetic text for a session that turns busy during its recovery')
+  f.calls.broken.get = 'throw'
+  await f.created('ses_r41')
+  await f.quiet()
+  delete f.calls.broken.get
+  // The tick's status lookup is held; meanwhile a prompt is submitted, and that event's own lookup is held too.
+  let openStatus, openGet
+  f.calls.gate = new Promise(done => { openStatus = done })
+  const asked = f.calls.status.length
+  f.tick()
+  await f.until(() => f.calls.status.length > asked, 'the tick asked the host for the session')
+  f.calls.holdGet = new Promise(done => { openGet = done })
+  const gets = f.calls.gets
+  const chatting = f.chat('ses_r41')
+  await f.until(() => f.calls.gets > gets, 'the prompt event started its lookup')
+  // The host's older answer says idle.
+  f.calls.gate = null
+  openStatus()
+  await f.quiet()
+  openGet()
+  await chatting
+  await f.quiet()
+  assert.equal(f.calls.promptAsync.length, 0, 'nothing was woken into the running turn')
+  await f.idle('ses_r41')
+  await f.until(() => f.message('r41-message').status === 'accepted' && f.settled(), 'the idle event woke the message')
   assert.equal(f.calls.promptAsync.length, 1)
 }, { watch: false }))
