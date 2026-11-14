@@ -3874,6 +3874,30 @@ const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell 
   assert.ok(!errors.includes('PRIVATE_') && !errors.includes(home), errors)
 })
 
+// A prompt's JSON check now runs after the classifier starts (#1080): a payload cut short must still be refused, not promoted.
+test('the PowerShell reporter refuses a prompt cut short as INCOMPLETE_INPUT and leaves nothing in its inbox', { skip: process.platform !== 'win32' }, () => fixture(f => {
+  const inbox = join(f.home, '.claude', 'progress-inbox')
+  const script = join(f.home, '.claude', 'progress-report.ps1')
+  f.save(script, reporterPs1())
+  const input = join(f.home, 'partial-prompt.txt')
+  f.save(input, '{"session_id":"synthetic-partial-prompt","prompt":"PRIVATE_PARTIAL_WORDS"')
+  const descriptor = openSync(input, 'r')
+  const powershell = join(process.env.SystemRoot || 'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  let result
+  try {
+    result = spawnSync(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], {
+      env: isolatedEnv(f.home), stdio: [descriptor, 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 30000,
+    })
+  } finally { closeSync(descriptor) }
+  assert.equal(result.error, undefined, hookFailure(result))
+  assert.equal(result.status, 0, hookFailure(result))
+  assert.equal(result.stdout.trim(), '{}')
+  const left = existsSync(inbox) ? readdirSync(inbox).filter(name => /\.(?:json|tmp|receipt|fallback|timeout)$/.test(name)) : []
+  assert.deepEqual(left, [], `${hookFailure(result)}; hookLog=${hookLog(f)}`)
+  assert.match(hookLog(f), /INCOMPLETE_INPUT/)
+  assert.ok(!hookLog(f).includes('PRIVATE_'), hookLog(f))
+}))
+
 test('the PowerShell reporter reads a complete input before it loads any module', { skip: process.platform !== 'win32' }, () => fixture(f => {
   const modules = join(f.home, 'modules'), inbox = join(f.home, '.claude', 'progress-inbox')
   const script = join(f.home, '.claude', 'progress-report.ps1')
