@@ -46,8 +46,8 @@ npx @wenyuchiou/agent-board@next
 | | Agent | Open the board | Your reply reaches it |
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | Sent when it is free |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | Handed over from its next turn, one per turn |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | Handed over from its next turn, one per turn |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | Held for the session when its card offers it; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | Held for the session when its card offers it; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | The second Quick start command | You paste it |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | You paste it |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | You paste it |
@@ -59,7 +59,7 @@ npx @wenyuchiou/agent-board@next
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` (board page) | Not yet |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page | Not yet |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | Not tested yet |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | Held for the session when its card offers it. Desktop app: checked in a live run; IDE: no run of its own, and it is treated like the app when its hook reports it as the app's surface; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page | Not tested yet |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page | Not tested yet |
 
@@ -74,7 +74,7 @@ npx @wenyuchiou/agent-board@next
 An answer to an agent's question and a message you send it travel the same way, by the button you press:
 
 - **Send** hands it to a connected session; a confirmation from that session means it was received. With no confirmation it may still have arrived, so look at the agent before you use **Copy answer**, or it may get it twice. Send needs [messaging on](docs/MESSAGING.md#local-storage).
-- **Queue for the agent's next turn** holds it for that session's turns, one message a turn, oldest first, does not wake an idle one, and can be rejected if the session ends first or its 12-hour mailbox expires.
+- **Queue for the agent's next turn** holds it for that session's turns, does not wake an idle one, and can be rejected if its 12-hour mailbox expires or, for an agent whose hook reports the end of a session, if the session ends first.
 - **Copy answer** puts it on your clipboard to paste into that agent.
 - Answered in the agent's own window? Press **Already answered, hide** to clear the card.
 

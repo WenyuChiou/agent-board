@@ -21,7 +21,8 @@ recover within that deadline. Idle polls do not rewrite the message file. Sendin
 and receipts are never automatically retried, including after a store lock.
 
 Use the existing reply box on the session's card. A matching receiver enables Send or
-Queue only when its session state, surface and route have a live record. When the state
+Queue only when the route for its session state and the surface it registered or enrolled as has a live
+record; clients that share a surface share that record. When the state
 or route is unknown, the card offers Copy. One known gap: a Codex hook can read which client
 started a session, not which client runs a turn, so a terminal session continued in another client
 that leaves no mark in the hook's environment can keep the terminal's Queue; whether a message
@@ -39,7 +40,8 @@ board already offered it.
 
 The direct message API applies the same recorded-route check to board sends. A mailbox
 with a live receiver for the same session is refused rather than redirected; an unrecorded
-route returns `NO_RECORDED_ROUTE`. Retrying an existing message id returns that message
+route returns `NO_RECORDED_ROUTE`, unless the target is refused first as gone or expired
+(`OFFLINE`) or contested (`CONTESTED`). Retrying an existing message id returns that message
 when its contents match, even if the route has since changed. The server records the route
 line itself; callers cannot supply `line`.
 
@@ -49,7 +51,12 @@ A turn-start hook can enroll its session only when the default messages folder a
 The page can queue a message for that exact session without waking it. A later turn-start
 hook of that session can claim one message, the oldest it is allowed to take. A message the page
 queues is saved with the surface its route was checked on. A hook that reads another surface does
-not claim such a message; the session's own MCP pull (`board_inbox`) still can. A message saved
+not claim such a message; the session's own MCP pull (`board_inbox`) still can. One known gap (#1405):
+no hook of the other surface takes such a message, and nothing rejects it for that, so it can stay
+queued until the mailbox expires or, where the agent's hook reports it, the session ends (below).
+After an upgrade this can catch an agy TUI session that an earlier release's hook enrolled as `IDE`:
+a message queued for it then is saved for `IDE`, and from its next turn the hook enrolls it as
+`agy TUI`. A message saved
 without a surface, by an older board or from another agent's session, is not held to one.
 A turn-start hook marks a message `accepted` only after it has written the message to its output
 for the host; that does not prove the model read it, and the hook collects no ACK. A hook that
@@ -299,8 +306,12 @@ answers `MESSAGE_STORE_BUSY`.
 
 The local hub accepts `POST /api/messages/dismiss` with only `{ "id": "<message-id>" }`,
 using the board token and the same browser-origin rules as sending. No receiver secret
-is needed; LAN requests are refused. A page button will come in a later change.
-Dismissal rejects a queued message before it can be handed out. An accepted or uncertain
+is needed; LAN requests are refused. On the page, only a Claude card's message has the
+buttons: Take back while it is queued; Dismiss once it is handed over, or while it is
+unconfirmed and not expired. A replied, stopped or expired message has neither.
+Dismissing a queued message rejects it, so it is not handed out after that; a message a hook
+handed back may already have been shown to its host (`queued` in the status table above).
+An accepted or uncertain
 message becomes final `uncertain` with error `DISMISSED`: delivery may already have happened,
 but it no longer blocks the next message. Disconnect and restart preserve that result;
 later receipts fail with `MESSAGE_DISMISSED`. A dismissed record drops its text at once, like any
@@ -426,10 +437,10 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 
 | Host | Surface | Tier | Primitive | Status | Live run | Receiver | Idle | Working | Ended |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Antigravity | 2.0 Desktop App | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
-| Antigravity | agy TUI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Antigravity | 2.0 Desktop App | 3 | Unknown | Verified | [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | none · no live note |
+| Antigravity | agy TUI | 3 | Unknown | Verified | [docs/validation/2026-11-12-antigravity-tui-mailbox-live.md](../docs/validation/2026-11-12-antigravity-tui-mailbox-live.md) | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-12-antigravity-tui-mailbox-live.md](../docs/validation/2026-11-12-antigravity-tui-mailbox-live.md) | nextTurn · no live note | none · no live note |
 | Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
-| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | none · no live note |
 | Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | stepEnd · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | none · no live note |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
@@ -473,7 +484,7 @@ This table is written by hand and covers progress reporting too. Its runs have n
 | --- | --- | --- |
 | Codex | Independent setup and explicit reporter; isolated native app-server SessionStart, UserPromptSubmit and Stop observed | Authenticated owners forwarded two prompts each way with Antigravity and native ACKs; autonomous model tools, CLI TTY and desktop chat remain separate |
 | Antigravity CLI | Independent named hooks; all four native Windows events observed after the command-quoting fix | Same cross-host owner acceptance; native stream ACK, idle continuation, deduplication, conflict and offline rejection verified |
-| Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established |
+| Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established in these runs. The desktop app's later next-turn mailbox runs have their own record, in the matrix above |
 | Gemini CLI (retired) | No longer offered by setup; Google's CLI is Antigravity CLI. An install from an earlier release still reports | The board no longer routes messages to it; its card offers Copy |
 | OpenCode | Independent setup, session-context progress tool and plugin events | Generic client API only; no native receiving adapter or real bidirectional acceptance yet |
 | OpenClaw | Independent metadata lifecycle plugin and native skill; separate optional Claude reporter | Its native session tools are not yet integrated into this hub; no real bidirectional acceptance |
@@ -502,8 +513,8 @@ An owned app-server or CLI stream is a separate surface from a CLI TTY, desktop 
 IDE. Earlier transport spikes and progress-hook runs do not verify those surfaces.
 
 Run `node scripts/messaging-matrix.mjs --write` after changing a record or its evidence.
-`node scripts/messaging-matrix.mjs --check` checks all four copies without writing and
-exits non-zero when any is stale or has missing markers.
+`node scripts/messaging-matrix.mjs --check` checks `docs/MESSAGING.md` without writing and
+exits non-zero when its table is stale or has missing markers.
 
 One machine's installation does not automatically attach every already-running agent.
 Each host needs its own authorized session binding and supported transport. A native
