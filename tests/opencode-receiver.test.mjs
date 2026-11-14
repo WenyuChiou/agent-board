@@ -1490,7 +1490,7 @@ test('R33 for every call the receiver makes and every fault it can meet, with th
   const WITH_A_MESSAGE = ['promptAsync', 'attempt', 'release', 'accept', 'end']
   // The calls the receiver makes only in some states of the session, so a fault on them can be met only there: a busy session
   // takes nothing and is never woken (V2); only an idle event makes the plugin look up the reply (messages); only a busy session
-  // with no mailbox in the file opens one (open); a verify is asked only of a file that shows nothing owed, which a board with no
+  // with no mailbox in the file, or with a file the board refused (A34), opens one (open); a verify is asked only of a file that shows nothing owed, which a board with no
   // folder, and a busy session with its message waiting, never have (verify); a busy session is asked about only while something is owed, which is not the
   // case when the board has no folder or the session's mailbox is open and nothing waits (status); an end is made when the
   // session is deleted, in either state. The host's get and messages hang for over two seconds, so they hang for the mailbox
@@ -2156,6 +2156,99 @@ test('A33 a message is the session\'s by its mailbox as well as by its address, 
   write(f, { ...store, messages: store.messages.map(one => one.id === 'a33-message' ? { ...one, to: 'opencode:another-session' } : one) })
   f.tick(); await f.quiet()
   assert.equal(f.calls.promptAsync.length, 1, 'the message for the session\'s mailbox is woken')
+}, { watch: false }))
+
+// Round 17 (codex_341, R6 decision 6884602127): a text the board did not vouch for is handled as a file that cannot be read, busy
+// sessions included: a busy one asks the board with open, whose own error is logged once.
+const busyOn = async (f, session) => { f.calls.busy = { ...(f.calls.busy ?? {}), [session]: { type: 'busy' } }; await f.reported({ session, type: 'busy' }); await f.quiet() }
+
+test('A34 I5 a busy session whose fresh mailbox is in a file the board refuses asks the board with open, and the board\'s error is logged once, through the real board script (#1366 round 17)', () => fixture(async f => {
+  const session = 'ses_a34'
+  const log = join(f.home, '.agent-board', 'hook-errors.log')
+  const lines = () => (existsSync(log) ? readFileSync(log, 'utf8') : '').split('MAILBOX_FAILED').length - 1
+  await f.created(session); await f.quiet()
+  await busyOn(f, session)
+  mkdirSync(f.directory, { recursive: true })
+  const text = write(f, { ...withFinished(session), pausePeerMessages: 'x' })
+  assert.ok(isRefused(text), 'the board refuses the store')
+  assert.equal(lines(), 0)
+  const opens = f.count('open')
+  f.tick(); await f.quiet()
+  assert.ok(f.count('open') > opens, 'the busy session asked the board with open')
+  assert.equal(lines(), 1, 'the board\'s error is logged')
+  for (let round = 0; round < 5; round++) { f.tick(); await f.quiet() }
+  assert.equal(lines(), 1, 'once, not at every tick')
+  assert.equal(f.calls.promptAsync.length, 0, 'nothing woke the running turn')
+}, { spawn: true, watch: false }))
+
+test('A35 I5 a verify that hangs, fails or is lost for a busy session with nothing owed is followed by an open in the same tick (#1366 round 17)', async () => {
+  const wrong = []
+  for (const fault of ['hang', 'error', 'lose']) {
+    await fixture(async f => {
+      const session = `ses_a35_${fault}`
+      await f.created(session); await f.quiet()
+      await busyOn(f, session)
+      f.calls.broken.verify = fault
+      const from = f.calls.board.length
+      f.tick(); await f.quiet()
+      const made = f.calls.board.slice(from)
+      if (!f.calls.reached.includes(`verify ${fault}`)) wrong.push(`${fault}: no verify was made`)
+      if (!made.slice(made.indexOf('verify')).includes('open')) wrong.push(`${fault}: no open after the verify: ${made.join(' ')}`)
+      if (f.calls.promptAsync.length !== 0) wrong.push(`${fault}: woke the running turn`)
+    }, { watch: false })
+  }
+  assert.deepEqual(wrong, [])
+})
+
+test('A36 I2 a busy session whose verify answers for another text, written while the verify was on its way, asks the board with open in that tick (#1366 round 17)', () => fixture(async f => {
+  const session = 'ses_a36'
+  await settleIdle(f, session)
+  await busyOn(f, session)
+  write(f, withFinished(session))
+  const verifies = f.count('verify'), opens = f.count('open')
+  f.tick()
+  write(f, { ...withFinished(session), pausePeerMessages: true })
+  await f.quiet()
+  assert.equal(f.count('verify'), verifies + 1)
+  assert.ok(f.count('open') > opens, 'the answer vouched for nothing, so the busy session asked the board')
+  assert.equal(f.calls.promptAsync.length, 0)
+}, { watch: false }))
+
+test('A37 I5 a session that turns busy while its verify is out, then is refused, asks the board with open (#1366 round 17)', () => fixture(async f => {
+  const session = 'ses_a37'
+  await settleIdle(f, session)
+  write(f, { ...withFinished(session), messages: [{ ...withFinished(session).messages[0], hash: textHash('other text') }] })
+  let open
+  f.calls.hold.verify = new Promise(done => { open = done })
+  const verifies = f.count('verify'), opens = f.count('open')
+  f.tick()
+  await f.until(() => f.count('verify') > verifies, 'the tick asked for a verify')
+  f.calls.busy = { [session]: { type: 'busy' } }
+  await f.reported({ session, type: 'busy' })
+  assert.equal(f.count('open'), opens, 'nothing asked the board before the answer')
+  open()
+  await f.quiet()
+  assert.ok(f.count('open') > opens, 'the refused answer made the now busy session ask the board')
+  assert.equal(f.calls.promptAsync.length, 0)
+}, { timing: { boardMs: 20000 }, watch: false }))
+
+test('A38 I4 a text the board refused that shows a message queued for an idle session still wakes it, exactly once (#1366 round 17)', () => fixture(async f => {
+  const idle = 'ses_a38a', busy = 'ses_a38b'
+  await settleIdle(f, idle)
+  await f.created(busy); await f.quiet()
+  await busyOn(f, busy)
+  f.queue(idle, 'a38-message', 'Synthetic text for A38')
+  const store = f.store()
+  // A finished message whose hash is not its text's: the board refuses the file, while the queued message stays as it was.
+  write(f, { ...store, messages: [...store.messages, { ...withFinished(idle).messages[0], id: 'finished-a38', hash: textHash('other text') }] })
+  assert.ok(isRefused(readFileSync(join(f.directory, 'messages.json'), 'utf8')))
+  // The first take fails, so the refused text still shows the message when the next tick reads it.
+  f.calls.faults.take = ['fail']
+  f.tick(); await f.quiet()
+  assert.ok(f.count('verify') > 0, 'the busy session asked for a verify, which the board refused')
+  for (let round = 0; round < 4; round++) { f.tick(); await f.quiet() }
+  assert.equal(f.calls.promptAsync.length, 1, 'woken once')
+  assert.equal(f.calls.sent.length, 1)
 }, { watch: false }))
 
 test('A27 the test board stand-in refuses a link or a file at the messages folder in its default mode too, as the board script does (#1366 review)', async () => {

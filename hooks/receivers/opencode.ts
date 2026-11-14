@@ -104,7 +104,7 @@ const boardReceiver = (client, directory, replay) => {
   // ending: a closed mailbox whose end the board has not saved yet, with the tries so far.
   // pending: a session an event or chat.message named that is not known yet, with the state it reported and the tick's tries.
   // opening: an open under way. Nothing else remembers whether a mailbox is open or a message waits: owed() reads the board's file
-  // (vouched below remembers only which text of that file the board said it accepts).
+  // (vouched and doubted below remember only which text of that file the board accepted or did not answer for).
   // gone: every session this process saw deleted. OpenCode still sends busy, retry and idle events for a session deleted during
   // its turn (live record 2026-11-14), and its ids are never reused, so a deleted session is never made known again.
   const roots = new Map(), taking = new Set(), again = new Set(), marks = new Map(), settling = new Map(), held = new Map(), ending = new Map(), pending = new Map(), replaying = new Set(), closing = new Set(), sawBusy = new Set(), opening = new Set(), gone = new Set()
@@ -306,6 +306,8 @@ const boardReceiver = (client, directory, replay) => {
   // less than its lifetime minus ten minutes left, so it is opened or renewed), waiting (a message queued for it, and with
   // isClaimed also one claimed and not marked as a wake, which a take lost on its way back leaves behind), and sure (no folder, or
   // a text the board vouched for). A message is the session's by its address or by its mailbox, which is how the board hands it out.
+  // A text the board refused to vouch for asks for the mailbox as a file that cannot be read does (#1366 round 17), so a busy session
+  // asks the board with open and an idle one with a take, and the board's own error is logged; waiting is still read from it.
   const owed = (session, read, isClaimed) => {
     if (read === undefined) return { mailbox: false, waiting: false, sure: true }
     if (read === null) return { mailbox: true, waiting: false, sure: false }
@@ -314,13 +316,14 @@ const boardReceiver = (client, directory, replay) => {
     const isFor = one => one?.to === 'opencode:' + session || typeof entry?.id === 'string' && one?.target === entry.id
     const messages = Array.isArray(store.messages) ? store.messages : []
     const waiting = messages.some(one => isFor(one) && (one.status === 'queued' || isClaimed && one.status === 'uncertain' && one.error === '' && one.attempted === undefined && typeof one.ref === 'string'))
-    return { mailbox: !(entry?.expires - Date.now() > TIMING.mailboxMs - TIMING.renewMs), waiting, sure: read.mark === vouched }
+    return { mailbox: read.mark === doubted || !(entry?.expires - Date.now() > TIMING.mailboxMs - TIMING.renewMs), waiting, sure: read.mark === vouched }
   }
   // The sessions the file shows nothing owed for, while the board has not vouched for the text read. One verify at a time asks the
   // board, which reads its file without a lock and writes nothing; an answer for that very text vouches for it, and those sessions
-  // cost nothing more until the file changes. Any other answer (refused, failed, none, a board without verify, a file changed
-  // meanwhile) leaves them not known, and they ask the board as a session does whose file cannot be read. A text the board did not
-  // answer for is not asked about again: its sessions ask the board at each tick, and the first write to the file ends that.
+  // cost nothing more until the file changes. Any other answer (refused, failed, none, a board without verify, a mark for another
+  // text) leaves them not known, and they ask the board as a session does whose file cannot be read: a busy one, as it is by then,
+  // with open and an idle one through heal (#1366 round 17). A text the board did not answer for is not asked about again: owed
+  // asks for its mailbox at each tick, and the first write to the file ends that.
   const vouch = async (read, sessions) => {
     if (read.mark !== doubted) {
       if (isVouching) return
@@ -330,7 +333,11 @@ const boardReceiver = (client, directory, replay) => {
       if (answer?.ok === true && answer.mark === read.mark) { vouched = read.mark; return }
       if (answer?.ok !== true) doubted = read.mark
     }
-    for (const session of sessions) if (roots.has(session) && !taking.has(session)) heal(session)
+    for (const session of sessions) {
+      if (!roots.has(session) || taking.has(session)) continue
+      if (roots.get(session) === 'busy') openMailbox(session)
+      heal(session)
+    }
   }
   // A busy session with no mailbox, or one running out, opens or renews it; an idle one does the same by taking.
   const openIfOwed = session => { if (owed(session, readStore(), false).mailbox) openMailbox(session) }
@@ -412,7 +419,8 @@ const boardReceiver = (client, directory, replay) => {
   // The one recovery path, every 30 seconds. Each known session is judged from the board's file alone (owed): a busy one whose
   // mailbox is missing or running out opens it, and any one that owes a mailbox or a message, owes the board a step, or whose
   // file could not be read goes through heal and then deliver. One the file shows nothing owed for costs nothing once the board
-  // has vouched for the text read, and is asked about with one verify until then. A folder that appeared after it was learned is
+  // has vouched for the text read, and is asked about with one verify until then; a text the board refused owes the mailbox, as an
+  // unreadable file does (owed). A folder that appeared after it was learned is
   // watched from then on. Every session still written down is looked up again.
   const tick = () => {
     const read = readStore()
