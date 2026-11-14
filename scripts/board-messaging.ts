@@ -313,11 +313,13 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         try { unlinkSync(temp) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
         writeFileSync(temp, JSON.stringify({ pid: process.pid, port, url }), { mode: 0o600, flag: 'wx' })
         replaceFile(temp, owner)
-        isPublished = true
       } finally {
         try { if (existsSync(temp)) unlinkSync(temp) } catch {}
       }
     },
+    // The owner record goes out before the page is announced (#1472), so only an announced page keeps a folder this
+    // start made: a start whose address file then fails still leaves nothing behind.
+    markPublished: (): void => { isPublished = true },
     close: (): void => {
       if (isClosed) return
       // Quiesce every store method before releasing the lifetime claim.

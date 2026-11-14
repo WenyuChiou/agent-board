@@ -11288,6 +11288,7 @@ export const LINES = [
 "      stop();",
 "      return;",
 "    }",
+"    messaging.markPublished();",
 "    lastSeen = Date.now();",
 "    if (o.codex?.executable) {",
 "      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable });",

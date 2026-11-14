@@ -907,6 +907,7 @@ export const startServer = (o: ServeOptions): void => {
       stop()
       return
     }
+    messaging.markPublished()
     // Preparing a private address can block; inactivity starts once that address is ready.
     lastSeen = Date.now()
     if (o.codex?.executable) {
