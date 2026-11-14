@@ -120,10 +120,66 @@ or calls a vendor API directly:
 
 | AI / CLI | Background resume status | Policy / notes |
 | --- | --- | --- |
-| Antigravity (`agy`) | Out of scope | Disallowed on consumer plans (FAQ / terms section 6); uses own hooks / sidecar route (`#1396`). |
+| Antigravity (`agy`) | Planned (`#1396`) | The documented sidecar route, described below: setup writes its files only on the person's yes, and only the person enables it, in Antigravity's Automations page. `agy` background resume stays out of scope (FAQ / terms section 6). |
 | Cursor (`cursor-agent`) | Planned (`#1403`) | Pending vendor terms review, receiver wiring, and dated live record. |
 | Grok Build (`grok`) | Planned (`#1404`) | Pending vendor terms review, receiver wiring, and dated live record (separate from `--allow-resume`). |
 | Hermes Agent (`hermes`) | Planned (`#233`) | Pending vendor terms review, receiver wiring, and dated live record. |
+
+## Antigravity sidecar (#1396, setup half)
+
+Antigravity's desktop app runs a sidecar kept in `~/.gemini/config/sidecars/agent-board/` (`sidecar.json`
+and `sidecar.mjs`) only after the person switches it on in the app's Automations page. Setup writes
+those two files only on the person's yes (the `--antigravity-sidecar` flag, or the one question that
+defaults to no) and says that Google's terms may not cover it; it never switches the sidecar on, and an
+agent must not. `remove` takes both files away. The agy TUI runs no sidecars, and a closed app stops them.
+The sidecar touches no Antigravity sign-in, port or token: it uses only Antigravity's own `agentapi`,
+whose path the app gives it, and it never sees a message's text. The board half (the 10-second wait after
+a turn ends, the receipts, the card) is #1396 PR B; until it lands, a board answers the sidecar's poll
+with an error and the sidecar does nothing.
+
+The contract, as the sidecar speaks it. It finds the board the way the hooks do, from `server.lock` and
+`server.owner` in the messages folder; with no board it only checks those files every 30 s. While a board
+answers it polls every 2 s. **Each poll is the board's sign that the sidecar is alive**; the board decides
+in PR B how old a poll may be.
+
+| Call | Body | Answer |
+| --- | --- | --- |
+| `POST /api/messages/wake-poll` | `{"agent":"antigravity"}` | `{"wakes":[{"id","conversation","nonce"}]}` |
+| `POST /api/messages/wake-attempt` | `{"id","nonce"}` | `{"ok":true}`, or `{"ok":false,"code"}` |
+| `POST /api/messages/wake-report` | `{"id","nonce","status":"sent" or "failed","error"?}` | `{"ok":true}`, or `{"ok":false,"code":"NOT_STARTED"}` |
+
+For each wake the sidecar asks `wake-attempt` once and goes on only on `{"ok":true}`. It then checks that `conversation` is a UUID (one that is not is reported `failed`), and runs
+`agentapi send-message --title=Agent Board <conversation> "Agent Board: a message from the board is attached to this turn. Follow it."`
+(that is the English line; the sidecar sends the line in the setup language; one argument list, no shell, a 60 s limit). Exit 0 reports `sent`; anything else reports `failed` with a
+short code. The turn-start hook then hands the queued message over as it does for any hook mailbox.
+
+What each side may rely on (PR B writes the board's half to this):
+
+- A wake's `id` and `nonce` match a message id, `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`. One that does not is printed
+  as `INVALID_WAKE`; the sidecar asks nothing about it and runs nothing.
+- The board, not the sidecar, promises at most one wake per message. Before it runs `agentapi` the sidecar asks
+  `wake-attempt`; the board saves that the wake has started and only then answers `{"ok":true}`, once per
+  message. From then on `wake-poll` never returns that message again, whatever happens to `agentapi` or to the
+  report.
+- The sidecar runs `agentapi` only on that answer. Any other answer (`WAKE_STARTED` for a wake already started,
+  `NOT_HELD` for one the board does not hold), an error, or no answer runs nothing and reports nothing. It does
+  not ask again.
+- The sidecar keeps no record of wakes. A poll may return a wake it returned before, or the same wake twice, and
+  a restarted or second sidecar may ask for it; the attempt decides.
+- A wake handed out and never attempted may be returned by any later poll. The board returns at most one wake per
+  poll; the sidecar handles every entry it is given, in order.
+- A wake is tried once. One reported `failed`, or started and never reported, is not sent again; the message
+  stays queued and the turn-start hook hands it over at the conversation's next turn.
+- A report is repeatable: the same `id`, `nonce` and `status`. When a `wake-report` gets no answer, the sidecar
+  sends the same body again, up to three times in all, a second or two apart. The board treats a repeated report
+  of one wake as the same report and answers `{"ok":true}` again; a different `status` for a wake already
+  reported does not change it. A report still unanswered after the third try is only printed
+  (`report lost`), and that wake stays uncertain on the board: a card says the wake is unconfirmed, never
+  delivered, and the message is not sent again unseen. A report for a wake that was never started is answered
+  `NOT_STARTED`.
+- Where the connector already manages Antigravity's hooks, setup still writes the two sidecar files, on the same
+  yes, under a record of their own (`install-antigravity-sidecar.json`); it takes over none of the connector's
+  hooks, and `remove` takes the sidecar files out.
 
 ## Local storage
 
@@ -194,7 +250,7 @@ each disconnect frees its place. It has to run as your account or an administrat
 it, and the store frees itself within 30 minutes. Connector secrets and URLs must not be posted to
 issues. Messaging opens no listener beyond the existing loopback board; all LAN
 `/api/messages/*` requests are refused and LAN board JSON omits messaging and receipts.
-Setup installs no background receiver. Reopen with the same command and directory. Closing the board
+Setup installs no background receiver, with one exception: the Antigravity sidecar (below), which setup writes only on the person's yes and which Antigravity itself starts only after the person enables it. Reopen with the same command and directory. Closing the board
 disconnects its receivers; they must reconnect explicitly to the new board URL. Closing
 only the browser tab leaves the local service and receivers running. Local idle shutdown
 is disabled by default; `--idle-minutes 30` opts in. The LAN listener's separate timeout

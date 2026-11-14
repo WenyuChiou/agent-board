@@ -3805,7 +3805,10 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     }
     blur() { if (document.activeElement === this) document.activeElement = null }
     scrollIntoView() { this.scrolled = true }
-    setSelectionRange() {}
+    setSelectionRange(start, end) {
+      this.selectionStart = start
+      this.selectionEnd = end
+    }
     select() { this.isSelected = true }
     cloneNode() {
       const copy = new Element(this.tag)
@@ -14543,4 +14546,120 @@ test('serveModel projects a live in-flight receiver claim as queued instead of f
     const model = serveModel(view, [], EN, new Set(), false, { connections: entry.connections, messages: [entry.message] }, false, { now: entry.now ?? now, repoOf: () => null, versions: { board: '1.0.0', package: null } })
     assert.equal(firstRow(model)?.receipt?.status, 'uncertain', entry.name)
   }
+})
+
+test('a press held on a lost-result button survives a rebuild of the lost results (#1473)', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const base = redesignModel()
+  const askOne = { ...base.asks[0], key: 'ask-hide-1', text: 'Hide me first?', task: 'First plan', canHide: true, unhideKey: 'hidden:h1', isSending: false }
+  const askTwo = { ...base.asks[0], key: 'ask-gone-2', text: 'Answer me later?', task: 'Second plan', isSending: false }
+  let liveModel = { ...base, asks: [askOne, askTwo], hidden: [] }
+  let boardExtra = {}
+  const calls = []
+  const dom = await pageDom(html, liveModel, {
+    currentModel: () => liveModel,
+    currentBoard: () => boardExtra,
+    post: async request => {
+      calls.push(request)
+      if (request.body.type === 'hide') {
+        const ask = liveModel.asks.find(one => one.key === request.body.key)
+        liveModel = {
+          ...liveModel,
+          asks: liveModel.asks.filter(one => one.key !== request.body.key),
+          hidden: [...liveModel.hidden, { key: ask.unhideKey, project: ask.project, agent: ask.agent, task: ask.task, text: ask.text }],
+        }
+        return { ok: true, json: async () => ({ ok: true, note: EN.hidQuestion || 'Hidden' }) }
+      }
+      liveModel = {
+        ...liveModel,
+        asks: [...liveModel.asks, askOne],
+        hidden: liveModel.hidden.filter(one => one.key !== request.body.key),
+      }
+      return { ok: true, json: async () => ({ ok: true, note: 'Shown again' }) }
+    },
+  })
+  const cardButtons = (key) => {
+    const card = pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === key)
+    assert.ok(card, `card ${key}`)
+    return pressWalk(card).filter(node => node.tag === 'button')
+  }
+  const showAgainOf = label => {
+    const found = pageLostResults(dom, label).flatMap(node => pressWalk(node).filter(one => one.tag === 'button' && one.textContent === EN.showAgain))
+    assert.equal(found.length, 1, `${label}: exactly one Show again button`)
+    return found[0]
+  }
+  // Hide the first ask: it leaves a lost result with its own Show again button.
+  cardButtons('ask-hide-1').find(button => button.textContent === EN.answeredHide).click()
+  await dom.settle()
+  // The second ask's card leaves the board with no press of its own (a redraw drops it).
+  liveModel = { ...liveModel, asks: [] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  const firstShowAgain = showAgainOf('First plan')
+  assert.ok(pressWalk(dom.node('board')).includes(firstShowAgain), 'the first lost card is drawn before the hold')
+  // Hold a press on the first card's Show again, then let a background reply for the gone second card arrive.
+  dom.pointer('pointerdown', { pointerId: 1 })
+  boardExtra = { replies: [{ at: 2, note: 'Background answer', ok: true, key: 'ask-gone-2' }] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(pressWalk(dom.node('board')).includes(firstShowAgain), 'the held button is not replaced by the rebuild')
+  // Ending the hold runs the deferred rebuild: the first card is drawn again, now as a new button,
+  // and the background reply's lost card appears beside it.
+  dom.pointer('pointermove', { pointerId: 1, buttons: 0 })
+  const rebuilt = showAgainOf('First plan')
+  assert.notEqual(rebuilt, firstShowAgain, 'the deferred rebuild replaces the button only after the release')
+  assert.ok(pageLostResults(dom, '').some(node => node.textContent.includes('Background answer')), 'the deferred rebuild draws the background reply')
+  rebuilt.click()
+  await dom.settle()
+  assert.ok(calls.some(request => request.body.type === 'unhide' && request.body.key === 'hidden:h1'), 'the rebuilt first button still unhides its card')
+})
+
+test('a deferred lost-results rebuild keeps the focused copy field and its selection (#1473)', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const base = redesignModel()
+  const askCopy = { ...base.asks[0], key: 'ask-copy-1', text: 'Copy me?', task: 'Copy plan', command: 'echo synthetic-copy', canHide: true, isSending: false }
+  const askTwo = { ...base.asks[0], key: 'ask-gone-2', text: 'Answer me later?', task: 'Second plan', isSending: false }
+  let liveModel = { ...base, asks: [askCopy, askTwo], hidden: [] }
+  let boardExtra = {}
+  const dom = await pageDom(html, liveModel, {
+    currentModel: () => liveModel,
+    currentBoard: () => boardExtra,
+  })
+  const walk = node => [node, ...node.childNodes.flatMap(walk)]
+  const copyField = () => walk(dom.node('board')).find(node => node.tag === 'textarea' && node.value === 'echo synthetic-copy')
+  // The failed copy leaves a manual-copy textarea in the card's result slot.
+  const copyButton = dom.buttons().find(button => button.textContent === EN.serveCopyCommand)
+  assert.ok(copyButton, 'the copy command button is on the card')
+  copyButton.click()
+  await dom.settle()
+  assert.ok(copyField(), 'the failed copy draws its textarea in the slot')
+  // Both cards leave the board: the copy result becomes a lost result with its own copy field.
+  liveModel = { ...liveModel, asks: [] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(pageLostResults(dom, 'Copy plan'), 'the copy result leaves a lost card')
+  const area = copyField()
+  assert.ok(area, 'the lost card keeps the copy field')
+  // Focus the lost copy field and select a range, then hold a press in it while a background reply for the
+  // gone second card arrives.
+  area.focus()
+  area.setSelectionRange(2, 8)
+  assert.equal(dom.active(), area, 'the copy field is focused before the hold')
+  dom.pointer('pointerdown', { pointerId: 1 })
+  boardExtra = { replies: [{ at: 2, note: 'Background answer', ok: true, key: 'ask-gone-2' }] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(walk(dom.node('board')).includes(area), 'the held copy field is not replaced by the rebuild')
+  assert.equal(dom.active(), area, 'the copy field stays focused under the hold')
+  // Ending the hold runs the deferred rebuild: the copy field is drawn again, focused, with its selection.
+  dom.pointer('pointermove', { pointerId: 1, buttons: 0 })
+  const rebuilt = copyField()
+  assert.ok(rebuilt, 'the deferred rebuild draws the copy field again')
+  assert.notEqual(rebuilt, area, 'the deferred rebuild replaces the copy field only after the release')
+  assert.equal(dom.active(), rebuilt, 'the rebuilt copy field is focused again')
+  assert.equal(rebuilt.selectionStart, 2, 'the rebuilt copy field keeps the selection start')
+  assert.equal(rebuilt.selectionEnd, 8, 'the rebuilt copy field keeps the selection end')
+  assert.ok(pageLostResults(dom, '').some(node => node.textContent.includes('Background answer')), 'the deferred rebuild draws the background reply')
 })
