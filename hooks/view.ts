@@ -11,7 +11,7 @@ import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStale, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
 import { cellsOf, plainBar } from './progress-bar'
 import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
@@ -19,6 +19,8 @@ import { inboxQuestionOrigin, observeQuestions, partsKey2, partsKey3, pendingQue
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
 import { identity, isSilenceTask, isWorkingTask } from './grouping'
+import { deriveRowState, livenessOf } from './row-state'
+import type { RowState } from './row-state'
 import { closedCopies, mergeCopies, recordFolder } from './question-merge'
 import { foldRuns, mergeGroups, sessionIdentity, startersOf } from './runs'
 import type { RunGroup } from './runs'
@@ -166,6 +168,11 @@ export type TaskRow = {
   hasFutureTime?: boolean
   isHere: boolean
   auto: 'working' | 'waiting' | 'ended' | null
+  // The row's one derived state (#1317): from hooks/row-state.ts, so the pane,
+  // the page, the terminal board and --json all read the same state. Only
+  // 'unsure' changes the rendering yet; the rest are computed, not shown.
+  // The age is `at`/`when`, as before: now minus the block's last move.
+  rowState?: RowState
   // The block itself says state=ended (its session closed). `auto` also reads 'ended' for a finished,
   // stale or silent block, which does not mean the session is closed.
   isRecordedEnded?: true
@@ -900,6 +907,11 @@ export const buildView = (
   observe: typeof observeQuestions = observeQuestions,
   staleMs: number = STALE_MS,
   counts?: ViewIndexCounts,
+  // Blocks whose claimed live process is gone on this machine (#1092): their
+  // rows are treated as stopped/ended, like stale ones. The set holds block
+  // keys built by blockKey(auto), worked out per read by the shell and passed
+  // in as data.
+  gone: ReadonlySet<string> = new Set(),
 ): View => {
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
   // pair is no second row. What is left is what the rows, the questions and the counts read.
@@ -1007,10 +1019,10 @@ export const buildView = (
       const isDue = task.due !== null && days !== null && days <= 14
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
-      // Questions travel with an inactive session rather than asking for a live reply.
-      const stale = isStale(task.auto, now, updated, staleMs)
+      // Questions travel with an inactive or gone session rather than asking for a live reply.
+      const isGone = isStopped(task.auto, now, updated, staleMs, gone)
       const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
-      const isInactive = !isManual && (isComplete || stale || isSilence || task.auto?.state === 'ended')
+      const isInactive = !isManual && (isComplete || isGone || isSilence || task.auto?.state === 'ended')
       const repliedAt = task.auto?.replied
       const isRepliedTask = repliedAt !== undefined && Number.isFinite(repliedAt) && repliedAt >= (task.auto?.updated ?? 0)
       if (isRepliedTask && !isInactive && !isFrozen && task.auto !== null && task.auto.resume !== null && repliedAt <= now) {
@@ -1149,7 +1161,7 @@ export const buildView = (
           questionId: isFrozen ? undefined : observed?.keys[slotAt(index)],
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
-          ...(task.auto === null ? {} : { auto: task.auto.state === 'done' || isComplete || stale || isSilence ? 'ended' as const : task.auto.state, nativeSession: task.auto.resume ?? task.auto.session }),
+          ...(task.auto === null ? {} : { auto: task.auto.state === 'done' || isComplete || isGone || isSilence ? 'ended' as const : task.auto.state, nativeSession: task.auto.resume ?? task.auto.session }),
         })
       })
       const unresolved = taskQuestions.filter(item => {
@@ -1194,7 +1206,21 @@ export const buildView = (
         if (!isInactive || (unresolved.length === 0 && !task.steps.some(step => step.status === 'waiting'))) continue
       }
 
-      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || stale || isSilence ? 'ended' : task.auto.state
+      const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || isGone || isSilence ? 'ended' : task.auto.state
+      // The row's one derived state (#1317). The mirror is this session's own
+      // list, so another session's row carries none. The open ask is the
+      // ledger-resolved one: an open ask keeps its card in Needs you even on
+      // an unsure session (Q5), since 'unsure' is not confirmed ended.
+      const derivedRowState = deriveRowState({
+        auto: task.auto,
+        steps: task.steps,
+        mirror: null,
+        events: { hasSessionEnd: task.auto?.state === 'ended', lastEventAt: hasTime(lastActive) ? lastActive : 0, host: task.auto?.agent ?? '' },
+        liveness: livenessOf(task.auto, gone),
+        now,
+        staleMs,
+        hasOpenAsk: task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)),
+      })
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
       // CI or another agent, asks the person nothing: it stays with the work in progress.
@@ -1208,14 +1234,20 @@ export const buildView = (
       const { done, total } = countSteps(shown)
       const isAnsweredWaiting = !isBlocked && (auto === 'waiting' || isRepliedTask) && (task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index)) || isRepliedTask)
       const phrase =
-        auto === 'working' && isBlocked
+        // An unsure row keeps its shelf (Q3) and its lifecycle step text (Q4);
+        // only its status line changes, to the unsure wording with its age.
+        // A row the collapse already reads as ended keeps today's rendering:
+        // a working silence row already says "session stopped" on that shelf.
+        derivedRowState === 'unsure' && auto !== 'ended'
+          ? { status: s.rowUnsure(when), tone: 'quiet' as const }
+          : auto === 'working' && isBlocked
           ? stepPhrase(task, s, isPrompt)
           : isAnsweredWaiting
             ? { status: s.answeredWaiting, tone: 'quiet' as const }
             : auto === 'working'
             ? { status: task.auto?.agent === 'claude' ? s.claudeWorking : s.agentWorking(agentLabel(task.auto?.agent ?? '', s)), tone: 'accent' as const }
             : auto === 'ended'
-              ? { status: stale || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
+              ? { status: isGone || isSilence ? s.sessionStopped(when) : s.sessionEnded, tone: 'warn' as const }
               : !isBlocked && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) && !task.steps.some((step, index) => step.status === 'waiting' && isPrompt(index))
                 ? { status: task.steps.some((step, index) => step.status === 'waiting' && stageOf(index) === 'reminder') ? s.sectionQuestionReminders : s.sectionOlderQuestions, tone: 'quiet' as const }
                 : stepPhrase(task, s, isPrompt)
@@ -1236,6 +1268,7 @@ export const buildView = (
         ...(clock.isFuture ? { hasFutureTime: true } : {}),
         isHere,
         auto,
+        rowState: derivedRowState,
         steps: rowSteps(shown, s, isRepliedTask),
         ...(isManual ? { stepLines: task.steps.map(step => step.line), stepTask: { project: name, title: task.title, line: task.line, session: null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) } } : {}),
         cells: rowCells(shown, isRepliedTask),
@@ -1260,13 +1293,13 @@ export const buildView = (
         // already done offer confirm (#876).
         // A silence row past the stale time is accepted by both write guards (blocks.ts),
         // so it offers what they accept instead of nothing (#898).
-        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && (!isSilence || stale))))
+        confirm: (task.steps.some(step => step.status !== 'done' && step.status !== 'cancelled') && ((isManual && task.line >= 0) || (task.auto !== null && task.auto.state !== 'done' && auto === 'ended' && (!isSilence || isGone))))
           ? { project: name, title: task.title, line: task.line, session: task.auto?.session ?? null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) }
           : null,
         archive:
           isManual && task.line >= 0
             ? { project: name, title: task.title, line: task.line, session: null }
-            : auto === 'ended' && (!isSilence || stale) && task.auto !== null
+            : auto === 'ended' && (!isSilence || isGone) && task.auto !== null
               ? { project: name, title: task.title, line: task.line, session: task.auto.session }
               // A working row quiet past the Working now limit is no longer at work: the
               // person can archive it instead of waiting out the 12 h stale time (#1000).
@@ -1323,7 +1356,7 @@ export const buildView = (
       row: {
         key,
         project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
-        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', steps: [], cells: [], left: [], next: null, due: null, pr: '',
+        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', rowState: 'ended', steps: [], cells: [], left: [], next: null, due: null, pr: '',
         agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
         archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
       },
@@ -1442,14 +1475,14 @@ export const buildView = (
     let isInactiveSource = false
     if (source.kind === 'block' && !liveScopes.has(record.scope)) {
       // Unknown historical source shapes retain the existing review behavior.
-      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStale(saved.auto, now, observedTime(saved.auto, now, seen).updated, staleMs) || isMarksComplete(saved.steps))
+      isInactiveSource = saved !== null && saved.auto !== null && (saved.auto.state === 'ended' || saved.auto.state === 'done' || isStopped(saved.auto, now, observedTime(saved.auto, now, seen).updated, staleMs, gone) || isMarksComplete(saved.steps))
     }
-    const isStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
-    const stage = isStopped ? 'older' : age.stage
+    const rowStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
+    const stage = rowStopped ? 'older' : age.stage
     const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, dir: recordFolder(record) ?? saved?.auto?.dir ?? null, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), at: record.firstObserved, ...askOf(parts.text, parts.note), where: 'other', agent: agent === 'claude' ? '' : agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
     // The inbox file can be gone while its ledger copy still waits for the report.
     // Require the full binding and a newer source clock before moving its Resolve action.
-    const origin = replyRows.size > 0 && !isStopped ? inboxQuestionOrigin(source) : null
+    const origin = replyRows.size > 0 && !rowStopped ? inboxQuestionOrigin(source) : null
     const reply = origin === null ? undefined : replyFor(source.agent, source.session, origin.session, origin.at)
     if (reply !== undefined && !marked.has(record.id)) {
       provisional.push({ ...item, key: `${reply.key}::inbox-${sha256(record.id)}` })
@@ -1458,7 +1491,7 @@ export const buildView = (
     if (marked.has(record.id)) hidden.push(item)
     else {
       retained.push(item)
-      if (isStopped) stoppedQuestions.add(record.id)
+      if (rowStopped) stoppedQuestions.add(record.id)
     }
   }
   // A question that sits on a Stopped or recent row is also listed under Older, with the age it was

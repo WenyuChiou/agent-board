@@ -59,7 +59,7 @@ test('the board document has a schema version, the questions that need the perso
   assert.equal(document.needs[1].note, 'Need the sample file')
   assert.deepEqual(document.working[0], {
     agent: 'opencode', project: 'synthetic-api', title: 'Check endpoints', step: 'Compare responses',
-    done: 1, total: 2, updatedAt: new Date(NOW - 4 * MINUTE).toISOString(), age: '4 min ago', isUnsure: false,
+    done: 1, total: 2, updatedAt: new Date(NOW - 4 * MINUTE).toISOString(), age: '4 min ago', state: 'working', isUnsure: false,
   })
   assert.equal(document.waiting.find(one => one.title === 'Wait for CI').isUnsure, false)
   const unknown = document.waiting.find(one => one.title === 'Undated task')
@@ -83,6 +83,28 @@ test('the board document has a schema version, the questions that need the perso
     assert.ok(s.boardUsageAll.includes('[--print]'))
     assert.ok(!s.boardUsage.includes('--chat') && !s.boardUsageAll.includes('--chat'))
   }
+})
+
+test('the board document marks a quiet placeholder row unsure with its age and state (#1317)', () => {
+  // The Antigravity closed-window case: Stop was the last event, only the
+  // hook's placeholder is open, quiet past 30 min, no live process.
+  const view = viewOf(`## synthetic\n${block('a1000009', 'antigravity', 'waiting', 'Closed window work', '- [ ] Waiting for the next instruction', NOW - 31 * MINUTE)}`)
+  const document = documentOf(view)
+  const row = document.waiting.find(one => one.title === 'Closed window work')
+  assert.ok(row, 'the unsure row stays on its shelf, outside Needs you')
+  assert.equal(row.state, 'unsure')
+  assert.equal(row.isUnsure, true)
+  assert.equal(row.age, '31 min ago')
+  assert.equal(document.counts.needs, 0)
+  assert.equal(document.counts.working, 0)
+  assert.equal(document.counts.waiting, 1)
+
+  // The same row 29 min quiet is still waiting, not unsure.
+  const fresh = documentOf(viewOf(`## synthetic\n${block('a1000009', 'antigravity', 'waiting', 'Closed window work', '- [ ] Waiting for the next instruction', NOW - 29 * MINUTE)}`))
+  const still = fresh.waiting.find(one => one.title === 'Closed window work')
+  assert.equal(still.state, 'waiting')
+  assert.equal(still.isUnsure, false)
+  assert.equal(still.age, '29 min ago')
 })
 
 test('the board document hides the home folder and known credential forms, as the chat board does', () => {

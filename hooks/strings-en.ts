@@ -261,6 +261,8 @@ export const EN: Strings = {
     deepseek: 'DeepSeek',
   },
   sessionStopped: (when: string): string => `session stopped, last active ${when}`,
+  // A row quiet past 30 min with no live process: unsure, with its age (#1317).
+  rowUnsure: (when: string): string => `unsure, last active ${when}`,
   sessionEnded: 'session ended, can be taken over',
   uncategorized: '(uncategorized)',
   unnamed: '(unnamed)',
