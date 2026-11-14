@@ -2151,8 +2151,11 @@ const PAGE_SCRIPT = String.raw`
     question.setAttribute('title', text);
     add(body, question);
     if (isStuck) add(body, el('p', 'note', clean(ask.stuck && ask.stuck.reason)));
-    else if (ask.note) add(body, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
-    else if (ask.context) add(body, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
+    else {
+      if (ask.note) add(body, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
+      var askTitle = clean(String(ask.task || ''));
+      if (ask.context && (!ask.note || askTitle && (pg.titleCounts && pg.titleCounts[askTitle] || 0) > 1)) add(body, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
+    }
     if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
     var mode = ask.send;
     var answers = el('div', 'answers');
@@ -2402,10 +2405,11 @@ const PAGE_SCRIPT = String.raw`
     var detail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
     var status = ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
+    var sameTitle = (pg.titleCounts && pg.titleCounts[title] || 0) > 1 ? clean(row.contextLine || row.context) : '';
     var project = showProject ? clean(ref.repo || row.project) : '';
     if (sameName(project, title)) project = '';
     var progress = isTask && row.total > 0 && (section === 'working' || section === 'stopped' || section === 'others') ? progressNode(row.cells || '', row.done, row.total, current ? clean(current.text) : '') : null;
-    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
+    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st', status) : null, project ? el('span', '', project) : null, sameTitle ? el('span', '', sameTitle) : null, detail ? el('span', '', detail) : null);
     var titleNode = el('span', 'r-title', title);
     titleNode.setAttribute('title', title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
@@ -3377,6 +3381,17 @@ const PAGE_SCRIPT = String.raw`
     document.getElementById('shell').setAttribute('data-empty', !view.agents.length && !hasOwn ? '1' : '');
     if (!view.agents.length && !hasOwn) parts.push(freshPage(view));
     else {
+      var titleCounts = Object.create(null);
+      var seenKeys = Object.create(null);
+      view.needs.cards.concat(view.working, view.all.open, view.own.open, view.all.stopped, view.own.stopped, view.all.done, view.own.done).forEach(function (ref) {
+        var one = source(ref);
+        var id = one.session ? 's:' + one.session : String(ref.sourceKey || ref.key).replace(/^(?:stuck:|row:|ask:)+/, '').replace(/@[^@]*$/, '').replace(/::\d+$/, '');
+        if (seenKeys[id]) return;
+        seenKeys[id] = true;
+        var name = clean(String(one.title || one.task || ''));
+        if (name) titleCounts[name] = (titleCounts[name] || 0) + 1;
+      });
+      pg.titleCounts = titleCounts;
       var workingKeys = {};
       parts.push(needsSection(view));
       parts.push(sectionBlock(workingSection(view, workingKeys), 'working'));

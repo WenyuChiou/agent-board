@@ -3396,20 +3396,25 @@ test('two Antigravity sessions in one folder show different titles before either
   const ownerOf = id => createHash('sha256').update(`antigravity:${id}`).digest('hex')
   const firstRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(first)}.json`), 'utf8'))
   const secondRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(second)}.json`), 'utf8'))
-  assert.notEqual(firstRecord.title, secondRecord.title)
+  assert.equal(firstRecord.title, 'Local antigravity task')
+  assert.equal(secondRecord.title, 'Local antigravity task')
+  assert.notEqual(firstRecord.startedAt, secondRecord.startedAt)
+  assert.notEqual(firstRecord.context, secondRecord.context)
   // No hash in the title: a default view shows no session id, hash or file
   // path (parity checklist; dot's Question on #849). The distinction is the
   // session's start time, to the millisecond — second precision would let two
   // sessions started in the same second share a title.
   for (const [record, id] of [[firstRecord, first], [secondRecord, second]]) {
     assert.ok(!record.title.includes(ownerOf(id).slice(0, 8)), record.title)
-    assert.match(record.title, / · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, record.title)
+    assert.ok(Number.isSafeInteger(record.startedAt))
+    assert.match(record.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, record.context)
   }
   const text = readFileSync(f.progress, 'utf8')
   assert.ok(text.includes(`### ${firstRecord.title}`), text)
-  assert.ok(text.includes(`### ${secondRecord.title}`), text)
-  // Both distinct titles reach the default terminal view in every language, and
-  // the rendered output passes the never-shown check.
+  assert.ok(text.includes(`> Context: ${firstRecord.context}`), text)
+  assert.ok(text.includes(`> Context: ${secondRecord.context}`), text)
+  // Both distinct start times reach the default terminal view when two rows share a title,
+  // and the rendered output passes the never-shown check in every language.
   const { parseProgress } = await importTs('../hooks/parse.ts')
   const { buildView } = await importTs('../hooks/view.ts')
   const { boardText, boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
@@ -3419,8 +3424,8 @@ test('two Antigravity sessions in one folder show different titles before either
     const s = STRINGS[lang]
     const view = buildView(parseProgress(text), [], null, Date.now(), 0, {}, s)
     for (const drawn of [boardText(view, [], s, { width: 80, isColor: false }), boardScreen(view, [], emptyBoardState, s, { width: 80, isColor: false })]) {
-      assert.ok(drawn.includes(firstRecord.title), `${lang}: first title drawn`)
-      assert.ok(drawn.includes(secondRecord.title), `${lang}: second title drawn`)
+      assert.ok(drawn.includes(firstRecord.context), `${lang}: first context drawn`)
+      assert.ok(drawn.includes(secondRecord.context), `${lang}: second context drawn`)
       assert.deepEqual(neverShown(drawn), [], lang)
     }
   }
@@ -3447,10 +3452,13 @@ test('an Antigravity session created before the distinct title still gets one on
   const after = JSON.parse(readFileSync(recordFile, 'utf8'))
   // The re-title is a start time, not the old hash suffix: it differs from the
   // first event's title, carries no hash, and then stays put on later events.
-  assert.notEqual(after.title, 'Local antigravity task')
+  assert.equal(after.title, 'Local antigravity task')
   assert.ok(!after.title.includes(owner.slice(0, 8)), after.title)
-  assert.match(after.title, / · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, after.title)
-  assert.ok(readFileSync(f.progress, 'utf8').includes(`### ${after.title}`))
+  assert.ok(Number.isSafeInteger(after.startedAt))
+  assert.match(after.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, after.context)
+  const afterBoard = readFileSync(f.progress, 'utf8')
+  assert.ok(afterBoard.includes(`### ${after.title}`))
+  assert.ok(afterBoard.includes(`> Context: ${after.context}`))
   assert.equal(report('working', 'PostInvocation').status, 0)
   assert.equal(JSON.parse(readFileSync(recordFile, 'utf8')).title, after.title)
 }))
@@ -6095,7 +6103,7 @@ test('local status preserves cached session and step validation after owned-slot
 test('Antigravity reads only a current closing question from a bounded transcript tail', () => fixture(f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const file = join(f.home, 'conversation', 'transcript.jsonl')
-  const user = { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'SYNTHETIC-PRIVATE-PROMPT' }
+  const user = { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Closing question check\nSYNTHETIC-PRIVATE-PROMPT-BODY' }
   const model = content => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', content })
   const save = entries => f.save(file, entries.map(entry => typeof entry === 'string' ? entry : JSON.stringify(entry)).join('\n') + '\n')
   const send = (id, state, event, transcriptPath = file) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId: id, transcriptPath })
@@ -12286,3 +12294,593 @@ test('the local agent instructions tell Cursor to report from the project folder
     assert.ok(skill.includes('board --codex-report --agent cursor'), lang)
   }
 })
+
+const pbVarint = value => {
+  let n = BigInt.asUintN(64, BigInt(value))
+  const out = []
+  while (n >= 0x80n) {
+    out.push(Number((n & 0x7fn) | 0x80n))
+    n >>= 7n
+  }
+  out.push(Number(n))
+  return Buffer.from(out)
+}
+const pbTag = (field, wire) => pbVarint((field << 3) | wire)
+const pbBytes = (field, buf) => Buffer.concat([pbTag(field, 2), pbVarint(buf.length), buf])
+const pbSummaries = entries => Buffer.concat(entries.map(({ id, title, withUnknown = false }) => {
+  const inner = []
+  if (withUnknown) {
+    inner.push(pbTag(7, 0), pbVarint(-1n))
+    inner.push(pbTag(8, 5), Buffer.from([1, 2, 3, 4]))
+  }
+  if (title !== undefined) inner.push(pbBytes(1, Buffer.from(title, 'utf8')))
+  if (withUnknown) inner.push(pbTag(9, 1), Buffer.alloc(8, 0xaa))
+  const entry = [
+    ...(withUnknown ? [pbTag(4, 0), pbVarint(42)] : []),
+    pbBytes(1, Buffer.from(id, 'utf8')),
+    ...(withUnknown ? [pbTag(6, 5), Buffer.from([9, 8, 7, 6])] : []),
+    pbBytes(2, Buffer.concat(inner)),
+  ]
+  return pbBytes(1, Buffer.concat(entry))
+}))
+
+test('Antigravity protobuf and CLI JSON summary readers skip foreign entries and reject malformed data (#1401)', async () => {
+  const { findProtobufTitle, findCliJsonTitle, clientLocationFromPath } = await importTs('../scripts/antigravity-meta.ts')
+  const buf = pbSummaries([
+    { id: 'synthetic-foreign-1', title: 'SYNTHETIC-FOREIGN-TITLE-ONE', withUnknown: true },
+    { id: 'synthetic-target-id', title: '  Blue\nOr\x07Green\x85Title  ', withUnknown: true },
+    { id: 'synthetic-foreign-2', title: 'SYNTHETIC-FOREIGN-TITLE-TWO', withUnknown: true },
+  ])
+  assert.equal(findProtobufTitle(buf, 'synthetic-target-id'), 'Blue Or Green Title')
+  assert.equal(findProtobufTitle(buf, 'synthetic-missing-id'), null)
+  assert.equal(findProtobufTitle(Buffer.from([0x08, 0x80]), 'synthetic-target-id'), null)
+  assert.equal(findProtobufTitle(Buffer.from([0x00]), 'synthetic-target-id'), null)
+  assert.equal(findProtobufTitle(buf.subarray(0, buf.length - 5), 'synthetic-target-id'), 'Blue Or Green Title')
+
+  const jsonBuf = Buffer.from(JSON.stringify({
+    conversations: {
+      'synthetic-foreign-1': { summary: { Title: 'SYNTHETIC-FOREIGN-JSON' } },
+      'synthetic-cli-id': { summary: { Title: '  CLI\r\nTitle  ' } },
+    },
+  }))
+  assert.equal(findCliJsonTitle(jsonBuf, 'synthetic-cli-id'), 'CLI Title')
+  assert.equal(findCliJsonTitle(jsonBuf, 'synthetic-missing-id'), null)
+  assert.equal(findCliJsonTitle(Buffer.from('not-json{'), 'synthetic-cli-id'), null)
+  const unc = clientLocationFromPath('//srv/share/.gemini/antigravity-cli/brain/synthetic-id/transcript.jsonl')
+  assert.equal(unc?.kind, 'antigravity-cli')
+  if (process.platform === 'win32') assert.equal(unc?.clientDir, '\\\\srv\\share\\.gemini\\antigravity-cli')
+  else assert.equal(unc?.clientDir, '/srv/share/.gemini/antigravity-cli')
+})
+
+test('Antigravity desktop, IDE, and CLI rows use client summary titles and keep secondary start times (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const appId = 'synthetic-ag-app-1401'
+  const ideId = 'synthetic-ag-ide-1401'
+  const cliPbId = 'synthetic-ag-cli-pb-1401'
+  const cliJsonId = 'synthetic-ag-cli-json-1401'
+
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: 'synthetic-foreign-app', title: 'SYNTHETIC-FOREIGN-APP', withUnknown: true },
+    { id: appId, title: 'App Summary Title', withUnknown: true },
+  ]))
+  f.save(join(f.home, '.gemini', 'antigravity-ide', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: ideId, title: 'IDE Summary Title', withUnknown: true },
+  ]))
+  f.save(join(f.home, '.gemini', 'antigravity-cli', 'jetbox_summaries_proto.pb'), pbSummaries([
+    { id: cliPbId, title: 'CLI Proto Title' },
+  ]))
+  f.save(join(f.home, '.gemini', 'antigravity-cli', 'cache', 'conversation_metadata.json'), JSON.stringify({
+    conversations: {
+      [cliPbId]: { summary: { Title: 'CLI Json Secondary' } },
+      [cliJsonId]: { summary: { Title: 'CLI Json Title' } },
+      'synthetic-foreign-cli': { summary: { Title: 'SYNTHETIC-FOREIGN-CLI' } },
+    },
+  }))
+
+  const fire = (id, path) => f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: id,
+    transcriptPath: path,
+  })
+  const cases = [
+    [appId, join(f.home, '.gemini', 'antigravity', 'brain', appId, '.system_generated', 'logs', 'transcript.jsonl'), 'App Summary Title'],
+    [ideId, join(f.home, '.gemini', 'antigravity-ide', 'brain', ideId, '.system_generated', 'logs', 'transcript.jsonl'), 'IDE Summary Title'],
+    [cliPbId, join(f.home, '.gemini', 'antigravity-cli', 'brain', cliPbId, 'transcript.jsonl'), 'CLI Proto Title'],
+    [cliJsonId, join(f.home, '.gemini', 'antigravity-cli', 'brain', cliJsonId, 'transcript.jsonl'), 'CLI Json Title'],
+  ]
+  for (const [id, transcriptPath, expectedTitle] of cases) {
+    assert.equal(fire(id, transcriptPath).status, 0)
+    const owner = createHash('sha256').update(`antigravity:${id}`).digest('hex')
+    const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+    assert.equal(record.title, expectedTitle)
+    assert.equal(record.titleSource, 'summary')
+    assert.match(record.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/)
+  }
+  const board = readFileSync(f.progress, 'utf8')
+  for (const [, , expectedTitle] of cases) assert.ok(board.includes(`### ${expectedTitle}`), board)
+  assert.ok(!board.includes('SYNTHETIC-FOREIGN'))
+  assert.ok(!board.includes('Local antigravity task'))
+}))
+
+test('two Antigravity sessions with the same summary title show distinct start times on terminal and web boards (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const first = 'synthetic-ag-same-1-1401'
+  const second = 'synthetic-ag-same-2-1401'
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: first, title: 'Shared Summary Title' },
+    { id: second, title: 'Shared Summary Title' },
+  ]))
+  const fire = id => f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: id,
+    transcriptPath: join(f.home, '.gemini', 'antigravity', 'brain', id, 'transcript.jsonl'),
+  })
+  assert.equal(fire(first).status, 0)
+  const recordOf = id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`), 'utf8'))
+  const r1 = recordOf(first)
+  assert.equal(r1.title, 'Shared Summary Title')
+
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardText, boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { serveModel, servePage } = await importTs('../hooks/serve.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { LANGS } = await importTs('../hooks/i18n.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+
+  // When only a single session uses that title (even appearing in both working and open),
+  // collapsed rows do not surface its secondary Started context unnecessarily.
+  const webGroup = { now: Date.now(), repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } }
+  const singleText = readFileSync(f.progress, 'utf8')
+  const singleView = buildView(parseProgress(singleText), [], null, webGroup.now, 0, {}, STRINGS.en)
+  const singleScreen = boardScreen(singleView, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  assert.ok(singleScreen.includes('Shared Summary Title'))
+  assert.ok(!singleScreen.includes(r1.context))
+  const singleDom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), serveModel(singleView, [], STRINGS.en, new Set(), false, undefined, false, webGroup))
+  const singleVisible = singleDom.visible()
+  assert.ok(singleVisible.includes('Shared Summary Title'))
+  assert.ok(!singleVisible.includes(r1.context))
+
+  await new Promise(done => setTimeout(done, 15))
+  assert.equal(fire(second).status, 0)
+  const r2 = recordOf(second)
+  assert.equal(r2.title, 'Shared Summary Title')
+  assert.notEqual(r1.context, r2.context)
+
+  const text = readFileSync(f.progress, 'utf8')
+  for (const lang of LANGS) {
+    const s = STRINGS[lang]
+    const view = buildView(parseProgress(text), [], null, webGroup.now, 0, {}, s)
+    for (const drawn of [boardText(view, [], s, { width: 100, isColor: false }), boardScreen(view, [], emptyBoardState, s, { width: 100, isColor: false })]) {
+      assert.ok(drawn.includes('Shared Summary Title'), lang)
+      assert.ok(drawn.includes(r1.context), `${lang}: first context in terminal`)
+      assert.ok(drawn.includes(r2.context), `${lang}: second context in terminal`)
+      assert.deepEqual(neverShown(drawn), [], lang)
+    }
+    const dom = await pageDom(servePage(s, 'synthetic-nonce'), serveModel(view, [], s, new Set(), false, undefined, false, webGroup))
+    const visible = dom.visible()
+    assert.ok(visible.includes(r1.context), `${lang}: first context visible on web`)
+    assert.ok(visible.includes(r2.context), `${lang}: second context visible on web`)
+  }
+}))
+
+test('Antigravity prompt fallback clips first line, upgrades to summary preserving startedAt, and respects explicit reports (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const id = 'synthetic-ag-upgrade-1401'
+  const transcript = join(f.home, '.gemini', 'antigravity', 'brain', id, 'transcript_full.jsonl')
+  const longPrompt = `Prompt Title Edge Check: ${'A'.repeat(60)}\nSECRET-LINE-2-BODY`
+  f.save(transcript, [
+    { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: `\n  ${longPrompt}` },
+    { source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'SECRET-MODEL-REPLY' },
+    { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'SECRET-FOLLOWUP-PROMPT' },
+  ].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+
+  const fire = state => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', 'PreInvocation'], {
+    conversationId: id,
+    transcriptPath: transcript,
+    prompt: 'SECRET-STDIN-PROMPT',
+  })
+  assert.equal(fire('working').status, 0)
+  const owner = createHash('sha256').update(`antigravity:${id}`).digest('hex')
+  const recordFile = join(f.root, 'sessions', `${owner}.json`)
+  const fromPrompt = JSON.parse(readFileSync(recordFile, 'utf8'))
+  assert.equal(fromPrompt.titleSource, 'prompt')
+  assert.equal(fromPrompt.title, 'Prompt Title Edge Check…')
+  assert.ok(fromPrompt.title.length <= 48)
+  const startedAt = fromPrompt.startedAt
+  assert.ok(Number.isSafeInteger(startedAt))
+  assert.match(fromPrompt.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/)
+  let board = readFileSync(f.progress, 'utf8')
+  assert.ok(!board.includes('SECRET-'))
+
+  // Once a summary title appears in .pb, the row upgrades while preserving startedAt.
+  const pbPath = join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb')
+  f.save(pbPath, pbSummaries([{ id, title: 'Summary Upgraded Title' }]))
+  assert.equal(fire('working').status, 0)
+  const fromSummary = JSON.parse(readFileSync(recordFile, 'utf8'))
+  assert.equal(fromSummary.title, 'Summary Upgraded Title')
+  assert.equal(fromSummary.titleSource, 'summary')
+  assert.equal(fromSummary.startedAt, startedAt)
+
+  const wrappedTranscript = join(f.home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-wrapped-1401', 'transcript.jsonl')
+  f.save(wrappedTranscript, JSON.stringify({
+    source: 'USER_EXPLICIT',
+    type: 'USER_INPUT',
+    content: '<USER_REQUEST>\nTrim request framing first\nSECRET-LINE-2\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nSECRET-METADATA\n</ADDITIONAL_METADATA>',
+  }) + '\n')
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: 'synthetic-wrapped-1401',
+    transcriptPath: wrappedTranscript,
+  }).status, 0)
+  const wrappedRec = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update('antigravity:synthetic-wrapped-1401').digest('hex')}.json`), 'utf8'))
+  assert.equal(wrappedRec.titleSource, 'prompt')
+  assert.equal(wrappedRec.title, 'Trim request framing first')
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('SECRET-'))
+
+  // An explicit --codex-report title is never overwritten back by summary or prompt titles.
+  assert.equal(f.command(['--codex-report', '--agent', 'antigravity', '--session', id], {
+    title: 'Explicit Agent Report', project: 'demo', state: 'working', steps: ['- [~] Step'],
+  }).status, 0)
+  assert.equal(fire('working').status, 0)
+  const afterExplicit = JSON.parse(readFileSync(recordFile, 'utf8'))
+  assert.equal(afterExplicit.title, 'Explicit Agent Report')
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('SECRET-'))
+}))
+
+test('Antigravity unreadable, malformed, symlinked, or missing title files safely fall back and keep localization (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const dir = join(f.home, '.gemini', 'antigravity', 'brain', 'synthetic-fallback-1401')
+  const secret = join(f.home, 'synthetic-symlink-target.jsonl')
+  f.save(secret, JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-SYMLINK-CONTENT' }) + '\n')
+  const linkedTranscript = join(dir, 'transcript.jsonl')
+  mkdirSync(dir, { recursive: true })
+  try { symlinkSync(secret, linkedTranscript) } catch { /* symlinks may require privilege on some Windows hosts; malformed test covers fallback too */ }
+
+  const badTranscript = join(f.home, '.gemini', 'antigravity', 'brain', 'synthetic-bad-1401', 'transcript.jsonl')
+  f.save(badTranscript, '{not valid json\n')
+  const emptyWrappedTranscript = join(f.home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-empty-wrapped-1401', 'transcript.jsonl')
+  f.save(emptyWrappedTranscript, JSON.stringify({
+    source: 'USER_EXPLICIT',
+    type: 'USER_INPUT',
+    content: '<USER_REQUEST>\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nSECRET-METADATA-BODY\n</ADDITIONAL_METADATA>',
+  }) + '\n')
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), Buffer.from('corrupted-pb'))
+
+  const foreignTranscript = join(f.home, '.gemini', 'antigravity', 'brain', 'synthetic-other-session-1401', 'transcript.jsonl')
+  f.save(foreignTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-FOREIGN-SESSION-PROMPT' })}\n`)
+  const outsideTranscript = join(f.home, 'outside', 'transcript.jsonl')
+  f.save(outsideTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-OUTSIDE-PATH-PROMPT' })}\n`)
+  const fakeHomeTranscript = join(f.home, 'fake-home', '.gemini', 'antigravity', 'brain', 'synthetic-fake-home-1401', 'transcript.jsonl')
+  f.save(fakeHomeTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-FAKE-HOME-PROMPT' })}\n`)
+  const systemGeneratedTranscript = join(f.home, '.gemini', 'antigravity-ide', 'brain', 'synthetic-sysgen-1401', '.system_generated', 'logs', 'transcript.jsonl')
+  f.save(systemGeneratedTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'System generated prompt title' })}\n`)
+
+  const { isSessionAntigravityTranscript, readAntigravityFirstPrompt } = await importTs('../scripts/antigravity-meta.ts')
+  assert.equal(isSessionAntigravityTranscript(systemGeneratedTranscript, 'synthetic-sysgen-1401', f.home), true)
+  assert.equal(readAntigravityFirstPrompt(systemGeneratedTranscript, 'synthetic-sysgen-1401', f.home), 'System generated prompt title')
+  for (const [id, badPath] of [
+    ['synthetic-mismatch-1401', foreignTranscript],
+    ['synthetic-outside-1401', outsideTranscript],
+    ['synthetic-fake-home-1401', fakeHomeTranscript],
+    ['../synthetic-other-session-1401', foreignTranscript],
+    ['', foreignTranscript],
+    ['synthetic-sysgen-1401', join(f.home, '.gemini', 'antigravity-ide', 'brain', 'synthetic-sysgen-1401', '..', 'synthetic-other-session-1401', 'transcript.jsonl')],
+  ]) {
+    assert.equal(isSessionAntigravityTranscript(badPath, id, f.home), false, id)
+    assert.equal(readAntigravityFirstPrompt(badPath, id, f.home), null, id)
+  }
+
+  for (const [id, transcriptPath] of [
+    ['synthetic-fallback-1401', linkedTranscript],
+    ['synthetic-bad-1401', badTranscript],
+    ['synthetic-missing-1401', 'relative/transcript.jsonl'],
+    ['synthetic-empty-wrapped-1401', emptyWrappedTranscript],
+    ['synthetic-mismatch-1401', foreignTranscript],
+    ['synthetic-outside-1401', outsideTranscript],
+    ['synthetic-fake-home-1401', fakeHomeTranscript],
+  ]) {
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+      conversationId: id,
+      transcriptPath,
+    }).status, 0)
+    const owner = createHash('sha256').update(`antigravity:${id}`).digest('hex')
+    const rec = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+    assert.equal(rec.title, 'Local antigravity task')
+    assert.match(rec.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/)
+  }
+  const boardAfterRejected = readFileSync(f.progress, 'utf8')
+  assert.ok(!boardAfterRejected.includes('SECRET-SYMLINK-CONTENT'))
+  assert.ok(!boardAfterRejected.includes('SECRET-FOREIGN-SESSION-PROMPT'))
+  assert.ok(!boardAfterRejected.includes('SECRET-OUTSIDE-PATH-PROMPT'))
+  assert.ok(!boardAfterRejected.includes('SECRET-FAKE-HOME-PROMPT'))
+
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+    conversationId: 'synthetic-sysgen-1401',
+    transcriptPath: systemGeneratedTranscript,
+  }).status, 0)
+  const sysgenRec = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update('antigravity:synthetic-sysgen-1401').digest('hex')}.json`), 'utf8'))
+  assert.equal(sysgenRec.title, 'System generated prompt title')
+  assert.equal(sysgenRec.titleSource, 'prompt')
+
+  // Localized Started context writes clean UTF-8 in zh-TW and zh-CN.
+  for (const [lang, expected] of [['zh-TW', '> 背景：開始於 20'], ['zh-CN', '> 背景：开始于 20']]) {
+    const res = f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart', '--lang', lang], {
+      conversationId: `synthetic-i18n-${lang}-1401`,
+    }, { LANG: lang })
+    assert.equal(res.status, 0, res.stderr)
+    const board = readFileSync(f.progress, 'utf8')
+    assert.ok(board.includes(expected), `${lang}: expected ${expected} in\n${board}`)
+  }
+
+  // artifactDirectoryPath-only resolution, corrupt protobuf fallback to conversation_metadata.json,
+  // ask + row same-title disambiguation, plan-event preserving prompt upgrades, and legacy explicit context.
+  const cliPbCorrupt = 'synthetic-cli-corrupt-1401'
+  f.save(join(f.home, '.gemini', 'antigravity-cli', 'jetbox_summaries_proto.pb'), Buffer.from('corrupt-pb'))
+  f.save(join(f.home, '.gemini', 'antigravity-cli', 'cache', 'conversation_metadata.json'), JSON.stringify({
+    conversations: { [cliPbCorrupt]: { summary: { Title: 'Recovered CLI Title' } } },
+  }))
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: cliPbCorrupt,
+    artifactDirectoryPath: join(f.home, '.gemini', 'antigravity-cli', 'brain', cliPbCorrupt),
+  }).status, 0)
+  const corruptRec = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${cliPbCorrupt}`).digest('hex')}.json`), 'utf8'))
+  assert.equal(corruptRec.title, 'Recovered CLI Title')
+  assert.equal(corruptRec.titleSource, 'summary')
+
+  const planUpgradeId = 'synthetic-plan-upgrade-1401'
+  const planTranscript = join(f.home, '.gemini', 'antigravity', 'brain', planUpgradeId, 'transcript.jsonl')
+  f.save(planTranscript, `${JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Audit payment retries' })}\n`)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: planUpgradeId,
+    transcriptPath: planTranscript,
+  }).status, 0)
+  assert.equal(f.command(['--codex-report', '--agent', 'antigravity', '--session', planUpgradeId], {
+    state: 'working',
+    project: 'antigravity',
+    title: 'Ignored plan title',
+    planTitle: 'Ignored plan title',
+    steps: ['- [~] Check queue'],
+  }).status, 0)
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: planUpgradeId, title: 'Payment Retry Audit' },
+  ]))
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: planUpgradeId,
+    transcriptPath: planTranscript,
+  }).status, 0)
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${planUpgradeId}`).digest('hex')}.json`), 'utf8')).title, 'Payment Retry Audit')
+
+  const legacyExplicitId = 'synthetic-legacy-explicit-1401'
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+    conversationId: legacyExplicitId,
+  }).status, 0)
+  const legacyOwner = createHash('sha256').update(`antigravity:${legacyExplicitId}`).digest('hex')
+  const legacyRecFile = join(f.root, 'sessions', `${legacyOwner}.json`)
+  const legacyRec = JSON.parse(readFileSync(legacyRecFile, 'utf8'))
+  delete legacyRec.titleSource
+  legacyRec.title = 'Legacy Explicit Title'
+  legacyRec.context = 'Custom pre-1401 context'
+  writeFileSync(legacyRecFile, `${JSON.stringify(legacyRec, null, 2)}\n`)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: legacyExplicitId,
+  }).status, 0)
+  const afterLegacy = JSON.parse(readFileSync(legacyRecFile, 'utf8'))
+  assert.equal(afterLegacy.title, 'Legacy Explicit Title')
+  assert.equal(afterLegacy.context, 'Custom pre-1401 context')
+}))
+
+test('asking Antigravity row and working twin with the same title show start times on terminal and web boards (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const askId = 'synthetic-ag-ask-twin-1401'
+  const workId = 'synthetic-ag-work-twin-1401'
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: askId, title: 'Shared Ask Title' },
+    { id: workId, title: 'Shared Ask Title' },
+  ]))
+  const askTranscript = join(f.home, '.gemini', 'antigravity', 'brain', askId, 'transcript.jsonl')
+  f.save(askTranscript, [
+    JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Check release gate' }),
+    JSON.stringify({ source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Deploy now, OK?' }),
+  ].join('\n') + '\n')
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+    conversationId: askId,
+    transcriptPath: askTranscript,
+  }).status, 0)
+  await new Promise(done => setTimeout(done, 15))
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: workId,
+    transcriptPath: join(f.home, '.gemini', 'antigravity', 'brain', workId, 'transcript.jsonl'),
+  }).status, 0)
+  const recOf = id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`), 'utf8'))
+  const rAsk = recOf(askId)
+  const rWork = recOf(workId)
+  assert.notEqual(rAsk.context, rWork.context)
+
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { serveModel, servePage } = await importTs('../hooks/serve.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+
+  const view = buildView(parseProgress(readFileSync(f.progress, 'utf8')), [], null, Date.now(), 0, {}, STRINGS.en)
+  const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  assert.ok(screen.includes(rAsk.context), screen)
+  assert.ok(screen.includes(rWork.context), screen)
+  const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
+    now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },
+  }))
+  const visible = dom.visible()
+  assert.ok(visible.includes(rAsk.context), visible)
+  assert.ok(visible.includes(rWork.context), visible)
+}))
+
+test('upgrading a pre-#1401 Antigravity record preserves its legacy start time, and two asking twins with identical questions keep two web cards (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recOf = id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`), 'utf8'))
+  const recFileOf = id => join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`)
+
+  for (const [id, legacyTitle, expectedStamp] of [
+    ['synthetic-legacy-upgrade-en-1401', 'Local antigravity task · 2026-10-15 08:09:10.123', '2026-10-15 08:09:10.123'],
+    ['synthetic-legacy-upgrade-tw-1401', 'antigravity 本機任務 · 2026-10-15 08:09:11.456', '2026-10-15 08:09:11.456'],
+    ['synthetic-legacy-upgrade-cn-1401', 'antigravity 本地任务 · 2026-10-15 08:09:12.789', '2026-10-15 08:09:12.789'],
+  ]) {
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+      conversationId: id,
+    }).status, 0)
+    const legacy = recOf(id)
+    delete legacy.startedAt
+    delete legacy.titleSource
+    delete legacy.context
+    legacy.title = legacyTitle
+    writeFileSync(recFileOf(id), `${JSON.stringify(legacy, null, 2)}\n`)
+    if (id.endsWith('-en-1401')) {
+      f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+        { id, title: 'Upgraded Antigravity Title' },
+      ]))
+    }
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+      conversationId: id,
+    }).status, 0)
+    const upgraded = recOf(id)
+    assert.equal(upgraded.title, id.endsWith('-en-1401') ? 'Upgraded Antigravity Title' : 'Local antigravity task')
+    assert.equal(upgraded.context, `Started ${expectedStamp}`)
+  }
+
+  const askOneId = 'synthetic-ag-two-asks-one-1401'
+  const askTwoId = 'synthetic-ag-two-asks-two-1401'
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: askOneId, title: 'Shared Closing Question' },
+    { id: askTwoId, title: 'Shared Closing Question' },
+  ]))
+  for (const id of [askOneId, askTwoId]) {
+    const transcript = join(f.home, '.gemini', 'antigravity', 'brain', id, 'transcript.jsonl')
+    f.save(transcript, [
+      JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Check deployment readiness' }),
+      JSON.stringify({ source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Ship release now, OK?' }),
+    ].join('\n') + '\n')
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+      conversationId: id,
+      transcriptPath: transcript,
+    }).status, 0)
+    if (id === askOneId) await new Promise(done => setTimeout(done, 15))
+  }
+  const rOne = recOf(askOneId)
+  const rTwo = recOf(askTwoId)
+  assert.notEqual(rOne.context, rTwo.context)
+
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { serveModel, servePage } = await importTs('../hooks/serve.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+
+  const view = buildView(parseProgress(readFileSync(f.progress, 'utf8')), [], null, Date.now(), 0, {}, STRINGS.en)
+  const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  assert.ok(screen.includes(rOne.context), screen)
+  assert.ok(screen.includes(rTwo.context), screen)
+  const model = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
+    now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },
+  })
+  assert.equal(model.view?.needs.cards.length, 2)
+  const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), model)
+  const visible = dom.visible()
+  assert.ok(visible.includes(rOne.context), visible)
+  assert.ok(visible.includes(rTwo.context), visible)
+}))
+
+test('readAntigravityFirstPrompt stops at an empty first USER_INPUT and codexEvent preserves context (#1401)', () => fixture(async f => {
+  const { readAntigravityFirstPrompt } = await importTs('../scripts/antigravity-meta.ts')
+  const { codexEvent, codexReport } = await importTs('../hooks/codex.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const emptyFirstId = 'synthetic-ag-empty-first-1401'
+  const emptyFirstPath = join(f.home, '.gemini', 'antigravity', 'brain', emptyFirstId, 'transcript.jsonl')
+  f.save(emptyFirstPath, [
+    JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\n</USER_REQUEST>' }),
+    JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Private second prompt must never become title' }),
+  ].join('\n') + '\n')
+  assert.equal(readAntigravityFirstPrompt(emptyFirstPath, emptyFirstId, f.home), null)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: emptyFirstId,
+    transcriptPath: emptyFirstPath,
+  }).status, 0)
+  const rec = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${emptyFirstId}`).digest('hex')}.json`), 'utf8'))
+  assert.equal(rec.title, 'Local antigravity task')
+  assert.equal(rec.titleSource, 'fallback')
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('Private second prompt'))
+
+  const reported = codexReport(null, 'synthetic-context-1401', {
+    title: 'Context task',
+    project: 'agent-board',
+    context: 'Keep this context',
+    state: 'working',
+    steps: ['- [~] Working'],
+  }, '2026-11-14T03:00:00.000Z', STRINGS.en)
+  const afterEvent = codexEvent(reported, {
+    session_id: 'synthetic-context-1401',
+    hook_event_name: 'UserPromptSubmit',
+    turn_id: 'turn-context-1',
+  }, '2026-11-14T03:00:01.000Z', STRINGS.en)
+  assert.equal(afterEvent.context, 'Keep this context')
+}))
+
+test('two asking Antigravity sessions with question notes keep start times visible on terminal and web boards (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const noteOneId = 'synthetic-ag-note-asks-one-1401'
+  const noteTwoId = 'synthetic-ag-note-asks-two-1401'
+  const recOf = id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`), 'utf8'))
+  const pbSummaries = items => Buffer.concat(items.map(({ id, title }) => {
+    const idBuf = Buffer.from(id, 'utf8')
+    const idField = Buffer.concat([Buffer.from([0x0a, idBuf.length]), idBuf])
+    const tBuf = Buffer.from(title, 'utf8')
+    const sumBuf = Buffer.concat([Buffer.from([0x0a, tBuf.length]), tBuf])
+    const sumField = Buffer.concat([Buffer.from([0x12, sumBuf.length]), sumBuf])
+    const entry = Buffer.concat([idField, sumField])
+    return Buffer.concat([Buffer.from([0x0a, entry.length]), entry])
+  }))
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: noteOneId, title: 'Shared Note Question' },
+    { id: noteTwoId, title: 'Shared Note Question' },
+  ]))
+  for (const id of [noteOneId, noteTwoId]) {
+    const transcript = join(f.home, '.gemini', 'antigravity', 'brain', id, 'transcript.jsonl')
+    f.save(transcript, [
+      JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Prepare release rollout' }),
+      JSON.stringify({ source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Deploy release — should I proceed?' }),
+    ].join('\n') + '\n')
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+      conversationId: id,
+      transcriptPath: transcript,
+    }).status, 0)
+    if (id === noteOneId) await new Promise(done => setTimeout(done, 15))
+  }
+  const rOne = recOf(noteOneId)
+  const rTwo = recOf(noteTwoId)
+  assert.notEqual(rOne.context, rTwo.context)
+
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { serveModel, servePage } = await importTs('../hooks/serve.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+
+  const view = buildView(parseProgress(readFileSync(f.progress, 'utf8')), [], null, Date.now(), 0, {}, STRINGS.en)
+  assert.equal(view.waiting[0]?.note, 'should I proceed?')
+  assert.equal(view.waiting[1]?.note, 'should I proceed?')
+  const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  assert.ok(screen.includes('should I proceed?'), screen)
+  assert.equal(screen.split(rOne.context).length - 1, 1, screen)
+  assert.equal(screen.split(rTwo.context).length - 1, 1, screen)
+
+  const model = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
+    now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },
+  })
+  assert.equal(model.view?.needs.cards.length, 2)
+  const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), model)
+  const visible = dom.visible()
+  assert.ok(visible.includes('should I proceed?'), visible)
+  assert.ok(visible.includes(rOne.context), visible)
+  assert.ok(visible.includes(rTwo.context), visible)
+}))
