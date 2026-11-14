@@ -585,7 +585,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
-        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
+        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'uncertain' && one.error !== '') && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
       continue
@@ -667,7 +667,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         // A row says why only when a reply could otherwise be expected here.
         info: found ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
         ...lineOf,
-        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
+        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'uncertain' && one.error !== '') && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
         hasCopyBox: !(row.auto === 'ended' && row.question === null && send === 'none') && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined || found !== undefined && connection === undefined),
         // A Claude row has no target, so its closed session is the block's own state=ended.
@@ -1864,7 +1864,7 @@ const PAGE_SCRIPT = String.raw`
   // lives here so a board kept from redrawing under a press still applies it (#1468).
   function releaseFinishedAttempt(receipt, isClaude) {
     var isDone = isClaude ? receipt.status === 'rejected' || receipt.status === 'acknowledged' || receipt.error === 'DISMISSED' || receipt.error === 'EXPIRED'
-      : receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox;
+      : receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox || receipt.status === 'uncertain' && !receiptFailed(receipt) && Boolean(receipt.error);
     if (isDone) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
   }
   // The card's line for a message to a Claude session, by what its receipt says (#316).

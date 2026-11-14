@@ -5274,6 +5274,68 @@ test('1139 a timeout before Antigravity acceptance remains uncertain', async t =
   } finally { await receiver?.close() }
 })
 
+test('1486 a Codex card clears sending and accepts another message after a delivery turn ends uncertain', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now(), connection = { ...target, session: 'session1', expires: now + 120000 }
+  const askFile = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=session1 state=waiting updated=${new Date(now).toISOString()} -->\n### Ask delivery\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+  const rowFile = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=session1 state=waiting updated=${new Date(now).toISOString()} -->\n### Row delivery\n- [ ] Next step\n<!-- /auto session=abcdef01 -->\n`
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  const askView = buildView(parseProgress(askFile), [], null, now, 0, {}, EN)
+  const rowView = buildView(parseProgress(rowFile), [], null, now, 0, {}, EN)
+  const modelOf = (view, messages) => serveModel(view, [], EN, new Set(), false, { connections: [connection], messages }, false, group)
+
+  for (const error of ['TURN_NOT_COMPLETED', 'ACK_MISSING']) {
+    const rowPage = await pageDom(servePage(EN, 'synthetic'), modelOf(rowView, []), async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    const initialRowCard = rowPage.cards().find(one => rowPage.inputs(one).length)
+    rowPage.inputs(initialRowCard)[0].value = 'Continue'
+    rowPage.buttons(initialRowCard).find(one => one.textContent === EN.serveSend('Codex')).click()
+    await rowPage.flush()
+    const firstId = rowPage.requests[0].body.id
+
+    const sent = queueMessage({ messages: [] }, { id: firstId, target: connection.id, turn: connection.turn, text: 'Continue' }, 'board', connection, now).state
+    const claimed = claimMessages(sent, connection, now + 1, 'abcdef').state
+    const accepted = messageReceipt(claimed, connection, { id: firstId, nonce: 'abcdef', status: 'accepted' }, now + 2)
+    const settled = messageReceipt(accepted, connection, { id: firstId, nonce: 'abcdef', status: 'uncertain', error }, now + 3)
+
+    // Still-claimed (no error yet) keeps isSending true, while settled uncertain clears it on both ask and row cards.
+    assert.equal(modelOf(askView, claimed.messages).asks[0].isSending, true)
+    assert.equal(modelOf(rowView, claimed.messages).groups[0].rows[0].isSending, true)
+    const askModel = modelOf(askView, settled.messages)
+    const rowModel = modelOf(rowView, settled.messages)
+    assert.equal(askModel.asks[0].isSending, false, `${error}: ask.isSending`)
+    assert.equal(rowModel.groups[0].rows[0].isSending, false, `${error}: row.isSending`)
+
+    await rowPage.redraw(rowModel)
+    assert.ok(rowPage.text().includes(EN.messagesAcceptedUnconfirmed), rowPage.text())
+    assert.ok(!rowPage.text().includes(EN.serveSendBusy('Codex')), `${error} row card must not show serveSendBusy`)
+    const rowCard = rowPage.cards().find(one => rowPage.inputs(one).length)
+    const rowSend = rowPage.buttons(rowCard).find(one => one.textContent === EN.serveSend('Codex'))
+    assert.equal(rowSend.disabled, false, `${error} row send button must be enabled`)
+    // Sending the exact same words again allocates a fresh attempt id rather than resending firstId (#1486).
+    rowPage.inputs(rowCard)[0].value = 'Continue'
+    rowSend.click()
+    await rowPage.flush()
+    assert.equal(rowPage.requests.length, 2)
+    const secondId = rowPage.requests[1].body.id
+    assert.notEqual(secondId, firstId, `${error} retry after settled uncertain must allocate a fresh message id`)
+
+    const askPage = await pageDom(servePage(EN, 'synthetic'), askModel, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    askPage.cards().flatMap(card => askPage.buttons(card)).find(one => one.textContent === EN.pgWriteOwn)?.click()
+    assert.ok(askPage.text().includes(EN.messagesAcceptedUnconfirmed), askPage.text())
+    assert.ok(!askPage.text().includes(EN.serveSendBusy('Codex')), `${error} ask card must not show serveSendBusy`)
+    const askCard = askPage.cards().find(one => askPage.inputs(one).length)
+    const askSend = askPage.buttons(askCard).find(one => one.textContent === EN.serveSend('Codex'))
+    assert.equal(askSend.disabled, false, `${error} ask send button must be enabled`)
+
+    // Sending again from the board must neither fail with PAIR_BUSY nor be held behind the settled uncertain message.
+    const nextQueued = queueMessage(settled, { id: secondId, target: connection.id, turn: connection.turn, text: 'Continue' }, 'board', connection, now + 4)
+    const nextClaim = claimMessages(nextQueued.state, connection, now + 5, 'fedcba')
+    assert.deepEqual(nextClaim.messages.map(one => one.id), [secondId])
+  }
+})
+
+
 test('1139 a Codex timeout before acceptance remains uncertain when the start later returns', async t => {
   const thread = '11111111-2222-4333-8444-555555555555', receipts = []
   let receiver, polled = false, releaseStart

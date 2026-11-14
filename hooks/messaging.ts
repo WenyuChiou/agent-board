@@ -301,7 +301,7 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   const hops = from === 'unverified' ? HOP_LIMIT : 1 + (previous?.hops ?? 0)
   if (hops > HOP_LIMIT) throw new Error('HOP_LIMIT')
   const to = address(target.agent, target.session)
-  const open = state.messages.filter(one => one.to === to && isOpen(one) && !isHookDelivered(one))
+  const open = state.messages.filter(one => one.to === to && isOpen(one) && !(one.status === 'uncertain' && one.error !== '') && !isHookDelivered(one))
   if (open.length >= TARGET_OPEN_CAP) throw new Error('TARGET_BUSY')
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
@@ -318,7 +318,7 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   const isOwn = (one: Message): boolean => one.target === target.id && one.turn === target.turn
   // While a message of the session is in doubt, no queued message goes out. A claim can take one in doubt again
   // only when every one is this binding's and has lapsed, and only on a surface that message allows.
-  const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isHookDelivered(one))
+  const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !(one.status === 'uncertain' && one.error !== '') && !isHookDelivered(one))
   const canTake = (one: Message): boolean => one.status === 'queued' && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
   const pick = held.length === 0 ? state.messages.find(canTake) : held.every(one => isOwn(one) && isLapsed(one, now)) ? held.find(canReach) : undefined
   const messages = pick === undefined ? [] : [pick]
