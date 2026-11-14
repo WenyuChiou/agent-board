@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -248,6 +248,27 @@ test('a failing post-checkout hook in the checkout changes neither the verdict n
     const result = runMergeCheck({ run: bare, pr: 1, head: s.head, cwd: s.clone, checks: [passesWhenBoth], log: () => {} })
     assert.equal(result.ok, true, result.reason)
     assertClean(s.clone)
+  } finally {
+    removeLeftovers(s.clone)
+    await rm(s.base, { recursive: true, force: true })
+  }
+})
+
+test('a worktree add that fails after registering the worktree is a FAIL and leaves no registration or folder', async () => {
+  const s = await setup(addFiles)
+  const ours = () => readdirSync(tmpdir()).filter(name => name.startsWith(`ab-merge-check-${process.pid}-`)).sort()
+  const before = ours()
+  try {
+    // git can register the worktree and then fail (a checkout error, a full disk); the cleanup must still remove it.
+    const addFailsLate = (command, args, options) => {
+      const done = bare(command, args, options)
+      return args[0] === 'worktree' && args[1] === 'add' ? { ...done, status: 128, stderr: 'synthetic failure after the worktree was registered' } : done
+    }
+    const result = runMergeCheck({ run: addFailsLate, pr: 1, head: s.head, cwd: s.clone, checks: [passesWhenBoth], log: () => {} })
+    assert.equal(result.ok, false)
+    assert.match(result.reason, /^could not create a worktree on main: synthetic failure/)
+    assertClean(s.clone)
+    assert.deepEqual(ours(), before)
   } finally {
     removeLeftovers(s.clone)
     await rm(s.base, { recursive: true, force: true })
