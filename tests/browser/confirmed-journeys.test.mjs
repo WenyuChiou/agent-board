@@ -449,4 +449,51 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       await page.getByText('Inspect the second synthetic step').first().waitFor()
     })
   })
+  // One board, one press held by a synthetic event, one change in the file: does the board draw it before the press ends?
+  // `hold` and `end` run in the page; `drawsAfterEnd` says whether the change must show once `end` has run.
+  const pointerSource = "const hit = (type, id, buttons = 1) => document.dispatchEvent(new PointerEvent(type, { pointerId: id, buttons, bubbles: true }));"
+  const nextBoard = (page) => page.waitForResponse(answer => new URL(answer.url()).pathname === '/api/board')
+  const holdJourney = async (name, hold, end, drawsAfterEnd) => {
+    await browserFixture(name, async ({ page, progress, startServer }) => {
+      const working = step => block('a63ce003', 'antigravity', 'working', 'Synthetic presses', 'Keep the board moving', [step])
+      writeProgress(progress, working('- [~] Inspect the first synthetic step'))
+      await new BoardPage(page).open(await startServer())
+      await page.getByText('Inspect the first synthetic step').first().waitFor()
+      await page.evaluate(`(() => { ${pointerSource} ${hold} })()`)
+      writeProgress(progress, working('- [~] Inspect the second synthetic step'))
+      await page.waitForResponse(answer => new URL(answer.url()).pathname === '/api/board' && answer.status() === 200)
+      await nextBoard(page)
+      assert.equal(await page.getByText('Inspect the second synthetic step').count(), 0, 'the board drew under the held press')
+      await page.evaluate(`(() => { ${pointerSource} ${end} })()`)
+      if (drawsAfterEnd) await page.getByText('Inspect the second synthetic step').first().waitFor()
+      else {
+        await nextBoard(page)
+        await nextBoard(page)
+        assert.equal(await page.getByText('Inspect the second synthetic step').count(), 0, 'a press that is still held ended early')
+        await page.evaluate(`(() => { ${pointerSource} hit('pointerup', 1, 0); hit('pointerup', 2, 0) })()`)
+        await page.getByText('Inspect the second synthetic step').first().waitFor()
+      }
+    })
+  }
+
+  test('a cancelled press ends the hold and the board draws again (#1468)', { concurrency: false, timeout: 120_000 }, async () => {
+    await holdJourney('press-cancel', "hit('pointerdown', 1)", "hit('pointercancel', 1, 0)", true)
+  })
+
+  test('a window that loses focus ends the hold and the board draws again (#1468)', { concurrency: false, timeout: 120_000 }, async () => {
+    await holdJourney('press-blur', "hit('pointerdown', 1)", "window.dispatchEvent(new Event('blur'))", true)
+  })
+
+  test('a move with no button held ends the hold and the board draws again (#1468)', { concurrency: false, timeout: 120_000 }, async () => {
+    await holdJourney('press-move', "hit('pointerdown', 1)", "hit('pointermove', 1, 0)", true)
+  })
+
+  test('a release timer left over from an earlier press does not end a newer press (#1468)', { concurrency: false, timeout: 120_000 }, async () => {
+    // The mouse reuses one pointer id: down, up and down again before the release timer runs.
+    await holdJourney('press-stale-timer', "hit('pointerdown', 1)", "hit('pointerup', 1, 0); hit('pointerdown', 1)", false)
+  })
+
+  test('releasing one of two pointers keeps the hold while the other is down (#1468)', { concurrency: false, timeout: 120_000 }, async () => {
+    await holdJourney('press-two-pointers', "hit('pointerdown', 1); hit('pointerdown', 2)", "hit('pointerup', 2, 0)", false)
+  })
 })
