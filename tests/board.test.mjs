@@ -13374,6 +13374,55 @@ test('the agent first page keeps step notes and card notes on one line with thei
   } finally { await board.close() }
 })
 
+test('closing a clipped step or step fold right before a redraw stays closed and ignores its stale toggle (#1456)', async () => {
+  const step = 'Review the complete synthetic rollout plan'
+  const note = 'Detailed note repeated '.repeat(8).trim()
+  const source = groupedBlock('47700911', 'codex', 'working', 'clip-repo', 'Close race plan', [
+    `- [~] ${step} — ${note}`,
+    '- [ ] Second synthetic open step',
+    '- [ ] Third synthetic open step',
+  ])
+  const { board, model, html } = await groupedPage(source)
+  try {
+    const dom = await pageDom(html, model)
+    const findClip = () => clipsOf(dom).find(node => pressWalk(node).some(child => child.className === 'whole' && child.textContent?.includes(step)))
+    const findFold = () => pressWalk(dom.node('board')).find(node => node.tag === 'details' && !node.className?.includes('clip') && pressWalk(node).some(child => child.textContent?.includes('Second synthetic open step')))
+    const clip = findClip()
+    const fold = findFold()
+    assert.ok(clip && fold)
+    clip.open = true
+    clip.events.toggle()
+    fold.open = true
+    fold.events.toggle()
+    await dom.redraw(model)
+    const clipBefore = findClip()
+    const foldBefore = findFold()
+    assert.equal(clipBefore.open, true)
+    assert.equal(foldBefore.open, true)
+
+    // User closes both synchronously, and a redraw runs before either queued toggle event fires.
+    clipBefore.open = false
+    foldBefore.open = false
+    await dom.redraw(model)
+    const clipAfter = findClip()
+    const foldAfter = findFold()
+    assert.equal(clipAfter.open, false)
+    assert.equal(foldAfter.open, false)
+
+    // Even if the user re-opens them on the new DOM before the detached elements' stale toggles fire,
+    // the stale toggle events cannot overwrite the new open state.
+    clipAfter.open = true
+    clipAfter.events.toggle()
+    foldAfter.open = true
+    foldAfter.events.toggle()
+    clipBefore.events.toggle()
+    foldBefore.events.toggle()
+    await dom.redraw(model)
+    assert.equal(findClip().open, true)
+    assert.equal(findFold().open, true)
+  } finally { await board.close() }
+})
+
 test('a step longer than one line shows one line on the card and its full text on open', async () => {
   const dom = await pageDom(await sourcePage('en'), await sourceModel(ONE_LINE_FILE, ONE_LINE_NOW))
   const steps = pressWalk(dom.node('board')).filter(node => node.tag === 'li' && node.parentNode?.className === 'steps')

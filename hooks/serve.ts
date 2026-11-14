@@ -1386,6 +1386,31 @@ const PAGE_SCRIPT = String.raw`
   var last = '';
   var boardEtag = '';
   var opened = {};
+  var liveDetails = [];
+  // Read live <details>.open before redraw because HTML queues the toggle event asynchronously.
+  function syncDetails() {
+    for (var i = 0; i < liveDetails.length; i += 1) {
+      var entry = liveDetails[i];
+      entry.stale = true;
+      var isOpen = entry.box.open === true;
+      if (isOpen !== entry.wasOpen) opened[entry.ref] = isOpen;
+    }
+    liveDetails = [];
+  }
+  function detailsBox(ref, cls) {
+    var box = el('details', cls || '');
+    var initial = opened[ref] === true;
+    var entry = { ref: ref, box: box, wasOpen: initial, stale: false };
+    box.open = initial;
+    liveDetails.push(entry);
+    box.addEventListener('toggle', function () {
+      if (entry.stale) return;
+      var isOpen = box.open === true;
+      opened[ref] = isOpen;
+      entry.wasOpen = isOpen;
+    });
+    return box;
+  }
   var timer = null;
   var isClosed = false;
   var isUnreachable = false;
@@ -1916,9 +1941,7 @@ const PAGE_SCRIPT = String.raw`
   // pressing it, or Enter on it, opens the whole text in its place. An open one stays open across
   // a redraw (opened[ref]). The short text is the folded, capped copy when the model sent one.
   function clipped(short, whole, cls, ref) {
-    var box = el('details', 'clip ' + cls);
-    box.open = opened[ref] === true;
-    box.addEventListener('toggle', function () { opened[ref] = box.open; });
+    var box = detailsBox(ref, 'clip ' + cls);
     add(box, add(el('summary'), el('span', 'short', short || whole), el('span', 'whole', whole)));
     return box;
   }
@@ -2097,10 +2120,7 @@ const PAGE_SCRIPT = String.raw`
   // A fold of finished or further steps stays open across a redraw (opened[ref]), like a clipped text: the page
   // redraws whenever the board changes or the minute turns, and a fold the person opened must not close under them.
   function folded(label, list, ref) {
-    var box = el('details');
-    box.open = opened[ref] === true;
-    box.addEventListener('toggle', function () { opened[ref] = box.open; });
-    return add(box, el('summary', '', label), list);
+    return add(detailsBox(ref), el('summary', '', label), list);
   }
   function sends(mode) { return mode === 'send' || mode === 'connected' || mode === 'mailbox'; }
   // One question or stuck task on the Needs you sheet, answerable where it is.
@@ -3294,6 +3314,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function draw(model) {
     if (!model.view) return;
+    syncDetails();
     var view = model.view;
     board.querySelectorAll('textarea[data-key]').forEach(function (box) { pg.drafts[box.getAttribute('data-key')] = box.value; });
     var active = document.activeElement;
