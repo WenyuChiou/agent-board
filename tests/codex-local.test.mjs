@@ -12871,8 +12871,8 @@ test('two asking Antigravity sessions with question notes keep start times visib
   assert.equal(view.waiting[1]?.note, 'should I proceed?')
   const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
   assert.ok(screen.includes('should I proceed?'), screen)
-  assert.ok(screen.includes(rOne.context), screen)
-  assert.ok(screen.includes(rTwo.context), screen)
+  assert.equal(screen.split(rOne.context).length - 1, 1, screen)
+  assert.equal(screen.split(rTwo.context).length - 1, 1, screen)
 
   const model = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
     now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },

@@ -104,8 +104,9 @@ closes it. A board-only prompt keeps it waiting. The hook marks its question and
 then reuses their lines for later asks; ending a session leaves its question waiting. OpenCode fetches its last
 assistant message on idle and passes its text to the board script. Antigravity's hooks carry no reply or title text, so
 to replace the generic `Local antigravity task` title, the board performs a bounded read of the matching conversation's
-title from the client's local summary file (`agyhub_summaries_proto.pb`, `jetbox_summaries_proto.pb` or
-`cache/conversation_metadata.json`, skipping foreign entries by wire length) or, while untitled, only the clipped first
+title from the client's local summary file (`agyhub_summaries_proto.pb` or `jetbox_summaries_proto.pb`, skipping
+foreign protobuf entries by wire length without decoding them, or `cache/conversation_metadata.json`, where the CLI JSON file
+is parsed whole in memory and only the matching entry's title is kept) or, while untitled, only the clipped first
 line (at most 48 display columns) of the first `USER_INPUT` entry from the first 256 KiB of its own
 `transcript.jsonl` / `transcript_full.jsonl` (regular file only); and for closing questions, the last 256 KiB of that
 transcript, ignoring an earlier reply if a newer user prompt has appeared. Nothing of hook stdin prompts, remaining prompt

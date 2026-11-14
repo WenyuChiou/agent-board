@@ -379,8 +379,8 @@ execution-policy setting is changed.
 The reporter binds the native `conversationId`, ignoring hook stdin prompts,
 workspace paths, tool inputs and full model text. To name the conversation row instead
 of `Local antigravity task`, it reads only a matching title from the client's local
-summary file (`agyhub_summaries_proto.pb`, `jetbox_summaries_proto.pb` or
-`cache/conversation_metadata.json`, bounded regular read, skipping foreign entries) or,
+summary file (`agyhub_summaries_proto.pb` / `jetbox_summaries_proto.pb`, bounded regular read skipping foreign protobuf entries
+without decoding them, or `cache/conversation_metadata.json`, bounded regular read parsed whole in memory keeping only the matching title) or,
 while untitled, only the clipped first line of the first `USER_INPUT` entry from the
 start of that conversation's own `transcript.jsonl`. Its own session record retains at most 16
 event/state/timestamp observations. SessionStart and Stop mean waiting; PreInvocation
