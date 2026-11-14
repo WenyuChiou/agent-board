@@ -81,7 +81,7 @@ const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteK
 export const isRecordedRoute = (one: Connection, stateOfSession: (agent: string, session: string) => RowState | undefined, routes: readonly ReceiverRoutes[]): boolean => {
   const state = stateOfSession(one.agent, one.session)
   const route = state === undefined ? undefined : routeOf(routes, one.agent, routeKind(one.scope), state)
-  return route !== undefined && route.line !== 'none' && typeof route.record === 'string' && route.record !== '' && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface)
+  return route !== undefined && route.line !== 'none' && isNote(routeRecord(route, one.surface)) && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface)
 }
 
 export const sendDecision = (

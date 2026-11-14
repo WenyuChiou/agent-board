@@ -2471,7 +2471,7 @@ test('a store rename refused for another reason is not retried, and the receiver
 // decides whether a message was durably claimed before the response was lost.
 const pollingProxy = async (board, mode, onClaim) => {
   const upstream = new URL(board.address)
-  let faults = 0, polls = 0, registrations = 0
+  let faults = 0, polls = 0, registrations = 0, hasClaimed = false
   const server = createServer(async (req, res) => {
     try {
       let body = ''
@@ -2484,7 +2484,9 @@ const pollingProxy = async (board, mode, onClaim) => {
         res.writeHead(code, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ error: 'SYNTHETIC_POLL_FAILURE' }))
       }
-      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim' && mode !== 'pass') {
+      // forbidden-after-claim: the poll that hands a message out is answered, every later poll is refused for good (403).
+      if (isPoll && mode === 'forbidden-after-claim' && hasClaimed) return fail(403)
+      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim' && mode !== 'pass' && mode !== 'forbidden-after-claim') {
         if (mode === 'network' || mode === 'timeout') {
           faults += 1
           if (mode === 'network') req.socket.destroy()
@@ -2497,6 +2499,7 @@ const pollingProxy = async (board, mode, onClaim) => {
         method: req.method, headers: { 'x-board-token': upstream.searchParams.get('t'), 'content-type': 'application/json' }, body,
       })
       const text = await answer.text()
+      if (isPoll && mode === 'forbidden-after-claim' && JSON.parse(text).messages?.length) hasClaimed = true
       if (isPoll && faults === 0 && mode === 'after-claim' && JSON.parse(text).messages?.length) return fail(503)
       if (isPoll && onClaim && JSON.parse(text).messages?.length) await onClaim()
       res.writeHead(answer.status, { 'content-type': 'application/json' })
@@ -4654,9 +4657,12 @@ const codexTable = [
     const receiver = codexReceiver(board, daemon)
     try {
       await codexSend(board, await codexConnection(board), id)
-      // A closed daemon is known at once; a silent one is waited for until the request's own 10 second limit.
-      await waitFor(async () => (await codexMessage(board, id))?.status === 'uncertain')
-      await pause(1500)
+      // A closed daemon is known at once. A silent one is waited for until the request's own 10 second limit: the claim reads
+      // uncertain from the start, so the proof that the timeout came is its own receipt, the code the receiver sends after it.
+      if (variant === 'mute') await codexUncertain(board, id, 'OWNER_TIMEOUT')
+      else await waitFor(async () => (await codexMessage(board, id))?.status === 'uncertain')
+      // At least one more poll (every 2 seconds) passes, and nothing is sent again.
+      await pause(2500)
       assert.equal((await codexMessage(board, id)).status, 'uncertain')
       assert.equal(codexStarts(daemon), 1)
     } finally { await receiver.close() }
@@ -4782,6 +4788,41 @@ const codexTable = [
       assert.equal(codexStarts(daemon), 1)
     } finally { await receiver.close() }
     return [{ daemon, id: 'AB-CX-002' }]
+  } },
+  { name: 'the idle read answers after the deadline of the claim: no turn/start, and the card shows EXPIRED', fixture: 'fault', final: ['uncertain'], run: async ({ board, dir }) => {
+    const clock = ms => writeFileSync(join(dir, 'message-clock-offset'), String(ms))
+    // The rows before moved the board's clock; the receiver reads the real one when it measures the wait from the claim.
+    clock(0)
+    // Its own folder: the stand-in's log of an earlier row in this folder would count as starts.
+    const sub = join(dir, 'expired'); mkdirSync(sub)
+    const daemon = codexDaemon(sub, { readDelay: 1500 })
+    const receiver = codexReceiver(board, daemon, { ackMs: 1000 })
+    try {
+      assert.equal(await codexSend(board, await codexConnection(board), 'AB-CX-003'), 200)
+      await waitFor(async () => daemon.calls().some(call => call.method === 'thread/read'))
+      // The read began inside the deadline and answers idle after it.
+      await pause(2500)
+      assert.equal(codexStarts(daemon), 0)
+      clock(31 * 60_000)
+      const one = await codexMessage(board, 'AB-CX-003')
+      assert.deepEqual([one.status, one.error], ['uncertain', 'EXPIRED'])
+      clock(0)
+    } finally { await receiver.close() }
+    return [{ daemon, id: 'AB-CX-003' }]
+  } },
+  { name: 'the board client closes while the idle read is in flight: no turn/start, uncertain DISCONNECTED', fixture: 'shared', final: ['uncertain'], run: async ({ board, dir }) => {
+    const daemon = codexDaemon(dir, { readDelay: 3500 })
+    // The poll that hands the message out is answered and every later poll is refused for good, so the client closes about 2 seconds
+    // after the claim, 1.5 seconds before the read answers. The next tick is far off, so only the client's own close can stop the start.
+    const proxy = await pollingProxy(board, 'forbidden-after-claim')
+    const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 30_000 })
+    try {
+      assert.equal(await codexSend(board, await codexConnection(board)), 200)
+      await codexUncertain(board, 'AB-CX-001', 'DISCONNECTED')
+      await pause(2500)
+      assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).error, codexStarts(daemon)], ['DISCONNECTED', 0])
+    } finally { await receiver.close(); await proxy.close() }
+    return [{ daemon, id: 'AB-CX-001' }]
   } },
   { name: 'the turn ends with no ACK, failed, or with no status: uncertain with its code', fixture: 'shared', final: ['uncertain'], variants: [['ACK_MISSING', { start: 'silent', endFlag: 'end-turn' }], ['TURN_NOT_COMPLETED', { endStatus: 'failed' }], ['TURN_STATUS_UNKNOWN', { endStatus: 'none' }]], run: async ({ board, dir, variant: [code, config] }) => {
     const endFlag = config.endFlag && join(dir, 'case0', config.endFlag)
@@ -5903,6 +5944,24 @@ test('shape 27: a Codex live connection takes the mailbox\'s place only on its r
   assert.equal(busy.canSend, false)
   assert.equal((await w.call('/api/messages/disconnect', { connection: daemon.id, secret: daemon.secret, turn: 'session' })).status, 200)
   assert.deepEqual(busy, await w.card())
+})
+test('a live route whose only note for its surface is in surfaceRecords takes the place of the mailbox, on the card and in the API (#318)', async () => {
+  const w = await shapeCase({ agent: 'codex', kind: 'mailbox', surface: SURFACE_IDS.cli })
+  const note = line => ({ line, record: shapeNote, surfaces: [SURFACE_IDS.cli] }), none = { line: 'none', record: null, surfaces: [] }
+  shapeRoutes.push(
+    { agent: 'codex', kind: 'mailbox', routes: { idle: note('nextTurn'), working: note('nextTurn'), ended: none } },
+    { agent: 'codex', kind: 'live', routes: { idle: { line: 'now', record: null, surfaces: [SURFACE_IDS.codexDaemon], surfaceRecords: { [SURFACE_IDS.codexDaemon]: shapeNote } }, working: none, ended: none } })
+  const queue = await w.card()
+  assert.deepEqual([queue.delivery?.id, queue.line], [w.target.id, 'nextTurn'])
+  const live = (await w.call('/api/messages/register', { agent: 'codex', session: w.session, surface: SURFACE_IDS.codexDaemon, turn: 'session', scope: 'session', unclaimed: true })).body
+  // The card sends through the live connection, now.
+  const card = await w.card()
+  assert.deepEqual([card.delivery?.id, card.line, card.canSend], [live.id, 'now', true])
+  // The API refuses the shadowed mailbox, and sends through the live connection.
+  const viaMailbox = await w.direct('shape-surface-note')
+  assert.deepEqual([viaMailbox.status, viaMailbox.body.error], [409, 'NO_RECORDED_ROUTE'])
+  const direct = await w.direct('shape-surface-live', { target: live.id })
+  assert.deepEqual([direct.status, direct.body.line], [200, 'now'])
 })
 test('a peer send remains independent of recorded board routes', async () => {
   const w = await shapeCase({ agent: 'deepseek', kind: 'mailbox', surface: 'TUI' })

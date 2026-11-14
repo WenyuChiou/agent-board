@@ -9326,7 +9326,7 @@ export const LINES = [
 "var isRecordedRoute = (one, stateOfSession, routes) => {",
 "  const state = stateOfSession(one.agent, one.session);",
 "  const route = state === undefined ? undefined : routeOf(routes, one.agent, routeKind(one.scope), state);",
-"  return route !== undefined && route.line !== \"none\" && typeof route.record === \"string\" && route.record !== \"\" && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface);",
+"  return route !== undefined && route.line !== \"none\" && isNote(routeRecord(route, one.surface)) && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface);",
 "};",
 "var sendDecision = (targetId, connections, mailboxes, stateOfSession, routes, now) => {",
 "  const target = connections.find((one) => one.id === targetId) ?? mailboxes.find((one) => one.id === targetId);",

@@ -229,7 +229,9 @@ export const startCodexReceiver = ({
       waiters.add(finish)
     })
     // Whether this thread's connection is still this one's to deliver on.
-    const isHeld = () => attached.get(thread) === one && !one.isLost && !isClosed && daemon !== null
+    // The board client's own close counts too: it closes on a poll error that is not retryable or a lapsed lease, and the board then
+    // settles the claim as disconnected, so a read that answers after that starts nothing.
+    const isHeld = () => attached.get(thread) === one && !one.isLost && !isClosed && daemon !== null && one.receiver?.isClosed() !== true
     try {
       // Resuming a loaded thread subscribes this connection to its events without starting a turn.
       const statusEvents = state.statusEvents
@@ -270,7 +272,7 @@ export const startCodexReceiver = ({
             if (typeof status !== 'string') throw new Error('INVALID_OWNER_RESPONSE')
             // A busy answer is kept until a status notice says otherwise, so the next poll does not claim the message again.
             if (state.statusEvents === statusEvents && !state.pending) state.status = status
-            if (status === 'idle' && isIdle() && isHeld()) break
+            if (status === 'idle' && isIdle() && !isDone()) break
             await nextEvent()
           }
           let timer

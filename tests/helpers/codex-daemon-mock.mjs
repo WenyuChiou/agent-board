@@ -12,6 +12,7 @@
 //              and starts nothing, as the real daemon does (the text joins the turn).
 //   joinOnStart when true, the person's own turn starts just before the first turn/start is handled, so the call joins it
 //   joinLate   like joinOnStart, but that turn's notices (its start, its first user message) go out only after the answer
+//   readDelay  ms the answer to thread/read is held back (the thread's status is read when it is sent)
 //   readActive  when true, the person's own turn starts as thread/read is first asked: the answer says active, the notices follow
 //   endStatus  the status the delivery turn ends with: 'completed' (default), 'failed', 'interrupted', 'none' (no status field) or any other word
 //   approval   when true, the daemon asks its client for an approval during the turn
@@ -77,6 +78,7 @@ serveWebSocketProxy({
         begin(threadId)
         return
       }
+      if (config.readDelay) { setTimeout(() => emit({ id: value.id, result: { thread: thread(threadId) } }), config.readDelay); return }
       emit({ id: value.id, result: { thread: thread(threadId) } })
     }
     if (value.method === 'turn/start') {
