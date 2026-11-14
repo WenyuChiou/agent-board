@@ -2278,6 +2278,41 @@ test('a hub that cannot remove an old owner record gives its lock back and does 
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('a hub that cannot publish its owner record stops before its page is announced, gives its lock back and names the cause (#1472 review)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-owner-publish-'))
+  const runtime = join(dir, 'runtime')
+  mkdirSync(runtime, { mode: 0o700 })
+  const progress = join(dir, 'progress.md'), script = join(dir, 'board.mjs'), preload = join(dir, 'owner-fault.cjs')
+  const hash = createHash('sha256').update(progress).digest('hex').slice(0, 16)
+  const folder = join(runtimeFolder(runtime), `agent-board-${hash}-messages`)
+  const addressFile = join(runtimeFolder(runtime), `agent-board-${hash}.json`)
+  writeFileSync(progress, '# Synthetic\n')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${BOARD_SCRIPT}`)
+  // Every rename onto the owner record is refused, through each retry, as a file another program holds open refuses it.
+  writeFileSync(preload, `const fs = require('node:fs')
+const rename = fs.renameSync
+fs.renameSync = (from, to, ...args) => {
+  if (String(to).endsWith('server.owner')) throw Object.assign(new Error('synthetic owner rename refused'), { code: 'EPERM' })
+  return rename(from, to, ...args)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const options = {
+    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, XDG_RUNTIME_DIR: runtime },
+    windowsHide: true, encoding: 'utf8', timeout: 20_000,
+  }
+  try {
+    const result = spawnSync(process.execPath, ['-r', preload, script, '--serve-child'], options)
+    assert.equal(result.error, undefined, 'the hub stopped by itself')
+    assert.equal(result.status, 1)
+    assert.equal(result.stderr.trim(), 'MESSAGE_STORE_FAILED EPERM')
+    assert.ok(!result.stdout.includes('http://127.0.0.1:'), 'the page was never announced')
+    assert.equal(existsSync(join(folder, 'server.lock')), false, 'the lock was given back')
+    assert.equal(existsSync(join(folder, 'server.owner')), false)
+    assert.equal(existsSync(addressFile), false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('a lock that changed before it was moved aside is put back', () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-message-lock-aside-'))
   const lock = join(dir, 'server.lock')

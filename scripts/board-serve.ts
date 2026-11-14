@@ -78,6 +78,8 @@ export type ServeOptions = {
   onReady: (url: string, port: number) => boolean
   onStop: () => void
   onListenError?: (error: NodeJS.ErrnoException) => void
+  // The hub of the default folder could not publish its owner record: it has stopped and given its lock back (#1472 review).
+  onStoreError?: (error: unknown) => void
   idleMs: number
   // Opens the page in the person's browser at this address (with its one-time approval key) and
   // says whether a window opened. Absent: the board script opens the page itself, and that page
@@ -757,6 +759,21 @@ export const startServer = (o: ServeOptions): void => {
     isListening = true
     port = (server.address() as AddressInfo).port
     const url = `http://127.0.0.1:${port}/?t=${token}`
+    // A later --serve asks this address before moving a lock this hub left behind, and a hook reads a lock with no owner
+    // as a hub still starting, so every take waits. A hub that cannot publish its owner record would hold the lock that way
+    // for as long as it ran (#1472 review): the record goes out before the page is announced, and a failure stops the hub,
+    // gives the lock back and names the cause.
+    if (o.isDefaultMessagesDirectory) {
+      try { messaging.recordOwner(port, url) } catch (error) {
+        isStopping = true
+        try { messaging.close() } catch {}
+        server.close()
+        server.closeAllConnections()
+        if (o.onStoreError !== undefined) o.onStoreError(error)
+        else o.onStop()
+        return
+      }
+    }
     if (!o.onReady(url, port)) {
       stop()
       return
@@ -773,10 +790,6 @@ export const startServer = (o: ServeOptions): void => {
       if (o.idleMs > 0 && sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
     }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
     server.on('close', () => clearInterval(idle))
-    if (o.isDefaultMessagesDirectory) {
-      // A later --serve asks this address before moving a lock this hub left behind.
-      try { messaging.recordOwner(port, url) } catch {}
-    }
     const sweeper = setInterval(() => { try { o.sweep() } catch {} }, o.sweepMs)
     server.on('close', () => clearInterval(sweeper))
   })
