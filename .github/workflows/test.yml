@@ -500,7 +500,17 @@ jobs:
         shell: bash
         run: |
           npm install --prefix "$RUNNER_TEMP/agent-board-playwright" --no-save --package-lock=false --ignore-scripts --no-audit --no-fund playwright@1.62.1
-          node "$RUNNER_TEMP/agent-board-playwright/node_modules/playwright/cli.js" install --with-deps chromium
+          # The runner's Ubuntu package mirror is sometimes unreachable for a minute (DNS: "Temporary failure
+          # resolving azure.archive.ubuntu.com", 11 jobs 2026-11-11). This installs tools; it runs no test, so
+          # trying it again is not RULES R6's retry of a flaky test. Three tries, 20 s and 40 s apart.
+          for try in 1 2 3; do
+            node "$RUNNER_TEMP/agent-board-playwright/node_modules/playwright/cli.js" install --with-deps chromium && exit 0
+            [ "$try" = 3 ] && break
+            echo "::warning::browser tool install failed (try $try of 3); trying again in $((try * 20)) s"
+            sleep $((try * 20))
+          done
+          echo "::error::browser tool install failed three times"
+          exit 1
       - name: Browser tests present
         shell: bash
         run: ls tests/browser/*.test.mjs

@@ -979,3 +979,41 @@ test('the brief template retains the same local and CI execution policy as AGENT
   assert.ok(policy)
   assert.ok(brief.split('\n').includes('10. ' + policy))
 })
+
+// The browser job's tool install tries up to three times when the runner's Ubuntu package mirror is unreachable
+// (#1460). Its loop runs here as written in the workflow, under the bash options Actions uses, with a stand-in
+// installer that fails a set number of times and a sleep that returns at once.
+const gitBash = process.platform === 'win32' ? join(process.env.ProgramFiles ?? 'C:\Program Files', 'Git', 'bin', 'bash.exe') : '/bin/bash'
+test('the browser tool install stops at its first success, tries three times and then fails', async () => {
+  const text = await workflow()
+  const step = text.slice(text.indexOf('- name: Install isolated browser test tools'))
+  const start = step.indexOf('for try in 1 2 3; do')
+  assert.ok(start > 0, 'the install step has its three-try loop')
+  const loop = step.slice(start, step.indexOf('exit 1\n', start) + 'exit 1'.length)
+  const root = await mkdtemp(join(tmpdir(), 'ab-install-loop-'))
+  try {
+    const cli = join(root, 'agent-board-playwright', 'node_modules', 'playwright', 'cli.js')
+    await mkdir(dirname(cli), { recursive: true })
+    await writeFile(cli, "const fs = require('node:fs'); const n = Number(fs.readFileSync(process.env.TRIES, 'utf8')) + 1\n" +
+      "fs.writeFileSync(process.env.TRIES, String(n)); process.exit(n <= Number(process.env.FAILS) ? 1 : 0)\n")
+    const run = async fails => {
+      const tries = join(root, `tries-${fails}`)
+      await writeFile(tries, '0')
+      const result = spawnSync(gitBash, ['--noprofile', '--norc', '-eo', 'pipefail', '-c', 'sleep() { echo "slept $1"; }\n' + loop], {
+        encoding: 'utf8',
+        env: { ...process.env, RUNNER_TEMP: root, TRIES: tries, FAILS: String(fails), PATH: dirname(process.execPath) + (process.platform === 'win32' ? ';' : ':') + process.env.PATH },
+      })
+      return { status: result.status, tries: Number(await readFile(tries, 'utf8')), out: result.stdout }
+    }
+    assert.deepEqual(await run(0), { status: 0, tries: 1, out: '' })
+    const flaky = await run(2)
+    assert.deepEqual([flaky.status, flaky.tries], [0, 3])
+    assert.equal(flaky.out, '::warning::browser tool install failed (try 1 of 3); trying again in 20 s\nslept 20\n' +
+      '::warning::browser tool install failed (try 2 of 3); trying again in 40 s\nslept 40\n')
+    const down = await run(3)
+    assert.deepEqual([down.status, down.tries], [1, 3])
+    assert.match(down.out, /slept 40\n::error::browser tool install failed three times\n$/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
