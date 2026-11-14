@@ -286,7 +286,11 @@ messages, and accepted messages with an error become final `uncertain` / `EXPIRE
 30 minutes. They no longer block delivery, are never handed out again, and reject later
 receipts with `MESSAGE_EXPIRED`. A connected adapter's accepted delivery stays open while
 it waits for the turn; after disconnect, the 30-minute limit applies. The page continues
-to show expired messages as no reply confirmed.
+to show expired messages as no reply confirmed. The one exception is a wake the OpenCode
+plugin started: at 30 minutes it reads "sent, not confirmed" (`uncertain` / `UNCONFIRMED`)
+instead, keeps its text and takes a late accept or ACK, and becomes `EXPIRED` a day later.
+Only the board writes `UNCONFIRMED`; a receipt that sends it, like one that sends `EXPIRED`
+or `DISMISSED`, fails with `INVALID_RECEIPT`.
 
 The store holds at most 1,000 open messages (`MESSAGE_LIMIT`); finished ones do not count,
 so a store full of finished messages still accepts new ones, short of the 2,000-record
@@ -320,7 +324,7 @@ and an unknown id fails with `NOT_FOUND`.
 
 Open messages are queued, accepted, or uncertain without `EXPIRED` or `DISMISSED`. Each target
 `agent:session` permits at most three (`TARGET_BUSY`), and each source/target pair permits
-one (`PAIR_BUSY`). An accepted mailbox message with no ACK marked as awaited ("stdio MCP") is not counted in either. Sourceless sends count as source `board`. The hub assigns `hops: 1`
+one (`PAIR_BUSY`). An accepted mailbox message with no ACK marked as awaited ("stdio MCP") is not counted in either, nor is an OpenCode wake that reads "sent, not confirmed". Sourceless sends count as source `board`. The hub assigns `hops: 1`
 without a source; an authenticated source inherits one plus the hops of the message most
 recently claimed by its `agent:session`, or one if none. A third hop fails with `HOP_LIMIT`.
 Clients cannot set hops. Two live registrations for one agent/session mark both contested:

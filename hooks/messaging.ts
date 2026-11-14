@@ -208,9 +208,10 @@ export const originOf = (value: unknown): Origin => {
 
 export const isFinished = (one: Pick<Message, 'status' | 'error'>): boolean => ['acknowledged', 'rejected'].includes(one.status) || one.status === 'uncertain' && ['EXPIRED', 'DISMISSED'].includes(one.error)
 export const isOpen = (one: Pick<Message, 'status' | 'error'>): boolean => !isFinished(one)
-// An open message that still holds its target: a wake that reads "sent, not confirmed" keeps its text but no longer
-// holds the session's next message, as an open message did when it expired at the open limit (#1366 review).
-const isHolding = (one: Pick<Message, 'status' | 'error'>): boolean => isOpen(one) && one.error !== UNCONFIRMED
+// An open message that still holds its target: an OpenCode wake that reads "sent, not confirmed" keeps its text but no
+// longer holds the session's next message, as an open message did when it expired at the open limit (#1366 review).
+// Only the board writes that state, and only for an OpenCode wake, so any other message in it still counts.
+const isHolding = (one: Pick<Message, 'status' | 'error' | 'to' | 'ref'>): boolean => isOpen(one) && !(one.error === UNCONFIRMED && isAtMostOnce(one))
 // A finished message keeps its hash, not its text, and no more of its reply than an ACK line holds.
 const settled = (one: Message): Message => isFinished(one) && (one.text !== '' || one.reply.length > ACK_MAX) ? { ...one, text: '', reply: one.reply.slice(0, ACK_MAX) } : one
 export const pruneMessages = (state: MessageState, now: number): MessageState => {
@@ -372,7 +373,9 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   const status = input.status as Message['status']
   const reply = input.reply === undefined ? '' : input.reply
   const error = input.error === undefined ? '' : messageId(input.error)
-  if (error === 'EXPIRED' || error === 'DISMISSED') throw new Error('INVALID_RECEIPT')
+  // These are the board's own states: EXPIRED and DISMISSED it writes at the limit or for the person, and "sent, not
+  // confirmed" only for an OpenCode wake it started; a receiver cannot claim them (#1366 review).
+  if (error === 'EXPIRED' || error === 'DISMISSED' || error === UNCONFIRMED) throw new Error('INVALID_RECEIPT')
   if (status === 'acknowledged' && (typeof reply !== 'string' || reply.length > ACK_MAX || /[\r\n]/.test(reply) || reply !== `ACK ${one.nonce}` && !reply.startsWith(`ACK ${one.nonce} `))) throw new Error('ACK_REQUIRED')
   if (typeof reply !== 'string' || reply && messageText(reply) !== reply) throw new Error('INVALID_TEXT')
   if (one.status === 'acknowledged' || one.status === 'rejected') {

@@ -1797,3 +1797,15 @@ test('B17 a disconnection after the host accepted a wake keeps the time of the a
   const queued = b.messaging.queueMessage(late, { id: 'm2', target: box.id, turn: 'session', text: 'Synthetic second message' }, 'board', box, T0 + 2 * SEC + 31 * MIN).state
   assert.equal(b.take(queued, 'opencode', 's1', refOf(2), T0 + 2 * SEC + 32 * MIN).message?.id, 'm2')
 })
+
+test('B18 only an OpenCode wake that reads "sent, not confirmed" stops holding its session: a receiver cannot send that state, and another agent\'s message in it still holds the pair (#1366 review)', async () => {
+  const b = await mailbox()
+  const taken = b.take(b.seed('codex', 's2'), 'codex', 's2', refOf(1), T0)
+  assert.equal(taken.message.id, 'm1')
+  const box = taken.state.mailboxes.find(one => one.agent === 'codex' && one.session === 's2')
+  // "Sent, not confirmed" is the board's own state for an OpenCode wake; a receipt cannot claim it, as it cannot claim EXPIRED.
+  assert.throws(() => b.messaging.messageReceipt(taken.state, box, { id: 'm1', nonce: taken.message.nonce, status: 'uncertain', error: 'UNCONFIRMED' }, T0 + SEC), /INVALID_RECEIPT/)
+  // A store that still holds another agent's message in that state keeps it counted, so the pair stays busy.
+  const held = { ...taken.state, messages: taken.state.messages.map(one => one.id === 'm1' ? { ...one, status: 'uncertain', error: 'UNCONFIRMED', updated: T0 + SEC } : one) }
+  assert.throws(() => b.messaging.queueMessage(held, { id: 'm2', target: box.id, turn: 'session', text: 'Synthetic second message' }, 'board', box, T0 + 2 * SEC), /PAIR_BUSY/)
+})
