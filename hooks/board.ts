@@ -1067,7 +1067,10 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       // Under In progress a row also names its project, which has no heading there.
       const lead = [(isWorking || isStuck) && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
       // The step it is on, in the accent colour, where its status only says that it works.
-      const step = needs === null && row.isChatReplied !== true && (row.tone === 'quiet' || row.tone === 'accent')
+      // An unsure row keeps its derived status: the step it is on is the lifecycle
+      // placeholder, which would hide the unsure wording with its age (#1317).
+      const isUnsureRow = row.rowState === 'unsure' && row.auto !== 'ended'
+      const step = needs === null && !isUnsureRow && row.isChatReplied !== true && (row.tone === 'quiet' || row.tone === 'accent')
         ? row.steps.find(one => one.isCurrent && one.isReplyPending !== true && (one.status === 'doing' || one.status === 'todo')) : undefined
       const bar = rowBar(row, o, isWide)
       const barRoom = bar.width === 0 ? 0 : bar.width + 1

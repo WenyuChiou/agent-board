@@ -24,7 +24,7 @@ const loadSources = async () => {
   } finally { loader.deregister() }
 }
 
-const [{ parseProgress, STALE_MS }, { buildView }, { serveModel, servePage }, { boardText }, { boardStatus, boardCounts }, { boardDocument }, { STRINGS }, { queueMessage }, { mailboxId }] = await loadSources()
+const [{ parseProgress, STALE_MS }, { buildView }, { serveModel, servePage }, { boardText, boardScreen, emptyBoardState }, { boardStatus, boardCounts }, { boardDocument }, { STRINGS }, { queueMessage }, { mailboxId }] = await loadSources()
 const EN = STRINGS.en
 const NOW = Date.parse('2026-11-04T12:00:00Z')
 const MINUTE = 60_000
@@ -33,7 +33,9 @@ const MINUTE = 60_000
 // terminal board (boardText), --status (boardStatus) and --json
 // (boardDocument). The counts must agree on every case (#1317). The queued
 // case also re-verifies #1296: it records what the four surfaces do with a
-// queued answer, and does not claim #1296 fixed.
+// queued answer, and does not claim #1296 fixed. surfaces() also renders the
+// interactive terminal (boardScreen); the round-7 test checks it, since the
+// printed board and the interactive terminal can disagree (#1406).
 const block = (id, agent, state, title, steps, at = NOW, extra = '') =>
   `<!-- auto session=${id} agent=${agent} state=${state} updated=${new Date(at).toISOString()} ${extra} -->\n### ${title}\n${steps}\n<!-- /auto session=${id} -->\n`
 const groupOptions = { now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] }
@@ -41,9 +43,10 @@ const surfaces = (file, { messaging, pending = [], staleMs = STALE_MS } = {}) =>
   const view = buildView(parseProgress(file), [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, staleMs)
   const page = serveModel(view, pending, EN, new Set(), false, messaging, false, groupOptions)
   const terminal = boardText(view, pending, EN, { width: 100, isColor: false, messaging })
+  const interactive = boardScreen(view, pending, emptyBoardState, EN, { width: 100, isColor: false })
   const status = boardStatus(file, NOW, EN, staleMs, '', '', pending, messaging)
   const json = boardDocument(view, pending, [], EN, '/synthetic-home', false, NOW, groupOptions, undefined, messaging)
-  return { view, page, terminal, status, json }
+  return { view, page, terminal, interactive, status, json }
 }
 // The page's Needs-you number is its grouped count minus the answers already
 // held for the next turn; the other three surfaces already leave those out.
@@ -136,6 +139,28 @@ test('one fixture, four surfaces: an unsure row counts in no number anywhere (#1
   assert.equal(jsonRow.isUnsure, true)
   assert.equal(jsonRow.age, '31 min ago')
   assert.equal(out.json.counts.waiting, 1, 'the unsure row stays on its shelf in --json')
+})
+
+test('the interactive terminal keeps the unsure status instead of the placeholder step (#1317)', () => {
+  // codex_301 P1 on #1406: boardScreen replaced the unsure row's status with
+  // its current todo step — the lifecycle placeholder — so the interactive
+  // terminal never showed the unsure wording, while the printed board did.
+  const file = '## synthetic-api\n' +
+    block('a1000001', 'antigravity', 'waiting', 'Closed window work', '- [ ] Waiting for the next instruction', NOW - 31 * MINUTE) +
+    block('a1000002', 'codex', 'working', 'Write a test', '- [~] Write a test', NOW - MINUTE)
+  const out = surfaces(file)
+  assert.equal(out.view.groups.flatMap(group => group.rows).find(row => row.title === 'Closed window work').rowState, 'unsure')
+  assert.ok(out.interactive.includes(EN.rowUnsure(EN.minutesAgo(31))), `interactive terminal must show the unsure row with its age:\n${out.interactive}`)
+  assert.ok(!out.interactive.includes('Waiting for the next instruction'), `the placeholder step must not stand in for the unsure status:\n${out.interactive}`)
+  // Effective-ended control: the same shape, quiet past 30 min while working,
+  // derives unsure but its effective state is ended, so the interactive
+  // terminal must keep the stopped wording and never show the unsure wording.
+  const silentFile = '## synthetic-api\n' +
+    block('a1000001', 'antigravity', 'working', 'Silent window work', '- [ ] Waiting for the next instruction', NOW - 31 * MINUTE) +
+    block('a1000002', 'codex', 'working', 'Write a test', '- [~] Write a test', NOW - MINUTE)
+  const silent = surfaces(silentFile)
+  assert.equal(silent.view.stopped.find(row => row.title === 'Silent window work').rowState, 'unsure')
+  assert.ok(!silent.interactive.includes(EN.rowUnsure(EN.minutesAgo(31))), `interactive terminal must not show the unsure wording for an effectively ended row:\n${silent.interactive}`)
 })
 
 test('one fixture, four surfaces: an ended row sits on the stopped shelf everywhere', () => {
