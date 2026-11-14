@@ -406,6 +406,109 @@ test('a hook-only target takes one message per turn, oldest first, and an accept
   assert.equal(mailboxTake(state, now + 7).message.id, 'third')
 })
 
+test('hookMailbox defers only when the store is busy or times out, and exposes store errors (#1448)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-error-'))
+  try {
+    const missing = hookMailbox(join(dir, 'missing'), 500)
+    assert.equal(await missing.turn('codex', 's-missing', 'CLI', Date.now()), null)
+    assert.equal(missing.hasDeferred, false)
+    assert.equal(missing.error, null)
+
+    const corrupt = join(dir, 'corrupt')
+    mkdirSync(corrupt)
+    writeFileSync(join(corrupt, 'messages.json'), '{not json')
+    const corruptBox = hookMailbox(corrupt, 500)
+    assert.equal(await corruptBox.turn('codex', 's-corrupt', 'CLI', Date.now()), null)
+    assert.equal(corruptBox.hasDeferred, false)
+    assert.equal(corruptBox.error, 'INVALID_MESSAGE_STORE')
+
+    const unsafe = join(dir, 'unsafe')
+    mkdirSync(unsafe)
+    mkdirSync(join(unsafe, 'messages.json'))
+    const unsafeBox = hookMailbox(unsafe, 500)
+    assert.equal(await unsafeBox.turn('codex', 's-unsafe', 'CLI', Date.now()), null)
+    assert.equal(unsafeBox.hasDeferred, false)
+    assert.equal(unsafeBox.error, 'UNSAFE_MESSAGE_FILE')
+
+    const badOwner = join(dir, 'bad-owner')
+    mkdirSync(badOwner)
+    writeFileSync(join(badOwner, 'server.lock'), String(process.pid))
+    writeFileSync(join(badOwner, 'server.owner'), '{bad owner')
+    const badOwnerBox = hookMailbox(badOwner, 500)
+    assert.equal(await badOwnerBox.turn('codex', 's-owner', 'CLI', Date.now()), null)
+    assert.equal(badOwnerBox.hasDeferred, false)
+    assert.equal(badOwnerBox.error, 'INVALID_SERVER_OWNER')
+
+    writeFileSync(join(badOwner, 'server.owner'), JSON.stringify({ pid: process.pid + 1, url: 'http://127.0.0.1:9999/?t=synthetic' }))
+    assert.equal(await badOwnerBox.turn('codex', 's-owner', 'CLI', Date.now()), null)
+    assert.equal(badOwnerBox.hasDeferred, false)
+    assert.equal(badOwnerBox.error, 'INVALID_SERVER_OWNER')
+
+    const busy = join(dir, 'busy')
+    mkdirSync(busy)
+    const claim = claimMessageStore(busy)
+    try {
+      const busyBox = hookMailbox(busy, 500)
+      assert.equal(await busyBox.turn('codex', 's-busy', 'CLI', Date.now()), null)
+      assert.equal(busyBox.hasDeferred, true)
+      assert.equal(busyBox.error, null)
+    } finally { claim.release() }
+
+    const starting = join(dir, 'starting')
+    mkdirSync(starting)
+    writeFileSync(join(starting, 'server.lock'), String(process.pid))
+    const startingBox = hookMailbox(starting, 500)
+    assert.equal(await startingBox.turn('codex', 's-starting', 'CLI', Date.now()), null)
+    assert.equal(startingBox.hasDeferred, true)
+    assert.equal(startingBox.error, null)
+
+    // A simultaneous hub write can create `server.owner` before its bytes land; under a live lock
+    // an empty owner file still reads as deferred rather than `INVALID_SERVER_OWNER` (#1448).
+    writeFileSync(join(starting, 'server.owner'), '')
+    assert.equal(await startingBox.turn('codex', 's-starting-empty', 'CLI', Date.now()), null)
+    assert.equal(startingBox.hasDeferred, true)
+    assert.equal(startingBox.error, null)
+
+    // No board writes an owner record of only spaces or line ends: under a live lock it is a damaged record, an error.
+    writeFileSync(join(starting, 'server.owner'), ' \r\n')
+    assert.equal(await startingBox.turn('codex', 's-starting-blank', 'CLI', Date.now()), null)
+    assert.equal(startingBox.hasDeferred, false)
+    assert.equal(startingBox.error, 'INVALID_SERVER_OWNER')
+
+    const httpDir = join(dir, 'http-errors')
+    mkdirSync(httpDir)
+    writeFileSync(join(httpDir, 'server.lock'), String(process.pid))
+    let nextReply = { status: 503, body: { error: 'MESSAGE_STORE_BUSY' } }
+    const httpServer = createServer((_req, res) => {
+      res.statusCode = nextReply.status
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify(nextReply.body))
+    })
+    try {
+      await new Promise(done => httpServer.listen(0, '127.0.0.1', done))
+      const httpUrl = `http://127.0.0.1:${httpServer.address().port}/?t=synthetic`
+      writeFileSync(join(httpDir, 'server.owner'), JSON.stringify({ pid: process.pid, url: httpUrl }))
+      const httpBox = hookMailbox(httpDir, 500)
+
+      assert.equal(await httpBox.turn('codex', 's-http-busy', 'CLI', Date.now()), null)
+      assert.equal(httpBox.hasDeferred, true)
+      assert.equal(httpBox.error, null)
+
+      nextReply = { status: 409, body: { error: "EACCES: permission denied, open '/Users/private/messages.json'" } }
+      assert.equal(await httpBox.turn('codex', 's-http-eacces', 'CLI', Date.now()), null)
+      assert.equal(httpBox.hasDeferred, false)
+      assert.equal(httpBox.error, 'EACCES')
+
+      nextReply = { status: 409, body: { error: 'disk write failed under /Users/private/messages.json' } }
+      assert.equal(await httpBox.turn('codex', 's-http-path', 'CLI', Date.now()), null)
+      assert.equal(httpBox.hasDeferred, false)
+      assert.equal(httpBox.error, 'MAILBOX_FAILED')
+    } finally {
+      await new Promise(done => httpServer.close(done))
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('an uncertain mailbox message still blocks its target and is never handed out again', () => {
   const now = Date.now()
   const first = mailboxTake(mailboxQueue(mailboxSeed(now), 'uncertain-first'), now + 1)
@@ -2176,6 +2279,41 @@ test('a hub that cannot remove an old owner record gives its lock back and does 
     mkdirSync(join(dir, 'server.owner'))
     assert.throws(() => createMessaging(dir), error => error.code !== undefined && error.code !== 'ENOENT')
     assert.equal(existsSync(join(dir, 'server.lock')), false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a hub that cannot publish its owner record stops before its page is announced, gives its lock back and names the cause (#1472 review)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-owner-publish-'))
+  const runtime = join(dir, 'runtime')
+  mkdirSync(runtime, { mode: 0o700 })
+  const progress = join(dir, 'progress.md'), script = join(dir, 'board.mjs'), preload = join(dir, 'owner-fault.cjs')
+  const hash = createHash('sha256').update(progress).digest('hex').slice(0, 16)
+  const folder = join(runtimeFolder(runtime), `agent-board-${hash}-messages`)
+  const addressFile = join(runtimeFolder(runtime), `agent-board-${hash}.json`)
+  writeFileSync(progress, '# Synthetic\n')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${BOARD_SCRIPT}`)
+  // Every rename onto the owner record is refused, through each retry, as a file another program holds open refuses it.
+  writeFileSync(preload, `const fs = require('node:fs')
+const rename = fs.renameSync
+fs.renameSync = (from, to, ...args) => {
+  if (String(to).endsWith('server.owner')) throw Object.assign(new Error('synthetic owner rename refused'), { code: 'EPERM' })
+  return rename(from, to, ...args)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const options = {
+    env: { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, XDG_RUNTIME_DIR: runtime },
+    windowsHide: true, encoding: 'utf8', timeout: 20_000,
+  }
+  try {
+    const result = spawnSync(process.execPath, ['-r', preload, script, '--serve-child'], options)
+    assert.equal(result.error, undefined, 'the hub stopped by itself')
+    assert.equal(result.status, 1)
+    assert.equal(result.stderr.trim(), 'MESSAGE_STORE_FAILED EPERM')
+    assert.ok(!result.stdout.includes('http://127.0.0.1:'), 'the page was never announced')
+    assert.equal(existsSync(join(folder, 'server.lock')), false, 'the lock was given back')
+    assert.equal(existsSync(join(folder, 'server.owner')), false)
+    assert.equal(existsSync(addressFile), false)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
