@@ -10,6 +10,24 @@ import { seenWithin, noMachineIds, noSilentPress } from './expect.mjs'
 import { PANE_MS } from './budget.mjs'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
+// On Linux a process that has exited but that its parent has not collected yet still answers
+// signal 0; it is gone all the same (#1478).
+export const isZombie = pid => {
+  if (process.platform !== 'linux') return false
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).startsWith('Z')
+  } catch { return false }
+}
+// What /proc says about a process, for a teardown failure message: its state and its parent.
+const procState = pid => {
+  if (process.platform !== 'linux') return 'no /proc here'
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const [state, parent] = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    return `state ${state}, parent ${parent}`
+  } catch { return 'no /proc entry' }
+}
 const ownedChildren = new Set()
 const ownedServers = new Set()
 process.once('exit', () => {
@@ -371,7 +389,8 @@ export const serve = {
     }
     const alive = () => {
       if (!Number.isInteger(pid) || pid <= 0) return false
-      try { process.kill(pid, 0); return true } catch { return false }
+      try { process.kill(pid, 0) } catch { return false }
+      return !isZombie(pid)
     }
     const isRecorded = () => {
       if (!recordPath || !url) return false
@@ -396,13 +415,14 @@ export const serve = {
       clearTimeout(timer)
       discover()
       try {
-        if (url) await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).catch(() => {})
+        const isCloseTaken = url ? await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).then(response => response.ok, () => false) : false
         if (pid) {
           for (let n = 0; n < 30 && alive(); n++) await pause(50)
           // Recheck the record and authenticated endpoint before killing a detached server.
           await owner.killRecorded()
           for (let n = 0; n < 30 && alive(); n++) await pause(50)
-          assert.ok(!alive(), `Owned server ${pid} survived teardown`)
+          // Say what teardown saw, so a server that outlives it names its own cause (#1478).
+          if (alive()) assert.fail(`Owned server ${pid} survived teardown (close ${isCloseTaken ? 'answered OK' : 'not answered OK'}; record ${isRecorded() ? 'still names it' : 'gone'}; ${procState(pid)})`)
         }
         isStopped = true
       } finally { ownedServers.delete(owner) }

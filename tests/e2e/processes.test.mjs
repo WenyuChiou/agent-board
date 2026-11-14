@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { killChecked, processList, stopTree } from './lib/processes.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
+import { isZombie } from './lib/surfaces.mjs'
 import { makeWorld } from './lib/world.mjs'
 
 const within = async (promise, ms, message) => {
@@ -134,5 +135,35 @@ test('L6 soak processes: a process whose start time no longer matches its listed
       try { await world.close() } catch (error) { errors.push(error) }
     }
     if (errors.length > 0) throw new AggregateError(errors, 'Process test cleanup failed')
+  }
+})
+
+test('a process that has exited but is not yet collected reads as gone on Linux (#1478)', { skip: process.platform !== 'linux' && 'only Linux keeps an exited process until its parent collects it' }, async () => {
+  const world = makeWorld()
+  const env = Object.fromEntries(Object.entries(world.env).filter(([name]) => name !== 'NODE_OPTIONS' && !name.startsWith('E2E_')))
+  // `exec sleep 5` replaces the shell, and sleep never collects the shell's background child.
+  const parent = spawnIsolated('/bin/sh', ['-c', 'sleep 0.2 & echo $!; exec sleep 5'], { env, cwd: world.root, stdio: ['ignore', 'pipe', 'ignore'] })
+  const closed = new Promise(done => parent.once('close', done))
+  try {
+    // A shell that ends, or fails to start, before it prints fails the read instead of leaving it waiting.
+    const lines = createInterface({ input: parent.stdout })
+    const line = await within(new Promise((done, reject) => {
+      lines.once('line', done)
+      lines.once('close', () => reject(new Error('the shell ended before it printed its child pid')))
+      parent.once('error', reject)
+    }), 5000, 'the shell did not print its child pid')
+    const child = Number(line)
+    // The deadline sits inside the loop, so a child that is never seen in state Z fails the test and stops the polling.
+    const deadline = Date.now() + 5000
+    while (!isZombie(child)) {
+      assert.ok(Date.now() < deadline, 'the background child did not exit')
+      await new Promise(done => setTimeout(done, 25))
+    }
+    assert.doesNotThrow(() => process.kill(child, 0), 'signal 0 still reaches the exited child')
+    assert.equal(isZombie(parent.pid), false)
+  } finally {
+    parent.kill()
+    await within(closed, 5000, 'The test process did not close during cleanup')
+    await world.close()
   }
 })
