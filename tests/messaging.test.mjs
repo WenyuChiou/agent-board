@@ -5,9 +5,10 @@ import { basename, join } from 'node:path'
 import { createServer, request } from 'node:http'
 import { createHash } from 'node:crypto'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
-import { after, test } from 'node:test'
+import { after, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+import { partTest } from '../scripts/ci-impact.mjs'
 import { turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/message-client.mjs'
@@ -19,6 +20,10 @@ import { claimMessageStore } from '../scripts/message-store-claim.ts'
 import { classifyMessageStoreFiles, isMessageStoreClean, readMessageStoreFiles } from './e2e/lib/message-store-files.mjs'
 import { block as writeBlock } from './e2e/lib/writers.mjs'
 import { privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
+
+// The Windows exchange job runs this file in two parts, and each part runs its share of the tests:
+// the job used 75-80% of its ten-minute limit with the file whole (#1445).
+const test = partTest(nodeTest)
 
 // The server store and page modules use the host's extensionless imports; resolve only those
 // local paths, as tests/prompt-hooks.test.mjs does.
