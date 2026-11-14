@@ -187,20 +187,34 @@ export const cutOffScopes = (projects: readonly ProgressProject[], cut: readonly
 // step, so a real board's ledger grew past the host's 4 MiB write limit, and every edit above a
 // block wrote a new copy of each of its questions (#419).
 export const sourceData = (task: ProgressTask): string => {
-  const stepOptions = Object.fromEntries(task.steps.flatMap(step => step.status === 'waiting' && (step.options ?? []).length >= 2 ? [[sha256(questionWords(step.text)).slice(0, 8), step.options!]] : []))
+  const counts = new Map<string, number>()
+  const indexed = task.steps.map(step => {
+    const words = questionWords(step.text)
+    const occurrence = (counts.get(words) ?? 0) + 1
+    counts.set(words, occurrence)
+    return { step, hash: sha256(words).slice(0, 8), words, occurrence }
+  })
+  const stepOptions = Object.fromEntries(indexed.flatMap(({ step, hash, words, occurrence }) =>
+    step.status === 'waiting' && (step.options ?? []).length >= 2
+      ? [[(counts.get(words) ?? 0) > 1 ? `${hash}:${occurrence}` : hash, step.options!]]
+      : []
+  ))
   return JSON.stringify({ auto: task.auto, steps: task.steps.map(step => step.status), ...(Object.keys(stepOptions).length === 0 ? {} : { stepOptions }) })
 }
 
-export const sourceOptions = (source: QuestionSource): string[] | undefined => {
+export const sourceOptions = (source: QuestionSource, occurrence?: number): string[] | undefined => {
   const parsed = parsedJson(source.data)
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
   const record = parsed as Record<string, unknown>
+  const hash = sha256(questionWords(source.text)).slice(0, 8)
   const raw = source.kind === 'own'
     ? (record.task !== null && typeof record.task === 'object' && !Array.isArray(record.task) ? (record.task as Record<string, unknown>).options : undefined)
     : source.kind === 'inbox'
       ? record.options
       : record.stepOptions !== null && typeof record.stepOptions === 'object' && !Array.isArray(record.stepOptions)
-        ? (record.stepOptions as Record<string, unknown>)[sha256(questionWords(source.text)).slice(0, 8)]
+        ? occurrence !== undefined
+          ? (record.stepOptions as Record<string, unknown>)[`${hash}:${occurrence}`] ?? (record.stepOptions as Record<string, unknown>)[hash]
+          : (record.stepOptions as Record<string, unknown>)[hash]
         : undefined
   if (!Array.isArray(raw)) return undefined
   const list = raw.filter((one): one is string => typeof one === 'string' && one.trim() !== '')

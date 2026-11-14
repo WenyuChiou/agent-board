@@ -809,7 +809,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           ...(previous ?? codexReport(null, session, { title: s.localAgentTask(agent), project: agent, state, steps: question.steps }, clock, s)),
           state: state as CodexReport['state'], steps: question.steps, updated: clock, asked: question.asked,
           ...(question.askedRevision === undefined ? {} : { askedRevision: question.askedRevision }),
-          ...(question.askedOptions === undefined ? {} : { askedOptions: question.askedOptions }),
+          askedOptions: question.askedOptions,
         }, session) : codexReport(previous, session, given, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)

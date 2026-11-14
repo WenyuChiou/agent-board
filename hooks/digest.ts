@@ -68,12 +68,16 @@ export const replyData = (answer: string): string => answer.slice(-3000).replace
 export const requestData = (text: string): string => text.slice(0, 1200).replace(FENCE_TAG, '')
 
 // Markdown's `_` marks emphasis at the edge of a word; inside one (`snake_case`, `ghp_16C7`,
-// `sk_live_abc`) it is part of the word and stays. Dropping it changed the word, and left a
-// token in a shape no pattern for tokens knows.
+// `sk_live_abc`) it is part of the word and stays. Inline code (`C#`, `__init__.py`) stays literal via placeholders.
+const restoreInline = (line: string): string =>
+  line.replace(/\u0001/g, '"').replace(/\u0002/g, '*').replace(/\u0003/g, '_')
+
 const withoutEmphasis = (line: string): string =>
   line
-    .replace(/[*#]+/g, '')
-    .replace(/^\s*>+\s?/, '')
+    .replace(/^\s*(?:>+\s?)+/, '')
+    .replace(/^\s*#+(?:\s+|$)/, '')
+    .replace(/\s+#+\s*$/, '')
+    .replace(/\*+/g, '')
     .replace(/_+/g, (run, at: number, whole: string) => (/[A-Za-z0-9]/.test(whole[at - 1] ?? '') && /[A-Za-z0-9]/.test(whole[at + run.length] ?? '') ? run : ''))
 
 // JSON objects and arrays are data, not prose. Only a top-level, nonempty string can
@@ -138,7 +142,7 @@ const isChoice = (item: string): boolean => {
   return label !== '' && label.length <= 60 && !/[?？。！]|[.!]\s/.test(label) && !/[.!;；:：]$/.test(label) && !/\d\s*[%％]/.test(label)
 }
 const choiceLabel = (raw: string): string | null => {
-  const item = withoutEmphasis(raw).replace(/\u0001/g, '"').replace(/\s+/g, ' ').trim()
+  const item = restoreInline(withoutEmphasis(raw)).replace(/\s+/g, ' ').trim()
   if (!isChoice(item)) return null
   return /^[^\s.]+\.$/.test(item) ? item.slice(0, -1) : item
 }
@@ -219,7 +223,7 @@ const choicesBeforeQuestion = (lines: readonly string[], questionLineIndex: numb
   const scan = scanChoiceList(lines, questionLineIndex)
   if (scan === null) return []
   const lead = lines.slice(0, scan.before).filter(one => one.trim() !== '').at(-1) ?? ''
-  const leadText = withoutEmphasis(lead).replace(/\u0001/g, '"').trim()
+  const leadText = restoreInline(withoutEmphasis(lead)).trim()
   if (leadText !== '' && LIST_ITEM.test(lead)) return []
   if (leadText !== '' && /[:：?？]$/.test(leadText) && (IS_PAST.test(leadText) || /\b(?:changed|changes|results|timeline|summary|survey|answered|diffs?|edits?)\b|改了|哪些|結果|结果|調查|调查/i.test(leadText))) return []
 
@@ -268,9 +272,10 @@ const isQuoted = (line: string, mark: number): boolean => {
 
 // For callers that already normalized the reply: do not parse it a second time.
 export const lastQuestionInProseWithOptions = (answer: string, isFull = false): AskedQuestion | null => {
-  // A straight quote in code (`name"`) is a character the reply shows, not a quotation: it stands
-  // in as another mark until the question is put back together.
-  const prose = answer.replace(/```[\s\S]*?```/g, '\n\n').replace(/`([^`]*)`/g, (_, code: string) => code.replace(/"/g, '\u0001'))
+  // A straight quote, asterisk or underscore in code (`name"`, `src/*.ts`) is content, not quote or emphasis.
+  const prose = answer
+    .replace(/```[\s\S]*?```/g, '\n\n')
+    .replace(/`([^`]*)`/g, (_, code: string) => code.replace(/"/g, '\u0001').replace(/\*/g, '\u0002').replace(/_/g, '\u0003'))
   const paragraphs = prose.split(/\n\s*\n/).map(one => one.trim()).filter(one => one !== '')
   const last = paragraphs.at(-1)
   if (last === undefined) return null
@@ -301,7 +306,7 @@ export const lastQuestionInProseWithOptions = (answer: string, isFull = false): 
   const sentence = [...tail.matchAll(/[^.。!！?？]*[?？]["'”」』)]*/g)].at(-1)
   if (sentence === undefined) return null
   if (isQuoted(tail, (sentence.index ?? 0) + sentence[0].search(/[?？]/))) return null
-  const question = sentence[0].replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '').replace(/\u0001/g, '"').trim()
+  const question = restoreInline(sentence[0].replace(/\u0000(\d+)\u0000/g, (_, at: string) => links[Number(at)] ?? '')).trim()
   // The question itself must be put to the person, not the line it ends: `You asked for a
   // summary. What changed?` over a list asks nothing.
   if (isOverList && !asksToPick(question, isHeading)) return null

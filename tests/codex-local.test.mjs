@@ -5952,6 +5952,17 @@ test('Codex, Cursor and --agent-status persist list choice options for a closing
   }).status, 0)
   const opencodeBoard = readFileSync(f.progress, 'utf8')
   assert.ok(opencodeBoard.includes('<!-- options=["Alpha","Beta"] -->'), opencodeBoard)
+
+  // A subsequent --agent-status waiting question without choices clears the prior question's options.
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: grokId, hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'waiting'], {
+    sessionId: grokId,
+    hookEventName: 'Stop',
+    lastAssistantMessage: 'What folder should I use?',
+  }).status, 0)
+  const grokFollowup = readFileSync(f.progress, 'utf8')
+  assert.ok(grokFollowup.includes('- [?] What folder should I use?'), grokFollowup)
+  assert.ok(!grokFollowup.includes('<!-- options=["中文選項甲丠","Option B"] -->'), grokFollowup)
 }))
 
 test('the approval step and the question step close and reuse their own lines in either order', () => fixture(f => {

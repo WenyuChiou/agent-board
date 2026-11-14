@@ -5305,6 +5305,15 @@ test('a closing question over or after a choice list extracts each short label a
     question: 'Ready to commit?',
     options: [],
   })
+  // Preserve meaningful characters (# in C#/F#, leading #tags) and inline code characters (*, _) in choices
+  expect(lastQuestionWithOptions('Which language should I use?\n- C#\n- F#')).toEqual({
+    question: 'Which language should I use?',
+    options: ['C#', 'F#'],
+  })
+  expect(lastQuestionWithOptions('Which tag or file should I inspect?\n- #general\n- `src/*.ts`\n- `__init__.py`')).toEqual({
+    question: 'Which tag or file should I inspect?',
+    options: ['#general', 'src/*.ts', '__init__.py'],
+  })
 })
 
 test('digest, markAsked and board views preserve list choices cleanly and drop them when settled (#1277)', () => {

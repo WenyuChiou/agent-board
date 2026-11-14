@@ -1405,4 +1405,35 @@ test('observed questions keep and clear list choice options across block, retain
   const afterInboxAnswer = observeQuestions(inboxObserved.ledger, [], null, [], NOW + 2000, true, 'inbox-answered', undefined, inbox, [nextTurn]).ledger
   expect(afterInboxAnswer.records[0]?.isUnresolved).toBe(false)
   expect(buildView([], inbox, null, NOW + 2000, 0, {}, STRINGS.en, [], {}, afterInboxAnswer).waiting).toEqual([])
+
+  // Duplicate waiting question text in one block preserves distinct choices per occurrence.
+  const duplicateBlock = [
+    '## demo',
+    `<!-- auto session=d0123456 agent=codex state=waiting updated=${new Date(NOW).toISOString()} -->`,
+    '### Two matching prompts',
+    '- [?] Which one?',
+    '<!-- options=["Alpha","Beta"] -->',
+    '- [?] Which one?',
+    '<!-- options=["Red","Blue"] -->',
+    '<!-- /auto session=d0123456 -->',
+  ].join('\n')
+  const dupObserved = observe(emptyQuestions(), duplicateBlock).ledger
+  const dupRetained = view(dupObserved, '## demo\n')
+  expect(dupRetained.waiting.map(item => item.options)).toEqual([['Alpha', 'Beta'], ['Red', 'Blue']])
+  expect(view(dupObserved, '## demo\n', [dupObserved.records[1]!.id]).waiting.map(item => item.options)).toEqual([['Alpha', 'Beta']])
+
+  // With dir=, live duplicate questions preserve both distinct choice lists, while hiding the older keeps the newer.
+  const duplicateDirBlock = [
+    '## demo',
+    `<!-- auto session=d0123456 agent=codex state=waiting updated=${new Date(NOW).toISOString()} dir=${encodeURIComponent('/work/demo')} -->`,
+    '### Two matching prompts',
+    '- [?] Which one?',
+    '<!-- options=["Alpha","Beta"] -->',
+    '- [?] Which one?',
+    '<!-- options=["Red","Blue"] -->',
+    '<!-- /auto session=d0123456 -->',
+  ].join('\n')
+  const dupDirObserved = observe(emptyQuestions(), duplicateDirBlock).ledger
+  expect(view(dupDirObserved, duplicateDirBlock).waiting.map(item => item.options)).toEqual([['Alpha', 'Beta'], ['Red', 'Blue']])
+  expect(view(dupDirObserved, duplicateDirBlock, [dupDirObserved.records[0]!.id]).waiting.map(item => item.options)).toEqual([['Red', 'Blue']])
 })
