@@ -2007,6 +2007,26 @@ test('A24 the receiver reads the messages folder by the board\'s rule: only noth
   assert.deepEqual(await folderCases(true), [])
 })
 
+test('A28 a messages file that holds the session\'s fresh mailbox but is not shaped as the board reads it is asked of the board at the next tick and logged once (#1366 review)', async () => {
+  const fresh = JSON.parse(freshMailbox('ses_a28'))
+  const cases = [
+    ['messages that is not a list', { ...fresh, messages: {} }],
+    ['an unknown version', { ...fresh, version: 9 }],
+    ['mailboxes that is not a list', { ...fresh, messages: [], mailboxes: { ...fresh.mailboxes[0] } }],
+    ['a message that is not an object', { ...fresh, messages: ['x'] }],
+  ]
+  const wrong = []
+  for (const [label, store] of cases) {
+    await fixture(async f => {
+      const seen = await afterEmptyTake(f, 'ses_a28', () => { mkdirSync(f.directory); writeFileSync(join(f.directory, 'messages.json'), JSON.stringify(store)) })
+      f.tick(); await f.quiet()
+      if (!seen.asked || seen.lines() !== 1) wrong.push(`${label}: asked ${seen.asked}, logged ${seen.lines()}`)
+      if (f.calls.promptAsync.length !== 0) wrong.push(`${label}: woke a turn`)
+    }, { spawn: true })
+  }
+  assert.deepEqual(wrong, [])
+})
+
 test('A27 the test board stand-in refuses a link or a file at the messages folder in its default mode too, as the board script does (#1366 review)', async () => {
   assert.deepEqual(await folderCases(false), [])
 })

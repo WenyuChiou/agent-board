@@ -284,7 +284,9 @@ const boardReceiver = (client, directory, replay) => {
   }
   // The board's file, read: undefined only when nothing is at the known folder (no board has made it, so nobody can queue anything
   // and there is nothing to open); null, not knowing, when no folder is known yet, when a link or anything but a real folder or
-  // file is there, or when the file cannot be read. Not knowing asks the board, which answers by the same rule and is logged.
+  // file is there, when the file cannot be read, or when it is not shaped as the board first checks it (version 1 or 2, a list of
+  // messages, and a list of mailboxes if any, each an object). Not knowing asks the board, which answers by the same rule and is logged.
+  const isEntries = list => Array.isArray(list) && list.every(one => one !== null && typeof one === 'object')
   const readStore = () => {
     if (folder === null) return null
     const state = folderState(folder)
@@ -292,7 +294,10 @@ const boardReceiver = (client, directory, replay) => {
     if (state !== 'folder') return null
     const file = joinBoard(folder, 'messages.json')
     try { if (!boardEntry(file).isFile()) return null } catch {}
-    try { return JSON.parse(readBoardStore(file, 'utf8')) } catch { return null }
+    let store
+    try { store = JSON.parse(readBoardStore(file, 'utf8')) } catch { return null }
+    const isShaped = store !== null && typeof store === 'object' && (store.version === 1 || store.version === 2) && isEntries(store.messages) && (store.mailboxes === undefined || isEntries(store.mailboxes))
+    return isShaped ? store : null
   }
   // What one session owes, worked out from the file each time and never remembered (#1366 round 6): mailbox (none in the file, or
   // less than its lifetime minus ten minutes left, so it is opened or renewed), waiting (a message queued for it, and with
