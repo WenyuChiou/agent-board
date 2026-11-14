@@ -1406,21 +1406,50 @@ const PAGE_SCRIPT = String.raw`
   var heldPointers = {};
   var pressCount = 0;
   function isHeld() { return Object.keys(heldPointers).length > 0; }
+  // A lost-results rebuild skipped under a press waits here until the hold ends (#1473). The flush keeps the
+  // copy focus like the other rebuild paths, so a selected copy field survives it.
+  var lostResultsStale = false;
+  function drawLostResultsIfStale() { if (!isHeld() && lostResultsStale) { lostResultsStale = false; keepCopyFocus(drawLostResults); } }
   function pointerReleased(event) {
     var id = String(event && event.pointerId);
     var press = heldPointers[id];
-    setTimeout(function () { if (heldPointers[id] === press) delete heldPointers[id]; }, 0);
+    setTimeout(function () { if (heldPointers[id] === press) { delete heldPointers[id]; drawLostResultsIfStale(); } }, 0);
   }
   if (typeof document.addEventListener === 'function') {
     document.addEventListener('pointerdown', function (event) { pressCount += 1; heldPointers[String(event.pointerId)] = pressCount; }, true);
     document.addEventListener('pointerup', pointerReleased, true);
     document.addEventListener('pointercancel', pointerReleased, true);
     // A move with no button held means the release was lost (a context menu, a scrollbar drag): the board draws again.
-    document.addEventListener('pointermove', function (event) { if (!event.buttons) delete heldPointers[String(event.pointerId)]; }, true);
+    document.addEventListener('pointermove', function (event) { if (!event.buttons) { delete heldPointers[String(event.pointerId)]; drawLostResultsIfStale(); } }, true);
   }
   // Losing focus loses every release that was still to come.
-  if (typeof window.addEventListener === 'function') window.addEventListener('blur', function () { heldPointers = {}; });
+  if (typeof window.addEventListener === 'function') window.addEventListener('blur', function () { heldPointers = {}; drawLostResultsIfStale(); });
   var opened = {};
+  var liveDetails = [];
+  // Read live <details>.open before redraw because HTML queues the toggle event asynchronously.
+  function syncDetails() {
+    for (var i = 0; i < liveDetails.length; i += 1) {
+      var entry = liveDetails[i];
+      entry.stale = true;
+      var isOpen = entry.box.open === true;
+      if (isOpen !== entry.wasOpen) opened[entry.ref] = isOpen;
+    }
+    liveDetails = [];
+  }
+  function detailsBox(ref, cls) {
+    var box = el('details', cls || '');
+    var initial = opened[ref] === true;
+    var entry = { ref: ref, box: box, wasOpen: initial, stale: false };
+    box.open = initial;
+    liveDetails.push(entry);
+    box.addEventListener('toggle', function () {
+      if (entry.stale) return;
+      var isOpen = box.open === true;
+      opened[ref] = isOpen;
+      entry.wasOpen = isOpen;
+    });
+    return box;
+  }
   var timer = null;
   var isClosed = false;
   var isUnreachable = false;
@@ -1642,14 +1671,29 @@ const PAGE_SCRIPT = String.raw`
       }, function () { barStyleShown(before); settingsSay(w('pressFailed'), true); }).finally(function () { node.disabled = false; });
     });
   });
+  function showMoved() {
+    isClosed = true;
+    approveSecret = '';
+    clearTimeout(timer);
+    if (drawerOpen) setDrawer(false, true);
+    paintLight();
+    var movedMain = document.querySelector('main');
+    movedMain.textContent = '';
+    add(movedMain, el('p', '', w('serveMoved')));
+    document.getElementById('side').hidden = true;
+  }
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
     try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
   });
-  // A page the browser kept in its back/forward cache and shows again is the same document, but the board forgot its id when it left: it names itself anew and asks at once (#1028).
+  // A page the browser kept in its back/forward cache and shows again is the same document, but the board forgot its id
+  // and retired its secret when it left: it names itself anew, drops any approval secret and asks at once (#1028, #1378).
   if (typeof window.addEventListener === 'function') window.addEventListener('pageshow', function (event) {
     if (!event || !event.persisted || isClosed) return;
     pageId = newPageId();
+    approveSecret = '';
+    boardEtag = '';
+    last = '';
     refresh();
   });
   // onCopied: what to do once the text is on the clipboard; the card then says where to paste it. Without it the
@@ -1964,9 +2008,7 @@ const PAGE_SCRIPT = String.raw`
   // pressing it, or Enter on it, opens the whole text in its place. An open one stays open across
   // a redraw (opened[ref]). The short text is the folded, capped copy when the model sent one.
   function clipped(short, whole, cls, ref) {
-    var box = el('details', 'clip ' + cls);
-    box.open = opened[ref] === true;
-    box.addEventListener('toggle', function () { opened[ref] = box.open; });
+    var box = detailsBox(ref, 'clip ' + cls);
     add(box, add(el('summary'), el('span', 'short', short || whole), el('span', 'whole', whole)));
     return box;
   }
@@ -2145,10 +2187,7 @@ const PAGE_SCRIPT = String.raw`
   // A fold of finished or further steps stays open across a redraw (opened[ref]), like a clipped text: the page
   // redraws whenever the board changes or the minute turns, and a fold the person opened must not close under them.
   function folded(label, list, ref) {
-    var box = el('details');
-    box.open = opened[ref] === true;
-    box.addEventListener('toggle', function () { opened[ref] = box.open; });
-    return add(box, el('summary', '', label), list);
+    return add(detailsBox(ref), el('summary', '', label), list);
   }
   function sends(mode) { return mode === 'send' || mode === 'connected' || mode === 'mailbox'; }
   // One question or stuck task on the Needs you sheet, answerable where it is.
@@ -3349,6 +3388,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function draw(model) {
     if (!model.view) return;
+    syncDetails();
     var view = model.view;
     board.querySelectorAll('textarea[data-key]').forEach(function (box) { pg.drafts[box.getAttribute('data-key')] = box.value; });
     var active = document.activeElement;
@@ -3475,6 +3515,9 @@ const PAGE_SCRIPT = String.raw`
     keepCopyFocus(function () { draw(model); });
   }
   function drawLostResults() {
+    // A rebuild under a press would replace the button being held, so it waits for the release (#1473).
+    if (isHeld()) { lostResultsStale = true; return; }
+    lostResultsStale = false;
     lostResults.forEach(function (card) { card.remove(); });
     lostResults = [];
     Object.keys(results).reverse().forEach(function (key) {
@@ -3502,18 +3545,11 @@ const PAGE_SCRIPT = String.raw`
   function refresh() {
     if (isClosed) return;
     clearTimeout(timer);
+    var pollPage = pageId;
     call('/api/board').then(function (data) {
+      if (isClosed || pollPage !== pageId) return;
       // A newer page took over: this one stops asking and says so, once (#265).
-      if (data.moved) {
-        isClosed = true;
-        if (drawerOpen) setDrawer(false, true);
-        paintLight();
-        var movedMain = document.querySelector('main');
-        movedMain.textContent = '';
-        add(movedMain, el('p', '', w('serveMoved')));
-        document.getElementById('side').hidden = true;
-        return;
-      }
+      if (data.moved) { showMoved(); return; }
       if (data.unchanged) { reachable(); maybeShowAway(); return; }
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }
@@ -3558,10 +3594,10 @@ const PAGE_SCRIPT = String.raw`
         if (reply.at > seenAt) { since = Math.max(since, reply.at); say(reply.note, reply.ok ? 'done' : 'alert', reply.key, undefined, !reply.ok); }
       });
     }, function () {
-      unreachable();
+      if (pollPage === pageId) unreachable();
     }).then(function () {
       // Leave room for the response and paint inside the three-second ask deadline.
-      if (!isClosed) timer = setTimeout(refresh, 2000);
+      if (!isClosed && pollPage === pageId) timer = setTimeout(refresh, 2000);
     });
   }
   // Wider than the parser's start marker, so a block it would take is never dropped here.
