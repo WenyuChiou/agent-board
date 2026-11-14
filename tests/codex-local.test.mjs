@@ -12824,3 +12824,63 @@ test('readAntigravityFirstPrompt stops at an empty first USER_INPUT and codexEve
   }, '2026-11-14T03:00:01.000Z', STRINGS.en)
   assert.equal(afterEvent.context, 'Keep this context')
 }))
+
+test('two asking Antigravity sessions with question notes keep start times visible on terminal and web boards (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const noteOneId = 'synthetic-ag-note-asks-one-1401'
+  const noteTwoId = 'synthetic-ag-note-asks-two-1401'
+  const recOf = id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`), 'utf8'))
+  const pbSummaries = items => Buffer.concat(items.map(({ id, title }) => {
+    const idBuf = Buffer.from(id, 'utf8')
+    const idField = Buffer.concat([Buffer.from([0x0a, idBuf.length]), idBuf])
+    const tBuf = Buffer.from(title, 'utf8')
+    const sumBuf = Buffer.concat([Buffer.from([0x0a, tBuf.length]), tBuf])
+    const sumField = Buffer.concat([Buffer.from([0x12, sumBuf.length]), sumBuf])
+    const entry = Buffer.concat([idField, sumField])
+    return Buffer.concat([Buffer.from([0x0a, entry.length]), entry])
+  }))
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: noteOneId, title: 'Shared Note Question' },
+    { id: noteTwoId, title: 'Shared Note Question' },
+  ]))
+  for (const id of [noteOneId, noteTwoId]) {
+    const transcript = join(f.home, '.gemini', 'antigravity', 'brain', id, 'transcript.jsonl')
+    f.save(transcript, [
+      JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Prepare release rollout' }),
+      JSON.stringify({ source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Deploy release — should I proceed?' }),
+    ].join('\n') + '\n')
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+      conversationId: id,
+      transcriptPath: transcript,
+    }).status, 0)
+    if (id === noteOneId) await new Promise(done => setTimeout(done, 15))
+  }
+  const rOne = recOf(noteOneId)
+  const rTwo = recOf(noteTwoId)
+  assert.notEqual(rOne.context, rTwo.context)
+
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { serveModel, servePage } = await importTs('../hooks/serve.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+
+  const view = buildView(parseProgress(readFileSync(f.progress, 'utf8')), [], null, Date.now(), 0, {}, STRINGS.en)
+  assert.equal(view.waiting[0]?.note, 'should I proceed?')
+  assert.equal(view.waiting[1]?.note, 'should I proceed?')
+  const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  assert.ok(screen.includes('should I proceed?'), screen)
+  assert.ok(screen.includes(rOne.context), screen)
+  assert.ok(screen.includes(rTwo.context), screen)
+
+  const model = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
+    now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },
+  })
+  assert.equal(model.view?.needs.cards.length, 2)
+  const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), model)
+  const visible = dom.visible()
+  assert.ok(visible.includes('should I proceed?'), visible)
+  assert.ok(visible.includes(rOne.context), visible)
+  assert.ok(visible.includes(rTwo.context), visible)
+}))

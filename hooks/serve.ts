@@ -2122,8 +2122,11 @@ const PAGE_SCRIPT = String.raw`
     question.setAttribute('title', text);
     add(body, question);
     if (isStuck) add(body, el('p', 'note', clean(ask.stuck && ask.stuck.reason)));
-    else if (ask.note) add(body, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
-    else if (ask.context) add(body, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
+    else {
+      if (ask.note) add(body, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
+      var askTitle = clean(String(ask.task || ''));
+      if (ask.context && (!ask.note || askTitle && (pg.titleCounts && pg.titleCounts[askTitle] || 0) > 1)) add(body, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
+    }
     if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
     var mode = ask.send;
     var answers = el('div', 'answers');

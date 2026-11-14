@@ -1028,7 +1028,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       lines.push(`${mark} ${titled(2, `${s.chip(s.ask[ask.kind])}${ask.text}`, [name, ask.when === s.questionAgeUnknown ? '' : ask.when].filter(part => part !== '').join(' · '), isHere)}`)
       if (result?.key === item.key) resultLines('    ')
       lines.push(`    ${c('project', cut(ask.project + (ask.task ? ` › ${ask.task}` : ''), o.width - 6))}`)
-      if (ask.task && !ask.note && ask.context && (titleCounts.get(ask.task) ?? 0) > 1) lines.push(`    ${c('quiet', cut(ask.context, o.width - 6))}`)
+      if (ask.task && ask.context && (titleCounts.get(ask.task) ?? 0) > 1) lines.push(`    ${c('quiet', cut(ask.context, o.width - 6))}`)
       if (isOpen || isHere) {
         if (ask.canHide === false) lines.push(`    ${c('quiet', cut(s.questionReviewOnly, o.width - 6))}`)
         if (ask.note) lines.push(`    ${cut(ask.note, o.width - 6)}`)
