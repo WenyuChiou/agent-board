@@ -18,7 +18,7 @@ import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-d
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
-import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { assertClassifierExited, classifierStartMs, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
 import { partTest } from '../scripts/ci-impact.mjs'
 
 // The Windows board job runs this file in two parts, and each part runs its share of the tests: the
@@ -3923,6 +3923,30 @@ const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell 
   assert.ok(!errors.includes('PRIVATE_') && !errors.includes(home), errors)
 })
 
+// A prompt's JSON check now runs after the classifier starts (#1080): a payload cut short must still be refused, not promoted.
+test('the PowerShell reporter refuses a prompt cut short as INCOMPLETE_INPUT and leaves nothing in its inbox', { skip: process.platform !== 'win32' }, () => fixture(f => {
+  const inbox = join(f.home, '.claude', 'progress-inbox')
+  const script = join(f.home, '.claude', 'progress-report.ps1')
+  f.save(script, reporterPs1())
+  const input = join(f.home, 'partial-prompt.txt')
+  f.save(input, '{"session_id":"synthetic-partial-prompt","prompt":"PRIVATE_PARTIAL_WORDS"')
+  const descriptor = openSync(input, 'r')
+  const powershell = join(process.env.SystemRoot || 'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  let result
+  try {
+    result = spawnSync(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], {
+      env: isolatedEnv(f.home), stdio: [descriptor, 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 30000,
+    })
+  } finally { closeSync(descriptor) }
+  assert.equal(result.error, undefined, hookFailure(result))
+  assert.equal(result.status, 0, hookFailure(result))
+  assert.equal(result.stdout.trim(), '{}')
+  const left = existsSync(inbox) ? readdirSync(inbox).filter(name => /\.(?:json|tmp|receipt|fallback|timeout)$/.test(name)) : []
+  assert.deepEqual(left, [], `${hookFailure(result)}; hookLog=${hookLog(f)}`)
+  assert.match(hookLog(f), /INCOMPLETE_INPUT/)
+  assert.ok(!hookLog(f).includes('PRIVATE_'), hookLog(f))
+}))
+
 test('the PowerShell reporter reads a complete input before it loads any module', { skip: process.platform !== 'win32' }, () => fixture(f => {
   const modules = join(f.home, 'modules'), inbox = join(f.home, '.claude', 'progress-inbox')
   const script = join(f.home, '.claude', 'progress-report.ps1')
@@ -3960,6 +3984,27 @@ test('the PowerShell reporter calls no cmdlet between its input clock and the pa
   const end = source.indexOf('$Payload = [Text.Encoding]::UTF8.GetString', start)
   assert.ok(start >= 0 && end > start, 'the reporter has an input clock and payload decode')
   assert.doesNotMatch(source.slice(start, end), /\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/)
+})
+
+// The first cmdlet loads a module, 0.7 to 3.9 s on a fresh runner. On a prompt that must happen while the
+// classifier already runs, so the shared 2 s clock never ends before Start() (#1080).
+test('the PowerShell reporter calls no cmdlet between its input clock and the classifier start on a prompt', () => {
+  const source = reporterPs1()
+  const cmdlet = /\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/
+  const ownFunctions = /\bWrite-Exclusive\b|\bRead-PromptReceipt\b/g
+  const clock = source.indexOf('$clock = [Diagnostics.Stopwatch]::StartNew()')
+  const call = source.indexOf('$receipt = Read-PromptReceipt $tmp $clock', clock)
+  assert.ok(clock >= 0 && call > clock, 'the prompt path calls the classifier after the input clock')
+  assert.doesNotMatch(source.slice(clock, call).replace(ownFunctions, ''), cmdlet, 'main flow, clock to classifier call')
+  const bodyFrom = (signature, endMarker) => {
+    const begin = source.indexOf(signature), end = source.indexOf(endMarker, begin)
+    assert.ok(begin >= 0 && end > begin, `${signature} reaches ${endMarker}`)
+    return source.slice(source.indexOf('\n', begin), end)
+  }
+  assert.doesNotMatch(bodyFrom('function Write-Exclusive(', '\n}\n'), cmdlet, 'the exclusive write uses .NET only')
+  assert.doesNotMatch(bodyFrom('function Read-PromptReceipt(', '$isStarted = $process.Start()'), cmdlet, 'entry of the classifier function to Start()')
+  assert.ok(source.indexOf('ConvertFrom-Json', clock) > call, 'JSON parsing runs after the classifier is started')
+  assert.ok(source.indexOf('& $Prepare') > source.indexOf('$isStarted = $process.Start()'), 'the caller work runs after Start()')
 })
 
 test('legacy reporters bound an unfinished input and keep Cursor responses and errors local', () => legacyReporterProbe())
@@ -4294,7 +4339,7 @@ const timedOutClassifierCases = isWindows => {
   ]
 }
 for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of timedOutClassifierCases(process.platform === 'win32').entries()) {
-  test(`a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board, case ${index}`, () => fixture(async f => {
+  test(`a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board, case ${index}`, t => fixture(async f => {
     const isWindows = process.platform === 'win32'
     const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
     const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
@@ -4315,11 +4360,14 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
       assert.equal(out.error, undefined, hookFailure(out))
       assert.equal(out.status, 0, hookFailure(out))
       assert.equal(out.stdout.trim(), '{}')
-      // On Windows the 2 s budget is shared with the reporter's own JSON work, so on a loaded runner Node can be
-      // killed at the deadline before its preload writes a PID (#1080). The reporter's own record that it started
+      // On Windows the classifier starts before the reporter's JSON work, but a loaded runner can still kill Node
+      // at the deadline before its preload writes a PID (#1080). The reporter's own record that it started
       // and ended the process is the proof there, as in the interrupted-PID test below.
-      if (isWindows) assertClassifierExited(exitProof)
-      else {
+      if (isWindows) {
+        // The shipped clock is unchanged; this shows on every run how much of it the reporter used before Node started.
+        t.diagnostic(`classifier started ${classifierStartMs(exitProof)} ms into the 2000 ms clock, case ${index}`)
+        assertClassifierExited(exitProof)
+      } else {
         assert.equal(existsSync(pidFile), true, `exercise the real classifier process, case ${index}: ${hookLog(f)}`)
         assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
       }
@@ -4344,7 +4392,7 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
   }))
 }
 
-test('a classifier interrupted while publishing its PID marker still proves its owned process exited', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+test('a classifier interrupted while publishing its PID marker still proves its owned process exited', { skip: process.platform !== 'win32' }, t => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), pidFile = join(f.home, 'classifier.pid')
   const exitProof = join(f.home, 'classifier-exit.json'), preload = join(f.home, 'partial-classifier-pid.cjs')
   f.save(script, observeClassifierExit(reporterPs1(), exitProof))
@@ -4352,6 +4400,7 @@ test('a classifier interrupted while publishing its PID marker still proves its 
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
     JSON.stringify({ session_id: 'synthetic-partial-pid', prompt: 'PRIVATE_RAW_PROMPT' }))
+  t.diagnostic(`classifier started ${classifierStartMs(exitProof)} ms into the 2000 ms clock`)
   assertClassifierExited(exitProof)
   assert.equal(out.error, undefined, hookFailure(out))
   assert.equal(out.status, 0, hookFailure(out))
@@ -4365,7 +4414,7 @@ test('a classifier interrupted while publishing its PID marker still proves its 
 }))
 
 // A loaded machine can kill the classifier before its own code writes anything, so the proof must not need it (#1080).
-test('a classifier that never writes anything still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+test('a classifier that never writes anything still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, t => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), exitProof = join(f.home, 'classifier-exit.json')
   const preload = join(f.home, 'silent-classifier.cjs')
   f.save(script, observeClassifierExit(reporterPs1(), exitProof))
@@ -4373,6 +4422,7 @@ test('a classifier that never writes anything still proves its owned process exi
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
     JSON.stringify({ session_id: 'synthetic-silent-classifier', prompt: 'PRIVATE_RAW_PROMPT' }))
+  t.diagnostic(`classifier started ${classifierStartMs(exitProof)} ms into the 2000 ms clock`)
   assertClassifierExited(exitProof)
   assert.equal(out.error, undefined, hookFailure(out))
   assert.equal(out.status, 0, hookFailure(out))
@@ -7439,15 +7489,26 @@ test('deepseekLocalPlugin ignores subagents and gives a waiting board message to
     return child
   }
   const settled = () => children.every(child => child.isClosed)
+  // A wait that runs out says where the message stopped (#1429): its status, what each session got, every board
+  // call's action and exit code, and the codes in the hook log.
+  const agents = []
+  const where = () => {
+    const log = join(f.home, '.agent-board', 'hook-errors.log')
+    const calls = children.map(child => `${child.spawnargs[child.spawnargs.indexOf('--mailbox') + 1]}:${child.isClosed ? child.exitCode : 'running'}`)
+    const codes = existsSync(log) ? readFileSync(log, 'utf8').match(/[A-Z][A-Z0-9_]{3,}/g) ?? [] : []
+    const statuses = existsSync(file) ? store().messages.map(one => `${one.id}=${one.status}`) : []
+    return `messages [${statuses}]; received [${agents.map(one => `${one.session.header.id}=${one.received.length}`)}]; calls [${calls}]; hook log [${codes}]`
+  }
   const until = async (check, label) => {
     for (const end = Date.now() + 30_000; Date.now() < end; await new Promise(done => setTimeout(done, 50))) if (check()) return
-    assert.fail(label)
+    assert.fail(`${label}: ${where()}`)
   }
   const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, board)
   const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
   const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
   const fake = (id, header = {}) => {
     const agent = { session: { header: { id, ...header } }, status: 'idle', received: [], followup(message) { agent.received.push(message); agent.status = 'running' } }
+    agents.push(agent)
     return agent
   }
   const root = fake('deepseek-root-session'), sub = fake('deepseek-subagent-session', { origin: 'subagent', parentSession: 'deepseek-root-session' })
@@ -7527,6 +7588,159 @@ test('deepseekLocalPlugin ignores subagents and gives a waiting board message to
     for (const child of children) if (!child.isClosed) child.kill()
     for (const end = Date.now() + 10_000; !settled() && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
   }
+}))
+
+test('deepseekLocalPlugin asks again when the board answers a take as deferred, and gives the message once the store is free (#1429)', () => fixture(async f => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  const { randomUUID } = await import('node:crypto')
+  const { watch } = await import('node:fs')
+  const board = join(f.home, 'deepseek-deferred-board.mjs')
+  f.save(board, bundleFromDir(new URL('..', import.meta.url)))
+  const progress = join(f.home, 'deepseek-deferred-progress.md')
+  f.save(progress, '')
+  const directory = defaultMessagesDirectory(progress, f.home, process.env, process.platform)
+  const file = join(directory, 'messages.json')
+  const status = () => JSON.parse(readFileSync(file, 'utf8')).messages.find(one => one.id === 'deferred-message')?.status
+  const enrolled = enrollMailbox({ messages: [] }, 'deepseek', 'deepseek-deferred-session', 'dsh', Date.now(), 43_200_000)
+  const target = enrolled.mailboxes.find(one => one.id === mailboxId('deepseek', 'deepseek-deferred-session'))
+  f.save(file, JSON.stringify({ version: 2, ...queueMessage(enrolled, { id: 'deferred-message', target: target.id, turn: 'session', text: 'Synthetic deferred answer' }, 'board', target, Date.now()).state }))
+  const children = []
+  const spawnMailbox = (...args) => {
+    const child = spawn(...args)
+    children.push(child)
+    child.on('close', () => { child.isClosed = true })
+    return child
+  }
+  const settled = () => children.every(child => child.isClosed)
+  const takes = () => children.filter(child => child.spawnargs.includes('take'))
+  const until = async (check, label) => {
+    for (const end = Date.now() + 30_000; Date.now() < end; await new Promise(done => setTimeout(done, 50))) if (check()) return
+    assert.fail(`${label}: message ${status()}, ${takes().length} takes`)
+  }
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, board)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
+  const agent = { session: { header: { id: 'deepseek-deferred-session' } }, status: 'idle', received: [], followup(message) { agent.received.push(message); agent.status = 'running' } }
+  const hooks = new Map()
+  // A live claim on the messages folder: every take the board script makes finds the store busy and answers deferred.
+  const claim = claimMessageStore(directory)
+  let isHeld = true
+  try {
+    apply({ on: (name, fn) => hooks.set(name, fn) })
+    hooks.get('agent/created')({ agent })
+    await until(() => takes().length >= 1 && settled(), 'the first take ran while the store was held')
+    assert.deepEqual(agent.received, [])
+    assert.equal(status(), 'queued')
+    const taken = takes().length
+    claim.release()
+    isHeld = false
+    // Nothing from dsh and no write to messages.json happens now: only the plugin asking again can deliver.
+    await until(() => status() === 'accepted' && settled(), 'the plugin asked again after the store was free')
+    assert.equal(agent.received.length, 1)
+    assert.ok(agent.received[0].content[0].text.includes('Synthetic deferred answer'))
+    assert.ok(takes().length > taken)
+    hooks.get('agent/disposed')({ agent })
+    await until(settled, 'the session ended')
+  } finally {
+    if (isHeld) claim.release()
+    for (const child of children) if (!child.isClosed) child.kill()
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
+  }
+}))
+
+test('a deferred take asks again for its own session only, and a session closed while its take ran leaves no count for the next one (#1429)', () => fixture(async f => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { EventEmitter } = await import('node:events')
+  const { randomUUID } = await import('node:crypto')
+  const progress = join(f.home, 'deepseek-asks-progress.md')
+  f.save(progress, '')
+  const directory = join(f.home, 'deepseek-asks-mailbox')
+  // Every session has a message waiting, so each ask again finds something worth a take.
+  f.save(join(directory, 'messages.json'), JSON.stringify({ messages: ['asks-a', 'asks-b', 'asks-c'].map(id => ({ status: 'queued', to: 'deepseek:' + id })) }))
+  const takes = new Map(), held = new Map()
+  // A stand-in board script: every take finds the store busy and answers deferred; a held session's take waits.
+  const spawnMailbox = (_node, args) => {
+    const child = new EventEmitter()
+    child.stdout = Object.assign(new EventEmitter(), { setEncoding() {} })
+    child.kill = () => {}
+    const action = args[args.indexOf('--mailbox') + 1], session = args[args.indexOf('--session') + 1]
+    if (action === 'take') takes.set(session, (takes.get(session) ?? 0) + 1)
+    const answer = () => {
+      child.stdout.emit('data', JSON.stringify(action === 'take' ? { watch: directory, message: null, deferred: true } : { ok: true }) + '\n')
+      child.emit('close', 0)
+    }
+    if (action === 'take' && held.has(session)) held.set(session, answer)
+    else setImmediate(answer)
+    return child
+  }
+  const watch = () => Object.assign(new EventEmitter(), { close() {} })
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, join(f.home, 'deepseek-asks-board.mjs'))
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
+  const hooks = new Map()
+  apply({ on: (name, fn) => hooks.set(name, fn) })
+  const session = id => ({ session: { header: { id } }, status: 'idle', followup() { throw new Error('UNUSED') } })
+  // Settled: no take for 1 s, four times the 250 ms between asks.
+  const settled = async () => {
+    for (const end = Date.now() + 30_000; Date.now() < end;) {
+      const before = JSON.stringify([...takes])
+      await new Promise(done => setTimeout(done, 1000))
+      if (JSON.stringify([...takes]) === before) return
+    }
+    assert.fail(`takes never settled: ${JSON.stringify([...takes])}`)
+  }
+  const a = session('asks-a'), b = session('asks-b')
+  hooks.get('agent/created')({ agent: a })
+  await settled()
+  // The first take and 20 asks again.
+  assert.equal(takes.get('asks-a'), 21)
+  hooks.get('agent/created')({ agent: b })
+  await settled()
+  assert.equal(takes.get('asks-b'), 21)
+  // Before: each of b's asks again took for a too, 41 takes in all.
+  assert.equal(takes.get('asks-a'), 21)
+  held.set('asks-c', null)
+  const closed = session('asks-c')
+  hooks.get('agent/created')({ agent: closed })
+  for (const end = Date.now() + 10_000; held.get('asks-c') === null && Date.now() < end;) await new Promise(done => setTimeout(done, 20))
+  hooks.get('agent/disposed')({ agent: closed })
+  const late = held.get('asks-c')
+  held.delete('asks-c')
+  late()
+  await settled()
+  assert.equal(takes.get('asks-c'), 1)
+  const reopened = session('asks-c')
+  hooks.get('agent/created')({ agent: reopened })
+  await settled()
+  // Before: the late answer left a count of 1, so the same id came back with 19 asks again, not 20.
+  assert.equal(takes.get('asks-c'), 22)
+  for (const agent of [a, b, reopened]) hooks.get('agent/disposed')({ agent })
+}))
+
+test('a mailbox accept the board did not take prints ok false, and ok true once it did (#1430)', async () => mailboxFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  f.seed('deepseek')
+  const run = (...args) => spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--session', session, '--mailbox', ...args], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const took = run('take', '--surface', 'Web')
+  assert.equal(took.status, 0, took.stderr)
+  const { message } = JSON.parse(took.stdout)
+  assert.equal(message.id, 'hook-mailbox-message')
+  const accept = () => run('accept', '--id', message.id, '--nonce', message.nonce)
+  const claim = claimMessageStore(f.directory)
+  try {
+    const refused = accept()
+    assert.equal(refused.status, 0, refused.stderr)
+    assert.deepEqual(JSON.parse(refused.stdout), { ok: false })
+    assert.equal(f.state().messages[0].status, 'uncertain')
+  } finally { claim.release() }
+  const done = accept()
+  assert.equal(done.status, 0, done.stderr)
+  assert.deepEqual(JSON.parse(done.stdout), { ok: true })
+  assert.equal(f.state().messages[0].status, 'accepted')
 }))
 
 test('Grok prompt hooks return a waiting session to working through the native shell shape', () => fixture(f => {

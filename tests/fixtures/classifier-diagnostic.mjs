@@ -23,7 +23,7 @@ export const observeClassifier = (source, file, { isSelectionOnly = false } = {}
   for (const [phase, line] of [
     ['resolve', '    $start.FileName ='], ['arguments', '    $start.Arguments ='],
     ['redirect', '    $start.UseShellExecute ='], ['environment', '    $start.EnvironmentVariables['],
-    ['construct', '    $process = New-Object'], ['start', '    $isStarted = $process.Start()'],
+    ['construct', '    $process = [Diagnostics.Process]::new()'], ['start', '    $isStarted = $process.Start()'],
     ['stdin', '    $process.StandardInput.Close()'], ['stdout', '    $output ='], ['stderr', '    $errors ='],
     ['wait', '    if ($remaining -le 0 -or -not $process.WaitForExit'],
     ['output', '    if ($remaining -le 0 -or -not $output.Wait'],

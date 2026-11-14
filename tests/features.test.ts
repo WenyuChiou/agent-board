@@ -2430,7 +2430,7 @@ test('a working folder with a line break or a comment opening in its name become
 
 test('the Windows reporter finds its inbox beside itself and holds only ASCII, so PowerShell 5.1 reads it under a home folder named in any language', () => {
   const script = reporterPs1()
-  expect(script).toContain("$dir = Join-Path $PSScriptRoot 'progress-inbox'")
+  expect(script).toContain("$dir = [IO.Path]::Combine($PSScriptRoot, 'progress-inbox')")
   expect(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(script)).toBe(true)
 })
 

@@ -68,6 +68,11 @@ export const makePlan = (files, options = {}) => {
       select('generated', path)
       known = true
     }
+    // The plugin step's own runner: a change to it must run the plugin job (the walk only reaches its board test).
+    if (path === 'scripts/plugin-tests.mjs') {
+      select('plugin', path)
+      known = true
+    }
     const testGroup = groupForTest(path)
     if (testGroup) {
       select(testGroup, path)
@@ -99,7 +104,7 @@ export const makePlan = (files, options = {}) => {
   // its modules) and its line-ending policy at run time, under the Claude Code version test.yml pins, and a
   // Windows-only load failure (a CRLF bundle, #589) passed on Ubuntu twice. Test files and docs that only select the
   // plugin group stay on Ubuntu, and a hooks/ file the plugin does not load selects no plugin check at all.
-  const reachesPluginRuntime = files.some(path => path.startsWith('hooks/') || path.startsWith('.claude-plugin/') || path === 'package.json' || path === '.gitattributes' || path === '.github/workflows/test.yml' || options.pluginRuntime?.has(path))
+  const reachesPluginRuntime = files.some(path => path.startsWith('hooks/') || path.startsWith('.claude-plugin/') || path === 'package.json' || path === '.gitattributes' || path === '.github/workflows/test.yml' || path === 'scripts/plugin-tests.mjs' || options.pluginRuntime?.has(path))
   if (checks.installers && (full || !installers.size || files.some(path => options.deps?.installers?.has(path) && !/^(?:scripts\/setup|tests\/setup\.check)\.(?:sh|ps1)$/.test(path)))) {
     for (const system of systems) installers.add(system)
   }

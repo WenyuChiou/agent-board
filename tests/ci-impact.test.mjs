@@ -84,6 +84,13 @@ test('ci impact selects only the installer runner needed by the changed installe
   }
 })
 
+test('a change to the plugin test runner selects the plugin job on both systems; its own test stays in board', () => {
+  const plan = makePlan(['scripts/plugin-tests.mjs'], options())
+  assertOnly(plan, ['plugin'])
+  assert.deepEqual(plan.pluginMatrix, bothSystems)
+  assertOnly(makePlan(['tests/plugin-tests.test.mjs'], options()), ['board'])
+})
+
 test('ci impact uses injected dependency sets for ordinary runtime sources', () => {
   const configured = options()
   configured.deps.plugin.add('hooks/pane.tsx')
