@@ -748,9 +748,9 @@ test('B16 a deletion that follows a saved attempt, before the reply reaches the 
   const late = b.prune(ended, T0 + 31 * MIN)
   assert.deepEqual([late.messages[0].status, late.messages[0].error, late.messages[0].text], ['uncertain', 'UNCONFIRMED', 'Synthetic text for the board cases'])
   assert.equal(b.prune(late, T0 + 31 * MIN + 1439 * MIN).messages[0].error, 'UNCONFIRMED')
-  // A day later it expires; its text stays one more day for a release still owed (B19).
+  // A day later it expires, and its text goes (B20).
   const expired = b.prune(late, T0 + 31 * MIN + 1441 * MIN)
-  assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].text], ['uncertain', 'EXPIRED', 'Synthetic text for the board cases'])
+  assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].text], ['uncertain', 'EXPIRED', ''])
   assert.equal(b.prune(expired, T0 + 31 * MIN + 2882 * MIN).messages.length, 0)
   // One that already read "sent, not confirmed" when the session was deleted keeps its day as well.
   const after = b.act(late, 'mailbox-end', { agent: 'opencode', session: 's1' }, T0 + 32 * MIN).state
@@ -778,9 +778,9 @@ test('B9 a started wake holds the next message to its session only until it read
   assert.equal(next.message?.id, 'm2')
   const first = next.state.messages.find(one => one.id === 'm1')
   assert.deepEqual([first.error, first.text], ['UNCONFIRMED', 'Synthetic text for the board cases'])
-  // A day later it expires like any other open message; its text stays one more day for a release still owed (B19).
+  // A day later it expires like any other open message, and its text goes (B20).
   const gone = b.prune(late, T0 + 31 * MIN + 1441 * MIN).messages.find(one => one.id === 'm1')
-  assert.deepEqual([gone.status, gone.error, gone.text], ['uncertain', 'EXPIRED', 'Synthetic text for the board cases'])
+  assert.deepEqual([gone.status, gone.error, gone.text], ['uncertain', 'EXPIRED', ''])
 })
 
 test('B5 release --unsent takes a started wake back to queued; a plain release does not; an unknown ref is NOT_HELD', async () => {
@@ -1211,7 +1211,7 @@ test('R21 a session marked busy whose next lookup fails is looked at again at th
   assert.equal(f.calls.promptAsync.length, 1)
 }, { watch: false }))
 
-test('R22 a wake the host refused whose release could not be saved for over 30 minutes is still taken back at a tick, and woken once (round 2)', () => fixture(async f => {
+test('R22 a wake the host refused whose release could not be saved for 30 minutes is not woken again: the board answers NOT_HELD, the plugin drops what it owed, and the card offers Copy (#1366 review, replaces round 2)', () => fixture(async f => {
   f.calls.prompts.push(f.prompts.refuse)
   f.calls.faults.release = ['fail', 'fail']
   f.queue('ses_r22', 'r22-message', 'Synthetic text for a refused wake whose release failed')
@@ -1224,12 +1224,13 @@ test('R22 a wake the host refused whose release could not be saved for over 30 m
   f.advance(31 * 60_000)
   f.tick()
   await f.quiet()
-  assert.equal(f.message('r22-message').status, 'queued', 'the release saved at last took it back')
+  assert.equal(f.count('release'), 3, 'the owed release was asked once more')
+  assert.deepEqual([f.message('r22-message').status, f.message('r22-message').error], ['uncertain', 'UNCONFIRMED'])
   f.tick()
-  await f.until(() => f.message('r22-message').status === 'accepted' && f.settled(), 'the message was woken again')
-  assert.equal(f.calls.promptAsync.length, 2)
-  assert.equal(f.calls.sent.length, 1)
-  assert.equal(f.message('r22-message').error, '')
+  await f.quiet()
+  assert.equal(f.count('release'), 3, 'the plugin let the debt go after NOT_HELD')
+  assert.equal(f.calls.promptAsync.length, 1)
+  assert.equal(f.calls.sent.length, 0)
 }, { watch: false }))
 
 test('R23 an OpenCode message accepted after a 204 answer and acknowledged by the model after 31 minutes is acknowledged; meanwhile it reads sent, not confirmed (round 2)', () => fixture(async f => {
@@ -1258,17 +1259,17 @@ test('B10 a repeated attempt answers ok only while the message is an active star
   assert.throws(() => attempt(dismissed, T0 + 3 * MIN), /CLAIM_LOST/)
 })
 
-test('B11 release --unsent also takes back a wake that read "sent, not confirmed", and it is handed out again once (round 2)', async () => {
+test('B11 release --unsent no longer takes back a wake that reads "sent, not confirmed": it is the person\'s to copy, so the board never hands it out again (#1366 review, replaces round 2)', async () => {
   const b = await mailbox()
   const marked = b.act(b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0).state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + SEC).state
   const late = b.prune(marked, T0 + 31 * MIN)
   assert.equal(late.messages[0].error, 'UNCONFIRMED')
-  const back = b.act(late, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1), unsent: true }, T0 + 32 * MIN).state
-  assert.deepEqual([back.messages[0].status, back.messages[0].error, back.messages[0].ref, back.messages[0].attempted, back.messages[0].claimed], ['queued', '', undefined, undefined, 0])
-  const next = b.take(back, 'opencode', 's1', refOf(2), T0 + 32 * MIN)
-  assert.equal(next.message?.id, 'm1')
-  // A plain release still leaves a message that read "sent, not confirmed" as it is.
-  assert.throws(() => b.act(late, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + 32 * MIN), /NOT_HELD/)
+  for (const extra of [{ unsent: true }, {}]) {
+    assert.throws(() => b.act(late, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1), ...extra }, T0 + 32 * MIN), /NOT_HELD/)
+  }
+  const next = b.take(late, 'opencode', 's1', refOf(2), T0 + 32 * MIN)
+  assert.equal(next.message, null)
+  assert.deepEqual([next.state.messages[0].status, next.state.messages[0].error, next.state.messages[0].text], ['uncertain', 'UNCONFIRMED', 'Synthetic text for the board cases'])
 })
 
 test('B12 a late ack on an expired message that had been accepted is taken for OpenCode only (round 2)', async () => {
@@ -1813,39 +1814,32 @@ test('B18 only an OpenCode wake that reads "sent, not confirmed" stops holding i
   assert.throws(() => b.messaging.queueMessage(held, { id: 'm2', target: box.id, turn: 'session', text: 'Synthetic second message' }, 'board', box, T0 + 2 * SEC), /PAIR_BUSY/)
 })
 
-test('B19 a started wake whose unsent release is still owed keeps its text through expiry, and the release sends it; a wake the host took does not (#1366 review)', async () => {
+test('B19 a copied "sent, not confirmed" message resent by hand runs once: a late unsent release is NOT_HELD and only the new message is taken (#1366 review)', async () => {
   const b = await mailbox()
-  const text = 'Synthetic text for the board cases'
   const marked = b.act(b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0).state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + SEC).state
   const late = b.prune(marked, T0 + 31 * MIN)
-  // The plugin could not save its release for more than a day: the message expired, and a later pass does not clear its text.
-  const expired = b.prune(late, T0 + 31 * MIN + 1441 * MIN)
-  assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].text], ['uncertain', 'EXPIRED', text])
-  assert.equal(b.prune(expired, T0 + 31 * MIN + 1442 * MIN).messages[0].text, text)
-  // The release it owed is saved at last: the board answers ok, and the message goes out again.
-  const back = b.act(expired, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1), unsent: true }, T0 + 31 * MIN + 1443 * MIN)
-  assert.equal(back.result.ok, true)
-  assert.deepEqual([back.state.messages[0].status, back.state.messages[0].error, back.state.messages[0].text], ['queued', '', text])
-  // Without --unsent a started wake is not taken back, and once the finished message itself is dropped nothing is held.
-  assert.throws(() => b.act(expired, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + 31 * MIN + 1443 * MIN), /NOT_HELD/)
-  const dropped = T0 + 31 * MIN + 2882 * MIN
-  assert.throws(() => b.act(b.prune(expired, dropped), 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1), unsent: true }, dropped), /NOT_HELD/)
-  // A wake the host answered with a 204 was sent: its text goes at expiry, as before.
-  const started = b.act(b.take(b.seed('opencode', 's2'), 'opencode', 's2', refOf(3), T0).state, 'mailbox-attempt', { agent: 'opencode', session: 's2', ref: refOf(3) }, T0 + SEC).state
-  const accepted = b.act(started, 'mailbox-accept', { agent: 'opencode', session: 's2', id: 'm1', nonce: started.messages[0].nonce, awaitsAck: true }, T0 + 2 * SEC).state
-  const sent = b.prune(b.prune(accepted, T0 + 33 * MIN), T0 + 33 * MIN + 1441 * MIN).messages[0]
-  assert.deepEqual([sent.status, sent.error, sent.text], ['uncertain', 'EXPIRED', ''])
+  // The person copies the text from the card and sends it again from the board.
+  const box = late.mailboxes.find(one => one.agent === 'opencode' && one.session === 's1')
+  const resent = b.messaging.queueMessage(late, { id: 'm2', target: box.id, turn: 'session', text: late.messages[0].text }, 'board', box, T0 + 32 * MIN).state
+  // The plugin's release, owed since the first minute, is saved only now: it changes nothing.
+  assert.throws(() => b.act(resent, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1), unsent: true }, T0 + 33 * MIN), /NOT_HELD/)
+  const first = b.take(resent, 'opencode', 's1', refOf(2), T0 + 33 * MIN)
+  assert.equal(first.message?.id, 'm2')
+  const second = b.take(b.act(first.state, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(2) }, T0 + 34 * MIN).state, 'opencode', 's1', refOf(3), T0 + 34 * MIN)
+  assert.equal(second.message?.id, 'm2', 'only the resent message is ever handed out')
+  assert.equal(second.state.messages.find(one => one.id === 'm1').error, 'UNCONFIRMED')
 })
 
-test('B20 a started wake whose answer was lost (OpenCode may have it) is kept like an owed one: its text stays through expiry and goes only with the deleted record (#1366 review)', async () => {
+test('B20 a started wake with no accept loses its text when it expires, whatever happened to its answer, and no finished record keeps text after a prune at the cap (#1366 review)', async () => {
   const b = await mailbox()
-  const text = 'Synthetic text for the board cases'
-  // The plugin marked the wake and called OpenCode, but the answer never came: no accept and no release follow.
   const marked = b.act(b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0).state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + SEC).state
   const expired = b.prune(b.prune(marked, T0 + 31 * MIN), T0 + 31 * MIN + 1441 * MIN)
-  assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].text], ['uncertain', 'EXPIRED', text])
-  // A day after it finished the record is deleted, and its text with it.
-  assert.equal(b.prune(expired, T0 + 31 * MIN + 2882 * MIN).messages.find(one => one.id === expired.messages[0].id), undefined)
+  assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].text], ['uncertain', 'EXPIRED', ''])
+  assert.throws(() => b.act(expired, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1), unsent: true }, T0 + 31 * MIN + 1442 * MIN), /NOT_HELD/)
+  // Fill the store past its count with finished records that still hold text: after a prune none keeps it.
+  const filler = Array.from({ length: b.messaging.FINISHED_KEEP_COUNT + 5 }, (_, i) => ({ ...marked.messages[0], id: `f${i}`, ref: undefined, status: 'uncertain', error: 'EXPIRED', updated: T0 + 31 * MIN + 1441 * MIN - i }))
+  const full = b.prune({ ...expired, messages: [...expired.messages, ...filler] }, T0 + 31 * MIN + 1442 * MIN)
+  assert.ok(full.messages.filter(one => b.messaging.isFinished(one)).every(one => one.text === ''))
 })
 
 test('A19 a board started before the plugin existed is told by open before anything is taken: the message stays queued and no claim is made (#1366 review)', async () => {

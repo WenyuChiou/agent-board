@@ -144,7 +144,8 @@ const boardReceiver = (client, directory, replay) => {
     settling.set(session, one)
   }
   // Gives a claim back. A started wake goes back only with unsent, and only the plugin knows that the host was never called.
-  // NOT_HELD means the board no longer holds it, which is as good.
+  // NOT_HELD means the board no longer holds it, which is as good: after 30 minutes a started wake reads "sent, not confirmed"
+  // and is the person's to copy, so an owed release that was never saved is dropped then, not sent (#1366 review).
   const giveBack = async (session, ref, isUnsent) => {
     const answer = await boardCall('release', session, directory, ['--ref', ref, ...(isUnsent ? ['--unsent'] : [])])
     return answer?.ok === true || answer?.code === 'NOT_HELD'

@@ -167,9 +167,7 @@ const settleWake = (one: Message, now: number): Message | undefined => {
   }
   if (one.status === 'accepted' && one.awaitsAck === true) return now - one.updated > OPEN_LIMIT_MS ? { ...one, status: 'uncertain', error: UNCONFIRMED, updated: now, hasAccepted: true } : undefined
   if (one.attempted === undefined || one.status !== 'uncertain' || one.error !== '' && one.error !== UNCONFIRMED) return undefined
-  // A day after it read "sent, not confirmed" it expires like any other open message. A wake the host never took may still be one the
-  // plugin knows it never made, whose release it could not save: its text stays one more day, as a finished message's receipt does,
-  // so a release that is saved by then still sends it (#1366 review).
+  // A day after it read "sent, not confirmed" it expires like any other open message, and its text goes (#1366 review).
   if (one.error === UNCONFIRMED) return now - one.updated >= FINISHED_KEEP_MS ? settled({ ...one, error: 'EXPIRED', updated: now }) : one
   return one.error === '' && now - one.attempted >= OPEN_LIMIT_MS ? { ...one, error: UNCONFIRMED, updated: now } : one
 }
@@ -226,9 +224,7 @@ export const isOpen = (one: Pick<Message, 'status' | 'error'>): boolean => !isFi
 // Only the board writes that state, and only for an OpenCode wake, so any other message in it still counts.
 const isHolding = (one: Pick<Message, 'status' | 'error' | 'to' | 'ref'>): boolean => isOpen(one) && !(one.error === UNCONFIRMED && isAtMostOnce(one))
 // A finished message keeps its hash, not its text, and no more of its reply than an ACK line holds.
-// An expired OpenCode wake the host never took keeps its text until the finished message itself is dropped, for a release that is still owed.
-export const isOwedWake = (one: Message): boolean => isAtMostOnce(one) && one.status === 'uncertain' && one.error === 'EXPIRED' && one.attempted !== undefined && one.hasAccepted !== true && one.text !== ''
-const settled = (one: Message): Message => isFinished(one) && !isOwedWake(one) && (one.text !== '' || one.reply.length > ACK_MAX) ? { ...one, text: '', reply: one.reply.slice(0, ACK_MAX) } : one
+const settled = (one: Message): Message => isFinished(one) && (one.text !== '' || one.reply.length > ACK_MAX) ? { ...one, text: '', reply: one.reply.slice(0, ACK_MAX) } : one
 export const pruneMessages = (state: MessageState, now: number): MessageState => {
   // A claim an OpenCode plugin made is never expired while it is unsent (it returns to queued) or a wake that was started or
   // accepted (it reads "sent, not confirmed" and keeps its text); every other message follows the open limit.

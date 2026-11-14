@@ -1892,7 +1892,7 @@ export const LINES = [
 "  return { state: claimed.state, message: claimed.messages[0] ?? null };",
 "};",
 "var releaseMailboxMessage = (state, agent, session, ref, now, isUnsent = false) => {",
-"  const one = state.messages.find((message) => message.target === mailboxId(agent, session) && message.ref === ref && message.status === \"uncertain\" && (message.error === \"\" || isUnsent && (message.error === UNCONFIRMED || isOwedWake(message))));",
+"  const one = state.messages.find((message) => message.target === mailboxId(agent, session) && message.ref === ref && message.status === \"uncertain\" && message.error === \"\");",
 "  if (one === undefined || one.attempted !== undefined && !isUnsent)",
 "    return state;",
 "  const { ref: _ref, attempted: _attempted, ...kept } = one;",

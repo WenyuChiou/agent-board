@@ -109,14 +109,14 @@ progress report fails, the tick makes them again through the plugin's own path, 
 The plugin takes a marked message back (`--mailbox release --unsent`) in three cases: the host answered 400 or 404, which
 proves it was not sent; the session changed after the attempt was saved, before the host was called; and an attempt
 the board did not answer `ok`, whether or not it saved the mark, since the host was never called. Any other error answer
-or a call that never answered may come after the turn started, so the message stays a started wake. `--unsent` also takes
-back one that read "sent, not confirmed" meanwhile, and a release that failed is owed to the board until it is saved.
+or a call that never answered may come after the turn started, so the message stays a started wake. A release that failed
+is owed to the board and asked again at each tick, but only for the wake's first 30 minutes: once it reads "sent, not
+confirmed" the board answers `NOT_HELD` and never hands it out again, since you may have copied and sent it yourself.
 
 A started wake the host never confirms (the model's `agent_board_ack`), and one the host took with a 204 answer that the
 model never acknowledged, read "sent, not confirmed" on the card after 30 minutes and keep their text, so you can copy it;
 an accept or an ack that comes later is still taken. From then on the message no longer holds the session's next message,
-and a day later it expires like any other open message; a started wake the host never took keeps its text one more day, so a
-`--unsent` release the plugin could not save until then still sends it. A repeated `attempt` is answered ok only while the message is
+and a day later it expires like any other open message and its text goes. A repeated `attempt` is answered ok only while the message is
 still an active started wake. Each workspace the host loads the plugin for has its own receiver. `release` answers
 `NOT_HELD` for a ref the board does not hold and `WAKE_STARTED` for a marked one without `--unsent`; `end` answers
 `ok: false` with a code when its write fails, and the tick asks again, a few times. The plugin reads no message of the
@@ -282,9 +282,7 @@ IDs are scoped to this message store. A claim is never automatically replayed, e
 mailbox claim as above. Before each action or snapshot, finished messages older than 24 hours
 are deleted. Finished means
 acknowledged, rejected, or uncertain with error `EXPIRED` or `DISMISSED`. A message drops its
-text the moment it finishes (except an OpenCode started wake that expires with no accept recorded, which keeps
-its text until it is deleted, for a release the plugin may still owe: OpenCode never took it, or its answer was lost
-and it may have) and keeps only a SHA-256 hash of it (of the text as a JSON
+text the moment it finishes and keeps only a SHA-256 hash of it (of the text as a JSON
 string), which is what an exact retry is compared with, and the first 200 characters of its
 reply; a repeated receipt is compared with those. Uncertain messages, accepted mailbox
 messages, and accepted messages with an error become final `uncertain` / `EXPIRED` after
