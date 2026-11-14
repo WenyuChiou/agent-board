@@ -4206,18 +4206,21 @@ test('a reporter sweeps scratch files older than a minute from the inbox and kee
   const held = join(inbox, 'codex-prompt-1-3.tmp')
   f.save(held, 'held'); utimesSync(held, old, old)
   f.save(script, isWindows ? reporterPs1() : reporterSh(inbox))
-  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'prompt'] : [script, 'codex', 'prompt']
+  // A turn event, not a prompt (#1235): the sweep runs after every event, while a prompt first waits up to 2 s for its
+  // classifier, and on a cold Windows runner that wait ran the reporter out of time before it swept, leaving
+  // codex-prompt-1-1.tmp. The prompt's own timing has its own tests (#1080).
+  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'turn'] : [script, 'codex', 'turn']
   const lock = isWindows ? openSync(held, 0x10000000) : undefined
   let out
   try {
-    out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, f.env, JSON.stringify({ session_id: 'synthetic-scratch-sweep', prompt: 'PRIVATE_RAW_PROMPT' }))
+    out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, f.env, JSON.stringify({ session_id: 'synthetic-scratch-sweep' }))
   } finally {
     if (lock !== undefined) closeSync(lock)
   }
   assert.equal(out.error, undefined, hookFailure(out))
   assert.equal(out.status, 0, hookFailure(out))
   const files = readdirSync(inbox)
-  for (const name of names) assert.equal(files.includes(name), false, name)
+  for (const name of names) assert.equal(files.includes(name), false, `${name} was not swept; hook log: ${hookLog(f)}`)
   assert.equal(files.includes('codex-prompt-1-2.tmp'), true)
   assert.equal(files.includes('notes.txt'), true)
   assert.equal(files.filter(name => name.endsWith('.json')).length, 1)
