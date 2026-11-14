@@ -794,7 +794,8 @@ const isDeliveryPath = path => path.startsWith('hooks/receivers/') || ['hooks/me
 const isUncountedForSurface = path => path.startsWith('tests/') || isGeneratedPath(path) || /^hooks\/strings-[^/]+\.ts$/.test(path) || path === 'hooks/i18n.ts'
 // The body's lines as a reader sees them, so an example `Surface:` line is not read: no fenced code (``` or ~~~ after at most
 // three spaces, closed only by a line of the same character at least as long, as CommonMark has it) and no HTML comment (an
-// unclosed `<!--` hides the rest). A comment marker inside a fence, and a fence marker inside a comment, are plain text.
+// unclosed `<!--` hides the rest). A comment marker inside a fence or a code span on one line (`<!--`), and a fence marker
+// inside a comment, are plain text.
 const visibleLines = text => {
   const shown = []
   let fence = null
@@ -810,23 +811,49 @@ const visibleLines = text => {
       fence = open[1]
       continue
     }
-    let rest = raw
     let kept = ''
-    while (rest !== '') {
-      const at = rest.indexOf(isComment ? '-->' : '<!--')
-      if (at === -1) {
-        if (!isComment) kept += rest
+    let at = 0
+    while (at < raw.length) {
+      if (isComment) {
+        const end = raw.indexOf('-->', at)
+        if (end === -1) break
+        at = end + 3
+        isComment = false
+        continue
+      }
+      const comment = raw.indexOf('<!--', at)
+      const tick = raw.indexOf('`', at)
+      if (tick !== -1 && (comment === -1 || tick < comment)) {
+        // A code span: a run of backticks closed by a run of the same length later on the line; an unclosed run is text.
+        const run = raw.slice(tick).match(/^`+/)[0]
+        let close = -1
+        for (let from = tick + run.length; from < raw.length;) {
+          const next = raw.indexOf('`', from)
+          if (next === -1) break
+          const other = raw.slice(next).match(/^`+/)[0]
+          if (other.length === run.length) { close = next; break }
+          from = next + other.length
+        }
+        const end = close === -1 ? tick + run.length : close + run.length
+        kept += raw.slice(at, end)
+        at = end
+        continue
+      }
+      if (comment === -1) {
+        kept += raw.slice(at)
         break
       }
-      if (!isComment) kept += rest.slice(0, at)
-      rest = rest.slice(at + (isComment ? 3 : 4))
-      isComment = !isComment
+      kept += raw.slice(at, comment)
+      at = comment + 4
+      isComment = true
     }
     shown.push(kept)
   }
   return shown
 }
-export const surface = ({ body = '', title = '', number = null, paths = [], numstat, tier = tierOf(body) } = {}) => {
+// The tier as a reader sees it, for the surface check: a `Tier:` line outside fences and comments.
+const visibleTier = body => visibleLines(body).map(line => line.match(/^Tier:[ \t]*`?(risk|normal|light)\b/i)?.[1].toLowerCase()).find(Boolean) ?? null
+export const surface = ({ body = '', title = '', number = null, paths = [], numstat, tier = visibleTier(body) } = {}) => {
   const output = result()
   if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= SURFACE_FROM)) return output
   const fail = (message, fix) => output.problems.push(problem('surface', message, fix))
@@ -845,7 +872,7 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   }
   const [named, ...reasonParts] = line.split(/,[ \t]*cannot split:/i)
   const reason = reasonParts.join(',').trim()
-  if (reasonParts.length && (!reason || reason.startsWith('<'))) {
+  if (reasonParts.length && (!reason || /^<[^<>]*>$/.test(reason))) {
     fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.','write the reason after `cannot split:`, for the maintainer or the owner to accept or refuse before the first review.')
     return output
   }
@@ -859,6 +886,10 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   }
   if (new Set(values).size < values.length) {
     fail('the `Surface:` line names the same surface twice.', how)
+    return output
+  }
+  if (values.length > 2) {
+    fail(`the \`Surface:\` line names ${values.length} surfaces; \`cannot split:\` covers two at most.`, 'split the change into one pull request per surface, or two with `cannot split: <reason>`.')
     return output
   }
   if (values.length > 1 && !reasonParts.length) {

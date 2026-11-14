@@ -1761,6 +1761,10 @@ test('pr-check accepts two surfaces with cannot split and says it waits for an a
   for (const empty of ['Surface: delivery + data, cannot split:', 'Surface: delivery + data, cannot split:   ', 'Surface: delivery + data, cannot split: <reason>']) {
     assert.match(surfaceRun(empty).problems[0]?.message ?? '', /`cannot split:` with no reason/, empty)
   }
+  // A filled reason may start with `<`; only the template's own `<reason>` is a placeholder.
+  assert.deepEqual(surfaceRun('Surface: delivery + data, cannot split: <30 seconds of a broken main still blocks a release').problems, [])
+  // The exception covers two surfaces, not three.
+  assert.match(surfaceRun('Surface: delivery + data + launch, cannot split: main breaks between steps').problems[0]?.message ?? '', /3 surfaces; `cannot split:` covers two at most/)
 })
 
 test('pr-check reads one Surface line outside code fences and skips the template placeholder', () => {
@@ -1780,6 +1784,12 @@ test('pr-check reads one Surface line outside code fences and skips the template
   assert.deepEqual(surfaceRun('```html\n<!-- not closed\n```\nSurface: data').problems, [])
   assert.deepEqual(surfaceRun('<!--\n```\n-->\nSurface: data').problems, [])
   assert.deepEqual(surfaceRun('<!-- note --> \nSurface: data <!-- why -->').problems, [])
+  // A comment marker inside a code span on one line is text too.
+  assert.deepEqual(surfaceRun('Note: `<!--` opens a comment, and ``a ` <!-- b`` too.\nSurface: data').problems, [])
+  assert.deepEqual(surfaceRun('A lone ` tick, then <!-- a comment -->\nSurface: data').problems, [])
+  // The tier is read as a reader sees it, so a comment marker in a fenced example does not hide `Tier: risk` from this check.
+  const hidden = surface({ body: 'Fixes #1\nAuthor: codex, fix/x\n```\n<!--\n```\nTier: risk\nSurface: speed\n', title: 'fix(x): y', number: SURFACE_FROM + 1 })
+  assert.match(hidden.problems[0]?.message ?? '', /"speed", which is not a surface/)
 })
 
 test('pr-check leaves the Surface line to risk pull requests above SURFACE_FROM that are not releases', () => {
