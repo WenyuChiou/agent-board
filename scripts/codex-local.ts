@@ -15,6 +15,7 @@ import { reporterTail } from './reporter-tail'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
+import { antigravitySidecarConfig, antigravitySidecarSource, ANTIGRAVITY_SIDECAR_ID } from '../hooks/antigravity-sidecar'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, planEvents, planPlugins, statusEvents, windowsHookCommand } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
@@ -566,7 +567,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const openclawDir = resolve(flag('--openclaw-dir') ?? (process.env.OPENCLAW_STATE_DIR || join(home, '.openclaw')))
   const deepseekDir = resolve(flag('--deepseek-dir') ?? (process.env.DSH_HOME || join(home, '.dsh')))
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
-  const manifest: Manifest = { files: object(loaded.files ?? {}) as Record<string, string>, groups: object(loaded.groups ?? {}), foreignGroups: object(loaded.foreignGroups ?? {}) }
+  // The sidecar's own record (see runSidecarOnly): where it exists, this install keeps and removes those files too.
+  const sidecarRecord = join(root, 'install-antigravity-sidecar.json')
+  const manifest: Manifest = { files: { ...(agent === 'antigravity' ? object(jsonInitial(sidecarRecord).files ?? {}) : {}), ...object(loaded.files ?? {}) } as Record<string, string>, groups: object(loaded.groups ?? {}), foreignGroups: object(loaded.foreignGroups ?? {}) }
   // A check must not fail on the words of its next step: an argument a shell would expand or eat goes through boardRun's code points.
   const nextCommand = (nextMode: string, extra: string[] = []): string => {
     const rest = [nextMode, ...args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json' && arg !== '--plain'), ...extra]
@@ -580,6 +583,57 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
   }
 
+  // The sidecar's two files (#1396) have a record of their own, apart from the agent's install record, so an
+  // Antigravity the connector manages can have them without setup taking over the connector's hooks. Later runs
+  // keep them current; --remove takes them out. The sidecar never sees a message's text; setup never switches it on.
+  const sidecarDirectory = join(home, '.gemini', 'config', 'sidecars', ANTIGRAVITY_SIDECAR_ID)
+  const sidecarOnlyFiles = [join(sidecarDirectory, 'sidecar.json'), join(sidecarDirectory, 'sidecar.mjs')]
+  const runSidecarOnly = (progressFile: string, isRemoving: boolean, connector: boolean): void => {
+    const recorded = object(jsonInitial(sidecarRecord).files ?? {}) as Record<string, string>
+    const desired = [antigravitySidecarConfig(process.execPath, progressFile, home, fileWords.antigravitySidecarDescription), antigravitySidecarSource(fileWords.antigravityWakeLine)]
+    const sidecarChanges: { file: string; action: string }[] = []
+    const sidecarConflicts: string[] = []
+    sidecarOnlyFiles.forEach((file, i) => {
+      const existing = initial(file)
+      const isOwned = existing !== null && hash(existing) === recorded[file]
+      if (existing !== null && !isOwned && (isRemoving || existing !== desired[i])) sidecarConflicts.push(file)
+      else if (isRemoving ? isOwned : existing !== desired[i]) sidecarChanges.push({ file, action: isRemoving ? 'remove' : existing === null ? 'create' : 'update' })
+    })
+    const nextRecord = `${JSON.stringify({ files: Object.fromEntries(sidecarOnlyFiles.map((file, i) => [file, hash(desired[i]!)])), progress: progressFile }, null, 2)}\n`
+    if (isRemoving ? initial(sidecarRecord) !== null : initial(sidecarRecord) !== nextRecord) sidecarChanges.push({ file: sidecarRecord, action: isRemoving ? 'remove' : initial(sidecarRecord) === null ? 'create' : 'update' })
+    const sidecarPlan: LocalPlan & Json = {
+      mode: isRemoving ? 'remove' : 'install', agent, progress: progressFile, data: root, changes: sidecarChanges, conflicts: sidecarConflicts, alreadyGone: [],
+      ...(connector ? { managedBy: 'connector', script: join(dirname(progressFile), 'agent-board.mjs') } : {}),
+      notice: s.setupSummary.connector.replace('{progress}', progressFile), privacy: s.codexPrivacy,
+      capabilities: { lifecycle: lifecycleCapability(agent), liveReply: false },
+    }
+    if (args.includes('--apply') && !sidecarConflicts.length) {
+      withInstallLock(home, () => {
+        for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
+        // Each file is read again just before its change and checked after it, so an edit made while setup runs
+        // is never overwritten or removed, and a change that did not land is not reported as applied.
+        for (const change of sidecarChanges) {
+          const unchanged = (): void => { if (readLocal(change.file) !== before.get(change.file)) throw new Error('INSTALL_CHANGED') }
+          const text = change.action === 'remove' ? null : change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!
+          if (text === null) { unchanged(); unlinkSync(change.file) }
+          else atomic(change.file, text, unchanged)
+          if (readLocal(change.file) !== text) throw new Error('INSTALL_CHANGED')
+        }
+      })
+      if (isRemoving) try { rmdirSync(sidecarDirectory) } catch {}
+      sidecarPlan.applied = true
+    }
+    if (args.includes('--json') || !isRemoving) output(sidecarPlan)
+    else process.stdout.write(codexRemoveOutput(sidecarPlan, s, nextCommand('--codex-remove')))
+    if (sidecarConflicts.length && args.includes('--apply')) throw new Error('INSTALL_CONFLICT')
+  }
+  const wantsSidecarOnly = agent === 'antigravity' && (args.includes('--antigravity-sidecar') || initial(sidecarRecord) !== null)
+  // A remove for an Antigravity with no install record of its own: only the sidecar's files are left to take out.
+  if (mode === '--codex-remove' && agent === 'antigravity' && initial(manifestFile) === null && initial(sidecarRecord) !== null) {
+    runSidecarOnly(typeof jsonInitial(sidecarRecord).progress === 'string' ? jsonInitial(sidecarRecord).progress as string : progress, true, false)
+    return true
+  }
+
   // Keep the connector as the sole writer for its agents, including its next automatic probe.
   if (activeConnection?.setup?.agents.some(one => one.agent === agent && one.hook === 'configured') && initial(manifestFile) === null) {
     const connectedProgress = localProgressPath(undefined, connectorProgress!)
@@ -589,6 +643,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       process.stdout.write(`${s.localSummary.removal(s.agentNames[agent] ?? agent, s.setupSummary.connector.replace('{progress}', connectedProgress))}\n${s.localSummary.connectRepair}\n`)
       return true
     }
+    if (wantsSidecarOnly && !args.includes('--plain')) { runSidecarOnly(connectedProgress, false, true); return true }
     output({
       mode: 'install', agent, progress: connectedProgress, data: root, script: join(dirname(connectedProgress), 'agent-board.mjs'),
       managedBy: 'connector', changes: [], conflicts: [],
@@ -1350,7 +1405,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat)
   if (agent === 'openclaw') {
     files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
-    files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
+    // activation.onStartup: OpenClaw 2026.6.35 loads a plugin when its gateway starts only when the manifest asks for it (#1489).
+    files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', activation: { onStartup: true }, contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {
@@ -1359,6 +1415,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (agent === 'hermes') files[join(hermesDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   if (agent === 'antigravity') files[antigravitySkill] = skillText
+  // The sidecar is written only on the person's flag, or kept as it is where an earlier setup wrote it (#1396). Setup never switches it on: the person does, in Antigravity's Automations page.
+  if (agent === 'antigravity') {
+    const sidecarDir = join(home, '.gemini', 'config', 'sidecars', ANTIGRAVITY_SIDECAR_ID)
+    const sidecarFiles = [join(sidecarDir, 'sidecar.json'), join(sidecarDir, 'sidecar.mjs')]
+    if (args.includes('--antigravity-sidecar') || sidecarFiles.some(file => Object.hasOwn(manifest.files, file))) {
+      files[sidecarFiles[0]!] = antigravitySidecarConfig(process.execPath, progress, home, fileWords.antigravitySidecarDescription)
+      files[sidecarFiles[1]!] = antigravitySidecarSource(fileWords.antigravityWakeLine)
+    }
+  }
   if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)}}\n'''\n`
   if (agent === 'opencode') files[join(opencodeDir, 'commands', 'agent-board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)}\`\n`
   // 0.24.2 and earlier wrote /board here. The command is now /agent-board, so setup takes the old file
@@ -1416,6 +1481,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
   const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
+  if (remove && agent === 'antigravity' && initial(sidecarRecord) !== null) changes.push({ file: sidecarRecord, action: 'remove' })
   const removedDirs = new Set<string>()
   let handover: { file: string; text: string } | undefined
   if (remove) {

@@ -3720,7 +3720,7 @@ const viewed = model => {
 // The stub now reads every static button with its attributes (#1163). The bulk tidy's confirm and
 // cancel start disabled and wait for a preview, online or not, so the offline checks leave them out.
 const WAITS_FOR_PREVIEW = ['tidy-confirm', 'tidy-cancel']
-const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now, notification, sessionStore, onReload, onFocus } = {}) => {
+const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now, notification, sessionStore, onReload, onFocus, hash = '' } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -3805,7 +3805,10 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     }
     blur() { if (document.activeElement === this) document.activeElement = null }
     scrollIntoView() { this.scrolled = true }
-    setSelectionRange() {}
+    setSelectionRange(start, end) {
+      this.selectionStart = start
+      this.selectionEnd = end
+    }
     select() { this.isSelected = true }
     cloneNode() {
       const copy = new Element(this.tag)
@@ -3905,7 +3908,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(found => found[1]).find(code => code.includes('(function ()'))
   runInNewContext(script, {
     document,
-    location: { search: '?t=x' },
+    location: { search: '?t=x', pathname: '/', hash },
     URLSearchParams,
     navigator: clipboard ? { clipboard: { writeText: async text => { copied.push(text) }, ...(readClipboard ? { readText: readClipboard } : {}) } } : {},
     window: win,
@@ -3982,7 +3985,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     delays,
     get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
-    leave: () => windowEvents.pagehide?.(),
+    leave: event => windowEvents.pagehide?.(event),
     restore: persisted => windowEvents.pageshow?.({ persisted }),
     sent,
     setNow: value => { clockNow = value },
@@ -5267,6 +5270,64 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   dom.restore(false)
   await dom.settle()
   assert.equal(polls.length, same)
+})
+
+test('a paired page restored from the back/forward cache drops its approval secret and ignores late moved replies from its earlier page id (#1436 review)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  const polls = []
+  let holdNextPoll = null
+  let moveRestored = false
+  const dom = await pageDom(html, null, {
+    width: 1000,
+    hash: '#k=synthetic-key',
+    getBoard: async options => {
+      polls.push(options.headers)
+      if (holdNextPoll !== null) {
+        const next = holdNextPoll
+        holdNextPoll = null
+        return await next
+      }
+      if (moveRestored) return { ok: true, json: async () => ({ moved: true }) }
+      return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }, now: 1 }) }
+    },
+    post: async req => {
+      if (req.path === '/api/approvals/pair') return { ok: true, json: async () => ({ secret: 'sec-initial' }) }
+      return { ok: true, json: async () => ({}) }
+    },
+  })
+  await dom.settle()
+  const first = polls[0]['x-board-page']
+  assert.equal(polls[0]['x-board-approve'], 'sec-initial')
+
+  // An in-flight poll that left before pagehide and receives { moved: true } after pageshow must not close the restored page (#1436 review).
+  let releaseStale
+  holdNextPoll = new Promise(resolve => { releaseStale = resolve })
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+
+  dom.leave({ persisted: true })
+  await dom.flush()
+  assert.ok(dom.requests.some(r => r.path === '/api/page-gone'))
+
+  const before = polls.length
+  dom.restore(true)
+  await dom.flush()
+  releaseStale({ ok: true, json: async () => ({ moved: true }) })
+  await dom.settle()
+  assert.equal(dom.node('side').hidden, false)
+  assert.equal(dom.sent.some(s => s.path === '/api/approvals/restore'), false)
+  assert.ok(polls.length > before)
+  for (const poll of polls.slice(before)) {
+    assert.notEqual(poll['x-board-page'], first)
+    assert.equal(poll['x-board-approve'], undefined)
+  }
+
+  // A moved reply for the restored page id itself closes it.
+  moveRestored = true
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+  assert.equal(dom.node('side').hidden, true)
 })
 
 test('a page the board says was replaced stops asking and shows one line (#265)', async () => {
@@ -10545,6 +10606,58 @@ test('reopening a board replaces an explicit resume opt-in when that flag is rem
   } finally { await board.end(urls) }
 })
 
+test('a replaced server tells an open tab the board moved instead of dropping offline, and closes once notified', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  try {
+    const first = board.urlOf(await board.serve([]))
+    assert.ok(first)
+    urls.push(first)
+    const firstAddress = new URL(first)
+    const pageHeaders = { 'x-board-token': firstAddress.searchParams.get('t'), 'x-board-page': 'tab-1', 'x-board-visible': '1' }
+    const polled = await fetchAt('127.0.0.1', Number(firstAddress.port), 'GET', '/api/board', pageHeaders)
+    assert.equal(polled.status, 200)
+    assert.ok(polled.json().model)
+
+    const second = board.urlOf(await board.serve(['--codex-send']))
+    assert.ok(second)
+    assert.notEqual(second, first)
+    urls.push(second)
+
+    const moved = await fetchAt('127.0.0.1', Number(firstAddress.port), 'GET', '/api/board', pageHeaders)
+    assert.equal(moved.status, 200)
+    assert.deepEqual(moved.json(), { moved: true })
+
+    // Once its open tab has been told `{ moved: true }`, the old server closes on its own.
+    let closedOwn = false
+    for (let tries = 0; tries < 30; tries++) {
+      try {
+        await fetchAt('127.0.0.1', Number(firstAddress.port), 'GET', '/api/ping', { 'x-board-token': firstAddress.searchParams.get('t') })
+        await delay(50)
+      } catch {
+        closedOwn = true
+        break
+      }
+    }
+    assert.ok(closedOwn, 'replaced server closes once its open tab has been notified')
+
+    const secondAddress = new URL(second)
+    const ping = await fetchAt('127.0.0.1', Number(secondAddress.port), 'GET', '/api/ping', { 'x-board-token': secondAddress.searchParams.get('t') })
+    assert.equal(ping.json().codexSend, true)
+
+    // When `--port` explicitly reuses the running port, replacement closes immediately without holding that port even with an open tab.
+    const secondHeaders = { 'x-board-token': secondAddress.searchParams.get('t'), 'x-board-page': 'tab-2', 'x-board-visible': '1' }
+    const secondPoll = await fetchAt('127.0.0.1', Number(secondAddress.port), 'GET', '/api/board', secondHeaders)
+    assert.equal(secondPoll.status, 200)
+    assert.ok(secondPoll.json().model)
+    const samePort = String(secondAddress.port)
+    const third = board.urlOf(await board.serve(['--port', samePort, '--allow-resume']))
+    assert.ok(third)
+    assert.equal(new URL(third).port, samePort)
+    urls.push(third)
+  } finally { await board.end(urls) }
+})
+
 const redesignPage = () => run('en', ['--chat'], {}, FILE, `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`)
 const themeScript = html => html.match(/<head>[\s\S]*?<script[^>]*>([\s\S]*?)<\/script>/)[1]
 const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '' }, system = 'light') => {
@@ -13396,6 +13509,55 @@ test('the agent first page keeps step notes and card notes on one line with thei
   } finally { await board.close() }
 })
 
+test('closing a clipped step or step fold right before a redraw stays closed and ignores its stale toggle (#1456)', async () => {
+  const step = 'Review the complete synthetic rollout plan'
+  const note = 'Detailed note repeated '.repeat(8).trim()
+  const source = groupedBlock('47700911', 'codex', 'working', 'clip-repo', 'Close race plan', [
+    `- [~] ${step} — ${note}`,
+    '- [ ] Second synthetic open step',
+    '- [ ] Third synthetic open step',
+  ])
+  const { board, model, html } = await groupedPage(source)
+  try {
+    const dom = await pageDom(html, model)
+    const findClip = () => clipsOf(dom).find(node => pressWalk(node).some(child => child.className === 'whole' && child.textContent?.includes(step)))
+    const findFold = () => pressWalk(dom.node('board')).find(node => node.tag === 'details' && !node.className?.includes('clip') && pressWalk(node).some(child => child.textContent?.includes('Second synthetic open step')))
+    const clip = findClip()
+    const fold = findFold()
+    assert.ok(clip && fold)
+    clip.open = true
+    clip.events.toggle()
+    fold.open = true
+    fold.events.toggle()
+    await dom.redraw(model)
+    const clipBefore = findClip()
+    const foldBefore = findFold()
+    assert.equal(clipBefore.open, true)
+    assert.equal(foldBefore.open, true)
+
+    // User closes both synchronously, and a redraw runs before either queued toggle event fires.
+    clipBefore.open = false
+    foldBefore.open = false
+    await dom.redraw(model)
+    const clipAfter = findClip()
+    const foldAfter = findFold()
+    assert.equal(clipAfter.open, false)
+    assert.equal(foldAfter.open, false)
+
+    // Even if the user re-opens them on the new DOM before the detached elements' stale toggles fire,
+    // the stale toggle events cannot overwrite the new open state.
+    clipAfter.open = true
+    clipAfter.events.toggle()
+    foldAfter.open = true
+    foldAfter.events.toggle()
+    clipBefore.events.toggle()
+    foldBefore.events.toggle()
+    await dom.redraw(model)
+    assert.equal(findClip().open, true)
+    assert.equal(findFold().open, true)
+  } finally { await board.close() }
+})
+
 test('a step longer than one line shows one line on the card and its full text on open', async () => {
   const dom = await pageDom(await sourcePage('en'), await sourceModel(ONE_LINE_FILE, ONE_LINE_NOW))
   const steps = pressWalk(dom.node('board')).filter(node => node.tag === 'li' && node.parentNode?.className === 'steps')
@@ -14317,4 +14479,187 @@ test('a finished message seen only under a held press still frees its id, so the
   await dom.settle()
   assert.equal(ids.length, 2)
   assert.notEqual(ids[1], ids[0])
+})
+
+test('serveModel projects a live in-flight receiver claim as queued instead of flickering uncertain (#1335)', async () => {
+  const { serveModel, buildView, parseProgress, CLAIM_HANDOFF_MS } = await sourceBoard()
+  const now = Date.parse('2026-11-14T12:00:00Z')
+  const text = [
+    '## Work',
+    '<!-- auto session=thread-1 agent=codex state=working updated=2026-11-14T12:00:00Z -->',
+    '### Ship feature',
+    '- [ ] Check status',
+    '<!-- /auto session=thread-1 -->',
+    '',
+    '<!-- auto session=thread-2 agent=codex state=waiting updated=2026-11-14T12:00:00Z -->',
+    '### Review PR',
+    '- [?] Deploy now, OK?',
+    '<!-- /auto session=thread-2 -->',
+    '',
+  ].join('\n')
+  const view = buildView(parseProgress(text), [], null, now, 0, {}, EN)
+  const firstRow = model => [...model.groups.flatMap(g => g.rows), ...model.idle, ...model.stopped][0]
+  const baseMessage = {
+    id: 'm1',
+    target: 'conn-1',
+    turn: 'turn-1',
+    from: 'board',
+    to: 'codex:thread-1',
+    text: 'Continue',
+    origin: 'local',
+    status: 'uncertain',
+    updated: now,
+    reply: '',
+    error: '',
+    hops: 0,
+    claimed: now,
+  }
+  const askMessage = { ...baseMessage, id: 'm2', target: 'conn-2', to: 'codex:thread-2', ...(view.waiting[0]?.questionId ? { answers: view.waiting[0].questionId } : {}) }
+  const liveConnection = { id: 'conn-1', agent: 'codex', session: 'thread-1', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
+  const askConnection = { id: 'conn-2', agent: 'codex', session: 'thread-2', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
+  for (const probe of [now, now + CLAIM_HANDOFF_MS - 1]) {
+    const inFlight = serveModel(view, [], EN, new Set(), false, { connections: [{ ...liveConnection, expires: probe + 60_000 }, { ...askConnection, expires: probe + 60_000 }], messages: [baseMessage, askMessage] }, false, { now: probe, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+    assert.equal(firstRow(inFlight)?.receipt?.status, 'queued', `at +${probe - now}ms`)
+    assert.equal(inFlight.asks[0]?.receipt?.status, 'queued', `ask at +${probe - now}ms`)
+  }
+
+  // Lost /api/messages/poll response: the receiver retries and keeps renewing the same connection without ever receiving or accepting the claim;
+  // once CLAIM_HANDOFF_MS elapses, the board must surface uncertain rather than keeping queued until OPEN_LIMIT_MS.
+  const later = now + CLAIM_HANDOFF_MS
+  const renewedRowConn = { ...liveConnection, expires: later + 60_000 }
+  const renewedAskConn = { ...askConnection, expires: later + 60_000 }
+  const expiredHandoff = serveModel(view, [], EN, new Set(), false, { connections: [renewedRowConn, renewedAskConn], messages: [baseMessage, askMessage] }, false, { now: later, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+  assert.equal(firstRow(expiredHandoff)?.receipt?.status, 'uncertain', 'lost poll response after handoff window')
+  assert.equal(expiredHandoff.asks[0]?.receipt?.status, 'uncertain', 'lost poll response ask after handoff window')
+
+  const cases = [
+    { name: 'error', connections: [liveConnection], message: { ...baseMessage, error: 'ACK_MISSING' } },
+    { name: 'disconnected', connections: [], message: { ...baseMessage, error: 'DISCONNECTED' } },
+    { name: 'no connection', connections: [], message: baseMessage },
+    { name: 'contested', connections: [{ ...liveConnection, contested: true }], message: baseMessage },
+    { name: 'expired connection', connections: [{ ...liveConnection, expires: now }], message: baseMessage },
+    { name: 'later uncertain receipt', connections: [liveConnection], message: { ...baseMessage, updated: now + 10 } },
+    { name: 'mailbox claim', connections: [{ ...liveConnection, id: 'mailbox_' + 'a'.repeat(24) }], message: { ...baseMessage, target: 'mailbox_' + 'a'.repeat(24) } },
+    { name: 'missing clock fails closed', connections: [liveConnection], message: baseMessage, now: 0 },
+  ]
+  for (const entry of cases) {
+    const model = serveModel(view, [], EN, new Set(), false, { connections: entry.connections, messages: [entry.message] }, false, { now: entry.now ?? now, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+    assert.equal(firstRow(model)?.receipt?.status, 'uncertain', entry.name)
+  }
+})
+
+test('a press held on a lost-result button survives a rebuild of the lost results (#1473)', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const base = redesignModel()
+  const askOne = { ...base.asks[0], key: 'ask-hide-1', text: 'Hide me first?', task: 'First plan', canHide: true, unhideKey: 'hidden:h1', isSending: false }
+  const askTwo = { ...base.asks[0], key: 'ask-gone-2', text: 'Answer me later?', task: 'Second plan', isSending: false }
+  let liveModel = { ...base, asks: [askOne, askTwo], hidden: [] }
+  let boardExtra = {}
+  const calls = []
+  const dom = await pageDom(html, liveModel, {
+    currentModel: () => liveModel,
+    currentBoard: () => boardExtra,
+    post: async request => {
+      calls.push(request)
+      if (request.body.type === 'hide') {
+        const ask = liveModel.asks.find(one => one.key === request.body.key)
+        liveModel = {
+          ...liveModel,
+          asks: liveModel.asks.filter(one => one.key !== request.body.key),
+          hidden: [...liveModel.hidden, { key: ask.unhideKey, project: ask.project, agent: ask.agent, task: ask.task, text: ask.text }],
+        }
+        return { ok: true, json: async () => ({ ok: true, note: EN.hidQuestion || 'Hidden' }) }
+      }
+      liveModel = {
+        ...liveModel,
+        asks: [...liveModel.asks, askOne],
+        hidden: liveModel.hidden.filter(one => one.key !== request.body.key),
+      }
+      return { ok: true, json: async () => ({ ok: true, note: 'Shown again' }) }
+    },
+  })
+  const cardButtons = (key) => {
+    const card = pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === key)
+    assert.ok(card, `card ${key}`)
+    return pressWalk(card).filter(node => node.tag === 'button')
+  }
+  const showAgainOf = label => {
+    const found = pageLostResults(dom, label).flatMap(node => pressWalk(node).filter(one => one.tag === 'button' && one.textContent === EN.showAgain))
+    assert.equal(found.length, 1, `${label}: exactly one Show again button`)
+    return found[0]
+  }
+  // Hide the first ask: it leaves a lost result with its own Show again button.
+  cardButtons('ask-hide-1').find(button => button.textContent === EN.answeredHide).click()
+  await dom.settle()
+  // The second ask's card leaves the board with no press of its own (a redraw drops it).
+  liveModel = { ...liveModel, asks: [] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  const firstShowAgain = showAgainOf('First plan')
+  assert.ok(pressWalk(dom.node('board')).includes(firstShowAgain), 'the first lost card is drawn before the hold')
+  // Hold a press on the first card's Show again, then let a background reply for the gone second card arrive.
+  dom.pointer('pointerdown', { pointerId: 1 })
+  boardExtra = { replies: [{ at: 2, note: 'Background answer', ok: true, key: 'ask-gone-2' }] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(pressWalk(dom.node('board')).includes(firstShowAgain), 'the held button is not replaced by the rebuild')
+  // Ending the hold runs the deferred rebuild: the first card is drawn again, now as a new button,
+  // and the background reply's lost card appears beside it.
+  dom.pointer('pointermove', { pointerId: 1, buttons: 0 })
+  const rebuilt = showAgainOf('First plan')
+  assert.notEqual(rebuilt, firstShowAgain, 'the deferred rebuild replaces the button only after the release')
+  assert.ok(pageLostResults(dom, '').some(node => node.textContent.includes('Background answer')), 'the deferred rebuild draws the background reply')
+  rebuilt.click()
+  await dom.settle()
+  assert.ok(calls.some(request => request.body.type === 'unhide' && request.body.key === 'hidden:h1'), 'the rebuilt first button still unhides its card')
+})
+
+test('a deferred lost-results rebuild keeps the focused copy field and its selection (#1473)', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const base = redesignModel()
+  const askCopy = { ...base.asks[0], key: 'ask-copy-1', text: 'Copy me?', task: 'Copy plan', command: 'echo synthetic-copy', canHide: true, isSending: false }
+  const askTwo = { ...base.asks[0], key: 'ask-gone-2', text: 'Answer me later?', task: 'Second plan', isSending: false }
+  let liveModel = { ...base, asks: [askCopy, askTwo], hidden: [] }
+  let boardExtra = {}
+  const dom = await pageDom(html, liveModel, {
+    currentModel: () => liveModel,
+    currentBoard: () => boardExtra,
+  })
+  const walk = node => [node, ...node.childNodes.flatMap(walk)]
+  const copyField = () => walk(dom.node('board')).find(node => node.tag === 'textarea' && node.value === 'echo synthetic-copy')
+  // The failed copy leaves a manual-copy textarea in the card's result slot.
+  const copyButton = dom.buttons().find(button => button.textContent === EN.serveCopyCommand)
+  assert.ok(copyButton, 'the copy command button is on the card')
+  copyButton.click()
+  await dom.settle()
+  assert.ok(copyField(), 'the failed copy draws its textarea in the slot')
+  // Both cards leave the board: the copy result becomes a lost result with its own copy field.
+  liveModel = { ...liveModel, asks: [] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(pageLostResults(dom, 'Copy plan'), 'the copy result leaves a lost card')
+  const area = copyField()
+  assert.ok(area, 'the lost card keeps the copy field')
+  // Focus the lost copy field and select a range, then hold a press in it while a background reply for the
+  // gone second card arrives.
+  area.focus()
+  area.setSelectionRange(2, 8)
+  assert.equal(dom.active(), area, 'the copy field is focused before the hold')
+  dom.pointer('pointerdown', { pointerId: 1 })
+  boardExtra = { replies: [{ at: 2, note: 'Background answer', ok: true, key: 'ask-gone-2' }] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(walk(dom.node('board')).includes(area), 'the held copy field is not replaced by the rebuild')
+  assert.equal(dom.active(), area, 'the copy field stays focused under the hold')
+  // Ending the hold runs the deferred rebuild: the copy field is drawn again, focused, with its selection.
+  dom.pointer('pointermove', { pointerId: 1, buttons: 0 })
+  const rebuilt = copyField()
+  assert.ok(rebuilt, 'the deferred rebuild draws the copy field again')
+  assert.notEqual(rebuilt, area, 'the deferred rebuild replaces the copy field only after the release')
+  assert.equal(dom.active(), rebuilt, 'the rebuilt copy field is focused again')
+  assert.equal(rebuilt.selectionStart, 2, 'the rebuilt copy field keeps the selection start')
+  assert.equal(rebuilt.selectionEnd, 8, 'the rebuilt copy field keeps the selection end')
+  assert.ok(pageLostResults(dom, '').some(node => node.textContent.includes('Background answer')), 'the deferred rebuild draws the background reply')
 })

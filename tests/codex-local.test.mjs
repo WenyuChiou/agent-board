@@ -7223,6 +7223,27 @@ test('OpenClaw native metadata callbacks fence stale runs and never request conv
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
+test('OpenClaw setup asks the gateway to load the board plugin at start, also over a manifest an earlier setup wrote, and removes it (#1489)', () => fixture(f => {
+  const file = join(f.root, 'adapters', 'openclaw', 'openclaw.plugin.json')
+  const record = join(f.root, 'install-openclaw.json')
+  assert.equal(f.install('--agent', 'openclaw', '--apply').status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).activation, { onStartup: true })
+  // An earlier release wrote the manifest without activation and recorded its bytes: the next setup takes it over.
+  const earlier = `${JSON.stringify({ id: 'agent-board-local', contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}
+`
+  f.save(file, earlier)
+  const saved = JSON.parse(readFileSync(record, 'utf8'))
+  saved.files[file] = createHash('sha256').update(earlier).digest('hex')
+  f.save(record, `${JSON.stringify(saved, null, 2)}
+`)
+  const again = f.install('--agent', 'openclaw', '--apply')
+  assert.equal(again.status, 0, again.stdout)
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).activation, { onStartup: true })
+  const removed = f.install('--agent', 'openclaw', '--remove', '--apply')
+  assert.equal(removed.status, 0, removed.stdout)
+  assert.equal(existsSync(file), false)
+}))
+
 test('OpenClaw session events carry the session folder and progress_card reports to the plugin session', () => fixture(async f => {
   assert.equal(f.install('--agent', 'openclaw', '--apply').status, 0)
   const plugin = (await import(pathToFileURL(join(f.root, 'adapters', 'openclaw', 'agent-board-local.mjs')))).default

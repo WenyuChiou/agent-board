@@ -46,7 +46,15 @@ const reachable = (agent: string, session: string | undefined, target: AgentTarg
   const found = liveTarget(agent, session, targets)
   return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
 }
-const rowReceipt = (agent: string, session: string | undefined, messages: readonly ShownMessage[], now: number, s: Strings, answers?: string, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true): { receipt?: Receipt } => {
+// A claim just handed to a live receiver still shows as queued during the brief handoff window while the receiver can accept or fail;
+// once that window elapses (for example a lost /api/messages/poll response while the receiver keeps renewing its connection), show uncertain (#1335).
+export const CLAIM_HANDOFF_MS = 15_000
+const isClaimInFlight = (one: ShownMessage, connections: readonly Connection[], now: number): boolean =>
+  one.status === 'uncertain' && one.error === '' && one.hasAccepted !== true && one.reply === ''
+  && one.claimed > 0 && one.updated === one.claimed && !isMailboxTarget(one.target)
+  && now >= one.claimed && now - one.claimed < CLAIM_HANDOFF_MS
+  && connections.some(c => c.id === one.target && c.turn === one.turn && !c.contested && c.expires > now)
+const rowReceipt = (agent: string, session: string | undefined, messages: readonly ShownMessage[], now: number, s: Strings, answers?: string, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true, connections: readonly Connection[] = []): { receipt?: Receipt } => {
   // A kept question (no live session here) is found by the one message the board sent to answer it; a message
   // with no such link is no receipt for it. Only the board sets that link, so the question id alone names the
   // message. On a live question's card, an answer to another question is no receipt for this one (#725), while
@@ -55,7 +63,9 @@ const rowReceipt = (agent: string, session: string | undefined, messages: readon
   const one = to === undefined
     ? answers === undefined ? undefined : messages.filter(message => message.answers === answers).at(-1)
     : messages.filter(message => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1)
-  return one === undefined ? {} : { receipt: { id: one.id, status: one.status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
+  if (one === undefined) return {}
+  const status = isClaimInFlight(one, connections, now) ? 'queued' : one.status
+  return { receipt: { id: one.id, status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 // The person's answer to this question reached its session: the session took it, or replied.
 const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
@@ -495,7 +505,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
-  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId, isMessageSurfaceLost))
+  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId, isMessageSurfaceLost, messaging?.connections))
   const asks: ServeAsk[] = []
   // Per ask card: whether an answer to this very question is held (the page's `isSending` is per session).
   const held = new Map<string, boolean>()
@@ -550,7 +560,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         // A question the board knows gets the receipt of the answer sent to it, not of an earlier message
         // to the same session.
-        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId, isMessageSurfaceLost)),
+        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId, isMessageSurfaceLost, messaging?.connections)),
         key: item.key,
         ...(ask.questionId === undefined ? {} : { questionId: ask.questionId }),
         project: ask.project,
@@ -629,7 +639,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
           ...(row.rowState === undefined ? {} : { rowState: row.rowState }),
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
-        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, undefined, isMessageSurfaceLost)),
+        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, undefined, isMessageSurfaceLost, messaging?.connections)),
         key: item.key,
         project: row.project,
         title: row.title,
@@ -1406,21 +1416,50 @@ const PAGE_SCRIPT = String.raw`
   var heldPointers = {};
   var pressCount = 0;
   function isHeld() { return Object.keys(heldPointers).length > 0; }
+  // A lost-results rebuild skipped under a press waits here until the hold ends (#1473). The flush keeps the
+  // copy focus like the other rebuild paths, so a selected copy field survives it.
+  var lostResultsStale = false;
+  function drawLostResultsIfStale() { if (!isHeld() && lostResultsStale) { lostResultsStale = false; keepCopyFocus(drawLostResults); } }
   function pointerReleased(event) {
     var id = String(event && event.pointerId);
     var press = heldPointers[id];
-    setTimeout(function () { if (heldPointers[id] === press) delete heldPointers[id]; }, 0);
+    setTimeout(function () { if (heldPointers[id] === press) { delete heldPointers[id]; drawLostResultsIfStale(); } }, 0);
   }
   if (typeof document.addEventListener === 'function') {
     document.addEventListener('pointerdown', function (event) { pressCount += 1; heldPointers[String(event.pointerId)] = pressCount; }, true);
     document.addEventListener('pointerup', pointerReleased, true);
     document.addEventListener('pointercancel', pointerReleased, true);
     // A move with no button held means the release was lost (a context menu, a scrollbar drag): the board draws again.
-    document.addEventListener('pointermove', function (event) { if (!event.buttons) delete heldPointers[String(event.pointerId)]; }, true);
+    document.addEventListener('pointermove', function (event) { if (!event.buttons) { delete heldPointers[String(event.pointerId)]; drawLostResultsIfStale(); } }, true);
   }
   // Losing focus loses every release that was still to come.
-  if (typeof window.addEventListener === 'function') window.addEventListener('blur', function () { heldPointers = {}; });
+  if (typeof window.addEventListener === 'function') window.addEventListener('blur', function () { heldPointers = {}; drawLostResultsIfStale(); });
   var opened = {};
+  var liveDetails = [];
+  // Read live <details>.open before redraw because HTML queues the toggle event asynchronously.
+  function syncDetails() {
+    for (var i = 0; i < liveDetails.length; i += 1) {
+      var entry = liveDetails[i];
+      entry.stale = true;
+      var isOpen = entry.box.open === true;
+      if (isOpen !== entry.wasOpen) opened[entry.ref] = isOpen;
+    }
+    liveDetails = [];
+  }
+  function detailsBox(ref, cls) {
+    var box = el('details', cls || '');
+    var initial = opened[ref] === true;
+    var entry = { ref: ref, box: box, wasOpen: initial, stale: false };
+    box.open = initial;
+    liveDetails.push(entry);
+    box.addEventListener('toggle', function () {
+      if (entry.stale) return;
+      var isOpen = box.open === true;
+      opened[ref] = isOpen;
+      entry.wasOpen = isOpen;
+    });
+    return box;
+  }
   var timer = null;
   var isClosed = false;
   var isUnreachable = false;
@@ -1642,14 +1681,29 @@ const PAGE_SCRIPT = String.raw`
       }, function () { barStyleShown(before); settingsSay(w('pressFailed'), true); }).finally(function () { node.disabled = false; });
     });
   });
+  function showMoved() {
+    isClosed = true;
+    approveSecret = '';
+    clearTimeout(timer);
+    if (drawerOpen) setDrawer(false, true);
+    paintLight();
+    var movedMain = document.querySelector('main');
+    movedMain.textContent = '';
+    add(movedMain, el('p', '', w('serveMoved')));
+    document.getElementById('side').hidden = true;
+  }
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
     try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
   });
-  // A page the browser kept in its back/forward cache and shows again is the same document, but the board forgot its id when it left: it names itself anew and asks at once (#1028).
+  // A page the browser kept in its back/forward cache and shows again is the same document, but the board forgot its id
+  // and retired its secret when it left: it names itself anew, drops any approval secret and asks at once (#1028, #1378).
   if (typeof window.addEventListener === 'function') window.addEventListener('pageshow', function (event) {
     if (!event || !event.persisted || isClosed) return;
     pageId = newPageId();
+    approveSecret = '';
+    boardEtag = '';
+    last = '';
     refresh();
   });
   // onCopied: what to do once the text is on the clipboard; the card then says where to paste it. Without it the
@@ -1958,9 +2012,7 @@ const PAGE_SCRIPT = String.raw`
   // pressing it, or Enter on it, opens the whole text in its place. An open one stays open across
   // a redraw (opened[ref]). The short text is the folded, capped copy when the model sent one.
   function clipped(short, whole, cls, ref) {
-    var box = el('details', 'clip ' + cls);
-    box.open = opened[ref] === true;
-    box.addEventListener('toggle', function () { opened[ref] = box.open; });
+    var box = detailsBox(ref, 'clip ' + cls);
     add(box, add(el('summary'), el('span', 'short', short || whole), el('span', 'whole', whole)));
     return box;
   }
@@ -2139,10 +2191,7 @@ const PAGE_SCRIPT = String.raw`
   // A fold of finished or further steps stays open across a redraw (opened[ref]), like a clipped text: the page
   // redraws whenever the board changes or the minute turns, and a fold the person opened must not close under them.
   function folded(label, list, ref) {
-    var box = el('details');
-    box.open = opened[ref] === true;
-    box.addEventListener('toggle', function () { opened[ref] = box.open; });
-    return add(box, el('summary', '', label), list);
+    return add(detailsBox(ref), el('summary', '', label), list);
   }
   function sends(mode) { return mode === 'send' || mode === 'connected' || mode === 'mailbox'; }
   // One question or stuck task on the Needs you sheet, answerable where it is.
@@ -3343,6 +3392,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function draw(model) {
     if (!model.view) return;
+    syncDetails();
     var view = model.view;
     board.querySelectorAll('textarea[data-key]').forEach(function (box) { pg.drafts[box.getAttribute('data-key')] = box.value; });
     var active = document.activeElement;
@@ -3469,6 +3519,9 @@ const PAGE_SCRIPT = String.raw`
     keepCopyFocus(function () { draw(model); });
   }
   function drawLostResults() {
+    // A rebuild under a press would replace the button being held, so it waits for the release (#1473).
+    if (isHeld()) { lostResultsStale = true; return; }
+    lostResultsStale = false;
     lostResults.forEach(function (card) { card.remove(); });
     lostResults = [];
     Object.keys(results).reverse().forEach(function (key) {
@@ -3496,18 +3549,11 @@ const PAGE_SCRIPT = String.raw`
   function refresh() {
     if (isClosed) return;
     clearTimeout(timer);
+    var pollPage = pageId;
     call('/api/board').then(function (data) {
+      if (isClosed || pollPage !== pageId) return;
       // A newer page took over: this one stops asking and says so, once (#265).
-      if (data.moved) {
-        isClosed = true;
-        if (drawerOpen) setDrawer(false, true);
-        paintLight();
-        var movedMain = document.querySelector('main');
-        movedMain.textContent = '';
-        add(movedMain, el('p', '', w('serveMoved')));
-        document.getElementById('side').hidden = true;
-        return;
-      }
+      if (data.moved) { showMoved(); return; }
       if (data.unchanged) { reachable(); maybeShowAway(); return; }
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }
@@ -3552,10 +3598,10 @@ const PAGE_SCRIPT = String.raw`
         if (reply.at > seenAt) { since = Math.max(since, reply.at); say(reply.note, reply.ok ? 'done' : 'alert', reply.key, undefined, !reply.ok); }
       });
     }, function () {
-      unreachable();
+      if (pollPage === pageId) unreachable();
     }).then(function () {
       // Leave room for the response and paint inside the three-second ask deadline.
-      if (!isClosed) timer = setTimeout(refresh, 2000);
+      if (!isClosed && pollPage === pageId) timer = setTimeout(refresh, 2000);
     });
   }
   // Wider than the parser's start marker, so a block it would take is never dropped here.

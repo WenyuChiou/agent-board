@@ -94,6 +94,8 @@ export type ServeOptions = {
   // The tests' shorter waits; the board uses APPROVAL_DRAW_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS
   // and APPROVAL_GRACE_MS.
   approvalTimes?: { drawMs: number; pressMs: number; secretMs?: number; graceMs?: number }
+  // How long a replaced server keeps HTTP open after dropping locks/receivers so an open tab can read `{ moved: true }` (#1335).
+  movedGraceMs?: number
 }
 
 type Result = { ok: boolean; note: string }
@@ -182,6 +184,13 @@ export const startServer = (o: ServeOptions): void => {
   let pageSeq = 0
   // Pages told they were replaced. They stay replaced: a poll already on its way when the page stopped must not make it the newest again.
   const retired = new Set<string>()
+  let activeMaxSeq = 0
+  const retirePage = (id: string): void => {
+    if (id === '') return
+    retired.add(id)
+    // A bound on the memory: the oldest ids are forgotten first.
+    while (retired.size > 256) retired.delete(retired.values().next().value as string)
+  }
   // A page that has not asked for this long no longer stands for a newer page (a backgrounded tab asks about once a minute).
   const PAGE_STALE_MS = 150_000
   const pageIdOf = (headers: IncomingMessage['headers']): string => {
@@ -195,6 +204,11 @@ export const startServer = (o: ServeOptions): void => {
     return latest === 0 ? null : now - latest
   }
   let isStopping = false
+  let isMoved = false
+  let movedReleased = false
+  let movedTimer: ReturnType<typeof setTimeout> | null = null
+  const movedWaiting = new Set<string>()
+  let isFinished = false
   // The page on the local network: its own server, address and token, so the computer's token
   // never crosses the network.
   let lan: { server: Server; host: string; token: string; url: string; lastSeen: number } | null = null
@@ -206,9 +220,16 @@ export const startServer = (o: ServeOptions): void => {
   // and nothing more. The key does pass on the browser's command line: a used key stays known
   // until it expires, and a second use of it turns approvals off (see the pair route).
   const pairKeys = new Map<string, { until: number; secret: string }>()
-  // Each page secret: when it was given, when any page last asked for the board with it, and when
-  // a visible page did.
-  const pageSecrets = new Map<string, { pairedAt: number; seen: number; watched: number }>()
+  // Each page secret: which page holds it, that page's order (when known), when it was given,
+  // when that page last asked for the board with it, and when it did so while visible.
+  const pageSecrets = new Map<string, { page: string; seq: number; pairedAt: number; seen: number; watched: number }>()
+  const dropPageSecrets = (id: string): void => {
+    if (id === '') return
+    for (const [secret, held] of pageSecrets) if (held.page === id) pageSecrets.delete(secret)
+  }
+  const dropOlderSecrets = (id: string, seq: number, now: number): void => {
+    for (const [other, held] of pageSecrets) if (now - held.seen > secretMs || (id !== '' && held.page !== '' && held.page !== id && held.seq < seq)) pageSecrets.delete(other)
+  }
   // A pairing key used twice: no page answers approvals again until the board restarts.
   let isApprovalOff = false
   // A host asked for an approval since the board started: only then does an open page that cannot
@@ -224,11 +245,12 @@ export const startServer = (o: ServeOptions): void => {
     const secret = text(headers['x-board-approve'])
     const held = secret === '' || isApprovalOff ? undefined : pageSecrets.get(secret)
     if (held === undefined) return ''
-    // A page that stopped asking (closed, or its tab gone) takes its secret with it.
-    if (now - held.seen > secretMs) {
+    // A page that stopped asking, left, or was replaced takes its secret with it (#1378).
+    if (now - held.seen > secretMs || (held.page !== '' && retired.has(held.page))) {
       pageSecrets.delete(secret)
       return ''
     }
+    if (held.page !== '' && pageIdOf(headers) !== held.page) return ''
     return secret
   }
   const isWatched = (now: number): boolean => !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs && now - held.watched < APPROVAL_PAGE_MS)
@@ -267,19 +289,53 @@ export const startServer = (o: ServeOptions): void => {
 
   let codexReceiver: ReturnType<typeof startCodexReceiver> | null = null
 
-  const stop = (): void => {
-    if (isStopping) return
+  const closeNonServer = (): void => {
+    // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
+    try { messaging.close() } catch {}
+    closeLan()
+  }
+
+  const finish = (): void => {
+    if (isFinished) return
+    isFinished = true
+    if (movedTimer !== null) {
+      clearTimeout(movedTimer)
+      movedTimer = null
+    }
+    closeNonServer()
+    server.close()
+    server.closeAllConnections()
+    o.onStop()
+  }
+
+  const stop = (moved = false): void => {
+    if (isStopping) {
+      if (!moved && isMoved) {
+        isMoved = false
+        if (movedReleased) finish()
+      }
+      return
+    }
     isStopping = true
     for (const id of [...approvals.keys()]) settleApproval(id, null)
     for (const one of approvals.values()) one.timers.forEach(clearTimeout)
     approvals.clear()
-    const finish = (): void => {
-      // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
-      try { messaging.close() } catch {}
-      closeLan()
-      server.close()
-      server.closeAllConnections()
-      o.onStop()
+    if (moved) {
+      const now = Date.now()
+      for (const [id, one] of pages) if (now - one.at < PAGE_STALE_MS) movedWaiting.add(id)
+      pages.clear()
+    }
+    if (moved && movedWaiting.size > 0) {
+      isMoved = true
+      movedTimer = setTimeout(finish, o.movedGraceMs ?? 5_000)
+      const released = (): void => {
+        movedReleased = true
+        closeNonServer()
+        if (!isMoved || movedWaiting.size === 0) finish()
+      }
+      if (codexReceiver === null) released()
+      else void Promise.race([codexReceiver.close().catch(() => undefined), new Promise(done => setTimeout(done, 1500))]).then(released)
+      return
     }
     if (codexReceiver === null) {
       finish()
@@ -370,22 +426,80 @@ export const startServer = (o: ServeOptions): void => {
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
+    const replyMessage = (action: string, payload: Record<string, unknown>): void => {
+      // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
+      if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
+      try { return json(res, 200, messaging.act(action, payload, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
+      catch (error) {
+        // A temporary file lock is storage unavailability, not a stale binding.
+        // Only the owner's lease-bounded poller retries; sends and receipts do not.
+        const code = (error as { code?: unknown } | null)?.code
+        if (['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
+        return json(res, 409, { error: error instanceof Error ? error.message : 'MESSAGE_FAILED' })
+      }
+    }
+    if (isMoved) {
+      if (!isLan && req.method === 'GET' && url.pathname === '/api/board') {
+        const id = pageIdOf(req.headers)
+        if (id !== '') movedWaiting.delete(id)
+        res.once('finish', () => { if (movedWaiting.size === 0 && movedReleased) setImmediate(finish) })
+        return json(res, 200, { moved: true })
+      }
+      if (req.method === 'POST') {
+        const body = await readBody(req)
+        if (body === null) return json(res, 400, {})
+        if (!isLan && url.pathname === '/api/page-gone') {
+          const id = pageIdOf(req.headers)
+          if (id !== '') movedWaiting.delete(id)
+          res.once('finish', () => { if (movedWaiting.size === 0 && movedReleased) setImmediate(finish) })
+          return json(res, 200, {})
+        }
+        if (url.pathname === '/api/close') {
+          if (body.moved !== true) res.once('finish', () => setImmediate(() => stop(false)))
+          return json(res, 200, {})
+        }
+        // Before closeNonServer() closes messaging, let codexReceiver disconnect and any in-flight receipt finish cleanly (#1335).
+        if (!isLan && !movedReleased && url.pathname.startsWith('/api/messages/')) {
+          const action = url.pathname.slice('/api/messages/'.length)
+          if (['disconnect', 'receipt', 'mailbox-accept', 'mailbox-ack'].includes(action)) {
+            return replyMessage(action, body)
+          }
+        }
+      }
+      return json(res, 410, { moved: true })
+    }
     if (!isLan && isPage) loadedAt = Date.now()
     let isReplaced = false
     if (!isLan && req.method === 'GET' && url.pathname === '/api/board' && pageIdOf(req.headers) !== '') {
       const now = Date.now()
       const id = pageIdOf(req.headers)
-      const mine = pages.get(id)?.seq ?? ++pageSeq
-      isReplaced = retired.has(id) || [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)
-      if (isReplaced) {
+      if (retired.has(id)) {
+        // A retired page already dropped its secrets when it left or was replaced; keep its late poll
+        // from allocating a fresh pageSeq or disturbing any other page's secret (#1378).
+        isReplaced = true
         pages.delete(id)
-        retired.add(id)
-        // A bound on the memory: the oldest ids are forgotten first.
-        if (retired.size > 256) retired.delete(retired.values().next().value as string)
-      } else pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
+      } else {
+        const mine = pages.get(id)?.seq ?? ++pageSeq
+        const superseded = activeMaxSeq > mine || [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)
+        isReplaced = superseded
+        if (isReplaced) {
+          pages.delete(id)
+          retirePage(id)
+          dropPageSecrets(id)
+        } else {
+          pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
+          if (mine > activeMaxSeq) activeMaxSeq = mine
+          // Any secret bound to an older page is retired once a newer page asks for the board (#1378).
+          dropOlderSecrets(id, mine, now)
+        }
+      }
       // A page asking with its secret keeps it; only a visible one counts as watching for approvals.
       const held = isReplaced ? undefined : pageSecrets.get(secretOf(req.headers, now))
       if (held !== undefined) {
+        if (held.page === '') {
+          held.page = id
+          held.seq = pages.get(id)!.seq
+        }
         held.seen = now
         if (req.headers['x-board-visible'] !== '0') held.watched = now
       }
@@ -462,16 +576,17 @@ export const startServer = (o: ServeOptions): void => {
     if (body === null) return json(res, 400, {})
     if (url.pathname === '/api/page-gone' && !isLan) {
       // The page is gone for good: a poll of it that was already on its way must not bring it back as an open page.
+      // Its approval secret retires at once so /api/ping asks for a keyed page right away (#1378).
       const gone = pageIdOf(req.headers)
       pages.delete(gone)
       if (gone !== '') {
-        retired.add(gone)
-        if (retired.size > 256) retired.delete(retired.values().next().value as string)
+        retirePage(gone)
+        dropPageSecrets(gone)
       }
       loadedAt = 0
       return json(res, 200, {})
     }
-    if (url.pathname.startsWith('/api/approvals/') || url.pathname === '/api/open') {
+    if (url.pathname === '/api/open' || url.pathname === '/api/approvals/ask' || url.pathname === '/api/approvals/pair' || url.pathname === '/api/approvals/drawn' || url.pathname === '/api/approvals/press') {
       // Never from the page on the network.
       if (isLan) return json(res, 403, {})
       const now = Date.now()
@@ -555,23 +670,28 @@ export const startServer = (o: ServeOptions): void => {
       // program can send one: the one-time key and the page secret are what count.
       if (req.headers.origin === undefined) return json(res, 403, {})
       if (url.pathname === '/api/approvals/pair') {
+        const page = pageIdOf(req.headers)
         const key = text(body.key)
         const known = key === '' ? undefined : pairKeys.get(key)
         // Only in time: a key read later from a browser's history opens nothing.
         if (isApprovalOff || known === undefined || known.until < now) return json(res, 403, { note: isApprovalOff ? o.s.approvalOff : o.s.approvalNoSecret })
         // A key used twice: another program read it, from the browser's command line, and one of
         // the two pages is not the person's. Neither may answer, and approvals stay off until the
-        // board restarts.
+        // board restarts. Checked before rejecting a retired page so a replay there still shuts down.
         if (known.secret !== '') {
           turnApprovalsOff()
           return json(res, 403, { note: o.s.approvalOff })
         }
+        if (page === '' || retired.has(page)) return json(res, 403, { note: o.s.approvalNoSecret })
         const secret = randomBytes(24).toString('base64url')
         known.secret = secret
-        for (const [other, held] of pageSecrets) if (now - held.seen > secretMs) pageSecrets.delete(other)
+        const seq = page !== '' ? (pages.get(page)?.seq ?? ++pageSeq) : 0
+        if (seq > activeMaxSeq) activeMaxSeq = seq
+        if (page !== '' && !pages.has(page)) pages.set(page, { seq, at: now, visible: false })
+        dropOlderSecrets(page, seq, now)
         if (pageSecrets.size >= 16) pageSecrets.delete(pageSecrets.keys().next().value as string)
         // Counted as watching only once the page asks for the board while it is in front.
-        pageSecrets.set(secret, { pairedAt: now, seen: now, watched: 0 })
+        pageSecrets.set(secret, { page, seq, pairedAt: now, seen: now, watched: 0 })
         return json(res, 200, { secret })
       }
       const secret = secretOf(req.headers, now)
@@ -618,17 +738,7 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (url.pathname.startsWith('/api/messages/')) {
       if (isLan) return json(res, 403, {})
-      const action = url.pathname.slice('/api/messages/'.length)
-      // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
-      if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
-      try { return json(res, 200, messaging.act(action, body, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
-      catch (error) {
-        // A temporary file lock is storage unavailability, not a stale binding.
-        // Only the owner's lease-bounded poller retries; sends and receipts do not.
-        const code = (error as { code?: unknown } | null)?.code
-        if (['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
-        return json(res, 409, { error: error instanceof Error ? error.message : 'MESSAGE_FAILED' })
-      }
+      return replyMessage(url.pathname.slice('/api/messages/'.length), body)
     }
     // A press that met a file the board could not read or write is answered with why; any other
     // error stays a bare server error.
@@ -753,8 +863,9 @@ export const startServer = (o: ServeOptions): void => {
     if (url.pathname === '/api/close') {
       // Closing would cut a reply off halfway: on Windows the agent goes with the server.
       if (sending.size > 0) return json(res, 409, { note: o.s.serveCloseBusy })
+      const moved = body.moved === true
       json(res, 200, {})
-      setImmediate(stop)
+      setImmediate(() => stop(moved))
       return
     }
     return json(res, 404, {})
@@ -793,6 +904,7 @@ export const startServer = (o: ServeOptions): void => {
     // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
     // `idleMs` and no reply is on its way.
     const idle = setInterval(() => {
+      if (isStopping) return
       if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
       if (o.idleMs > 0 && sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
     }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
@@ -801,7 +913,7 @@ export const startServer = (o: ServeOptions): void => {
       // A later --serve asks this address before moving a lock this hub left behind.
       try { messaging.recordOwner(port, url) } catch {}
     }
-    const sweeper = setInterval(() => { try { o.sweep() } catch {} }, o.sweepMs)
+    const sweeper = setInterval(() => { if (!isStopping) try { o.sweep() } catch {} }, o.sweepMs)
     server.on('close', () => clearInterval(sweeper))
   })
 }

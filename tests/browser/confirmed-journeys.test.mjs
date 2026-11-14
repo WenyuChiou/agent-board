@@ -409,6 +409,88 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
     })
   })
 
+  test('a clipped text or step fold the person closes stays closed when a redraw runs before its toggle event (#1456)', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('details-close-redraw-race', async ({ page, progress, startServer }) => {
+      const longStep = 'Review the complete synthetic rollout plan without losing collapsed state across a concurrent board redraw. '.repeat(3).trim()
+      const steps = [`- [ ] ${longStep}`, '- [ ] Synthetic second open step', '- [ ] Synthetic third open step']
+      writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n`)
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      const task = await board.openTask('Close before toggle')
+      const fold = task.locator('details:not(.clip)').filter({ has: page.locator('summary', { hasText: '2 more steps' }) })
+      const clip = task.locator('.steps details.clip').first()
+      await fold.evaluate(node => new Promise(done => {
+        node.addEventListener('toggle', () => done(), { once: true })
+        node.querySelector('summary').click()
+      }))
+      await clip.evaluate(node => new Promise(done => {
+        node.addEventListener('toggle', () => done(), { once: true })
+        node.querySelector('summary').click()
+      }))
+      assert.equal(await fold.evaluate(node => node.open), true)
+      assert.equal(await clip.evaluate(node => node.open), true)
+
+      await page.evaluate(() => {
+        const origFetch = window.fetch
+        window.__race = { armed: true, done: false, toggledBeforeDraw: null, closedSync: null, afterDraw: null }
+        window.fetch = async function (...args) {
+          const res = await origFetch.apply(this, args)
+          const url = typeof args[0] === 'string' ? args[0] : ''
+          if (!window.__race.armed || !url.includes('/api/board') || res.status !== 200) return res
+          const origJson = res.json.bind(res)
+          res.json = async function () {
+            const data = await origJson()
+            if (window.__race.armed && JSON.stringify(data).includes('Synthetic redraw race task')) {
+              window.__race.armed = false
+              const root = document.getElementById('board')
+              const liveFold = [...root.querySelectorAll('details:not(.clip)')].find(node => node.querySelector('summary')?.textContent === '2 more steps')
+              const liveClip = [...root.querySelectorAll('.steps details.clip')].find(node => node.textContent.includes('Review the complete synthetic rollout plan'))
+              let toggled = false
+              const mark = () => { toggled = true }
+              liveFold.addEventListener('toggle', mark, { once: true })
+              liveClip.addEventListener('toggle', mark, { once: true })
+              liveFold.querySelector('summary').click()
+              liveClip.querySelector('summary').click()
+              const closedSync = [liveFold.open, liveClip.open]
+              const observer = new MutationObserver(() => {
+                if (!root.textContent.includes('Synthetic redraw race task')) return
+                observer.disconnect()
+                const nextFold = [...root.querySelectorAll('details:not(.clip)')].find(node => node.querySelector('summary')?.textContent === '2 more steps')
+                const nextClip = [...root.querySelectorAll('.steps details.clip')].find(node => node.textContent.includes('Review the complete synthetic rollout plan'))
+                window.__race = {
+                  armed: false,
+                  done: true,
+                  toggledBeforeDraw: toggled,
+                  closedSync,
+                  afterDraw: [nextFold?.open ?? null, nextClip?.open ?? null],
+                }
+              })
+              observer.observe(root, { childList: true, subtree: true })
+            }
+            return data
+          }
+          return res
+        }
+      })
+
+      writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger redraw\n`)
+      await board.task('Synthetic redraw race task').waitFor()
+      const race = await page.evaluate(() => window.__race)
+      assert.equal(race.done, true)
+      assert.equal(race.toggledBeforeDraw, false)
+      assert.deepEqual(race.closedSync, [false, false])
+      assert.deepEqual(race.afterDraw, [false, false])
+      await page.evaluate(() => new Promise(done => setTimeout(done, 0)))
+      assert.deepEqual(await Promise.all([fold.evaluate(node => node.open), clip.evaluate(node => node.open)]), [false, false])
+      // Re-opening after the race still sticks across a subsequent redraw.
+      await fold.locator('summary', { hasText: '2 more steps' }).click()
+      await clip.locator('summary').click()
+      writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger second redraw\n`)
+      await page.locator('.short', { hasText: 'Trigger second redraw' }).waitFor()
+      assert.deepEqual(await Promise.all([fold.evaluate(node => node.open), clip.evaluate(node => node.open)]), [true, true])
+    })
+  })
+
   test('a press held while the board redraws still archives the row it was pressed on (#1468)', { concurrency: false, timeout: 120_000 }, async () => {
     await browserFixture('press-during-redraw', async ({ page, progress, startServer }) => {
       const old = new Date(Date.now() - 4 * 86400000).toISOString()
@@ -495,5 +577,108 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
 
   test('releasing one of two pointers keeps the hold while the other is down (#1468)', { concurrency: false, timeout: 120_000 }, async () => {
     await holdJourney('press-two-pointers', "hit('pointerdown', 1); hit('pointerdown', 2)", "hit('pointerup', 2, 0)", false)
+  })
+
+  // A press held on a lost-result button while a background reply arrives for another gone card. The reply
+  // reaches `say()` with no slot, which rebuilds the lost results — the rebuild must wait for the release.
+  // Ending 'cancel' ends the hold without a click, so the deferred rebuild runs and the reply's lost card
+  // appears. Ending 'click' releases the press on the original button, so its click fires and the first
+  // question comes back. The two endings cannot share one press: a click clears done results first, by
+  // design, so the reply's result is gone by the time the card could be drawn.
+  const heldLostPress = async (name, end) => {
+    await browserFixture(name, async ({ page, progress, root, env, startServer }) => {
+      const session = '88888888-8888-4888-8888-888888888888'
+      const first = `## Synthetic lost presses
+<!-- auto session=a11ce301 agent=codex state=waiting updated=${new Date().toISOString()} -->
+### Choose the first synthetic plan
+- [?] Blue or green?
+<!-- /auto session=a11ce301 -->
+`
+      const second = `## Synthetic lost presses
+<!-- auto session=b2c3d4e5 agent=grok state=ended updated=${new Date().toISOString()} resume=${session} dir=${root.replaceAll('\\', '/')} -->
+### Choose the second synthetic plan
+- [x] Measured both
+- [?] Small or large?
+<!-- /auto session=b2c3d4e5 -->
+`
+      // The background reply comes from the legacy send path: the stand-in Grok answers only once the test
+      // releases it, so the reply arrives exactly while the press is held. A receiver reply would not do:
+      // it lands as a receipt in the model, never as a `say()` with no slot.
+      const stand = join(root, 'grok-stand-in.mjs')
+      writeFileSync(stand, `import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+const until = Date.now() + 60_000
+while (!existsSync(join(process.cwd(), 'release-reply')) && Date.now() < until) await new Promise(done => setTimeout(done, 100))
+process.stdout.write('Redis it is; wiring it up now.\\n')
+`)
+      env.AGENT_BOARD_GROK = stand
+      writeProgress(progress, first + second)
+      const url = await startServer({ allowResume: true })
+      const token = new URL(url).searchParams.get('t')
+      const boardReplies = async () => {
+        const res = await fetch(new URL('/api/board', url), { headers: { 'x-board-token': token } })
+        return (await res.json()).replies ?? []
+      }
+      const board = new BoardPage(page)
+      await board.open(url)
+      // Send the second question's answer first: any later press would clear the first question's lost result.
+      await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
+      const secondRow = await board.openTask('Choose the second synthetic plan')
+      await secondRow.getByRole('textbox', { name: 'What to tell Grok Build…', exact: true }).fill('Use the synthetic small plan.')
+      await secondRow.getByRole('button', { name: 'Send to Grok Build', exact: true }).click()
+      await secondRow.locator('[role="status"]').filter({ hasText: 'Sent to Grok Build' }).waitFor()
+      // Hide the first question: it leaves a lost result with its own Show again button.
+      const firstCard = page.locator('article.card').filter({ hasText: 'Blue or green?' })
+      const more = firstCard.getByRole('button', { name: 'More', exact: true })
+      if (await more.getAttribute('aria-expanded') !== 'true') await more.click()
+      await firstCard.getByRole('button', { name: 'Already answered, hide', exact: true }).click()
+      const notice = page.locator('article.lost > .press-result').filter({ hasText: 'Hidden:' })
+      await notice.getByRole('button', { name: 'Show again', exact: true }).waitFor()
+      // The lost card keeps the question's words, so the detach wait must name the card, not any article.
+      await firstCard.waitFor({ state: 'detached' })
+      // The second question's row leaves the board with no press of its own: the file drops its block.
+      writeProgress(progress, first)
+      await board.task('Choose the second synthetic plan').waitFor({ state: 'detached' })
+      // Hold a real press on the first card's Show again button.
+      const showAgain = notice.getByRole('button', { name: 'Show again', exact: true })
+      await showAgain.hover()
+      assert.equal(await page.evaluate(() => {
+        const card = [...document.querySelectorAll('article.lost')].find(one => one.textContent.includes('Hidden:'))
+        window.__held1473 = card?.querySelector('.press-result button') ?? null
+        return window.__held1473?.isConnected ?? false
+      }), true, 'the held button is on the board before the reply')
+      await page.mouse.down()
+      // The background reply arrives for the gone second row while the press is held.
+      writeFileSync(join(root, 'release-reply'), '')
+      const until = Date.now() + 30_000
+      while ((await boardReplies()).length === 0) {
+        if (Date.now() > until) throw new Error('the background reply never reached the board')
+        await new Promise(done => setTimeout(done, 100))
+      }
+      // Wait for two more board polls: the first may be a stale 304 that left before the reply landed, so the
+      // second is the first poll that certainly carries it. The steady polls are 304s, so the wait must not
+      // require 200 — only the poll carrying the reply is a 200.
+      for (let i = 0; i < 2; i += 1) await page.waitForResponse(answer => new URL(answer.url()).pathname === '/api/board')
+      assert.equal(await page.evaluate(() => window.__held1473?.isConnected ?? false), true, 'the held button survived the lost-results rebuild')
+      if (end === 'cancel') {
+        // Ending the hold without a click runs the deferred rebuild: the reply's lost card appears.
+        await page.evaluate(() => { document.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 1, buttons: 0, bubbles: true })) })
+        await page.locator('article.lost > .press-result').filter({ hasText: 'Redis it is' }).waitFor()
+      } else {
+        // Releasing fires the click on the original button: the first question comes back.
+        const unhidden = page.waitForResponse(answer => new URL(answer.url()).pathname === '/api/act')
+        await page.mouse.up()
+        assert.equal((await unhidden).status(), 200)
+        await firstCard.waitFor()
+      }
+    })
+  }
+
+  test('a press held on a lost-result button survives a background reply for another gone card (#1473)', { concurrency: false, timeout: 120_000 }, async () => {
+    await heldLostPress('lost-result-press-reply-cancel', 'cancel')
+  })
+
+  test('releasing a press held on a lost-result button across a background reply still fires its click (#1473)', { concurrency: false, timeout: 120_000 }, async () => {
+    await heldLostPress('lost-result-press-reply-click', 'click')
   })
 })
