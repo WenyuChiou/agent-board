@@ -57,6 +57,9 @@ jobs:
       # half of codex-local's tests (#1130).
       board_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22,"part":"1/2"},{"os":"ubuntu-latest","node":22,"part":"2/2"},{"os":"windows-latest","node":24,"part":"1/6"},{"os":"windows-latest","node":24,"part":"2/6"},{"os":"windows-latest","node":24,"part":"3/6"},{"os":"windows-latest","node":24,"part":"4/6"},{"os":"windows-latest","node":24,"part":"5/6"},{"os":"windows-latest","node":24,"part":"6/6"}]' || '[{"os":"ubuntu-latest","node":22,"part":"1/2"},{"os":"ubuntu-latest","node":22,"part":"2/2"},{"os":"ubuntu-latest","node":24,"part":"1/2"},{"os":"ubuntu-latest","node":24,"part":"2/2"},{"os":"windows-latest","node":22,"part":"1/6"},{"os":"windows-latest","node":22,"part":"2/6"},{"os":"windows-latest","node":22,"part":"3/6"},{"os":"windows-latest","node":22,"part":"4/6"},{"os":"windows-latest","node":22,"part":"5/6"},{"os":"windows-latest","node":22,"part":"6/6"},{"os":"windows-latest","node":24,"part":"1/6"},{"os":"windows-latest","node":24,"part":"2/6"},{"os":"windows-latest","node":24,"part":"3/6"},{"os":"windows-latest","node":24,"part":"4/6"},{"os":"windows-latest","node":24,"part":"5/6"},{"os":"windows-latest","node":24,"part":"6/6"}]' }}
       journeys_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]' || '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/2"},{"os":"windows-latest","node":22,"part":"2/2"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]' }}
+      # The local exchange job: on Windows it used 75-80% of its ten-minute limit and one run hit it (#1445),
+      # so it runs in two parts there, as the journeys do.
+      messaging_matrix: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]' || '[{"os":"ubuntu-latest","node":22,"part":"1/1"},{"os":"ubuntu-latest","node":24,"part":"1/1"},{"os":"windows-latest","node":22,"part":"1/2"},{"os":"windows-latest","node":22,"part":"2/2"},{"os":"windows-latest","node":24,"part":"1/2"},{"os":"windows-latest","node":24,"part":"2/2"}]' }}
       # An empty planner output (the base selector predates plugin_os) falls through to both systems.
       plugin_os: ${{ (github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'chore(release):')) && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}
       bundle: ${{ steps.plan.outputs.bundle }}
@@ -188,15 +191,16 @@ jobs:
   messaging:
     needs: impact
     if: ${{ needs.impact.outputs.full == 'true' || needs.impact.outputs.messaging == 'true' }}
-    name: local exchange (${{ matrix.os }}, Node ${{ matrix.node }})
+    name: local exchange (${{ matrix.os }}${{ matrix.node == 22 && ', Node 22' || '' }}${{ matrix.part != '1/1' && format(', part {0}', matrix.part) || '' }})
     strategy:
       fail-fast: false
       matrix:
         # The CLI loads .ts files through Node's type stripping: on by default from
         # 22.18 and in 24. Both lines run so an import Node cannot load fails here.
-        include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
+        include: ${{ fromJSON(needs.impact.outputs.messaging_matrix) }}
     runs-on: ${{ matrix.os }}
-    # Split board and messaging so Windows keeps its existing ten-minute budget.
+    # Split board and messaging so Windows keeps its existing ten-minute budget; messaging is split
+    # in two on Windows too (#1445).
     timeout-minutes: 10
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
@@ -229,9 +233,15 @@ jobs:
           python -B -c "import json, os, re, secrets, stat, sys, tempfile, datetime"
           "python import took $($clock.ElapsedMilliseconds) ms"
       - name: Synthetic exchange and mock owner tests
+        id: exchange
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.messaging_tests }}
+          CI_TEST_PART: ${{ matrix.part }}
         run: node scripts/ci-impact.mjs run
+      # Step time in the job summary (#1445): the time `run` recorded, against this job's ten minutes.
+      - name: Exchange step time
+        if: always() && steps.exchange.conclusion != 'skipped'
+        run: node scripts/ci-impact.mjs summary 600
 
   tooling:
     needs: impact
@@ -490,7 +500,17 @@ jobs:
         shell: bash
         run: |
           npm install --prefix "$RUNNER_TEMP/agent-board-playwright" --no-save --package-lock=false --ignore-scripts --no-audit --no-fund playwright@1.62.1
-          node "$RUNNER_TEMP/agent-board-playwright/node_modules/playwright/cli.js" install --with-deps chromium
+          # The runner's Ubuntu package mirror is sometimes unreachable for a minute (DNS: "Temporary failure
+          # resolving azure.archive.ubuntu.com", 11 jobs 2026-11-11). This installs tools; it runs no test, so
+          # trying it again is not RULES R6's retry of a flaky test. Three tries, 20 s and 40 s apart.
+          for try in 1 2 3; do
+            node "$RUNNER_TEMP/agent-board-playwright/node_modules/playwright/cli.js" install --with-deps chromium && exit 0
+            [ "$try" = 3 ] && break
+            echo "::warning::browser tool install failed (try $try of 3); trying again in $((try * 20)) s"
+            sleep $((try * 20))
+          done
+          echo "::error::browser tool install failed three times"
+          exit 1
       - name: Browser tests present
         shell: bash
         run: ls tests/browser/*.test.mjs
