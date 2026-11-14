@@ -79,7 +79,10 @@ const summaries = [
     "board": "Open the board: {command}",
     "thisWill": "This will:",
     "question": "Set these up? [Y/n] ",
+    "sidecarTerms": "Antigravity sidecar: Google's terms may not cover it. Setup only writes its files; you switch it on yourself, in Antigravity's Automations page.",
+    "sidecarQuestion": "Also write the Antigravity sidecar, so the board can start a turn in an idle conversation? Google's terms may not cover it, and you switch it on yourself in Automations. [y/N] ",
     "filesPart": "{host} files",
+    "sidecarPart": "Antigravity sidecar files",
     "trustPart": "Approve the board's hooks in {host}",
     "installPlugin": "Install the Claude Code plugin",
     "enablePlugin": "Claude Code: the plugin is installed but turned off in your user settings. Run {command} to turn it back on.",
@@ -137,7 +140,10 @@ const summaries = [
     "board": "開啟看板：{command}",
     "thisWill": "會做這幾件事：",
     "question": "要設定這些嗎？[Y/n] ",
+    "sidecarTerms": "Antigravity sidecar：Google 的條款可能不涵蓋它。setup 只寫入它的檔案，要由你自己在 Antigravity 的 Automations 頁面開啟。",
+    "sidecarQuestion": "要一併寫入 Antigravity sidecar，讓看板能在閒置的對話裡開始一輪嗎？Google 的條款可能不涵蓋它，而且要由你自己在 Automations 開啟。[y/N] ",
     "filesPart": "{host} 設定檔案",
+    "sidecarPart": "Antigravity sidecar 檔案",
     "trustPart": "在 {host} 核准看板的 hooks",
     "installPlugin": "安裝 Claude Code 外掛",
     "enablePlugin": "Claude Code：外掛已安裝，但在使用者設定裡被停用了。請執行 {command} 重新啟用。",
@@ -195,7 +201,10 @@ const summaries = [
     "board": "打开看板：{command}",
     "thisWill": "会做这几件事：",
     "question": "要设置这些吗？[Y/n] ",
+    "sidecarTerms": "Antigravity sidecar：Google 的条款可能不涵盖它。setup 只写入它的文件，要由你自己在 Antigravity 的 Automations 页面开启。",
+    "sidecarQuestion": "要一并写入 Antigravity sidecar，让看板能在空闲的对话里开始一轮吗？Google 的条款可能不涵盖它，而且要由你自己在 Automations 开启。[y/N] ",
     "filesPart": "{host} 设置文件",
+    "sidecarPart": "Antigravity sidecar 文件",
     "trustPart": "在 {host} 批准看板的 hooks",
     "installPlugin": "安装 Claude Code 插件",
     "enablePlugin": "Claude Code：插件已安装，但在用户设置里被禁用了。请运行 {command} 重新启用。",
@@ -306,8 +315,9 @@ const hermesHome = home => {
 // On a POSIX terminal the answer is read from /dev/tty. fd 0 can be non-blocking (code in this process
 // opened process.stdin, or a parent shared a non-blocking pipe); a read before the answer is typed then
 // fails with EAGAIN, so setup waits and reads again.
-const askYes = () => {
-  process.stdout.write(words('question'))
+// `isDefaultYes` false: only an explicit yes counts, so an empty answer or a closed input is a no.
+const askYes = (key = 'question', isDefaultYes = true) => {
+  process.stdout.write(words(key))
   let fd = 0
   let isOwn = false
   if (process.platform !== 'win32' && isatty(0)) {
@@ -333,7 +343,7 @@ const askYes = () => {
   } finally {
     if (isOwn) try { closeSync(fd) } catch {}
   }
-  return size > 0 && /^\s*(y|yes|是|好|對|对)?\s*$/i.test(Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0])
+  return size > 0 && (isDefaultYes ? /^\s*(y|yes|是|好|對|对)?\s*$/i : /^\s*(y|yes|是|好|對|对)\s*$/i).test(Buffer.concat(chunks).toString('utf8').split(/\r?\n/)[0])
 }
 
 // npm supplies .cmd shims on Windows; quote each argument for cmd rather than enabling a shell for every program.
@@ -346,6 +356,9 @@ const runProgram = (program, argv) => {
   }
   return spawnSync(program, argv, options)
 }
+
+// Whether a plan writes the Antigravity sidecar's files (#1396): the person asked for them by the flag or the question.
+const hasSidecar = plans => plans.some(plan => !plan.conflicts.length && plan.changes.some(change => change.action !== 'remove' && /sidecars[\\/]agent-board[\\/]sidecar\.json$/.test(change.file)))
 
 const main = () => {
   const at = args.indexOf('--agent')
@@ -404,9 +417,9 @@ const main = () => {
   // Only inside a test run (as AGENT_BOARD_SETUP_TTY), a stand-in helper can report what a real one cannot on cue.
   const script = process.env.AGENT_BOARD_TEST_PID && process.env.AGENT_BOARD_SETUP_HELPER ? process.env.AGENT_BOARD_SETUP_HELPER : fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
   let removing = selected
-  const run = (agent, isApplying) => {
+  const run = (agent, isApplying, extra = []) => {
     const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')] : common
-    const result = spawnSync(process.execPath, [script, ...runArgs, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
+    const result = spawnSync(process.execPath, [script, ...runArgs, ...extra, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
     const fallback = () => {
       const cause = isCode(result.error?.code) ? result.error.code : 'UNKNOWN'
       const reason = result.error?.message || (result.stderr ?? '').trim().split(/\r?\n/).filter(Boolean).pop() || 'The setup helper did not return a result.'
@@ -508,6 +521,8 @@ const main = () => {
     return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
   })
   lines.push(...agentLines)
+  // The sidecar's files are in this run's plan, by the flag or the question: say what they are and who switches them on.
+  if (!isRemove && hasSidecar(results)) lines.push(words('sidecarTerms'))
   if (hasClaude && !isRemove) lines.push(`Claude Code: ${words('claude')}`)
   if (isRemove && results.length) {
     const progress = results[0]?.progress || join(data, 'progress.md')
@@ -620,6 +635,19 @@ const main = () => {
             isPluginReady = isDone && !isPluginDisabled(claudeDirectory)
           }
         }
+      }
+      // The sidecar is a second, separate question that defaults to no. A yes only writes its files (the person
+      // switches it on in Antigravity's Automations); with the flag, its files were part of the plan above.
+      if (completed.includes('antigravity') && !args.includes('--antigravity-sidecar') && !existsSync(join(home, '.gemini', 'config', 'sidecars', 'agent-board', 'sidecar.json')) && askYes('sidecarQuestion', false)) {
+        let isDone = true
+        try {
+          const applied = run('antigravity', true, ['--antigravity-sidecar'])
+          isDone = applied.applied === true && !applied.conflicts.length && hasSidecar([applied])
+        } catch { isDone = false }
+        if (!isDone) process.exitCode = 1
+        process.stdout.write('\n')
+        report(words('sidecarPart'), isDone, setupCommand(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']))
+        if (isDone) process.stdout.write(`${words('sidecarTerms')}\n`)
       }
       const next = []
       const sessions = []

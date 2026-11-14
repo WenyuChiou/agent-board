@@ -15,6 +15,7 @@ import { reporterTail } from './reporter-tail'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
+import { antigravitySidecarConfig, antigravitySidecarSource, ANTIGRAVITY_SIDECAR_ID } from '../hooks/antigravity-sidecar'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, planEvents, planPlugins, statusEvents, windowsHookCommand } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
@@ -1354,6 +1355,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (agent === 'hermes') files[join(hermesDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   if (agent === 'antigravity') files[antigravitySkill] = skillText
+  // The sidecar is written only on the person's flag, or kept as it is where an earlier setup wrote it (#1396). Setup never switches it on: the person does, in Antigravity's Automations page.
+  if (agent === 'antigravity') {
+    const sidecarDir = join(home, '.gemini', 'config', 'sidecars', ANTIGRAVITY_SIDECAR_ID)
+    const sidecarFiles = [join(sidecarDir, 'sidecar.json'), join(sidecarDir, 'sidecar.mjs')]
+    if (args.includes('--antigravity-sidecar') || sidecarFiles.some(file => Object.hasOwn(manifest.files, file))) {
+      files[sidecarFiles[0]!] = antigravitySidecarConfig(process.execPath, progress, home)
+      files[sidecarFiles[1]!] = antigravitySidecarSource()
+    }
+  }
   if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)}}\n'''\n`
   if (agent === 'opencode') files[join(opencodeDir, 'commands', 'agent-board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)}\`\n`
   // 0.24.2 and earlier wrote /board here. The command is now /agent-board, so setup takes the old file
