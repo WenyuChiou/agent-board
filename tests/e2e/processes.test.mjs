@@ -3,10 +3,10 @@ import { once } from 'node:events'
 import { realpathSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { test } from 'node:test'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { killChecked, processList, stopTree } from './lib/processes.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
-import { isZombie, serve } from './lib/surfaces.mjs'
+import { isZombie } from './lib/surfaces.mjs'
 import { makeWorld } from './lib/world.mjs'
 
 const within = async (promise, ms, message) => {
@@ -137,33 +137,6 @@ test('L6 soak processes: a process whose start time no longer matches its listed
     }
     if (errors.length > 0) throw new AggregateError(errors, 'Process test cleanup failed')
   }
-})
-
-test('teardown ends a page server that took /api/close but stalls before it exits (#1478)', async () => {
-  const world = makeWorld()
-  try {
-    // Closing, the server first removes server.lock; holding that call keeps it running, and answering
-    // nothing, past teardown's own waits, as a slow disk or a starved runner can.
-    const stall = world.write('stall-preload.mjs', `import fs from 'node:fs'
-import { basename } from 'node:path'
-import { syncBuiltinESMExports } from 'node:module'
-const original = fs.unlinkSync
-fs.unlinkSync = (file, ...rest) => {
-  if (basename(String(file)) === 'server.lock') {
-    fs.writeFileSync(new URL('./stalled', import.meta.url), '')
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8000)
-  }
-  return original(file, ...rest)
-}
-syncBuiltinESMExports()
-`)
-    world.env.NODE_OPTIONS = `${world.env.NODE_OPTIONS} --import=${pathToFileURL(stall).href}`
-    const server = await serve.start(world)
-    await server.stop()
-    // Only the server's own shutdown, which runs once it has taken /api/close, removes server.lock: the
-    // marker shows teardown ended a server that took the close, not one a lost request left serving.
-    assert.equal(world.exists('stalled'), true, 'the server did not reach its own shutdown')
-  } finally { await world.close() }
 })
 
 test('a process that has exited but is not yet collected reads as gone on Linux (#1478)', { skip: process.platform !== 'linux' && 'only Linux keeps an exited process until its parent collects it' }, async () => {

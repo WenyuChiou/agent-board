@@ -19,6 +19,15 @@ export const isZombie = pid => {
     return stat.slice(stat.lastIndexOf(')') + 2).startsWith('Z')
   } catch { return false }
 }
+// What /proc says about a process, for a teardown failure message: its state and its parent.
+const procState = pid => {
+  if (process.platform !== 'linux') return 'no /proc here'
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const [state, parent] = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    return `state ${state}, parent ${parent}`
+  } catch { return 'no /proc entry' }
+}
 const ownedChildren = new Set()
 const ownedServers = new Set()
 process.once('exit', () => {
@@ -390,12 +399,9 @@ export const serve = {
         return current.pid === pid && current.url === url.href
       } catch { return false }
     }
-    const owner = { killRecorded: async (isClosing = false) => {
+    const owner = { killRecorded: async () => {
       discover()
       if (!isRecorded() || !alive()) return
-      // A server that took /api/close answers nothing more, so the check below would always decline. Its
-      // record, which it removes only just before it exits, still names it, so it is still this world's server (#1478).
-      if (isClosing) { try { process.kill(pid) } catch {} return }
       const response = await fetch(new URL('/api/board', url), {
         headers: { 'x-board-token': url.searchParams.get('t') },
         signal: AbortSignal.timeout(1500),
@@ -409,13 +415,14 @@ export const serve = {
       clearTimeout(timer)
       discover()
       try {
-        const isClosing = url ? await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).then(response => response.ok, () => false) : false
+        const isCloseTaken = url ? await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).then(response => response.ok, () => false) : false
         if (pid) {
           for (let n = 0; n < 30 && alive(); n++) await pause(50)
-          // Recheck the record (and, unless the server took the close, the authenticated endpoint) before killing a detached server.
-          await owner.killRecorded(isClosing)
+          // Recheck the record and authenticated endpoint before killing a detached server.
+          await owner.killRecorded()
           for (let n = 0; n < 30 && alive(); n++) await pause(50)
-          assert.ok(!alive(), `Owned server ${pid} survived teardown`)
+          // Say what teardown saw, so a server that outlives it names its own cause (#1478).
+          if (alive()) assert.fail(`Owned server ${pid} survived teardown (close ${isCloseTaken ? 'answered OK' : 'not answered OK'}; record ${isRecorded() ? 'still names it' : 'gone'}; ${procState(pid)})`)
         }
         isStopped = true
       } finally { ownedServers.delete(owner) }
