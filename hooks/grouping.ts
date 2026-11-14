@@ -304,11 +304,17 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
   }
   const pending: GroupedQuestion[] = []
   const older: GroupedQuestion[] = []
-  const sessionsOf = (item: { session?: string | null; sessionId?: string | null }): string[] =>
-    [item.session ?? '', item.sessionId ?? ''].filter(one => one !== '')
+  const sessionsOf = (item: { readonly session?: string | null; readonly sessionId?: string | null } | GroupingRetained | GroupingTurn): string[] => {
+    const session = 'session' in item && typeof item.session === 'string' ? item.session : ''
+    const sessionId = 'sessionId' in item && typeof item.sessionId === 'string' ? item.sessionId : ''
+    return [session, sessionId].filter(one => one !== '')
+  }
   // When both a question and a row name a session, only matching sessions share a card (#1401):
   // two sessions that happen to share a conversation title in the same folder keep their own rows.
-  const sameTaskSession = (left: { session?: string | null; sessionId?: string | null }, right: { session?: string | null; sessionId?: string | null }): boolean => {
+  const sameTaskSession = (
+    left: { readonly session?: string | null; readonly sessionId?: string | null } | GroupingRetained | GroupingTurn,
+    right: { readonly session?: string | null; readonly sessionId?: string | null } | GroupingRetained | GroupingTurn,
+  ): boolean => {
     const a = sessionsOf(left)
     const b = sessionsOf(right)
     return a.length === 0 || b.length === 0 || a.some(id => b.includes(id))
