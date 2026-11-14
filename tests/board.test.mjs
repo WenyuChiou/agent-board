@@ -14475,7 +14475,7 @@ test('a finished message seen only under a held press still frees its id, so the
 })
 
 test('serveModel projects a live in-flight receiver claim as queued instead of flickering uncertain (#1335)', async () => {
-  const { serveModel, buildView, parseProgress } = await sourceBoard()
+  const { serveModel, buildView, parseProgress, CLAIM_HANDOFF_MS } = await sourceBoard()
   const now = Date.parse('2026-11-14T12:00:00Z')
   const text = [
     '## Work',
@@ -14510,9 +14510,20 @@ test('serveModel projects a live in-flight receiver claim as queued instead of f
   const askMessage = { ...baseMessage, id: 'm2', target: 'conn-2', to: 'codex:thread-2', ...(view.waiting[0]?.questionId ? { answers: view.waiting[0].questionId } : {}) }
   const liveConnection = { id: 'conn-1', agent: 'codex', session: 'thread-1', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
   const askConnection = { id: 'conn-2', agent: 'codex', session: 'thread-2', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
-  const inFlight = serveModel(view, [], EN, new Set(), false, { connections: [liveConnection, askConnection], messages: [baseMessage, askMessage] }, false, { now, repoOf: () => null, versions: { board: '1.0.0', package: null } })
-  assert.equal(firstRow(inFlight)?.receipt?.status, 'queued')
-  assert.equal(inFlight.asks[0]?.receipt?.status, 'queued')
+  for (const probe of [now, now + CLAIM_HANDOFF_MS - 1]) {
+    const inFlight = serveModel(view, [], EN, new Set(), false, { connections: [{ ...liveConnection, expires: probe + 60_000 }, { ...askConnection, expires: probe + 60_000 }], messages: [baseMessage, askMessage] }, false, { now: probe, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+    assert.equal(firstRow(inFlight)?.receipt?.status, 'queued', `at +${probe - now}ms`)
+    assert.equal(inFlight.asks[0]?.receipt?.status, 'queued', `ask at +${probe - now}ms`)
+  }
+
+  // Lost /api/messages/poll response: the receiver retries and keeps renewing the same connection without ever receiving or accepting the claim;
+  // once CLAIM_HANDOFF_MS elapses, the board must surface uncertain rather than keeping queued until OPEN_LIMIT_MS.
+  const later = now + CLAIM_HANDOFF_MS
+  const renewedRowConn = { ...liveConnection, expires: later + 60_000 }
+  const renewedAskConn = { ...askConnection, expires: later + 60_000 }
+  const expiredHandoff = serveModel(view, [], EN, new Set(), false, { connections: [renewedRowConn, renewedAskConn], messages: [baseMessage, askMessage] }, false, { now: later, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+  assert.equal(firstRow(expiredHandoff)?.receipt?.status, 'uncertain', 'lost poll response after handoff window')
+  assert.equal(expiredHandoff.asks[0]?.receipt?.status, 'uncertain', 'lost poll response ask after handoff window')
 
   const cases = [
     { name: 'error', connections: [liveConnection], message: { ...baseMessage, error: 'ACK_MISSING' } },
@@ -14522,9 +14533,10 @@ test('serveModel projects a live in-flight receiver claim as queued instead of f
     { name: 'expired connection', connections: [{ ...liveConnection, expires: now }], message: baseMessage },
     { name: 'later uncertain receipt', connections: [liveConnection], message: { ...baseMessage, updated: now + 10 } },
     { name: 'mailbox claim', connections: [liveConnection], message: { ...baseMessage, target: 'mailbox:codex:thread-1' } },
+    { name: 'missing clock fails closed', connections: [liveConnection], message: baseMessage, now: 0 },
   ]
   for (const entry of cases) {
-    const model = serveModel(view, [], EN, new Set(), false, { connections: entry.connections, messages: [entry.message] }, false, { now, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+    const model = serveModel(view, [], EN, new Set(), false, { connections: entry.connections, messages: [entry.message] }, false, { now: entry.now ?? now, repoOf: () => null, versions: { board: '1.0.0', package: null } })
     assert.equal(firstRow(model)?.receipt?.status, 'uncertain', entry.name)
   }
 })

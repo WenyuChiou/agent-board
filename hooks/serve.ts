@@ -46,11 +46,14 @@ const reachable = (agent: string, session: string | undefined, target: AgentTarg
   const found = liveTarget(agent, session, targets)
   return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
 }
-// A claim just handed to a live receiver still shows as queued until the receiver confirms acceptance or reports failure (#1335).
+// A claim just handed to a live receiver still shows as queued during the brief handoff window while the receiver can accept or fail;
+// once that window elapses (for example a lost /api/messages/poll response while the receiver keeps renewing its connection), show uncertain (#1335).
+export const CLAIM_HANDOFF_MS = 15_000
 const isClaimInFlight = (one: ShownMessage, connections: readonly Connection[], now: number): boolean =>
   one.status === 'uncertain' && one.error === '' && one.hasAccepted !== true && one.reply === ''
   && one.claimed > 0 && one.updated === one.claimed && !isMailboxTarget(one.target)
-  && connections.some(c => c.id === one.target && c.turn === one.turn && !c.contested && (now === 0 || c.expires > now))
+  && now >= one.claimed && now - one.claimed < CLAIM_HANDOFF_MS
+  && connections.some(c => c.id === one.target && c.turn === one.turn && !c.contested && c.expires > now)
 const rowReceipt = (agent: string, session: string | undefined, messages: readonly ShownMessage[], now: number, s: Strings, answers?: string, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true, connections: readonly Connection[] = []): { receipt?: Receipt } => {
   // A kept question (no live session here) is found by the one message the board sent to answer it; a message
   // with no such link is no receipt for it. Only the board sets that link, so the question id alone names the
