@@ -32,6 +32,12 @@ const TICK_MS = 3000
 const APPROVAL_LIMIT_MS = 120_000
 // The first daemon whose unload delay the record read and ran live; an older or unnamed one is read as "nobody attached".
 const MIN_DAEMON = [0, 169, 0]
+// The daemon's unload delay (60 s) plus a margin for the time a request and its answer take.
+const UNLOAD_MS = 65_000
+// A turn left waiting on an approval is asked to stop this many times before the receiver reports that it could not.
+const INTERRUPT_TRIES = 3
+// The answers to thread/unsubscribe that say this connection is out of the thread.
+const LEFT = new Set(['unsubscribed', 'notSubscribed', 'notLoaded'])
 const RETRY_MAX_MS = 30_000
 
 // The Codex program to run, as a path that needs no shell: an `.exe` or a script Node runs. On Windows
@@ -159,36 +165,45 @@ const input = prompt => [{ type: 'text', text: prompt, text_elements: [] }]
 const isOwnInput = (item, pending) => item.clientId === pending.nonce
   || Array.isArray(item.content) && item.content.some(part => part?.type === 'text' && part.text === pending.prompt)
 // Takes a board message for each Codex thread that a person has open and the board knows, and starts one turn with it when the
-// thread reads idle. The daemon keeps a thread loaded while any client is subscribed to it and unloads it 60 s after the last one
-// left, so a thread that is listed while this receiver is not subscribed has a person's client on it (isPersonAttached). The
-// receiver stays out of the thread while it waits: it joins to deliver one message and leaves when the turn ends. A claim that
-// meets a busy thread or nobody attached is held here, never given back (the board's claim is the only change of owner), and the
-// board's own 30-minute limit on an unanswered message covers it. `threads()` gives the Codex session ids the board knows,
-// and throws when it cannot tell. Nothing is started for a thread the daemon has not loaded, nothing goes
+// thread reads idle. The daemon keeps a thread loaded while any client is subscribed to it and unloads it 60 s after the later of
+// "the last one left" and "the last turn ended", so a thread that is listed while this receiver is not subscribed has a person's
+// client on it (isPersonAttached). This receiver's own leave and each turn end restart those 60 s too, so once it has been in a
+// thread a listing counts only when it was asked for unloadMs after both: a second message to the same thread waits out that
+// delay. The receiver stays out of the thread while it waits: it joins to deliver one message and leaves when the turn ends. A
+// claim that meets a busy thread or nobody attached is held here, never given back (the board's claim is the only change of
+// owner), and the board's own 30-minute limit on an unanswered message covers it. `threads()` gives the Codex session ids the
+// board knows, and throws when it cannot tell. Nothing is started for a thread the daemon has not loaded, nothing goes
 // through Codex's queue, and a running turn is never steered (#1409).
 export const startCodexReceiver = ({
   boardUrl, threads, executable, socket, env = process.env,
-  tickMs = TICK_MS, ackMs = ACK_LIMIT_MS, approvalMs = APPROVAL_LIMIT_MS, onError = () => undefined,
+  tickMs = TICK_MS, ackMs = ACK_LIMIT_MS, approvalMs = APPROVAL_LIMIT_MS, unloadMs = UNLOAD_MS, onError = () => undefined,
 }) => {
   if (typeof threads !== 'function' || !isAbsolute(executable ?? '')) throw new Error('EXPLICIT_EXECUTABLE_REQUIRED')
   const client = boardClient(boardUrl)
   const attached = new Map()
   let daemon = null, isTicking = false, isClosed = false, failures = 0, retryAt = 0
-  // The newest list of loaded threads, with the number its request was sent under: a list asked for before this receiver left a
-  // thread still shows the receiver's own subscription, so it says nothing about a person.
-  let listing = { set: new Set(), ticket: 0 }, issued = 0, canTell = false
+  // The newest list of loaded threads, with the time its request was sent: a thread it shows was still loaded after that time.
+  let listing = { set: new Set(), sentAt: 0 }, canTell = false
+  // For each thread this receiver has been in, the later of its last confirmed leave and the last turn end it heard there. The
+  // daemon keeps the thread loaded for 60 s after that whoever else is on it, so a listing sent sooner shows nothing about a
+  // person. Kept when a thread is dropped and attached again, and when the connection is lost: the daemon's delay outlives both.
+  const lastOut = new Map()
+  const markOut = thread => lastOut.set(thread, Date.now())
 
   const ask = (method, params, limit, onAnswer) => daemon === null ? Promise.reject(new Error('OWNER_DISCONNECTED')) : daemon.request(method, params, limit, onAnswer)
   const list = async () => {
-    const ticket = ++issued
+    const sentAt = Date.now()
     const set = await loadedThreads(daemon)
-    if (ticket > listing.ticket) listing = { set, ticket }
+    if (sentAt >= listing.sentAt) listing = { set, sentAt }
     return set
   }
   // Loaded now, and not because of this receiver: some other client of the daemon is subscribed (or quit less than 60 s ago).
+  // Before the receiver has been in the thread, any listing counts.
   const isPersonAttached = thread => {
     const one = attached.get(thread)
-    return canTell && one !== undefined && !one.isJoined && listing.set.has(thread) && listing.ticket > one.leftTicket
+    if (!canTell || one === undefined || one.isJoined || !listing.set.has(thread)) return false
+    const out = lastOut.get(thread)
+    return out === undefined || listing.sentAt >= out + unloadMs
   }
 
   const route = value => {
@@ -209,6 +224,8 @@ export const startCodexReceiver = ({
     else if (value.method === 'serverRequest/resolved') one.stopWaiting()
     else if (value.method === 'turn/started' && p.turn?.id) { state.turn = p.turn.id; state.pending?.begun.add(p.turn.id) }
     else if (value.method === 'turn/completed' && p.turn?.id) {
+      // A turn that ends restarts the daemon's unload delay for the thread (the receiver hears it only while it is in the thread).
+      if (one.isJoined) markOut(p.threadId)
       one.stopWaiting()
       if (state.turn === p.turn.id) state.turn = null
       if (state.pending) { state.pending.ended.set(p.turn.id, typeof p.turn.status === 'string' ? p.turn.status : ''); one.settle() }
@@ -222,8 +239,13 @@ export const startCodexReceiver = ({
     }
   }
 
+  // A lost connection has left every thread it was in (the daemon drops its subscriptions), and the unload delay starts then.
+  const lost = () => {
+    daemon = null
+    for (const [thread, one] of attached) if (one.isJoined) { one.isJoined = false; markOut(thread) }
+  }
   const connect = async () => {
-    daemon = await connectDaemon({ executable, socket, env, onMessage: route, onClose: () => { daemon = null } })
+    daemon = await connectDaemon({ executable, socket, env, onMessage: route, onClose: lost })
     canTell = hasUnloadDelay(daemon.info)
     failures = 0
   }
@@ -243,9 +265,11 @@ export const startCodexReceiver = ({
   const attach = async thread => {
     const state = { status: 'unknown', turn: null, pending: null, statusEvents: 0 }
     const waiters = new Set()
-    // isJoined: this receiver is subscribed to the thread (only while it delivers). leftTicket: the lists asked for up to this
-    // number may still show that subscription. deliveries: claims being handled now.
-    const one = { state, receiver: null, isLost: false, isJoined: false, leftTicket: 0, deliveries: 0, settle: () => undefined, wake: () => { for (const done of [...waiters]) done() }, waitOnApproval: () => undefined, stopWaiting: () => undefined, leave: async () => undefined }
+    // isJoined: this receiver is subscribed to the thread (only while it delivers), or may be: until a leave is confirmed.
+    // isJoining: a delivery is joining and has not started its turn yet, so nothing else may leave. joins: counts the joins, so
+    // the answer to a leave asked before a join changes nothing. leaving: the leave in flight. deliveries: claims being handled
+    // now. interrupt: the turn an approval left waiting, still being asked to stop.
+    const one = { state, receiver: null, isLost: false, isJoined: false, isJoining: false, joins: 0, leaving: null, hasLeaveFailed: false, interrupt: null, deliveries: 0, settle: () => undefined, wake: () => { for (const done of [...waiters]) done() }, waitOnApproval: () => undefined, stopWaiting: () => undefined, leave: async () => undefined, retryInterrupt: () => undefined }
     attached.set(thread, one)
     // The delivery turn settles when its own turn has ended: an ACK seen in another turn, or none, or a
     // turn that failed after its ACK never reads as a receipt. A turn may end before turn/start answers,
@@ -279,27 +303,65 @@ export const startCodexReceiver = ({
         // The message settles first: the interrupt makes the turn end as interrupted, which would otherwise be what the card reads.
         const turn = pending.turn ?? state.turn
         pending.reject(new Error('APPROVAL_TIMEOUT'))
-        if (turn) void ask('turn/interrupt', { threadId: thread, turnId: turn }).catch(() => undefined)
+        // The receiver stays in the thread until the interrupt is done, so it hears whether the turn is still running.
+        if (turn) { one.interrupt = { turn, tries: 0, isAsking: false }; one.retryInterrupt() }
       }, approvalMs)
       approvalTimer.unref?.()
     }
+    // A refused or unanswered interrupt leaves the turn waiting on an approval nobody answers: it is asked again on each tick while
+    // that turn still runs, and reported once the tries are used up.
+    one.retryInterrupt = () => {
+      const asked = one.interrupt
+      if (asked === null || asked.isAsking) return
+      if (state.turn !== asked.turn) { one.interrupt = null; return }
+      asked.tries += 1
+      asked.isAsking = true
+      void ask('turn/interrupt', { threadId: thread, turnId: asked.turn }).then(() => { if (one.interrupt === asked) one.interrupt = null }, () => {
+        asked.isAsking = false
+        if (one.interrupt !== asked || asked.tries < INTERRUPT_TRIES) return
+        one.interrupt = null
+        if (state.turn === asked.turn) onError(new Error('INTERRUPT_FAILED'))
+      })
+    }
     // Reads the thread's status without joining it. A status notice that came while the answer was on its way is at least as new
-    // as the answer, which can reach this code after notices that followed it in the same read.
+    // as the answer, which can reach this code after notices that followed it in the same read. Otherwise the read is newer than
+    // anything heard before it: an idle thread with no delivery of its own has no running turn, even one that ended while this
+    // receiver was out of the thread and could not hear it end.
     const readStatus = async () => {
       const statusEvents = state.statusEvents
       const status = (await ask('thread/read', { threadId: thread, includeTurns: false }))?.thread?.status?.type
       if (typeof status !== 'string') throw new Error('INVALID_OWNER_RESPONSE')
-      if (state.statusEvents === statusEvents && !state.pending) state.status = status
+      if (state.statusEvents === statusEvents && !state.pending) {
+        state.status = status
+        if (status === 'idle') state.turn = null
+      }
       return status
     }
-    // Leaves the thread so the daemon can unload it once nobody else is on it. A lost connection has left already (the daemon drops
-    // its subscriptions), and a thread that is not loaded or not joined has nothing to leave. An answer that never came keeps the
-    // thread marked joined, so no claim reads this receiver's own subscription as a person; the tick asks again.
-    one.leave = async () => {
-      if (!one.isJoined) return
-      try { await ask('thread/unsubscribe', { threadId: thread }) } catch (error) { if (error?.message === 'OWNER_TIMEOUT') return }
-      one.isJoined = false
-      one.leftTicket = issued
+    // Leaves the thread so the daemon can unload it once nobody else is on it. One leave at a time: a second caller gets the one in
+    // flight. Only a confirmed leave, or a lost connection (the daemon drops its subscriptions), marks the thread left. A refused,
+    // odd or missing answer keeps it marked joined, so no claim reads this receiver's own subscription as a person; it is reported
+    // once and asked again. The answer to a leave asked before a later join is about the old subscription and changes nothing.
+    one.leave = () => {
+      if (one.leaving !== null) return one.leaving
+      if (!one.isJoined) return Promise.resolve()
+      const joins = one.joins
+      const markLeft = () => {
+        if (one.joins !== joins) return
+        one.isJoined = false
+        one.hasLeaveFailed = false
+        markOut(thread)
+      }
+      one.leaving = (async () => {
+        try {
+          const answer = await ask('thread/unsubscribe', { threadId: thread })
+          if (!LEFT.has(answer?.status)) throw new Error('INVALID_OWNER_RESPONSE')
+          markLeft()
+        } catch (error) {
+          if (error?.message === 'OWNER_DISCONNECTED') markLeft()
+          else if (!one.hasLeaveFailed) { one.hasLeaveFailed = true; onError(error) }
+        } finally { one.leaving = null }
+      })()
+      return one.leaving
     }
     const isIdle = () => !state.pending && state.turn === null && state.status === 'idle'
     // Until the thread reports something, or one tick has passed (a notice that never came must not stall a claim).
@@ -324,8 +386,9 @@ export const startCodexReceiver = ({
       one.receiver = await client.attach({
         agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: SURFACE, unclaimed: true, verify, onError,
         // Nobody attached, or busy, is not a refusal: the lease stays alive and the message waits in the board, unclaimed.
-        // The status is read now: this receiver hears no notices from a thread it has not joined.
-        canReceive: async () => !state.pending && one.deliveries === 0 && state.turn === null && isPersonAttached(thread) && await readStatus() === 'idle',
+        // The status is read now: this receiver hears no notices from a thread it has not joined, and the read clears a turn it
+        // last heard of while it was in the thread.
+        canReceive: async () => !state.pending && one.deliveries === 0 && isPersonAttached(thread) && await readStatus() === 'idle' && state.turn === null,
         deliver: async (message, accepted, begin) => {
           // The claim is held until a person has the thread open and it reads idle: a turn that began after the board's poll, or
           // one this connection has not heard of yet (the thread is read fresh right before the start), keeps the message waiting
@@ -338,17 +401,27 @@ export const startCodexReceiver = ({
           let timer
           try {
             for (;;) {
-              while (!isDone() && !isPersonAttached(thread)) await nextEvent()
+              while (!isDone() && !isPersonAttached(thread)) {
+                // A leave that was refused or got no answer is asked again while this claim waits: the receiver is still in the
+                // thread for all it knows, and stays out of it until it can tell a person from its own subscription.
+                if (one.isJoined && !state.pending) await one.leave()
+                await nextEvent()
+              }
               if (isDone()) return undefined
               // Joining a loaded thread subscribes this connection to its events without starting a turn. A thread the daemon
               // refuses (it has no saved history yet, or was just unloaded) is tried again once it can be.
+              one.isJoining = true
+              if (one.leaving !== null) await one.leaving
               const statusEvents = state.statusEvents
+              one.joins += 1
               one.isJoined = true
               try {
                 const resumed = await ask('thread/resume', { threadId: thread, excludeTurns: true })
                 if (state.statusEvents === statusEvents) state.status = typeof resumed?.thread?.status?.type === 'string' ? resumed.thread.status.type : 'unknown'
               } catch (error) {
-                if (error?.message === 'OWNER_REJECTED') { one.isJoined = false; one.leftTicket = issued; await nextEvent(); continue }
+                one.isJoining = false
+                // Refused: the daemon did not subscribe this connection, so there is nothing to leave.
+                if (error?.message === 'OWNER_REJECTED') { one.isJoined = false; await nextEvent(); continue }
                 if (error?.message === 'OWNER_DISCONNECTED') return undefined
                 if (error?.message !== 'OWNER_TIMEOUT') throw error
                 await one.leave(); await nextEvent()
@@ -362,6 +435,7 @@ export const startCodexReceiver = ({
               }
               if (status === 'idle' && isIdle() && !isDone()) break
               // Busy: the receiver leaves again, so the thread is not kept loaded for a person who has gone.
+              one.isJoining = false
               await one.leave()
               await nextEvent()
             }
@@ -393,10 +467,11 @@ export const startCodexReceiver = ({
             one.settle()
             return await answer
           } finally {
-            clearTimeout(timer); one.stopWaiting(); state.pending = null
+            clearTimeout(timer); one.stopWaiting(); state.pending = null; one.isJoining = false
             one.deliveries -= 1
-            // On every way out (the turn ended, a refused start, a lost connection), unless another claim is still being handled.
-            if (one.deliveries === 0) await one.leave()
+            // On every way out (the turn ended, a refused start, a lost connection), unless another claim is still being handled or
+            // an interrupt still waits on the turn (the tick leaves once it is done).
+            if (one.deliveries === 0 && one.interrupt === null) await one.leave()
           }
         },
       })
@@ -419,8 +494,7 @@ export const startCodexReceiver = ({
       if (daemon === null) {
         for (const thread of [...attached.keys()]) await drop(thread)
         if (Date.now() < retryAt) return
-        // Not `try { await connect() } catch`: tests/page-reader-fixture.mjs cuts the first `await x();` before a catch out of the bundle to
-        // drop the CLI's entry call, and must not find this one first.
+        // A daemon that cannot be reached is tried again later, waiting longer after each failure, up to RETRY_MAX_MS.
         const error = await connect().then(() => null, one => one)
         if (error !== null) {
           failures += 1
@@ -432,8 +506,11 @@ export const startCodexReceiver = ({
       let loaded
       try { loaded = await list() } catch (error) { onError(error); return }
       for (const [thread, one] of [...attached]) if (one.isLost || one.receiver?.isClosed() || one.receiver?.isContested() || !loaded.has(thread) || !wanted.includes(thread)) await drop(thread, !wanted.includes(thread))
-      // A leave that got no answer is asked again, once nothing is being delivered.
-      for (const one of attached.values()) if (one.isJoined && one.deliveries === 0) await one.leave()
+      // An interrupt that was refused or got no answer is asked again while its turn still runs.
+      for (const one of attached.values()) one.retryInterrupt()
+      // A leave that was refused or got no answer is asked again while no delivery is joining or running its turn, a held claim
+      // included, and no interrupt still waits on a turn. Not awaited: one with no answer would hold every tick for its whole limit.
+      for (const one of attached.values()) if (one.isJoined && !one.state.pending && !one.isJoining && one.interrupt === null) void one.leave()
       for (const thread of wanted) {
         if (isClosed || attached.has(thread) || !loaded.has(thread)) continue
         // A session someone else holds (TARGET_CLAIMED) is tried again on a later tick: this receiver never contests it.
