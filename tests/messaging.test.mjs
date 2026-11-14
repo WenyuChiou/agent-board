@@ -458,6 +458,13 @@ test('hookMailbox defers only when the store is busy or times out, and exposes s
     assert.equal(startingBox.hasDeferred, true)
     assert.equal(startingBox.error, null)
 
+    // A simultaneous hub write can create `server.owner` before its bytes land; under a live lock
+    // an empty owner file still reads as deferred rather than `INVALID_SERVER_OWNER` (#1448).
+    writeFileSync(join(starting, 'server.owner'), '')
+    assert.equal(await startingBox.turn('codex', 's-starting-empty', 'CLI', Date.now()), null)
+    assert.equal(startingBox.hasDeferred, true)
+    assert.equal(startingBox.error, null)
+
     const httpDir = join(dir, 'http-errors')
     mkdirSync(httpDir)
     writeFileSync(join(httpDir, 'server.lock'), String(process.pid))

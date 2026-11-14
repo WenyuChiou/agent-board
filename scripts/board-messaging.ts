@@ -264,7 +264,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
   try {
     // A hub killed between writing and renaming leaves its temp file; with the lock held, none is in use.
     for (const name of readdirSync(root)) {
-      if (/^messages\.json\.\d+\.tmp$/.test(name)) try { unlinkSync(join(root, name)) } catch {}
+      if (/^(?:messages\.json|server\.owner)\.\d+\.tmp$/.test(name)) try { unlinkSync(join(root, name)) } catch {}
     }
     if (existsSync(file)) {
       if (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_FILE')
@@ -294,8 +294,15 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
   return {
     recordOwner: (port: number, url: string): void => {
       requireOpen()
-      writeFileSync(owner, JSON.stringify({ pid: process.pid, port, url }), { mode: 0o600 })
-      isPublished = true
+      const temp = `${owner}.${process.pid}.tmp`
+      try {
+        try { unlinkSync(temp) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        writeFileSync(temp, JSON.stringify({ pid: process.pid, port, url }), { mode: 0o600, flag: 'wx' })
+        replaceFile(temp, owner)
+        isPublished = true
+      } finally {
+        try { if (existsSync(temp)) unlinkSync(temp) } catch {}
+      }
     },
     close: (): void => {
       if (isClosed) return
@@ -524,6 +531,10 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
             throw new Error('BOARD_NOT_RUNNING')
           }
           throw error
+        }
+        if (ownerRaw.trim() === '') {
+          hasDeferred = true
+          throw new Error('BOARD_NOT_RUNNING')
         }
         let owner: { pid?: unknown; url?: unknown }
         try { owner = JSON.parse(ownerRaw) as { pid?: unknown; url?: unknown } } catch { throw new Error('INVALID_SERVER_OWNER') }
