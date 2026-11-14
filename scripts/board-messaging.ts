@@ -517,7 +517,14 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
       }
       const pid = livePid()
       if (pid !== null) {
-        const ownerRaw = readFileSync(join(root, 'server.owner'), 'utf8')
+        let ownerRaw: string
+        try { ownerRaw = readFileSync(join(root, 'server.owner'), 'utf8') } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            hasDeferred = true
+            throw new Error('BOARD_NOT_RUNNING')
+          }
+          throw error
+        }
         let owner: { pid?: unknown; url?: unknown }
         try { owner = JSON.parse(ownerRaw) as { pid?: unknown; url?: unknown } } catch { throw new Error('INVALID_SERVER_OWNER') }
         if (!owner || typeof owner !== 'object' || owner.pid !== pid || typeof owner.url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url)) throw new Error('INVALID_SERVER_OWNER')

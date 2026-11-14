@@ -450,6 +450,14 @@ test('hookMailbox defers only when the store is busy or times out, and exposes s
       assert.equal(busyBox.error, null)
     } finally { claim.release() }
 
+    const starting = join(dir, 'starting')
+    mkdirSync(starting)
+    writeFileSync(join(starting, 'server.lock'), String(process.pid))
+    const startingBox = hookMailbox(starting, 500)
+    assert.equal(await startingBox.turn('codex', 's-starting', 'CLI', Date.now()), null)
+    assert.equal(startingBox.hasDeferred, true)
+    assert.equal(startingBox.error, null)
+
     const httpDir = join(dir, 'http-errors')
     mkdirSync(httpDir)
     writeFileSync(join(httpDir, 'server.lock'), String(process.pid))
