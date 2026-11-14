@@ -3421,7 +3421,7 @@ export const LINES = [
 "          }",
 "          throw error;",
 "        }",
-"        if (ownerRaw.trim() === \"\") {",
+"        if (ownerRaw === \"\") {",
 "          hasDeferred = true;",
 "          throw new Error(\"BOARD_NOT_RUNNING\");",
 "        }",

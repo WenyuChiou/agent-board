@@ -532,7 +532,9 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
           }
           throw error
         }
-        if (ownerRaw.trim() === '') {
+        // Only the zero-byte file of a writer whose bytes have not landed yet is a hub still starting; no board writes
+        // a record of spaces, so a damaged one is reported as such, not as a hub not yet running (#1448).
+        if (ownerRaw === '') {
           hasDeferred = true
           throw new Error('BOARD_NOT_RUNNING')
         }

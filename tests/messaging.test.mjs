@@ -465,6 +465,12 @@ test('hookMailbox defers only when the store is busy or times out, and exposes s
     assert.equal(startingBox.hasDeferred, true)
     assert.equal(startingBox.error, null)
 
+    // No board writes an owner record of only spaces or line ends: under a live lock it is a damaged record, an error.
+    writeFileSync(join(starting, 'server.owner'), ' \r\n')
+    assert.equal(await startingBox.turn('codex', 's-starting-blank', 'CLI', Date.now()), null)
+    assert.equal(startingBox.hasDeferred, false)
+    assert.equal(startingBox.error, 'INVALID_SERVER_OWNER')
+
     const httpDir = join(dir, 'http-errors')
     mkdirSync(httpDir)
     writeFileSync(join(httpDir, 'server.lock'), String(process.pid))
