@@ -221,3 +221,38 @@ test('remote clock errors are generated from all three string tables and deliver
     }
   }
 }))
+
+test('validate.py accepts a valid options line after a [?] step and treats cut options= as a cut marker', () => {
+  const code = `import sys, json
+sys.path.insert(0, sys.argv[1])
+import validate
+valid = """<!-- auto session=1234abcd agent=codex state=waiting updated=2026-10-30T12:00:00Z -->
+### Pick storage
+- [?] Which database should I use?
+<!-- options=["Postgres","SQLite"] -->
+<!-- /auto session=1234abcd -->"""
+errs = validate.validate_block(valid.splitlines(), strict=True)
+cut_tail = """## Project
+<!-- auto session=1234abcd agent=codex state=working updated=2026-10-30T12:00:00Z -->
+### Task 1
+- [?] Pick?
+<!-- options=["Postgres"
+<!-- auto session=abcd1234 agent=codex state=working updated=2026-10-30T12:00:00Z -->
+### Task 2
+- [ ] Next
+<!-- /auto session=abcd1234 -->"""
+blocks = validate.scan_blocks(cut_tail.splitlines())
+print(json.dumps({
+    "errs": errs,
+    "isCut": validate.is_cut_marker('<!-- options=["Postgres"'),
+    "blocks": [b["session"] for b in blocks],
+}))`
+  const result = spawnSync(python, ['-B', '-c', code, join(root, 'scripts/remote-reporter')], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+  })
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout), { errs: [], isCut: true, blocks: ['1234abcd', 'abcd1234'] })
+})

@@ -41,24 +41,33 @@ export const NATIVE = /^<!--\s*native=(\S*)(?:\s+options=(.*?))?\s*-->\s*$/
 export const OPTIONS = /^<!--\s*options=(.*?)\s*-->\s*$/
 const NATIVE_AGENTS: readonly string[] = ['claude', 'codex']
 
-export const cleanOptions = (options: readonly string[], limit = 9, maxChars = 120): string[] =>
-  options.map(one => one.replace(/<!--[\s\S]*?-->/g, ' ').replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim().slice(0, maxChars)).filter(one => one !== '').slice(0, limit)
+export const validOptions = (list: readonly string[]): string[] | null => {
+  const normalized = list.map(one => one.replace(/\s+/g, ' ').trim())
+  if (
+    normalized.length < 2 ||
+    normalized.length > 9 ||
+    normalized.some(one => one === '' || one.length > 120 || one.includes('<!--') || one.includes('-->'))
+  ) {
+    return null
+  }
+  return normalized
+}
 
 // A comment must not hold `--` or `>`, so both are written as JSON escapes.
 export const escapeOptionsJson = (options: readonly string[]): string =>
   JSON.stringify(options).replace(/-/g, '\\u002d').replace(/>/g, '\\u003e')
 
-export const optionsComment = (options: readonly string[], limit = 9, maxChars = 120): string => {
-  const cleaned = cleanOptions(options, limit, maxChars)
-  return cleaned.length < 2 ? '' : `<!-- options=${escapeOptionsJson(cleaned)} -->`
+export const optionsComment = (options: readonly string[]): string => {
+  const valid = validOptions(options)
+  return valid === null ? '' : `<!-- options=${escapeOptionsJson(valid)} -->`
 }
 
-const parseOptionsJson = (raw: string, limit: number): string[] | null => {
+const parseOptionsJson = (raw: string, limit?: number): string[] | null => {
   try {
     const list: unknown = JSON.parse(raw)
     if (!Array.isArray(list) || !list.every((one): one is string => typeof one === 'string')) return null
 
-    return list.slice(0, limit).map(one => one.slice(0, 120))
+    return limit === undefined ? list : list.slice(0, limit)
   } catch {
     return null
   }
@@ -70,17 +79,15 @@ export const nativeOf = (line: string): NativeAsk | null => {
   if (found === null || found[1] === undefined || !NATIVE_AGENTS.includes(found[1])) return null
   if (found[2] === undefined) return { agent: found[1], options: [] }
   const options = parseOptionsJson(found[2], 8)
-  return options === null ? null : { agent: found[1], options }
+  return options === null ? null : { agent: found[1], options: options.map(one => one.slice(0, 120)) }
 }
 
-// Null for an unreadable line or fewer than two non-empty choices.
+// Null for an unreadable line or an invalid choice list.
 export const optionsOf = (line: string): string[] | null => {
   const found = OPTIONS.exec(line)
   if (found === null || found[1] === undefined) return null
-  const parsed = parseOptionsJson(found[1], 9)
-  if (parsed === null) return null
-  const cleaned = cleanOptions(parsed, 9)
-  return cleaned.length >= 2 ? cleaned : null
+  const parsed = parseOptionsJson(found[1])
+  return parsed === null ? null : validOptions(parsed)
 }
 const DUE = /(?:截止|\bdue)[:：\s]*((?:\d{4}[-/])?\d{1,2}[-/]\d{1,2})/i
 

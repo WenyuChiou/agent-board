@@ -1,6 +1,6 @@
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
 import { cleanContext, cleanTitle, clip, markAnswered, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
-import { cleanOptions } from './parse'
+import { validOptions } from './parse'
 import { answeredStep, oneLine } from './step-words'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -142,10 +142,13 @@ const isChoice = (item: string): boolean => {
 
   return label !== '' && label.length <= 60 && !/[?？。！]|[.!]\s/.test(label) && !/[.!;；:：]$/.test(label) && !/\d\s*[%％]/.test(label)
 }
+const unwrapWholeBold = (item: string): string => {
+  const match = /^\*\*([\p{L}\p{N}](?:[^*\u0002]*[\p{L}\p{N}])?)\*\*$/u.exec(item)
+  return match?.[1] ?? item
+}
 const choiceLabel = (raw: string): string | null => {
-  const item = restoreInline(withoutEmphasis(raw)).replace(/\s+/g, ' ').trim()
-  if (!isChoice(item)) return null
-  return /^[^\s.]+\.$/.test(item) ? item.slice(0, -1) : item
+  const item = restoreInline(unwrapWholeBold(raw.replace(/\s+/g, ' ').trim()))
+  return isChoice(item) ? item : null
 }
 // Words only the agent says to the person. With them an open `what` asks to pick too; a yes or
 // no (`Do you want the details?`) over a list does not.
@@ -320,7 +323,7 @@ export const lastQuestionInProseWithOptions = (answer: string, isFull = false): 
     options = choicesBeforeQuestion(rawLines, tailIndex, question)
   }
 
-  return { question: isFull ? question : clip(question, 120), options }
+  return { question: isFull ? question : clip(question, 120), options: validOptions(options) ?? [] }
 }
 
 export const lastQuestionInProse = (answer: string, isFull = false): string | null =>
@@ -356,7 +359,7 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
     ask: hasRunningTurnBackgroundJob ? '' : clip(given.ask, 48),
     why: hasRunningTurnBackgroundJob ? '' : clip(given.why, 120),
   }
-  const options = hasRunningTurnBackgroundJob ? [] : cleanOptions(given.options ?? [], 9)
+  const options = hasRunningTurnBackgroundJob ? null : validOptions(given.options ?? [])
   const done = mirror.source === 'turns' ? mirror.tasks.filter(one => one.status === 'completed') : []
   let seq = Math.max(0, ...mirror.tasks.map(one => Number(one.id.replace(/^t/, '')) || 0))
   const id = (): string => {
@@ -364,17 +367,26 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
     return `t${seq}`
   }
   const finished = digest.done === '' ? done : [...done, task(id(), digest.done, 'completed', null)]
+  const askedTask =
+    digest.ask === ''
+      ? null
+      : renewQuestion(task(id(), digest.ask, 'in_progress', digest.why || digest.ask), mirror.questionSequence)
   const open = [
-    ...(digest.ask === '' ? [] : [{ ...task(id(), digest.ask, 'in_progress', digest.why || digest.ask), options: options.length >= 2 ? options : [] }]),
+    ...(askedTask === null ? [] : [askedTask]),
     ...(digest.next === '' || digest.next === digest.ask ? [] : [{ ...task(hasBackgroundJob && given.next === '' ? 'background' : id(), digest.next, digest.handoffTo ? 'completed' : 'pending', null), ...(digest.handoffTo ? { handoffTo: digest.handoffTo } : {}) }]),
   ]
+  const { inferredChoices: _inferredChoices, ...rest } = mirror
 
   return {
-    ...mirror,
+    ...rest,
     source: 'turns',
     title: digest.title || mirror.title,
     context: digest.context || mirror.context,
     isTitleFinal: mirror.isTitleFinal || digest.title !== '',
+    ...(askedTask?.questionRevision === undefined ? {} : { questionSequence: askedTask.questionRevision }),
+    ...(askedTask !== null && askedTask.questionRevision !== undefined && options !== null
+      ? { inferredChoices: { id: askedTask.id, revision: askedTask.questionRevision, options } }
+      : {}),
     tasks: [...finished.slice(-KEEP_DONE), ...open],
     autoAsk: null,
     updated: now,
@@ -385,12 +397,14 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
 // original question or introducing an ask from before the person's reply.
 export const applyLateDigest = (mirror: ProgressMirror, digest: Digest, now: number, s: Strings, hasRunningTurnBackgroundJob = false): ProgressMirror => {
   const next = applyDigest(mirror, { ...digest, ask: '', why: '', options: [] }, now, s, hasRunningTurnBackgroundJob)
-  return { ...next, updated: mirror.updated, autoAsk: mirror.autoAsk, tasks: [...next.tasks, ...mirror.tasks.filter(one => waitsOnYou(mirror, one))] }
-}
-
-const withInferredOptions = (task: ProgressMirrorTask, options: string[], inferred: boolean): ProgressMirrorTask => {
-  const { inferredOptions: _inferredOptions, ...rest } = task
-  return { ...rest, options, ...(inferred && options.length > 0 ? { inferredOptions: true as const } : {}) }
+  return {
+    ...next,
+    updated: mirror.updated,
+    autoAsk: mirror.autoAsk,
+    ...(mirror.questionSequence === undefined ? {} : { questionSequence: mirror.questionSequence }),
+    ...(mirror.inferredChoices === undefined ? {} : { inferredChoices: mirror.inferredChoices }),
+    tasks: [...next.tasks, ...mirror.tasks.filter(one => waitsOnYou(mirror, one))],
+  }
 }
 
 // A turn that ended on a question, in a session whose list says nothing waits on the
@@ -398,8 +412,7 @@ const withInferredOptions = (task: ProgressMirrorTask, options: string[], inferr
 // note, until they answer.
 export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTurnBackgroundJob = false, options: readonly string[] = []): ProgressMirror => {
   if (hasRunningTurnBackgroundJob) return mirror
-  const cleaned = cleanOptions(options, 9)
-  const validOptions = cleaned.length >= 2 ? cleaned : []
+  const valid = validOptions(options)
   const waiting = mirror.tasks.filter(one => waitsOnYou(mirror, one))
   if (waiting.length > 0) {
     const words = question.replace(/\s+/g, ' ').trim()
@@ -407,22 +420,30 @@ export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTu
     if (matching.length !== 1) return mirror
     const target = matching[0]
     if (target === undefined) return mirror
-    const keepsOwnOptions = target.ask !== null || (target.options.length > 0 && target.inferredOptions !== true)
-    const resolvedOptions = keepsOwnOptions ? target.options : validOptions
-    const nextInferred = !keepsOwnOptions && resolvedOptions.length > 0
-    const sameOptions = resolvedOptions.length === (target.options ?? []).length && resolvedOptions.every((one, index) => one === target.options?.[index]) && Boolean(target.inferredOptions) === nextInferred
-    const updated = sameOptions ? target : withInferredOptions(target, resolvedOptions, nextInferred)
-    const renewed = renewQuestion(updated, mirror.questionSequence)
-    return { ...mirror, questionSequence: renewed.questionRevision, tasks: mirror.tasks.map(one => one.id === target.id ? renewed : one) }
+    const renewed = renewQuestion(target, mirror.questionSequence)
+    const { inferredChoices: _inferredChoices, ...rest } = mirror
+    const keepsOwn = target.ask !== null || target.options.length > 0
+    return {
+      ...rest,
+      questionSequence: renewed.questionRevision,
+      ...(!keepsOwn && valid !== null && renewed.questionRevision !== undefined
+        ? { inferredChoices: { id: renewed.id, revision: renewed.questionRevision, options: valid } }
+        : {}),
+      tasks: mirror.tasks.map(one => (one.id === target.id ? renewed : one)),
+    }
   }
   // Finished work stays finished when the closing reply asks a new question.
   const target = mirror.tasks.find(one => one.status === 'in_progress') ?? mirror.tasks.find(one => one.status === 'pending') ?? task('auto-question', question, 'pending', null)
-  const renewed = renewQuestion(withInferredOptions({ ...target, waiting: 'you', why: target.id === 'auto-question' ? null : question, ask: null, command: null, link: null }, validOptions, validOptions.length > 0), mirror.questionSequence)
+  const renewed = renewQuestion({ ...target, waiting: 'you', why: target.id === 'auto-question' ? null : question, ask: null, options: [], command: null, link: null }, mirror.questionSequence)
+  const { inferredChoices: _inferredChoices, ...rest } = mirror
 
   return {
-    ...mirror,
+    ...rest,
     autoAsk: target.id,
     questionSequence: renewed.questionRevision,
+    ...(valid !== null && renewed.questionRevision !== undefined
+      ? { inferredChoices: { id: renewed.id, revision: renewed.questionRevision, options: valid } }
+      : {}),
     // Asked again, even in the words the person answered: it waits on them again, as a plain
     // question. The kind, options, command and link Claude set were for the one they answered.
     answered: withoutMarks(mirror, [target.id]),

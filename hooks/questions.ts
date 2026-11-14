@@ -2,7 +2,7 @@ import type { CutBlock, ProgressAuto, ProgressMirror, ProgressProject, ProgressS
 import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
 import { cutOffTest, matchesSpan, scanBlocks, shortId, stepWords } from './blocks'
-import { questionToken, waitsOnYou } from './mirror'
+import { offeredOptions, questionToken, waitsOnYou } from './mirror'
 import { withoutProcessIdentity } from './session-liveness'
 import { sha256 } from './sha256'
 import type { TaskRef } from './view'
@@ -650,7 +650,9 @@ const ownObservations = (mine: ProgressMirror, scopeOf: QuestionScopeOf = questi
   const scope = scopeOf(mine.project, auto.agent, own, auto.resume)
   return mine.tasks.map((task, index) => {
     const text = stepWords(task).trim()
-    return { scope, session: own, index, text, words: questionWords(text), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text, agent: auto.agent, session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume }) } }
+    const offered = offeredOptions(mine, task)
+    const snapshot = offered.length === task.options.length && offered.every((one, i) => one === task.options[i]) ? task : { ...task, options: offered }
+    return { scope, session: own, index, text, words: questionWords(text), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text, agent: auto.agent, session: own, data: JSON.stringify({ task: snapshot, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume }) } }
   })
 }
 

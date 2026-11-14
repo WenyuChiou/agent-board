@@ -2,7 +2,7 @@ import { LANGS } from './i18n'
 import type { Strings } from './i18n'
 import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
-import { baseName, cleanOptions, escapeOptionsJson, parseAttrs, parseProgress, RESUME } from './parse'
+import { baseName, escapeOptionsJson, parseAttrs, parseProgress, RESUME, validOptions } from './parse'
 import { scanBlocks, sectionOfProject } from './blocks'
 import { cutLine } from './step-words'
 import type { BlockSpan } from './blocks'
@@ -169,8 +169,8 @@ export const questionSteps = (
   const steps = [...held]
   let asked = previousAsked !== undefined && Number.isInteger(previousAsked) && previousAsked >= 0 && previousAsked < steps.length ? previousAsked : undefined
   let askedRevision = previousRevision
-  const prevOptions = cleanOptions(previousOptions ?? [], 9)
-  let askedOptions: string[] | undefined = asked !== undefined && steps[asked]?.startsWith('- [?] ') && prevOptions.length >= 2 ? prevOptions : undefined
+  const prevOptions = validOptions(previousOptions ?? [])
+  let askedOptions: string[] | undefined = asked !== undefined && steps[asked]?.startsWith('- [?] ') && prevOptions !== null ? prevOptions : undefined
   if (isBoardPrompt) return { steps, asked, askedRevision, askedOptions }
   if ((state === 'working' || isSettlingReply) && asked !== undefined) {
     steps[asked] = steps[asked]!.replace(/^- \[\?\] /, '- [x] ')
@@ -178,8 +178,7 @@ export const questionSteps = (
   }
   const question = state === 'waiting' && typeof value === 'string' ? cutLine(value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
   if (question !== '' && (asked !== undefined || steps.length < 40)) {
-    const nextCleaned = cleanOptions(valueOptions, 9)
-    const nextOptions = nextCleaned.length >= 2 ? nextCleaned : undefined
+    const nextOptions = validOptions(valueOptions) ?? undefined
     // Hosts may deliver the same closing question again after Stop or an idle status.
     // A repeated question after a real reply is a new incarnation, even in the same words.
     if (asked === undefined || steps[asked] !== `- [?] ${question}` || JSON.stringify(askedOptions ?? []) !== JSON.stringify(nextOptions ?? [])) askedRevision = nextRevision(askedRevision)
@@ -312,8 +311,8 @@ export const validateCodexReport = (report: CodexReport, session: string): Codex
     index !== undefined && Number.isInteger(index) && index >= 0 && Array.isArray(report.steps) && index < report.steps.length))
   if (Array.isArray(report.steps) && report.steps.length > 40 + owned.size) throw new Error('INVALID_STEPS')
   const steps = reportSteps(report.state, report.steps, 40 + owned.size)
-  const rawOptions = Array.isArray(report.askedOptions) ? cleanOptions(report.askedOptions.filter((one): one is string => typeof one === 'string'), 9) : []
-  const askedOptions = report.asked !== undefined && steps[report.asked]?.startsWith('- [?] ') && rawOptions.length >= 2 ? rawOptions : undefined
+  const rawOptions = Array.isArray(report.askedOptions) && report.askedOptions.every((one): one is string => typeof one === 'string') ? validOptions(report.askedOptions) : null
+  const askedOptions = report.asked !== undefined && steps[report.asked]?.startsWith('- [?] ') && rawOptions !== null ? rawOptions : undefined
   const context = typeof report.context === 'string' && report.context.trim() !== '' ? line(report.context) : undefined
   const startedAt = typeof report.startedAt === 'number' && Number.isFinite(report.startedAt) ? report.startedAt : undefined
   const { askedOptions: _drop, context: _context, startedAt: _startedAt, titleSource: _titleSource, ...rest } = report
@@ -398,11 +397,15 @@ const localBlockSpans = (lines: readonly string[], owner: string, agent: string,
 // `codex-local` passes UTF-8 bytes pre-encoded as latin1 strings, so whitespace cleanup must match only ASCII space/tabs/newlines (never `\s`/`.trim()`, which corrupts `0xA0` inside CJK/Cyrillic UTF-8 byte sequences).
 const stepOptionsLine = (options: readonly string[] | undefined): string => {
   if (options === undefined) return ''
-  const sanitized = options
-    .map(one => one.replace(/<!--|-->/g, ' ').replace(/[ \t\r\n]+/g, ' ').replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, ''))
-    .filter(one => one !== '')
-    .slice(0, 9)
-  return sanitized.length < 2 ? '' : `<!-- options=${escapeOptionsJson(sanitized)} -->`
+  const normalized = options.map(one => one.replace(/[ \t\r\n]+/g, ' ').replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, ''))
+  if (
+    normalized.length < 2 ||
+    normalized.length > 9 ||
+    normalized.some(one => one === '' || one.length > 120 || one.includes('<!--') || one.includes('-->'))
+  ) {
+    return ''
+  }
+  return `<!-- options=${escapeOptionsJson(normalized)} -->`
 }
 
 // A report's step lines. The step a PermissionRequest added, while it still waits, is followed by the native line.

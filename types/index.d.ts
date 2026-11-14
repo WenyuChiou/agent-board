@@ -169,7 +169,6 @@ export type ProgressMirrorTask = {
   // options to choose from, a command to run, a link to look at.
   ask: string | null
   options: string[]
-  inferredOptions?: true
   command: string | null
   link: string | null
   blocked: string | null
@@ -210,6 +209,7 @@ export type ProgressMirror = {
   retainedCancelled?: string[]
   // Retained even after a task is deleted, so reusing its id cannot reuse an ask revision.
   questionSequence?: string
+  inferredChoices?: { id: string; revision: string; options: string[] }
   updated: number
   // Where the steps come from: Claude's Task list, or each turn summed up when the session
   // has none (`turns`). A Task call replaces the summed-up steps.

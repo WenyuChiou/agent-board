@@ -5,7 +5,7 @@ import type { Strings } from './i18n'
 import { stamped, stampOf, withoutStamp } from './done-stamp'
 import { localDay } from './journal'
 import { splitLines } from './lines'
-import { fallbackTitle, isAnswered, questionToken, retainedCancelledOf } from './mirror'
+import { fallbackTitle, isAnswered, offeredOptions, questionToken, retainedCancelledOf } from './mirror'
 import { AUTO_END, AUTO_START, autoOf, doneKey, escapeOptionsJson, isCutMarker, isTaskComplete, optionsComment, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
@@ -169,7 +169,7 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
       const token = questionToken(task)
       const native = nativeLine(task)
-      const options = native === '' && task.waiting === 'you' ? optionsComment(task.options ?? []) : ''
+      const options = native === '' && task.waiting === 'you' ? optionsComment(offeredOptions(mirror, task)) : ''
       return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native]), ...(options === '' ? [] : [options])]
     }),
     ...retainedCancelledOf(mirror).map(text => `- [-] ${text}`),

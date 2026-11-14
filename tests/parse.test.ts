@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { splitLines } from '../hooks/lines'
-import { cleanOptions, currentStepIndex, isCutMarker, isHereProject, parseProgress, progressTail, readable } from '../hooks/parse'
+import { currentStepIndex, isCutMarker, isHereProject, optionsComment, optionsOf, parseProgress, progressTail, readable, validOptions } from '../hooks/parse'
 
 test('splitting progress.md into lines gives the same lines as the regular expression for every mix of CR and LF', () => {
   const alphabet = ['a', '\r', '\n']
@@ -211,17 +211,17 @@ test('options markers attach cleaned choice lists to waiting steps inside owned 
   expect(isCutMarker('<!-- options=["Postgres"')).toBe(true)
   expect(isCutMarker('<!--   options=')).toBe(true)
 
-  const evil = ['a --> b', 'c -- d']
+  const escaped = ['_config.yml', 'c -- d']
   const escapedBlock = [
     '## synthetic-api',
     '<!-- auto session=ab12cd34 agent=codex state=waiting updated=2026-10-30T12:00:00.000Z -->',
     '### Escape test',
     `- [?] ${stepText}`,
-    `<!-- options=${JSON.stringify(evil).replace(/--/g, '\\u002d\\u002d').replace(/>/g, '\\u003e')} -->`,
+    optionsComment(escaped),
     '<!-- /auto session=ab12cd34 -->',
   ].join('\n')
   const reparsed = parseProgress(escapedBlock)
-  expect(reparsed[0]?.tasks[0]?.steps[0]?.options).toEqual(['a b', 'c -- d'])
+  expect(reparsed[0]?.tasks[0]?.steps[0]?.options).toEqual(['_config.yml', 'c -- d'])
 })
 
 test('short comment openings like <!-- opt stay hidden while <!-- options= stays a cut marker (#1277)', () => {
@@ -232,5 +232,36 @@ test('short comment openings like <!-- opt stay hidden while <!-- options= stays
   const parsed = parseProgress('## P\n### T\n- [x] a\n<!-- opt\n## Hidden\n### Hidden task\n- [ ] secret\n-->')
   expect(parsed.map(project => project.name)).toEqual(['P'])
   expect(parsed[0]?.tasks.map(task => task.title)).toEqual(['T'])
-  expect(cleanOptions(['Postgres <!-- private note -->', 'SQLite <!-- hidden -->'])).toEqual(['Postgres', 'SQLite'])
+})
+
+test('an options line with a comment opening or over-long entry is ignored whole', () => {
+  expect(validOptions(['Postgres <!-- private note -->', 'SQLite'])).toBeNull()
+  expect(validOptions(['Postgres --> hidden', 'SQLite'])).toBeNull()
+  expect(validOptions(['a'.repeat(121), 'SQLite'])).toBeNull()
+  expect(validOptions(['', 'SQLite'])).toBeNull()
+  expect(validOptions(['   ', 'SQLite'])).toBeNull()
+  expect(validOptions(['OnlyOne'])).toBeNull()
+  expect(validOptions(Array.from({ length: 10 }, (_, i) => `Option ${i + 1}`))).toBeNull()
+  expect(validOptions(['  _config.yml  ', 'a'.repeat(120)])).toEqual(['_config.yml', 'a'.repeat(120)])
+
+  expect(optionsComment(['Postgres <!-- hidden -->', 'SQLite'])).toBe('')
+  expect(optionsComment(['a'.repeat(121), 'SQLite'])).toBe('')
+  expect(optionsOf(`<!-- options=${JSON.stringify(['Postgres', 'x'.repeat(121)])} -->`)).toBeNull()
+  expect(optionsOf('<!-- options=["a \\u002d\\u002d\\u003e b","SQLite"] -->')).toBeNull()
+  expect(optionsOf('<!-- options=["\\u003c!-- a","SQLite"] -->')).toBeNull()
+  expect(optionsOf(`<!-- options=${JSON.stringify(Array.from({ length: 10 }, (_, i) => `O${i}`))} -->`)).toBeNull()
+
+  const blockWithBadOptions = [
+    '## synthetic-api',
+    '<!-- auto session=ab12cd34 agent=codex state=waiting updated=2026-10-30T12:00:00.000Z -->',
+    '### Pick storage',
+    '- [?] Which database should I use?',
+    `<!-- options=${JSON.stringify(['Postgres', 'x'.repeat(121)])} -->`,
+    '- [?] Which file?',
+    '<!-- options=["\\u003c!-- bad","SQLite"] -->',
+    '<!-- /auto session=ab12cd34 -->',
+  ].join('\n')
+  const parsed = parseProgress(blockWithBadOptions)
+  expect(parsed[0]?.tasks[0]?.steps[0]?.options).toBeUndefined()
+  expect(parsed[0]?.tasks[0]?.steps[1]?.options).toBeUndefined()
 })

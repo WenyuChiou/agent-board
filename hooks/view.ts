@@ -9,9 +9,9 @@ import type { ConfirmRef } from './blocks'
 import { isLifecycleStep } from './codex'
 import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
-import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
+import { doingTask, fallbackTitle, isAnswered, offeredOptions, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, validOptions } from './parse'
 import { cellsOf, plainBar } from './progress-bar'
 import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
@@ -659,7 +659,7 @@ const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, strin
       when: '',
       ...askOf(task.subject, task.why ?? '', {
         ask: task.ask ?? undefined,
-        options: (task.options ?? []).length > 0 ? task.options : undefined,
+        options: validOptions(offeredOptions(mine, task)) ?? undefined,
         command: task.command ?? undefined,
         link: task.link ?? undefined,
       }),

@@ -158,6 +158,22 @@ export const isAnswered = (mirror: ProgressMirror, task: ProgressMirrorTask): bo
 export const waitsOnYou = (mirror: ProgressMirror, task: ProgressMirrorTask): boolean =>
   task.status !== 'completed' && task.waiting === 'you' && !isAnswered(mirror, task)
 
+// Choices offered for this waiting step: explicit task options win over inferred choices.
+export const offeredOptions = (mirror: ProgressMirror, task: ProgressMirrorTask): string[] => {
+  if (task.ask !== null || task.options.length > 0) return task.options
+  const inferred = mirror.inferredChoices
+  if (
+    waitsOnYou(mirror, task) &&
+    inferred !== undefined &&
+    inferred.id === task.id &&
+    task.questionRevision !== undefined &&
+    inferred.revision === task.questionRevision
+  ) {
+    return inferred.options
+  }
+  return []
+}
+
 // The person answered: the steps that wait on them (all, or the ones `only` names) are marked
 // answered with the words they answered. What the steps asked stays, for Claude's next call.
 export const markAnswered = (mirror: ProgressMirror, only?: readonly string[]): ProgressMirror => {
@@ -233,11 +249,6 @@ const askFields = (
   }
 }
 
-const withoutInferred = (task: ProgressMirrorTask): ProgressMirrorTask => {
-  const { inferredOptions: _inferredOptions, ...rest } = task
-  return rest
-}
-
 // `metadata: { waiting: "you" | "run", why: "what it needs", ask: "confirm", options: [...],
 // command: "...", link: "...", blocked: "why" }`; a key set to null clears it, and clearing
 // `waiting` clears what it asked.
@@ -246,16 +257,15 @@ const withMetadata = (task: ProgressMirrorTask, metadata: object | undefined): P
   const meta = metadata as Record<string, unknown>
   const waiting = waitingOf(meta.waiting, task.waiting)
   const handoffTo = textOr(meta.handoffTo, task.handoffTo ?? null)?.replace(/\s+/g, ' ').slice(0, 120)
-  if (handoffTo) return { ...withoutInferred(task), status: 'completed', waiting: null, why: null, ...NO_ASK, blocked: null, handoffTo }
-  const base = waiting === null || Array.isArray(meta.options) || meta.options === null ? withoutInferred(task) : task
+  if (handoffTo) return { ...task, status: 'completed', waiting: null, why: null, ...NO_ASK, blocked: null, handoffTo }
 
   return {
-    ...base,
+    ...task,
     handoffTo: undefined,
     waiting,
-    why: whyOf(meta, waiting, base.why ?? null),
-    ...askFields(meta, waiting, base),
-    blocked: blockedOf(meta.blocked, base.blocked),
+    why: whyOf(meta, waiting, task.why ?? null),
+    ...askFields(meta, waiting, task),
+    blocked: blockedOf(meta.blocked, task.blocked),
   }
 }
 
@@ -323,7 +333,7 @@ export const applyTaskUpdate = (mirror: ProgressMirror, input: TaskUpdateInput, 
       blockedBy: [...new Set([...task.blockedBy, ...(input.addBlockedBy ?? [])])],
     }
     // Finishing a step clears what it was waiting on.
-    const done = next.status === 'completed' ? { ...withoutInferred(next), waiting: null, why: null, ...NO_ASK, blocked: null } : next
+    const done = next.status === 'completed' ? { ...next, waiting: null, why: null, ...NO_ASK, blocked: null } : next
 
     const meta = input.metadata as Record<string, unknown> | undefined
     const completedMeta = meta !== undefined && Object.hasOwn(meta, 'handoffTo') ? { handoffTo: meta.handoffTo } : undefined
