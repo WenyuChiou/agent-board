@@ -7,7 +7,8 @@
 //   status     'idle' | 'active': the thread's status when it is resumed
 //   turn       the running turn's id when the thread is active
 //   start      what turn/start does on an idle thread: 'ack' (answers, ACKs, completes), 'silent' (answers, nothing else),
-//              'error' (an error answer), 'empty' (an answer with no turn). On a running turn it answers with that turn's id
+//              'error' (an error answer), 'empty' (an answer with no turn), 'mute' (no answer at all), 'die' (the proxy exits once
+//              the request is in), 'endFirst' (the turn's ACK and end go out before the answer, which comes last). On a running turn it answers with that turn's id
 //              and starts nothing, as the real daemon does (the text joins the turn).
 //   joinOnStart when true, the person's own turn starts just before the first turn/start is handled, so the call joins it
 //   joinLate   like joinOnStart, but that turn's notices (its start, its first user message) go out only after the answer
@@ -79,6 +80,18 @@ serveWebSocketProxy({
       emit({ id: value.id, result: { thread: thread(threadId) } })
     }
     if (value.method === 'turn/start') {
+      // One extra line per start: whether the text lands in a turn that is running (or that the person's own turn races into).
+      log({ startedInRunningTurn: Boolean(running) || Boolean((config.joinOnStart || config.joinLate) && !hasRaced) })
+      if (config.start === 'mute') return
+      if (config.start === 'die') process.exit(0)
+      if (config.start === 'endFirst' && !running) {
+        const id = 'turn-delivery'
+        emit({ method: 'item/completed', params: { threadId, turnId: id, item: { type: 'agentMessage', text: ackOf(value.params.input[0].text) } } })
+        emit({ method: 'turn/completed', params: { threadId, turn: { id, status: 'completed' } } })
+        emit({ method: 'thread/status/changed', params: { threadId, status: { type: 'idle' } } })
+        emit({ id: value.id, result: { turn: { id } } })
+        return
+      }
       const own = userMessage(threadId, null, value.params.input, value.params.clientUserMessageId)
       if (config.joinOnStart && !running && !hasRaced) { hasRaced = true; begin(threadId) }
       if (config.joinLate && !running && !hasRaced) {

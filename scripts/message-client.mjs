@@ -18,9 +18,6 @@
  *   that route live, or null. The board offers Send only on a route with a record.
  */
 
-// How many times a receiver tries to give a claim back before it reports the failure.
-const RELEASE_TRIES = 3
-
 export const deliveryPrompt = message => {
   if (typeof message.prompt !== 'string' || !message.prompt) throw new Error('PROMPT_REQUIRED')
   return message.prompt
@@ -76,30 +73,6 @@ export const boardClient = address => {
         await call('disconnect', { ...credentials, turn, ...(ended === true ? { ended: true } : {}) }).catch(() => undefined)
       }
       const receipt = (message, status, reply, error) => call('receipt', { ...credentials, id: message.id, nonce: message.nonce, status, ...(reply === undefined ? {} : { reply }), ...(error === undefined ? {} : { error }) })
-      // Messages whose claim is being given back: a poll that hands one out again meanwhile leaves it alone, so the
-      // release that is still trying never gives back a claim that is being delivered. Such a claim is the board's
-      // newer one (the release took effect while its answer was on the way): nothing was started for it, so it is
-      // given back once that release ends, and never held with nothing started.
-      const releasing = new Set(), metWhileReleasing = new Map()
-      // Giving a claim back sends no prompt, so it is tried a few times. A request that reached the board but lost its
-      // answer is met by the next try as CLAIM_REQUIRED (queued again): that is done. One that still fails is reported.
-      const release = async message => {
-        releasing.add(message.id)
-        try {
-          for (let attempt = 1; ; attempt++) {
-            try { await receipt(message, 'released'); return } catch (error) {
-              if (error?.message === 'CLAIM_REQUIRED') return
-              if (error?.isRetryable !== true || attempt >= RELEASE_TRIES || isClosed) { onError(error); return }
-            }
-            await new Promise(done => setTimeout(done, 250 * attempt))
-          }
-        } finally {
-          releasing.delete(message.id)
-          const newer = metWhileReleasing.get(message.id)
-          metWhileReleasing.delete(message.id)
-          if (newer !== undefined && !isClosed) void release(newer)
-        }
-      }
       const processMessage = async message => {
         let hasStarted = false
         try {
@@ -111,8 +84,6 @@ export const boardClient = address => {
           const reply = await (deliver.length >= 3 ? deliver(message, accept, begin) : deliver(message, accept))
           if (typeof reply === 'string' && reply.trim()) await receipt(message, 'acknowledged', reply)
         } catch (error) {
-          // A receiver that started nothing and says so (`isReleased`, e.g. the session turned busy) gives the claim back.
-          if (!hasStarted && error?.isReleased === true) { await release(message); return }
           if (!hasStarted) await receipt(message, 'rejected', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : undefined).catch(() => undefined)
           else await receipt(message, 'uncertain', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : 'DELIVERY_UNCERTAIN').catch(() => undefined)
           // After delivery begins, a timeout or exception never authorizes redelivery.
@@ -159,10 +130,7 @@ export const boardClient = address => {
               leaseUntil = again.expires
               isContested = again.contested === true
             }
-            if (!isClosed) for (const message of result.messages) {
-              if (releasing.has(message.id)) metWhileReleasing.set(message.id, message)
-              else void processMessage(message)
-            }
+            if (!isClosed) for (const message of result.messages) void processMessage(message)
           } catch (error) {
             if (!error.isRetryable || Date.now() >= leaseUntil) await close()
             // A busy store (#914) costs one short wait, not a whole poll period: one quick retry until a

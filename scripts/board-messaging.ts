@@ -27,6 +27,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
+    if (one.leftAt !== undefined && !Number.isFinite(one.leftAt)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.line !== undefined && !ROUTE_LINES.includes(one.line)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.surface !== undefined && (typeof one.surface !== 'string' || one.surface === '' || /[\r\n]/.test(one.surface))) throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
@@ -244,14 +245,8 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
   }
   let state: MessageState = { messages: [] }
   const connections = new Map<string, Live>()
-  // The connections automatic receivers left, with when; their queued messages are refused LEFT_MS later.
-  const leftBehind = new Map<string, number>()
   // Whether what this connection leaves queued stays queued: only an automatic receiver's, unless its session ended.
-  const keepsLeft = (one: Live, now: number, isEnded = false): boolean => {
-    const isKept = one.keepsQueued === true && !isEnded
-    if (isKept) leftBehind.set(one.id, now)
-    return isKept
-  }
+  const keepsLeft = (one: Live, isEnded = false): boolean => one.keepsQueued === true && !isEnded
   const expectations = new Map<string, SessionExpectation>()
   // Every write is pruned first, so the file never holds more than the two caps allow.
   const save = (changed: MessageState, now: number): void => {
@@ -280,7 +275,10 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       if (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_FILE')
       state = parseMessageStore(readFileSync(file, 'utf8'), Date.now())
       state = expireMailboxes(state, Date.now())
-      for (const id of new Set(state.messages.map(one => one.target))) if (!state.mailboxes?.some(one => one.id === id)) state = disconnectMessages(state, id, Date.now())
+      // A message an automatic receiver left queued keeps its stamp across a restart of the hub; expire() refuses it on time.
+      for (const id of new Set(state.messages.map(one => one.target))) {
+        if (!state.mailboxes?.some(one => one.id === id)) state = disconnectMessages(state, id, Date.now(), state.messages.some(one => one.target === id && one.status === 'queued' && one.leftAt !== undefined))
+      }
       // Persist reconciliation even if a server closes before a browser polls it again.
       const next = state
       state = { messages: [] }
@@ -293,13 +291,10 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
   // A connection goes only once its messages' new states are on disk.
   const expire = (now: number): void => {
     const gone = [...connections.values()].filter(one => one.expires <= now)
-    let next = gone.reduce((sum, one) => disconnectMessages(sum, one.id, now, keepsLeft(one, now)), state)
-    for (const [id, at] of leftBehind) {
-      if (now - at < LEFT_MS) continue
-      leftBehind.delete(id)
-      // A later automatic receiver took them over already when none is left on this connection.
-      if (next.messages.some(one => one.target === id)) next = disconnectMessages(next, id, now)
-    }
+    let next = gone.reduce((sum, one) => disconnectMessages(sum, one.id, now, keepsLeft(one)), state)
+    // A message left queued is refused LEFT_MS after the stamp it carries. A later automatic receiver took over (and
+    // unstamped) what it could; a save that failed here is tried again at the next request, which comes through here.
+    for (const id of new Set(next.messages.filter(one => one.status === 'queued' && one.leftAt !== undefined && now - one.leftAt >= LEFT_MS).map(one => one.target))) next = disconnectMessages(next, id, now)
     save(expireMailboxes(next, now), now)
     for (const one of gone) connections.delete(one.id)
   }
@@ -400,7 +395,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         if (previous) {
           if (typeof body.secret !== 'string' || !same(previous.secret, body.secret)) throw new Error('CONNECTOR_NOT_CONNECTED')
           if (previous.agent !== agent || previous.session !== session) throw new Error('REPLACE_MISMATCH')
-          save(disconnectMessages(state, previous.id, now, keepsLeft(previous, now)), now)
+          save(disconnectMessages(state, previous.id, now, keepsLeft(previous)), now)
           connections.delete(previous.id)
         }
         if (connections.size >= 100) throw new Error('CONNECTION_LIMIT')
@@ -459,7 +454,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       if (action === 'disconnect') {
         // ended: the receiver read its session as ended, so what it leaves queued is refused as before.
         if (body.ended !== undefined && typeof body.ended !== 'boolean') throw new Error('INVALID_CONNECTION_REQUEST')
-        save(disconnectMessages(state, one.id, now, keepsLeft(one, now, body.ended === true)), now)
+        save(disconnectMessages(state, one.id, now, keepsLeft(one, body.ended === true)), now)
         connections.delete(one.id)
         return { ok: true }
       }

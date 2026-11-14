@@ -142,11 +142,10 @@ const input = prompt => [{ type: 'text', text: prompt, text_elements: [] }]
 // Whether a user message item is this delivery's own: its echoed claim nonce, or the exact text it was sent with.
 const isOwnInput = (item, pending) => item.clientId === pending.nonce
   || Array.isArray(item.content) && item.content.some(part => part?.type === 'text' && part.text === pending.prompt)
-// Nothing was started: the board queues the message again, with the same ACK code (the `released` receipt).
-const released = (code = 'SESSION_BUSY') => Object.assign(new Error(code), { isReleased: true })
-
 // Takes a board message for each Codex thread that the shared daemon has loaded and the board knows, and
-// starts one turn with it while the thread is idle. `threads()` gives the Codex session ids the board knows,
+// starts one turn with it when the thread reads idle: a claim that meets a busy thread is held here, never given back
+// (the board's claim is the only change of owner), and the board's own 30-minute limit on an unanswered message
+// covers it. `threads()` gives the Codex session ids the board knows,
 // and throws when it cannot tell. Nothing is started for a thread the daemon has not loaded, nothing goes
 // through Codex's queue, and a running turn is never steered (#1409).
 export const startCodexReceiver = ({
@@ -163,6 +162,8 @@ export const startCodexReceiver = ({
     const one = typeof p?.threadId === 'string' ? attached.get(p.threadId) : undefined
     if (!one) return
     const state = one.state
+    // Whatever the thread reports can end a held claim's wait.
+    one.wake()
     if (value.method === 'thread/status/changed' && typeof p.status?.type === 'string') { state.status = p.status.type; state.statusEvents += 1 }
     else if (value.method === 'turn/started' && p.turn?.id) { state.turn = p.turn.id; state.pending?.begun.add(p.turn.id) }
     else if (value.method === 'turn/completed' && p.turn?.id) {
@@ -191,11 +192,14 @@ export const startCodexReceiver = ({
     attached.delete(thread)
     one.state.pending?.reject(new Error('OWNER_DISCONNECTED'))
     await one.receiver?.close({ ended }).catch(() => undefined)
+    // A claim held for this thread stops waiting once the board has the disconnect, and so sends no receipt of its own.
+    one.wake()
   }
 
   const attach = async thread => {
     const state = { status: 'unknown', turn: null, pending: null, statusEvents: 0 }
-    const one = { state, receiver: null, isLost: false, settle: () => undefined }
+    const waiters = new Set()
+    const one = { state, receiver: null, isLost: false, settle: () => undefined, wake: () => { for (const done of [...waiters]) done() } }
     attached.set(thread, one)
     // The delivery turn settles when its own turn has ended: an ACK seen in another turn, or none, or a
     // turn that failed after its ACK never reads as a receipt. A turn may end before turn/start answers,
@@ -217,6 +221,15 @@ export const startCodexReceiver = ({
       }
     }
     const isIdle = () => !state.pending && state.turn === null && state.status === 'idle'
+    // Until the thread reports something, or one tick has passed (a notice that never came must not stall a claim).
+    const nextEvent = () => new Promise(done => {
+      const timer = setTimeout(() => finish(), tickMs)
+      const finish = () => { clearTimeout(timer); waiters.delete(finish); done() }
+      timer.unref?.()
+      waiters.add(finish)
+    })
+    // Whether this thread's connection is still this one's to deliver on.
+    const isHeld = () => attached.get(thread) === one && !one.isLost && !isClosed && daemon !== null
     try {
       // Resuming a loaded thread subscribes this connection to its events without starting a turn.
       const statusEvents = state.statusEvents
@@ -235,20 +248,31 @@ export const startCodexReceiver = ({
         // Busy is not a refusal: the lease stays alive and the message waits in the board until the turn ends.
         canReceive: async () => isIdle(),
         deliver: async (message, accepted, begin) => {
-          // A turn that began after the board's poll: the claim goes back, and the message waits for that turn's end.
-          if (!isIdle()) throw released()
-          // The thread is read fresh right before the start, so a turn this connection has not heard of yet keeps the message
-          // waiting too. A read that got no answer started nothing either; a refused or odd answer is a refusal.
-          if (daemon === null) throw released('OWNER_DISCONNECTED')
-          const statusEvents = state.statusEvents
-          let status
-          try { status = (await daemon.request('thread/read', { threadId: thread, includeTurns: false }))?.thread?.status?.type } catch (error) {
-            throw error?.message === 'OWNER_TIMEOUT' || error?.message === 'OWNER_DISCONNECTED' ? released(error.message) : error
+          // The claim is held until the thread reads idle: a turn that began after the board's poll, or one this connection has
+          // not heard of yet (the thread is read fresh right before the start), keeps the message waiting here. Nothing is
+          // given back. A connection that is lost meanwhile, or a wait past the board's limit, ends this with no receipt:
+          // the board settles a claim it lost the connection of (`uncertain`, `DISCONNECTED`) or expired itself.
+          // Measured from the board's own claim time, which is what it expires from, so nothing starts for a claim the card already shows as expired.
+          const waitsSince = Number.isFinite(message.claimed) && message.claimed > 0 ? message.claimed : Date.now()
+          const isDone = () => !isHeld() || Date.now() - waitsSince >= ackMs
+          for (;;) {
+            while (!isDone() && !isIdle()) await nextEvent()
+            if (isDone()) return undefined
+            const statusEvents = state.statusEvents
+            let status
+            try { status = (await daemon.request('thread/read', { threadId: thread, includeTurns: false }))?.thread?.status?.type } catch (error) {
+              // A read that got no answer started nothing either: it is asked again. A refused or odd answer is a refusal.
+              if (error?.message === 'OWNER_DISCONNECTED') return undefined
+              if (error?.message !== 'OWNER_TIMEOUT') throw error
+              await nextEvent()
+              continue
+            }
+            if (typeof status !== 'string') throw new Error('INVALID_OWNER_RESPONSE')
+            // A busy answer is kept until a status notice says otherwise, so the next poll does not claim the message again.
+            if (state.statusEvents === statusEvents && !state.pending) state.status = status
+            if (status === 'idle' && isIdle() && isHeld()) break
+            await nextEvent()
           }
-          if (typeof status !== 'string') throw new Error('INVALID_OWNER_RESPONSE')
-          // A busy answer is kept until a status notice says otherwise, so the next poll does not claim the message again.
-          if (state.statusEvents === statusEvents && !state.pending) state.status = status
-          if (status !== 'idle' || !isIdle() || daemon === null) throw released()
           let timer
           const answer = new Promise((done, reject) => {
             // begun: the turns whose start this connection heard while turn/start was out. firstInput: for each turn, whether

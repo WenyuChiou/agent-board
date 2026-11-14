@@ -39,6 +39,9 @@ export type Message = {
   // The surface the board checked the route for (set only by the board). Another surface of the same session
   // cannot claim the message, since the record shown for the first says nothing of it.
   surface?: string
+  // When an automatic receiver left with this message still queued. The board refuses the message a fixed time after
+  // this, working from the store alone; the next receiver of the session takes it over and clears the stamp (#318).
+  leftAt?: number
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
@@ -337,13 +340,6 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   if (one.status === 'queued') throw new Error('CLAIM_REQUIRED')
   if (!one.nonce || input.nonce !== one.nonce) throw new Error('TARGET_MISMATCH')
   if (one.status === 'uncertain' && one.error === 'EXPIRED') throw new Error('MESSAGE_EXPIRED')
-  // A receiver gives a claim back when it started nothing (its session began a turn after the poll): the message is queued
-  // again with the same ACK code. Only a claim with no acceptance and no error on record can be given back (#318).
-  if (input.status === 'released') {
-    if (one.status !== 'uncertain' || one.error !== '' || one.hasAccepted === true || input.reply !== undefined || input.error !== undefined) throw new Error('INVALID_RECEIPT')
-    const { ref: _ref, ...kept } = one
-    return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, claimed: 0, updated: now } : message) }
-  }
   if (!['uncertain', 'accepted', 'acknowledged', 'rejected'].includes(String(input.status))) throw new Error('INVALID_RECEIPT')
   const status = input.status as Message['status']
   const reply = input.reply === undefined ? '' : input.reply
@@ -360,18 +356,24 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   return { ...state, messages: state.messages.map(message => message === one ? settled({ ...one, status, reply, error, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
 }
 // keepQueued: the connection that went is an automatic receiver whose leaving is no sign that its session ended (a
-// restarted daemon, a contest). A message it was never handed stays queued, text and all, for its next connection (#318).
+// restarted daemon, a contest). A message it was never handed stays queued, text and all, for its next connection, and
+// carries the time it was left, which is the clock for refusing it (#318).
 export const disconnectMessages = (state: MessageState, target: string, now: number, keepQueued = false): MessageState => ({
   ...state,
-  messages: state.messages.map(one => one.target !== target || isFinished(one) || keepQueued && one.status === 'queued' ? one : settled({
-    ...one, status: one.status === 'queued' ? 'rejected' : one.status === 'accepted' ? 'accepted' : 'uncertain', error: 'DISCONNECTED', updated: one.error === 'DISCONNECTED' || one.status === 'uncertain' ? one.updated : now,
-  })),
+  messages: state.messages.map(one => {
+    if (one.target !== target || isFinished(one)) return one
+    if (keepQueued && one.status === 'queued') return one.leftAt === undefined ? { ...one, leftAt: now } : one
+    const { leftAt: _leftAt, ...rest } = one
+    return settled({
+      ...rest, status: one.status === 'queued' ? 'rejected' : one.status === 'accepted' ? 'accepted' : 'uncertain', error: 'DISCONNECTED', updated: one.error === 'DISCONNECTED' || one.status === 'uncertain' ? one.updated : now,
+    })
+  }),
 })
 // The next automatic receiver of the same session takes over what an earlier one left queued: a message for a
-// connection that is gone (`isLive` false), on this connection's surface or on none.
+// connection that is gone (`isLive` false), on this connection's surface or on none. The takeover clears the leave stamp.
 export const rebindMessages = (state: MessageState, target: Connection, isLive: (id: string) => boolean): MessageState => {
   const to = address(target.agent, target.session)
   const isLeft = (one: Message): boolean => one.status === 'queued' && one.to === to && !isMailboxTarget(one.target) && !isLive(one.target)
     && (one.surface === undefined || one.surface === target.surface)
-  return state.messages.some(isLeft) ? { ...state, messages: state.messages.map(one => isLeft(one) ? { ...one, target: target.id, turn: target.turn } : one) } : state
+  return state.messages.some(isLeft) ? { ...state, messages: state.messages.map(one => { if (!isLeft(one)) return one; const { leftAt: _leftAt, ...rest } = one; return { ...rest, target: target.id, turn: target.turn } }) } : state
 }
