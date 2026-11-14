@@ -6067,11 +6067,11 @@ const fakeBoard = (board, source) => {
   return { ...board, script }
 }
 
-test('the Cursor shell helper accepts a command that runs longer than 5 seconds and then returns with its pipes closed', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+test('the Cursor shell helper accepts a command that runs longer than 5 seconds and then returns with its pipes closed', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
   const board = serveIn()
   try {
     const marks = []
-    const result = await cursorShell(fakeBoard(board, "console.log('done'); setTimeout(() => process.exit(0), 5600)"), [], {}, async () => {}, line => marks.push(line))
+    const result = await cursorShell(fakeBoard(board, "console.log('done'); setTimeout(() => process.exit(0), 5600)"), [], {}, async () => {}, line => marks.push(line), t.signal)
     assert.equal(result.stdout.trim(), 'done')
     assert.ok(marks.some(line => line.startsWith('bash exit code=0')), marks.join('\n'))
   } finally { await board.end([]) }
@@ -6081,13 +6081,13 @@ test('the Cursor shell helper stops a command that never exits when its abort si
   const board = serveIn()
   const pidFile = join(board.dir, 'hung.pid')
   const controller = new AbortController()
-  let pid
+  let pid, run
   try {
     const began = performance.now()
     const hung = `import { writeFileSync } from 'node:fs'
 writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))
 setInterval(() => {}, 1000)`
-    const run = cursorShell(fakeBoard(board, hung), [], {}, async () => {}, () => {}, controller.signal)
+    run = cursorShell(fakeBoard(board, hung), [], {}, async () => {}, () => {}, controller.signal)
     run.catch(() => {})
     for (let tries = 0; !(existsSync(pidFile) && readFileSync(pidFile, 'utf8')) && tries < 80; tries++) await delay(100)
     pid = Number(readFileSync(pidFile, 'utf8'))
@@ -6098,18 +6098,21 @@ setInterval(() => {}, 1000)`
     assert.ok(!processAlive(pid), 'the stand-in command must be gone after the abort')
     assert.ok(performance.now() - began < 12_000, 'the abort must end the helper promptly')
   } finally {
+    // Whatever failed above (a pid file that cannot be read, too), the stand-in is stopped and settled before the fixture goes.
+    controller.abort()
+    await run?.catch(() => {})
     if (pid && processAlive(pid)) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true })
     await board.end([])
   }
 })
 
-test('the Cursor shell helper still fails, naming the pipe, when a command returns at once and a detached child holds fd3', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+test('the Cursor shell helper still fails, naming the pipe, when a command returns at once and a detached child holds fd3', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
   const board = serveIn()
   try {
     const marks = []
     const holder = "import { spawn } from 'node:child_process'\nspawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' }).unref()"
     await assert.rejects(
-      () => cursorShell(fakeBoard(board, holder), [], {}, async () => {}, line => marks.push(line)),
+      () => cursorShell(fakeBoard(board, holder), [], {}, async () => {}, line => marks.push(line), t.signal),
       // Windows lets the detached child inherit every inheritable handle, so fd3 is named among the open pipes and bash exit is not.
       error => /did not all reach EOF in 5 seconds after bash exit; still open: [^;]*fd3[^;]*;/.test(error.message) && !error.message.includes('still open: bash exit') && !/still open: [^;]*bash exit/.test(error.message),
     )
