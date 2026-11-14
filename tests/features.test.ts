@@ -3998,11 +3998,8 @@ test("on the local network every agent's task shows as on the computer, except t
     const here = computer.find(row => who(row) === agent)
     const there = lan.find(row => who(row) === agent)
     if (here === undefined || there === undefined) throw new Error(`no row for ${agent}`)
-    // The network page sends no fold key: a hash of a short session id can be guessed back (#1412).
-    const { foldKey: _foldKey, ...sameOnLan } = here
-    expect(there.foldKey).toBeUndefined()
-    if (here.send === 'send') expect(there).toEqual({ ...sameOnLan, send: 'open', where: '', info: STRINGS.en.serveLanSend(agentLabel(agent, STRINGS.en)), hasCopyBox: true, resume: null, line: 'none', canSend: false, lineText: '' })
-    else expect(there).toEqual({ ...sameOnLan, resume: null })
+    if (here.send === 'send') expect(there).toEqual({ ...here, send: 'open', where: '', info: STRINGS.en.serveLanSend(agentLabel(agent, STRINGS.en)), hasCopyBox: true, resume: null, line: 'none', canSend: false, lineText: '' })
+    else expect(there).toEqual({ ...here, resume: null })
   }
   // Claude's row has a command to resume it on the computer, which stays there.
   expect(computer.find(row => who(row) === 'claude')?.resume).toContain('--resume')

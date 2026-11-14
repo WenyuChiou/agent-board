@@ -12973,16 +12973,6 @@ test('the page of a grouped board draws each question once, copies an answer and
     assert.ok(lanModel.asks.every(ask => ask.reopen === null))
     assert.ok(rowsOf(lanModel).every(row => row.resume === null))
     assert.ok(rowsOf(lanModel).every(row => !('sessionId' in row)))
-    // The phone page carries no fold key and nothing made from a session id, however short or guessable the id is (#1412).
-    const sessions = rowsOf(homeModel).flatMap(row => row.sessionId ? [row] : [])
-    assert.ok(sessions.length > 0 && rowsOf(homeModel).some(row => typeof row.foldKey === 'string'), 'the computer page keeps the fold key of a session row')
-    const lanText = JSON.stringify(lanModel)
-    assert.ok(!lanText.includes('foldKey'), 'the phone page sends no fold key')
-    for (const row of sessions) {
-      const derived = createHash('sha256').update(`fold:${row.agent || 'claude'}:${row.sessionId}`).digest('hex').slice(0, 16)
-      assert.ok(!lanText.includes(derived), 'the phone page sends nothing made from a session id')
-      assert.ok(!lanText.includes(row.foldKey), 'the phone page sends nothing made from a session id')
-    }
     const lanDom = await pageDom(runtime.servePage(EN, 'synthetic', true), lanModel)
     assert.ok(!lanDom.node('board').textContent.includes('Copy resume command'))
     assert.ok(lanDom.node('agent-note').textContent.includes("Codex's progress file could not be read"))

@@ -18,7 +18,6 @@ import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from '
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
 import { deliveryTargets } from './hook-messages'
-import { sha256 } from './sha256'
 import { address, isMailboxSurfaceLost, isMailboxTarget, isOpen, sendDecision, SURFACE_IDS } from './messaging'
 import { RECEIVER_ROUTES } from './receiver-routes'
 
@@ -228,12 +227,6 @@ export type ServeRow = {
   at?: number
   dir?: string | null
   sessionId?: string
-  // What a task is across redraws, for the page's fold state, from the task and not from what the page shows of it: a
-  // hash of a JSON list of its project, title, real first step and which of the tasks reading alike this is, never a joined string.
-  foldId?: string
-  // A session's row on the computer's page: a hash of its agent and session, so a renamed task keeps its folds. The network
-  // page gets none: a hash of a short session id can be guessed back (#1412).
-  foldKey?: string
   stuck?: { reason: string }
   delivery?: Delivery
   receipt?: Receipt
@@ -517,16 +510,6 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     const { heldBy } = holderOf(item.ask)
     if (heldBy !== undefined) openBy.set(heldBy, (openBy.get(heldBy) ?? 0) + 1)
   }
-  // A task's identity for the page's fold state: its project, title and real first step (before the view folds the steps into
-  // counts), as a JSON list so no two tasks join to the same text, and which of the tasks reading alike it is; sent as a hash.
-  const foldSeen = new Map<string, number>()
-  const foldIdOf = (row: { project: string; title: string; firstStep?: string }): string => {
-    const same = JSON.stringify([row.project, row.title, row.firstStep ?? ''])
-    const place = (foldSeen.get(same) ?? 0) + 1
-    foldSeen.set(same, place)
-    // A hash, so the first step's own words (a record an agent wrote, say) never go out a second time under another name.
-    return sha256(JSON.stringify([same, place])).slice(0, 32)
-  }
   for (const item of items) {
     if (item.type === 'ask') {
       const { ask } = item
@@ -636,8 +619,6 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
         ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, undefined, isMessageSurfaceLost)),
-        ...(isLan || row.nativeSession === undefined ? {} : { foldKey: sha256(`fold:${row.agent || 'claude'}:${row.nativeSession}`).slice(0, 16) }),
-        foldId: foldIdOf(row),
         key: item.key,
         project: row.project,
         title: row.title,
@@ -1950,7 +1931,7 @@ const PAGE_SCRIPT = String.raw`
     node.setAttribute('aria-hidden', 'true');
     return node;
   }
-  var pg = { filter: '', project: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {}, foldIds: {} };
+  var pg = { filter: '', project: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
   var cardState = {};
   var cardParts = {};
   var cardChoices = Object.create(null);
@@ -1969,21 +1950,6 @@ const PAGE_SCRIPT = String.raw`
       .replace(/\b[\da-f]{7,}\b/gi, function (one) { return one.length === 40 || /\d/.test(one) && /[a-f]/i.test(one) ? '…' : one; })
       .replace(/(?:[A-Z]:[\\/]|\/(?:Users|home)\/)[^\s<>"'\x60|]*/gi, '…')
       .replace(/#\d+\b/g, '').replace(/\s+/g, ' ').trim()).slice(0, 220).join('');
-  }
-  // A task's fold state is kept under what the task is, not under its row key: a second task with the same title is
-  // keyed #2 until the first goes, and then it would take over the first one's open fold. A session's block is its
-  // foldKey (a hash of its agent and session, on the computer's page only), so a renamed task keeps its folds; any other
-  // task is the foldId the server made from its project, title, real first step and place among tasks reading alike.
-  // draw() fills pg.foldIds and drops the state of tasks that are gone.
-  function foldId(key) { return pg.foldIds[key] || key; }
-  function foldIdsOf(sources) {
-    var ids = {};
-    Object.keys(sources).forEach(function (key) {
-      var row = sources[key];
-      if (!row || !Array.isArray(row.steps)) return;
-      ids[key] = row.foldKey ? 'session:' + row.foldKey : row.foldId || key;
-    });
-    return ids;
   }
   function source(ref) { return pg.sources[ref.sourceKey || ref.key] || pg.sources[ref.key.replace(/^stuck:/, '')] || {}; }
   function fullTitle(ref) { var one = source(ref); return String(one.title || one.task || one.text || ''); }
@@ -2361,12 +2327,12 @@ const PAGE_SCRIPT = String.raw`
       if (row.context) add(inner, clipped(clean(row.contextLine || row.context), row.context, 'context', 'context:' + key));
       if (row.pr) add(inner, el('p', 'context', row.pr));
       var completed = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
-      if (completed.length) add(inner, folded(plural('pgDoneSteps', completed.length), stepList(completed, row), 'fold:' + foldId(key) + ':done'));
+      if (completed.length) add(inner, folded(plural('pgDoneSteps', completed.length), stepList(completed, row), 'done:' + key));
       var left = steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled' && one.status !== 'waiting'; });
       var primary = left.find(function (one) { return one.isCurrent; }) || left[0];
       if (primary) add(inner, stepList([primary], row));
       var rest = left.filter(function (one) { return one !== primary; });
-      if (rest.length) add(inner, folded(plural('pgMoreSteps', rest.length), stepList(rest, row), 'fold:' + foldId(key) + ':more'));
+      if (rest.length) add(inner, folded(plural('pgMoreSteps', rest.length), stepList(rest, row), 'more:steps:' + key));
       if (row.handoff) add(inner, el('p', 'context', row.handoff));
       if (row.runs) add(inner, el('p', 'context', row.runs));
       if (row.lineText) add(inner, el('p', 'context', row.lineText));
@@ -3338,10 +3304,6 @@ const PAGE_SCRIPT = String.raw`
     view.agents.forEach(function (agent) { if (pg.ids.indexOf(agent.agent) === -1) pg.ids.push(agent.agent); });
     pg.sources = {};
     [].concat(model.asks || [], model.reminder || [], model.older || [], model.idle || [], model.stopped || [], (model.groups || []).flatMap(function (group) { return group.rows; }), model.turns || [], model.recent || [], model.finished || []).forEach(function (item) { if (item.key) pg.sources[item.key] = Object.assign({}, pg.sources[item.key], item); });
-    pg.foldIds = foldIdsOf(pg.sources);
-    var liveFolds = {};
-    Object.keys(pg.foldIds).forEach(function (key) { liveFolds['fold:' + pg.foldIds[key] + ':'] = true; });
-    Object.keys(opened).forEach(function (key) { if (key.indexOf('fold:') === 0 && !liveFolds[key.slice(0, key.lastIndexOf(':') + 1)]) delete opened[key]; });
     var questionKeys = Object.create(null);
     (model.asks || []).forEach(function (ask) { questionKeys[ask.key] = true; });
     Object.keys(cardChoices).forEach(function (key) { if (!questionKeys[key]) delete cardChoices[key]; });

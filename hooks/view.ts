@@ -170,9 +170,6 @@ export type TaskRow = {
   // stale or silent block, which does not mean the session is closed.
   isRecordedEnded?: true
   steps: ViewStep[]
-  // The task's real first step, before display folding turns the first shown step into a count: with its project and
-  // title it is what the page tells one task from another by (#1412).
-  firstStep?: string
   // Source positions before display folding, including a next step outside the shown list.
   stepLines?: readonly number[]
   // Ticking is available even when an untitled task has no Confirm done action.
@@ -1240,7 +1237,6 @@ export const buildView = (
         isHere,
         auto,
         steps: rowSteps(shown, s, isRepliedTask),
-        firstStep: shown.steps[0]?.text ?? '',
         ...(isManual ? { stepLines: task.steps.map(step => step.line), stepTask: { project: name, title: task.title, line: task.line, session: null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) } } : {}),
         cells: rowCells(shown, isRepliedTask),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
