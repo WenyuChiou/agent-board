@@ -10,6 +10,15 @@ import { seenWithin, noMachineIds, noSilentPress } from './expect.mjs'
 import { PANE_MS } from './budget.mjs'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
+// On Linux a process that has exited but that its parent has not collected yet still answers
+// signal 0; it is gone all the same (#1478).
+export const isZombie = pid => {
+  if (process.platform !== 'linux') return false
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).startsWith('Z')
+  } catch { return false }
+}
 const ownedChildren = new Set()
 const ownedServers = new Set()
 process.once('exit', () => {
@@ -371,7 +380,8 @@ export const serve = {
     }
     const alive = () => {
       if (!Number.isInteger(pid) || pid <= 0) return false
-      try { process.kill(pid, 0); return true } catch { return false }
+      try { process.kill(pid, 0) } catch { return false }
+      return !isZombie(pid)
     }
     const isRecorded = () => {
       if (!recordPath || !url) return false
@@ -380,9 +390,12 @@ export const serve = {
         return current.pid === pid && current.url === url.href
       } catch { return false }
     }
-    const owner = { killRecorded: async () => {
+    const owner = { killRecorded: async (isClosing = false) => {
       discover()
       if (!isRecorded() || !alive()) return
+      // A server that took /api/close answers nothing more, so the check below would always decline. Its
+      // record, which it removes only just before it exits, still names it, so it is still this world's server (#1478).
+      if (isClosing) { try { process.kill(pid) } catch {} return }
       const response = await fetch(new URL('/api/board', url), {
         headers: { 'x-board-token': url.searchParams.get('t') },
         signal: AbortSignal.timeout(1500),
@@ -396,11 +409,11 @@ export const serve = {
       clearTimeout(timer)
       discover()
       try {
-        if (url) await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).catch(() => {})
+        const isClosing = url ? await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).then(response => response.ok, () => false) : false
         if (pid) {
           for (let n = 0; n < 30 && alive(); n++) await pause(50)
-          // Recheck the record and authenticated endpoint before killing a detached server.
-          await owner.killRecorded()
+          // Recheck the record (and, unless the server took the close, the authenticated endpoint) before killing a detached server.
+          await owner.killRecorded(isClosing)
           for (let n = 0; n < 30 && alive(); n++) await pause(50)
           assert.ok(!alive(), `Owned server ${pid} survived teardown`)
         }

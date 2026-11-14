@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { realpathSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { killChecked, processList, stopTree } from './lib/processes.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
+import { isZombie, serve } from './lib/surfaces.mjs'
 import { makeWorld } from './lib/world.mjs'
 
 const within = async (promise, ms, message) => {
@@ -134,5 +137,40 @@ test('L6 soak processes: a process whose start time no longer matches its listed
       try { await world.close() } catch (error) { errors.push(error) }
     }
     if (errors.length > 0) throw new AggregateError(errors, 'Process test cleanup failed')
+  }
+})
+
+test('teardown ends a page server that took /api/close but stalls before it exits (#1478)', async () => {
+  const world = makeWorld()
+  try {
+    // Closing, the server first removes server.lock; holding that call keeps it running, and answering
+    // nothing, past teardown's own waits, as a slow disk or a starved runner can.
+    const stall = world.write('stall-preload.mjs', `import fs from 'node:fs'
+import { basename } from 'node:path'
+import { syncBuiltinESMExports } from 'node:module'
+const original = fs.unlinkSync
+fs.unlinkSync = (file, ...rest) => {
+  if (basename(String(file)) === 'server.lock') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8000)
+  return original(file, ...rest)
+}
+syncBuiltinESMExports()
+`)
+    world.env.NODE_OPTIONS = `${world.env.NODE_OPTIONS} --import=${pathToFileURL(stall).href}`
+    await serve.start(world)
+  } finally { await world.close() }
+})
+
+test('a process that has exited but is not yet collected reads as gone on Linux (#1478)', { skip: process.platform !== 'linux' && 'only Linux keeps an exited process until its parent collects it' }, async () => {
+  // `exec sleep 5` replaces the shell, and sleep never collects the shell's background child.
+  const parent = spawn('sh', ['-c', 'sleep 0.2 & echo $!; exec sleep 5'], { stdio: ['ignore', 'pipe', 'ignore'] })
+  try {
+    const [line] = await once(createInterface({ input: parent.stdout }), 'line')
+    const child = Number(line)
+    await within((async () => { while (!isZombie(child)) await new Promise(done => setTimeout(done, 25)) })(), 5000, 'the background child did not exit')
+    assert.doesNotThrow(() => process.kill(child, 0), 'signal 0 still reaches the exited child')
+    assert.equal(isZombie(parent.pid), false)
+  } finally {
+    parent.kill()
+    if (parent.exitCode === null && parent.signalCode === null) await once(parent, 'exit')
   }
 })
