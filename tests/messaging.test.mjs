@@ -5,13 +5,14 @@ import { basename, join } from 'node:path'
 import { createServer, request } from 'node:http'
 import { createHash } from 'node:crypto'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
-import { after, test } from 'node:test'
+import { after, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+import { partTest } from '../scripts/ci-impact.mjs'
 import { turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/message-client.mjs'
-import { observeSession } from '../hooks/messaging.ts'
+import { isNote, observeSession, routeRecord } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { attachAntigravitySession } from '../scripts/antigravity-session-connector.mjs'
@@ -19,6 +20,10 @@ import { claimMessageStore } from '../scripts/message-store-claim.ts'
 import { classifyMessageStoreFiles, isMessageStoreClean, readMessageStoreFiles } from './e2e/lib/message-store-files.mjs'
 import { block as writeBlock } from './e2e/lib/writers.mjs'
 import { privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
+
+// The Windows exchange job runs this file in two parts, and each part runs its share of the tests:
+// the job used 75-80% of its ten-minute limit with the file whole (#1445).
+const test = partTest(nodeTest)
 
 // The server store and page modules use the host's extensionless imports; resolve only those
 // local paths, as tests/prompt-hooks.test.mjs does.
@@ -4415,7 +4420,7 @@ test('every receiver record against idle, working and ended shows its line, with
     // A closed chat has no mailbox, so a mailbox card for an ended session has no route at all.
     const isGone = record.kind === 'mailbox' && state === 'ended'
     assert.equal(card.line, isGone ? 'none' : route.line, label)
-    const canSend = !isGone && route.line !== 'none' && route.record !== null
+    const canSend = !isGone && route.line !== 'none' && isNote(routeRecord(route, surface))
     assert.equal(card.canSend, canSend, label)
     const page = await pageDom(servePage(s, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
     page.cards().flatMap(one => page.buttons(one)).find(one => one.textContent === s.pgWriteOwn)?.click()
@@ -4480,9 +4485,41 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'CLI').canSend, true)
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'CLI').canSend, false)
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'TUI').canSend, false)
-  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'IDE').canSend, false)
-  // The only Antigravity note ran headless `agy`, not the TUI, so no Antigravity surface has a recorded route.
-  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, false)
+  // The agy TUI note ran the interactive TUI with the session idle; the desktop app note ran the app idle and
+  // working, and the app reads as IDE. The headless `agy` note is no record for any surface.
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'working', 'agy TUI').canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'IDE').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'working', 'IDE').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'ended', 'IDE').canSend, false)
+  assert.equal(RECEIVER_ROUTES.find(one => one.agent === 'antigravity').routes.idle.record, 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md')
+  // A route may name a surface's own note: the gate reads the target surface's note, so an empty one refuses that
+  // surface alone. The hand-over table refuses a note that is empty, or names a surface the route does not cover.
+  const { isReceiverRoutes, routeRecord } = await import('../hooks/messaging.ts')
+  const withNotes = surfaceRecords => [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md', surfaces: ['Web', 'CLI'], surfaceRecords }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(withNotes({ CLI: '' }), 'alpha', 'mailbox', 'idle', 'Web').canSend, true)
+  assert.equal(routeOf(withNotes({ CLI: '' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  assert.equal(routeOf(withNotes({ CLI: 'docs/validation/other.md' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, true)
+  assert.equal(isReceiverRoutes(withNotes({ CLI: 'docs/validation/other.md' })), true)
+  for (const bad of [{ CLI: '' }, { CLI: '   ' }, { CLI: 'docs/a.md\ndocs/b.md' }, { TUI: 'docs/validation/other.md' }, ['docs/validation/other.md'], null]) assert.equal(isReceiverRoutes(withNotes(bad)), false, JSON.stringify(bad))
+  // A note of spaces names no file: the gate refuses it as it refuses an empty one, for a route and for a surface.
+  assert.equal(routeOf(withNotes({ CLI: '   ' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  const spaced = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: '   ', surfaces: ['CLI'] }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(spaced, 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  // A note on two lines names no file either: the gate refuses it for a surface and for a route.
+  assert.equal(routeOf(withNotes({ CLI: 'docs/validation/a.md\ndocs/validation/b.md' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  const twoLines = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: 'docs/validation/a.md\ndocs/validation/b.md', surfaces: ['CLI'] }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(twoLines, 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  // A route with no note of its own may carry one surface's note: Send on that surface alone, and the route check takes it.
+  const surfaceOnly = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: null, surfaces: ['Web', 'CLI'], surfaceRecords: { CLI: 'docs/validation/other.md' } }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(surfaceOnly, 'alpha', 'mailbox', 'idle', 'CLI').canSend, true)
+  assert.equal(routeOf(surfaceOnly, 'alpha', 'mailbox', 'idle', 'Web').canSend, false)
+  assert.equal(isReceiverRoutes(surfaceOnly), true)
+  // agy TUI's idle route cites the TUI's own note; the app's note covers IDE.
+  const agyIdle = RECEIVER_ROUTES.find(one => one.agent === 'antigravity' && one.kind === 'mailbox').routes.idle
+  assert.equal(routeRecord(agyIdle, 'agy TUI'), 'docs/validation/2026-11-12-antigravity-tui-mailbox-live.md')
+  assert.equal(routeRecord(agyIdle, 'IDE'), 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md')
+  assert.equal(routeRecord(agyIdle, 'constructor'), 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md')
   const { readReceiverRecords, renderMatrix } = await import('../scripts/messaging-matrix.mjs')
   const root = join(import.meta.dirname, '..')
   const rows = renderMatrix(await readReceiverRecords(root), 'docs/MESSAGING.md', root).split('\n')
@@ -4493,6 +4530,17 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.ok(rowOf('DeepSeek Harness', 'Web').includes('2026-11-08-deepseek-harness-live.md'))
   assert.ok(!rowOf('DeepSeek Harness', 'TUI').includes('2026-11-08-deepseek-harness-live.md'))
   assert.ok(rowOf('Codex', 'CLI').includes('2026-11-12-codex-cli-mailbox-live.md'))
+  // Each Antigravity row cites the note that ran its own surface: the TUI's idle cell its own note, the app's
+  // cells the app note, and the editor, which has no run of its own, the route's note.
+  const cells = row => row.split(' | ')
+  assert.match(cells(rowOf('Antigravity', 'agy TUI'))[4], /Verified/)
+  assert.match(cells(rowOf('Antigravity', 'agy TUI'))[7], /2026-11-12-antigravity-tui-mailbox-live\.md/)
+  assert.match(cells(rowOf('Antigravity', 'agy TUI'))[8], /no live note/)
+  assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[4], /Verified/)
+  assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[7], /2026-11-13-antigravity-app-mailbox-live\.md/)
+  assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[8], /2026-11-13-antigravity-app-mailbox-live\.md/)
+  assert.match(cells(rowOf('Antigravity', 'IDE'))[4], /Implemented/)
+  assert.match(cells(rowOf('Antigravity', 'IDE'))[7], /2026-11-13-antigravity-app-mailbox-live\.md/)
 })
 
 test('the line and Send of a route come from its record: no record gives none and Copy', () => {
@@ -4822,6 +4870,15 @@ test('shape 22: a null, empty or none record keeps Copy', async () => {
     await shapeCopy(w)
   }
 })
+test('shape 22b: a route whose only note is one surface\'s own sends there and keeps Copy on its other surface (#1386 review)', async () => {
+  const route = { line: 'now', record: null, surfaces: ['Claude Code', 'CLI'], surfaceRecords: { 'Claude Code': shapeNote } }
+  const noted = await shapeCase()
+  shapeRoutes[0].routes.idle = route
+  await shapeSend(noted, 'now')
+  const bare = await shapeCase({ surface: 'CLI' })
+  shapeRoutes[0].routes.idle = route
+  await shapeCopy(bare)
+})
 test('shape 23: every recorded surface and state agrees with the card in three languages', async () => {
   const { readReceiverRecords } = await import('../scripts/messaging-matrix.mjs')
   const { agentLabel } = await import('../hooks/strings.ts')
@@ -4836,7 +4893,7 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
     const model = realServeModel(view, [], s, new Set(), false, target, false, group, RECEIVER_ROUTES)
     const card = model.asks[0] ?? [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)].find(one => one.title === 'Route table')
-    const canSend = state !== 'ended' && route.line !== 'none' && typeof route.record === 'string' && route.record !== '' && route.surfaces.includes(surface.id)
+    const canSend = state !== 'ended' && route.line !== 'none' && isNote(routeRecord(route, surface.id)) && route.surfaces.includes(surface.id)
     assert.equal(card.delivery !== undefined, canSend, `${record.source}/${surface.id}/${state}`)
     if (!(record.kind === 'mailbox' && state === 'ended')) {
       const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)

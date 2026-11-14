@@ -575,7 +575,10 @@ export const hookMailbox = (directory: string, budget: number) => {
         return null
       }
     },
-    accept: (agent: string, session: string, id: string, nonce: string, now: number) => call('mailbox-accept', { agent, session, id, nonce }, now),
+    // Whether the board took the accept: a caller that tells its host the message was delivered needs to know it did not (#1430).
+    accept: async (agent: string, session: string, id: string, nonce: string, now: number): Promise<boolean> => {
+      try { await access.call('mailbox-accept', { agent, session, id, nonce }, now); return true } catch { return false }
+    },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
   }
 }

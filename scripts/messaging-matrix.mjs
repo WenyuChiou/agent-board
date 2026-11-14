@@ -1,7 +1,7 @@
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { SURFACE_IDS } from '../hooks/messaging.ts'
+import { isNote, isRoute, routeRecord, SURFACE_IDS } from '../hooks/messaging.ts'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const start = '<!-- messaging-matrix:start -->'
@@ -74,11 +74,10 @@ const sourceFiles = directory => {
 
 export const hasReceiverRecord = text => /^export\s+const\s+messagingReceiver\b|^export\s*\{[^}]*\bmessagingReceiver\b/m.test(text)
 
-const lines = ['now', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
 const states = ['idle', 'working', 'ended']
-const isRoute = route => route && lines.includes(route.line) && (route.record === null || isText(route.record)) && Array.isArray(route.surfaces) && (route.record === null || route.surfaces.length > 0) && route.surfaces.every(isText)
-const isRoutes = record => record.routes === undefined || isText(record.agent) && ['live', 'mailbox', 'turn'].includes(record.kind) && record.routes !== null && typeof record.routes === 'object' && states.every(state => isRoute(record.routes[state]))
-const isText = value => typeof value === 'string' && value.trim() !== '' && !/[\r\n]/.test(value)
+// Each route is checked by the board's own isRoute; what only a record can show (known surface ids, each route
+// surface listed by the record) is checked below.
+const isRoutes = record => record.routes === undefined || isNote(record.agent) && ['live', 'mailbox', 'turn'].includes(record.kind) && record.routes !== null && typeof record.routes === 'object' && states.every(state => isRoute(record.routes[state]))
 const surfaceIds = new Set(Object.values(SURFACE_IDS))
 
 export const readReceiverRecords = async (directory = root) => {
@@ -87,7 +86,7 @@ export const readReceiverRecords = async (directory = root) => {
     if (!hasReceiverRecord(readFileSync(path, 'utf8'))) continue
     // Record modules must be safe to import: no host startup or model calls at load time.
     const { messagingReceiver: record } = await import(pathToFileURL(path).href)
-    if (!record || !isText(record.host) || ![1, 2, 3, 4].includes(record.tier) || !/^(?:\[P[1-5]\]|unknown)$/.test(record.primitive) || typeof record.isImplemented !== 'boolean' || !Array.isArray(record.surfaces) || !record.surfaces.length || record.surfaces.some(surface => !isText(surface?.name) || surface.evidence !== null && !isText(surface.evidence) || surface.earlier !== undefined && !isText(surface.earlier) || record.routes !== undefined && !surfaceIds.has(surface.id)) || !isRoutes(record)) {
+    if (!record || !isNote(record.host) || ![1, 2, 3, 4].includes(record.tier) || !/^(?:\[P[1-5]\]|unknown)$/.test(record.primitive) || typeof record.isImplemented !== 'boolean' || !Array.isArray(record.surfaces) || !record.surfaces.length || record.surfaces.some(surface => !isNote(surface?.name) || surface.evidence !== null && !isNote(surface.evidence) || surface.earlier !== undefined && !isNote(surface.earlier) || record.routes !== undefined && !surfaceIds.has(surface.id)) || !isRoutes(record)) {
       throw new Error('Invalid messaging receiver record: ' + relative(directory, path))
     }
     if (record.routes !== undefined && states.some(state => record.routes[state].surfaces.some(id => !record.surfaces.some(surface => surface.id === id)))) {
@@ -135,11 +134,13 @@ const cell = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&l
 const link = (path, file) => `[${cell(path)}](${file.startsWith('docs/') ? '../' : ''}${path.split('/').map(encodeURIComponent).join('/')})`
 
 // A route's line, and the note that showed it live when the file is there.
-// A route recorded for some surfaces only shows its note on those rows.
+// A route recorded for some surfaces only shows its note on those rows, and a surface's own note on that route
+// (routeRecord, the note the send gate reads) where it names one.
 const routeCell = (route, file, directory, s, surface) => {
   if (!route) return s.none
-  if (route.record === null || !route.surfaces.includes(surface)) return `${route.line} · ${s.noRecord}`
-  return `${route.line} · ${hasEarlierRun(directory, route.record) ? link(route.record, file) : s.noRecord}`
+  const note = routeRecord(route, surface)
+  if (note === null || !route.surfaces.includes(surface)) return `${route.line} · ${s.noRecord}`
+  return `${route.line} · ${hasEarlierRun(directory, note) ? link(note, file) : s.noRecord}`
 }
 
 export const renderMatrix = (records, file, directory = root) => {

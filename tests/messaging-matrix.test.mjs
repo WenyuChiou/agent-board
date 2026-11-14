@@ -247,9 +247,74 @@ test('a routed receiver record requires known surface ids and explicit recorded 
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
+test('the board and the matrix refuse the same malformed routes: a blank agent, a blank or two-line note, a note with no surface, a blank surface, a surface note outside the route or not in a plain object', async () => {
+  const { isReceiverRoutes } = await import('../hooks/messaging.ts')
+  const note = 'docs/validation/2026-01-02-synthetic.md'
+  const entry = { agent: 'synthetic', kind: 'mailbox', routes: { idle: { line: 'nextTurn', record: note, surfaces: ['CLI', 'Web'] }, working: { line: 'nextTurn', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }
+  const idle = change => ({ ...entry, routes: { ...entry.routes, idle: { ...entry.routes.idle, ...change } } })
+  // One list for both checks: the board reads routes from a routes file (isReceiverRoutes), the matrix from a receiver record.
+  const bad = [
+    ['blank agent', { ...entry, agent: '   ' }],
+    ['empty record', idle({ record: '' })],
+    ['record of spaces', idle({ record: '   ' })],
+    ['two-line record', idle({ record: `${note}\n${note}` })],
+    ['record with no surface', idle({ surfaces: [] })],
+    ['blank surface', idle({ surfaces: ['CLI', ' '] })],
+    ['surface note of spaces', idle({ surfaceRecords: { CLI: '   ' } })],
+    ['two-line surface note', idle({ surfaceRecords: { CLI: `${note}\n${note}` } })],
+    ['surface note outside the route', idle({ surfaceRecords: { TUI: note } })],
+    ['surface notes in a list', idle({ surfaceRecords: [note] })],
+    ['surface notes null', idle({ surfaceRecords: null })],
+  ]
+  const directory = mkdtempSync(join(tmpdir(), 'agent-board-matrix-both-'))
+  try {
+    // A module is imported once, so each record is a file of its own.
+    const isReadByMatrix = async (name, one) => {
+      const folder = join(directory, name.replaceAll(' ', '-'))
+      mkdirSync(join(folder, 'scripts'), { recursive: true })
+      putRecord(folder, 'receiver.mjs', { host: 'Synthetic Host', surfaces: [{ name: 'Synthetic CLI', id: 'CLI', evidence: null }, { name: 'Synthetic Web', id: 'Web', evidence: null }], tier: 3, primitive: '[P4]', isImplemented: true, ...one })
+      try { await readReceiverRecords(folder); return true } catch (error) {
+        if (/Invalid messaging receiver record/.test(error.message)) return false
+        throw error
+      }
+    }
+    // A route with no note of its own may carry a surface's note; both checks take it.
+    const surfaceOnly = idle({ record: null, surfaceRecords: { CLI: note } })
+    assert.deepEqual([isReceiverRoutes([entry]), isReceiverRoutes([surfaceOnly])], [true, true])
+    assert.deepEqual([await isReadByMatrix('good', entry), await isReadByMatrix('surface only', surfaceOnly)], [true, true])
+    assert.deepEqual(bad.filter(([, one]) => isReceiverRoutes([one])).map(([name]) => name), [], 'routes the board takes')
+    // Only the board can be handed a Map (a record file writes plain data); routeRecord reads only a plain object's notes.
+    assert.equal(isReceiverRoutes([idle({ surfaceRecords: new Map([['CLI', note]]) })]), false, 'surface notes in a Map')
+    const taken = []
+    for (const [name, one] of bad) if (await isReadByMatrix(name, one)) taken.push(name)
+    assert.deepEqual(taken, [], 'routes the matrix takes')
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test("a surface note whose file is missing shows no live note on that surface's row, while the route's note still shows on the others", async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'agent-board-matrix-surface-note-'))
+  try {
+    mkdirSync(join(directory, 'scripts'))
+    mkdirSync(join(directory, 'docs/validation'), { recursive: true })
+    writeFileSync(join(directory, 'docs/validation/2026-01-02-synthetic.md'), '# Synthetic\n')
+    putRecord(directory, 'noted.mjs', {
+      host: 'Noted Host', surfaces: [{ name: 'CLI', id: 'CLI', evidence: null }, { name: 'Web', id: 'Web', evidence: null }], tier: 3, primitive: '[P4]', isImplemented: true,
+      agent: 'noted', kind: 'mailbox',
+      routes: {
+        idle: { line: 'nextTurn', record: 'docs/validation/2026-01-02-synthetic.md', surfaces: ['CLI', 'Web'], surfaceRecords: { Web: 'docs/validation/2026-01-03-missing.md' } },
+        working: { line: 'nextTurn', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] },
+      },
+    })
+    const rows = renderMatrix(await readReceiverRecords(directory), 'docs/MESSAGING.md', directory).split('\n')
+    const idleOf = surface => rows.find(one => one.startsWith(`| Noted Host | ${surface} |`))?.split(' | ')[7]
+    assert.match(idleOf('CLI'), /^nextTurn · \[docs\/validation\/2026-01-02-synthetic\.md\]\(/)
+    assert.equal(idleOf('Web'), 'nextTurn · no live note')
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
 test('shape 23 matrix: each displayed surface names its registered id and only its own recorded routes', async () => {
   const records = (await readReceiverRecords(root)).filter(one => one.routes)
-  const { SURFACE_IDS } = await import('../hooks/messaging.ts')
+  const { SURFACE_IDS, routeRecord } = await import('../hooks/messaging.ts')
   assert.ok(SURFACE_IDS, 'the shared surface ids are exported')
   const ids = new Set(Object.values(SURFACE_IDS))
   let checked = 0
@@ -264,8 +329,9 @@ test('shape 23 matrix: each displayed surface names its registered id and only i
         assert.ok(row, `${record.source}: missing matrix row for ${surface.name}`)
         const cell = row.slice(2, -2).split(' | ')[7 + index]
         assert.ok(cell.startsWith(`${route.line} · `), `${record.source}: wrong ${state} line on ${surface.name}`)
-        for (const note of new Set(Object.values(record.routes).map(one => one.record).filter(Boolean))) {
-          assert.equal(cell.includes(note), note === route.record && route.surfaces.includes(surface.id), `${record.source}: wrong ${state} note on ${surface.name}`)
+        // A route's own note, or a surface's own note on it, shows on that surface's row only, and an unrecorded route shows none.
+        for (const note of new Set(Object.values(record.routes).flatMap(one => [one.record, ...Object.values(one.surfaceRecords ?? {})]).filter(Boolean))) {
+          assert.equal(cell.includes(note), note === routeRecord(route, surface.id) && route.surfaces.includes(surface.id), `${record.source}: wrong ${state} note on ${surface.name}`)
         }
         checked++
       }

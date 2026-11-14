@@ -84,6 +84,13 @@ test('ci impact selects only the installer runner needed by the changed installe
   }
 })
 
+test('a change to the plugin test runner selects the plugin job on both systems; its own test stays in board', () => {
+  const plan = makePlan(['scripts/plugin-tests.mjs'], options())
+  assertOnly(plan, ['plugin'])
+  assert.deepEqual(plan.pluginMatrix, bothSystems)
+  assertOnly(makePlan(['tests/plugin-tests.test.mjs'], options()), ['board'])
+})
+
 test('ci impact uses injected dependency sets for ordinary runtime sources', () => {
   const configured = options()
   configured.deps.plugin.add('hooks/pane.tsx')
@@ -476,6 +483,40 @@ test('a Windows job runs at most two test files at once, and a serial job still 
   }
 })
 
+test('the summary command writes the recorded run time and its share of the job limit', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-summary-'))
+  try {
+    const script = fileURLToPath(new URL('../scripts/ci-impact.mjs', import.meta.url))
+    const timings = join(dir, 'timings.json'), summary = join(dir, 'summary.md')
+    const run = (...args) => spawnSync(process.execPath, [script, 'summary', ...args], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: timings, GITHUB_STEP_SUMMARY: summary } })
+    await writeFile(timings, JSON.stringify({ version: 1, part: '2/2', serial: false, totalMs: 312_000, files: [] }))
+    const ok = run('600')
+    assert.equal(ok.status, 0)
+    assert.equal(await readFile(summary, 'utf8'), '- part 2/2: tests ran 312s, 52% of the 600s job limit\n')
+    assert.notEqual(run().status, 0)
+    await rm(timings)
+    assert.match(run('600').stdout, /no test timings recorded/)
+    // A half-written or odd timings file warns and leaves the job green (#1445).
+    for (const text of ['{"version":1,"totalMs":31', '{}', 'null', '{"totalMs":null}', '{"totalMs":{"toString":null}}', '{"totalMs":\n::error::x']) {
+      await writeFile(timings, text)
+      const bad = run('600')
+      assert.equal(bad.status, 0, text)
+      assert.match(bad.stdout, /^::warning::/m, text)
+      // The warning stays one line, so text from the file never starts a runner command of its own.
+      assert.doesNotMatch(bad.stdout, /^::error::/m, text)
+    }
+    assert.equal(await readFile(summary, 'utf8'), '- part 2/2: tests ran 312s, 52% of the 600s job limit\n')
+    // An odd part name reads as the whole run, and a summary file that cannot be written warns.
+    await writeFile(timings, JSON.stringify({ totalMs: 60_000, part: { toString: null } }))
+    assert.match(run('600').stdout, /^part 1\/1: tests ran 60s, 10% of the 600s job limit$/m)
+    const unwritable = spawnSync(process.execPath, [script, 'summary', '600'], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: timings, GITHUB_STEP_SUMMARY: dir } })
+    assert.equal(unwritable.status, 0)
+    assert.match(unwritable.stdout, /^::warning::no summary line: /m)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a self-parted test file runs whole in every part and keeps its share, so the parts together run each of its tests once', async () => {
   const { testRuns, partTest, selfPartedTests } = await import('../scripts/ci-impact.mjs')
   const files = ['tests/a.test.mjs', 'tests/board.test.mjs', 'tests/b.test.mjs', 'tests/codex-local.test.mjs']
@@ -509,7 +550,7 @@ test('the budgeted slow files go to different parts, and the parts together run 
     for (const share of shares) assert.ok(share.filter(path => slow.includes(path)).length <= Math.ceil(slow.length / total), total + ' parts: ' + share.join(' '))
     const others = shares.flat().filter(path => !selfPartedTests.includes(path))
     assert.deepEqual([...others].sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
-    for (const share of shares) for (const path of selfPartedTests) assert.ok(share.includes(path))
+    for (const share of shares) for (const path of selfPartedTests.filter(one => files.includes(one))) assert.ok(share.includes(path))
   }
 })
 
@@ -547,6 +588,8 @@ test('the board time check fails a file over seventy percent of its budget and a
     assert.deepEqual(checkBoardTimes(atLimit), { ok: true, errors: [], warnings: [] })
     assert.equal(checkBoardTimes({ ...atLimit, files: [{ path, ms: limit + 1 }] }).ok, false)
   }
+  // merge-check's slowest Windows run so far, 46.4 s, failed the 60 s default budget (#1464); its own budget passes it.
+  assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/merge-check.test.mjs', ms: 46_400 }] }), { ok: true, errors: [], warnings: [] })
   const slowFile = { ...base, files: [{ path: 'tests/board.test.mjs', ms: 141_000 }] }
   const overFile = checkBoardTimes(slowFile)
   assert.equal(overFile.ok, false)
@@ -832,14 +875,21 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   const ubuntu = '{"os":"ubuntu-latest","node":22,"part":"1/1"}', ubuntu24 = '{"os":"ubuntu-latest","node":24,"part":"1/1"}'
   assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 6)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 6)},${parts(24, 6)}]' }}`))
   assert.ok(text.includes(`journeys_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 2)}]' || '[${ubuntu},${ubuntu24},${parts(22, 2)},${parts(24, 2)}]' }}`))
+  // The local exchange job takes the journeys' split: its Windows run used 75-80% of ten minutes (#1445).
+  assert.ok(text.includes(`messaging_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 2)}]' || '[${ubuntu},${ubuntu24},${parts(22, 2)},${parts(24, 2)}]' }}`))
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
     assert.ok(block, group)
-    const matrix = group === 'board' || group === 'journeys' ? `${group}_matrix` : 'node_matrix'
+    const matrix = group === 'board' || group === 'journeys' || group === 'messaging' ? `${group}_matrix` : 'node_matrix'
     assert.ok(block.includes(`include: \${{ fromJSON(needs.impact.outputs.${matrix}) }}`), group)
-    if (group === 'board' || group === 'journeys') {
+    if (group === 'board' || group === 'journeys' || group === 'messaging') {
       assert.ok(block.includes('CI_TEST_PART: ${{ matrix.part }}') && block.includes('timeout-minutes: 10'), group)
+    }
+    if (group === 'board' || group === 'journeys') {
       assert.ok(block.includes("CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}"), group)
+    }
+    if (group === 'messaging') {
+      assert.ok(block.includes("format(', part {0}', matrix.part)") && block.includes('node scripts/ci-impact.mjs summary 600'), group)
     }
     assert.doesNotMatch(block, /node: \[/, group)
     assert.doesNotMatch(block, /^\s+os: \[/m, group)
@@ -930,4 +980,42 @@ test('the brief template retains the same local and CI execution policy as AGENT
   const policy = agent.split('\n').find(line => line.startsWith('On your own computer,'))
   assert.ok(policy)
   assert.ok(brief.split('\n').includes('10. ' + policy))
+})
+
+// The browser job's tool install tries up to three times when the runner's Ubuntu package mirror is unreachable
+// (#1460). Its loop runs here as written in the workflow, under the bash options Actions uses, with a stand-in
+// installer that fails a set number of times and a sleep that returns at once.
+const gitBash = process.platform === 'win32' ? join(process.env.ProgramFiles ?? 'C:\Program Files', 'Git', 'bin', 'bash.exe') : '/bin/bash'
+test('the browser tool install stops at its first success, tries three times and then fails', async () => {
+  const text = await workflow()
+  const step = text.slice(text.indexOf('- name: Install isolated browser test tools'))
+  const start = step.indexOf('for try in 1 2 3; do')
+  assert.ok(start > 0, 'the install step has its three-try loop')
+  const loop = step.slice(start, step.indexOf('exit 1\n', start) + 'exit 1'.length)
+  const root = await mkdtemp(join(tmpdir(), 'ab-install-loop-'))
+  try {
+    const cli = join(root, 'agent-board-playwright', 'node_modules', 'playwright', 'cli.js')
+    await mkdir(dirname(cli), { recursive: true })
+    await writeFile(cli, "const fs = require('node:fs'); const n = Number(fs.readFileSync(process.env.TRIES, 'utf8')) + 1\n" +
+      "fs.writeFileSync(process.env.TRIES, String(n)); process.exit(n <= Number(process.env.FAILS) ? 1 : 0)\n")
+    const run = async fails => {
+      const tries = join(root, `tries-${fails}`)
+      await writeFile(tries, '0')
+      const result = spawnSync(gitBash, ['--noprofile', '--norc', '-eo', 'pipefail', '-c', 'sleep() { echo "slept $1"; }\n' + loop], {
+        encoding: 'utf8',
+        env: { ...process.env, RUNNER_TEMP: root, TRIES: tries, FAILS: String(fails), PATH: dirname(process.execPath) + (process.platform === 'win32' ? ';' : ':') + process.env.PATH },
+      })
+      return { status: result.status, tries: Number(await readFile(tries, 'utf8')), out: result.stdout }
+    }
+    assert.deepEqual(await run(0), { status: 0, tries: 1, out: '' })
+    const flaky = await run(2)
+    assert.deepEqual([flaky.status, flaky.tries], [0, 3])
+    assert.equal(flaky.out, '::warning::browser tool install failed (try 1 of 3); trying again in 20 s\nslept 20\n' +
+      '::warning::browser tool install failed (try 2 of 3); trying again in 40 s\nslept 40\n')
+    const down = await run(3)
+    assert.deepEqual([down.status, down.tries], [1, 3])
+    assert.match(down.out, /slept 40\n::error::browser tool install failed three times\n$/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

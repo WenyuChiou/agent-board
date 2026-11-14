@@ -46,8 +46,8 @@ npx @wenyuchiou/agent-board@next
 | | Agent | 開看板 | 你的回答怎麼送到 |
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` | 它空下來就送出 |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 下一輪起交給它，一輪一則 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 下一輪起交給它，一輪一則 |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 卡片有「排入」時可排給它；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 卡片有「排入」時可排給它；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 快速開始的第二個指令 | 你自己貼上 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己貼上 |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己貼上 |
@@ -59,7 +59,7 @@ npx @wenyuchiou/agent-board@next
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board`（看板網頁） | 尚未支援 |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁 | 尚未支援 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 尚未測試 |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 卡片有「排入」時可排給它。桌面 app：實際跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板網頁 | 尚未測試 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁 | 尚未支援 |
 
@@ -74,7 +74,7 @@ npx @wenyuchiou/agent-board@next
 回答 agent 的問題，和主動傳訊息給它，走的是同一條路，看你按哪顆按鈕：
 
 - **傳送**把它交給已連線的對話；對話回確認才代表收到。沒有確認也可能已經送到，先看一下那個 agent 再用**複製回答**，免得它收到兩次。傳送需要[開啟訊息功能](docs/MESSAGING.md#local-storage)（英文）。
-- **排入 agent 的下一回合**會留給那個對話的各個回合，一回合交一則，先排的先送，不會叫醒閒置中的對話；對話先結束，或它的信箱滿 12 小時過期，都可能被拒收。
+- **排入 agent 的下一回合**會留給那個對話的各個回合，不會叫醒閒置中的對話；它的信箱滿 12 小時過期，或是對話先結束（限 hook 會回報對話結束的 agent），都可能被拒收。
 - **複製回答**把它放進剪貼簿，由你貼到那個 agent。
 - 已經在 agent 自己的視窗裡回答了？按**已回覆，先隱藏**就能收掉這張卡。
 

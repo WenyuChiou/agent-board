@@ -68,6 +68,11 @@ export const makePlan = (files, options = {}) => {
       select('generated', path)
       known = true
     }
+    // The plugin step's own runner: a change to it must run the plugin job (the walk only reaches its board test).
+    if (path === 'scripts/plugin-tests.mjs') {
+      select('plugin', path)
+      known = true
+    }
     const testGroup = groupForTest(path)
     if (testGroup) {
       select(testGroup, path)
@@ -99,7 +104,7 @@ export const makePlan = (files, options = {}) => {
   // its modules) and its line-ending policy at run time, under the Claude Code version test.yml pins, and a
   // Windows-only load failure (a CRLF bundle, #589) passed on Ubuntu twice. Test files and docs that only select the
   // plugin group stay on Ubuntu, and a hooks/ file the plugin does not load selects no plugin check at all.
-  const reachesPluginRuntime = files.some(path => path.startsWith('hooks/') || path.startsWith('.claude-plugin/') || path === 'package.json' || path === '.gitattributes' || path === '.github/workflows/test.yml' || options.pluginRuntime?.has(path))
+  const reachesPluginRuntime = files.some(path => path.startsWith('hooks/') || path.startsWith('.claude-plugin/') || path === 'package.json' || path === '.gitattributes' || path === '.github/workflows/test.yml' || path === 'scripts/plugin-tests.mjs' || options.pluginRuntime?.has(path))
   if (checks.installers && (full || !installers.size || files.some(path => options.deps?.installers?.has(path) && !/^(?:scripts\/setup|tests\/setup\.check)\.(?:sh|ps1)$/.test(path)))) {
     for (const system of systems) installers.add(system)
   }
@@ -155,6 +160,8 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/setup-terminal.test.mjs': 70_000, // slowest 36.0 s
   // Grew with #1339's lock tests (several wait out the 2 s bounded lock wait): 43.4 s on Windows Node 24 (run 43190652904).
   'tests/settings-symlink.test.mjs': 85_000, // slowest 43.4 s
+  // New with #1438 (merge-check runs git in temporary repositories): 46.1 and 46.4 s on Windows Node 24 (#1464).
+  'tests/merge-check.test.mjs': 90_000, // slowest 46.4 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
@@ -382,8 +389,9 @@ const parsePart = part => {
 }
 
 // The files that split their own tests with partTest: on Windows codex-local took about 8 minutes and
-// board about 5, each far longer than any other file (#899).
-export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs']
+// board about 5, each far longer than any other file (#899). messaging joined when the Windows exchange
+// job used 75-80% of its 10 minutes (#1445).
+export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs']
 
 export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
   const { index, total } = parsePart(part)
@@ -481,13 +489,33 @@ const main = async () => {
     if (!result.ok) process.exitCode = 1
     return
   }
+  if (process.argv[2] === 'summary') {
+    // One summary line: the time the run step recorded and its share of the job's limit in seconds (#1445).
+    const limitMs = Number(process.argv[3]) * 1000
+    if (!(limitMs > 0)) throw new Error('summary needs the job limit in seconds, such as 600')
+    // The line only reports: whatever the timings file holds, or a summary file that cannot be written,
+    // a job whose tests passed stays green, with a warning instead of the line.
+    let line = null
+    try {
+      const timings = readBoardTimings()
+      const totalMs = timings?.totalMs
+      if (typeof totalMs !== 'number' || !Number.isFinite(totalMs) || totalMs < 0) throw new Error('the test timings have no run time')
+      const part = typeof timings.part === 'string' && /^\d+\/\d+$/.test(timings.part) ? timings.part : '1/1'
+      line = 'part ' + part + ': tests ran ' + seconds(totalMs) + 's, ' + Math.round(totalMs / limitMs * 100) + '% of the ' + seconds(limitMs) + 's job limit'
+      console.log(line)
+      if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, '- ' + line + '\n')
+    } catch (error) {
+      console.log(error?.code === 'ENOENT' && line === null ? 'no test timings recorded; no summary line' : '::warning::no summary line: ' + String(error?.message ?? error).replace(/\s+/g, ' '))
+    }
+    return
+  }
   if (process.argv[2] === 'verify') {
     const result = checkResults(JSON.parse(process.env.CI_PLAN), JSON.parse(process.env.CI_RESULTS))
     console.log(JSON.stringify(result, null, 2))
     if (!result.ok) process.exitCode = 1
     return
   }
-  if (process.argv[2] !== 'plan') throw new Error('use plan, run, check or verify')
+  if (process.argv[2] !== 'plan') throw new Error('use plan, run, check, summary or verify')
   const roots = JSON.parse(process.env.CI_SOURCE_ROOTS)
   const files = process.env.CI_CHANGED_FILES ? JSON.parse(process.env.CI_CHANGED_FILES) : process.env.CI_FORCE_FULL === 'true' ? [] : gitPaths(roots.at(-1), process.env.CI_BASE_SHA, process.env.CI_HEAD_SHA)
   emitPlan(await buildPlan(files, { roots, forceFull: process.env.CI_FORCE_FULL === 'true' }))
