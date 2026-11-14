@@ -1396,6 +1396,28 @@ const PAGE_SCRIPT = String.raw`
   var GLYPH = { done: '✓', doing: '▸', todo: '•', waiting: '●', running: '◐', blocked: '!', cancelled: '–' };
   var last = '';
   var boardEtag = '';
+  // A press is a press and a release on the same button. A redraw between them puts a new button under the pointer and
+  // the click is lost without a word (#1468), so while a pointer is down the board keeps what it shows and draws from
+  // the next answer. The flag clears after the click that follows the release has run.
+  // Each held pointer is kept by its id with the number of its press, so a second finger does not end the first
+  // finger's hold, and a release timer from an earlier press (a mouse reuses one id) cannot end a later press.
+  var heldPointers = {};
+  var pressCount = 0;
+  function isHeld() { return Object.keys(heldPointers).length > 0; }
+  function pointerReleased(event) {
+    var id = String(event && event.pointerId);
+    var press = heldPointers[id];
+    setTimeout(function () { if (heldPointers[id] === press) delete heldPointers[id]; }, 0);
+  }
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('pointerdown', function (event) { pressCount += 1; heldPointers[String(event.pointerId)] = pressCount; }, true);
+    document.addEventListener('pointerup', pointerReleased, true);
+    document.addEventListener('pointercancel', pointerReleased, true);
+    // A move with no button held means the release was lost (a context menu, a scrollbar drag): the board draws again.
+    document.addEventListener('pointermove', function (event) { if (!event.buttons) delete heldPointers[String(event.pointerId)]; }, true);
+  }
+  // Losing focus loses every release that was still to come.
+  if (typeof window.addEventListener === 'function') window.addEventListener('blur', function () { heldPointers = {}; });
   var opened = {};
   var timer = null;
   var isClosed = false;
@@ -1792,13 +1814,20 @@ const PAGE_SCRIPT = String.raw`
       }, function () { say(w('pressFailed'), 'alert', key, undefined, true); });
     });
   }
+  // A finished message's attempt id is done with, so the next send of the same words is a new message. The rule
+  // lives here so a board kept from redrawing under a press still applies it (#1468).
+  function releaseFinishedAttempt(receipt, isClaude) {
+    var isDone = isClaude ? receipt.status === 'rejected' || receipt.status === 'acknowledged' || receipt.error === 'DISMISSED' || receipt.error === 'EXPIRED'
+      : receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox;
+    if (isDone) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+  }
   // The card's line for a message to a Claude session, by what its receipt says (#316).
   function claudeReceipt(receipt, key, canSend) {
     var error = receipt.error || '';
     var isStopped = receipt.status === 'rejected';
     var isReplied = receipt.status === 'acknowledged';
     // Whatever went nowhere can be sent again, under an id of its own.
-    if (isStopped || isReplied || error === 'DISMISSED' || error === 'EXPIRED') Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+    releaseFinishedAttempt(receipt, true);
     if (error === 'DISMISSED') return null;
     var isUnconfirmed = receipt.status === 'uncertain' || receipt.status === 'accepted' && error === 'DISCONNECTED';
     var isFail = isStopped || receipt.status === 'uncertain' && receipt.hasAccepted !== true;
@@ -1829,7 +1858,7 @@ const PAGE_SCRIPT = String.raw`
     line = receipt.line;
     var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : !line || line === 'now' || line === 'stepEnd' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     // A mailbox message that was handed over gets no ACK, so its id is done with here: the next send is a new message.
-    if (receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
+    releaseFinishedAttempt(receipt, false);
     // The server already took a nonce ACK off; a receipt kept from a version 1 store was
     // acknowledged with the message id instead.
     var reply = receipt.reply || '';
@@ -2133,8 +2162,11 @@ const PAGE_SCRIPT = String.raw`
     question.setAttribute('title', text);
     add(body, question);
     if (isStuck) add(body, el('p', 'note', clean(ask.stuck && ask.stuck.reason)));
-    else if (ask.note) add(body, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
-    else if (ask.context) add(body, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
+    else {
+      if (ask.note) add(body, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
+      var askTitle = clean(String(ask.task || ''));
+      if (ask.context && (!ask.note || askTitle && (pg.titleCounts && pg.titleCounts[askTitle] || 0) > 1)) add(body, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
+    }
     if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
     var mode = ask.send;
     var answers = el('div', 'answers');
@@ -2387,10 +2419,11 @@ const PAGE_SCRIPT = String.raw`
     var isUnsureRow = row.rowState === 'unsure' && row.auto !== 'ended';
     var status = isUnsureRow ? w('rowUnsure', row.when) : ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
     var title = clean(fullTitle(ref));
+    var sameTitle = (pg.titleCounts && pg.titleCounts[title] || 0) > 1 ? clean(row.contextLine || row.context) : '';
     var project = showProject ? clean(ref.repo || row.project) : '';
     if (sameName(project, title)) project = '';
     var progress = isTask && row.total > 0 && (section === 'working' || section === 'stopped' || section === 'others') ? progressNode(row.cells || '', row.done, row.total, current ? clean(current.text) : '') : null;
-    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null, project ? el('span', '', project) : null, detail ? el('span', '', detail) : null);
+    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null, project ? el('span', '', project) : null, sameTitle ? el('span', '', sameTitle) : null, detail ? el('span', '', detail) : null);
     var titleNode = el('span', 'r-title', title);
     titleNode.setAttribute('title', title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
@@ -3362,6 +3395,17 @@ const PAGE_SCRIPT = String.raw`
     document.getElementById('shell').setAttribute('data-empty', !view.agents.length && !hasOwn ? '1' : '');
     if (!view.agents.length && !hasOwn) parts.push(freshPage(view));
     else {
+      var titleCounts = Object.create(null);
+      var seenKeys = Object.create(null);
+      view.needs.cards.concat(view.working, view.all.open, view.own.open, view.all.stopped, view.own.stopped, view.all.done, view.own.done).forEach(function (ref) {
+        var one = source(ref);
+        var id = one.session ? 's:' + one.session : String(ref.sourceKey || ref.key).replace(/^(?:stuck:|row:|ask:)+/, '').replace(/@[^@]*$/, '').replace(/::\d+$/, '');
+        if (seenKeys[id]) return;
+        seenKeys[id] = true;
+        var name = clean(String(one.title || one.task || ''));
+        if (name) titleCounts[name] = (titleCounts[name] || 0) + 1;
+      });
+      pg.titleCounts = titleCounts;
       var workingKeys = {};
       parts.push(needsSection(view));
       parts.push(sectionBlock(workingSection(view, workingKeys), 'working'));
@@ -3475,7 +3519,13 @@ const PAGE_SCRIPT = String.raw`
       connections = data.messaging && data.messaging.connections || [];
       latestApprovals = data.approvals || null;
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; }), latestApprovals], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
-      if (text !== last) {
+      // Under a press this answer is not drawn, and the next poll asks for the whole board again (#1468).
+      if (text !== last && isHeld()) {
+        boardEtag = '';
+        // Only the bookkeeping render would do: a finished message must not keep its id while nothing is drawn.
+        [].concat(data.model.asks || [], data.model.reminder || [], data.model.older || [], data.model.idle || [], data.model.stopped || [], (data.model.groups || []).flatMap(function (group) { return group.rows; }), data.model.turns || [], data.model.recent || [], data.model.finished || []).forEach(function (item) { if (item.receipt) releaseFinishedAttempt(item.receipt, isClaudeAgent(item.agent)); });
+      }
+      else if (text !== last) {
         last = text;
         render(data.model);
         if (presence) { presence.remove(); presence = null; }
