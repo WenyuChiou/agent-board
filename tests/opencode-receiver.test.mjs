@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { registerHooks, createRequire } from 'node:module'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, watch, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, watch, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
@@ -111,9 +111,12 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       const run = (name, body) => { const out = mailboxAction(readState(), name, body, now); writeState(out.state); return out.result }
       if (!Object.hasOwn(BOARD, action)) return { ok: false, code: 'INVALID_MAILBOX_CALL' }
       // A board that has not made its messages folder yet: an open enrolls nothing and a take finds nothing, as the board script answers.
-      if (calls.noFolder && !existsSync(directory)) {
-        if (action === 'open') return { ok: true, enrolled: false, watch: directory }
-        if (action === 'take') return { watch: directory, message: null }
+      if (calls.noFolder) {
+        // The board's rule: only nothing at that path is no folder; a link or a file in its place is a failure.
+        const state = (() => { try { const entry = lstatSync(directory); return entry.isDirectory() && !entry.isSymbolicLink() ? 'folder' : 'other' } catch (error) { return error.code === 'ENOENT' ? 'absent' : 'other' } })()
+        if (state === 'other') return { ok: false, code: 'BOARD_NOT_RUNNING', ...(action === 'take' ? { watch: directory, message: null } : {}) }
+        if (state === 'absent' && action === 'open') return { ok: true, enrolled: false, watch: directory }
+        if (state === 'absent' && action === 'take') return { watch: directory, message: null }
       }
       try {
         const answer = BOARD[action](run, base, at, args)
@@ -281,11 +284,11 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       watchers.push(watcher)
       return watcher
     }
-    const names = ['createRequire', 'spawnSync', 'tool', 'spawnBoard', 'readBoardStore', 'watchBoard', 'joinBoard', 'boardFolderExists', 'setInterval', 'clearInterval']
+    const names = ['createRequire', 'spawnSync', 'tool', 'spawnBoard', 'readBoardStore', 'watchBoard', 'joinBoard', 'boardEntry', 'setInterval', 'clearInterval']
     const build = async () => {
       if (!isSpawn) globalThis[TIMING_KEY] = { ...FAST, ...timing }
       try {
-        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0], hostCall: typeof hostCall === 'undefined' ? undefined : hostCall }`)(createRequire, reporter, tool, spawnBoard, readFileSync, watchBoard, join, existsSync, fakeSetInterval, fakeClearInterval)
+        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0], hostCall: typeof hostCall === 'undefined' ? undefined : hostCall }`)(createRequire, reporter, tool, spawnBoard, readFileSync, watchBoard, join, lstatSync, fakeSetInterval, fakeClearInterval)
         const hooks = await factory.plugin({ client, directory: home })
         receiverOf = factory.receiver
         return { hooks, receiver: factory.receiver, plugin: factory.plugin, hostCall: factory.hostCall }
@@ -1951,6 +1954,59 @@ test('A22 a named take is empty only when nothing is at the messages folder; a d
     }
     assert.deepEqual(wrong, [])
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// What a receiver's tick does with each thing at the messages folder, after an empty take while the session stays idle (#1366
+// round 13): only nothing there stays silent; anything else is asked of the board, which refuses it, and is logged once.
+const folderLink = (target, path) => symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir')
+const freshMailbox = session => JSON.stringify({ version: 2, messages: [], mailboxes: [{ id: 'x', agent: 'opencode', session, surface: 'CLI', expires: Date.now() + 43_200_000 }] })
+const afterEmptyTake = async (f, session, arrange) => {
+  const log = join(f.home, '.agent-board', 'hook-errors.log')
+  const lines = () => (existsSync(log) ? readFileSync(log, 'utf8') : '').split('MAILBOX_FAILED').length - 1
+  await f.created(session)
+  await f.quiet()
+  const takes = f.count('take')
+  mkdirSync(join(f.directory, '..'), { recursive: true })
+  arrange()
+  f.tick(); await f.quiet(); f.tick(); await f.quiet()
+  return { asked: f.count('take') > takes, logged: lines(), lines }
+}
+
+test('A23 after an empty take, a dead link at the messages folder is asked of the board at the next tick and logged once, while the session stays idle (#1366 review)', () => fixture(async f => {
+  const seen = await afterEmptyTake(f, 'ses_a23', () => { const gone = join(f.home, 'gone'); mkdirSync(gone); folderLink(gone, f.directory); rmSync(gone, { recursive: true }) })
+  assert.ok(seen.asked, 'the tick asked the board')
+  assert.equal(seen.logged, 1, 'the failure is logged')
+  f.tick(); await f.quiet()
+  assert.equal(seen.lines(), 1, 'once, not at every tick')
+  assert.equal(f.calls.promptAsync.length, 0)
+}, { spawn: true }))
+
+test('A24 the receiver reads the messages folder by the board\'s rule: only nothing there is silent; a dead link, a link to a folder, one holding the session\'s fresh mailbox and a file in its place are asked of the board and logged (#1366 review)', async () => {
+  const cases = [
+    ['a dead link', f => { const gone = join(f.home, 'gone'); mkdirSync(gone); folderLink(gone, f.directory); rmSync(gone, { recursive: true }) }, 'logged'],
+    ['a link to an empty folder', f => { const real = join(f.home, 'real'); mkdirSync(real); folderLink(real, f.directory) }, 'logged'],
+    ['a link to a folder holding the session\'s fresh mailbox', f => { const real = join(f.home, 'real'); mkdirSync(real); writeFileSync(join(real, 'messages.json'), freshMailbox('ses_a24')); folderLink(real, f.directory) }, 'logged'],
+    ['a file in its place', f => writeFileSync(f.directory, 'not a folder'), 'logged'],
+    ['nothing there', () => {}, 'silent'],
+  ]
+  // Every case runs, so a failure names all the cases that are wrong, not only the first.
+  const wrong = []
+  for (const [label, arrange, expected] of cases) {
+    await fixture(async f => {
+      const seen = await afterEmptyTake(f, 'ses_a24', () => arrange(f))
+      const outcome = seen.asked && seen.logged === 1 ? 'logged' : !seen.asked && seen.logged === 0 ? 'silent' : `asked ${seen.asked}, logged ${seen.logged}`
+      if (outcome !== expected) wrong.push(`${label}: ${outcome}`)
+    }, { spawn: true })
+  }
+  assert.deepEqual(wrong, [])
+})
+
+test('A26 the receiver decides what is at a board path only through lstat: its source never calls existsSync or statSync (#1366 review)', async () => {
+  const { opencodeReceiverSource } = await importTs('../hooks/receivers/opencode.ts')
+  const words = { opencodeAckTool: 'ack', opencodeAcknowledged: 'Acknowledged.', opencodeAckNote: 'note {id} {nonce}' }
+  const source = opencodeReceiverSource(process.execPath, 'board.mjs', 'progress.md', tmpdir(), words)
+  assert.ok(!/\bexistsSync\b/.test(source) && !/\bstatSync\b/.test(source), 'no existsSync or statSync in the receiver')
+  assert.ok(/\blstatSync\b/.test(source))
 })
 
 test('R40 a failed attempt and a failed release each leave a line in the hook error log, once, not at every tick (#1366 review)', () => fixture(async f => {
