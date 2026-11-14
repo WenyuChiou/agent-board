@@ -7553,6 +7553,75 @@ test('deepseekLocalPlugin asks again when the board answers a take as deferred, 
   }
 }))
 
+test('a deferred take asks again for its own session only, and a session closed while its take ran leaves no count for the next one (#1429)', () => fixture(async f => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { EventEmitter } = await import('node:events')
+  const { randomUUID } = await import('node:crypto')
+  const progress = join(f.home, 'deepseek-asks-progress.md')
+  f.save(progress, '')
+  const directory = join(f.home, 'deepseek-asks-mailbox')
+  // Every session has a message waiting, so each ask again finds something worth a take.
+  f.save(join(directory, 'messages.json'), JSON.stringify({ messages: ['asks-a', 'asks-b', 'asks-c'].map(id => ({ status: 'queued', to: 'deepseek:' + id })) }))
+  const takes = new Map(), held = new Map()
+  // A stand-in board script: every take finds the store busy and answers deferred; a held session's take waits.
+  const spawnMailbox = (_node, args) => {
+    const child = new EventEmitter()
+    child.stdout = Object.assign(new EventEmitter(), { setEncoding() {} })
+    child.kill = () => {}
+    const action = args[args.indexOf('--mailbox') + 1], session = args[args.indexOf('--session') + 1]
+    if (action === 'take') takes.set(session, (takes.get(session) ?? 0) + 1)
+    const answer = () => {
+      child.stdout.emit('data', JSON.stringify(action === 'take' ? { watch: directory, message: null, deferred: true } : { ok: true }) + '\n')
+      child.emit('close', 0)
+    }
+    if (action === 'take' && held.has(session)) held.set(session, answer)
+    else setImmediate(answer)
+    return child
+  }
+  const watch = () => Object.assign(new EventEmitter(), { close() {} })
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, join(f.home, 'deepseek-asks-board.mjs'))
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
+  const hooks = new Map()
+  apply({ on: (name, fn) => hooks.set(name, fn) })
+  const session = id => ({ session: { header: { id } }, status: 'idle', followup() { throw new Error('UNUSED') } })
+  // Settled: no take for 1 s, four times the 250 ms between asks.
+  const settled = async () => {
+    for (const end = Date.now() + 30_000; Date.now() < end;) {
+      const before = JSON.stringify([...takes])
+      await new Promise(done => setTimeout(done, 1000))
+      if (JSON.stringify([...takes]) === before) return
+    }
+    assert.fail(`takes never settled: ${JSON.stringify([...takes])}`)
+  }
+  const a = session('asks-a'), b = session('asks-b')
+  hooks.get('agent/created')({ agent: a })
+  await settled()
+  // The first take and 20 asks again.
+  assert.equal(takes.get('asks-a'), 21)
+  hooks.get('agent/created')({ agent: b })
+  await settled()
+  assert.equal(takes.get('asks-b'), 21)
+  // Before: each of b's asks again took for a too, 41 takes in all.
+  assert.equal(takes.get('asks-a'), 21)
+  held.set('asks-c', null)
+  const closed = session('asks-c')
+  hooks.get('agent/created')({ agent: closed })
+  for (const end = Date.now() + 10_000; held.get('asks-c') === null && Date.now() < end;) await new Promise(done => setTimeout(done, 20))
+  hooks.get('agent/disposed')({ agent: closed })
+  const late = held.get('asks-c')
+  held.delete('asks-c')
+  late()
+  await settled()
+  assert.equal(takes.get('asks-c'), 1)
+  const reopened = session('asks-c')
+  hooks.get('agent/created')({ agent: reopened })
+  await settled()
+  // Before: the late answer left a count of 1, so the same id came back with 19 asks again, not 20.
+  assert.equal(takes.get('asks-c'), 22)
+  for (const agent of [a, b, reopened]) hooks.get('agent/disposed')({ agent })
+}))
+
 test('a mailbox accept the board did not take prints ok false, and ok true once it did (#1430)', async () => mailboxFixture(async f => {
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   f.seed('deepseek')

@@ -71,12 +71,12 @@ const sessionOf = agent => {
   const id = agent?.session?.header?.id
   return typeof id === 'string' && id !== '' ? id : undefined
 }
-// A take the board answers with deferred (its store was busy, so nothing was checked) is asked again through the
-// 250 ms timer this many times in a row: about 5 s, the 5000 ms a take itself is given, which outlasts the
-// stalls of a few seconds seen on a busy computer. After that the watcher and the ten-minute tick are all there is.
+// A take the board answers with deferred (its store was busy, so nothing was checked) is asked again, for that
+// session only, 250 ms later, this many times in a row: about 5 s, the 5000 ms a take itself is given, which outlasts
+// the stalls of a few seconds seen on a busy computer. After that the watcher and the ten-minute tick are all there is.
 const DEFERRED_ASKS = 20
 const mailboxReceiver = () => {
-  const roots = new Map(), busy = new Set(), failing = new Set(), again = new Set(), stashed = new Map(), asks = new Map()
+  const roots = new Map(), busy = new Set(), failing = new Set(), again = new Set(), stashed = new Map(), asks = new Map(), retries = new Map()
   let watcher = null, folder = null, pending = null, timer = null, ticks = 0
   const isDeliverable = message => {
     if (folder === null) return true
@@ -107,13 +107,18 @@ const mailboxReceiver = () => {
         failing.delete(session)
         if (typeof taken.watch === 'string') follow(taken.watch)
         message = taken.message
+        // A session that closed while its take ran keeps no count and no timer: its id can come back as a new
+        // session, which starts with every ask. A message it took runs out its claim and goes out again.
+        if (roots.get(session) !== agent) return
         if (message == null && taken.deferred === true) {
           const asked = (asks.get(session) ?? 0) + 1
           asks.set(session, asked)
+          // Its own timer, so one session's asks never take for another session or use up another's count.
           if (asked <= DEFERRED_ASKS && folder !== null) {
-            clearTimeout(pending)
-            pending = setTimeout(check, 250)
-            pending.unref?.()
+            clearTimeout(retries.get(session))
+            const retry = setTimeout(() => { retries.delete(session); check(session) }, 250)
+            retry.unref?.()
+            retries.set(session, retry)
           }
         } else asks.delete(session)
       }
@@ -137,11 +142,12 @@ const mailboxReceiver = () => {
     }
   }
   // The board rewrites messages.json whenever it queues a message: a session with one waiting takes it.
-  const check = () => {
+  // An ask again after a deferred take passes its session, and only that session takes.
+  const check = only => {
     let store
     try { store = JSON.parse(readFileSync(join(folder, 'messages.json'), 'utf8')) } catch { return }
     const waiting = new Set((Array.isArray(store?.messages) ? store.messages : []).filter(one => one?.status === 'queued' && typeof one.to === 'string').map(one => one.to))
-    for (const [session, agent] of roots) if (waiting.has('deepseek:' + session) || stashed.has(session)) deliver(agent)
+    for (const [session, agent] of roots) if ((only === undefined || only === session) && (waiting.has('deepseek:' + session) || stashed.has(session))) deliver(agent)
   }
   const follow = directory => {
     if (watcher !== null && folder === directory) return
@@ -187,6 +193,8 @@ const mailboxReceiver = () => {
       failing.delete(session)
       again.delete(session)
       asks.delete(session)
+      clearTimeout(retries.get(session))
+      retries.delete(session)
       stashed.delete(session)
       mailboxCall('end', session)
       if (roots.size > 0) return
