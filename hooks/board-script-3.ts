@@ -4195,7 +4195,7 @@ export const LINES = [
 "      hidden.push(item);",
 "    else {",
 "      retained.push(item);",
-"      if (isStopped)",
+"      if (rowStopped)",
 "        stoppedQuestions.add(record.id);",
 "    }",
 "  }",

@@ -1491,7 +1491,7 @@ export const buildView = (
     if (marked.has(record.id)) hidden.push(item)
     else {
       retained.push(item)
-      if (isStopped) stoppedQuestions.add(record.id)
+      if (rowStopped) stoppedQuestions.add(record.id)
     }
   }
   // A question that sits on a Stopped or recent row is also listed under Older, with the age it was

@@ -81,6 +81,37 @@ test('repro2: a newest duplicate without a claim must suppress the older dead cl
   assert.equal(view.older.length, 0, 'nothing about the newest duplicate may fold into Older')
 })
 
+test('repro4: a retained pending question keeps its live copy when an ended duplicate exists', async () => {
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { buildView } = await import('../hooks/view.ts')
+  const { emptyQuestions, observeQuestions } = await import('../hooks/questions.ts')
+  const { STRINGS } = await import('../hooks/strings.ts')
+  const text = 'Publish the synthetic build, OK?'
+  // A recent Codex inbox question for session B, captured with observeQuestions.
+  const pending = { id: 'bbbb2222', agent: 'codex', project: 'demo', dir: '/work/demo', text, fullText: text, isQuestion: true, at: NOW }
+  const first = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'review-probe:1', undefined, [pending]).ledger
+  // On the following observation the inbox input is no longer supplied, so the
+  // question is retained — and an ended session A asks the same words.
+  const ended = '## demo\n<!-- auto session=aaaa1111 agent=codex state=ended updated=' + new Date(NOW - 60000).toISOString() + ' dir=%2Fwork%2Fdemo -->\n### Ended duplicate\n- [?] ' + text + '\n<!-- /auto session=aaaa1111 -->\n'
+  const second = observeQuestions(first, parseProgress(ended), null, [], NOW + 1, true, 'review-probe:2').ledger
+  const view = buildView(parseProgress(ended), [], null, NOW + 2, 0, {}, STRINGS.en, [], {}, second)
+  console.log(JSON.stringify({ waiting: view.waiting.map(one => one.text), older: (view.older ?? []).map(one => one.text), waitingCount: view.overview.waiting, stoppedAsking: view.stoppedAsking }))
+  // The retained live copy must win the merge: the question still waits, and
+  // the ended duplicate must not move the shared question to Older. The
+  // round-6 P1 (codex_300) was the retained loop testing the imported
+  // `isStopped` function — always truthy — instead of its `rowStopped`
+  // local, so every retained question was marked stopped and the ended
+  // copy won.
+  assert.equal(view.waiting.length, 1, 'the retained pending question left Needs you when an ended duplicate exists')
+  assert.equal(view.waiting[0]?.text, text)
+  assert.equal(view.overview.waiting, 1)
+  assert.equal(view.older.filter(one => one.text === text).length, 0, 'the ended duplicate moved the shared question to Older')
+  // Control: without the ended duplicate the same retained question waits,
+  // so this probe can tell the fix from the bug.
+  const control = buildView([], [], null, NOW + 2, 0, {}, STRINGS.en, [], {}, first)
+  assert.equal(control.waiting.length, 1, 'control: the retained question must wait with no duplicate')
+})
+
 test('repro3: an unchanged reused-pid claim must not re-run the start-time lookup on each read', async () => {
   const { parseProgress } = await import('../hooks/parse.ts')
   const { blockKey } = await import('../hooks/session-liveness.ts')
