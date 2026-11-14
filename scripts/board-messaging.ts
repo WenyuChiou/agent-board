@@ -604,6 +604,12 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
   // The take itself; a failure is thrown, so a caller that must tell it from an empty mailbox can.
   const takeTurn = async (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => {
     const ref = named ?? randomBytes(6).toString('hex')
+    // A plugin that names its claim also marks its wake (attempt) and gives it back as unsent, which a board started before
+    // the plugin existed refuses with UNKNOWN_FIELD, so a claim it took could never go back: it waits out 30 minutes and its text
+    // is cleared. Such a board is told by open, which claims nothing, so nothing is taken there (#1366 review).
+    if (named !== undefined) {
+      try { await access.call('mailbox-open', { agent, session, surface }, now) } catch (error) { if ((error as Error).message === 'UNKNOWN_FIELD') throw new Error('BOARD_OLDER') }
+    }
     try { return (await access.call('mailbox-turn', { agent, session, surface, ref }, now)).message as Message ?? null } catch (error) {
       // A board started before claims had names refuses the field until it restarts: ask it as before.
       if ((error as Error).message === 'UNKNOWN_FIELD') {

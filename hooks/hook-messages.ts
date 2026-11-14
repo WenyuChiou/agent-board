@@ -1,4 +1,4 @@
-import { address, claimMessages, disconnectMessages, MAILBOX_LEASE_MS, messageReceipt, UNCONFIRMED } from './messaging'
+import { address, claimMessages, disconnectMessages, isOwedWake, MAILBOX_LEASE_MS, messageReceipt, UNCONFIRMED } from './messaging'
 import type { Connection, Message, MessageState } from './messaging'
 import { sha256 } from './sha256'
 
@@ -36,9 +36,9 @@ export const takeMailboxMessage = (state: MessageState, agent: string, session: 
 // and the message is queued again for a later hook (#990). The ACK code stays, for a message shown before.
 // A started OpenCode wake (marked by attemptMailboxMessage) is handed back only with isUnsent, which the plugin sets
 // when it knows the host was never called (#724); a plain release leaves it as it is. A wake that read "sent, not
-// confirmed" meanwhile (the release could not be saved for 30 minutes) is taken back by isUnsent too.
+// confirmed" meanwhile (the release could not be saved for 30 minutes), or one that expired with its text kept, is taken back by isUnsent too.
 export const releaseMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number, isUnsent = false): MessageState => {
-  const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && (message.error === '' || isUnsent && message.error === UNCONFIRMED))
+  const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && (message.error === '' || isUnsent && (message.error === UNCONFIRMED || isOwedWake(message))))
   if (one === undefined || one.attempted !== undefined && !isUnsent) return state
   const { ref: _ref, attempted: _attempted, ...kept } = one
   return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, error: '', claimed: 0, updated: now } : message) }

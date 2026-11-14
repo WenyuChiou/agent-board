@@ -4,6 +4,7 @@ import { registerHooks, createRequire } from 'node:module'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createServer } from 'node:http'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
@@ -747,8 +748,10 @@ test('B16 a deletion that follows a saved attempt, before the reply reaches the 
   const late = b.prune(ended, T0 + 31 * MIN)
   assert.deepEqual([late.messages[0].status, late.messages[0].error, late.messages[0].text], ['uncertain', 'UNCONFIRMED', 'Synthetic text for the board cases'])
   assert.equal(b.prune(late, T0 + 31 * MIN + 1439 * MIN).messages[0].error, 'UNCONFIRMED')
-  const gone = b.prune(late, T0 + 31 * MIN + 1441 * MIN).messages[0]
-  assert.deepEqual([gone.status, gone.error, gone.text], ['uncertain', 'EXPIRED', ''])
+  // A day later it expires; its text stays one more day for a release still owed (B19).
+  const expired = b.prune(late, T0 + 31 * MIN + 1441 * MIN)
+  assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].text], ['uncertain', 'EXPIRED', 'Synthetic text for the board cases'])
+  assert.equal(b.prune(expired, T0 + 31 * MIN + 2882 * MIN).messages.length, 0)
   // One that already read "sent, not confirmed" when the session was deleted keeps its day as well.
   const after = b.act(late, 'mailbox-end', { agent: 'opencode', session: 's1' }, T0 + 32 * MIN).state
   assert.deepEqual([after.messages[0].error, after.messages[0].text], ['UNCONFIRMED', 'Synthetic text for the board cases'])
@@ -775,9 +778,9 @@ test('B9 a started wake holds the next message to its session only until it read
   assert.equal(next.message?.id, 'm2')
   const first = next.state.messages.find(one => one.id === 'm1')
   assert.deepEqual([first.error, first.text], ['UNCONFIRMED', 'Synthetic text for the board cases'])
-  // A day later it expires like any other open message and its text goes.
+  // A day later it expires like any other open message; its text stays one more day for a release still owed (B19).
   const gone = b.prune(late, T0 + 31 * MIN + 1441 * MIN).messages.find(one => one.id === 'm1')
-  assert.deepEqual([gone.status, gone.error, gone.text], ['uncertain', 'EXPIRED', ''])
+  assert.deepEqual([gone.status, gone.error, gone.text], ['uncertain', 'EXPIRED', 'Synthetic text for the board cases'])
 })
 
 test('B5 release --unsent takes a started wake back to queued; a plain release does not; an unknown ref is NOT_HELD', async () => {
@@ -1809,3 +1812,85 @@ test('B18 only an OpenCode wake that reads "sent, not confirmed" stops holding i
   const held = { ...taken.state, messages: taken.state.messages.map(one => one.id === 'm1' ? { ...one, status: 'uncertain', error: 'UNCONFIRMED', updated: T0 + SEC } : one) }
   assert.throws(() => b.messaging.queueMessage(held, { id: 'm2', target: box.id, turn: 'session', text: 'Synthetic second message' }, 'board', box, T0 + 2 * SEC), /PAIR_BUSY/)
 })
+
+test('B19 a started wake whose unsent release is still owed keeps its text through expiry, and the release sends it; a wake the host took does not (#1366 review)', async () => {
+  const b = await mailbox()
+  const text = 'Synthetic text for the board cases'
+  const marked = b.act(b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0).state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + SEC).state
+  const late = b.prune(marked, T0 + 31 * MIN)
+  // The plugin could not save its release for more than a day: the message expired, and a later pass does not clear its text.
+  const expired = b.prune(late, T0 + 31 * MIN + 1441 * MIN)
+  assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].text], ['uncertain', 'EXPIRED', text])
+  assert.equal(b.prune(expired, T0 + 31 * MIN + 1442 * MIN).messages[0].text, text)
+  // The release it owed is saved at last: the board answers ok, and the message goes out again.
+  const back = b.act(expired, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1), unsent: true }, T0 + 31 * MIN + 1443 * MIN)
+  assert.equal(back.result.ok, true)
+  assert.deepEqual([back.state.messages[0].status, back.state.messages[0].error, back.state.messages[0].text], ['queued', '', text])
+  // Without --unsent a started wake is not taken back, and once the finished message itself is dropped nothing is held.
+  assert.throws(() => b.act(expired, 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + 31 * MIN + 1443 * MIN), /NOT_HELD/)
+  const dropped = T0 + 31 * MIN + 2882 * MIN
+  assert.throws(() => b.act(b.prune(expired, dropped), 'mailbox-release', { agent: 'opencode', session: 's1', ref: refOf(1), unsent: true }, dropped), /NOT_HELD/)
+  // A wake the host answered with a 204 was sent: its text goes at expiry, as before.
+  const started = b.act(b.take(b.seed('opencode', 's2'), 'opencode', 's2', refOf(3), T0).state, 'mailbox-attempt', { agent: 'opencode', session: 's2', ref: refOf(3) }, T0 + SEC).state
+  const accepted = b.act(started, 'mailbox-accept', { agent: 'opencode', session: 's2', id: 'm1', nonce: started.messages[0].nonce, awaitsAck: true }, T0 + 2 * SEC).state
+  const sent = b.prune(b.prune(accepted, T0 + 33 * MIN), T0 + 33 * MIN + 1441 * MIN).messages[0]
+  assert.deepEqual([sent.status, sent.error, sent.text], ['uncertain', 'EXPIRED', ''])
+})
+
+test('A19 a board started before the plugin existed is told by open before anything is taken: the message stays queued and no claim is made (#1366 review)', async () => {
+  const { createMessaging, hookMailbox } = await importTs('../scripts/board-messaging.ts')
+  const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'agent-board-old-hub-'))
+  let hub, server
+  try {
+    const now = Date.now()
+    const enrolled = enrollMailbox({ messages: [] }, 'opencode', 's1', 'CLI', now, 43_200_000)
+    const target = enrolled.mailboxes.find(one => one.id === mailboxId('opencode', 's1'))
+    const seeded = queueMessage(enrolled, { id: 'old-hub-message', target: target.id, turn: 'session', text: 'Synthetic text for an older board' }, 'board', target, now).state
+    writeFileSync(join(dir, 'messages.json'), JSON.stringify({ version: 2, ...seeded }))
+    hub = createMessaging(dir)
+    const asked = []
+    // A board of the release before this one refuses the plugin's open, attempt and unsent release, as its field check does.
+    server = createServer(async (req, res) => {
+      try {
+        let text = ''
+        for await (const chunk of req) text += chunk
+        const body = JSON.parse(text), action = req.url.split('/').at(-1)
+        asked.push(action)
+        if (action === 'mailbox-open' || action === 'mailbox-attempt' || body.unsent !== undefined) throw new Error('UNKNOWN_FIELD')
+        res.end(JSON.stringify(hub.act(action, body, Date.now())))
+      } catch (error) { if (!res.destroyed) { res.statusCode = 409; res.end(JSON.stringify({ error: error.message })) } }
+    })
+    await new Promise(done => server.listen(0, '127.0.0.1', done))
+    const url = `http://127.0.0.1:${server.address().port}`
+    hub.recordOwner(server.address().port, `${url}/?t=synthetic`)
+    await assert.rejects(hookMailbox(dir, 4000, 2000, 2000).turnOrThrow('opencode', 's1', 'CLI', Date.now(), refOf(1)), /BOARD_OLDER/)
+    assert.ok(!asked.includes('mailbox-turn'), asked.join())
+    const kept = hub.snapshot(Date.now()).messages.find(one => one.id === 'old-hub-message')
+    assert.deepEqual([kept.status, kept.ref, kept.claimed], ['queued', undefined, 0])
+  } finally { if (server) await new Promise(done => server.close(done)); hub?.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('R40 a failed attempt and a failed release each leave a line in the hook error log, once, not at every tick (#1366 review)', () => fixture(async f => {
+  f.calls.faults.attempt = ['fail']
+  f.calls.faults.release = ['fail', 'fail']
+  const log = join(f.home, '.agent-board', 'hook-errors.log')
+  const lines = () => (existsSync(log) ? readFileSync(log, 'utf8') : '').split('MAILBOX_FAILED').length - 1
+  f.queue('ses_r40', 'r40-message', 'Synthetic text while the attempt and its release fail')
+  await f.created('ses_r40')
+  await f.quiet()
+  assert.equal(f.calls.promptAsync.length, 0)
+  assert.equal(f.count('release'), 1)
+  assert.equal(lines(), 2, 'one line for the attempt, one for the release the board did not save')
+  f.tick()
+  await f.quiet()
+  assert.equal(f.count('release'), 2, 'the owed release was tried again')
+  assert.equal(lines(), 2, 'a retry at the tick adds no line')
+  f.tick()
+  await f.quiet()
+  assert.equal(f.message('r40-message').status, 'queued', 'the saved release took it back')
+  f.tick()
+  await f.until(() => f.message('r40-message').status === 'accepted' && f.settled(), 'the release was saved and the message woken once')
+  assert.equal(f.calls.promptAsync.length, 1)
+}, { watch: false }))
