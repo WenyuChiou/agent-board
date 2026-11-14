@@ -236,7 +236,7 @@ finish
 
 // Keep paths out of the source: Windows PowerShell5.1 can read a BOM-free script
 // using the system code page. The actual inbox is beside this installed script.
-export const powershellReporter = (fromShell: boolean): string => `# Written by the Agent Board plugin (/progress connect).
+const reporterSource = (fromShell: boolean): string => `# Written by the Agent Board plugin (/progress connect).
 ${fromShell ? "$Agent = [string]$env:AGENT_BOARD_SH_AGENT; $Event = [string]$env:AGENT_BOARD_SH_EVENT; $Payload = [string]$env:AGENT_BOARD_SH_PAYLOAD" : "param([string]$Agent = 'agent', [string]$Event = 'turn', [string]$Payload = '')"}
 $ErrorActionPreference = 'Stop'
 if ($Agent -notin @('codex','cursor','gemini','grok','muse','hermes','openclaw','opencode','antigravity','deepseek')) { $Agent = 'unknown' }
@@ -288,9 +288,8 @@ function Read-PromptReceipt([string]$File, [Diagnostics.Stopwatch]$Clock, [scrip
     # same file. Only absolute folders count, so an empty or relative entry never makes
     # the walk look in the project folder. FileName needs one path, never an array.
     $node = $null
-    $extensions = [Collections.Generic.List[string]]::new()
-    foreach ($piece in ([string]$env:PATHEXT).Split([char]59)) { if ($piece -ne '') { $extensions.Add($piece) } }
-    if ($extensions.Count -eq 0) { foreach ($piece in @('.COM', '.EXE', '.BAT', '.CMD')) { $extensions.Add($piece) } }
+    $extensions = @(([string]$env:PATHEXT).Split([char[]]@(59), [StringSplitOptions]::RemoveEmptyEntries))
+    if ($extensions.Count -eq 0) { $extensions = @('.COM', '.EXE', '.BAT', '.CMD') }
     foreach ($folder in ([string]$env:PATH).Split([char]59)) {
       if ($Clock.ElapsedMilliseconds -ge ${HOOK_INPUT_TIMEOUT}) { throw 'REPORTER_TIMEOUT' }
       $folderPath = $folder.Trim().Trim([char]34)
@@ -366,15 +365,15 @@ try {
   }
   if ($Payload.Trim() -eq '') { throw 'INCOMPLETE_INPUT' }
   if ([Text.Encoding]::UTF8.GetByteCount($Payload) -gt 1048576) { throw 'INPUT_TOO_LARGE' }
+  # Only .NET calls before the classifier starts: a first cmdlet loads a module, seconds on a fresh runner (#1080).
+  $dir = ${fromShell ? '$env:AGENT_BOARD_SH_INBOX' : "[IO.Path]::Combine($PSScriptRoot, 'progress-inbox')"}
+  $null = [IO.Directory]::CreateDirectory($dir)
+  $name = '{0}-{1}-{2}-{3}' -f $Agent, $Event, [DateTimeOffset]::Now.ToUnixTimeMilliseconds(), $PID
+  $tmp = [IO.Path]::Combine($dir, $name + '.tmp')
+  Write-Exclusive $tmp $Payload
+  $ownsTemp = $true
+  $ready = $tmp
   if ($Event -eq 'prompt') {
-    # Only .NET calls run before Node starts: the first cmdlet loads a module, which takes
-    # up to seconds on a fresh runner and would use the budget before the classifier exists.
-    $dir = ${fromShell ? '$env:AGENT_BOARD_SH_INBOX' : "[IO.Path]::Combine($PSScriptRoot, 'progress-inbox')"}
-    $null = [IO.Directory]::CreateDirectory($dir)
-    $name = '{0}-{1}-{2}-{3}' -f $Agent, $Event, [DateTimeOffset]::Now.ToUnixTimeMilliseconds(), $PID
-    $tmp = [IO.Path]::Combine($dir, $name + '.tmp')
-    Write-Exclusive $tmp $Payload
-    $ownsTemp = $true
     $receipt = Read-PromptReceipt $tmp $clock {
       try { $raw = ConvertFrom-Json -InputObject $Payload } catch { throw 'INCOMPLETE_INPUT' }
       # Only the timeout fallback reads this; a failure here must not lose a prompt the classifier would handle.
@@ -406,23 +405,13 @@ try {
       } catch { $script:fallback = ''; $script:hasFallbackFailure = $raw -is [Management.Automation.PSCustomObject] }
     }
     if ($clock.ElapsedMilliseconds -ge ${HOOK_INPUT_TIMEOUT}) { throw 'REPORTER_TIMEOUT' }
-    $ready = $tmp
     if ($receipt -ne '') {
       $receiptTmp = Join-Path $dir ($name + '.receipt')
       Write-Exclusive $receiptTmp $receipt
       $ownsReceipt = $true
       $ready = $receiptTmp
     }
-  } else {
-    try { $raw = ConvertFrom-Json -InputObject $Payload } catch { throw 'INCOMPLETE_INPUT' }
-    $dir = ${fromShell ? '$env:AGENT_BOARD_SH_INBOX' : "Join-Path $PSScriptRoot 'progress-inbox'"}
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    $name = '{0}-{1}-{2}-{3}' -f $Agent, $Event, [DateTimeOffset]::Now.ToUnixTimeMilliseconds(), $PID
-    $tmp = Join-Path $dir ($name + '.tmp')
-    Write-Exclusive $tmp $Payload
-    $ownsTemp = $true
-    $ready = $tmp
-  }
+  } else { try { $null = ConvertFrom-Json -InputObject $Payload } catch { throw 'INCOMPLETE_INPUT' } }
   Move-Item -LiteralPath $ready -Destination (Join-Path $dir ($name + '.json'))
   if ($ready -eq $tmp) { $ownsTemp = $false } else { $ownsReceipt = $false }
   # The receipt is saved: a file that cannot be removed is only a cleanup failure, and one another reporter removed first is none.
@@ -534,5 +523,11 @@ try {
 if ($Agent -eq 'cursor') { '{}' }
 exit 0
 `
+
+// The sh reporter passes the whole script as one -Command argument, and a Windows command line holds at
+// most 32,767 characters, so that copy leaves out its whole-line comments (#1444).
+export const powershellReporter = (fromShell: boolean): string => fromShell
+  ? reporterSource(true).split('\n').filter(line => !line.trimStart().startsWith('#')).join('\n')
+  : reporterSource(false)
 
 export const reporterPs1 = (): string => powershellReporter(false)
