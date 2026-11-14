@@ -441,8 +441,7 @@ const proofFiles = immutableQuestionFiles<{ kind: keyof QuestionProofs; hash: st
   },
 })
 let questionProofCache: { files: { kind: keyof QuestionProofs; hash: string }[]; proofs: QuestionProofs } | null = null
-const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCapture['disposition']): void => {
-  const text = captureJson(record, disposition)
+const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCapture['disposition'], text = captureJson(record, disposition), capture: QuestionCapture = { version: 1, disposition, record }): void => {
   const file = capturePath(path, sha256(text))
   // The name is the hash of the bytes, so a file whose bytes differ is a
   // partial write from a process killed mid-flush (#921 T6): no valid capture
@@ -459,7 +458,7 @@ const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCaptur
       if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
     }
     if (read(file) === text) {
-      captureFiles.invalidate(basename(file))
+      captureFiles.remember(basename(file), capture)
       return
     }
     try { unlinkSync(file) } catch {}
@@ -524,7 +523,7 @@ const flushQuestionCaptures = (budget: number): void => {
     if (attempted >= budget) break
     attempted += 1
     try {
-      keepQuestionCapture(capture.record, capture.disposition)
+      keepQuestionCapture(capture.record, capture.disposition, key, capture)
     } catch (error) {
       emptyCopyCache = null
       process.stderr.write(`agent-board: could not write queued question capture ${basename(capturePath(path, sha256(key)))}: ${error instanceof Error ? error.message : String(error)}\n`)

@@ -129,6 +129,16 @@ export const immutableQuestionFiles = <T>(options: {
       }
     },
     invalidate: (name: string): void => { if (accepts(name)) dirty.add(name) },
+    remember: (name: string, value: T): void => {
+      if (!accepts(name)) return
+      try {
+        const entry = statSync(join(options.directory, name))
+        known.set(name, { stamp: `${entry.size}:${entry.mtimeMs}:${entry.ctimeMs}:${entry.ino}`, value })
+        dirty.delete(name)
+      } catch {
+        dirty.add(name)
+      }
+    },
     close: (): void => { isClosed = true; close() },
   }
 }
