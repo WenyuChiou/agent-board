@@ -781,6 +781,137 @@ export const reviewOf = item => {
 // The tier the body names on its `Tier:` line (RULES R2), or null when it names none.
 export const tierOf = body => stripComments(body ?? '').match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
 
+// A risk-tier pull request changes one failure surface and names it on a `Surface:` line (CONTRIBUTING rule 2, #1490).
+// It applies to pull requests numbered above SURFACE_FROM, the issue (#1490) the rule and this check came in with; a local
+// --body-file run has no number and is checked as new.
+export const SURFACE_FROM = 1490
+export const SURFACE_LINES = 300
+const surfaceValues = ['delivery', 'setup-writes', 'data', 'wording', 'rules-text', 'launch']
+const isRulesTextPath = path => ['SECURITY.md', 'AGENTS.md', 'CONTRIBUTING.md'].includes(path) || path.startsWith('docs/dev/')
+const setupOnlyPaths = new Set(['scripts/setup-agent.mjs', 'scripts/setup-codex.mjs', 'scripts/setup-discovery.mjs', 'scripts/setup.sh', 'scripts/setup.ps1', 'scripts/install-control.ts', 'scripts/connect-transaction.ts', 'scripts/legacy-connect.ts', 'scripts/settings-agents.ts', 'hooks/settings-agents.ts', 'hooks/connect.ts', 'hooks/connect-pure.ts', 'hooks/connect-worker.ts'])
+const isDeliveryPath = path => path.startsWith('hooks/receivers/') || ['hooks/messaging.ts', 'scripts/board-messaging.ts', 'scripts/message-client.mjs', 'scripts/codex-receiver.mjs'].includes(path)
+// Not counted toward the size note: tests, generated files and the string tables.
+const isUncountedForSurface = path => path.startsWith('tests/') || isGeneratedPath(path) || /^hooks\/strings-[^/]+\.ts$/.test(path) || path === 'hooks/i18n.ts'
+// The body's lines as a reader sees them, so an example `Surface:` line is not read: no fenced code (``` or ~~~ after at most
+// three spaces, closed only by a line of the same character at least as long, as CommonMark has it) and no HTML comment (an
+// unclosed `<!--` hides the rest). A comment marker inside a fence or a code span on one line (`<!--`), and a fence marker
+// inside a comment, are plain text.
+const visibleLines = text => {
+  const shown = []
+  let fence = null
+  let isComment = false
+  for (const raw of text.split(/\r?\n/)) {
+    if (fence !== null) {
+      const close = raw.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/)?.[1]
+      if (close !== undefined && close[0] === fence[0] && close.length >= fence.length) fence = null
+      continue
+    }
+    const open = isComment ? undefined : raw.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+    if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
+      fence = open[1]
+      continue
+    }
+    let kept = ''
+    let at = 0
+    while (at < raw.length) {
+      if (isComment) {
+        const end = raw.indexOf('-->', at)
+        if (end === -1) break
+        at = end + 3
+        isComment = false
+        continue
+      }
+      const comment = raw.indexOf('<!--', at)
+      const tick = raw.indexOf('`', at)
+      if (tick !== -1 && (comment === -1 || tick < comment)) {
+        // A code span: a run of backticks closed by a run of the same length later on the line; an unclosed run is text.
+        const run = raw.slice(tick).match(/^`+/)[0]
+        let close = -1
+        for (let from = tick + run.length; from < raw.length;) {
+          const next = raw.indexOf('`', from)
+          if (next === -1) break
+          const other = raw.slice(next).match(/^`+/)[0]
+          if (other.length === run.length) { close = next; break }
+          from = next + other.length
+        }
+        const end = close === -1 ? tick + run.length : close + run.length
+        kept += raw.slice(at, end)
+        at = end
+        continue
+      }
+      if (comment === -1) {
+        kept += raw.slice(at)
+        break
+      }
+      kept += raw.slice(at, comment)
+      at = comment + 4
+      isComment = true
+    }
+    shown.push(kept)
+  }
+  return shown
+}
+// The tier as a reader sees it, for the surface check: a `Tier:` line outside fences and comments.
+const visibleTier = body => visibleLines(body).map(line => line.match(/^Tier:[ \t]*`?(risk|normal|light)\b/i)?.[1].toLowerCase()).find(Boolean) ?? null
+export const surface = ({ body = '', title = '', number = null, paths = [], numstat, tier = visibleTier(body) } = {}) => {
+  const output = result()
+  if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= SURFACE_FROM)) return output
+  const fail = (message, fix) => output.problems.push(problem('surface', message, fix))
+  const how = 'name the one failure surface on a line of its own in the body, for example `Surface: delivery` (delivery, setup-writes, data, wording, rules-text or launch, or `none` when the only reason for the tier is the lane under risk-tier review; CONTRIBUTING.md rule 2).'
+  const found = visibleLines(body).flatMap(line => line.match(/^Surface:[ \t]*(.*)$/i)?.[1].trim() ?? [])
+  // The template's own `Surface: <...>` line is a placeholder, not a value.
+  const filled = found.filter(value => value !== '' && !value.startsWith('<'))
+  if (filled.length > 1) {
+    fail(`the body has ${filled.length} \`Surface:\` lines; it names its surface once.`, 'keep one `Surface:` line; put an example inside a code fence.')
+    return output
+  }
+  const line = filled[0]
+  if (!line) {
+    fail(found.some(value => value.startsWith('<')) ? 'the `Surface:` line is still the template\'s placeholder.' : 'a risk-tier pull request has no `Surface:` line.', how)
+    return output
+  }
+  const [named, ...reasonParts] = line.split(/,[ \t]*cannot split:/i)
+  const reason = reasonParts.join(',').trim()
+  if (reasonParts.length && (!reason || /^<[^<>]*>$/.test(reason))) {
+    fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.','write the reason after `cannot split:`, for the maintainer or the owner to accept or refuse before the first review.')
+    return output
+  }
+  const values = named.split('+').map(value => value.replace(/`/g, '').trim().toLowerCase())
+  // `none`: risk tier only because the lane is under risk-tier review, and no surface changed. It stands alone.
+  const isNone = values.length === 1 && values[0] === 'none' && !reasonParts.length
+  const unknown = isNone ? [] : values.filter(value => !surfaceValues.includes(value))
+  if (unknown.length) {
+    fail(`the \`Surface:\` line names ${unknown.map(value => `"${value || ' '}"`).join(', ')}, which is not a surface.`, how)
+    return output
+  }
+  if (new Set(values).size < values.length) {
+    fail('the `Surface:` line names the same surface twice.', how)
+    return output
+  }
+  if (values.length > 2) {
+    fail(`the \`Surface:\` line names ${values.length} surfaces; \`cannot split:\` covers two at most.`, 'split the change into one pull request per surface, or two with `cannot split: <reason>`.')
+    return output
+  }
+  if (values.length > 1 && !reasonParts.length) {
+    fail(`the \`Surface:\` line names ${values.length} surfaces without a reason.`, 'split the change into one pull request per surface; if a split would leave main broken between steps, end the line with `, cannot split: <reason>`.')
+  }
+  if (reasonParts.length) output.info.push(`surface: "cannot split: ${reason}" waits for the maintainer's or the owner's answer before the first review.`)
+  if (paths.some(isRulesTextPath) && !values.includes('rules-text')) {
+    fail('this pull request changes a rules or security file (SECURITY.md, AGENTS.md, CONTRIBUTING.md or docs/dev/) but its `Surface:` line is not `rules-text`.', 'put the rules-text change in its own pull request with `Surface: rules-text`.')
+  }
+  if (Array.isArray(numstat)) {
+    const lines = numstat.filter(item => !isUncountedForSurface(item.path)).reduce((sum, item) => sum + item.added + item.deleted, 0)
+    if (lines > SURFACE_LINES) output.info.push(`surface note: ${lines} changed lines (tests, generated files and string tables not counted) is more than about ${SURFACE_LINES}; check that this is still one surface.`)
+  }
+  if (values.includes('delivery') && !values.includes('setup-writes') && paths.some(path => setupOnlyPaths.has(path))) {
+    output.info.push('surface note: `Surface: delivery`, but the diff touches setup files; check that this is not a setup-writes change.')
+  }
+  if (values.includes('setup-writes') && !values.includes('delivery') && paths.some(isDeliveryPath)) {
+    output.info.push('surface note: `Surface: setup-writes`, but the diff touches message delivery files; check that this is not a delivery change.')
+  }
+  return output
+}
+
 export const verdict = (comments, head, options = {}) => {
   const output = result()
   const { isDraft = false, authorAgent = null, number = null, tier = null } = options
@@ -848,6 +979,7 @@ export const checkPr = data => {
   add(privateData({ added: data.added, body: data.body }))
   add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
+  add(surface({ body: data.body, title: data.title, number: data.number, paths: data.paths, numstat: data.numstat }))
   if (issue.issue !== null) {
     // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
     const lookups = [...new Set(issue.issues)].map((number, index) => {

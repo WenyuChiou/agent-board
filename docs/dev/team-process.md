@@ -28,7 +28,7 @@ This repository follows the multi-agent workflow standard that its maintainer ke
 
 ## How much is open at once
 
-- A pull request is one feature (it may span several issues), or two or three bug fixes, never more than three (CONTRIBUTING rule 2). The team has no limit on how many pull requests it has open, how many issues it works on or how many it opens, and needs no claim on an issue; a comment saying who works on one is welcome and nothing checks it (CONTRIBUTING rules 3 and 10).
+- A pull request is one feature (it may span several issues), or two or three bug fixes, never more than three; a risk-tier pull request changes one failure surface, named on its `Surface:` line, with the exceptions CONTRIBUTING rule 2 lists, and risk-tier bug fixes go together only when they share a surface (CONTRIBUTING rule 2). The team has no limit on how many pull requests it has open, how many issues it works on or how many it opens, and needs no claim on an issue; a comment saying who works on one is welcome and nothing checks it (CONTRIBUTING rules 3 and 10).
 - A contributor from outside the team claims an issue first (rule 3) and has at most two open pull requests per GitHub login and four from outside the team in all (rule 10); [CONTRIBUTOR-PATH.md](../CONTRIBUTOR-PATH.md) has the steps.
 - Work in the next milestone only. Milestones after the next one are parked: no work starts there until the release before them ships. An issue labelled `for-agent` is the exception: the maintainer labels it so an agent outside the team can take it whatever its milestone. A milestone has no limit on its number of issues.
 
@@ -131,8 +131,8 @@ An agent below these aims two weeks running takes smaller issues for a while: on
 Open an issue only where the repo's rules tell you to (agent-board: when no issue fits the change you are about to make). Put any other finding on the hold list or as a comment on your PR or one of its issues; the coordinator files it if it qualifies. A finding in the same files that the same tests already cover may be fixed in your PR and named in its body, if B3 lets it join this PR (same kind, and a bug-fix PR keeps at most three fixes). An audit or test run hands in one list, not a batch of issues.
 
 ### B3. What goes in one PR
-- A new feature gets one branch and one PR, even when it spans several issues. Unrelated features stay in separate PRs.
-- Bug fixes go two or three to a PR when several are waiting, never more than three; a lone or urgent fix may go by itself. Any other small issue (a small improvement, docs, a refactor, tests) follows the same rule with issues of its own kind, unless it belongs to a feature's PR. An improvement that spans several issues counts as a feature.
+- A new feature gets one branch and one PR, even when it spans several issues; a risk-tier feature that needs more than one failure surface goes in steps, one surface per PR, unless the maintainer or the owner accepts a `cannot split:` reason (CONTRIBUTING rule 2). Unrelated features stay in separate PRs.
+- Bug fixes go two or three to a PR when several are waiting, never more than three, and risk-tier fixes only when they share a failure surface (CONTRIBUTING rule 2); a lone or urgent fix may go by itself. Any other small issue (a small improvement, docs, a refactor, tests) follows the same rule with issues of its own kind, unless it belongs to a feature's PR. An improvement that spans several issues counts as a feature.
 - Never put a bug fix in a feature PR, so fixes can ship in a patch release while features wait.
 - In the PR body, give each issue its own `Fixes #N` or `Part of #N` line and its evidence (B1 step 6).
 - If review finds a problem in one issue, take that issue out of the PR (its changes and its `Fixes #N` or `Part of #N` line) and say so on the issue; fix it later in another PR, and do not hold up the rest.
