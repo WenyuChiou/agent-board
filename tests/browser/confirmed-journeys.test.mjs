@@ -405,4 +405,86 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       await assertNoIdentifiers(page, root, ['a61ce001', 'a61ce002', 'a61ce003'])
     })
   })
+
+  test('a clipped text or step fold the person closes stays closed when a redraw runs before its toggle event (#1456)', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('details-close-redraw-race', async ({ page, progress, startServer }) => {
+      const longStep = 'Review the complete synthetic rollout plan without losing collapsed state across a concurrent board redraw. '.repeat(3).trim()
+      const steps = [`- [ ] ${longStep}`, '- [ ] Synthetic second open step', '- [ ] Synthetic third open step']
+      writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n`)
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      const task = await board.openTask('Close before toggle')
+      const fold = task.locator('details:not(.clip)').filter({ has: page.locator('summary', { hasText: '2 more steps' }) })
+      const clip = task.locator('.steps details.clip').first()
+      await fold.evaluate(node => new Promise(done => {
+        node.addEventListener('toggle', () => done(), { once: true })
+        node.querySelector('summary').click()
+      }))
+      await clip.evaluate(node => new Promise(done => {
+        node.addEventListener('toggle', () => done(), { once: true })
+        node.querySelector('summary').click()
+      }))
+      assert.equal(await fold.evaluate(node => node.open), true)
+      assert.equal(await clip.evaluate(node => node.open), true)
+
+      await page.evaluate(() => {
+        const origFetch = window.fetch
+        window.__race = { armed: true, done: false, toggledBeforeDraw: null, closedSync: null, afterDraw: null }
+        window.fetch = async function (...args) {
+          const res = await origFetch.apply(this, args)
+          const url = typeof args[0] === 'string' ? args[0] : ''
+          if (!window.__race.armed || !url.includes('/api/board') || res.status !== 200) return res
+          const origJson = res.json.bind(res)
+          res.json = async function () {
+            const data = await origJson()
+            if (window.__race.armed && JSON.stringify(data).includes('Synthetic redraw race task')) {
+              window.__race.armed = false
+              const root = document.getElementById('board')
+              const liveFold = [...root.querySelectorAll('details:not(.clip)')].find(node => node.querySelector('summary')?.textContent === '2 more steps')
+              const liveClip = [...root.querySelectorAll('.steps details.clip')].find(node => node.textContent.includes('Review the complete synthetic rollout plan'))
+              let toggled = false
+              const mark = () => { toggled = true }
+              liveFold.addEventListener('toggle', mark, { once: true })
+              liveClip.addEventListener('toggle', mark, { once: true })
+              liveFold.querySelector('summary').click()
+              liveClip.querySelector('summary').click()
+              const closedSync = [liveFold.open, liveClip.open]
+              const observer = new MutationObserver(() => {
+                if (!root.textContent.includes('Synthetic redraw race task')) return
+                observer.disconnect()
+                const nextFold = [...root.querySelectorAll('details:not(.clip)')].find(node => node.querySelector('summary')?.textContent === '2 more steps')
+                const nextClip = [...root.querySelectorAll('.steps details.clip')].find(node => node.textContent.includes('Review the complete synthetic rollout plan'))
+                window.__race = {
+                  armed: false,
+                  done: true,
+                  toggledBeforeDraw: toggled,
+                  closedSync,
+                  afterDraw: [nextFold?.open ?? null, nextClip?.open ?? null],
+                }
+              })
+              observer.observe(root, { childList: true, subtree: true })
+            }
+            return data
+          }
+          return res
+        }
+      })
+
+      writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger redraw\n`)
+      await board.task('Synthetic redraw race task').waitFor()
+      const race = await page.evaluate(() => window.__race)
+      assert.equal(race.done, true)
+      assert.equal(race.toggledBeforeDraw, false)
+      assert.deepEqual(race.closedSync, [false, false])
+      assert.deepEqual(race.afterDraw, [false, false])
+      await page.evaluate(() => new Promise(done => setTimeout(done, 0)))
+      assert.deepEqual(await Promise.all([fold.evaluate(node => node.open), clip.evaluate(node => node.open)]), [false, false])
+      // Re-opening after the race still sticks across a subsequent redraw.
+      await fold.locator('summary', { hasText: '2 more steps' }).click()
+      await clip.locator('summary').click()
+      writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger second redraw\n`)
+      await page.locator('.short', { hasText: 'Trigger second redraw' }).waitFor()
+      assert.deepEqual(await Promise.all([fold.evaluate(node => node.open), clip.evaluate(node => node.open)]), [true, true])
+    })
+  })
 })
