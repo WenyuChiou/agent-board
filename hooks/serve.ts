@@ -1607,14 +1607,29 @@ const PAGE_SCRIPT = String.raw`
       }, function () { barStyleShown(before); settingsSay(w('pressFailed'), true); }).finally(function () { node.disabled = false; });
     });
   });
+  function showMoved() {
+    isClosed = true;
+    approveSecret = '';
+    clearTimeout(timer);
+    if (drawerOpen) setDrawer(false, true);
+    paintLight();
+    var movedMain = document.querySelector('main');
+    movedMain.textContent = '';
+    add(movedMain, el('p', '', w('serveMoved')));
+    document.getElementById('side').hidden = true;
+  }
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
     try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
   });
-  // A page the browser kept in its back/forward cache and shows again is the same document, but the board forgot its id when it left: it names itself anew and asks at once (#1028).
+  // A page the browser kept in its back/forward cache and shows again is the same document, but the board forgot its id
+  // and retired its secret when it left: it names itself anew, drops any approval secret and asks at once (#1028, #1378).
   if (typeof window.addEventListener === 'function') window.addEventListener('pageshow', function (event) {
     if (!event || !event.persisted || isClosed) return;
     pageId = newPageId();
+    approveSecret = '';
+    boardEtag = '';
+    last = '';
     refresh();
   });
   // onCopied: what to do once the text is on the clipboard; the card then says where to paste it. Without it the
@@ -3436,18 +3451,11 @@ const PAGE_SCRIPT = String.raw`
   function refresh() {
     if (isClosed) return;
     clearTimeout(timer);
+    var pollPage = pageId;
     call('/api/board').then(function (data) {
+      if (isClosed || pollPage !== pageId) return;
       // A newer page took over: this one stops asking and says so, once (#265).
-      if (data.moved) {
-        isClosed = true;
-        if (drawerOpen) setDrawer(false, true);
-        paintLight();
-        var movedMain = document.querySelector('main');
-        movedMain.textContent = '';
-        add(movedMain, el('p', '', w('serveMoved')));
-        document.getElementById('side').hidden = true;
-        return;
-      }
+      if (data.moved) { showMoved(); return; }
       if (data.unchanged) { reachable(); maybeShowAway(); return; }
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }
@@ -3486,10 +3494,10 @@ const PAGE_SCRIPT = String.raw`
         if (reply.at > seenAt) { since = Math.max(since, reply.at); say(reply.note, reply.ok ? 'done' : 'alert', reply.key, undefined, !reply.ok); }
       });
     }, function () {
-      unreachable();
+      if (pollPage === pageId) unreachable();
     }).then(function () {
       // Leave room for the response and paint inside the three-second ask deadline.
-      if (!isClosed) timer = setTimeout(refresh, 2000);
+      if (!isClosed && pollPage === pageId) timer = setTimeout(refresh, 2000);
     });
   }
   // Wider than the parser's start marker, so a block it would take is never dropped here.

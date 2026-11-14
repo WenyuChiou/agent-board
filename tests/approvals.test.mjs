@@ -1,9 +1,9 @@
 // Approvals on the board (D3, #1318): the board's server from source, the page played by these
 // requests, and Claude Code's PermissionRequest hook (scripts/claude-approval.mjs) run as the host
 // would run it, with a synthetic request on its input. No model, no browser.
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerHooks } from 'node:module'
@@ -20,6 +20,7 @@ registerHooks({ resolve(specifier, context, next) {
   }
 } })
 const { startServer } = await import('../scripts/board-serve.ts')
+const { privateRuntimeFolder, writePrivateRuntimeFile } = await import('../scripts/runtime-folder.ts')
 const { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, approvalCards, approvalOf, approvalsPayload, decisionOf, readAsk } = await import('../hooks/approvals.ts')
 const { addressFileName: receiverFileName, addressKey: receiverKey, parseAddress: receiverParse } = await import('../hooks/receiver.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
@@ -105,15 +106,16 @@ const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, 
 }
 
 // The page the board opened: it trades the key for its secret and asks for the board as a page does.
-const openPage = async (board, { visible = '1' } = {}) => {
+const openPage = async (board, { visible = '1', pageId = 'p-synthetic', pairWithPage = false } = {}) => {
   const opened = await board.call('/api/open', { asApp: true })
   assert.equal(opened.status, 200)
   const key = board.lastKey()
   assert.ok(key, 'the board opened its page with a one-time key')
-  const paired = await board.call('/api/approvals/pair', { key }, { origin: board.origin })
+  const pairHeaders = pairWithPage ? { origin: board.origin, 'x-board-page': pageId } : { origin: board.origin }
+  const paired = await board.call('/api/approvals/pair', { key }, pairHeaders)
   assert.equal(paired.status, 200)
   const secret = paired.body.secret
-  const headers = { origin: board.origin, 'x-board-page': 'p-synthetic', 'x-board-visible': visible, 'x-board-approve': secret }
+  const headers = { origin: board.origin, 'x-board-page': pageId, 'x-board-visible': visible, 'x-board-approve': secret }
   const page = {
     key, secret, headers,
     look: async () => (await board.call('/api/board', undefined, headers)).body.approvals,
@@ -194,6 +196,216 @@ test('the hook takes XDG_RUNTIME_DIR as the board does: its own folder, never a 
     assert.equal(hook.addressFile({ ...base, XDG_RUNTIME_DIR: own }, 'linux').folder, own)
     assert.equal(hook.addressFile({ ...base, XDG_RUNTIME_DIR: link }, 'linux').folder, `${home}/.cache/agent-board`, 'a linked runtime folder is not used, as the board does not use it')
   } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the hook reads <XDG_RUNTIME_DIR>\\agent-board on Windows only when its ACL is private (#1378)', async () => {
+  assert.equal(hook.addressFolder(true, 'C:\\synthetic\\home', 'D:\\synthetic\\run', true), 'D:\\synthetic\\run\\agent-board')
+  assert.equal(hook.addressFolder(true, 'C:\\synthetic\\home', 'D:\\synthetic\\run', false), null)
+  if (!isWindows) return
+  const stand = await allowingBoard()
+  const root = mkdtempSync(join(tmpdir(), 'approvals-win-runtime-'))
+  try {
+    const home = join(root, 'home')
+    const own = join(root, 'own')
+    const shared = join(root, 'shared')
+    const link = join(root, 'link')
+    const progress = join(home, '.claude', 'progress.md')
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(progress, '# Progress\n')
+    const runtimeFolder = privateRuntimeFolder(join(own, 'agent-board'))
+    const file = join(runtimeFolder, receiverFileName(receiverKey(progress)))
+    const payload = JSON.stringify({ pid: process.pid, port: Number(new URL(stand.url).port), url: stand.url, path: progress, built: '' })
+    writePrivateRuntimeFile(file, payload)
+    const base = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(CLAUDE_|XDG_RUNTIME_DIR$|HOME$|USERPROFILE$)/.test(name))),
+      CLAUDE_PROGRESS_FILE: progress,
+      HOME: home,
+      USERPROFILE: home,
+    }
+    assert.equal(hook.addressFile({ ...base, XDG_RUNTIME_DIR: own }, 'win32')?.folder, runtimeFolder)
+    const allowed = await runHook({ env: { ...base, XDG_RUNTIME_DIR: own } }, request('npm run synthetic-win-runtime')).done
+    assert.deepEqual(allowed.decision, ALLOW)
+    assert.equal(stand.seen.length, 1)
+
+    // Linked runtime folder must not be trusted.
+    symlinkSync(own, link, 'junction')
+    assert.equal(hook.addressFile({ ...base, XDG_RUNTIME_DIR: link }, 'win32'), null)
+    const fromLink = await runHook({ env: { ...base, XDG_RUNTIME_DIR: link } }, request('npm run synthetic-win-link')).done
+    assert.equal(fromLink.decision, null)
+
+    // Unprotected runtime folder (e.g. inherited %TEMP% ACLs) must not be trusted.
+    const openFolder = join(shared, 'agent-board')
+    mkdirSync(openFolder, { recursive: true })
+    writeFileSync(join(openFolder, receiverFileName(receiverKey(progress))), payload)
+    assert.equal(hook.addressFile({ ...base, XDG_RUNTIME_DIR: shared }, 'win32'), null)
+    const fromShared = await runHook({ env: { ...base, XDG_RUNTIME_DIR: shared } }, request('npm run synthetic-win-shared')).done
+    assert.equal(fromShared.decision, null)
+
+    // A second hard link or extra read grant on the address file inside a private folder must not be trusted.
+    const linkedCopy = join(runtimeFolder, 'hardlink-copy.json')
+    linkSync(file, linkedCopy)
+    const fromHardlink = await runHook({ env: { ...base, XDG_RUNTIME_DIR: own } }, request('npm run synthetic-win-nlink')).done
+    assert.equal(fromHardlink.decision, null)
+    rmSync(linkedCopy, { force: true })
+    execFileSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe'), [file, '/grant', '*S-1-1-0:(R)'], { stdio: 'ignore', windowsHide: true })
+    const fromExtraAce = await runHook({ env: { ...base, XDG_RUNTIME_DIR: own } }, request('npm run synthetic-win-ace')).done
+    assert.equal(fromExtraAce.decision, null)
+    assert.equal(stand.seen.length, 1, 'none of the untrusted runtime layouts reached the board')
+  } finally {
+    await stand.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('address discovery shares one budget before asking the board and skips asking when exhausted (#1436 review)', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    let tick = 0
+    const exhausted = await hook.run(place.env, process.platform, {
+      input: request('npm run synthetic-discovery-exhausted'),
+      discoveryMs: 0,
+      now: () => tick,
+    })
+    assert.equal(exhausted, null)
+    assert.deepEqual(stand.seen, [], 'an exhausted discovery budget never asks the board')
+
+    const valid = await hook.run(place.env, process.platform, {
+      input: request('npm run synthetic-discovery-ok'),
+      now: () => tick,
+    })
+    assert.deepEqual(valid, ALLOW)
+    assert.equal(stand.seen.length, 1)
+
+    if (isWindows) {
+      const root = mkdtempSync(join(tmpdir(), 'approvals-win-budget-'))
+      try {
+        const home = join(root, 'home')
+        const own = join(root, 'own')
+        const progress = join(home, '.claude', 'progress.md')
+        mkdirSync(join(home, '.claude'), { recursive: true })
+        writeFileSync(progress, '# Progress\n')
+        const runtimeFolder = privateRuntimeFolder(join(own, 'agent-board'))
+        const file = join(runtimeFolder, receiverFileName(receiverKey(progress)))
+        writePrivateRuntimeFile(file, JSON.stringify({ pid: process.pid, port: Number(new URL(stand.url).port), url: stand.url, path: progress, built: '' }))
+        const env = {
+          ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(CLAUDE_|XDG_RUNTIME_DIR$|HOME$|USERPROFILE$)/.test(name))),
+          CLAUDE_PROGRESS_FILE: progress,
+          HOME: home,
+          USERPROFILE: home,
+          XDG_RUNTIME_DIR: own,
+        }
+        const sid = 'S-1-5-21-1000-2000-3000-1001'
+        const sddls = [`O:${sid}G:${sid}D:P(A;OICI;FA;;;${sid})`, `O:${sid}G:${sid}D:AI(A;ID;FA;;;${sid})`]
+        const seenTimeouts = []
+
+        // First probe takes 4 s, leaving 6 s (not a full 10 s or 30 s) for PowerShell; total 7 s < 10 s proceeds.
+        tick = 0
+        const withinBudget = await hook.run(env, 'win32', {
+          input: request('npm run synthetic-win-within-budget'),
+          now: () => tick,
+          probeAccount: timeout => { seenTimeouts.push(['account', timeout]); tick += 4_000; return { sid, aliases: {} } },
+          probeAcls: (_files, timeout) => { seenTimeouts.push(['acls', timeout]); tick += 3_000; return sddls },
+        })
+        assert.deepEqual(seenTimeouts, [['account', hook.DISCOVERY_MS], ['acls', hook.DISCOVERY_MS - 4_000]])
+        assert.deepEqual(withinBudget, ALLOW)
+        assert.equal(stand.seen.length, 2)
+
+        // Combined 4 s + 6 s consumes the 10 s discovery budget -> even with valid SDDL, the board is not asked.
+        tick = 0
+        const spentBudget = await hook.run(env, 'win32', {
+          input: request('npm run synthetic-win-spent-budget'),
+          now: () => tick,
+          probeAccount: () => { tick += 4_000; return { sid, aliases: {} } },
+          probeAcls: () => { tick += hook.DISCOVERY_MS - 4_000; return sddls },
+        })
+        assert.equal(spentBudget, null)
+        assert.equal(stand.seen.length, 2)
+
+        // First probe alone uses the entire budget -> PowerShell is never started.
+        let aclCalls = 0
+        tick = 0
+        const firstExhausts = await hook.run(env, 'win32', {
+          input: request('npm run synthetic-win-first-exhausts'),
+          now: () => tick,
+          probeAccount: () => { tick += hook.DISCOVERY_MS; return { sid, aliases: {} } },
+          probeAcls: () => { aclCalls++; return sddls },
+        })
+        assert.equal(firstExhausts, null)
+        assert.equal(aclCalls, 0)
+        assert.equal(stand.seen.length, 2)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  } finally {
+    await stand.close()
+  }
+})
+
+test('swapping a parent folder or replacing the address file during Windows ACL verification fails closed (#1436 review)', async () => {
+  if (!isWindows) return
+  const stand = await allowingBoard()
+  const root = mkdtempSync(join(tmpdir(), 'approvals-win-swap-'))
+  try {
+    const home = join(root, 'home')
+    const own = join(root, 'own')
+    const swapParent = join(root, 'swap-parent')
+    const runDir = join(swapParent, 'run')
+    const progress = join(home, '.claude', 'progress.md')
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(progress, '# Progress\n')
+    const fileName = receiverFileName(receiverKey(progress))
+    const payload = JSON.stringify({ pid: process.pid, port: Number(new URL(stand.url).port), url: stand.url, path: progress, built: '' })
+    const runtimeFolder = privateRuntimeFolder(join(own, 'agent-board'))
+    const file = join(runtimeFolder, fileName)
+    writePrivateRuntimeFile(file, payload)
+
+    const evilFolder = join(runDir, 'agent-board')
+    mkdirSync(evilFolder, { recursive: true })
+    const evilFile = join(evilFolder, fileName)
+    writeFileSync(evilFile, payload)
+
+    const base = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(CLAUDE_|XDG_RUNTIME_DIR$|HOME$|USERPROFILE$)/.test(name))),
+      CLAUDE_PROGRESS_FILE: progress,
+      HOME: home,
+      USERPROFILE: home,
+    }
+    const sid = 'S-1-5-21-1000-2000-3000-1001'
+    const sddls = [`O:${sid}G:${sid}D:P(A;OICI;FA;;;${sid})`, `O:${sid}G:${sid}D:AI(A;ID;FA;;;${sid})`]
+
+    // While ACL probing runs, the address file is already open in readWindowsPrivateFile so
+    // Windows prevents renaming or swapping its parent directory, and replacing the file fails closed.
+    let swapErrorCode = ''
+    const swappedParent = await hook.run({ ...base, XDG_RUNTIME_DIR: runDir }, 'win32', {
+      input: request('npm run synthetic-win-parent-swap'),
+      probeAccount: () => ({ sid, aliases: {} }),
+      probeAcls: () => {
+        try { renameSync(runDir, join(swapParent, 'moved')) } catch (error) { swapErrorCode = error?.code ?? '' }
+        return null
+      },
+    })
+    assert.ok(swapErrorCode === 'EPERM' || swapErrorCode === 'EBUSY', `expected open file handle to lock parent directory, got ${swapErrorCode || 'none'}`)
+    assert.equal(swappedParent, null)
+    // Run against the real Windows ACL probe: unprotected parent cannot be swapped and fails closed.
+    assert.equal(await hook.run({ ...base, XDG_RUNTIME_DIR: runDir }, 'win32', { input: request('npm run synthetic-win-evil-real') }), null)
+
+    const replacedFile = await hook.run({ ...base, XDG_RUNTIME_DIR: own }, 'win32', {
+      input: request('npm run synthetic-win-file-swap'),
+      probeAccount: () => ({ sid, aliases: {} }),
+      probeAcls: () => {
+        renameSync(file, join(runtimeFolder, 'old.json'))
+        writePrivateRuntimeFile(file, payload)
+        return sddls
+      },
+    })
+    assert.equal(replacedFile, null)
+    assert.deepEqual(stand.seen, [])
+  } finally {
+    await stand.close()
     rmSync(root, { recursive: true, force: true })
   }
 })
@@ -328,6 +540,45 @@ test('a page secret no page asked with past its window is dropped and refused', 
   await waiting.done
 })
 
+test('a page secret is retired at once when its page leaves or a reloaded page polls, so a new keyed page gets buttons immediately (#1378)', async () => {
+  const board = await startBoard({ secretMs: APPROVAL_SECRET_MS })
+  const first = await openPage(board, { pageId: 'p-first', pairWithPage: true })
+  const warmAsk = runHook(board, request('npm run synthetic-before-reload'))
+  const warmCard = await first.show('npm run synthetic-before-reload')
+  assert.equal((await first.press(warmCard, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await warmAsk.done).decision, ALLOW)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+
+  // Another page id cannot use the first page's secret.
+  const otherHeaders = { origin: board.origin, 'x-board-page': 'p-other', 'x-board-visible': '1', 'x-board-approve': first.secret }
+  assert.equal((await board.call('/api/approvals/press', { id: 'x', turn: 't', state: 'shown', behavior: 'allow', reason: '', confirmed: true }, otherHeaders)).status, 403)
+
+  // User reloads without /api/page-gone: the reloaded page carries no secret (#k= was stripped).
+  await board.call('/api/board', undefined, { origin: board.origin, 'x-board-page': 'p-reloaded', 'x-board-visible': '1' })
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true, 'wantsKeyedPage turns true without waiting 90 s')
+  assert.equal((await first.press({ id: 'x', turn: 't', state: 'shown' }, 'allow', { confirmed: true })).status, 403)
+  assert.equal((await board.call('/api/board', undefined, first.headers)).body.moved, true)
+
+  // A new keyed page opens and approves immediately.
+  const second = await openPage(board, { pageId: 'p-second', pairWithPage: true })
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  const ask1 = runHook(board, request('npm run synthetic-after-reload'))
+  const card1 = await second.show('npm run synthetic-after-reload')
+  assert.equal((await second.press(card1, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await ask1.done).decision, ALLOW)
+
+  // When that page leaves via /api/page-gone, its secret also retires immediately.
+  assert.equal((await board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': 'p-second' })).status, 200)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true, 'wantsKeyedPage turns true immediately after page-gone')
+  assert.equal((await second.press(card1, 'allow', { confirmed: true })).status, 403)
+
+  const third = await openPage(board, { pageId: 'p-third', pairWithPage: true })
+  const ask2 = runHook(board, request('npm run synthetic-after-gone'))
+  const card2 = await third.show('npm run synthetic-after-gone')
+  assert.equal((await third.press(card2, 'deny')).status, 200)
+  assert.equal((await ask2.done).decision.hookSpecificOutput.decision.behavior, 'deny')
+})
+
 test('a pairing key used twice turns approvals off, and neither page can press', async () => {
   const board = await startBoard()
   const page = await openPage(board)
@@ -351,6 +602,107 @@ test('a pairing key used twice turns approvals off, and neither page can press',
   assert.equal((await board.call('/api/open', { asApp: true })).body.isOpen, true)
   assert.doesNotMatch(board.opened.at(-1), /#k=/)
   assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+})
+
+test('reusing a pairing key with a retired page id still turns approvals off (#1436 review)', async () => {
+  const board = await startBoard()
+  const first = await openPage(board, { pageId: 'p-first', pairWithPage: true })
+  assert.equal((await board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': 'p-retired' })).status, 200)
+  const waiting = runHook(board, request('npm run synthetic-retired-key-reuse'))
+  const card = await first.show('npm run synthetic-retired-key-reuse')
+  const replay = await board.call('/api/approvals/pair', { key: first.key }, { origin: board.origin, 'x-board-page': 'p-retired' })
+  assert.equal(replay.status, 403)
+  assert.equal(replay.body.note, EN.approvalOff)
+  assert.equal(replay.body.secret, undefined)
+  assert.equal((await waiting.done).decision, null)
+  const press = await first.press(card, 'allow', { confirmed: true })
+  assert.equal(press.status, 403)
+  assert.equal(press.body.note, EN.approvalOff)
+  const shown = await first.look()
+  assert.equal(shown.note, EN.approvalOff)
+  assert.ok(shown.cards.every(one => one.canPress === false))
+})
+
+test('a page secret is dropped on page-gone (persisted or not), ignores restore, ignores late polls for page order and secrets, and accepts only its paired page id (#1378, #1436 review)', async () => {
+  const board = await startBoard({ secretMs: APPROVAL_SECRET_MS })
+  const warm = await openPage(board, { pageId: 'p-warm', pairWithPage: true })
+  const warmAsk = runHook(board, request('npm run synthetic-warm-has-asked'))
+  const warmCard = await warm.show('npm run synthetic-warm-has-asked')
+  assert.equal((await warm.press(warmCard, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await warmAsk.done).decision, ALLOW)
+  assert.equal((await board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': 'p-warm' })).status, 200)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
+
+  // I1 & I5: persisted or non-persisted page-gone immediately retires the secret, sets wantsKeyedPage, and /api/approvals/restore does not exist.
+  for (const [tag, body] of [['persisted', { persisted: true }], ['closed', {}]]) {
+    const pageId = `p-${tag}`
+    const page = await openPage(board, { pageId, pairWithPage: true })
+    assert.equal((await board.call('/api/board', undefined, page.headers)).status, 200)
+    assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+    assert.equal((await board.call('/api/approvals/restore', { fromPage: pageId }, { origin: board.origin, 'x-board-page': `${pageId}-back`, 'x-board-approve': page.secret })).status, 404)
+    assert.equal((await board.call('/api/approvals/restore', { fromPage: pageId }, { origin: board.origin })).status, 404)
+
+    assert.equal((await board.call('/api/page-gone', body, { origin: board.origin, 'x-board-page': pageId })).status, 200)
+    assert.equal((await page.press({ id: 'x', turn: 't', state: 'shown' }, 'allow', { confirmed: true })).status, 403)
+    assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
+
+    // I2 & I3 (no newer page yet): late poll answers moved without creating any secret or restoring wantsKeyedPage.
+    assert.equal((await board.call('/api/board', undefined, page.headers)).body.moved, true)
+    assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
+  }
+
+  // I2 & I3 (newer keyed page Q opened before P's late poll): P's late poll answers moved and neither deletes Q's secret nor shifts page order against Q.
+  const pLate = await openPage(board, { pageId: 'p-late', pairWithPage: true })
+  assert.equal((await board.call('/api/board', undefined, pLate.headers)).status, 200)
+  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-late' })).status, 200)
+  const qNew = await openPage(board, { pageId: 'q-new', pairWithPage: true })
+  assert.equal((await board.call('/api/board', undefined, qNew.headers)).moved, undefined)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  // Late poll of retired p-late (both before and when Q was opened earlier): answers moved, Q stays active & unmoved.
+  assert.equal((await board.call('/api/board', undefined, pLate.headers)).body.moved, true)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  assert.equal((await board.call('/api/board', undefined, qNew.headers)).moved, undefined)
+  const qAsk = runHook(board, request('npm run synthetic-q-survives-late-poll'))
+  const qCard = await qNew.show('npm run synthetic-q-survives-late-poll')
+  // I6: qNew's secret is accepted only under its paired page id q-new (rejected under another page id or missing x-board-page).
+  const drawnPayload = { items: [{ id: qCard.id, turn: qCard.turn, state: qCard.state }] }
+  assert.equal((await board.call('/api/approvals/drawn', drawnPayload, { origin: board.origin, 'x-board-page': 'p-wrong', 'x-board-approve': qNew.secret })).status, 403)
+  assert.equal((await board.call('/api/approvals/drawn', drawnPayload, { origin: board.origin, 'x-board-approve': qNew.secret })).status, 403)
+  const pressPayload = { id: qCard.id, turn: qCard.turn, state: 'shown', behavior: 'allow', reason: '', confirmed: true }
+  assert.equal((await board.call('/api/approvals/press', pressPayload, { origin: board.origin, 'x-board-page': 'p-wrong', 'x-board-approve': qNew.secret })).status, 403)
+  assert.equal((await board.call('/api/approvals/press', pressPayload, { origin: board.origin, 'x-board-approve': qNew.secret })).status, 403)
+  assert.equal((await qNew.press(qCard, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await qAsk.done).decision, ALLOW)
+
+  // I3 also when Q opened before P's page-gone and P's late poll arrives afterwards: Q still approves and is never told moved.
+  const pBefore = await openPage(board, { pageId: 'p-before', pairWithPage: true })
+  assert.equal((await board.call('/api/board', undefined, pBefore.headers)).status, 200)
+  const qBeforeGone = await openPage(board, { pageId: 'q-before-gone', pairWithPage: true })
+  assert.equal((await board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': 'p-before' })).status, 200)
+  assert.equal((await board.call('/api/board', undefined, pBefore.headers)).body.moved, true)
+  assert.equal((await board.call('/api/board', undefined, qBeforeGone.headers)).moved, undefined)
+  const qAsk2 = runHook(board, request('npm run synthetic-q-opened-first'))
+  const qCard2 = await qBeforeGone.show('npm run synthetic-q-opened-first')
+  assert.equal((await qBeforeGone.press(qCard2, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await qAsk2.done).decision, ALLOW)
+
+  // I8: a restored unkeyed page polls without an approval secret, then a new keyed page gets buttons at once and tells the restored page moved.
+  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'q-before-gone' })).status, 200)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
+  const restoredHeaders = { origin: board.origin, 'x-board-page': 'p-restored-unkeyed', 'x-board-visible': '1' }
+  const restoredPoll = await board.call('/api/board', undefined, restoredHeaders)
+  assert.equal(restoredPoll.status, 200)
+  assert.equal(restoredPoll.body.moved, undefined)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
+
+  const replacement = await openPage(board, { pageId: 'p-after-restore', pairWithPage: true })
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  const askAfter = runHook(board, request('npm run synthetic-after-restore'))
+  const cardAfter = await replacement.show('npm run synthetic-after-restore')
+  assert.equal(cardAfter.canPress, true)
+  assert.equal((await replacement.press(cardAfter, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await askAfter.done).decision, ALLOW)
+  assert.equal((await board.call('/api/board', undefined, restoredHeaders)).body.moved, true)
 })
 
 test('a page paired a moment ago cannot press until the grace window has passed', async () => {

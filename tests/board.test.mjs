@@ -3720,7 +3720,7 @@ const viewed = model => {
 // The stub now reads every static button with its attributes (#1163). The bulk tidy's confirm and
 // cancel start disabled and wait for a preview, online or not, so the offline checks leave them out.
 const WAITS_FOR_PREVIEW = ['tidy-confirm', 'tidy-cancel']
-const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now, notification, sessionStore, onReload, onFocus } = {}) => {
+const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now, notification, sessionStore, onReload, onFocus, hash = '' } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -3905,7 +3905,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(found => found[1]).find(code => code.includes('(function ()'))
   runInNewContext(script, {
     document,
-    location: { search: '?t=x' },
+    location: { search: '?t=x', pathname: '/', hash },
     URLSearchParams,
     navigator: clipboard ? { clipboard: { writeText: async text => { copied.push(text) }, ...(readClipboard ? { readText: readClipboard } : {}) } } : {},
     window: win,
@@ -3982,7 +3982,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     delays,
     get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
-    leave: () => windowEvents.pagehide?.(),
+    leave: event => windowEvents.pagehide?.(event),
     restore: persisted => windowEvents.pageshow?.({ persisted }),
     sent,
     setNow: value => { clockNow = value },
@@ -5266,6 +5266,64 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   dom.restore(false)
   await dom.settle()
   assert.equal(polls.length, same)
+})
+
+test('a paired page restored from the back/forward cache drops its approval secret and ignores late moved replies from its earlier page id (#1436 review)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  const polls = []
+  let holdNextPoll = null
+  let moveRestored = false
+  const dom = await pageDom(html, null, {
+    width: 1000,
+    hash: '#k=synthetic-key',
+    getBoard: async options => {
+      polls.push(options.headers)
+      if (holdNextPoll !== null) {
+        const next = holdNextPoll
+        holdNextPoll = null
+        return await next
+      }
+      if (moveRestored) return { ok: true, json: async () => ({ moved: true }) }
+      return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }, now: 1 }) }
+    },
+    post: async req => {
+      if (req.path === '/api/approvals/pair') return { ok: true, json: async () => ({ secret: 'sec-initial' }) }
+      return { ok: true, json: async () => ({}) }
+    },
+  })
+  await dom.settle()
+  const first = polls[0]['x-board-page']
+  assert.equal(polls[0]['x-board-approve'], 'sec-initial')
+
+  // An in-flight poll that left before pagehide and receives { moved: true } after pageshow must not close the restored page (#1436 review).
+  let releaseStale
+  holdNextPoll = new Promise(resolve => { releaseStale = resolve })
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+
+  dom.leave({ persisted: true })
+  await dom.flush()
+  assert.ok(dom.requests.some(r => r.path === '/api/page-gone'))
+
+  const before = polls.length
+  dom.restore(true)
+  await dom.flush()
+  releaseStale({ ok: true, json: async () => ({ moved: true }) })
+  await dom.settle()
+  assert.equal(dom.node('side').hidden, false)
+  assert.equal(dom.sent.some(s => s.path === '/api/approvals/restore'), false)
+  assert.ok(polls.length > before)
+  for (const poll of polls.slice(before)) {
+    assert.notEqual(poll['x-board-page'], first)
+    assert.equal(poll['x-board-approve'], undefined)
+  }
+
+  // A moved reply for the restored page id itself closes it.
+  moveRestored = true
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+  assert.equal(dom.node('side').hidden, true)
 })
 
 test('a page the board says was replaced stops asking and shows one line (#265)', async () => {
