@@ -110,11 +110,11 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       const now = clock.now()
       const run = (name, body) => { const out = mailboxAction(readState(), name, body, now); writeState(out.state); return out.result }
       if (!Object.hasOwn(BOARD, action)) return { ok: false, code: 'INVALID_MAILBOX_CALL' }
+      // The board's rule, in every mode: only nothing at that path is no folder; a link or a file in its place is a failure.
+      const state = (() => { try { const entry = lstatSync(directory); return entry.isDirectory() && !entry.isSymbolicLink() ? 'folder' : 'other' } catch (error) { return error.code === 'ENOENT' ? 'absent' : 'other' } })()
+      if (state === 'other') return { ok: false, code: 'BOARD_NOT_RUNNING', ...(action === 'take' ? { watch: directory, message: null } : {}) }
       // A board that has not made its messages folder yet: an open enrolls nothing and a take finds nothing, as the board script answers.
       if (calls.noFolder) {
-        // The board's rule: only nothing at that path is no folder; a link or a file in its place is a failure.
-        const state = (() => { try { const entry = lstatSync(directory); return entry.isDirectory() && !entry.isSymbolicLink() ? 'folder' : 'other' } catch (error) { return error.code === 'ENOENT' ? 'absent' : 'other' } })()
-        if (state === 'other') return { ok: false, code: 'BOARD_NOT_RUNNING', ...(action === 'take' ? { watch: directory, message: null } : {}) }
         if (state === 'absent' && action === 'open') return { ok: true, enrolled: false, watch: directory }
         if (state === 'absent' && action === 'take') return { watch: directory, message: null }
       }
@@ -1966,6 +1966,8 @@ const afterEmptyTake = async (f, session, arrange) => {
   await f.created(session)
   await f.quiet()
   const takes = f.count('take')
+  // The stand-in's default mode keeps its store in the messages folder; take it away so each case starts from nothing there.
+  rmSync(f.directory, { recursive: true, force: true })
   mkdirSync(join(f.directory, '..'), { recursive: true })
   arrange()
   f.tick(); await f.quiet(); f.tick(); await f.quiet()
@@ -1981,7 +1983,7 @@ test('A23 after an empty take, a dead link at the messages folder is asked of th
   assert.equal(f.calls.promptAsync.length, 0)
 }, { spawn: true }))
 
-test('A24 the receiver reads the messages folder by the board\'s rule: only nothing there is silent; a dead link, a link to a folder, one holding the session\'s fresh mailbox and a file in its place are asked of the board and logged (#1366 review)', async () => {
+const folderCases = async isSpawn => {
   const cases = [
     ['a dead link', f => { const gone = join(f.home, 'gone'); mkdirSync(gone); folderLink(gone, f.directory); rmSync(gone, { recursive: true }) }, 'logged'],
     ['a link to an empty folder', f => { const real = join(f.home, 'real'); mkdirSync(real); folderLink(real, f.directory) }, 'logged'],
@@ -1996,9 +1998,17 @@ test('A24 the receiver reads the messages folder by the board\'s rule: only noth
       const seen = await afterEmptyTake(f, 'ses_a24', () => arrange(f))
       const outcome = seen.asked && seen.logged === 1 ? 'logged' : !seen.asked && seen.logged === 0 ? 'silent' : `asked ${seen.asked}, logged ${seen.logged}`
       if (outcome !== expected) wrong.push(`${label}: ${outcome}`)
-    }, { spawn: true })
+    }, { spawn: isSpawn })
   }
-  assert.deepEqual(wrong, [])
+  return wrong
+}
+
+test('A24 the receiver reads the messages folder by the board\'s rule: only nothing there is silent; a dead link, a link to a folder, one holding the session\'s fresh mailbox and a file in its place are asked of the board and logged (#1366 review)', async () => {
+  assert.deepEqual(await folderCases(true), [])
+})
+
+test('A27 the test board stand-in refuses a link or a file at the messages folder in its default mode too, as the board script does (#1366 review)', async () => {
+  assert.deepEqual(await folderCases(false), [])
 })
 
 test('A26 the receiver decides what is at a board path only through lstat: its source never calls existsSync or statSync (#1366 review)', async () => {
