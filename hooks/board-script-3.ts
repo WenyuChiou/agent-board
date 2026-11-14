@@ -9591,7 +9591,7 @@ export const LINES = [
 "            begin();",
 "            if (!result?.turn?.id)",
 "              throw new Error(\"INVALID_TURN_RESPONSE\");",
-"            if (begunBefore.has(result.turn.id) || pending.firstInput.get(result.turn.id) === false)",
+"            if (pending.firstInput.get(result.turn.id) === false || begunBefore.has(result.turn.id) && pending.firstInput.get(result.turn.id) !== true)",
 "              throw new Error(\"TURN_JOINED\");",
 "            state.pending.turn = result.turn.id;",
 "            if (!state.pending.ended.has(result.turn.id))",
