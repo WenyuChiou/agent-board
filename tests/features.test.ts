@@ -5349,6 +5349,19 @@ test('digest, markAsked and board views preserve list choices cleanly and drop t
   const explicitEmpty = applyTaskCreate(base, { subject: 'Which storage?', metadata: { waiting: 'you', ask: 'choose', options: [] } }, '1', AT + 3000)
   const keptExplicit = markAsked(explicitEmpty, 'Which storage?', false, ['Postgres', 'SQLite'])
   expect(keptExplicit.tasks[0]?.options).toEqual([])
+
+  // Supplied options on a waiting step without `ask` stay put when the closing reply repeats the question without the list (#1277)
+  const suppliedNoAsk = applyTaskCreate(base, { subject: 'Which database should I use?', metadata: { waiting: 'you', options: opts } }, '1', AT + 4000)
+  const afterPlainReply = markAsked(suppliedNoAsk, 'Which database should I use?', false, [])
+  expect(afterPlainReply.tasks[0]?.options).toEqual(opts)
+  const suppliedBlock = `## demo\n${renderAutoBlock(afterPlainReply).join('\n')}\n`
+  expect(buildView(parseProgress(suppliedBlock), [], null, AT + 4000, 0, {}, STRINGS.en).waiting[0]?.options).toEqual(opts)
+
+  // Inferred options from markAsked are refreshed on a later plain reply without a list (#1277)
+  const refreshedInferred = markAsked(enriched, 'Pick one?', false, ['MySQL', 'SQLite'])
+  expect(refreshedInferred.tasks[0]?.options).toEqual(['MySQL', 'SQLite'])
+  const clearedInferred = markAsked(refreshedInferred, 'Pick one?', false, [])
+  expect(clearedInferred.tasks[0]?.options).toEqual([])
 })
 
 test('bare globs keep * and HTML comment bodies are stripped from extracted options (#1277)', () => {

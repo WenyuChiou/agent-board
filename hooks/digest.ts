@@ -388,6 +388,11 @@ export const applyLateDigest = (mirror: ProgressMirror, digest: Digest, now: num
   return { ...next, updated: mirror.updated, autoAsk: mirror.autoAsk, tasks: [...next.tasks, ...mirror.tasks.filter(one => waitsOnYou(mirror, one))] }
 }
 
+const withInferredOptions = (task: ProgressMirrorTask, options: string[], inferred: boolean): ProgressMirrorTask => {
+  const { inferredOptions: _inferredOptions, ...rest } = task
+  return { ...rest, options, ...(inferred && options.length > 0 ? { inferredOptions: true as const } : {}) }
+}
+
 // A turn that ended on a question, in a session whose list says nothing waits on the
 // person: the step in progress (else the next one) waits on them, with the question as its
 // note, until they answer.
@@ -402,15 +407,17 @@ export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTu
     if (matching.length !== 1) return mirror
     const target = matching[0]
     if (target === undefined) return mirror
-    const resolvedOptions = target.ask !== null ? target.options : validOptions
-    const sameOptions = resolvedOptions.length === (target.options ?? []).length && resolvedOptions.every((one, index) => one === target.options?.[index])
-    const updated = sameOptions ? target : { ...target, options: resolvedOptions }
+    const keepsOwnOptions = target.ask !== null || (target.options.length > 0 && target.inferredOptions !== true)
+    const resolvedOptions = keepsOwnOptions ? target.options : validOptions
+    const nextInferred = !keepsOwnOptions && resolvedOptions.length > 0
+    const sameOptions = resolvedOptions.length === (target.options ?? []).length && resolvedOptions.every((one, index) => one === target.options?.[index]) && Boolean(target.inferredOptions) === nextInferred
+    const updated = sameOptions ? target : withInferredOptions(target, resolvedOptions, nextInferred)
     const renewed = renewQuestion(updated, mirror.questionSequence)
     return { ...mirror, questionSequence: renewed.questionRevision, tasks: mirror.tasks.map(one => one.id === target.id ? renewed : one) }
   }
   // Finished work stays finished when the closing reply asks a new question.
   const target = mirror.tasks.find(one => one.status === 'in_progress') ?? mirror.tasks.find(one => one.status === 'pending') ?? task('auto-question', question, 'pending', null)
-  const renewed = renewQuestion({ ...target, waiting: 'you', why: target.id === 'auto-question' ? null : question, ask: null, options: validOptions, command: null, link: null }, mirror.questionSequence)
+  const renewed = renewQuestion(withInferredOptions({ ...target, waiting: 'you', why: target.id === 'auto-question' ? null : question, ask: null, command: null, link: null }, validOptions, validOptions.length > 0), mirror.questionSequence)
 
   return {
     ...mirror,

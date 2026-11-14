@@ -233,6 +233,11 @@ const askFields = (
   }
 }
 
+const withoutInferred = (task: ProgressMirrorTask): ProgressMirrorTask => {
+  const { inferredOptions: _inferredOptions, ...rest } = task
+  return rest
+}
+
 // `metadata: { waiting: "you" | "run", why: "what it needs", ask: "confirm", options: [...],
 // command: "...", link: "...", blocked: "why" }`; a key set to null clears it, and clearing
 // `waiting` clears what it asked.
@@ -241,15 +246,16 @@ const withMetadata = (task: ProgressMirrorTask, metadata: object | undefined): P
   const meta = metadata as Record<string, unknown>
   const waiting = waitingOf(meta.waiting, task.waiting)
   const handoffTo = textOr(meta.handoffTo, task.handoffTo ?? null)?.replace(/\s+/g, ' ').slice(0, 120)
-  if (handoffTo) return { ...task, status: 'completed', waiting: null, why: null, ...NO_ASK, blocked: null, handoffTo }
+  if (handoffTo) return { ...withoutInferred(task), status: 'completed', waiting: null, why: null, ...NO_ASK, blocked: null, handoffTo }
+  const base = waiting === null || Array.isArray(meta.options) || meta.options === null ? withoutInferred(task) : task
 
   return {
-    ...task,
+    ...base,
     handoffTo: undefined,
     waiting,
-    why: whyOf(meta, waiting, task.why ?? null),
-    ...askFields(meta, waiting, task),
-    blocked: blockedOf(meta.blocked, task.blocked),
+    why: whyOf(meta, waiting, base.why ?? null),
+    ...askFields(meta, waiting, base),
+    blocked: blockedOf(meta.blocked, base.blocked),
   }
 }
 
@@ -317,7 +323,7 @@ export const applyTaskUpdate = (mirror: ProgressMirror, input: TaskUpdateInput, 
       blockedBy: [...new Set([...task.blockedBy, ...(input.addBlockedBy ?? [])])],
     }
     // Finishing a step clears what it was waiting on.
-    const done = next.status === 'completed' ? { ...next, waiting: null, why: null, ...NO_ASK, blocked: null } : next
+    const done = next.status === 'completed' ? { ...withoutInferred(next), waiting: null, why: null, ...NO_ASK, blocked: null } : next
 
     const meta = input.metadata as Record<string, unknown> | undefined
     const completedMeta = meta !== undefined && Object.hasOwn(meta, 'handoffTo') ? { handoffTo: meta.handoffTo } : undefined

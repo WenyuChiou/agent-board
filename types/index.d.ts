@@ -169,6 +169,7 @@ export type ProgressMirrorTask = {
   // options to choose from, a command to run, a link to look at.
   ask: string | null
   options: string[]
+  inferredOptions?: true
   command: string | null
   link: string | null
   blocked: string | null
