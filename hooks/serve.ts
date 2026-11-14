@@ -1406,20 +1406,23 @@ const PAGE_SCRIPT = String.raw`
   var heldPointers = {};
   var pressCount = 0;
   function isHeld() { return Object.keys(heldPointers).length > 0; }
+  // A lost-results rebuild skipped under a press waits here until the hold ends (#1473).
+  var lostResultsStale = false;
+  function drawLostResultsIfStale() { if (!isHeld() && lostResultsStale) { lostResultsStale = false; drawLostResults(); } }
   function pointerReleased(event) {
     var id = String(event && event.pointerId);
     var press = heldPointers[id];
-    setTimeout(function () { if (heldPointers[id] === press) delete heldPointers[id]; }, 0);
+    setTimeout(function () { if (heldPointers[id] === press) { delete heldPointers[id]; drawLostResultsIfStale(); } }, 0);
   }
   if (typeof document.addEventListener === 'function') {
     document.addEventListener('pointerdown', function (event) { pressCount += 1; heldPointers[String(event.pointerId)] = pressCount; }, true);
     document.addEventListener('pointerup', pointerReleased, true);
     document.addEventListener('pointercancel', pointerReleased, true);
     // A move with no button held means the release was lost (a context menu, a scrollbar drag): the board draws again.
-    document.addEventListener('pointermove', function (event) { if (!event.buttons) delete heldPointers[String(event.pointerId)]; }, true);
+    document.addEventListener('pointermove', function (event) { if (!event.buttons) { delete heldPointers[String(event.pointerId)]; drawLostResultsIfStale(); } }, true);
   }
   // Losing focus loses every release that was still to come.
-  if (typeof window.addEventListener === 'function') window.addEventListener('blur', function () { heldPointers = {}; });
+  if (typeof window.addEventListener === 'function') window.addEventListener('blur', function () { heldPointers = {}; drawLostResultsIfStale(); });
   var opened = {};
   var timer = null;
   var isClosed = false;
@@ -3469,6 +3472,9 @@ const PAGE_SCRIPT = String.raw`
     keepCopyFocus(function () { draw(model); });
   }
   function drawLostResults() {
+    // A rebuild under a press would replace the button being held, so it waits for the release (#1473).
+    if (isHeld()) { lostResultsStale = true; return; }
+    lostResultsStale = false;
     lostResults.forEach(function (card) { card.remove(); });
     lostResults = [];
     Object.keys(results).reverse().forEach(function (key) {
