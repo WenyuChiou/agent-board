@@ -5268,14 +5268,14 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   assert.equal(polls.length, same)
 })
 
-test('a paired page restored from the back/forward cache re-pairs under a new page id without keeping its secret when replaced (#1436 review)', async () => {
+test('a paired page restored from the back/forward cache drops its approval secret and ignores late moved replies from its earlier page id (#1436 review)', async () => {
   const source = `${BOARD_SCRIPT}
 process.stdout.write(servePage(STRINGS.en, 'synthetic'))
 `
   const html = run('en', ['--chat'], {}, FILE, source)
   const polls = []
-  let restoreReply = () => ({ ok: true, json: async () => ({ secret: 'sec-restored' }) })
   let holdNextPoll = null
+  let moveRestored = false
   const dom = await pageDom(html, null, {
     width: 1000,
     hash: '#k=synthetic-key',
@@ -5286,11 +5286,11 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
         holdNextPoll = null
         return await next
       }
+      if (moveRestored) return { ok: true, json: async () => ({ moved: true }) }
       return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }, now: 1 }) }
     },
     post: async req => {
       if (req.path === '/api/approvals/pair') return { ok: true, json: async () => ({ secret: 'sec-initial' }) }
-      if (req.path === '/api/approvals/restore') return restoreReply()
       return { ok: true, json: async () => ({}) }
     },
   })
@@ -5305,7 +5305,7 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
 
   dom.leave({ persisted: true })
   await dom.flush()
-  assert.deepEqual(dom.requests.find(r => r.path === '/api/page-gone').body, { persisted: true })
+  assert.ok(dom.requests.some(r => r.path === '/api/page-gone'))
 
   const before = polls.length
   dom.restore(true)
@@ -5313,24 +5313,16 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   releaseStale({ ok: true, json: async () => ({ moved: true }) })
   await dom.settle()
   assert.equal(dom.node('side').hidden, false)
-  const restoreCall = dom.sent.find(s => s.path === '/api/approvals/restore')
-  assert.ok(restoreCall)
-  assert.deepEqual(dom.requests.find(r => r.path === '/api/approvals/restore').body, { fromPage: first })
-  assert.equal(restoreCall.headers['x-board-approve'], 'sec-initial')
-  const second = restoreCall.headers['x-board-page']
-  assert.notEqual(second, first)
+  assert.equal(dom.sent.some(s => s.path === '/api/approvals/restore'), false)
   assert.ok(polls.length > before)
-  assert.equal(polls.at(-1)['x-board-page'], second)
-  assert.equal(polls.at(-1)['x-board-approve'], 'sec-restored')
+  for (const poll of polls.slice(before)) {
+    assert.notEqual(poll['x-board-page'], first)
+    assert.equal(poll['x-board-approve'], undefined)
+  }
 
-  // When replaced while away in bfcache, restore sees moved and closes instead of polling under a newer id.
-  const beforeMoved = polls.length
-  restoreReply = () => ({ ok: false, json: async () => ({ moved: true }) })
-  dom.leave({ persisted: true })
-  await dom.settle()
-  dom.restore(true)
-  await dom.settle()
-  assert.equal(polls.length, beforeMoved)
+  // A moved reply for the restored page id itself closes it.
+  moveRestored = true
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
   assert.equal(dom.node('side').hidden, true)
 })
 

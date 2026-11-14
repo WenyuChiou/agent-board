@@ -177,18 +177,12 @@ export const startServer = (o: ServeOptions): void => {
   let pageSeq = 0
   // Pages told they were replaced. They stay replaced: a poll already on its way when the page stopped must not make it the newest again.
   const retired = new Set<string>()
-  const retiredSeq = new Map<string, number>()
   let activeMaxSeq = 0
-  const retirePage = (id: string, seq?: number): void => {
+  const retirePage = (id: string): void => {
     if (id === '') return
     retired.add(id)
-    if (seq !== undefined) retiredSeq.set(id, Math.max(retiredSeq.get(id) ?? 0, seq))
     // A bound on the memory: the oldest ids are forgotten first.
-    while (retired.size > 256) {
-      const oldest = retired.values().next().value as string
-      retired.delete(oldest)
-      retiredSeq.delete(oldest)
-    }
+    while (retired.size > 256) retired.delete(retired.values().next().value as string)
   }
   // A page that has not asked for this long no longer stands for a newer page (a backgrounded tab asks about once a minute).
   const PAGE_STALE_MS = 150_000
@@ -217,16 +211,12 @@ export const startServer = (o: ServeOptions): void => {
   // Each page secret: which page holds it, that page's order (when known), when it was given,
   // when that page last asked for the board with it, and when it did so while visible.
   const pageSecrets = new Map<string, { page: string; seq: number; pairedAt: number; seen: number; watched: number }>()
-  // Secrets temporarily suspended while a page enters the browser's back/forward cache (#1378).
-  const cachedSecrets = new Map<string, { page: string; seq: number; pairedAt: number; seen: number }>()
-  const dropPageSecrets = (id: string, includeCached = true): void => {
+  const dropPageSecrets = (id: string): void => {
     if (id === '') return
     for (const [secret, held] of pageSecrets) if (held.page === id) pageSecrets.delete(secret)
-    if (includeCached) for (const [secret, held] of cachedSecrets) if (held.page === id) cachedSecrets.delete(secret)
   }
   const dropOlderSecrets = (id: string, seq: number, now: number): void => {
     for (const [other, held] of pageSecrets) if (now - held.seen > secretMs || (id !== '' && held.page !== '' && held.page !== id && held.seq < seq)) pageSecrets.delete(other)
-    for (const [other, held] of cachedSecrets) if (now - held.seen > secretMs || (id !== '' && held.page !== '' && held.page !== id && held.seq < seq)) cachedSecrets.delete(other)
   }
   // A pairing key used twice: no page answers approvals again until the board restarts.
   let isApprovalOff = false
@@ -275,7 +265,6 @@ export const startServer = (o: ServeOptions): void => {
   const turnApprovalsOff = (): void => {
     isApprovalOff = true
     pageSecrets.clear()
-    cachedSecrets.clear()
     for (const [id, pending] of [...approvals]) if (pending.answer !== undefined) settleApproval(id, null)
   }
 
@@ -386,26 +375,32 @@ export const startServer = (o: ServeOptions): void => {
     if (!isLan && req.method === 'GET' && url.pathname === '/api/board' && pageIdOf(req.headers) !== '') {
       const now = Date.now()
       const id = pageIdOf(req.headers)
-      const mine = pages.get(id)?.seq ?? retiredSeq.get(id) ?? ++pageSeq
-      const superseded = activeMaxSeq > mine || [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)
-      isReplaced = retired.has(id) || superseded
-      if (isReplaced) {
+      if (retired.has(id)) {
+        // A retired page already dropped its secrets when it left or was replaced; keep its late poll
+        // from allocating a fresh pageSeq or disturbing any other page's secret (#1378).
+        isReplaced = true
         pages.delete(id)
-        retirePage(id, mine)
-        // A late in-flight poll after bfcache suspend (`persisted: true`) must not erase the suspended secret unless a newer page replaced it (#1436 review).
-        dropPageSecrets(id, superseded)
       } else {
-        pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
-        if (mine > activeMaxSeq) activeMaxSeq = mine
-        // Any secret bound to an older page is retired once a newer page asks for the board (#1378).
-        dropOlderSecrets(id, mine, now)
+        const mine = pages.get(id)?.seq ?? ++pageSeq
+        const superseded = activeMaxSeq > mine || [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)
+        isReplaced = superseded
+        if (isReplaced) {
+          pages.delete(id)
+          retirePage(id)
+          dropPageSecrets(id)
+        } else {
+          pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
+          if (mine > activeMaxSeq) activeMaxSeq = mine
+          // Any secret bound to an older page is retired once a newer page asks for the board (#1378).
+          dropOlderSecrets(id, mine, now)
+        }
       }
       // A page asking with its secret keeps it; only a visible one counts as watching for approvals.
       const held = isReplaced ? undefined : pageSecrets.get(secretOf(req.headers, now))
       if (held !== undefined) {
         if (held.page === '') {
           held.page = id
-          held.seq = mine
+          held.seq = pages.get(id)!.seq
         }
         held.seen = now
         if (req.headers['x-board-visible'] !== '0') held.watched = now
@@ -483,28 +478,17 @@ export const startServer = (o: ServeOptions): void => {
     if (body === null) return json(res, 400, {})
     if (url.pathname === '/api/page-gone' && !isLan) {
       // The page is gone for good: a poll of it that was already on its way must not bring it back as an open page.
-      // When the browser puts an active page into its back/forward cache, keep its secret suspended until restore,
-      // expiry, or replacement by a newer page (#1436 review).
+      // Its approval secret retires at once so /api/ping asks for a keyed page right away (#1378).
       const gone = pageIdOf(req.headers)
-      const now = Date.now()
-      const seq = pages.get(gone)?.seq
-      const wasReplaced = gone !== '' && (retired.has(gone) || (seq !== undefined && (activeMaxSeq > seq || [...pages.values()].some(one => one.seq > seq && now - one.at < PAGE_STALE_MS))))
-      const suspended = body.persisted === true && gone !== '' && !isApprovalOff && !wasReplaced
-        ? [...pageSecrets.entries()].filter(([, held]) => held.page === gone && now - held.seen <= secretMs)
-        : []
       pages.delete(gone)
       if (gone !== '') {
-        retirePage(gone, seq)
+        retirePage(gone)
         dropPageSecrets(gone)
-        for (const [secret, held] of suspended) {
-          if (cachedSecrets.size >= 16) cachedSecrets.delete(cachedSecrets.keys().next().value as string)
-          cachedSecrets.set(secret, { page: gone, seq: held.seq, pairedAt: held.pairedAt, seen: held.seen })
-        }
       }
       loadedAt = 0
       return json(res, 200, {})
     }
-    if (url.pathname.startsWith('/api/approvals/') || url.pathname === '/api/open') {
+    if (url.pathname === '/api/open' || url.pathname === '/api/approvals/ask' || url.pathname === '/api/approvals/pair' || url.pathname === '/api/approvals/drawn' || url.pathname === '/api/approvals/press') {
       // Never from the page on the network.
       if (isLan) return json(res, 403, {})
       const now = Date.now()
@@ -610,41 +594,6 @@ export const startServer = (o: ServeOptions): void => {
         if (pageSecrets.size >= 16) pageSecrets.delete(pageSecrets.keys().next().value as string)
         // Counted as watching only once the page asks for the board while it is in front.
         pageSecrets.set(secret, { page, seq, pairedAt: now, seen: now, watched: 0 })
-        return json(res, 200, { secret })
-      }
-      if (url.pathname === '/api/approvals/restore') {
-        const page = pageIdOf(req.headers)
-        const fromPage = text(body.fromPage)
-        const rawSecret = text(req.headers['x-board-approve'])
-        const cached = rawSecret === '' ? undefined : cachedSecrets.get(rawSecret)
-        if (cached !== undefined && (fromPage === '' || cached.page === fromPage)) cachedSecrets.delete(rawSecret)
-        const active = cached === undefined && rawSecret !== '' ? pageSecrets.get(rawSecret) : undefined
-        const held = cached ?? active
-        if (isApprovalOff) {
-          if (active !== undefined && active.page === fromPage) pageSecrets.delete(rawSecret)
-          return json(res, 403, { note: o.s.approvalOff })
-        }
-        const fromSeq = cached?.seq ?? (held?.page === fromPage ? held.seq : undefined) ?? retiredSeq.get(fromPage)
-        const isSuperseded = fromSeq !== undefined && (activeMaxSeq > fromSeq || [...pages.values()].some(one => one.seq > fromSeq && now - one.at < PAGE_STALE_MS))
-        if (page === '' || page === fromPage || retired.has(page) || fromPage === '' || isSuperseded) {
-          if (active !== undefined && active.page === fromPage) pageSecrets.delete(rawSecret)
-          return json(res, isSuperseded ? 409 : 403, { ...(isSuperseded ? { moved: true } : {}), note: o.s.approvalNoSecret })
-        }
-        if (held === undefined || (active !== undefined && retired.has(fromPage)) || now - held.seen > secretMs || held.page === '' || held.page !== fromPage) {
-          return json(res, 403, { note: o.s.approvalNoSecret })
-        }
-        if (active !== undefined) pageSecrets.delete(rawSecret)
-        pages.delete(fromPage)
-        retirePage(fromPage, held.seq)
-        dropPageSecrets(fromPage)
-        const seq = pages.get(page)?.seq ?? ++pageSeq
-        if (seq > activeMaxSeq) activeMaxSeq = seq
-        const visible = req.headers['x-board-visible'] !== '0'
-        pages.set(page, { seq, at: now, visible })
-        dropOlderSecrets(page, seq, now)
-        const secret = randomBytes(24).toString('base64url')
-        if (pageSecrets.size >= 16) pageSecrets.delete(pageSecrets.keys().next().value as string)
-        pageSecrets.set(secret, { page, seq, pairedAt: held.pairedAt, seen: now, watched: visible ? now : 0 })
         return json(res, 200, { secret })
       }
       const secret = secretOf(req.headers, now)

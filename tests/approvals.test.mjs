@@ -623,72 +623,86 @@ test('reusing a pairing key with a retired page id still turns approvals off (#1
   assert.ok(shown.cards.every(one => one.canPress === false))
 })
 
-test('a page restored from the back/forward cache restores its approval capability without reviving replaced pages or closed tabs (#1436 review)', async () => {
+test('a page secret is dropped on page-gone (persisted or not), ignores restore, ignores late polls for page order and secrets, and accepts only its paired page id (#1378, #1436 review)', async () => {
   const board = await startBoard({ secretMs: APPROVAL_SECRET_MS })
-  const first = await openPage(board, { pageId: 'p-first', pairWithPage: true })
-  const warmAsk = runHook(board, request('npm run synthetic-before-bfcache'))
-  const warmCard = await first.show('npm run synthetic-before-bfcache')
-  assert.equal((await first.press(warmCard, 'allow', { confirmed: true })).status, 200)
+  const warm = await openPage(board, { pageId: 'p-warm', pairWithPage: true })
+  const warmAsk = runHook(board, request('npm run synthetic-warm-has-asked'))
+  const warmCard = await warm.show('npm run synthetic-warm-has-asked')
+  assert.equal((await warm.press(warmCard, 'allow', { confirmed: true })).status, 200)
   assert.deepEqual((await warmAsk.done).decision, ALLOW)
-
-  // Page enters bfcache (`persisted: true`): while away, it cannot authorize and wantsKeyedPage is true.
-  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-first' })).status, 200)
+  assert.equal((await board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': 'p-warm' })).status, 200)
   assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
-  assert.equal((await first.press(warmCard, 'allow', { confirmed: true })).status, 403)
-  assert.equal((await runHook(board, request('npm run synthetic-while-in-bfcache')).done).decision, null)
 
-  // A late in-flight poll reaching the server after persisted page-gone stays retired without erasing the suspended secret (#1436 review).
-  assert.equal((await board.call('/api/board', undefined, { 'x-board-page': 'p-first', 'x-board-visible': '1', 'x-board-approve': first.secret })).body.moved, true)
+  // I1 & I5: persisted or non-persisted page-gone immediately retires the secret, sets wantsKeyedPage, and /api/approvals/restore does not exist.
+  for (const [tag, body] of [['persisted', { persisted: true }], ['closed', {}]]) {
+    const pageId = `p-${tag}`
+    const page = await openPage(board, { pageId, pairWithPage: true })
+    assert.equal((await board.call('/api/board', undefined, page.headers)).status, 200)
+    assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+    assert.equal((await board.call('/api/approvals/restore', { fromPage: pageId }, { origin: board.origin, 'x-board-page': `${pageId}-back`, 'x-board-approve': page.secret })).status, 404)
+    assert.equal((await board.call('/api/approvals/restore', { fromPage: pageId }, { origin: board.origin })).status, 404)
 
-  // Back navigation restores with a new page id and rotated secret.
-  const restored = await board.call('/api/approvals/restore', { fromPage: 'p-first' }, { origin: board.origin, 'x-board-page': 'p-restored', 'x-board-visible': '1', 'x-board-approve': first.secret })
-  assert.equal(restored.status, 200)
-  const secret2 = restored.body.secret
-  assert.ok(typeof secret2 === 'string' && secret2 !== '' && secret2 !== first.secret)
-  // One-time restore cannot be replayed with the old secret or old page id.
-  assert.equal((await board.call('/api/approvals/restore', { fromPage: 'p-first' }, { origin: board.origin, 'x-board-page': 'p-replay', 'x-board-approve': first.secret })).status, 409)
-  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+    assert.equal((await board.call('/api/page-gone', body, { origin: board.origin, 'x-board-page': pageId })).status, 200)
+    assert.equal((await page.press({ id: 'x', turn: 't', state: 'shown' }, 'allow', { confirmed: true })).status, 403)
+    assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
 
-  const headers2 = { origin: board.origin, 'x-board-page': 'p-restored', 'x-board-visible': '1', 'x-board-approve': secret2 }
-  const askAfterRestore = runHook(board, request('npm run synthetic-after-bfcache'))
-  let card2
-  for (let tries = 0; tries < 100 && card2 === undefined; tries++) {
-    card2 = (await board.call('/api/board', undefined, headers2)).body.approvals?.cards?.find(one => one.command === 'npm run synthetic-after-bfcache' && one.state === 'asking')
-    if (card2 === undefined) await pause(50)
+    // I2 & I3 (no newer page yet): late poll answers moved without creating any secret or restoring wantsKeyedPage.
+    assert.equal((await board.call('/api/board', undefined, page.headers)).body.moved, true)
+    assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
   }
-  assert.ok(card2)
-  assert.equal((await board.call('/api/approvals/drawn', { items: [{ id: card2.id, turn: card2.turn, state: card2.state }] }, headers2)).status, 200)
-  assert.equal((await board.call('/api/approvals/press', { id: card2.id, turn: card2.turn, state: 'shown', behavior: 'allow', reason: '' }, headers2)).status, 200)
-  assert.deepEqual((await askAfterRestore.done).decision, ALLOW)
 
-  // Consecutive bfcache round-trip also works until a newer page replaces it.
-  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-restored' })).status, 200)
-  // A newer page opens while p-restored is away: p-restored is now replaced and must not revive.
-  const newer = await openPage(board, { pageId: 'p-newer', pairWithPage: true })
-  const blockedRestore = await board.call('/api/approvals/restore', { fromPage: 'p-restored' }, { origin: board.origin, 'x-board-page': 'p-stale-back', 'x-board-visible': '1', 'x-board-approve': secret2 })
-  assert.equal(blockedRestore.status, 409)
-  assert.equal(blockedRestore.body.moved, true)
-  assert.equal(blockedRestore.body.secret, undefined)
-  // The newer page was not disturbed and can still approve.
-  const askNewer = runHook(board, request('npm run synthetic-newer-stays-alive'))
-  const cardNewer = await newer.show('npm run synthetic-newer-stays-alive')
-  assert.equal((await newer.press(cardNewer, 'allow', { confirmed: true })).status, 200)
-  assert.deepEqual((await askNewer.done).decision, ALLOW)
+  // I2 & I3 (newer keyed page Q opened before P's late poll): P's late poll answers moved and neither deletes Q's secret nor shifts page order against Q.
+  const pLate = await openPage(board, { pageId: 'p-late', pairWithPage: true })
+  assert.equal((await board.call('/api/board', undefined, pLate.headers)).status, 200)
+  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-late' })).status, 200)
+  const qNew = await openPage(board, { pageId: 'q-new', pairWithPage: true })
+  assert.equal((await board.call('/api/board', undefined, qNew.headers)).moved, undefined)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  // Late poll of retired p-late (both before and when Q was opened earlier): answers moved, Q stays active & unmoved.
+  assert.equal((await board.call('/api/board', undefined, pLate.headers)).body.moved, true)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  assert.equal((await board.call('/api/board', undefined, qNew.headers)).moved, undefined)
+  const qAsk = runHook(board, request('npm run synthetic-q-survives-late-poll'))
+  const qCard = await qNew.show('npm run synthetic-q-survives-late-poll')
+  // I6: qNew's secret is accepted only under its paired page id q-new (rejected under another page id or missing x-board-page).
+  const drawnPayload = { items: [{ id: qCard.id, turn: qCard.turn, state: qCard.state }] }
+  assert.equal((await board.call('/api/approvals/drawn', drawnPayload, { origin: board.origin, 'x-board-page': 'p-wrong', 'x-board-approve': qNew.secret })).status, 403)
+  assert.equal((await board.call('/api/approvals/drawn', drawnPayload, { origin: board.origin, 'x-board-approve': qNew.secret })).status, 403)
+  const pressPayload = { id: qCard.id, turn: qCard.turn, state: 'shown', behavior: 'allow', reason: '', confirmed: true }
+  assert.equal((await board.call('/api/approvals/press', pressPayload, { origin: board.origin, 'x-board-page': 'p-wrong', 'x-board-approve': qNew.secret })).status, 403)
+  assert.equal((await board.call('/api/approvals/press', pressPayload, { origin: board.origin, 'x-board-approve': qNew.secret })).status, 403)
+  assert.equal((await qNew.press(qCard, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await qAsk.done).decision, ALLOW)
 
-  // Non-persisted close cannot restore.
-  assert.equal((await board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': 'p-newer' })).status, 200)
-  assert.equal((await board.call('/api/approvals/restore', { fromPage: 'p-newer' }, { origin: board.origin, 'x-board-page': 'p-after-close', 'x-board-approve': newer.secret })).status, 403)
+  // I3 also when Q opened before P's page-gone and P's late poll arrives afterwards: Q still approves and is never told moved.
+  const pBefore = await openPage(board, { pageId: 'p-before', pairWithPage: true })
+  assert.equal((await board.call('/api/board', undefined, pBefore.headers)).status, 200)
+  const qBeforeGone = await openPage(board, { pageId: 'q-before-gone', pairWithPage: true })
+  assert.equal((await board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': 'p-before' })).status, 200)
+  assert.equal((await board.call('/api/board', undefined, pBefore.headers)).body.moved, true)
+  assert.equal((await board.call('/api/board', undefined, qBeforeGone.headers)).moved, undefined)
+  const qAsk2 = runHook(board, request('npm run synthetic-q-opened-first'))
+  const qCard2 = await qBeforeGone.show('npm run synthetic-q-opened-first')
+  assert.equal((await qBeforeGone.press(qCard2, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await qAsk2.done).decision, ALLOW)
 
-  // A page already replaced before pagehide cannot suspend or revive its secret on restore.
-  const victim = await openPage(board, { pageId: 'p-victim', pairWithPage: true })
-  const replacer = await openPage(board, { pageId: 'p-replacer', pairWithPage: true })
-  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-victim' })).status, 200)
-  assert.equal((await board.call('/api/approvals/restore', { fromPage: 'p-victim' }, { origin: board.origin, 'x-board-page': 'p-victim-back', 'x-board-approve': victim.secret })).status, 409)
+  // I8: a restored unkeyed page polls without an approval secret, then a new keyed page gets buttons at once and tells the restored page moved.
+  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'q-before-gone' })).status, 200)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
+  const restoredHeaders = { origin: board.origin, 'x-board-page': 'p-restored-unkeyed', 'x-board-visible': '1' }
+  const restoredPoll = await board.call('/api/board', undefined, restoredHeaders)
+  assert.equal(restoredPoll.status, 200)
+  assert.equal(restoredPoll.body.moved, undefined)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
 
-  // If approvals turn off while a page is in bfcache, restore stays off too.
-  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-replacer' })).status, 200)
-  assert.equal((await board.call('/api/approvals/pair', { key: replacer.key }, { origin: board.origin })).status, 403)
-  assert.equal((await board.call('/api/approvals/restore', { fromPage: 'p-replacer' }, { origin: board.origin, 'x-board-page': 'p-replacer-back', 'x-board-approve': replacer.secret })).status, 403)
+  const replacement = await openPage(board, { pageId: 'p-after-restore', pairWithPage: true })
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  const askAfter = runHook(board, request('npm run synthetic-after-restore'))
+  const cardAfter = await replacement.show('npm run synthetic-after-restore')
+  assert.equal(cardAfter.canPress, true)
+  assert.equal((await replacement.press(cardAfter, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await askAfter.done).decision, ALLOW)
+  assert.equal((await board.call('/api/board', undefined, restoredHeaders)).body.moved, true)
 })
 
 test('a page paired a moment ago cannot press until the grace window has passed', async () => {
