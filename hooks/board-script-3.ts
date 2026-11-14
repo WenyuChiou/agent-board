@@ -1929,7 +1929,7 @@ export const LINES = [
 "    files[join15(opencodeDir, \"plugins\", \"agent-board-local.js\")] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat);",
 "  if (agent === \"openclaw\") {",
 "    files[join15(root, \"adapters\", \"openclaw\", \"agent-board-local.mjs\")] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat);",
-"    files[join15(root, \"adapters\", \"openclaw\", \"openclaw.plugin.json\")] = `${JSON.stringify({ id: \"agent-board-local\", contracts: { tools: [\"progress_card\"] }, configSchema: { type: \"object\", additionalProperties: false, properties: {} } }, null, 2)}",
+"    files[join15(root, \"adapters\", \"openclaw\", \"openclaw.plugin.json\")] = `${JSON.stringify({ id: \"agent-board-local\", activation: { onStartup: true }, contracts: { tools: [\"progress_card\"] }, configSchema: { type: \"object\", additionalProperties: false, properties: {} } }, null, 2)}",
 "`;",
 "    files[join15(openclawDir, \"skills\", \"agent-board\", \"SKILL.md\")] = skillText;",
 "  }",
