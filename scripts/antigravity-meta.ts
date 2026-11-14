@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
 import { basename, isAbsolute, join, posix, resolve } from 'node:path'
 import { clip } from '../hooks/mirror'
 import { cutLine, oneLine } from '../hooks/step-words'
@@ -235,10 +235,46 @@ const firstPromptLine = (content: string): string => {
   return body.split(/\r?\n/).find(one => one.trim() !== '') ?? ''
 }
 
+const SESSION_ID_SEGMENT = /^(?!\.\.?$)[^\\/\0]+$/
+const SESSION_TRANSCRIPT_REL_PATHS: ReadonlyArray<readonly string[]> = [
+  ['transcript.jsonl'],
+  ['transcript_full.jsonl'],
+  ['.system_generated', 'logs', 'transcript.jsonl'],
+  ['.system_generated', 'logs', 'transcript_full.jsonl'],
+]
+const sameNormalizedPath = (a: string, b: string): boolean =>
+  process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+
+// Only read a transcript that resolves directly under this session's own
+// `<home>/.gemini/<client>/brain/<conversationId>/` folder, never symlinks or foreign paths.
+export const isSessionAntigravityTranscript = (
+  transcriptPath: unknown,
+  conversationId: string,
+  home: string,
+): transcriptPath is string => {
+  if (typeof transcriptPath !== 'string' || !isAbsolute(transcriptPath) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(transcriptPath))) return false
+  if (!SESSION_ID_SEGMENT.test(conversationId) || !isAbsolute(home)) return false
+  try {
+    if (!lstatSync(transcriptPath).isFile()) return false
+    const realFile = realpathSync.native(transcriptPath)
+    for (const client of CLIENTS) {
+      try {
+        const realBrain = realpathSync.native(join(home, '.gemini', client, 'brain', conversationId))
+        if (SESSION_TRANSCRIPT_REL_PATHS.some(rel => sameNormalizedPath(realFile, join(realBrain, ...rel)))) return true
+      } catch { /* missing client brain directory */ }
+    }
+    return false
+  } catch { return false }
+}
+
 // Read the first USER_INPUT line from the start of the conversation's own transcript.jsonl,
 // bounded and read-only, clipped to row display width. Never reads hook stdin prompt fields.
-export const readAntigravityFirstPrompt = (transcriptPath: unknown): string | null => {
-  if (typeof transcriptPath !== 'string' || !isAbsolute(transcriptPath) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(transcriptPath))) return null
+export const readAntigravityFirstPrompt = (
+  transcriptPath: unknown,
+  conversationId: string,
+  home: string,
+): string | null => {
+  if (!isSessionAntigravityTranscript(transcriptPath, conversationId, home)) return null
   const read = readRegularBytes(transcriptPath, MAX_TRANSCRIPT_HEAD_BYTES, true)
   if (read === null) return null
   try {
@@ -268,6 +304,6 @@ export const resolveAntigravityTitle = (
     const title = readClientSummaryTitle(kind, dir, conversationId)
     if (title !== null) return { title, titleSource: 'summary' }
   }
-  const promptTitle = readAntigravityFirstPrompt(transcriptPath)
+  const promptTitle = readAntigravityFirstPrompt(transcriptPath, conversationId, home)
   return promptTitle === null ? null : { title: promptTitle, titleSource: 'prompt' }
 }

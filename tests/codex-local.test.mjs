@@ -12432,7 +12432,7 @@ test('Antigravity prompt fallback clips first line, upgrades to summary preservi
   assert.ok(!readFileSync(f.progress, 'utf8').includes('SECRET-'))
 }))
 
-test('Antigravity unreadable, malformed, symlinked, or missing title files safely fall back and keep localization (#1401)', () => fixture(f => {
+test('Antigravity unreadable, malformed, symlinked, or missing title files safely fall back and keep localization (#1401)', () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const dir = join(f.home, '.gemini', 'antigravity', 'brain', 'synthetic-fallback-1401')
   const secret = join(f.home, 'synthetic-symlink-target.jsonl')
@@ -12451,11 +12451,38 @@ test('Antigravity unreadable, malformed, symlinked, or missing title files safel
   }) + '\n')
   f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), Buffer.from('corrupted-pb'))
 
+  const foreignTranscript = join(f.home, '.gemini', 'antigravity', 'brain', 'synthetic-other-session-1401', 'transcript.jsonl')
+  f.save(foreignTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-FOREIGN-SESSION-PROMPT' })}\n`)
+  const outsideTranscript = join(f.home, 'outside', 'transcript.jsonl')
+  f.save(outsideTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-OUTSIDE-PATH-PROMPT' })}\n`)
+  const fakeHomeTranscript = join(f.home, 'fake-home', '.gemini', 'antigravity', 'brain', 'synthetic-fake-home-1401', 'transcript.jsonl')
+  f.save(fakeHomeTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-FAKE-HOME-PROMPT' })}\n`)
+  const systemGeneratedTranscript = join(f.home, '.gemini', 'antigravity-ide', 'brain', 'synthetic-sysgen-1401', '.system_generated', 'logs', 'transcript.jsonl')
+  f.save(systemGeneratedTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'System generated prompt title' })}\n`)
+
+  const { isSessionAntigravityTranscript, readAntigravityFirstPrompt } = await importTs('../scripts/antigravity-meta.ts')
+  assert.equal(isSessionAntigravityTranscript(systemGeneratedTranscript, 'synthetic-sysgen-1401', f.home), true)
+  assert.equal(readAntigravityFirstPrompt(systemGeneratedTranscript, 'synthetic-sysgen-1401', f.home), 'System generated prompt title')
+  for (const [id, badPath] of [
+    ['synthetic-mismatch-1401', foreignTranscript],
+    ['synthetic-outside-1401', outsideTranscript],
+    ['synthetic-fake-home-1401', fakeHomeTranscript],
+    ['../synthetic-other-session-1401', foreignTranscript],
+    ['', foreignTranscript],
+    ['synthetic-sysgen-1401', join(f.home, '.gemini', 'antigravity-ide', 'brain', 'synthetic-sysgen-1401', '..', 'synthetic-other-session-1401', 'transcript.jsonl')],
+  ]) {
+    assert.equal(isSessionAntigravityTranscript(badPath, id, f.home), false, id)
+    assert.equal(readAntigravityFirstPrompt(badPath, id, f.home), null, id)
+  }
+
   for (const [id, transcriptPath] of [
     ['synthetic-fallback-1401', linkedTranscript],
     ['synthetic-bad-1401', badTranscript],
     ['synthetic-missing-1401', 'relative/transcript.jsonl'],
     ['synthetic-empty-wrapped-1401', emptyWrappedTranscript],
+    ['synthetic-mismatch-1401', foreignTranscript],
+    ['synthetic-outside-1401', outsideTranscript],
+    ['synthetic-fake-home-1401', fakeHomeTranscript],
   ]) {
     assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
       conversationId: id,
@@ -12466,7 +12493,19 @@ test('Antigravity unreadable, malformed, symlinked, or missing title files safel
     assert.equal(rec.title, 'Local antigravity task')
     assert.match(rec.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/)
   }
-  assert.ok(!readFileSync(f.progress, 'utf8').includes('SECRET-SYMLINK-CONTENT'))
+  const boardAfterRejected = readFileSync(f.progress, 'utf8')
+  assert.ok(!boardAfterRejected.includes('SECRET-SYMLINK-CONTENT'))
+  assert.ok(!boardAfterRejected.includes('SECRET-FOREIGN-SESSION-PROMPT'))
+  assert.ok(!boardAfterRejected.includes('SECRET-OUTSIDE-PATH-PROMPT'))
+  assert.ok(!boardAfterRejected.includes('SECRET-FAKE-HOME-PROMPT'))
+
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+    conversationId: 'synthetic-sysgen-1401',
+    transcriptPath: systemGeneratedTranscript,
+  }).status, 0)
+  const sysgenRec = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update('antigravity:synthetic-sysgen-1401').digest('hex')}.json`), 'utf8'))
+  assert.equal(sysgenRec.title, 'System generated prompt title')
+  assert.equal(sysgenRec.titleSource, 'prompt')
 
   // Localized Started context writes clean UTF-8 in zh-TW and zh-CN.
   for (const [lang, expected] of [['zh-TW', '> 背景：開始於 20'], ['zh-CN', '> 背景：开始于 20']]) {
