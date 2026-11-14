@@ -523,13 +523,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         message = await mailbox.turnOrThrow(agent, session, surfaceOf(surface), Date.now(), ref)
       } catch (error) {
         // A failed take is not an empty mailbox: the plugin tries again on its own clock.
-        answer({ ok: false, code: error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING', watch: directory, message: null })
+        // A take the board deferred (its store was busy) is asked again by a plugin that reads deferred (#1429).
+        answer({ ok: false, code: error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING', watch: directory, message: null, deferred: mailbox.hasDeferred })
         return true
       }
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
-      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary } })
+      // deferred: the board's store was busy, so null here is "not checked", not "nothing waiting"; the plugin asks again (#1429).
+      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary }, deferred: message === null && mailbox.hasDeferred })
     } else if (action === 'open') {
       // OpenCode's plugin only. It claims nothing, and the plugin reads the board's file to see whether it worked. The answer
       // names the folder to watch. With no board folder at all no board can queue a message, so nothing is enrolled yet
@@ -555,8 +557,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     } else if (action === 'accept' && agent !== 'opencode') {
       const id = flag('--id'), nonce = flag('--nonce')
       if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
-      await mailbox.accept(agent, session, id, nonce, Date.now())
-      answer({ ok: true })
+      answer({ ok: await mailbox.accept(agent, session, id, nonce, Date.now()) })
     } else if (action === 'accept' || action === 'ack') {
       // The plugin passes free text as base64, so a word that starts with two hyphens is not read as a flag.
       const text = (name: string): string | undefined => { const value = flag(name); return value === undefined ? undefined : Buffer.from(value, 'base64').toString('utf8') }

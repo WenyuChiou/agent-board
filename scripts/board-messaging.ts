@@ -602,7 +602,6 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
     turn: (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => takeTurn(agent, session, surface, now, named).catch(() => null),
     // The same take for a caller that must tell a failed take from an empty mailbox; a deferred claim is handed back first.
     turnOrThrow: takeTurn,
-    accept: (agent: string, session: string, id: string, nonce: string, now: number, awaitsAck = false) => call('mailbox-accept', { agent, session, id, nonce, ...(awaitsAck ? { awaitsAck: true } : {}) }, now),
     // An in-process plugin's acceptance, explicit acknowledgement and send; a refusal keeps its code for the caller, so only a saved acceptance reads as done.
     acceptOrThrow: async (agent: string, session: string, id: string, nonce: string, now: number, awaitsAck = false): Promise<void> => { await access.call('mailbox-accept', { agent, session, id, nonce, ...(awaitsAck ? { awaitsAck: true } : {}) }, now) },
     ack: async (agent: string, session: string, id: string, nonce: string, reply: string, now: number): Promise<void> => { await access.call('mailbox-ack', { agent, session, id, nonce, reply }, now) },
@@ -619,6 +618,10 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
     },
     // An OpenCode plugin opens or renews a busy session's mailbox without taking anything (#1366).
     open: async (agent: string, session: string, surface: string, now: number): Promise<void> => { await access.call('mailbox-open', { agent, session, surface }, now) },
+    // Whether the board took the accept: a caller that tells its host the message was delivered needs to know it did not (#1430).
+    accept: async (agent: string, session: string, id: string, nonce: string, now: number): Promise<boolean> => {
+      try { await access.call('mailbox-accept', { agent, session, id, nonce }, now); return true } catch { return false }
+    },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
     // The same end for a caller that must tell a write that failed from one that worked.
     endOrThrow: async (agent: string, session: string, now: number): Promise<void> => { await access.call('mailbox-end', { agent, session }, now) },
