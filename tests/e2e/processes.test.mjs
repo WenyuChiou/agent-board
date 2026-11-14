@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { realpathSync } from 'node:fs'
 import { createInterface } from 'node:readline'
@@ -161,8 +160,11 @@ syncBuiltinESMExports()
 })
 
 test('a process that has exited but is not yet collected reads as gone on Linux (#1478)', { skip: process.platform !== 'linux' && 'only Linux keeps an exited process until its parent collects it' }, async () => {
+  const world = makeWorld()
+  const env = Object.fromEntries(Object.entries(world.env).filter(([name]) => name !== 'NODE_OPTIONS' && !name.startsWith('E2E_')))
   // `exec sleep 5` replaces the shell, and sleep never collects the shell's background child.
-  const parent = spawn('sh', ['-c', 'sleep 0.2 & echo $!; exec sleep 5'], { stdio: ['ignore', 'pipe', 'ignore'] })
+  const parent = spawnIsolated('/bin/sh', ['-c', 'sleep 0.2 & echo $!; exec sleep 5'], { env, cwd: world.root, stdio: ['ignore', 'pipe', 'ignore'] })
+  const closed = new Promise(done => parent.once('close', done))
   try {
     const [line] = await once(createInterface({ input: parent.stdout }), 'line')
     const child = Number(line)
@@ -171,6 +173,7 @@ test('a process that has exited but is not yet collected reads as gone on Linux 
     assert.equal(isZombie(parent.pid), false)
   } finally {
     parent.kill()
-    if (parent.exitCode === null && parent.signalCode === null) await once(parent, 'exit')
+    await within(closed, 5000, 'The test process did not close during cleanup')
+    await world.close()
   }
 })
