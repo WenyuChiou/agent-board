@@ -284,13 +284,13 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     const build = async () => {
       if (!isSpawn) globalThis[TIMING_KEY] = { ...FAST, ...timing }
       try {
-        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0] }`)(createRequire, reporter, tool, spawnBoard, readFileSync, watchBoard, join, existsSync, fakeSetInterval, fakeClearInterval)
+        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0], hostCall: typeof hostCall === 'undefined' ? undefined : hostCall }`)(createRequire, reporter, tool, spawnBoard, readFileSync, watchBoard, join, existsSync, fakeSetInterval, fakeClearInterval)
         const hooks = await factory.plugin({ client, directory: home })
         receiverOf = factory.receiver
-        return { hooks, receiver: factory.receiver, plugin: factory.plugin }
+        return { hooks, receiver: factory.receiver, plugin: factory.plugin, hostCall: factory.hostCall }
       } finally { delete globalThis[TIMING_KEY] }
     }
-    let { hooks, plugin } = await build()
+    let { hooks, plugin, hostCall } = await build()
     const reported = state => hooks.event({ event: { type: 'session.status', properties: { sessionID: state.session, status: { type: state.type } } } })
     const idle = session => hooks.event({ event: { type: 'session.idle', properties: { sessionID: session } } })
     const created = session => hooks.event({ event: { type: 'session.created', properties: { info: { id: session } } } })
@@ -308,7 +308,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     const reshape = (session, change) => { const state = store(); writeFileSync(file, JSON.stringify({ ...state, mailboxes: change(state.mailboxes ?? [], session) })) }
     const shorten = (session, left) => reshape(session, (all, id) => all.map(one => one.session === id ? { ...one, expires: Date.now() + left } : one))
     const unmailbox = session => reshape(session, (all, id) => all.filter(one => one.session !== id))
-    const f = { mailbox, makeFolder, shorten, unmailbox, tick, quiet, home, board, progress, directory, calls, sessions, queue, message, store, until, settled, reported, idle, created, deleted, chat, note, save, watchers, advance, clock, prompts, rebuild, cards, methods, plugin: options => plugin(options), receiver: () => receiverOf(), count: action => calls.board.filter(one => one === action).length }
+    const f = { hostCall, mailbox, makeFolder, shorten, unmailbox, tick, quiet, home, board, progress, directory, calls, sessions, queue, message, store, until, settled, reported, idle, created, deleted, chat, note, save, watchers, advance, clock, prompts, rebuild, cards, methods, plugin: options => plugin(options), receiver: () => receiverOf(), count: action => calls.board.filter(one => one === action).length }
     Object.defineProperty(f, 'hooks', { get: () => hooks })
     await fn(f)
   } finally {
@@ -1482,7 +1482,11 @@ test('R33 for every call the receiver makes and every fault it can meet, with th
   // takes nothing and is never woken (V2); only an idle event makes the plugin look up the reply (messages); only a busy session
   // with no mailbox in the file opens one (open); a busy session is asked about only while something is owed, which is not the
   // case when the board has no folder or the session's mailbox is open and nothing waits (status); an end is made when the
-  // session is deleted, in either state. The host's get and messages hang for over two seconds, so they hang for one store only.
+  // session is deleted, in either state. The host's get and messages hang for over two seconds, so they hang for the mailbox
+  // store only: what a hang leaves the receiver is what a throw leaves it, which their throw rows check in every store. The
+  // session is written down before the get is awaited; at the hook's deadline the hook stops as at a thrown get, and the late
+  // answer is dropped by its own deadline check (current), so the tick looks the session up again either way. A messages hang
+  // ends at the reply capture's own wait, after which the report goes as after a thrown messages call (#1366 review).
   const ALL = ['none', 'empty', 'mailbox']
   const WHERE = {
     messages: { idle: ALL }, take: { idle: ALL }, promptAsync: { idle: ALL }, attempt: { idle: ALL }, release: { idle: ALL }, accept: { idle: ALL },
@@ -1751,3 +1755,45 @@ test('T5 a session deleted while its take is running leaves no mailbox: the end 
   await f.quiet()
   assert.equal(f.calls.board.length, calls)
 }, { watch: false }))
+
+test('R38 a session deleted during its turn stays gone: the busy, retry and idle events OpenCode sends for it after the deletion open no mailbox, take nothing and wake nothing (live record 2026-11-14, #1366 review)', () => fixture(async f => {
+  await f.reported({ session: 'ses_r38', type: 'busy' })
+  f.tick()
+  await f.until(() => f.mailbox('ses_r38') !== undefined && f.settled(), 'the busy session has its mailbox')
+  await f.deleted('ses_r38')
+  await f.until(() => f.mailbox('ses_r38') === undefined && f.settled(), 'the deletion ended its mailbox')
+  const before = [f.count('open'), f.count('take'), f.count('end')]
+  // The events the live run recorded after the deletion, in that order.
+  for (const type of ['retry', 'busy', 'retry', 'idle']) await f.reported({ session: 'ses_r38', type })
+  await f.idle('ses_r38')
+  for (let round = 0; round < 3; round++) { f.tick(); await f.quiet() }
+  assert.deepEqual([f.count('open'), f.count('take'), f.count('end')], before)
+  assert.equal(f.mailbox('ses_r38'), undefined)
+  assert.equal(f.calls.promptAsync.length, 0)
+}))
+
+test('R39 the host is asked in the same run as the last check before the call, so no event can come between them (#1366 review)', () => fixture(async f => {
+  let isCalled = false
+  const asked = f.hostCall(() => { isCalled = true; return 'answer' })
+  assert.equal(isCalled, true, 'the call started before the caller went on')
+  assert.equal(await asked, 'answer')
+  // A call that throws at once is a rejected answer, never a throw out of the step.
+  await assert.rejects(f.hostCall(() => { throw new Error('host failed') }), /host failed/)
+}))
+
+test('B17 a disconnection after the host accepted a wake keeps the time of the accept, so it reads "sent, not confirmed" 30 minutes after it and the next message goes out (#1366 review)', async () => {
+  const b = await mailbox()
+  const taken = b.take(b.seed('opencode', 's1'), 'opencode', 's1', refOf(1), T0)
+  const marked = b.act(taken.state, 'mailbox-attempt', { agent: 'opencode', session: 's1', ref: refOf(1) }, T0 + SEC).state
+  const accepted = b.act(marked, 'mailbox-accept', { agent: 'opencode', session: 's1', id: 'm1', nonce: taken.message.nonce, awaitsAck: true }, T0 + 2 * SEC).state
+  assert.equal(accepted.messages[0].status, 'accepted')
+  const box = accepted.mailboxes.find(one => one.agent === 'opencode' && one.session === 's1')
+  // The receiver's connection is lost 29 minutes after the accept: the accepted wake is left as it was.
+  const lost = b.messaging.disconnectMessages(accepted, box.id, T0 + 2 * SEC + 29 * MIN)
+  assert.deepEqual([lost.messages[0].status, lost.messages[0].error, lost.messages[0].updated], ['accepted', '', accepted.messages[0].updated])
+  // 31 minutes after the accept it reads "sent, not confirmed", keeps its text, and no longer holds the session's next message.
+  const late = b.prune(lost, T0 + 2 * SEC + 31 * MIN)
+  assert.deepEqual([late.messages[0].status, late.messages[0].error, late.messages[0].text], ['uncertain', 'UNCONFIRMED', 'Synthetic text for the board cases'])
+  const queued = b.messaging.queueMessage(late, { id: 'm2', target: box.id, turn: 'session', text: 'Synthetic second message' }, 'board', box, T0 + 2 * SEC + 31 * MIN).state
+  assert.equal(b.take(queued, 'opencode', 's1', refOf(2), T0 + 2 * SEC + 32 * MIN).message?.id, 'm2')
+})

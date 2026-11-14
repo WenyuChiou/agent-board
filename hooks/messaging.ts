@@ -386,9 +386,10 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   if (one.status === 'uncertain' && one.error === UNCONFIRMED && status === 'accepted' && one.to.startsWith('opencode:')) return one.hasAccepted === true ? state : { ...state, messages: state.messages.map(message => message === one ? { ...one, hasAccepted: true } : message) }
   return { ...state, messages: state.messages.map(message => message === one ? settled({ ...one, status, reply, error, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
 }
-// A wake the plugin started (marked by an attempt) whose reply may still be on its way: a disconnection does not change it, so
-// it reads "sent, not confirmed" at the open limit and keeps its text for the day, as it would without the disconnection.
-const isMarkedWake = (one: Message): boolean => isAtMostOnce(one) && one.attempted !== undefined && one.status === 'uncertain' && (one.error === '' || one.error === UNCONFIRMED)
+// A wake the plugin started (marked by an attempt) whose reply may still be on its way, accepted by the host or not: a
+// disconnection does not change it, so it reads "sent, not confirmed" at the open limit, counted from its attempt or its
+// accept, and keeps its text for the day, as it would without the disconnection (#1366 review).
+const isMarkedWake = (one: Message): boolean => isAtMostOnce(one) && one.attempted !== undefined && (one.status === 'uncertain' && (one.error === '' || one.error === UNCONFIRMED) || one.status === 'accepted' && one.awaitsAck === true && one.error === '')
 export const disconnectMessages = (state: MessageState, target: string, now: number): MessageState => ({
   ...state,
   messages: state.messages.map(one => one.target !== target || isFinished(one) || isMarkedWake(one) ? one : settled({

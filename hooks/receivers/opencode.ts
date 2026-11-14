@@ -76,7 +76,11 @@ const TIMING = { hostMs: 10000, boardMs: 15000, settleMs: 5000, tickMs: 30000, m
 const hostCall = call => new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('HOST_TIMEOUT')), TIMING.hostMs)
   timer.unref?.()
-  Promise.resolve().then(call).then(value => { clearTimeout(timer); resolve(value) }, error => { clearTimeout(timer); reject(error) })
+  // The call starts now, in the same run as the caller's last check, not a microtask later: an event that comes after that
+  // check cannot come before the call (#1366 review). A call that throws at once is a rejected answer.
+  let started
+  try { started = Promise.resolve(call()) } catch (error) { started = Promise.reject(error) }
+  started.then(value => { clearTimeout(timer); resolve(value) }, error => { clearTimeout(timer); reject(error) })
 })
 // Why the receiver can promise at most one wake per message: the board is told a wake has started (attempt) before the host
 // is called, and a message marked that way is never handed out again, whatever happens to the host call. The receiver
@@ -93,7 +97,9 @@ const boardReceiver = (client, directory, replay) => {
   // ending: a closed mailbox whose end the board has not saved yet, with the tries so far.
   // pending: a session an event or chat.message named that is not known yet, with the state it reported and the tick's tries.
   // opening: an open under way. Nothing else remembers whether a mailbox is open or a message waits: owed() reads the board's file.
-  const roots = new Map(), taking = new Set(), again = new Set(), marks = new Map(), settling = new Map(), held = new Map(), ending = new Map(), pending = new Map(), replaying = new Set(), closing = new Set(), sawBusy = new Set(), opening = new Set()
+  // gone: every session this process saw deleted. OpenCode still sends busy, retry and idle events for a session deleted during
+  // its turn (live record 2026-11-14), and its ids are never reused, so a deleted session is never made known again.
+  const roots = new Map(), taking = new Set(), again = new Set(), marks = new Map(), settling = new Map(), held = new Map(), ending = new Map(), pending = new Map(), replaying = new Set(), closing = new Set(), sawBusy = new Set(), opening = new Set(), gone = new Set()
   let watcher = null, folder = null, debounce = null, timer = null, isTakeFailing = false, isOpenFailing = false
   const mark = session => marks.get(session) ?? 0
   const bump = session => marks.set(session, mark(session) + 1)
@@ -378,7 +384,7 @@ const boardReceiver = (client, directory, replay) => {
   // subagent or another session (drop), ended, or given up at the tick. A known session's counter moves at once, and a busy
   // event also marks it busy and ends the settle wait, so a step already under way sees the change when its call returns.
   const seen = (session, state) => {
-    if (typeof session !== 'string' || session === '') return
+    if (typeof session !== 'string' || session === '' || gone.has(session)) return
     if (state === 'ended') { drop(session); return }
     if (!['working', 'waiting'].includes(state)) return
     if (roots.has(session)) {
@@ -397,6 +403,7 @@ const boardReceiver = (client, directory, replay) => {
   const note = (session, state, isReported = true) => {
     if (typeof session !== 'string' || session === '') return
     if (state === 'ended') {
+      gone.add(session)
       pending.delete(session)
       if (!roots.delete(session)) { stopIfIdle(); return }
       again.delete(session)
@@ -408,7 +415,7 @@ const boardReceiver = (client, directory, replay) => {
       closeMailbox(session)
       return
     }
-    if (state !== 'working' && state !== 'waiting') return
+    if (state !== 'working' && state !== 'waiting' || gone.has(session)) return
     if (!roots.has(session) && !isReported) { seen(session, state); return }
     pending.delete(session)
     // The counter moved when the event arrived (seen); this only records the state of the newest event.
