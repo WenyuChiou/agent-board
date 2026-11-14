@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { makeWorld, modulePath } from './lib/world.mjs'
 import { ISOLATED_VARIABLES, spawnIsolated, within, worldOf } from './lib/spawn.mjs'
 import { block, turn, hook, hookHosts } from './lib/writers.mjs'
-import { terminal, print, json, seenPageWithin, serve, run } from './lib/surfaces.mjs'
+import { terminal, print, json, seenPageWithin, serve, run, isZombie } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
 import { knownFailure } from './lib/known.mjs'
 import { killMidWrite, tear, lockFile, twoWriters, formatWriters, readOnly, diskFull, skew, updateMidSession, uninstall, reinstall } from './lib/faults.mjs'
@@ -144,7 +144,11 @@ describe('scenario runner', () => {
       world.cleanups.push(() => { throw new Error('injected cleanup failure') })
       await assert.rejects(world.close(), error => error instanceof AggregateError && error.errors.some(one => one.message === 'injected cleanup failure'))
       assert.equal(existsSync(world.root), false)
-      for (const pid of [server.pid, watch.pid]) assert.throws(() => process.kill(pid, 0), /ESRCH|no such process/i)
+      // On Linux an exited server that its new parent has not collected yet still answers signal 0;
+      // teardown no longer waits for that collection, and the process is stopped all the same (#1478).
+      for (const pid of [server.pid, watch.pid]) {
+        if (!isZombie(pid)) assert.throws(() => process.kill(pid, 0), /ESRCH|no such process/i)
+      }
     } finally { await world.close() }
   })
 
