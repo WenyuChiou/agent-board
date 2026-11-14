@@ -14437,4 +14437,3 @@ test('a deferred lost-results rebuild keeps the focused copy field and its selec
   assert.equal(rebuilt.selectionEnd, 8, 'the rebuilt copy field keeps the selection end')
   assert.ok(pageLostResults(dom, '').some(node => node.textContent.includes('Background answer')), 'the deferred rebuild draws the background reply')
 })
-
