@@ -3805,7 +3805,10 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     }
     blur() { if (document.activeElement === this) document.activeElement = null }
     scrollIntoView() { this.scrolled = true }
-    setSelectionRange() {}
+    setSelectionRange(start, end) {
+      this.selectionStart = start
+      this.selectionEnd = end
+    }
     select() { this.isSelected = true }
     cloneNode() {
       const copy = new Element(this.tag)
@@ -14384,5 +14387,54 @@ test('a press held on a lost-result button survives a rebuild of the lost result
   rebuilt.click()
   await dom.settle()
   assert.ok(calls.some(request => request.body.type === 'unhide' && request.body.key === 'hidden:h1'), 'the rebuilt first button still unhides its card')
+})
+
+test('a deferred lost-results rebuild keeps the focused copy field and its selection (#1473)', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const base = redesignModel()
+  const askCopy = { ...base.asks[0], key: 'ask-copy-1', text: 'Copy me?', task: 'Copy plan', command: 'echo synthetic-copy', canHide: true, isSending: false }
+  const askTwo = { ...base.asks[0], key: 'ask-gone-2', text: 'Answer me later?', task: 'Second plan', isSending: false }
+  let liveModel = { ...base, asks: [askCopy, askTwo], hidden: [] }
+  let boardExtra = {}
+  const dom = await pageDom(html, liveModel, {
+    currentModel: () => liveModel,
+    currentBoard: () => boardExtra,
+  })
+  const walk = node => [node, ...node.childNodes.flatMap(walk)]
+  const copyField = () => walk(dom.node('board')).find(node => node.tag === 'textarea' && node.value === 'echo synthetic-copy')
+  // The failed copy leaves a manual-copy textarea in the card's result slot.
+  const copyButton = dom.buttons().find(button => button.textContent === EN.serveCopyCommand)
+  assert.ok(copyButton, 'the copy command button is on the card')
+  copyButton.click()
+  await dom.settle()
+  assert.ok(copyField(), 'the failed copy draws its textarea in the slot')
+  // Both cards leave the board: the copy result becomes a lost result with its own copy field.
+  liveModel = { ...liveModel, asks: [] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(pageLostResults(dom, 'Copy plan'), 'the copy result leaves a lost card')
+  const area = copyField()
+  assert.ok(area, 'the lost card keeps the copy field')
+  // Focus the lost copy field and select a range, then hold a press in it while a background reply for the
+  // gone second card arrives.
+  area.focus()
+  area.setSelectionRange(2, 8)
+  assert.equal(dom.active(), area, 'the copy field is focused before the hold')
+  dom.pointer('pointerdown', { pointerId: 1 })
+  boardExtra = { replies: [{ at: 2, note: 'Background answer', ok: true, key: 'ask-gone-2' }] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(walk(dom.node('board')).includes(area), 'the held copy field is not replaced by the rebuild')
+  assert.equal(dom.active(), area, 'the copy field stays focused under the hold')
+  // Ending the hold runs the deferred rebuild: the copy field is drawn again, focused, with its selection.
+  dom.pointer('pointermove', { pointerId: 1, buttons: 0 })
+  const rebuilt = copyField()
+  assert.ok(rebuilt, 'the deferred rebuild draws the copy field again')
+  assert.notEqual(rebuilt, area, 'the deferred rebuild replaces the copy field only after the release')
+  assert.equal(dom.active(), rebuilt, 'the rebuilt copy field is focused again')
+  assert.equal(rebuilt.selectionStart, 2, 'the rebuilt copy field keeps the selection start')
+  assert.equal(rebuilt.selectionEnd, 8, 'the rebuilt copy field keeps the selection end')
+  assert.ok(pageLostResults(dom, '').some(node => node.textContent.includes('Background answer')), 'the deferred rebuild draws the background reply')
 })
 
