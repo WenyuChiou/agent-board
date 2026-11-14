@@ -533,13 +533,19 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // OpenCode's plugin names the claim (12 hex), so it can release it again.
       if (ref !== undefined && (agent !== 'opencode' || !/^[0-9a-f]{12}$/.test(ref))) throw new Error('INVALID_MAILBOX_CALL')
       let message: Awaited<ReturnType<typeof mailbox.turnOrThrow>>
-      try {
-        message = await mailbox.turnOrThrow(agent, session, surfaceOf(surface), Date.now(), ref)
-      } catch (error) {
-        // A failed take is not an empty mailbox: the plugin tries again on its own clock.
-        // A take the board deferred (its store was busy) is asked again by a plugin that reads deferred (#1429).
-        answer({ ok: false, code: error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING', watch: directory, message: null, deferred: mailbox.hasDeferred })
-        return true
+      if (agent !== 'opencode') {
+        // DeepSeek's receiver reads a failed take from the exit status and the code on stderr; a deferred take answers null (#1448).
+        message = await mailbox.turn(agent, session, surfaceOf(surface), Date.now())
+        if (message === null && mailbox.error !== null) throw new Error(mailbox.error)
+      } else {
+        try {
+          message = await mailbox.turnOrThrow(agent, session, surfaceOf(surface), Date.now(), ref)
+        } catch (error) {
+          // A failed take is not an empty mailbox: the plugin tries again on its own clock.
+          // A take the board deferred (its store was busy) is asked again by a plugin that reads deferred (#1429).
+          answer({ ok: false, code: error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING', watch: directory, message: null, deferred: mailbox.hasDeferred })
+          return true
+        }
       }
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
@@ -1474,7 +1480,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script, fileWords)
   if (agent === 'openclaw') {
     files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
-    files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
+    // activation.onStartup: OpenClaw 2026.6.35 loads a plugin when its gateway starts only when the manifest asks for it (#1489).
+    files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', activation: { onStartup: true }, contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {

@@ -83,6 +83,8 @@ export type ServeOptions = {
   onReady: (url: string, port: number) => boolean
   onStop: () => void
   onListenError?: (error: NodeJS.ErrnoException) => void
+  // The hub of the default folder could not publish its owner record: it has stopped and given its lock back (#1472 review).
+  onStoreError?: (error: unknown) => void
   idleMs: number
   // Opens the page in the person's browser at this address (with its one-time approval key) and
   // says whether a window opened. Absent: the board script opens the page itself, and that page
@@ -94,6 +96,8 @@ export type ServeOptions = {
   // The tests' shorter waits; the board uses APPROVAL_DRAW_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS
   // and APPROVAL_GRACE_MS.
   approvalTimes?: { drawMs: number; pressMs: number; secretMs?: number; graceMs?: number }
+  // How long a replaced server keeps HTTP open after dropping locks/receivers so an open tab can read `{ moved: true }` (#1335).
+  movedGraceMs?: number
 }
 
 type Result = { ok: boolean; note: string }
@@ -202,6 +206,11 @@ export const startServer = (o: ServeOptions): void => {
     return latest === 0 ? null : now - latest
   }
   let isStopping = false
+  let isMoved = false
+  let movedReleased = false
+  let movedTimer: ReturnType<typeof setTimeout> | null = null
+  const movedWaiting = new Set<string>()
+  let isFinished = false
   // The page on the local network: its own server, address and token, so the computer's token
   // never crosses the network.
   let lan: { server: Server; host: string; token: string; url: string; lastSeen: number } | null = null
@@ -282,19 +291,53 @@ export const startServer = (o: ServeOptions): void => {
 
   let codexReceiver: ReturnType<typeof startCodexReceiver> | null = null
 
-  const stop = (): void => {
-    if (isStopping) return
+  const closeNonServer = (): void => {
+    // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
+    try { messaging.close() } catch {}
+    closeLan()
+  }
+
+  const finish = (): void => {
+    if (isFinished) return
+    isFinished = true
+    if (movedTimer !== null) {
+      clearTimeout(movedTimer)
+      movedTimer = null
+    }
+    closeNonServer()
+    server.close()
+    server.closeAllConnections()
+    o.onStop()
+  }
+
+  const stop = (moved = false): void => {
+    if (isStopping) {
+      if (!moved && isMoved) {
+        isMoved = false
+        if (movedReleased) finish()
+      }
+      return
+    }
     isStopping = true
     for (const id of [...approvals.keys()]) settleApproval(id, null)
     for (const one of approvals.values()) one.timers.forEach(clearTimeout)
     approvals.clear()
-    const finish = (): void => {
-      // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
-      try { messaging.close() } catch {}
-      closeLan()
-      server.close()
-      server.closeAllConnections()
-      o.onStop()
+    if (moved) {
+      const now = Date.now()
+      for (const [id, one] of pages) if (now - one.at < PAGE_STALE_MS) movedWaiting.add(id)
+      pages.clear()
+    }
+    if (moved && movedWaiting.size > 0) {
+      isMoved = true
+      movedTimer = setTimeout(finish, o.movedGraceMs ?? 5_000)
+      const released = (): void => {
+        movedReleased = true
+        closeNonServer()
+        if (!isMoved || movedWaiting.size === 0) finish()
+      }
+      if (codexReceiver === null) released()
+      else void Promise.race([codexReceiver.close().catch(() => undefined), new Promise(done => setTimeout(done, 1500))]).then(released)
+      return
     }
     if (codexReceiver === null) {
       finish()
@@ -385,6 +428,48 @@ export const startServer = (o: ServeOptions): void => {
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
+    const replyMessage = (action: string, payload: Record<string, unknown>): void => {
+      // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
+      if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
+      try { return json(res, 200, messaging.act(action, payload, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
+      catch (error) {
+        // A temporary file lock is storage unavailability, not a stale binding.
+        // Only the owner's lease-bounded poller retries; sends and receipts do not.
+        const code = (error as { code?: unknown } | null)?.code
+        if (['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
+        return json(res, 409, { error: error instanceof Error ? error.message : 'MESSAGE_FAILED' })
+      }
+    }
+    if (isMoved) {
+      if (!isLan && req.method === 'GET' && url.pathname === '/api/board') {
+        const id = pageIdOf(req.headers)
+        if (id !== '') movedWaiting.delete(id)
+        res.once('finish', () => { if (movedWaiting.size === 0 && movedReleased) setImmediate(finish) })
+        return json(res, 200, { moved: true })
+      }
+      if (req.method === 'POST') {
+        const body = await readBody(req)
+        if (body === null) return json(res, 400, {})
+        if (!isLan && url.pathname === '/api/page-gone') {
+          const id = pageIdOf(req.headers)
+          if (id !== '') movedWaiting.delete(id)
+          res.once('finish', () => { if (movedWaiting.size === 0 && movedReleased) setImmediate(finish) })
+          return json(res, 200, {})
+        }
+        if (url.pathname === '/api/close') {
+          if (body.moved !== true) res.once('finish', () => setImmediate(() => stop(false)))
+          return json(res, 200, {})
+        }
+        // Before closeNonServer() closes messaging, let codexReceiver disconnect and any in-flight receipt finish cleanly (#1335).
+        if (!isLan && !movedReleased && url.pathname.startsWith('/api/messages/')) {
+          const action = url.pathname.slice('/api/messages/'.length)
+          if (['disconnect', 'receipt', 'mailbox-accept', 'mailbox-ack'].includes(action)) {
+            return replyMessage(action, body)
+          }
+        }
+      }
+      return json(res, 410, { moved: true })
+    }
     if (!isLan && isPage) loadedAt = Date.now()
     let isReplaced = false
     if (!isLan && req.method === 'GET' && url.pathname === '/api/board' && pageIdOf(req.headers) !== '') {
@@ -655,17 +740,7 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (url.pathname.startsWith('/api/messages/')) {
       if (isLan) return json(res, 403, {})
-      const action = url.pathname.slice('/api/messages/'.length)
-      // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
-      if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
-      try { return json(res, 200, messaging.act(action, body, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
-      catch (error) {
-        // A temporary file lock is storage unavailability, not a stale binding.
-        // Only the owner's lease-bounded poller retries; sends and receipts do not.
-        const code = (error as { code?: unknown } | null)?.code
-        if (['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
-        return json(res, 409, { error: error instanceof Error ? error.message : 'MESSAGE_FAILED' })
-      }
+      return replyMessage(url.pathname.slice('/api/messages/'.length), body)
     }
     // A press that met a file the board could not read or write is answered with why; any other
     // error stays a bare server error.
@@ -790,8 +865,9 @@ export const startServer = (o: ServeOptions): void => {
     if (url.pathname === '/api/close') {
       // Closing would cut a reply off halfway: on Windows the agent goes with the server.
       if (sending.size > 0) return json(res, 409, { note: o.s.serveCloseBusy })
+      const moved = body.moved === true
       json(res, 200, {})
-      setImmediate(stop)
+      setImmediate(() => stop(moved))
       return
     }
     return json(res, 404, {})
@@ -812,10 +888,26 @@ export const startServer = (o: ServeOptions): void => {
     isListening = true
     port = (server.address() as AddressInfo).port
     const url = `http://127.0.0.1:${port}/?t=${token}`
+    // A later --serve asks this address before moving a lock this hub left behind, and a hook reads a lock with no owner
+    // as a hub still starting, so every take waits. A hub that cannot publish its owner record would hold the lock that way
+    // for as long as it ran (#1472 review): the record goes out before the page is announced, and a failure stops the hub,
+    // gives the lock back and names the cause.
+    if (o.isDefaultMessagesDirectory) {
+      try { messaging.recordOwner(port, url) } catch (error) {
+        isStopping = true
+        try { messaging.close() } catch {}
+        server.close()
+        server.closeAllConnections()
+        if (o.onStoreError !== undefined) o.onStoreError(error)
+        else o.onStop()
+        return
+      }
+    }
     if (!o.onReady(url, port)) {
       stop()
       return
     }
+    messaging.markPublished()
     // Preparing a private address can block; inactivity starts once that address is ready.
     lastSeen = Date.now()
     if (o.codex?.executable) {
@@ -830,15 +922,12 @@ export const startServer = (o: ServeOptions): void => {
     // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
     // `idleMs` and no reply is on its way.
     const idle = setInterval(() => {
+      if (isStopping) return
       if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
       if (o.idleMs > 0 && sending.size === 0 && Date.now() - lastSeen > o.idleMs) stop()
     }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
     server.on('close', () => clearInterval(idle))
-    if (o.isDefaultMessagesDirectory) {
-      // A later --serve asks this address before moving a lock this hub left behind.
-      try { messaging.recordOwner(port, url) } catch {}
-    }
-    const sweeper = setInterval(() => { try { o.sweep() } catch {} }, o.sweepMs)
+    const sweeper = setInterval(() => { if (!isStopping) try { o.sweep() } catch {} }, o.sweepMs)
     server.on('close', () => clearInterval(sweeper))
   })
 }
