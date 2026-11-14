@@ -144,9 +144,11 @@ const winAcls = (files, timeout = DISCOVERY_MS) => {
     + "$sections = [System.Security.AccessControl.AccessControlSections]'Access,Owner,Group'; "
     + "$targets = $env:AGENT_BOARD_RUNTIME_ACL_PATH.Split('|'); "
     + 'for ($at = 0; $at -lt $targets.Length; $at++) { $target = $targets[$at]; '
-    + 'try { $security = if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::GetAccessControl($target, $sections) } else { [System.IO.File]::GetAccessControl($target, $sections) }; '
-    + '$security.GetSecurityDescriptorSddlForm($sections) } '
-    + "catch { if ($at -eq 0) { throw }; '-' } }"
+    + 'try { '
+    + 'if (([System.IO.File]::GetAttributes($target) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "reparse" }; '
+    + 'if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::GetAccessControl($target, $sections).GetSecurityDescriptorSddlForm($sections) } '
+    + "else { $fs = [System.IO.File]::Open($target, 'Open', 'Read', 'Read'); try { $fs.GetAccessControl().GetSecurityDescriptorSddlForm($sections) } finally { $fs.Dispose() } } "
+    + "} catch { if ($at -eq 0) { throw }; '-' } }"
   let output
   try {
     output = execFileSync(join(winSystem(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', script], {
@@ -191,12 +193,28 @@ const hasPlainParents = dir => {
   }
 }
 
-const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino
-  && left.size === right.size && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs
+const identityOf = dir => {
+  try {
+    const found = lstatSync(dir, { bigint: true })
+    return found.isDirectory() && !found.isSymbolicLink() ? `${found.dev}:${found.ino}:${found.birthtimeNs}` : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino && left.birthtimeNs === right.birthtimeNs
+  && left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
+
+const sameOpenFile = (folder, folderId, file, before, fd) => hasPlainParents(folder)
+  && identityOf(folder) === folderId
+  && isPlain(file, false)
+  && sameFile(before, fstatSync(fd, { bigint: true }))
+  && sameFile(before, lstatSync(file, { bigint: true }))
 
 const isOwnWindowsRuntime = (folder, { deadline, now = () => performance.now(), probeAccount = winCurrentAccount, probeAcls = winAcls } = {}) => {
   if (deadline !== undefined && now() >= deadline) return false
-  if (!hasPlainParents(folder)) return false
+  const folderBefore = identityOf(folder)
+  if (folderBefore === undefined || !hasPlainParents(folder)) return false
   const accountTimeout = deadlineTimeout(deadline, now)
   if (accountTimeout <= 0) return false
   const account = probeAccount(accountTimeout)
@@ -205,6 +223,7 @@ const isOwnWindowsRuntime = (folder, { deadline, now = () => performance.now(), 
   if (aclTimeout <= 0) return false
   const sddls = probeAcls([folder], aclTimeout)
   return sddls !== null && (deadline === undefined || now() < deadline)
+    && hasPlainParents(folder) && identityOf(folder) === folderBefore
     && isPrivateRuntimeSddl(sddls[0] ?? '', account.sid, true, account.aliases)
 }
 
@@ -212,9 +231,14 @@ const readWindowsPrivateFile = (folder, file, { deadline, now = () => performanc
   let fd
   try {
     if (deadline !== undefined && now() >= deadline) return null
-    if (!hasPlainParents(folder)) return null
-    const before = lstatSync(file)
-    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 16_384) return null
+    const folderBefore = identityOf(folder)
+    if (folderBefore === undefined || !hasPlainParents(folder)) return null
+    const before = lstatSync(file, { bigint: true })
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size > 16_384n) return null
+    // Hold the address file open before spawning account/ACL probes so Windows locks its plain
+    // ancestor directories against swaps during inspection, and verify path and handle stay identical.
+    fd = openSync(file, 'r')
+    if (!sameOpenFile(folder, folderBefore, file, before, fd)) return null
     const accountTimeout = deadlineTimeout(deadline, now)
     if (accountTimeout <= 0) return null
     const account = probeAccount(accountTimeout)
@@ -225,10 +249,9 @@ const readWindowsPrivateFile = (folder, file, { deadline, now = () => performanc
     if (sddls === null || (deadline !== undefined && now() >= deadline)) return null
     if (!isPrivateRuntimeSddl(sddls[0] ?? '', account.sid, true, account.aliases)) return null
     if (!isPrivateRuntimeSddl(sddls[1] ?? '', account.sid, false, account.aliases)) return null
-    fd = openSync(file, 'r')
-    if (!sameFile(before, fstatSync(fd))) return null
+    if (!sameOpenFile(folder, folderBefore, file, before, fd)) return null
     const text = readFileSync(fd, 'utf8')
-    if (!isPlain(file, false) || !sameFile(before, fstatSync(fd)) || !sameFile(before, lstatSync(file))) return null
+    if (!sameOpenFile(folder, folderBefore, file, before, fd)) return null
     if (deadline !== undefined && now() >= deadline) return null
     return text
   } catch {

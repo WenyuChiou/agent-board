@@ -3,7 +3,7 @@
 // would run it, with a synthetic request on its input. No model, no browser.
 import { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerHooks } from 'node:module'
@@ -345,6 +345,71 @@ test('address discovery shares one budget before asking the board and skips aski
   }
 })
 
+test('swapping a parent folder or replacing the address file during Windows ACL verification fails closed (#1436 review)', async () => {
+  if (!isWindows) return
+  const stand = await allowingBoard()
+  const root = mkdtempSync(join(tmpdir(), 'approvals-win-swap-'))
+  try {
+    const home = join(root, 'home')
+    const own = join(root, 'own')
+    const swapParent = join(root, 'swap-parent')
+    const runDir = join(swapParent, 'run')
+    const progress = join(home, '.claude', 'progress.md')
+    mkdirSync(join(home, '.claude'), { recursive: true })
+    writeFileSync(progress, '# Progress\n')
+    const fileName = receiverFileName(receiverKey(progress))
+    const payload = JSON.stringify({ pid: process.pid, port: Number(new URL(stand.url).port), url: stand.url, path: progress, built: '' })
+    const runtimeFolder = privateRuntimeFolder(join(own, 'agent-board'))
+    const file = join(runtimeFolder, fileName)
+    writePrivateRuntimeFile(file, payload)
+
+    const evilFolder = join(runDir, 'agent-board')
+    mkdirSync(evilFolder, { recursive: true })
+    const evilFile = join(evilFolder, fileName)
+    writeFileSync(evilFile, payload)
+
+    const base = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(CLAUDE_|XDG_RUNTIME_DIR$|HOME$|USERPROFILE$)/.test(name))),
+      CLAUDE_PROGRESS_FILE: progress,
+      HOME: home,
+      USERPROFILE: home,
+    }
+    const sid = 'S-1-5-21-1000-2000-3000-1001'
+    const sddls = [`O:${sid}G:${sid}D:P(A;OICI;FA;;;${sid})`, `O:${sid}G:${sid}D:AI(A;ID;FA;;;${sid})`]
+
+    // While ACL probing runs, the address file is already open in readWindowsPrivateFile so
+    // Windows prevents renaming or swapping its parent directory, and replacing the file fails closed.
+    let swapErrorCode = ''
+    const swappedParent = await hook.run({ ...base, XDG_RUNTIME_DIR: runDir }, 'win32', {
+      input: request('npm run synthetic-win-parent-swap'),
+      probeAccount: () => ({ sid, aliases: {} }),
+      probeAcls: () => {
+        try { renameSync(runDir, join(swapParent, 'moved')) } catch (error) { swapErrorCode = error?.code ?? '' }
+        return null
+      },
+    })
+    assert.ok(swapErrorCode === 'EPERM' || swapErrorCode === 'EBUSY', `expected open file handle to lock parent directory, got ${swapErrorCode || 'none'}`)
+    assert.equal(swappedParent, null)
+    // Run against the real Windows ACL probe: unprotected parent cannot be swapped and fails closed.
+    assert.equal(await hook.run({ ...base, XDG_RUNTIME_DIR: runDir }, 'win32', { input: request('npm run synthetic-win-evil-real') }), null)
+
+    const replacedFile = await hook.run({ ...base, XDG_RUNTIME_DIR: own }, 'win32', {
+      input: request('npm run synthetic-win-file-swap'),
+      probeAccount: () => ({ sid, aliases: {} }),
+      probeAcls: () => {
+        renameSync(file, join(runtimeFolder, 'old.json'))
+        writePrivateRuntimeFile(file, payload)
+        return sddls
+      },
+    })
+    assert.equal(replacedFile, null)
+    assert.deepEqual(stand.seen, [])
+  } finally {
+    await stand.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('the hook only ever answers allow, or deny with a message, and never adds a standing rule', () => {
   assert.deepEqual(hook.decisionOutput({ behavior: 'allow', updatedPermissions: [{ type: 'setMode', mode: 'bypassPermissions' }] }), { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } })
   assert.deepEqual(hook.decisionOutput({ behavior: 'deny', message: 'Synthetic reason', interrupt: true }), { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: 'Synthetic reason' } } })
@@ -537,6 +602,90 @@ test('a pairing key used twice turns approvals off, and neither page can press',
   assert.equal((await board.call('/api/open', { asApp: true })).body.isOpen, true)
   assert.doesNotMatch(board.opened.at(-1), /#k=/)
   assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+})
+
+test('reusing a pairing key with a retired page id still turns approvals off (#1436 review)', async () => {
+  const board = await startBoard()
+  const first = await openPage(board, { pageId: 'p-first', pairWithPage: true })
+  assert.equal((await board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': 'p-retired' })).status, 200)
+  const waiting = runHook(board, request('npm run synthetic-retired-key-reuse'))
+  const card = await first.show('npm run synthetic-retired-key-reuse')
+  const replay = await board.call('/api/approvals/pair', { key: first.key }, { origin: board.origin, 'x-board-page': 'p-retired' })
+  assert.equal(replay.status, 403)
+  assert.equal(replay.body.note, EN.approvalOff)
+  assert.equal(replay.body.secret, undefined)
+  assert.equal((await waiting.done).decision, null)
+  const press = await first.press(card, 'allow', { confirmed: true })
+  assert.equal(press.status, 403)
+  assert.equal(press.body.note, EN.approvalOff)
+  const shown = await first.look()
+  assert.equal(shown.note, EN.approvalOff)
+  assert.ok(shown.cards.every(one => one.canPress === false))
+})
+
+test('a page restored from the back/forward cache restores its approval capability without reviving replaced pages or closed tabs (#1436 review)', async () => {
+  const board = await startBoard({ secretMs: APPROVAL_SECRET_MS })
+  const first = await openPage(board, { pageId: 'p-first', pairWithPage: true })
+  const warmAsk = runHook(board, request('npm run synthetic-before-bfcache'))
+  const warmCard = await first.show('npm run synthetic-before-bfcache')
+  assert.equal((await first.press(warmCard, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await warmAsk.done).decision, ALLOW)
+
+  // Page enters bfcache (`persisted: true`): while away, it cannot authorize and wantsKeyedPage is true.
+  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-first' })).status, 200)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
+  assert.equal((await first.press(warmCard, 'allow', { confirmed: true })).status, 403)
+  assert.equal((await runHook(board, request('npm run synthetic-while-in-bfcache')).done).decision, null)
+
+  // Back navigation restores with a new page id and rotated secret.
+  const restored = await board.call('/api/approvals/restore', { fromPage: 'p-first' }, { origin: board.origin, 'x-board-page': 'p-restored', 'x-board-visible': '1', 'x-board-approve': first.secret })
+  assert.equal(restored.status, 200)
+  const secret2 = restored.body.secret
+  assert.ok(typeof secret2 === 'string' && secret2 !== '' && secret2 !== first.secret)
+  // One-time restore cannot be replayed with the old secret or old page id.
+  assert.equal((await board.call('/api/approvals/restore', { fromPage: 'p-first' }, { origin: board.origin, 'x-board-page': 'p-replay', 'x-board-approve': first.secret })).status, 409)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+
+  const headers2 = { origin: board.origin, 'x-board-page': 'p-restored', 'x-board-visible': '1', 'x-board-approve': secret2 }
+  const askAfterRestore = runHook(board, request('npm run synthetic-after-bfcache'))
+  let card2
+  for (let tries = 0; tries < 100 && card2 === undefined; tries++) {
+    card2 = (await board.call('/api/board', undefined, headers2)).body.approvals?.cards?.find(one => one.command === 'npm run synthetic-after-bfcache' && one.state === 'asking')
+    if (card2 === undefined) await pause(50)
+  }
+  assert.ok(card2)
+  assert.equal((await board.call('/api/approvals/drawn', { items: [{ id: card2.id, turn: card2.turn, state: card2.state }] }, headers2)).status, 200)
+  assert.equal((await board.call('/api/approvals/press', { id: card2.id, turn: card2.turn, state: 'shown', behavior: 'allow', reason: '' }, headers2)).status, 200)
+  assert.deepEqual((await askAfterRestore.done).decision, ALLOW)
+
+  // Consecutive bfcache round-trip also works until a newer page replaces it.
+  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-restored' })).status, 200)
+  // A newer page opens while p-restored is away: p-restored is now replaced and must not revive.
+  const newer = await openPage(board, { pageId: 'p-newer', pairWithPage: true })
+  const blockedRestore = await board.call('/api/approvals/restore', { fromPage: 'p-restored' }, { origin: board.origin, 'x-board-page': 'p-stale-back', 'x-board-visible': '1', 'x-board-approve': secret2 })
+  assert.equal(blockedRestore.status, 409)
+  assert.equal(blockedRestore.body.moved, true)
+  assert.equal(blockedRestore.body.secret, undefined)
+  // The newer page was not disturbed and can still approve.
+  const askNewer = runHook(board, request('npm run synthetic-newer-stays-alive'))
+  const cardNewer = await newer.show('npm run synthetic-newer-stays-alive')
+  assert.equal((await newer.press(cardNewer, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await askNewer.done).decision, ALLOW)
+
+  // Non-persisted close cannot restore.
+  assert.equal((await board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': 'p-newer' })).status, 200)
+  assert.equal((await board.call('/api/approvals/restore', { fromPage: 'p-newer' }, { origin: board.origin, 'x-board-page': 'p-after-close', 'x-board-approve': newer.secret })).status, 403)
+
+  // A page already replaced before pagehide cannot suspend or revive its secret on restore.
+  const victim = await openPage(board, { pageId: 'p-victim', pairWithPage: true })
+  const replacer = await openPage(board, { pageId: 'p-replacer', pairWithPage: true })
+  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-victim' })).status, 200)
+  assert.equal((await board.call('/api/approvals/restore', { fromPage: 'p-victim' }, { origin: board.origin, 'x-board-page': 'p-victim-back', 'x-board-approve': victim.secret })).status, 409)
+
+  // If approvals turn off while a page is in bfcache, restore stays off too.
+  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-replacer' })).status, 200)
+  assert.equal((await board.call('/api/approvals/pair', { key: replacer.key }, { origin: board.origin })).status, 403)
+  assert.equal((await board.call('/api/approvals/restore', { fromPage: 'p-replacer' }, { origin: board.origin, 'x-board-page': 'p-replacer-back', 'x-board-approve': replacer.secret })).status, 403)
 })
 
 test('a page paired a moment ago cannot press until the grace window has passed', async () => {

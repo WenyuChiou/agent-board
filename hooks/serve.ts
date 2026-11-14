@@ -1607,15 +1607,38 @@ const PAGE_SCRIPT = String.raw`
       }, function () { barStyleShown(before); settingsSay(w('pressFailed'), true); }).finally(function () { node.disabled = false; });
     });
   });
+  function showMoved() {
+    isClosed = true;
+    approveSecret = '';
+    clearTimeout(timer);
+    if (drawerOpen) setDrawer(false, true);
+    paintLight();
+    var movedMain = document.querySelector('main');
+    movedMain.textContent = '';
+    add(movedMain, el('p', '', w('serveMoved')));
+    document.getElementById('side').hidden = true;
+  }
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
-  if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
-    try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
+  if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function (event) {
+    try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: JSON.stringify({ persisted: Boolean(event && event.persisted) }) }).catch(function () {}); } catch (error) {}
   });
-  // A page the browser kept in its back/forward cache and shows again is the same document, but the board forgot its id when it left: it names itself anew and asks at once (#1028).
+  // A page the browser kept in its back/forward cache and shows again is the same document, but the board forgot its id when it left: it names itself anew and restores its approval secret if unreplaced (#1028, #1436 review).
   if (typeof window.addEventListener === 'function') window.addEventListener('pageshow', function (event) {
     if (!event || !event.persisted || isClosed) return;
+    var leftPage = pageId;
     pageId = newPageId();
-    refresh();
+    boardEtag = '';
+    last = '';
+    if (!approveSecret) { refresh(); return; }
+    clearTimeout(timer);
+    call('/api/approvals/restore', { fromPage: leftPage }).then(function (data) {
+      if (data.moved) { showMoved(); return; }
+      approveSecret = data.ok && typeof data.secret === 'string' ? data.secret : '';
+      refresh();
+    }, function () {
+      approveSecret = '';
+      refresh();
+    });
   });
   // onCopied: what to do once the text is on the clipboard; the card then says where to paste it. Without it the
   // result line says Copied. That line, and the card's after-copy line, show only after a copy was confirmed
@@ -3434,16 +3457,7 @@ const PAGE_SCRIPT = String.raw`
     clearTimeout(timer);
     call('/api/board').then(function (data) {
       // A newer page took over: this one stops asking and says so, once (#265).
-      if (data.moved) {
-        isClosed = true;
-        if (drawerOpen) setDrawer(false, true);
-        paintLight();
-        var movedMain = document.querySelector('main');
-        movedMain.textContent = '';
-        add(movedMain, el('p', '', w('serveMoved')));
-        document.getElementById('side').hidden = true;
-        return;
-      }
+      if (data.moved) { showMoved(); return; }
       if (data.unchanged) { reachable(); maybeShowAway(); return; }
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }
