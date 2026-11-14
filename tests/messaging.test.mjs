@@ -5,13 +5,14 @@ import { basename, join } from 'node:path'
 import { createServer, request } from 'node:http'
 import { createHash } from 'node:crypto'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
-import { after, test } from 'node:test'
+import { after, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+import { partTest } from '../scripts/ci-impact.mjs'
 import { turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/message-client.mjs'
-import { observeSession } from '../hooks/messaging.ts'
+import { isNote, observeSession, routeRecord } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { explicitCodexExecutable, resolveCodexExecutable, startCodexReceiver } from '../scripts/codex-receiver.mjs'
@@ -21,6 +22,10 @@ import { claimMessageStore } from '../scripts/message-store-claim.ts'
 import { classifyMessageStoreFiles, isMessageStoreClean, readMessageStoreFiles } from './e2e/lib/message-store-files.mjs'
 import { block as writeBlock } from './e2e/lib/writers.mjs'
 import { privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
+
+// The Windows exchange job runs this file in two parts, and each part runs its share of the tests:
+// the job used 75-80% of its ten-minute limit with the file whole (#1445).
+const test = partTest(nodeTest)
 
 // The server store and page modules use the host's extensionless imports; resolve only those
 // local paths, as tests/prompt-hooks.test.mjs does.
@@ -37,7 +42,7 @@ const { serveModel: realServeModel, serveAction: realServeAction } = await impor
 const { boardRequestWords, deliveryRequestWords, isBoardRequest } = await import('../hooks/board-commands.ts')
 const { isBoardTurn, readTurn } = await import('../hooks/inbox.ts')
 const { RECEIVER_ROUTES } = await import('../hooks/receiver-routes.ts')
-const { sendDecision, SURFACE_IDS } = await import('../hooks/messaging.ts')
+const { MCP_SURFACE, sendDecision, SURFACE_IDS } = await import('../hooks/messaging.ts')
 // The page's Send paths are tested with every route the receivers name taken as shown live; the
 // tests of what the real records allow (the end of this file) pass RECEIVER_ROUTES themselves.
 // tests/helpers/recorded-routes.json holds them, so the e2e worlds can hand the same table to a board they start.
@@ -465,7 +470,7 @@ test('a Cursor mailbox card says the message waits for the chat to open, not for
   assert.ok(!labels.includes(EN.serveQueueNextTurn('Cursor')))
   page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
   assert.ok(page.text().includes(EN.serveNextOpenHint))
-  assert.ok(!page.text().includes(EN.serveNextTurnHint))
+  assert.ok(!page.text().includes(EN.serveNextTurnHint('Cursor')))
 })
 
 test('a DeepSeek mailbox card is a plain Send with no Copy, and an answer handed over says so without naming a next turn (#725)', async () => {
@@ -483,7 +488,7 @@ test('a DeepSeek mailbox card is a plain Send with no Copy, and an answer handed
   assert.ok(!labels.includes(EN.serveQueueNextTurn('DeepSeek')))
   assert.ok(!labels.includes(EN.pgCopyAnswer))
   page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
-  assert.ok(!page.text().includes(EN.serveNextTurnHint))
+  assert.ok(!page.text().includes(EN.serveNextTurnHint('DeepSeek')))
   page.inputs(page.cards()[0])[0].value = 'Blue'
   page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.serveSend('DeepSeek')).click()
   await page.flush()
@@ -578,7 +583,7 @@ test('the page offers Queue for next turn beside Copy, prefers a live poller, an
   const queueButton = page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.serveQueueNextTurn('Codex'))
   assert.ok(page.buttons(queueButton.parentNode).some(one => one.textContent === EN.pgCopyAnswer))
   page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
-  assert.ok(page.text().includes(EN.serveNextTurnHint))
+  assert.ok(page.text().includes(EN.serveNextTurnHint('Codex')))
   page.inputs(page.cards()[0])[0].value = 'Queue this answer'
   queueButton.click()
   await page.flush()
@@ -5169,7 +5174,7 @@ test('every receiver record against idle, working and ended shows its line, with
     // A closed chat has no mailbox, so a mailbox card for an ended session has no route at all.
     const isGone = record.kind === 'mailbox' && state === 'ended'
     assert.equal(card.line, isGone ? 'none' : route.line, label)
-    const canSend = !isGone && route.line !== 'none' && route.record !== null
+    const canSend = !isGone && route.line !== 'none' && isNote(routeRecord(route, surface))
     assert.equal(card.canSend, canSend, label)
     const page = await pageDom(servePage(s, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
     page.cards().flatMap(one => page.buttons(one)).find(one => one.textContent === s.pgWriteOwn)?.click()
@@ -5179,7 +5184,7 @@ test('every receiver record against idle, working and ended shows its line, with
     assert.equal(card.send === 'connected' || card.send === 'mailbox', canSend, label)
     if (!canSend && state !== 'ended') assert.ok(labels.includes(s.pgCopyAnswer), label + ' ' + labels.join(' | '))
     if (!isGone) {
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint, chatOpen: s.serveNextOpenHint, none: s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, none: s.serveLineNone(name) }[route.line]
       assert.ok(page.text().includes(words), label + ' ' + words)
       assert.equal(page.text().includes(s.serveLineUnrecorded), !canSend && route.line !== 'none', label)
     }
@@ -5234,9 +5239,41 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'CLI').canSend, true)
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'CLI').canSend, false)
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'TUI').canSend, false)
-  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'IDE').canSend, false)
-  // The only Antigravity note ran headless `agy`, not the TUI, so no Antigravity surface has a recorded route.
-  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, false)
+  // The agy TUI note ran the interactive TUI with the session idle; the desktop app note ran the app idle and
+  // working, and the app reads as IDE. The headless `agy` note is no record for any surface.
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'working', 'agy TUI').canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'IDE').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'working', 'IDE').canSend, true)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'ended', 'IDE').canSend, false)
+  assert.equal(RECEIVER_ROUTES.find(one => one.agent === 'antigravity').routes.idle.record, 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md')
+  // A route may name a surface's own note: the gate reads the target surface's note, so an empty one refuses that
+  // surface alone. The hand-over table refuses a note that is empty, or names a surface the route does not cover.
+  const { isReceiverRoutes, routeRecord } = await import('../hooks/messaging.ts')
+  const withNotes = surfaceRecords => [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md', surfaces: ['Web', 'CLI'], surfaceRecords }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(withNotes({ CLI: '' }), 'alpha', 'mailbox', 'idle', 'Web').canSend, true)
+  assert.equal(routeOf(withNotes({ CLI: '' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  assert.equal(routeOf(withNotes({ CLI: 'docs/validation/other.md' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, true)
+  assert.equal(isReceiverRoutes(withNotes({ CLI: 'docs/validation/other.md' })), true)
+  for (const bad of [{ CLI: '' }, { CLI: '   ' }, { CLI: 'docs/a.md\ndocs/b.md' }, { TUI: 'docs/validation/other.md' }, ['docs/validation/other.md'], null]) assert.equal(isReceiverRoutes(withNotes(bad)), false, JSON.stringify(bad))
+  // A note of spaces names no file: the gate refuses it as it refuses an empty one, for a route and for a surface.
+  assert.equal(routeOf(withNotes({ CLI: '   ' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  const spaced = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: '   ', surfaces: ['CLI'] }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(spaced, 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  // A note on two lines names no file either: the gate refuses it for a surface and for a route.
+  assert.equal(routeOf(withNotes({ CLI: 'docs/validation/a.md\ndocs/validation/b.md' }), 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  const twoLines = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: 'docs/validation/a.md\ndocs/validation/b.md', surfaces: ['CLI'] }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(twoLines, 'alpha', 'mailbox', 'idle', 'CLI').canSend, false)
+  // A route with no note of its own may carry one surface's note: Send on that surface alone, and the route check takes it.
+  const surfaceOnly = [{ agent: 'alpha', kind: 'mailbox', routes: { idle: { line: 'now', record: null, surfaces: ['Web', 'CLI'], surfaceRecords: { CLI: 'docs/validation/other.md' } }, working: { line: 'none', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } }]
+  assert.equal(routeOf(surfaceOnly, 'alpha', 'mailbox', 'idle', 'CLI').canSend, true)
+  assert.equal(routeOf(surfaceOnly, 'alpha', 'mailbox', 'idle', 'Web').canSend, false)
+  assert.equal(isReceiverRoutes(surfaceOnly), true)
+  // agy TUI's idle route cites the TUI's own note; the app's note covers IDE.
+  const agyIdle = RECEIVER_ROUTES.find(one => one.agent === 'antigravity' && one.kind === 'mailbox').routes.idle
+  assert.equal(routeRecord(agyIdle, 'agy TUI'), 'docs/validation/2026-11-12-antigravity-tui-mailbox-live.md')
+  assert.equal(routeRecord(agyIdle, 'IDE'), 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md')
+  assert.equal(routeRecord(agyIdle, 'constructor'), 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md')
   const { readReceiverRecords, renderMatrix } = await import('../scripts/messaging-matrix.mjs')
   const root = join(import.meta.dirname, '..')
   const rows = renderMatrix(await readReceiverRecords(root), 'docs/MESSAGING.md', root).split('\n')
@@ -5247,6 +5284,17 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.ok(rowOf('DeepSeek Harness', 'Web').includes('2026-11-08-deepseek-harness-live.md'))
   assert.ok(!rowOf('DeepSeek Harness', 'TUI').includes('2026-11-08-deepseek-harness-live.md'))
   assert.ok(rowOf('Codex', 'CLI').includes('2026-11-12-codex-cli-mailbox-live.md'))
+  // Each Antigravity row cites the note that ran its own surface: the TUI's idle cell its own note, the app's
+  // cells the app note, and the editor, which has no run of its own, the route's note.
+  const cells = row => row.split(' | ')
+  assert.match(cells(rowOf('Antigravity', 'agy TUI'))[4], /Verified/)
+  assert.match(cells(rowOf('Antigravity', 'agy TUI'))[7], /2026-11-12-antigravity-tui-mailbox-live\.md/)
+  assert.match(cells(rowOf('Antigravity', 'agy TUI'))[8], /no live note/)
+  assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[4], /Verified/)
+  assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[7], /2026-11-13-antigravity-app-mailbox-live\.md/)
+  assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[8], /2026-11-13-antigravity-app-mailbox-live\.md/)
+  assert.match(cells(rowOf('Antigravity', 'IDE'))[4], /Implemented/)
+  assert.match(cells(rowOf('Antigravity', 'IDE'))[7], /2026-11-13-antigravity-app-mailbox-live\.md/)
 })
 
 test('the line and Send of a route come from its record: no record gives none and Copy', () => {
@@ -5586,6 +5634,15 @@ test('shape 22: a null, empty or none record keeps Copy', async () => {
     await shapeCopy(w)
   }
 })
+test('shape 22b: a route whose only note is one surface\'s own sends there and keeps Copy on its other surface (#1386 review)', async () => {
+  const route = { line: 'now', record: null, surfaces: ['Claude Code', 'CLI'], surfaceRecords: { 'Claude Code': shapeNote } }
+  const noted = await shapeCase()
+  shapeRoutes[0].routes.idle = route
+  await shapeSend(noted, 'now')
+  const bare = await shapeCase({ surface: 'CLI' })
+  shapeRoutes[0].routes.idle = route
+  await shapeCopy(bare)
+})
 test('shape 23: every recorded surface and state agrees with the card in three languages', async () => {
   const { readReceiverRecords } = await import('../scripts/messaging-matrix.mjs')
   const { agentLabel } = await import('../hooks/strings.ts')
@@ -5600,11 +5657,11 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
     const model = realServeModel(view, [], s, new Set(), false, target, false, group, RECEIVER_ROUTES)
     const card = model.asks[0] ?? [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)].find(one => one.title === 'Route table')
-    const canSend = state !== 'ended' && route.line !== 'none' && typeof route.record === 'string' && route.record !== '' && route.surfaces.includes(surface.id)
+    const canSend = state !== 'ended' && route.line !== 'none' && isNote(routeRecord(route, surface.id)) && route.surfaces.includes(surface.id)
     assert.equal(card.delivery !== undefined, canSend, `${record.source}/${surface.id}/${state}`)
     if (!(record.kind === 'mailbox' && state === 'ended')) {
       const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint, chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: s.serveLineNone(name) }[route.line]
       assert.equal(card.line, route.line, `${record.source}/${surface.id}/${state}`)
       assert.ok(card.lineText.includes(words), `${record.source}/${surface.id}/${state}: ${card.lineText}`)
     }
@@ -5744,6 +5801,44 @@ test('a board message goes only to the surface its route was checked for, and st
   } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('next-turn route explains in plain words in EN, ZH_TW, and ZH_CN, and in-flight wording never claims a reply (#1400)', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const { ZH_TW } = await import('../hooks/i18n.ts')
+  const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
+  const now = Date.now()
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const seed = enrollMailbox({ messages: [] }, 'codex', 'mailbox-next-turn', 'CLI', now, 43_200_000)
+    const mailbox = seed.mailboxes[0]
+    const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=mailbox-next-turn state=waiting updated=${new Date(now).toISOString()} -->\n### Next turn wording\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+    const view = buildView(parseProgress(file), [], null, now, 0, {}, s)
+    const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+    const makeModel = messages => serveModel(view, [], s, new Set(), false, { connections: [], mailboxes: [mailbox], messages }, false, group)
+    const cardText = makeModel([]).asks[0].lineText
+    assert.equal(cardText, s.serveNextTurnHint('Codex'))
+    assert.ok(!cardText.includes('does not wake an idle session'))
+    let release
+    const page = await pageDom(servePage(s, 'synthetic-nonce'), makeModel([]), () => new Promise(done => { release = done }))
+    page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === s.pgWriteOwn).click()
+    page.inputs(page.cards()[0])[0].value = 'Answer for next turn'
+    const queueBtn = page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent.startsWith(s.serveQueueNextTurn('Codex')))
+    queueBtn.click()
+    // Do not call page.flush() before release(): surfaces.mjs flush() awaits all pending fetch promises.
+    await new Promise(done => setImmediate(done))
+    assert.equal(queueBtn.disabled, true)
+    assert.ok(queueBtn.textContent.startsWith(s.serveQueueNextTurn('Codex')))
+    assert.ok(page.text().includes(s.serveQueuingNextTurn('Codex')), page.text())
+    assert.ok(!page.text().includes(s.serveSending('Codex')), page.text())
+    release({ ok: true, json: async () => ({ ok: true, note: s.serveQueuedNextTurn('Codex'), receipt: { id: 'next-turn-1', status: 'queued', line: 'nextTurn', isMailbox: true } }) })
+    await page.flush()
+    assert.ok(page.text().includes(s.serveQueuedNextTurn('Codex')), page.text())
+    const queued = queueMessage(seed, { id: 'next-turn-1', target: mailbox.id, turn: 'session', text: 'Answer for next turn' }, 'board', mailbox, now, 'local', undefined, 'nextTurn').state
+    await page.redraw(makeModel(queued.messages))
+    assert.ok(page.text().includes(s.serveQueuedNextTurn('Codex')), page.text())
+    assert.ok(!page.text().includes(s.serveSending('Codex')), page.text())
+  }
+})
+
 test("a session's own MCP inbox takes a board message bound to another surface of that session, and a hook mailbox on another surface still does not (#1351)", () => {
   const dir = mkdtempSync(join(tmpdir(), 'message-surface-mcp-'))
   const note = 'docs/validation/synthetic.md'
@@ -5757,5 +5852,101 @@ test("a session's own MCP inbox takes a board message bound to another surface o
     assert.equal(hub.act('mailbox-turn', { ...box, surface: 'TUI' }, now + 2).message, null)
     assert.equal(hub.act('mailbox-turn', { ...box, surface: 'unknown' }, now + 3).message, null)
     assert.equal(hub.act('mailbox-turn', { ...box, surface: 'mcp' }, now + 4).message?.id, 'AB-BOUND-2')
+  } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('docs/MESSAGING.md names the Codex proxy surface accepted by sendDecision and documents RECEIVER_ROUTES (#1415)', () => {
+  const messagingDoc = readFileSync(new URL('../docs/MESSAGING.md', import.meta.url), 'utf8')
+  const jsonLine = messagingDoc.split(/\r?\n/).find(line => line.includes('"executable":"<absolute Codex executable>"'))
+  assert.ok(jsonLine, 'expected Codex proxy stdin JSON example in docs/MESSAGING.md')
+  const example = JSON.parse(jsonLine)
+  const surface = example.surface ?? SURFACE_IDS.codexProxy
+  assert.equal(surface, SURFACE_IDS.codexProxy)
+  const now = Date.now()
+  const proxyConnection = { id: 'proxy-doc-1', agent: 'codex', session: 'synthetic-thread', turn: 'turn-1', scope: 'turn', surface, expires: now + 60_000 }
+  const allowed = sendDecision(proxyConnection.id, [proxyConnection], [], () => 'working', RECEIVER_ROUTES, now)
+  assert.equal(allowed.canSend, true)
+  assert.equal(allowed.line, 'now')
+  const refused = sendDecision('proxy-cli-1', [{ ...proxyConnection, id: 'proxy-cli-1', surface: SURFACE_IDS.cli }], [], () => 'working', RECEIVER_ROUTES, now)
+  assert.equal(refused.canSend, false)
+  assert.equal(refused.reason, 'SURFACE_UNKNOWN')
+  assert.ok(messagingDoc.includes('RECEIVER_ROUTES'))
+})
+
+test('a queued Codex CLI message stops waiting forever and offers Copy when a later hook reads unknown (#1405)', async () => {
+  const { handledOnly, servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const { ZH_TW } = await import('../hooks/i18n.ts')
+  const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
+  const dir = mkdtempSync(join(tmpdir(), 'message-surface-lost-'))
+  const hub = openTestMessaging(dir, false, { routes: RECEIVER_ROUTES, stateOfSession: () => 'idle' })
+  try {
+    const now = Date.now()
+    const box = { agent: 'codex', session: 'codex-surface-lost' }
+    hub.act('mailbox-turn', { ...box, surface: SURFACE_IDS.cli }, now)
+    const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=codex-surface-lost state=waiting updated=${new Date(now).toISOString()} -->\n### Surface change\n- [?] Continue?\n<!-- /auto session=abcdef01 -->\n`
+    const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+    const view = buildView(parseProgress(file), [], null, now, 0, {}, EN)
+    const beforeModel = realServeModel(view, [], EN, new Set(), false, hub.snapshot(now + 1), false, group, RECEIVER_ROUTES)
+    const askKey = beforeModel.asks[0].key
+    const questionId = beforeModel.asks[0].questionId
+    assert.equal(beforeModel.asks[0].send, 'mailbox')
+
+    const sent = hub.act('send', { id: 'AB-LOST-1', target: mailboxId('codex', 'codex-surface-lost'), turn: 'session', text: 'Yes', ...(questionId === undefined ? {} : { answers: questionId }) }, now + 1)
+    assert.equal(sent.status, 'queued')
+
+    // An older saved message with no bound surface stays deliverable when a hook reads unknown.
+    const unboundModel = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), false, {
+      connections: [],
+      mailboxes: [enrollMailbox({ messages: [] }, 'codex', 'codex-surface-lost', SURFACE_IDS.unknown, now, 43_200_000).mailboxes[0]],
+      messages: [{ ...sent, surface: undefined }],
+    }, false, group, RECEIVER_ROUTES)
+    assert.equal(unboundModel.asks[0].receipt?.isSurfaceLost, undefined)
+    assert.ok(unboundModel.view.needs.handled.includes(askKey))
+
+    // Check while still queued on CLI: card says Queued for next turn, held in handled.
+    const queuedModel = s => realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, s), [], s, new Set(), false, hub.snapshot(now + 2), false, group, RECEIVER_ROUTES)
+    assert.equal(queuedModel(EN).asks[0].isSending, true)
+    assert.ok(queuedModel(EN).view.needs.handled.includes(askKey))
+
+    // A later turn-start hook reads unknown: mailbox surface becomes unknown, message is unclaimed.
+    const taken = hub.act('mailbox-turn', { ...box, surface: SURFACE_IDS.unknown }, now + 3)
+    assert.equal(taken.message, null)
+
+    const snap = hub.snapshot(now + 4)
+    const afterEn = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), false, snap, false, group, RECEIVER_ROUTES)
+    assert.equal(afterEn.asks[0].send, 'none')
+    assert.equal(afterEn.asks[0].isSending, false)
+    assert.equal(afterEn.asks[0].receipt?.isSurfaceLost, true)
+    assert.ok(!afterEn.view.needs.handled.includes(askKey))
+    const lanAfter = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), true, handledOnly(snap), false, group, RECEIVER_ROUTES)
+    assert.ok(!lanAfter.view.needs.handled.includes(askKey))
+
+    // Enrolling the session's MCP inbox updates mailbox.surface to 'mcp', but MCP can still pull the message.
+    hub.act('mcp-enroll', { agent: 'codex', session: 'codex-surface-lost', surface: MCP_SURFACE, owner: '100:mcp-1', folderDigest: '0'.repeat(64), until: now + 60_000 }, now + 5)
+    const mcpSnap = hub.snapshot(now + 6)
+    const mcpModel = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, EN), [], EN, new Set(), false, mcpSnap, false, group, RECEIVER_ROUTES)
+    assert.equal(mcpModel.asks[0].receipt?.isSurfaceLost, undefined)
+    assert.ok(mcpModel.view.needs.handled.includes(askKey))
+
+    for (const s of [EN, ZH_TW, ZH_CN]) {
+      const m0 = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, s), [], s, new Set(), false, { connections: [], mailboxes: [enrollMailbox({ messages: [] }, 'codex', 'codex-surface-lost', SURFACE_IDS.cli, now, 43_200_000).mailboxes[0]], messages: [] }, false, group, RECEIVER_ROUTES)
+      const m1 = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, s), [], s, new Set(), false, { ...snap, mailboxes: [enrollMailbox({ messages: [] }, 'codex', 'codex-surface-lost', SURFACE_IDS.cli, now, 43_200_000).mailboxes[0]], messages: [{ ...sent, surface: undefined }] }, false, group, RECEIVER_ROUTES)
+      const m2 = realServeModel(buildView(parseProgress(file), [], null, now, 0, {}, s), [], s, new Set(), false, snap, false, group, RECEIVER_ROUTES)
+      const page = await pageDom(servePage(s, 'synthetic-nonce'), m0, async () => ({ ok: true, json: async () => ({ ok: true, note: s.serveQueuedNextTurn('Codex'), receipt: m1.asks[0].receipt }) }))
+      page.cards().flatMap(card => page.buttons(card)).find(btn => btn.textContent === s.pgWriteOwn).click()
+      page.inputs(page.cards()[0])[0].value = 'Yes'
+      page.cards().flatMap(card => page.buttons(card)).find(btn => btn.textContent.startsWith(s.serveQueueNextTurn('Codex'))).click()
+      await page.flush()
+      await page.redraw(m2)
+      const text = page.text()
+      assert.ok(text.includes(s.messagesSurfaceLost), text)
+      assert.ok(!text.includes(s.serveQueuedNextTurn('Codex')), text)
+      const buttons = page.cards().flatMap(card => page.buttons(card)).map(btn => btn.textContent)
+      assert.ok(buttons.includes(s.serveCopyMessage), buttons.join())
+      assert.ok(buttons.includes(s.messageTakeBack), buttons.join())
+      assert.ok(buttons.includes(s.pgCopyChoice), buttons.join())
+      assert.ok(!buttons.includes(s.serveRetry), buttons.join())
+    }
   } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
 })

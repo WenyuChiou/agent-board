@@ -21,7 +21,8 @@ recover within that deadline. Idle polls do not rewrite the message file. Sendin
 and receipts are never automatically retried, including after a store lock.
 
 Use the existing reply box on the session's card. A matching receiver enables Send or
-Queue only when its session state, surface and route have a live record. When the state
+Queue only when the route for its session state and the surface it registered or enrolled as has a live
+record; clients that share a surface share that record. When the state
 or route is unknown, the card offers Copy. One known gap: a Codex hook can read which client
 started a session, not which client runs a turn, so a terminal session continued in another client
 that leaves no mark in the hook's environment can keep the terminal's Queue; whether a message
@@ -31,15 +32,18 @@ Queue. Internal
 connection ids stay hidden. There is no
 separate target-picker workflow. Queue, transport and actual ACK receipts appear on the
 same card. Mark read, show again, collapse, tick and archive keep their existing actions.
-An offline card retains Copy. By default, the web UI and
-action API cannot spawn a CLI or resume a saved session. The existing copy-resume command
-remains available where the board already offered it.
+An offline card retains Copy. By default, only a recorded background-resume receiver
+(`reopen`, under [Background resume](#background-resume)) or an explicit `--allow-resume`
+opt-in may run an AI's own resume command from the local board; the LAN page and
+unrecorded routes keep Copy. The existing copy-resume command remains available where the
+board already offered it.
 
 The direct message API applies the same recorded-route check to board sends. A mailbox
 is refused rather than redirected when a live receiver of the same session has a recorded
 route, for the session's state and on its own surface; a live receiver without one leaves
 the mailbox's own route in place, on the card too. An unrecorded route returns
-`NO_RECORDED_ROUTE`. Retrying an existing message id returns that message
+`NO_RECORDED_ROUTE`, unless the target is refused first as gone or expired
+(`OFFLINE`) or contested (`CONTESTED`). Retrying an existing message id returns that message
 when its contents match, even if the route has since changed. The server records the route
 line itself; callers cannot supply `line`.
 
@@ -49,7 +53,12 @@ A turn-start hook can enroll its session only when the default messages folder a
 The page can queue a message for that exact session without waking it. A later turn-start
 hook of that session can claim one message, the oldest it is allowed to take. A message the page
 queues is saved with the surface its route was checked on. A hook that reads another surface does
-not claim such a message; the session's own MCP pull (`board_inbox`) still can. A message saved
+not claim such a message; the session's own MCP pull (`board_inbox`) still can. One known gap (#1405):
+no hook of the other surface takes such a message, and nothing rejects it for that, so it can stay
+queued until the mailbox expires or, where the agent's hook reports it, the session ends (below).
+After an upgrade this can catch an agy TUI session that an earlier release's hook enrolled as `IDE`:
+a message queued for it then is saved for `IDE`, and from its next turn the hook enrolls it as
+`agy TUI`. A message saved
 without a surface, by an older board or from another agent's session, is not held to one.
 A turn-start hook marks a message `accepted` only after it has written the message to its output
 for the host; that does not prove the model read it, and the hook collects no ACK. A hook that
@@ -85,6 +94,36 @@ start an ended Codex or Grok Build session. It is disabled by default, never ena
 setup, and works for closed sessions even with the message hub running. It is not live delivery.
 Reopening without the option replaces an idle server that had it enabled. LAN sends remain
 refused. Review the native agent's permissions before choosing this legacy mode.
+
+## Background resume
+
+For CLIs that have no external wake transport into an already-open session, a board message
+can run the AI's own resume command in the background (`reopen` route via the shared helper in
+`scripts/background-resume.ts`): `<ai> <resume flag> <conversation> <message>`. It reads the
+reply and the exact `ACK <code>` line from stdout and records the message receipt. Every
+background-resume receiver is bound by the owner's five limits:
+
+1. **Loopback only**: accepted only from the local board page on this computer (`127.0.0.1` /
+   `localhost`); requests off loopback or over `--lan` are refused.
+2. **Default permission mode only**: runs in the AI's own default permission mode and refuses
+   permission-widening or auto-approval flags (`--yolo`, `--full-auto`, `--dangerously-*`,
+   `--bypass-*`, `--permission-mode`, `--approval-mode`, `--ask-for-approval`, `--sandbox`, etc.).
+3. **Never mid-turn**: refused whenever the conversation has a turn running (`working` state, an
+   in-flight background resume, or an unknown session state).
+4. **One live record per AI before Send**: a card stays on Copy until a dated live run in
+   `docs/validation/` verifies the `reopen` route for that AI and surface.
+5. **Card wording**: before and after sending, the card explains that the turn runs in the
+   background and to open the AI's window to see it there.
+
+Each AI uses only routes permitted by its own terms and FAQ; the board never authenticates to
+or calls a vendor API directly:
+
+| AI / CLI | Background resume status | Policy / notes |
+| --- | --- | --- |
+| Antigravity (`agy`) | Out of scope | Disallowed on consumer plans (FAQ / terms section 6); uses own hooks / sidecar route (`#1396`). |
+| Cursor (`cursor-agent`) | Planned (`#1403`) | Pending vendor terms review, receiver wiring, and dated live record. |
+| Grok Build (`grok`) | Planned (`#1404`) | Pending vendor terms review, receiver wiring, and dated live record (separate from `--allow-resume`). |
+| Hermes Agent (`hermes`) | Planned (`#233`) | Pending vendor terms review, receiver wiring, and dated live record. |
 
 ## Local storage
 
@@ -227,8 +266,12 @@ answers `MESSAGE_STORE_BUSY`.
 
 The local hub accepts `POST /api/messages/dismiss` with only `{ "id": "<message-id>" }`,
 using the board token and the same browser-origin rules as sending. No receiver secret
-is needed; LAN requests are refused. A page button will come in a later change.
-Dismissal rejects a queued message before it can be handed out. An accepted or uncertain
+is needed; LAN requests are refused. On the page, only a Claude card's message has the
+buttons: Take back while it is queued; Dismiss once it is handed over, or while it is
+unconfirmed and not expired. A replied, stopped or expired message has neither.
+Dismissing a queued message rejects it, so it is not handed out after that; a message a hook
+handed back may already have been shown to its host (`queued` in the status table above).
+An accepted or uncertain
 message becomes final `uncertain` with error `DISMISSED`: delivery may already have happened,
 but it no longer blocks the next message. Disconnect and restart preserve that result;
 later receipts fail with `MESSAGE_DISMISSED`. A dismissed record drops its text at once, like any
@@ -354,10 +397,10 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 
 | Host | Surface | Tier | Primitive | Status | Live run | Receiver | Idle | Working | Ended |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Antigravity | 2.0 Desktop App | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
-| Antigravity | agy TUI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Antigravity | 2.0 Desktop App | 3 | Unknown | Verified | [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | none · no live note |
+| Antigravity | agy TUI | 3 | Unknown | Verified | [docs/validation/2026-11-12-antigravity-tui-mailbox-live.md](../docs/validation/2026-11-12-antigravity-tui-mailbox-live.md) | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-12-antigravity-tui-mailbox-live.md](../docs/validation/2026-11-12-antigravity-tui-mailbox-live.md) | nextTurn · no live note | none · no live note |
 | Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
-| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · no live note | nextTurn · no live note | none · no live note |
+| Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | none · no live note |
 | Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | stepEnd · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | none · no live note |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
@@ -401,7 +444,7 @@ This table is written by hand and covers progress reporting too. Its runs have n
 | --- | --- | --- |
 | Codex | Independent setup and explicit reporter; isolated native app-server SessionStart, UserPromptSubmit and Stop observed | Authenticated owners forwarded two prompts each way with Antigravity and native ACKs; autonomous model tools, CLI TTY and desktop chat remain separate |
 | Antigravity CLI | Independent named hooks; all four native Windows events observed after the command-quoting fix | Same cross-host owner acceptance; native stream ACK, idle continuation, deduplication, conflict and offline rejection verified |
-| Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established |
+| Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established in these runs. The desktop app's later next-turn mailbox runs have their own record, in the matrix above |
 | Gemini CLI (retired) | No longer offered by setup; Google's CLI is Antigravity CLI. An install from an earlier release still reports | The board no longer routes messages to it; its card offers Copy |
 | OpenCode | Independent setup, session-context progress tool and plugin events | Generic client API only; no native receiving adapter or real bidirectional acceptance yet |
 | OpenClaw | Independent metadata lifecycle plugin and native skill; separate optional Claude reporter | Its native session tools are not yet integrated into this hub; no real bidirectional acceptance |
@@ -409,9 +452,14 @@ This table is written by hand and covers progress reporting too. Its runs have n
 | DeepSeek Harness | Independent Cordis lifecycle plugin and native skill | Generic client contract checked; no DeepSeek-native receiver or model ACK acceptance |
 | dot / other UIs | Explicit progress relay where documented | No native receiving connector or real ACK established |
 
-To add a receiver, export `messagingReceiver` from its own import-safe `.mjs` or `.ts`
-module under `scripts/` or `hooks/`; no central receiver list or other receiver changes
-are needed. The `MessagingReceiverRecord` type is in `scripts/message-client.mjs`.
+To add a receiver, complete both steps: export `messagingReceiver` from its own import-safe `.mjs` or `.ts`
+module under `scripts/` or `hooks/` for matrix discovery (`scripts/messaging-matrix.mjs`),
+and add its routes to the runtime list `RECEIVER_ROUTES` in `hooks/receiver-routes.ts`
+(no other receiver changes are needed). The board offers Send only for routes in
+`RECEIVER_ROUTES` — a receiver missing there gets Copy — and the pinning test
+`'each receiver record names a validation note that exists, and the table the board reads matches every record'`
+in `tests/messaging.test.mjs` checks that `RECEIVER_ROUTES` matches every exported record.
+The `MessagingReceiverRecord` type is in `scripts/message-client.mjs`.
 Each surface names its own `docs/validation/<date>-<host>-live.md` file, or `null`; the host's
 name in lower case, with spaces and slashes as hyphens, starts the `<host>` part (`deepseek-harness`,
 `dot-web-chats`), and a surface may follow it. Importing a record module must start nothing;
@@ -425,8 +473,8 @@ An owned app-server or CLI stream is a separate surface from a CLI TTY, desktop 
 IDE. Earlier transport spikes and progress-hook runs do not verify those surfaces.
 
 Run `node scripts/messaging-matrix.mjs --write` after changing a record or its evidence.
-`node scripts/messaging-matrix.mjs --check` checks all four copies without writing and
-exits non-zero when any is stale or has missing markers.
+`node scripts/messaging-matrix.mjs --check` checks `docs/MESSAGING.md` without writing and
+exits non-zero when its table is stale or has missing markers.
 
 One machine's installation does not automatically attach every already-running agent.
 Each host needs its own authorized session binding and supported transport. A native
@@ -543,8 +591,10 @@ After a person approves the exact disposable server/thread/active-turn binding, 
 JSON on stdin:
 
 ```json
-{"boardUrl":"<private loopback board URL>","executable":"<absolute Codex executable>","thread":"<actual thread UUID>","turn":"<actual active turn id>","surface":"Codex CLI"}
+{"boardUrl":"<private loopback board URL>","executable":"<absolute Codex executable>","thread":"<actual thread UUID>","turn":"<actual active turn id>","surface":"Codex local proxy"}
 ```
+
+`surface` may also be omitted, because `connectCodexProxy` defaults to `"Codex local proxy"` (`SURFACE_IDS.codexProxy`).
 
 An explicit `socket` path may select an already-running owner. Preflight and each poll
 check `thread/loaded/list`; each send uses `turn/steer` with `expectedTurnId`. A stale turn

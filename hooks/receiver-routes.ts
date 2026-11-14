@@ -8,7 +8,7 @@ import { messagingReceiver as cursor } from './receivers/hook-mailbox-cursor'
 import { messagingReceiver as muse } from './receivers/hook-mailbox-muse'
 
 // A record module is plain data, so its lines read as strings here; the cast is the one place that trusts them, and a test checks each.
-type RecordShape = { agent: string; kind: string; routes: { [state in RowState]: { line: string; record: string | null; surfaces: string[] } } }
+type RecordShape = { agent: string; kind: string; routes: { [state in RowState]: { line: string; record: string | null; surfaces: string[]; surfaceRecords?: Record<string, string> } } }
 const fromRecord = (one: RecordShape): ReceiverRoutes => {
   const read = (state: RowState): Route => one.routes[state] as Route
   return { agent: one.agent, kind: one.kind as RouteKind, routes: { idle: read('idle'), working: read('working'), ended: read('ended') } }

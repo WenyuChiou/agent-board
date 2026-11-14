@@ -5,7 +5,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { inspect } from 'node:util'
 import { reporterPs1 } from '../hooks/hook-reporters.ts'
-import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { assertClassifierExited, classifierStartMs, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
 
 test('classifier exit proof refuses missing, unstarted, live and malformed observations without exposing their contents', () => {
   const dir = mkdtempSync(join(tmpdir(), 'classifier-exit-proof-'))
@@ -18,7 +18,7 @@ test('classifier exit proof refuses missing, unstarted, live and malformed obser
       return true
     })
     refuses()
-    for (const value of [null, [], { started: false, exited: true }, { started: true, exited: false }, { started: true, exited: true, pid: 123456789 }, { started: 'true', exited: true }]) {
+    for (const value of [null, [], { started: false, exited: true }, { started: true, exited: false }, { started: true, exited: true, pid: 123456789 }, { started: 'true', exited: true }, { started: true, exited: true, startMs: 'PRIVATE_123456789' }, { started: true, exited: true, startMs: 1.5 }]) {
       writeFileSync(file, JSON.stringify(value))
       refuses()
     }
@@ -26,6 +26,15 @@ test('classifier exit proof refuses missing, unstarted, live and malformed obser
     refuses()
     writeFileSync(file, '\uFEFF{"started":true,"exited":true}')
     assertClassifierExited(file)
+    for (const startMs of [null, 0, 812]) {
+      writeFileSync(file, JSON.stringify({ started: true, exited: true, startMs }))
+      assertClassifierExited(file)
+    }
+    assert.equal(classifierStartMs(file), 812)
+    writeFileSync(file, '﻿{"started":true,"exited":true,"startMs":null}')
+    assert.equal(classifierStartMs(file), null)
+    writeFileSync(file, 'PRIVATE_MALFORMED')
+    assert.equal(classifierStartMs(file), null)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 

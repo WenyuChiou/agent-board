@@ -5808,7 +5808,9 @@ const phaseLog = (budgetMs, more = () => []) => {
 
 // Cursor's shell has two extra inheritable pipes as well as stdout and stderr. `mark` takes one line
 // per event, so a failure says which pipe stayed open and when the others closed.
-const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = () => {}) => {
+// `signal` is the test's own abort signal: a command that never exits is ended with its whole process
+// tree when it fires, so the test runner's timeout does not leave the child and its pipes alive (#1439).
+const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = () => {}, signal) => {
   const found = spawnSync('where.exe', ['bash.exe'], { encoding: 'utf8', windowsHide: true })
   const bash = found.stdout.split(/\r?\n/).find(file => /[\\/]Git[\\/].*[\\/]bash\.exe$/i.test(file))
   assert.ok(bash, 'Git Bash is needed to reproduce Cursor on Windows')
@@ -5826,11 +5828,31 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
     child.once('exit', (code, signal) => { open.delete('bash exit'); mark(`bash exit code=${code} signal=${signal}`); done({ code, signal }) })
     child.once('error', fail)
   })
+  const closed = [end(child.stdout, 'stdout'), end(child.stderr, 'stderr'), end(child.stdio[3], 'fd3'), end(child.stdio[4], 'fd4')]
+  // A pipe that fails while the command is still running is reported below; this only stops it counting as unhandled first.
+  for (const pipe of closed) pipe.catch(() => {})
   let timer
+  let abort
+  const stopped = new Promise((_, fail) => {
+    abort = () => {
+      if (child.exitCode !== null || child.signalCode !== null) return
+      mark('test abort: ending the command')
+      if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+      else child.kill('SIGKILL')
+      fail(new Error("the Cursor shell command was stopped by the test's abort"))
+    }
+    if (signal?.aborted) abort()
+    else signal?.addEventListener('abort', abort, { once: true })
+  })
+  stopped.catch(() => {})
   try {
-    const [result] = await Promise.race([
-      Promise.all([exited, end(child.stdout, 'stdout'), end(child.stderr, 'stderr'), end(child.stdio[3], 'fd3'), end(child.stdio[4], 'fd4')]),
-      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
+    // The #1158 promise is that the pipes close once the command returns, so the 5 seconds count from
+    // that exit. How long the command itself takes is not this helper's to limit: the test's own limit
+    // and the phase log cover a command that hangs (#1439).
+    const result = await Promise.race([exited, stopped])
+    await Promise.race([
+      Promise.all(closed),
+      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds after bash exit; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
     ])
     assert.equal(result.code, 0, stderr)
     return { stdout, stderr }
@@ -5841,6 +5863,7 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
     throw error
   } finally {
     clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
     if (child.exitCode === null && child.signalCode === null) child.kill()
     child.stdout.destroy()
     child.stderr.destroy()
@@ -5947,7 +5970,7 @@ const browserFixture = board => {
 
 // Runs `--html` the way Cursor does against the fixture's browsers, with the launcher log loaded into
 // the `--html` process; `pid` is the stand-in that stays running, or undefined. Every step is marked.
-const htmlThroughCursor = async (board, fixture, log) => {
+const htmlThroughCursor = async (board, fixture, log, signal) => {
   writeFileSync(fixture.preload, launchLogPreload(fixture.launchLog))
   writeFileSync(board.script, `import { writeFileSync as recordLauncherPid } from 'node:fs'\nif (process.argv.includes('--html')) recordLauncherPid(${JSON.stringify(fixture.launcher)}, String(process.pid))\n${readFileSync(board.script, 'utf8')}`)
   const served = await board.serve()
@@ -5968,7 +5991,7 @@ const htmlThroughCursor = async (board, fixture, log) => {
     await closeFixturePage(board)
     await delay(200)
   }
-  const result = await cursorShell(board, ['--html'], env, stop, log.mark)
+  const result = await cursorShell(board, ['--html'], env, stop, log.mark, signal)
   for (let tries = 0; !existsSync(fixture.marker) && tries < 20; tries++) await delay(100)
   if (existsSync(fixture.marker)) pid = Number(readFileSync(fixture.marker, 'utf8'))
   log.mark(`stand-in ${pid === undefined ? 'never started' : `${pid} started, ${processAlive(pid) ? 'alive' : 'gone'}`}`)
@@ -5976,7 +5999,13 @@ const htmlThroughCursor = async (board, fixture, log) => {
 }
 
 // What the `--html` process's launcher log holds so far, for the phase log.
-const launcherLines = fixture => existsSync(fixture.launchLog) ? readFileSync(fixture.launchLog, 'utf8').trim().split('\n').filter(Boolean).map(entry => entry.replace(' ', ' launcher: ')) : []
+const readLauncherLines = fixture => existsSync(fixture.launchLog) ? readFileSync(fixture.launchLog, 'utf8').trim().split('\n').filter(Boolean).map(entry => entry.replace(' ', ' launcher: ')) : []
+
+// A log that cannot be read (a failed disk read, a folder in its place) is noted, never thrown: the cleanup
+// that follows must run, and the body's own error must stay the one reported.
+const launcherLines = fixture => {
+  try { return readLauncherLines(fixture) } catch (error) { return [`${Date.now()} launcher log unreadable: ${error.code ?? error.message}`] }
+}
 
 // Stops the stand-in and the `--html` process the fixture may have left, then removes the fixture.
 const endBrowserFixture = async (board, fixture, log, pid) => {
@@ -5997,18 +6026,21 @@ const endBrowserFixture = async (board, fixture, log, pid) => {
 
 // Runs a browser-startup test body with the phase log; a failure, in the body or in the cleanup,
 // carries the whole log, and the cleanup never hides the body's error.
-const browserStartupTest = async body => {
+const browserStartupTest = async (body, signal) => {
   const board = serveIn()
   const fixture = browserFixture(board)
-  const log = phaseLog(23_000, () => launcherLines(fixture))
+  // The cleanup removes the fixture folder and the launcher log with it, so the lines are read first.
+  let launched
+  const log = phaseLog(23_000, () => launched ?? launcherLines(fixture))
   let pid
   let failure
   try {
-    pid = await body(board, fixture, log)
+    pid = await body(board, fixture, log, signal)
   } catch (error) {
     failure = error
   } finally {
     log.end()
+    launched = launcherLines(fixture)
     try { await endBrowserFixture(board, fixture, log, pid) } catch (error) { log.mark(`cleanup failed: ${error.message.split('\n')[0]}`); failure ??= error }
   }
   if (failure !== undefined) {
@@ -6017,14 +6049,101 @@ const browserStartupTest = async body => {
   }
 }
 
-test('Windows server startup releases Cursor pipes while its page stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+test('Windows server startup releases Cursor pipes while its page stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
   const board = serveIn()
   try {
-    const result = await cursorShell(board, ['--serve', '--no-open'], {}, () => closeFixturePage(board))
+    const result = await cursorShell(board, ['--serve', '--no-open'], {}, () => closeFixturePage(board), () => {}, t.signal)
     assert.ok(board.urlOf(result.stdout), result.stdout)
     const server = JSON.parse(readFileSync(board.served, 'utf8'))
     assert.ok(processAlive(server.pid), 'the page must outlive the caller pipes')
   } finally { await board.end([]) }
+})
+
+// The helper times the #1158 promise (pipes close once the command returns), not the runner (#1439).
+// A stand-in for the board script is a tiny Node file, run the way Cursor runs the real one.
+const fakeBoard = (board, source) => {
+  const script = join(board.dir, 'fake-command.mjs')
+  writeFileSync(script, source)
+  return { ...board, script }
+}
+
+test('the Cursor shell helper accepts a command that runs longer than 5 seconds and then returns with its pipes closed', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
+  const board = serveIn()
+  try {
+    const marks = []
+    const result = await cursorShell(fakeBoard(board, "console.log('done'); setTimeout(() => process.exit(0), 5600)"), [], {}, async () => {}, line => marks.push(line), t.signal)
+    assert.equal(result.stdout.trim(), 'done')
+    assert.ok(marks.some(line => line.startsWith('bash exit code=0')), marks.join('\n'))
+  } finally { await board.end([]) }
+})
+
+test('the Cursor shell helper stops a command that never exits when its abort signal fires, ends the whole process and rejects at once', { skip: process.platform !== 'win32', timeout: 15_000 }, async () => {
+  const board = serveIn()
+  const pidFile = join(board.dir, 'hung.pid')
+  const controller = new AbortController()
+  let pid, run
+  try {
+    const began = performance.now()
+    const hung = `import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))
+setInterval(() => {}, 1000)`
+    run = cursorShell(fakeBoard(board, hung), [], {}, async () => {}, () => {}, controller.signal)
+    run.catch(() => {})
+    for (let tries = 0; !(existsSync(pidFile) && readFileSync(pidFile, 'utf8')) && tries < 80; tries++) await delay(100)
+    pid = Number(readFileSync(pidFile, 'utf8'))
+    assert.ok(pid > 0 && processAlive(pid), 'the stand-in command must be running before the abort')
+    controller.abort()
+    await assert.rejects(run, /stopped by the test's abort/)
+    for (let tries = 0; processAlive(pid) && tries < 30; tries++) await delay(100)
+    assert.ok(!processAlive(pid), 'the stand-in command must be gone after the abort')
+    assert.ok(performance.now() - began < 12_000, 'the abort must end the helper promptly')
+  } finally {
+    // Whatever failed above (a pid file that cannot be read, too), the stand-in is stopped and settled before the fixture goes.
+    controller.abort()
+    await run?.catch(() => {})
+    if (pid && processAlive(pid)) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true })
+    await board.end([])
+  }
+})
+
+test('the Cursor shell helper still fails, naming the pipe, when a command returns at once and a detached child holds fd3', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
+  const board = serveIn()
+  try {
+    const marks = []
+    const holder = "import { spawn } from 'node:child_process'\nspawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' }).unref()"
+    await assert.rejects(
+      () => cursorShell(fakeBoard(board, holder), [], {}, async () => {}, line => marks.push(line), t.signal),
+      // Windows lets the detached child inherit every inheritable handle, so fd3 is named among the open pipes and bash exit is not.
+      error => /did not all reach EOF in 5 seconds after bash exit; still open: [^;]*fd3[^;]*;/.test(error.message) && !error.message.includes('still open: bash exit') && !/still open: [^;]*bash exit/.test(error.message),
+    )
+    assert.ok(marks.some(line => line.includes('bash exit code=0')), `bash had already exited: ${marks.join('\n')}`)
+  } finally { await board.end([]) }
+})
+
+test('a browser startup failure keeps the launcher lines the launcher log held before the cleanup removed it', async () => {
+  const line = 'powershell 4242 started, stdio "ignore"'
+  await assert.rejects(
+    () => browserStartupTest(async (board, fixture) => {
+      writeFileSync(fixture.launchLog, `${Date.now()} ${line}\n`)
+      throw new Error('the body failed')
+    }),
+    error => error.message.startsWith('the body failed') && error.message.includes(' launcher: ') && error.message.includes(line),
+  )
+})
+
+test('a launcher log that cannot be read still lets the browser cleanup run and keeps the body error as the one reported', async () => {
+  let dir
+  try {
+    await assert.rejects(
+      () => browserStartupTest(async (board, fixture) => {
+        dir = board.dir
+        mkdirSync(fixture.launchLog)
+        throw new Error('the body failed')
+      }),
+      error => error.message.startsWith('the body failed') && error.message.includes('launcher log unreadable: EISDIR'),
+    )
+    assert.ok(!existsSync(dir), 'the cleanup must still remove the fixture folder')
+  } finally { if (dir) rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('on Windows the page address reaches the shell exactly as served, with no wildcard escaping', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
@@ -6090,27 +6209,27 @@ test('a Windows page starts from a folder whose name holds a curly apostrophe, b
   }
 })
 
-test('Windows browser startup releases Cursor pipes while the browser stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+test('Windows browser startup releases Cursor pipes while the browser stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, t => browserStartupTest(async (board, fixture, log, signal) => {
   // The Edge slot holds a file that is not a program, so the launcher has to move on to Chrome.
   mkdirSync(resolve(fixture.edge, '..'), { recursive: true })
   writeFileSync(fixture.edge, 'synthetic invalid executable')
   compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
   log.mark('stand-in browser compiled')
-  const result = await htmlThroughCursor(board, fixture, log)
+  const result = await htmlThroughCursor(board, fixture, log, signal)
   assert.ok(board.urlOf(result.stdout), result.stdout)
   assert.match(result.stdout, /Opened Agent Board/, result.stdout)
   assert.ok(result.pid() !== undefined, `the stand-in browser must start: ${result.stdout} ${result.stderr}`)
   assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
   return result.pid()
-}))
+}, t.signal))
 
-test('a Windows browser that exits with an error at once gives way to the next browser, and Cursor pipes are still released', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+test('a Windows browser that exits with an error at once gives way to the next browser, and Cursor pipes are still released', { skip: process.platform !== 'win32', timeout: 25_000 }, t => browserStartupTest(async (board, fixture, log, signal) => {
   // Start-Process returns once the program exists, so a browser that exits with an error right
   // away (no display, no sandbox) would otherwise count as opened and the person would see nothing.
   compileStandIn(board, fixture.edge, FAILING_BROWSER)
   compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
   log.mark('stand-in browsers compiled')
-  const result = await htmlThroughCursor(board, fixture, log)
+  const result = await htmlThroughCursor(board, fixture, log, signal)
   assert.ok(board.urlOf(result.stdout), result.stdout)
   assert.match(result.stdout, /Opened Agent Board/, result.stdout)
   assert.ok(existsSync(fixture.failed), 'the failing Edge stand-in must have been tried first')
@@ -6118,7 +6237,7 @@ test('a Windows browser that exits with an error at once gives way to the next b
   assert.ok(result.pid() !== undefined, `the Chrome stand-in must start after Edge failed: ${result.stdout} ${result.stderr}`)
   assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
   return result.pid()
-}))
+}, t.signal))
 
 test('Windows page startup times out without leaving its child or ready files', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
   const board = serveIn()
