@@ -7845,9 +7845,18 @@ test('a mailbox accept the board did not take prints ok false, and ok true once 
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   f.seed('deepseek')
   const run = (...args) => spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--session', session, '--mailbox', ...args], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
-  const took = run('take', '--surface', 'Web')
-  assert.equal(took.status, 0, took.stderr)
-  const { message } = JSON.parse(took.stdout)
+  const take = () => {
+    const took = run('take', '--surface', 'Web')
+    assert.equal(took.status, 0, took.stderr)
+    return JSON.parse(took.stdout)
+  }
+  // A take the store answers too slowly is deferred by design and asked again (#902): accept one, and check it was one (#1476).
+  const first = take()
+  if (first.message === null) {
+    assert.equal(first.deferred, true, 'a take with no message was not deferred')
+    assert.equal(f.state().messages[0].status, 'queued')
+  }
+  const { message } = first.message === null ? take() : first
   assert.equal(message.id, 'hook-mailbox-message')
   const accept = () => run('accept', '--id', message.id, '--nonce', message.nonce)
   const claim = claimMessageStore(f.directory)
