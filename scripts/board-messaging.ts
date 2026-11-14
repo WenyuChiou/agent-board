@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
@@ -211,6 +211,23 @@ export const readQueuedMessaging = (directory: string, now: number) => {
     const state = expireMailboxes(parseMessageStore(found.text, now), now)
     return { connections: [] as Connection[], mailboxes: state.mailboxes ?? [], messages: shownMessages(state) }
   } catch { return undefined }
+}
+
+// The board's own verdict on its messages file as it is on disk now (#1366): read as readQueuedMessaging reads it, without a
+// lock and without writing, and checked by parseMessageStore, as every call that opens the store checks it. mark is the
+// sha256 of the text it accepted; null when nothing is at the folder or the folder holds no file. A folder or a file it would
+// refuse throws. OpenCode's plugin says nothing about a session only on a text this accepted, so it keeps no copy of these rules.
+export const checkStoreFile = (directory: string, now: number): { mark: string | null } => {
+  const root = resolve(directory)
+  try { if (!lstatSync(root).isDirectory() || lstatSync(root).isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING') } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { mark: null }
+    throw error
+  }
+  const found = readSettings(join(root, 'messages.json'))
+  if (found.kind === 'missing') return { mark: null }
+  if (found.kind !== 'ok') throw new Error('UNSAFE_MESSAGE_FILE')
+  try { parseMessageStore(found.text, now) } catch { throw new Error('INVALID_MESSAGE_STORE') }
+  return { mark: createHash('sha256').update(found.text, 'utf8').digest('hex') }
 }
 
 const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDefault = false, gate?: MessageGate) => {

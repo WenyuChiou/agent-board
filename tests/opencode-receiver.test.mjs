@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { registerHooks, createRequire } from 'node:module'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, watch, writeFileSync } from 'node:fs'
@@ -42,7 +43,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
     const { queueMessage, pruneMessages, deliveryText } = await importTs('../hooks/messaging.ts')
     const { STRINGS } = await importTs('../hooks/strings.ts')
-    const { mailboxAction } = isSpawn ? {} : await importTs('../scripts/board-messaging.ts')
+    const { mailboxAction, checkStoreFile } = isSpawn ? {} : await importTs('../scripts/board-messaging.ts')
     const save = (file, text) => { mkdirSync(join(file, '..'), { recursive: true }); writeFileSync(file, text) }
     const board = join(home, 'opencode-board.mjs')
     save(board, isSpawn ? bundleFromDir(new URL('..', import.meta.url)) : '')
@@ -102,6 +103,8 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       },
       end: (run, base) => run('mailbox-end', base),
       open: (run, base) => run('mailbox-open', { ...base, surface: 'CLI' }),
+      // The board's own verdict on its file as it is on disk, which writes nothing.
+      verify: () => checkStoreFile(directory, clock.now()),
     }
     // The board script's answer to one --mailbox call.
     const answerOf = (action, args) => {
@@ -120,7 +123,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       }
       try {
         const answer = BOARD[action](run, base, at, args)
-        return action === 'take' ? answer : action === 'open' ? { ok: true, enrolled: true, watch: directory } : { ok: true }
+        return action === 'take' ? answer : action === 'open' ? { ok: true, enrolled: true, watch: directory } : action === 'verify' ? { ok: true, ...answer } : { ok: true }
       } catch (error) { return { ok: false, code: code(error), ...(action === 'take' ? { watch: directory, message: null } : {}) } }
     }
     const spawnBoard = (...args) => {
@@ -284,11 +287,11 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
       watchers.push(watcher)
       return watcher
     }
-    const names = ['createRequire', 'spawnSync', 'tool', 'spawnBoard', 'readBoardStore', 'watchBoard', 'joinBoard', 'boardEntry', 'setInterval', 'clearInterval']
+    const names = ['createRequire', 'spawnSync', 'tool', 'spawnBoard', 'readBoardStore', 'watchBoard', 'joinBoard', 'boardEntry', 'setInterval', 'clearInterval', 'hashBoard']
     const build = async () => {
       if (!isSpawn) globalThis[TIMING_KEY] = { ...FAST, ...timing }
       try {
-        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0], hostCall: typeof hostCall === 'undefined' ? undefined : hostCall }`)(createRequire, reporter, tool, spawnBoard, readFileSync, watchBoard, join, lstatSync, fakeSetInterval, fakeClearInterval)
+        const factory = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export default', 'const plugin =').replace(/^export /gm, '')}\nreturn { plugin: AgentBoardLocal, receiver: () => typeof receivers === 'undefined' ? receiver : [...receivers.values()][0], hostCall: typeof hostCall === 'undefined' ? undefined : hostCall }`)(createRequire, reporter, tool, spawnBoard, readFileSync, watchBoard, join, lstatSync, fakeSetInterval, fakeClearInterval, createHash)
         const hooks = await factory.plugin({ client, directory: home })
         receiverOf = factory.receiver
         return { hooks, receiver: factory.receiver, plugin: factory.plugin, hostCall: factory.hostCall }
@@ -1381,20 +1384,19 @@ test('R26 a failed status lookup at the end of the settle wait is looked at agai
   assert.equal(f.calls.promptAsync.length, 2)
 }, { watch: false }))
 
-test('R29 with nothing owed a tick spawns no board call and asks the host nothing; a mailbox with less than its lifetime minus ten minutes left is renewed by a take at the next tick (round 3, round 6)', () => fixture(async f => {
+test('R29 with nothing owed a tick spawns no board call but one verify of a new file, and asks the host nothing; a mailbox with less than its lifetime minus ten minutes left is renewed by a take at the next tick (round 3, round 6)', () => fixture(async f => {
   await f.created('ses_r29')
   await f.quiet()
   const board = f.calls.board.length
   const status = f.calls.status.length
   for (let round = 1; round <= 20; round++) { f.tick(); await wait(10) }
   await f.quiet()
-  assert.equal(f.calls.board.length, board, 'twenty ticks with nothing owed')
+  assert.deepEqual(f.calls.board.slice(board), ['verify'], 'twenty ticks with nothing owed: one verify of the file as the take left it, then nothing')
   assert.equal(f.calls.status.length, status)
   f.shorten('ses_r29', 5 * MIN)
   f.tick()
   await f.quiet()
-  assert.equal(f.calls.board.length, board + 1, 'the next tick renews the mailbox')
-  assert.equal(f.calls.board.at(-1), 'take')
+  assert.deepEqual(f.calls.board.slice(board + 1), ['take'], 'the next tick renews the mailbox')
   assert.ok(f.mailbox('ses_r29').expires > Date.now() + LIFETIME - 10 * MIN)
 }, { watch: false }))
 
@@ -1480,6 +1482,7 @@ test('R33 for every call the receiver makes and every fault it can meet, with th
     accept: ['error', 'lose', 'hang'],
     open: ['throw', 'error', 'hang'],
     end: ['throw', 'error', 'hang'],
+    verify: ['throw', 'error', 'hang'],
     report: ['throw', 'hang'],
   }
   const NOT_A_ROW = { ack: 'the model calls it after the wake (R6, R23, R35)' }
@@ -1487,7 +1490,8 @@ test('R33 for every call the receiver makes and every fault it can meet, with th
   const WITH_A_MESSAGE = ['promptAsync', 'attempt', 'release', 'accept', 'end']
   // The calls the receiver makes only in some states of the session, so a fault on them can be met only there: a busy session
   // takes nothing and is never woken (V2); only an idle event makes the plugin look up the reply (messages); only a busy session
-  // with no mailbox in the file opens one (open); a busy session is asked about only while something is owed, which is not the
+  // with no mailbox in the file opens one (open); a verify is asked only of a file that shows nothing owed, which a board with no
+  // folder, and a busy session with its message waiting, never have (verify); a busy session is asked about only while something is owed, which is not the
   // case when the board has no folder or the session's mailbox is open and nothing waits (status); an end is made when the
   // session is deleted, in either state. The host's get and messages hang for over two seconds, so they hang for the mailbox
   // store only: what a hang leaves the receiver is what a throw leaves it, which their throw rows check in every store. The
@@ -1497,7 +1501,7 @@ test('R33 for every call the receiver makes and every fault it can meet, with th
   const ALL = ['none', 'empty', 'mailbox']
   const WHERE = {
     messages: { idle: ALL }, take: { idle: ALL }, promptAsync: { idle: ALL }, attempt: { idle: ALL }, release: { idle: ALL }, accept: { idle: ALL },
-    open: { busy: ['none', 'empty'] }, status: { idle: ALL, busy: ['mailbox'] },
+    open: { busy: ['none', 'empty'] }, status: { idle: ALL, busy: ['mailbox'] }, verify: { idle: ['empty', 'mailbox'], busy: ['empty'] },
     'get hang': { idle: ['mailbox'], busy: ['mailbox'] }, 'messages hang': { idle: ['mailbox'] },
   }
   // By design nobody can know whether these wakes arrived: the message stays a started wake, with one call, never repeated.
@@ -1959,7 +1963,20 @@ test('A22 a named take is empty only when nothing is at the messages folder; a d
 // What a receiver's tick does with each thing at the messages folder, after an empty take while the session stays idle (#1366
 // round 13): only nothing there stays silent; anything else is asked of the board, which refuses it, and is logged once.
 const folderLink = (target, path) => symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir')
-const freshMailbox = session => JSON.stringify({ version: 2, messages: [], mailboxes: [{ id: 'x', agent: 'opencode', session, surface: 'CLI', expires: Date.now() + 43_200_000 }] })
+// A session's fresh mailbox as the board writes it (A29 checks the board accepts it), so each case damages one thing only.
+const { mailboxId: mailboxOf } = await importTs('../hooks/hook-messages.ts')
+const { parseMessageStore } = await importTs('../scripts/board-messaging.ts')
+const { queueMessage, textHash } = await importTs('../hooks/messaging.ts')
+const freshMailbox = session => JSON.stringify({ version: 2, messages: [], mailboxes: [{ id: mailboxOf('opencode', session), agent: 'opencode', session, surface: 'CLI', turn: 'session', scope: 'mailbox', expires: Date.now() + 43_200_000, origin: 'local' }] })
+// The same with one finished message to the session (turned away), which nothing owes: a store the board accepts and the receiver
+// stays silent about, with a message whose every field a case can damage.
+const withFinished = session => {
+  const fresh = JSON.parse(freshMailbox(session))
+  const target = fresh.mailboxes[0]
+  const queued = queueMessage({ messages: [], mailboxes: [target] }, { id: 'finished-1', target: target.id, turn: 'session', text: 'Synthetic finished text' }, 'board', target, Date.now()).message
+  return { ...fresh, pausePeerMessages: false, messages: [{ ...queued, status: 'rejected', error: 'SESSION_ENDED' }] }
+}
+const isRefused = text => { try { parseMessageStore(text, Date.now()); return false } catch { return true } }
 const afterEmptyTake = async (f, session, arrange) => {
   const log = join(f.home, '.agent-board', 'hook-errors.log')
   const lines = () => (existsSync(log) ? readFileSync(log, 'utf8') : '').split('MAILBOX_FAILED').length - 1
@@ -2007,14 +2024,18 @@ test('A24 the receiver reads the messages folder by the board\'s rule: only noth
   assert.deepEqual(await folderCases(true), [])
 })
 
-test('A28 a messages file that holds the session\'s fresh mailbox but is not shaped as the board reads it is asked of the board at the next tick and logged once (#1366 review)', async () => {
-  const fresh = JSON.parse(freshMailbox('ses_a28'))
+test('A28 a messages file that holds the session\'s fresh mailbox but that the board refuses is asked of the board at the next tick and logged once, through the real board script (#1366 review)', async () => {
+  const fresh = withFinished('ses_a28')
+  const [one] = fresh.messages
   const cases = [
     ['messages that is not a list', { ...fresh, messages: {} }],
-    ['an unknown version', { ...fresh, version: 9 }],
-    ['mailboxes that is not a list', { ...fresh, messages: [], mailboxes: { ...fresh.mailboxes[0] } }],
-    ['a message that is not an object', { ...fresh, messages: ['x'] }],
+    ['pausePeerMessages that is not true or false', { ...fresh, pausePeerMessages: 'x' }],
+    ['a mailbox id that is not the session\'s', { ...fresh, mailboxes: [{ ...fresh.mailboxes[0], id: 'x' }] }],
+    ['a message whose hash is not its text\'s', { ...fresh, messages: [{ ...one, hash: textHash('other text') }] }],
+    ['two messages with one id', { ...fresh, messages: [one, one] }],
   ]
+  for (const [label, store] of cases) assert.ok(isRefused(JSON.stringify(store)), `${label}: the board refuses it`)
+  assert.ok(!isRefused(JSON.stringify(fresh)), 'the board accepts the store each case damages')
   const wrong = []
   for (const [label, store] of cases) {
     await fixture(async f => {
@@ -2026,6 +2047,116 @@ test('A28 a messages file that holds the session\'s fresh mailbox but is not sha
   }
   assert.deepEqual(wrong, [])
 })
+
+// The Fable diagnosis of #1366 (after codex_339): the receiver is silent about a session only on a text of the board's file
+// the board itself accepted (verify), so no copy of the board's rules can fall behind them. One test per invariant.
+const settleIdle = async (f, session) => { await f.created(session); await f.quiet(); f.tick(); await f.quiet() }
+const write = (f, store) => { const text = typeof store === 'string' ? store : JSON.stringify(store); writeFileSync(join(f.directory, 'messages.json'), text); return text }
+const askedSince = (f, from) => f.calls.board.slice(from).some(action => action === 'take' || action === 'open')
+
+test('A29 I1 every top-level, mailbox and message field, damaged or removed one at a time: a store the board refuses is asked of the board at the next tick, and nothing wakes a turn (#1366 Fable diagnosis)', () => fixture(async f => {
+  const session = 'ses_a29'
+  await settleIdle(f, session)
+  const base = withFinished(session)
+  assert.ok(!isRefused(JSON.stringify(base)), 'the board accepts the store each case damages')
+  write(f, base)
+  let from = f.calls.board.length
+  f.tick(); await f.quiet()
+  assert.deepEqual(f.calls.board.slice(from), ['verify'], 'an accepted store with nothing owed: one verify, then silent')
+  const damaged = []
+  const VALUES = [null, 'x', {}, -1, undefined]
+  const change = (object, key, value) => { const next = { ...object }; if (value === undefined) delete next[key]; else next[key] = value; return next }
+  for (const key of Object.keys(base)) for (const value of VALUES) damaged.push([`${key} ${JSON.stringify(value)}`, change(base, key, value)])
+  for (const key of Object.keys(base.mailboxes[0])) for (const value of VALUES) damaged.push([`mailbox ${key} ${JSON.stringify(value)}`, { ...base, mailboxes: [change(base.mailboxes[0], key, value)] }])
+  for (const key of Object.keys(base.messages[0])) for (const value of VALUES) damaged.push([`message ${key} ${JSON.stringify(value)}`, { ...base, messages: [change(base.messages[0], key, value)] }])
+  damaged.push(['two messages with one id', { ...base, messages: [base.messages[0], base.messages[0]] }])
+  damaged.push(['two mailboxes with one id', { ...base, mailboxes: [base.mailboxes[0], base.mailboxes[0]] }])
+  const wrong = []
+  let refused = 0
+  for (const [label, store] of damaged) {
+    const text = write(f, store)
+    from = f.calls.board.length
+    f.tick(); await f.quiet()
+    if (isRefused(text)) {
+      refused += 1
+      if (!askedSince(f, from)) wrong.push(`${label}: refused by the board, but the receiver stayed silent`)
+    }
+  }
+  assert.deepEqual(wrong, [])
+  assert.ok(refused > damaged.length / 2, `most cases are refused (${refused} of ${damaged.length})`)
+  assert.equal(f.calls.promptAsync.length, 0, 'no case woke a turn')
+}, { watch: false }))
+
+test('A30 I2 a voucher is for the exact text: a same-length damaging edit after the board accepted the file is asked at the next tick, and an answer for another text vouches for nothing (#1366 Fable diagnosis)', () => fixture(async f => {
+  const session = 'ses_a30'
+  await settleIdle(f, session)
+  const good = write(f, withFinished(session))
+  f.tick(); await f.quiet()
+  let from = f.calls.board.length
+  f.tick(); await f.quiet()
+  assert.deepEqual(f.calls.board.slice(from), [], 'the accepted text is vouched for')
+  const bad = good.replace('"version":2', '"version":3')
+  assert.equal(bad.length, good.length)
+  assert.ok(isRefused(bad))
+  write(f, bad)
+  from = f.calls.board.length
+  f.tick(); await f.quiet()
+  assert.ok(askedSince(f, from), 'the same-length edit is asked of the board')
+  // The receiver reads one text and the board answers for another, written while the verify was on its way.
+  const first = write(f, withFinished(session))
+  const verifies = f.count('verify')
+  f.tick()
+  write(f, { ...withFinished(session), pausePeerMessages: true })
+  await f.quiet()
+  assert.equal(f.count('verify'), verifies + 1)
+  write(f, first)
+  f.tick(); await f.quiet()
+  assert.equal(f.count('verify'), verifies + 2, 'the text read was not vouched for by an answer about another, so it is asked again')
+  assert.equal(f.calls.promptAsync.length, 0)
+}, { watch: false }))
+
+test('A31 I3 cost: three idle sessions on an unchanged accepted file cost one verify in five ticks and no take or open; an unrelated rewrite costs exactly one more verify, and verify writes nothing (#1366 Fable diagnosis)', () => fixture(async f => {
+  for (const session of ['ses_a31a', 'ses_a31b', 'ses_a31c']) { await f.created(session); await f.quiet() }
+  let from = f.calls.board.length
+  for (let round = 0; round < 5; round++) { f.tick(); await f.quiet() }
+  assert.deepEqual(f.calls.board.slice(from), ['verify'], 'five ticks: one verify')
+  const text = readFileSync(join(f.directory, 'messages.json'), 'utf8')
+  write(f, JSON.stringify(JSON.parse(text), null, 1))
+  const rewritten = readFileSync(join(f.directory, 'messages.json'), 'utf8')
+  from = f.calls.board.length
+  for (let round = 0; round < 3; round++) { f.tick(); await f.quiet() }
+  assert.deepEqual(f.calls.board.slice(from), ['verify'], 'the rewrite: exactly one more verify')
+  assert.equal(readFileSync(join(f.directory, 'messages.json'), 'utf8'), rewritten, 'verify left the file as it was')
+}, { watch: false }))
+
+test('A32 I4 I5 a verify that hangs, fails or is unknown to an older board leaves the file not known: the session asks the board, and a queued message is still woken once (#1366 Fable diagnosis)', async () => {
+  const wrong = []
+  for (const fault of ['hang', 'error', 'lose']) {
+    await fixture(async f => {
+      const session = `ses_a32_${fault}`
+      await f.created(session); await f.quiet()
+      f.calls.broken.verify = fault
+      const from = f.calls.board.length
+      f.tick(); await f.quiet()
+      if (!f.calls.reached.includes(`verify ${fault}`)) wrong.push(`${fault}: no verify was made`)
+      if (!askedSince(f, from)) wrong.push(`${fault}: the session did not ask the board`)
+      f.queue(session, `a32-${fault}`, 'Synthetic text for A32')
+      for (let round = 0; round < 3; round++) { f.tick(); await f.quiet() }
+      if (f.calls.promptAsync.length !== 1 || f.calls.sent.length !== 1) wrong.push(`${fault}: ${f.calls.promptAsync.length} wakes, ${f.calls.sent.length} arrived`)
+    }, { watch: false })
+  }
+  assert.deepEqual(wrong, [])
+})
+
+test('A33 a message is the session\'s by its mailbox as well as by its address, as the board hands it out: one whose address differs is still woken (#1366 Fable diagnosis)', () => fixture(async f => {
+  const session = 'ses_a33'
+  await settleIdle(f, session)
+  f.queue(session, 'a33-message', 'Synthetic text for A33')
+  const store = f.store()
+  write(f, { ...store, messages: store.messages.map(one => one.id === 'a33-message' ? { ...one, to: 'opencode:another-session' } : one) })
+  f.tick(); await f.quiet()
+  assert.equal(f.calls.promptAsync.length, 1, 'the message for the session\'s mailbox is woken')
+}, { watch: false }))
 
 test('A27 the test board stand-in refuses a link or a file at the messages folder in its default mode too, as the board script does (#1366 review)', async () => {
   assert.deepEqual(await folderCases(false), [])

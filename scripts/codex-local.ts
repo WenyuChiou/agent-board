@@ -32,7 +32,7 @@ import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { deliverTurnEvent } from './hook-delivery'
-import { hookMailbox } from './board-messaging'
+import { checkStoreFile, hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
@@ -518,7 +518,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const action = flag('--mailbox'), session = flag('--session')
     // OpenCode's plugin (#724) also acknowledges for its own session: ack upgrades an accepted message.
     // open (OpenCode's too) opens or renews the mailbox of a session that is busy, where the plugin takes nothing (#1366).
-    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'release', 'attempt', 'open'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
+    // verify (OpenCode's too) answers whether the board accepts its messages file as it is now, and writes nothing (#1366).
+    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'release', 'attempt', 'open', 'verify'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
     const directory = defaultMessagesDirectory(progress, home, process.env, process.platform)
     // This path runs in the plugin's own process with seconds to spare, so it waits for a busy board or store (a turn-start hook cannot).
     const mailbox = hookMailbox(directory, 5000, 2000, 2000)
@@ -554,6 +555,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         answer({ ok: true, enrolled: true, watch: directory })
       } catch (error) {
         answer(mailbox.hasNoFolder ? { ok: true, enrolled: false, watch: directory } : { ok: false, code: codeOf(error), watch: directory })
+      }
+    } else if (action === 'verify') {
+      // OpenCode's plugin only. mark is the hash of the text the board accepted (null: no file there); the plugin trusts what
+      // it read only for that same text. A file the board refuses answers ok false with its code. No lock, no write.
+      try {
+        answer({ ok: true, ...checkStoreFile(directory, Date.now()) })
+      } catch (error) {
+        answer({ ok: false, code: codeOf(error) })
       }
     } else if (action === 'release' || action === 'attempt') {
       // OpenCode's plugin only. release hands a claim back (--unsent: the host was never called, so even a started wake goes back);
