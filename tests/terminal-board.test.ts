@@ -333,6 +333,33 @@ test('a question over a list offers each list item on the terminal board and pic
   expect(out).toContain('SQLite')
 })
 
+test('a choice press is refused when only the structured options changed since the draw (#1277)', () => {
+  const s = STRINGS.en
+  const make = (options: readonly string[]) => `## api
+<!-- auto session=ab12cd34 agent=codex state=waiting updated=${at(5)} -->
+### Pick storage
+- [?] Which database should I use?
+<!-- options=${JSON.stringify(options)} -->
+<!-- /auto session=ab12cd34 -->
+`
+  const firstItems = boardItems(viewOf(make(['Postgres', 'SQLite'])), [])
+  const choose = firstItems.findIndex(item => item.type === 'ask' && item.ask.kind === 'choose')
+  expect(choose).toBeGreaterThan(-1)
+  const item = firstItems[choose]!
+  const drawn = pinned({ ...emptyBoardState, selected: choose }, firstItems)
+
+  const changedItems = boardItems(viewOf(make(['SQLite', 'Postgres'])), [])
+  const route: AnswerRoute = { mode: 'connected', agent: 'codex', session: 'ab12cd34', asked: 'Which database should I use?', fp: drawn.seen![item.key]!, delivery: { id: 'c1', turn: 't1', agent: 'codex' } }
+  expect(boardKey(drawn, '1', changedItems, s)).toMatchObject({ action: null, state: { note: s.boardLineChanged } })
+  const refusedSend = boardKey(drawn, '1', changedItems, s, { [item.key]: route })
+  expect(refusedSend.action).toBeNull()
+  expect(refusedSend.state.note).toBe(s.boardLineChanged)
+
+  const redrawn = pinned(refusedSend.state, changedItems)
+  const freshRoute: AnswerRoute = { ...route, fp: redrawn.seen![item.key]! }
+  expect(boardKey(redrawn, '1', changedItems, s, { [item.key]: freshRoute }).action).toEqual({ type: 'send', key: item.key, text: 'SQLite', route: freshRoute })
+})
+
 test('the terminal board lists what waits on you, then what is working, then the rest by project, with agent names and ages in one column', () => {
   const s = STRINGS.en
   const view = viewOf(BOARD)
