@@ -637,6 +637,9 @@ test('a page restored from the back/forward cache restores its approval capabili
   assert.equal((await first.press(warmCard, 'allow', { confirmed: true })).status, 403)
   assert.equal((await runHook(board, request('npm run synthetic-while-in-bfcache')).done).decision, null)
 
+  // A late in-flight poll reaching the server after persisted page-gone stays retired without erasing the suspended secret (#1436 review).
+  assert.equal((await board.call('/api/board', undefined, { 'x-board-page': 'p-first', 'x-board-visible': '1', 'x-board-approve': first.secret })).body.moved, true)
+
   // Back navigation restores with a new page id and rotated secret.
   const restored = await board.call('/api/approvals/restore', { fromPage: 'p-first' }, { origin: board.origin, 'x-board-page': 'p-restored', 'x-board-visible': '1', 'x-board-approve': first.secret })
   assert.equal(restored.status, 200)

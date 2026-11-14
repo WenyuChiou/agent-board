@@ -5275,11 +5275,17 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   const html = run('en', ['--chat'], {}, FILE, source)
   const polls = []
   let restoreReply = () => ({ ok: true, json: async () => ({ secret: 'sec-restored' }) })
+  let holdNextPoll = null
   const dom = await pageDom(html, null, {
     width: 1000,
     hash: '#k=synthetic-key',
     getBoard: async options => {
       polls.push(options.headers)
+      if (holdNextPoll !== null) {
+        const next = holdNextPoll
+        holdNextPoll = null
+        return await next
+      }
       return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }, now: 1 }) }
     },
     post: async req => {
@@ -5292,13 +5298,21 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   const first = polls[0]['x-board-page']
   assert.equal(polls[0]['x-board-approve'], 'sec-initial')
 
+  // An in-flight poll that left before pagehide and receives { moved: true } after pageshow must not close the restored page (#1436 review).
+  let releaseStale
+  holdNextPoll = new Promise(resolve => { releaseStale = resolve })
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+
   dom.leave({ persisted: true })
-  await dom.settle()
+  await dom.flush()
   assert.deepEqual(dom.requests.find(r => r.path === '/api/page-gone').body, { persisted: true })
 
   const before = polls.length
   dom.restore(true)
+  await dom.flush()
+  releaseStale({ ok: true, json: async () => ({ moved: true }) })
   await dom.settle()
+  assert.equal(dom.node('side').hidden, false)
   const restoreCall = dom.sent.find(s => s.path === '/api/approvals/restore')
   assert.ok(restoreCall)
   assert.deepEqual(dom.requests.find(r => r.path === '/api/approvals/restore').body, { fromPage: first })

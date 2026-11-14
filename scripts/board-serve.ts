@@ -219,10 +219,10 @@ export const startServer = (o: ServeOptions): void => {
   const pageSecrets = new Map<string, { page: string; seq: number; pairedAt: number; seen: number; watched: number }>()
   // Secrets temporarily suspended while a page enters the browser's back/forward cache (#1378).
   const cachedSecrets = new Map<string, { page: string; seq: number; pairedAt: number; seen: number }>()
-  const dropPageSecrets = (id: string): void => {
+  const dropPageSecrets = (id: string, includeCached = true): void => {
     if (id === '') return
     for (const [secret, held] of pageSecrets) if (held.page === id) pageSecrets.delete(secret)
-    for (const [secret, held] of cachedSecrets) if (held.page === id) cachedSecrets.delete(secret)
+    if (includeCached) for (const [secret, held] of cachedSecrets) if (held.page === id) cachedSecrets.delete(secret)
   }
   const dropOlderSecrets = (id: string, seq: number, now: number): void => {
     for (const [other, held] of pageSecrets) if (now - held.seen > secretMs || (id !== '' && held.page !== '' && held.page !== id && held.seq < seq)) pageSecrets.delete(other)
@@ -386,12 +386,14 @@ export const startServer = (o: ServeOptions): void => {
     if (!isLan && req.method === 'GET' && url.pathname === '/api/board' && pageIdOf(req.headers) !== '') {
       const now = Date.now()
       const id = pageIdOf(req.headers)
-      const mine = pages.get(id)?.seq ?? ++pageSeq
-      isReplaced = retired.has(id) || [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)
+      const mine = pages.get(id)?.seq ?? retiredSeq.get(id) ?? ++pageSeq
+      const superseded = activeMaxSeq > mine || [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)
+      isReplaced = retired.has(id) || superseded
       if (isReplaced) {
         pages.delete(id)
         retirePage(id, mine)
-        dropPageSecrets(id)
+        // A late in-flight poll after bfcache suspend (`persisted: true`) must not erase the suspended secret unless a newer page replaced it (#1436 review).
+        dropPageSecrets(id, superseded)
       } else {
         pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
         if (mine > activeMaxSeq) activeMaxSeq = mine

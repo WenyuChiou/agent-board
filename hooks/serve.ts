@@ -1627,15 +1627,18 @@ const PAGE_SCRIPT = String.raw`
     if (!event || !event.persisted || isClosed) return;
     var leftPage = pageId;
     pageId = newPageId();
+    var restoredPage = pageId;
     boardEtag = '';
     last = '';
     if (!approveSecret) { refresh(); return; }
     clearTimeout(timer);
     call('/api/approvals/restore', { fromPage: leftPage }).then(function (data) {
+      if (isClosed || restoredPage !== pageId) return;
       if (data.moved) { showMoved(); return; }
       approveSecret = data.ok && typeof data.secret === 'string' ? data.secret : '';
       refresh();
     }, function () {
+      if (isClosed || restoredPage !== pageId) return;
       approveSecret = '';
       refresh();
     });
@@ -3455,7 +3458,9 @@ const PAGE_SCRIPT = String.raw`
   function refresh() {
     if (isClosed) return;
     clearTimeout(timer);
+    var pollPage = pageId;
     call('/api/board').then(function (data) {
+      if (isClosed || pollPage !== pageId) return;
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) { showMoved(); return; }
       if (data.unchanged) { reachable(); maybeShowAway(); return; }
