@@ -329,8 +329,8 @@ export const startServer = (o: ServeOptions): void => {
       isMoved = true
       movedTimer = setTimeout(finish, o.movedGraceMs ?? 5_000)
       const released = (): void => {
-        closeNonServer()
         movedReleased = true
+        closeNonServer()
         if (!isMoved || movedWaiting.size === 0) finish()
       }
       if (codexReceiver === null) released()
@@ -426,6 +426,18 @@ export const startServer = (o: ServeOptions): void => {
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
+    const replyMessage = (action: string, payload: Record<string, unknown>): void => {
+      // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
+      if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
+      try { return json(res, 200, messaging.act(action, payload, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
+      catch (error) {
+        // A temporary file lock is storage unavailability, not a stale binding.
+        // Only the owner's lease-bounded poller retries; sends and receipts do not.
+        const code = (error as { code?: unknown } | null)?.code
+        if (['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
+        return json(res, 409, { error: error instanceof Error ? error.message : 'MESSAGE_FAILED' })
+      }
+    }
     if (isMoved) {
       if (!isLan && req.method === 'GET' && url.pathname === '/api/board') {
         const id = pageIdOf(req.headers)
@@ -445,6 +457,13 @@ export const startServer = (o: ServeOptions): void => {
         if (url.pathname === '/api/close') {
           if (body.moved !== true) res.once('finish', () => setImmediate(() => stop(false)))
           return json(res, 200, {})
+        }
+        // Before closeNonServer() closes messaging, let codexReceiver disconnect and any in-flight receipt finish cleanly (#1335).
+        if (!isLan && !movedReleased && url.pathname.startsWith('/api/messages/')) {
+          const action = url.pathname.slice('/api/messages/'.length)
+          if (['disconnect', 'receipt', 'mailbox-accept', 'mailbox-ack'].includes(action)) {
+            return replyMessage(action, body)
+          }
         }
       }
       return json(res, 410, { moved: true })
@@ -719,17 +738,7 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (url.pathname.startsWith('/api/messages/')) {
       if (isLan) return json(res, 403, {})
-      const action = url.pathname.slice('/api/messages/'.length)
-      // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
-      if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
-      try { return json(res, 200, messaging.act(action, body, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
-      catch (error) {
-        // A temporary file lock is storage unavailability, not a stale binding.
-        // Only the owner's lease-bounded poller retries; sends and receipts do not.
-        const code = (error as { code?: unknown } | null)?.code
-        if (['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
-        return json(res, 409, { error: error instanceof Error ? error.message : 'MESSAGE_FAILED' })
-      }
+      return replyMessage(url.pathname.slice('/api/messages/'.length), body)
     }
     // A press that met a file the board could not read or write is answered with why; any other
     // error stays a bare server error.

@@ -10642,7 +10642,11 @@ test('a replaced server tells an open tab the board moved instead of dropping of
     const ping = await fetchAt('127.0.0.1', Number(secondAddress.port), 'GET', '/api/ping', { 'x-board-token': secondAddress.searchParams.get('t') })
     assert.equal(ping.json().codexSend, true)
 
-    // When `--port` explicitly reuses the running port, replacement closes immediately without holding that port.
+    // When `--port` explicitly reuses the running port, replacement closes immediately without holding that port even with an open tab.
+    const secondHeaders = { 'x-board-token': secondAddress.searchParams.get('t'), 'x-board-page': 'tab-2', 'x-board-visible': '1' }
+    const secondPoll = await fetchAt('127.0.0.1', Number(secondAddress.port), 'GET', '/api/board', secondHeaders)
+    assert.equal(secondPoll.status, 200)
+    assert.ok(secondPoll.json().model)
     const samePort = String(secondAddress.port)
     const third = board.urlOf(await board.serve(['--port', samePort, '--allow-resume']))
     assert.ok(third)
@@ -14532,7 +14536,7 @@ test('serveModel projects a live in-flight receiver claim as queued instead of f
     { name: 'contested', connections: [{ ...liveConnection, contested: true }], message: baseMessage },
     { name: 'expired connection', connections: [{ ...liveConnection, expires: now }], message: baseMessage },
     { name: 'later uncertain receipt', connections: [liveConnection], message: { ...baseMessage, updated: now + 10 } },
-    { name: 'mailbox claim', connections: [liveConnection], message: { ...baseMessage, target: 'mailbox:codex:thread-1' } },
+    { name: 'mailbox claim', connections: [{ ...liveConnection, id: 'mailbox_' + 'a'.repeat(24) }], message: { ...baseMessage, target: 'mailbox_' + 'a'.repeat(24) } },
     { name: 'missing clock fails closed', connections: [liveConnection], message: baseMessage, now: 0 },
   ]
   for (const entry of cases) {

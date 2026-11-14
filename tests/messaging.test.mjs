@@ -5117,6 +5117,53 @@ test('a board file that is missing for two ticks keeps the Codex receiver and it
   }
 })
 
+test('a moved server lets codexReceiver disconnect before closing messaging so queued Codex messages survive replacement (#1335)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-moved-'))
+  const progress = join(dir, 'progress.md')
+  const messagesDir = join(dir, 'messages')
+  writeFileSync(progress, `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${codexThread} state=waiting updated=${new Date().toISOString()} -->\n### A Codex task\n- [~] Keep going\n<!-- /auto session=abcdef01 -->\n`)
+  const endFlag = join(dir, 'end-turn')
+  const daemon = codexDaemon(dir, { status: 'active', endFlag, pidFile: join(dir, 'proxy.pid') })
+  process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
+  process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
+  let board, replacement
+  try {
+    board = await start(dir, '', ['--messages-dir', messagesDir, '--codex-send'], codexRoutes)
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    assert.equal((await codexMessage(board, 'AB-CX-001'))?.status, 'queued')
+
+    // Track an open browser tab so POST /api/close { moved: true } enters the moved grace window while codexReceiver disconnects.
+    const tabHeaders = { 'x-board-page': 'tab-1', 'x-board-visible': '1' }
+    assert.equal((await board.call('/api/board', undefined, tabHeaders)).status, 200)
+    assert.equal((await board.call('/api/close', { moved: true })).status, 200)
+    assert.deepEqual((await board.call('/api/board', undefined, tabHeaders)), { status: 200, body: { moved: true } })
+    await board.exited
+    board = undefined
+    const persisted = JSON.parse(readFileSync(join(messagesDir, 'messages.json'), 'utf8')).messages.find(one => one.id === codexId('AB-CX-001'))
+    assert.equal(persisted?.status, 'queued')
+    assert.ok(typeof persisted?.leftAt === 'number' && persisted.leftAt > 0)
+
+    // Start the replacement server on the same message store; the queued Codex message must survive disconnect and deliver when idle.
+    process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
+    replacement = await start(dir, '', ['--messages-dir', messagesDir, '--codex-send'], codexRoutes)
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    assert.equal((await codexMessage(replacement, 'AB-CX-001'))?.status, 'queued')
+
+    writeFileSync(endFlag, '')
+    await waitFor(async () => (await codexMessage(replacement, 'AB-CX-001'))?.status === 'acknowledged')
+    const proxy = Number(readFileSync(join(dir, 'proxy.pid'), 'utf8'))
+    writeFileSync(progress, readFileSync(progress, 'utf8').replace('state=waiting', 'state=ended'))
+    await waitFor(async () => { try { process.kill(proxy, 0); return false } catch { return true } })
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG
+    await board?.close().catch(() => undefined)
+    await replacement?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
+  }
+})
+
 test('1139 both ACK parsers accept the same complete lines', async () => {
   const { ackLine: clientAck } = await import('../scripts/message-client.mjs')
   const { ackLine: claudeAck } = await import('../hooks/receiver.ts')
