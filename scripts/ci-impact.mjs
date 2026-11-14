@@ -160,6 +160,8 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/setup-terminal.test.mjs': 70_000, // slowest 36.0 s
   // Grew with #1339's lock tests (several wait out the 2 s bounded lock wait): 43.4 s on Windows Node 24 (run 43190652904).
   'tests/settings-symlink.test.mjs': 85_000, // slowest 43.4 s
+  // New with #1438 (merge-check runs git in temporary repositories): 46.1 and 46.4 s on Windows Node 24 (#1464).
+  'tests/merge-check.test.mjs': 90_000, // slowest 46.4 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
