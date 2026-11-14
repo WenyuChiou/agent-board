@@ -475,7 +475,9 @@ const errorLabel = (error: unknown): string => {
   const code = (error as NodeJS.ErrnoException | null)?.code
   if (error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message)) return error.message
   if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code)) return code
-  return error instanceof Error && error.message ? error.message : 'MAILBOX_FAILED'
+  const prefixed = error instanceof Error ? /^([A-Z][A-Z0-9_]{1,63}):/.exec(error.message)?.[1] : undefined
+  if (prefixed !== undefined) return prefixed
+  return 'MAILBOX_FAILED'
 }
 
 const mailboxAccess = (directory: string, budget: number, storeBudget = budget) => {
@@ -529,7 +531,10 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
               clearTimeout(timer)
               try {
                 const result = JSON.parse(text)
-                if (res.statusCode !== 200) throw new Error(result.error ?? 'BOARD_NOT_RUNNING')
+                if (res.statusCode !== 200) {
+                  if (res.statusCode === 503 || result.error === 'MESSAGE_STORE_BUSY') hasDeferred = true
+                  throw new Error(result.error ?? 'BOARD_NOT_RUNNING')
+                }
                 hasDeferred = false
                 lastError = null
                 done(result)

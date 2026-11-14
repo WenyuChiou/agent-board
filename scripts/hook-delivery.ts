@@ -108,6 +108,9 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
         : agent === 'codex' ? codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null, process.env[CODEX_CLIENT_VARIABLE], process.env[CODEX_DAEMON_VARIABLE])
         : SURFACE_IDS.cli
       try { message = await mailbox?.turn(agent, session, surface, Date.now()) ?? null } catch {}
+      const failed = mailbox?.error ?? setupError
+      if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
+      else if (failed !== null) process.stderr.write(`${s.localAgentMailboxFailed(failed)}\n`)
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       let pushed: string[] = []
@@ -149,9 +152,6 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
         }
         return true
       }
-      const failed = mailbox?.error ?? setupError
-      if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
-      else if (failed !== null) process.stderr.write(`${s.localAgentMailboxFailed(failed)}\n`)
     }
   }
   return false

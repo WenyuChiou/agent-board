@@ -449,6 +449,38 @@ test('hookMailbox defers only when the store is busy or times out, and exposes s
       assert.equal(busyBox.hasDeferred, true)
       assert.equal(busyBox.error, null)
     } finally { claim.release() }
+
+    const httpDir = join(dir, 'http-errors')
+    mkdirSync(httpDir)
+    writeFileSync(join(httpDir, 'server.lock'), String(process.pid))
+    let nextReply = { status: 503, body: { error: 'MESSAGE_STORE_BUSY' } }
+    const httpServer = createServer((_req, res) => {
+      res.statusCode = nextReply.status
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify(nextReply.body))
+    })
+    try {
+      await new Promise(done => httpServer.listen(0, '127.0.0.1', done))
+      const httpUrl = `http://127.0.0.1:${httpServer.address().port}/?t=synthetic`
+      writeFileSync(join(httpDir, 'server.owner'), JSON.stringify({ pid: process.pid, url: httpUrl }))
+      const httpBox = hookMailbox(httpDir, 500)
+
+      assert.equal(await httpBox.turn('codex', 's-http-busy', 'CLI', Date.now()), null)
+      assert.equal(httpBox.hasDeferred, true)
+      assert.equal(httpBox.error, null)
+
+      nextReply = { status: 409, body: { error: "EACCES: permission denied, open '/Users/private/messages.json'" } }
+      assert.equal(await httpBox.turn('codex', 's-http-eacces', 'CLI', Date.now()), null)
+      assert.equal(httpBox.hasDeferred, false)
+      assert.equal(httpBox.error, 'EACCES')
+
+      nextReply = { status: 409, body: { error: 'disk write failed under /Users/private/messages.json' } }
+      assert.equal(await httpBox.turn('codex', 's-http-path', 'CLI', Date.now()), null)
+      assert.equal(httpBox.hasDeferred, false)
+      assert.equal(httpBox.error, 'MAILBOX_FAILED')
+    } finally {
+      await new Promise(done => httpServer.close(done))
+    }
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 

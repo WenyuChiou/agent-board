@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
-import { delimiter, dirname, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -7724,6 +7724,21 @@ test('hook delivery and DeepSeek take report corrupt messages.json as an error i
   assert.equal(failedHook.stdout, '')
   assert.match(failedHook.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
   assert.doesNotMatch(failedHook.stderr, /deferred/)
+
+  f.save(f.progress, [
+    `## ${basename(f.home)}`,
+    `<!-- auto session=a1b2c3f9 agent=codex state=working updated=${new Date().toISOString()} -->`,
+    '### Auth check',
+    '- [?] codex: Use JWT or session cookies?',
+    '<!-- /auto session=a1b2c3f9 -->',
+    '',
+  ].join('\n'))
+  const withQuestion = f.call('codex', 'UserPromptSubmit')
+  assert.equal(withQuestion.status, 0, withQuestion.stderr)
+  const questionEnvelope = JSON.parse(withQuestion.stdout)
+  assert.match(questionEnvelope.hookSpecificOutput.additionalContext, /Auth check/)
+  assert.match(withQuestion.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
+  f.save(f.progress, '')
 
   const claim = claimMessageStore(f.directory)
   let isHeld = true
