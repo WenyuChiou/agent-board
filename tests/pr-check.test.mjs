@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  addedLines, apiReader, authorKey, authorLine, binaryImages, cap, changelog, checkIssue, checkPr,
+  addedLines, apiReader, authorKey, authorLine, binaryImages, cap, CASES_FROM, cases, changelog, checkIssue, checkPr,
   duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
   main, naming, needsBundle, outsideClaim, privateData, report, reportMarkdown, reviewOf, rulesPage, sections,
-  stripComments, SURFACE_FROM, surface, testTitles, tierOf, titleKnown, verdict,
+  ROUND_CAP, rounds, stripComments, SURFACE_FROM, surface, testTitles, tierOf, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -925,7 +925,8 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   const args = ['--event', event, '--repo-dir', setup.directory]
   const passed = await runMain(args, env)
   assert.equal(passed.status, 0, passed.stdout + passed.stderr)
-  assert.equal(calls.length, 5)
+  // The reviews are read even with an approving comment, for the round count (#1503).
+  assert.equal(calls.length, 6)
   assert.ok(calls.every(call => call.host === 'api.example.invalid' && call.authorization === 'Bearer synthetic-token-value'))
   globalThis.fetch = async url => (url.pathname.endsWith('/issues/42') ? { ok: false, status: 404, headers: new Headers() } : { ok: true, status: 200, json: async () => [], headers: new Headers() })
   const missing = await runMain(args, env)
@@ -1798,4 +1799,305 @@ test('pr-check leaves the Surface line to risk pull requests above SURFACE_FROM 
   assert.equal(surfaceRun(undefined, { number: SURFACE_FROM + 1 }).problems.length, 1)
   assert.deepEqual(surfaceRun(undefined, { title: 'chore(release): Agent Board 1.0.0' }).problems, [])
   assert.equal(checkPr({ ...syntheticPr(), number: SURFACE_FROM + 1, body: `${body}Tier: risk\n` }).problems.filter(item => item.check === 'surface').length, 1)
+})
+
+const caseTableText = (...rows) => `## Cases\n\n| State | Event | Expected result | Test |\n|---|---|---|---|\n${rows.join('\n')}\n`
+const caseRow = (test = 'receiver keeps the turn') => `| attached | leave refused | stays attached | ${test} |`
+const casesRun = (text, extra = {}) => cases({ body: `Fixes #1\nAuthor: codex, fix/x\nTier: risk\nSurface: ${extra.surface ?? 'delivery'}\n${text ?? ''}`, title: 'fix(x): y', number: CASES_FROM + 1, ...extra })
+
+test('pr-check asks a risk-tier pull request on delivery, setup-writes, data or launch for a Cases line', () => {
+  for (const surfaceName of ['delivery', 'setup-writes', 'data', 'launch']) {
+    const missing = casesRun(undefined, { surface: surfaceName })
+    assert.equal(missing.problems.length, 1, surfaceName)
+    assert.equal(missing.problems[0].check, 'cases')
+    assert.match(missing.problems[0].message, new RegExp(`on ${surfaceName} has no \`Cases:\` line`))
+    assert.match(missing.problems[0].fix, /CONTRIBUTING\.md rule 2/)
+  }
+  assert.match(casesRun('Cases: <n> rows or none, <reason>').problems[0].message, /placeholder is still there/)
+  assert.match(casesRun('Cases: none, x\nCases: none, y').problems[0].message, /2 `Cases:` lines/)
+  for (const other of ['wording', 'rules-text', 'none']) assert.deepEqual(casesRun(undefined, { surface: other }).problems, [], other)
+  assert.deepEqual(casesRun(undefined, { number: CASES_FROM }).problems, [])
+  assert.deepEqual(casesRun(undefined, { title: 'chore(release): Agent Board 1.0.0' }).problems, [])
+  assert.deepEqual(cases({ body: 'Fixes #1\nTier: normal\nSurface: delivery\n', title: 'fix(x): y', number: CASES_FROM + 1 }).problems, [])
+  assert.equal(casesRun(undefined, { number: null }).problems.length, 1)
+  assert.equal(checkPr({ ...syntheticPr(), number: CASES_FROM + 1, body: `${body}Tier: risk\nSurface: data\n` }).problems.filter(item => item.check === 'cases').length, 1)
+})
+
+test('pr-check accepts Cases: none with a reason and refuses it without one', () => {
+  assert.deepEqual(casesRun('Cases: none, one event in one state').problems, [])
+  assert.deepEqual(casesRun('Cases: `none`, one event in one state').problems, [])
+  for (const empty of ['Cases: none', 'Cases: none,', 'Cases: none, <reason>']) {
+    assert.match(casesRun(empty).problems[0]?.message ?? '', /says `none` with no reason/, empty)
+  }
+  assert.match(casesRun('Cases: several').problems[0]?.message ?? '', /neither "<n> rows" nor "none/)
+  // An example in a fence or a comment is not a line.
+  assert.match(casesRun('```\nCases: none, why\n```').problems[0]?.message ?? '', /has no `Cases:` line/)
+  assert.match(casesRun('<!--\nCases: none, why\n-->').problems[0]?.message ?? '', /has no `Cases:` line/)
+})
+
+test('pr-check wants a ## Cases table when the Cases line names rows', () => {
+  const noTable = /names a table, but the body has no "## Cases" table/
+  const notInForm = /table is not in the form pr-check reads: its header is not/
+  assert.match(casesRun('Cases: 2 rows').problems[0]?.message ?? '', noTable)
+  assert.match(casesRun('Cases: 2 rows\n## Cases\n\n| State | Event | Expected result | Test |\n|---|---|---|---|\n').problems[0]?.message ?? '', noTable)
+  assert.match(casesRun(`Cases: 1 rows\n${caseTableText(caseRow()).replace('Event', 'When')}`).problems[0]?.message ?? '', notInForm)
+  assert.match(casesRun(`Cases: 1 rows\n\`\`\`\n${caseTableText(caseRow())}\`\`\`\n`).problems[0]?.message ?? '', noTable)
+  const full = casesRun(`Cases: 2 rows\n${caseTableText(caseRow(), caseRow('second test'))}`)
+  assert.deepEqual(full.problems, [])
+  assert.deepEqual(full.info, ['cases: 2 rows.'])
+  // The line goes above the table: below it fails, and inside the section above the rows passes (codex_395).
+  const below = casesRun(`${caseTableText(caseRow())}\nCases: 1 rows\n`)
+  assert.equal(below.problems.length, 1)
+  assert.match(below.problems[0].message, /`Cases:` line is below the case table/)
+  assert.deepEqual(casesRun(caseTableText(caseRow()).replace('## Cases\n\n', '## Cases\n\nCases: 1 rows\n\n')).problems, [])
+  // A count that differs from the table is a problem.
+  const off = casesRun(`Cases: 3 rows\n${caseTableText(caseRow(), caseRow())}`)
+  assert.equal(off.problems.length, 1)
+  assert.match(off.problems[0].message, /says 3 rows; the table has 2/)
+  assert.match(off.problems[0].fix, /Cases: 2 rows/)
+})
+
+test('pr-check reads the Cases line once, so every form it accepts is held to its place above the table', () => {
+  // The place is read from the same line the count is read from, so no form the parser accepts passes below the table
+  // (Fable 5.2 on #1514, after codex_395 and codex_396).
+  const table = caseTableText(caseRow())
+  const forms = ['Cases: 1 rows', 'Cases: `1 rows`', 'Cases: ``1 rows``', 'Cases: ```1 rows', 'cases: 1 rows', 'Cases: 1 rows', 'Cases:\f1 rows', '<!-- a -->Cases: 1 rows']
+  for (const form of forms) {
+    assert.deepEqual(casesRun(`${form}\n${table}`).problems, [], `above: ${form}`)
+    assert.deepEqual(casesRun(table.replace('## Cases\n\n', `## Cases\n\n${form}\n\n`)).problems, [], `inside, above the rows: ${form}`)
+    const below = casesRun(`${table}\n${form}\n`).problems
+    assert.equal(below.length, 1, `below: ${form}`)
+    assert.match(below[0].message, /below the case table/, `below: ${form}`)
+  }
+  // The template's placeholder above and the real line below is still below.
+  const placeholder = casesRun(`Cases: <n> rows or none, <reason>\n${table}\nCases: 1 rows\n`).problems
+  assert.equal(placeholder.length, 1)
+  assert.match(placeholder[0].message, /below the case table/)
+  // Shapes the rules do not name stay unread, above and below the table, so they cannot drift without a test failing.
+  for (const shape of ['  Cases: 1 rows', '- Cases: 1 rows', '> Cases: 1 rows']) {
+    assert.match(casesRun(`${shape}\n${table}`).problems[0]?.message ?? '', /has no `Cases:` line/, `above: ${shape}`)
+    assert.match(casesRun(`${table}\n${shape}\n`).problems[0]?.message ?? '', /has no `Cases:` line/, `below: ${shape}`)
+  }
+})
+
+// The one form of the case table pr-check reads (#1503); every other shape fails with the form in its fix.
+const formFix = /header line "\| State \| Event \| Expected result \| Test \|", the line "\|---\|---\|---\|---\|"/
+const offForm = (text, reason) => {
+  const checked = casesRun(text)
+  assert.equal(checked.problems.length, 1, JSON.stringify(checked))
+  assert.match(checked.problems[0].message, /^the "## Cases" table is not in the form pr-check reads: /)
+  assert.match(checked.problems[0].message, reason)
+  assert.match(checked.problems[0].fix, formFix)
+  assert.deepEqual(checked.info, [])
+}
+
+test('pr-check reads the template form of the case table: header in any letter case, colons in the rule, prose around it', () => {
+  const table = '## Cases\n\nThe cases, from the issue:\n\n| STATE | event | Expected Result | test |\n| :--- | :---: | ---: | --- |\n| attached | leave refused | stays attached | keeps the turn |\n| idle | send | starts a turn | starts it |\n'
+  assert.deepEqual(casesRun(`Cases: 2 rows\n${table}`).problems, [])
+  // Prose after a blank line under the last row is prose, with a pipe in it too.
+  const after = casesRun(`Cases: 2 rows\n${table}\nRow 2 covers send | resend from the issue.\n\nMore words.\n`)
+  assert.deepEqual(after.problems, [])
+  assert.deepEqual(after.info, ['cases: 2 rows.'])
+  // A heading right under the last row ends the section, as does the end of the body.
+  assert.deepEqual(casesRun(`Cases: 2 rows\n${table}## Tests\n\nWords.\n`).problems, [])
+  assert.deepEqual(casesRun(`Cases: 2 rows\n${table.trimEnd()}`).problems, [])
+  // A comment line right under the last row ends the table on GitHub and shows nothing, so it passes (GitHub's renderer
+  // checked for codex_397: no extra row).
+  assert.deepEqual(casesRun(`Cases: 2 rows\n${table}<!-- a note -->\n\nWords.\n`).problems, [])
+})
+
+test('pr-check fails a line right under the case table last row, which GitHub can show as one more row', () => {
+  // GitHub's Markdown can join a line right under a table's last row to the table, so a blank line comes first (#1513, from codex_390).
+  const underRow = /the line right under its last row is not blank; on GitHub such a line can show as one more row/
+  for (const line of ['Row 2 covers send | resend from the issue.', 'Plain words.', '--- | ---', '```', '- a list item']) {
+    offForm(`Cases: 1 rows\n${caseTableText(caseRow())}${line}\n`, underRow)
+  }
+  // The form names the blank line, so the fix says what to write.
+  assert.match(casesRun(`Cases: 1 rows\n${caseTableText(caseRow())}Plain words.\n`).problems[0].fix, /leave a blank line under the last row/)
+})
+
+test('pr-check fails a case table without outer pipes and names the form it reads', () => {
+  offForm('Cases: 2 rows\n## Cases\n\nState | Event | Expected result | Test\n--- | --- | --- | ---\nattached | leave refused | stays attached | keeps the turn\nidle | send | starts a turn | starts it\n', /its lines do not start with "\|"/)
+  offForm(`Cases: 1 rows\n${caseTableText('| attached | leave refused | stays attached | keeps the turn')}`, /row 1 does not start and end with "\|"/)
+})
+
+test('pr-check keeps an escaped pipe inside its case table cell', () => {
+  const row = '| attached | leave \\| rejoin | stays attached | keeps the turn |'
+  assert.deepEqual(casesRun(`Cases: 1 rows\n${caseTableText(row)}`).problems, [])
+  // The text after the escaped pipe is not the next cell, so it cannot stand in for a test.
+  const untested = casesRun(`Cases: 1 rows\n${caseTableText('| attached | leave \\| rejoin | stays attached | |')}`)
+  assert.equal(untested.problems.length, 1)
+  assert.match(untested.problems[0].message, /^1 rows of the case table name no test/)
+})
+
+test('pr-check fails a case table whose rows a blank line or a comment splits', () => {
+  const split = /a blank line, a code fence, a comment or prose splits its rows, or a second table follows it/
+  offForm(`Cases: 1 rows\n${caseTableText(caseRow(), '', caseRow('second test'))}`, split)
+  offForm(`Cases: 1 rows\n${caseTableText(caseRow(), '<!-- later -->', caseRow('second test'))}`, split)
+  offForm(`Cases: 1 rows\n${caseTableText(caseRow(), 'and then:', caseRow('second test'))}`, split)
+})
+
+test('pr-check fails a case table with a code fence in it or a second table after it', () => {
+  const split = /a blank line, a code fence, a comment or prose splits its rows, or a second table follows it/
+  // The fence hides its own lines, and the rows on either side of it are still not neighbours.
+  offForm(`Cases: 2 rows\n${caseTableText(caseRow(), '```', 'an example', '```', caseRow('second test'))}`, split)
+  offForm(`Cases: 3 rows\n${caseTableText(caseRow(), '~~~', 'x', '~~~', '| Name | Value |', '|---|---|')}`, split)
+  offForm(`Cases: 1 rows\n${caseTableText(caseRow())}\n| Name | Value |\n|---|---|\n| a | b |\n`, split)
+  // A second table without outer pipes, after the case table or before it, fails too (codex_387).
+  const second = /the section has a second table, with or without outer pipes/
+  offForm(`Cases: 1 rows\n${caseTableText(caseRow())}\nName | Value | More | Last\n--- | --- | --- | ---\na | b | c | d\n`, second)
+  offForm(`Cases: 1 rows\n## Cases\n\nName | Value\n:--- | ---:\na | b\n\n| State | Event | Expected result | Test |\n|---|---|---|---|\n${caseRow()}\n`, second)
+  // Prose with a dash, or a thematic break, is not a table.
+  assert.deepEqual(casesRun(`Cases: 1 rows\n${caseTableText(caseRow())}\nThe case - one event - is listed.\n\n---\n`).problems, [])
+  // Nor is a "--- | ---" line under prose of another cell count, after the case table or before it (GFM; codex_388).
+  assert.deepEqual(casesRun(`Cases: 1 rows\n${caseTableText(caseRow())}\nExample:\n--- | ---\nEnd.\n`).problems, [])
+  assert.deepEqual(casesRun(`Cases: 1 rows\n## Cases\n\nExample:\n--- | ---\nEnd.\n\n| State | Event | Expected result | Test |\n|---|---|---|---|\n${caseRow()}\n`).problems, [])
+  // A table under the next heading is not in the Cases section.
+  assert.deepEqual(casesRun(`Cases: 1 rows\n${caseTableText(caseRow())}\n## Notes\n\n| Name | Value |\n|---|---|\n| a | b |\n`).problems, [])
+})
+
+test('pr-check fails a case table with another column, another order or another header name', () => {
+  const header = /its header is not "\| State \| Event \| Expected result \| Test \|"/
+  offForm('Cases: 1 rows\n## Cases\n\n| State | Event | Expected result | Test | Notes |\n|---|---|---|---|---|\n| attached | leave refused | stays attached | keeps the turn | none |\n', header)
+  offForm('Cases: 1 rows\n## Cases\n\n| Event | State | Expected result | Test |\n|---|---|---|---|\n| leave refused | attached | stays attached | keeps the turn |\n', header)
+  offForm(`Cases: 1 rows\n${caseTableText(caseRow()).replace('State', 'Where')}`, header)
+  offForm(`Cases: 1 rows\n${caseTableText(caseRow()).replace('Expected result', 'Expected')}`, header)
+  offForm(`Cases: 1 rows\n${caseTableText(caseRow()).replace('|---|---|---|---|', '|---|---|---|')}`, /the line under its header is not "\|---\|---\|---\|---\|"/)
+  offForm(`Cases: 2 rows\n${caseTableText(caseRow(), '| idle | send | starts a turn |')}`, /row 2 has 3 cells where four are read/)
+  offForm(`Cases: 1 rows\n${caseTableText('| attached | leave refused | stays attached | keeps the turn | extra |')}`, /row 1 has 5 cells where four are read/)
+})
+
+test('pr-check counts a case table row of placeholders as a row with empty cells', () => {
+  // A row is never dropped: the template's own row counts, and fails on its empty cells.
+  const template = casesRun(`Cases: 1 rows\n${caseTableText(caseRow(), '| <state> | <event> | <result> | <test> |')}`)
+  assert.deepEqual(template.info, ['cases: 2 rows.'])
+  assert.deepEqual(template.problems.map(item => item.message.replace(/[.;].*$/, '')), ['the `Cases:` line says 1 rows', '1 rows of the case table leave State, Event or Expected result empty', '1 rows of the case table name no test'])
+  const gap = casesRun(`Cases: 2 rows\n${caseTableText(caseRow(), '| <state> | send | starts a turn | starts it |')}`)
+  assert.equal(gap.problems.length, 1)
+  assert.match(gap.problems[0].message, /^1 rows of the case table leave State, Event or Expected result empty/)
+  for (const dots of ['...', '…', '']) {
+    assert.match(casesRun(`Cases: 1 rows\n${caseTableText(`| attached | leave refused | ${dots} | keeps the turn |`)}`).problems[0]?.message ?? '', /leave State, Event or Expected result empty/)
+  }
+})
+
+test('pr-check asks for cases when one of two surfaces that cannot split is a case surface', () => {
+  const two = surfaceName => casesRun(undefined, { surface: `${surfaceName}, cannot split: main breaks between steps` })
+  assert.match(two('wording + delivery').problems[0]?.message ?? '', /on delivery has no `Cases:` line/)
+  assert.match(two('setup-writes + data').problems[0]?.message ?? '', /on setup-writes has no `Cases:` line/)
+  assert.deepEqual(two('wording + rules-text').problems, [])
+  assert.deepEqual(casesRun('Cases: none, one event in one state', { surface: 'wording + delivery, cannot split: main breaks between steps' }).problems, [])
+})
+
+test('pr-check fails a case table row without a test on a draft too', () => {
+  const text = `Cases: 2 rows\n${caseTableText(caseRow(), caseRow(''))}`
+  for (const isDraft of [false, true]) {
+    const checked = casesRun(text, { isDraft })
+    assert.equal(checked.problems.length, 1)
+    assert.match(checked.problems[0].message, /^1 rows of the case table name no test/)
+    assert.match(checked.problems[0].fix, /title of the test planned for each row.*on a draft too/)
+    assert.equal(checked.problems[0].check, 'cases')
+  }
+  assert.match(casesRun(`Cases: 1 rows\n${caseTableText(caseRow('<test>'))}`, { isDraft: true }).problems[0]?.message ?? '', /^1 rows of the case table name no test/)
+})
+
+test('pr-check fails the round count of a risk-tier pull request whose reviews cannot be read', async t => {
+  const unread = /FAIL rounds: the reviews of this pull request could not be read, so its review rounds are not counted/
+  const setup = fixture(t)
+  const event = join(setup.directory, 'event.json')
+  const put = (number, text) => setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number, title: 'fix: synthetic check', body: text, draft: false, created_at: '2030-01-01T00:00:00Z', labels: [], head: { ref: branch, sha: setup.head }, base: { sha: setup.base } } }))
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const env = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' }
+  const args = ['--event', event, '--repo-dir', setup.directory]
+  const answers = isReviewsDown => async url => {
+    if (isReviewsDown && url.pathname.endsWith('/reviews')) return { ok: false, status: 502, headers: new Headers() }
+    const payload = /\/issues\/\d+\/comments$/.test(url.pathname) && !url.pathname.endsWith('/issues/42/comments') ? [{ body: `Review: APPROVE ${setup.head} by independent reviewer` }] : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  const risk = `${body}Tier: risk\nSurface: none\n`
+  put(CASES_FROM + 1, risk)
+  globalThis.fetch = answers(true)
+  const down = await runMain(args, env)
+  assert.equal(down.status, 1, down.stdout + down.stderr)
+  assert.match(down.stdout, unread)
+  globalThis.fetch = answers(false)
+  assert.equal(unread.test((await runMain(args, env)).stdout), false)
+  // Outside the round count's reach nothing changes: another tier, or a pull request from before the rule.
+  globalThis.fetch = answers(true)
+  put(CASES_FROM + 1, body)
+  assert.equal(unread.test((await runMain(args, env)).stdout), false)
+  put(CASES_FROM, risk)
+  assert.equal(unread.test((await runMain(args, env)).stdout), false)
+  const pr = { ...syntheticPr(), number: CASES_FROM + 1, body: risk, isReviewsUnread: true }
+  assert.equal(checkPr(pr).problems.filter(item => item.check === 'rounds').length, 1)
+  assert.equal(checkPr({ ...pr, title: 'chore(release): Agent Board 1.0.0' }).problems.filter(item => item.check === 'rounds').length, 0)
+})
+
+const roundComments = (...entries) => entries.map(([kind, sha]) => ({ body: `Review: ${kind} ${sha.padEnd(40, '0')} by someone` }))
+const roundsRun = (comments, line, extra = {}) => rounds(comments, { body: `Fixes #1\nTier: risk\n${line ?? ''}\n`, title: 'fix(x): y', number: CASES_FROM + 1, ...extra })
+const rc = sha => ['REQUEST CHANGES', sha]
+const roundHeads = k => roundComments(...Array.from({ length: k }, (_, i) => rc(`a${i}`)))
+
+test('pr-check counts one round per head with REQUEST CHANGES over the whole pull request', () => {
+  // The #1366 shape: 2, APPROVE, 2, APPROVE, 5 heads with two verdicts on one: nine rounds, an APPROVE does not reset it.
+  const shape = roundComments(rc('a1'), rc('a2'), ['APPROVE', 'a3'], rc('b1'), rc('b2'), ['APPROVE', 'b3'], rc('c1'), rc('c2'), rc('c2'), rc('c3'), rc('c4'), rc('c5'))
+  assert.equal(roundsRun(shape).problems.length, 1)
+  assert.match(roundsRun(shape).problems[0].message, /has had 9 review rounds/)
+  // A short sha and its full sha are one head; the same head twice is one round.
+  const same = [{ body: 'Review: REQUEST CHANGES abcdef1' }, { body: `Review: REQUEST CHANGES ${'abcdef1'.padEnd(40, '2')}` }, { body: 'Review: REQUEST CHANGES abcdef1 by a second reviewer' }]
+  assert.deepEqual(roundsRun([...same, ...roundHeads(2)]).info, ['review rounds: 3 of 5.'])
+  // A person's review state counts as reviewOf reads it; a bot's review, as a state or a written line, starts no round.
+  const states = [{ state: 'CHANGES_REQUESTED', commit_id: 'd1'.padEnd(40, '0'), user: { login: 'x' } }, { state: 'CHANGES_REQUESTED', commit_id: 'd2'.padEnd(40, '0'), user: { login: 'bot[bot]', type: 'Bot' } }, { body: `Review: REQUEST CHANGES ${'d4'.padEnd(40, '0')}`, user: { login: 'reviewer-bot[bot]' } }, { state: 'APPROVED', commit_id: 'd3'.padEnd(40, '0'), user: { login: 'y' } }, ...roundHeads(2)]
+  assert.deepEqual(roundsRun(states).info, ['review rounds: 3 of 5.'])
+  // A review that requests changes counts by its state even when its body quotes an earlier approval (codex_395).
+  const quotesApproval = { state: 'CHANGES_REQUESTED', commit_id: 'f9'.padEnd(40, '0'), user: { login: 'x' }, body: `Review: APPROVE ${'a0'.padEnd(40, '0')} was the last verdict.\nA new P1.` }
+  assert.deepEqual(roundsRun([quotesApproval, ...roundHeads(2)]).info, ['review rounds: 3 of 5.'])
+  // A verdict quoted in a code fence or an HTML comment is an example and starts no round.
+  const quoted = [{ body: `An example:\n\`\`\`\nReview: REQUEST CHANGES ${'e1'.padEnd(40, '0')}\n\`\`\`` }, { body: `<!--\nReview: REQUEST CHANGES ${'e2'.padEnd(40, '0')}\n-->` }, `\`\`\`\nReview: REQUEST CHANGES ${'e3'.padEnd(40, '0')}\n\`\`\``, ...roundHeads(2)]
+  assert.deepEqual(roundsRun(quoted).info, [])
+  // A verdict line outside the fence still counts when the comment also quotes one inside.
+  const header = { body: `Review: REQUEST CHANGES ${'e4'.padEnd(40, '0')} by codex_1, maintainer route\n\`\`\`text\nReview: REQUEST CHANGES ${'e4'.padEnd(40, '0')}\n\`\`\`` }
+  assert.deepEqual(roundsRun([header, ...roundHeads(2)]).info, ['review rounds: 3 of 5.'])
+})
+
+test('pr-check stops a risk-tier pull request at five rounds until its body names the split', () => {
+  assert.deepEqual(roundsRun(roundHeads(2)).info, [])
+  assert.deepEqual(roundsRun(roundHeads(4)).info, ['review rounds: 4 of 5.'])
+  assert.deepEqual(roundsRun(roundHeads(4)).problems, [])
+  const stopped = roundsRun(roundHeads(ROUND_CAP))
+  assert.equal(stopped.problems.length, 1)
+  assert.equal(stopped.problems[0].check, 'rounds')
+  assert.match(stopped.problems[0].message, /5 review rounds; it stops at 5 \(RULES\.md, R6\)/)
+  assert.match(stopped.problems[0].fix, /team-process\.md, From claim to merge/)
+  assert.deepEqual(roundsRun(roundHeads(5), 'Round cap: #1, #2').problems, [])
+  assert.match(roundsRun(roundHeads(5), 'Round cap: #7').info.join('\n'), /stopped, the rest is in #7/)
+  assert.equal(roundsRun(roundHeads(5), 'Round cap: <#A, #B>').problems.length, 1)
+  assert.equal(roundsRun(roundHeads(5), '```\nRound cap: #1, #2\n```').problems.length, 1)
+  assert.deepEqual(roundsRun(roundHeads(6), 'Round cap: #1, #2').problems, [])
+  const draft = roundsRun(roundHeads(5), undefined, { isDraft: true })
+  assert.deepEqual(draft.problems, [])
+  assert.match(draft.info.join('\n'), /review rounds: 5; at the cap of 5, so it needs a "Round cap:" line before it is ready/)
+  assert.deepEqual(rounds(roundHeads(5), { body: 'Fixes #1\nTier: normal\n', title: 'fix(x): y', number: CASES_FROM + 1 }).problems, [])
+  assert.deepEqual(roundsRun(roundHeads(5), undefined, { number: CASES_FROM }).problems, [])
+  assert.deepEqual(roundsRun(roundHeads(5), undefined, { title: 'chore(release): Agent Board 1.0.0' }).problems, [])
+  const inCheckPr = checkPr({ ...syntheticPr(), number: CASES_FROM + 1, body: `${body}Tier: risk\n`, prComments: roundHeads(5) })
+  assert.equal(inCheckPr.problems.filter(item => item.check === 'rounds').length, 1)
+  // Review states are counted even when a comment approves and the verdict leaves them out of prComments.
+  const reviewStates = Array.from({ length: 4 }, (_, i) => ({ state: 'CHANGES_REQUESTED', commit_id: `f${i}`.padEnd(40, '0'), user: { login: 'x' } }))
+  const afterApproval = checkPr({ ...syntheticPr(), number: CASES_FROM + 1, body: `${body}Tier: risk\n`, prComments: [...roundHeads(1), { body: `Review: APPROVE ${'f9'.padEnd(40, '0')} by someone` }], prReviews: reviewStates })
+  assert.equal(afterApproval.problems.filter(item => item.check === 'rounds').length, 1)
+})
+
+test('pr-check lets a risk-tier pull request at five rounds take one more round when its body says words only, and not a sixth', () => {
+  const words = 'Round cap: one more round, words only'
+  const fifth = roundsRun(roundHeads(5), words)
+  assert.deepEqual(fifth.problems, [])
+  assert.deepEqual(fifth.info, ['review rounds: 5; one more round, docs and comments only.'])
+  assert.equal(roundsRun(roundHeads(6), words).problems.length, 1)
+  assert.equal(roundsRun(roundHeads(6), words).problems[0].check, 'rounds')
+  // The split form still passes above the cap, and a placeholder or a hidden line is no filled line.
+  assert.deepEqual(roundsRun(roundHeads(6), `${words}\nRound cap: #3`).problems, [])
+  assert.equal(roundsRun(roundHeads(5), 'Round cap: <one more round, words only>').problems.length, 1)
+  assert.equal(roundsRun(roundHeads(5), `<!--\n${words}\n-->`).problems.length, 1)
+  assert.match(roundsRun(roundHeads(5)).problems[0].fix, /one more round, words only/)
 })
