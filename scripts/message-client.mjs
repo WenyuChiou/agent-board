@@ -65,7 +65,7 @@ export const boardClient = address => {
       if (typeof verify !== 'function' || typeof deliver !== 'function' || canReceive !== undefined && typeof canReceive !== 'function' || !await verify()) throw new Error('HOST_NOT_CONNECTED')
       const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }), ...(unclaimed ? { unclaimed: true } : {}) })
       let credentials = { connection: registered.id, secret: registered.secret }, contestAfter = 0
-      let isContested = false, isClosed = false, isPolling = false, isPollDue = false, isRetried = false, leaseUntil = registered.expires
+      let isContested = false, isClosed = false, isPolling = false, isPollDue = false, isRetried = false, inFlight = 0, leaseUntil = registered.expires
       // ended: the caller read its session as ended. Only then does an automatic receiver's queued message go back refused.
       const close = async ({ ended = false } = {}) => {
         if (isClosed) return
@@ -76,6 +76,7 @@ export const boardClient = address => {
       const receipt = (message, status, reply, error) => call('receipt', { ...credentials, id: message.id, nonce: message.nonce, status, ...(reply === undefined ? {} : { reply }), ...(error === undefined ? {} : { error }) })
       const processMessage = async message => {
         let hasStarted = false
+        inFlight += 1
         try {
           if (!await verify()) { await receipt(message, 'rejected'); return }
           const begin = () => { hasStarted = true }
@@ -89,6 +90,8 @@ export const boardClient = address => {
           else await receipt(message, 'uncertain', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : 'DELIVERY_UNCERTAIN').catch(() => undefined)
           // After delivery begins, a timeout or exception never authorizes redelivery.
           onError(error)
+        } finally {
+          inFlight = Math.max(0, inFlight - 1)
         }
       }
       const poll = async () => {
@@ -154,6 +157,7 @@ export const boardClient = address => {
         // True once this connection has ended for good (closed, lost ownership or lease expired), so a caller can attach again.
         isClosed: () => isClosed,
         isContested: () => isContested,
+        isSending: () => inFlight > 0,
         // A function, so the secret never lands in a log of this object.
         credentials: () => ({ ...credentials }),
         // For a receiver that says what became of a message after its delivery has ended (a turn it stopped later on). The board
