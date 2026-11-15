@@ -967,7 +967,8 @@ const caseTable = body => {
   if (!rule || rule.length !== 4 || rule.some(cell => !/^:?-+:?$/.test(cell))) return { error: 'the line under its header is not "|---|---|---|---|"' }
   const odd = rows.findIndex(cells => !cells || cells.length !== 4)
   if (odd !== -1) return { error: `row ${odd + 1} ${rows[odd] ? `has ${rows[odd].length} cells where four are read` : 'does not start and end with "|"'}` }
-  return { rows: rows.map(cells => cells.map(cell => isPlaceholderCell(cell) ? '' : cell)) }
+  // `at` is the header row's place among visibleLines(body, { isPlaceKept: true }), the list cases() reads its line from.
+  return { rows: rows.map(cells => cells.map(cell => isPlaceholderCell(cell) ? '' : cell)), at: start + 1 + first }
 }
 export const cases = ({ body = '', title = '', number = null, tier = visibleTier(body) } = {}) => {
   const output = result()
@@ -978,17 +979,21 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
   if (!on.length) return output
   const fail = (message, fix) => output.problems.push(problem('cases', message, fix))
   const how = 'write "Cases: <n> rows" above a "## Cases" table, or "Cases: none, <reason>" when the change handles no event that can arrive while another is under way (CONTRIBUTING.md rule 2).'
-  const found = visibleLines(body).flatMap(line => line.match(/^Cases:[ \t]*(.*)$/i)?.[1].trim() ?? [])
-  const lines = found.filter(value => value !== '' && !value.startsWith('<'))
+  // Each `Cases:` line is read once, its value with its place, so every later check reads the same line (Fable 5.2, #1514).
+  const found = visibleLines(body, { isPlaceKept: true }).flatMap((text, at) => {
+    const match = typeof text === 'string' ? text.match(/^Cases:[ \t]*(.*)$/i) : null
+    return match ? [{ value: match[1].trim(), at }] : []
+  })
+  const lines = found.filter(({ value }) => value !== '' && !value.startsWith('<'))
   if (lines.length > 1) {
     fail(`the body has ${lines.length} \`Cases:\` lines; it names its cases once.`, 'keep one `Cases:` line; put an example inside a code fence.')
     return output
   }
   if (!lines.length) {
-    fail(`a risk-tier pull request on ${on[0]} has no \`Cases:\` line.${found.some(value => value.startsWith('<')) ? ' The template\'s placeholder is still there.' : ''}`, how)
+    fail(`a risk-tier pull request on ${on[0]} has no \`Cases:\` line.${found.some(({ value }) => value.startsWith('<')) ? ' The template\'s placeholder is still there.' : ''}`, how)
     return output
   }
-  const line = lines[0].replace(/`/g, '')
+  const line = lines[0].value.replace(/`/g, '')
   const none = line.match(/^none\b[ \t]*,?[ \t]*(.*)$/i)
   if (none) {
     if (!none[1].trim() || /^<[^<>]*>$/.test(none[1].trim())) fail('the `Cases:` line says `none` with no reason.', 'write the reason after `none`, for example "Cases: none, the change handles one event in one state".')
@@ -1010,11 +1015,7 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
   }
   output.info.push(`cases: ${table.rows.length} rows.`)
   // The line goes above the table (CONTRIBUTING rule 2), so a reader meets the count before the rows.
-  const placed = visibleLines(body, { isPlaceKept: true })
-  const at = placed.findIndex(value => typeof value === 'string' && /^Cases:[ \t]*`?\d/i.test(value))
-  const heading = placed.findIndex(value => typeof value === 'string' && /^ {0,3}##[ \t]+Cases[ \t]*#*[ \t]*$/i.test(value))
-  const top = placed.findIndex((value, i) => i > heading && typeof value === 'string' && /^ {0,3}\|/.test(value))
-  if (at > top) fail('the `Cases:` line is below the case table.', 'move "Cases: <n> rows" above the table, as in the template (CONTRIBUTING.md rule 2).')
+  if (lines[0].at > table.at) fail('the `Cases:` line is below the case table.', 'move "Cases: <n> rows" above the table, as in the template (CONTRIBUTING.md rule 2).')
   if (Number(rows[1]) !== table.rows.length) fail(`the \`Cases:\` line says ${rows[1]} rows; the table has ${table.rows.length}.`, `make the line say "Cases: ${table.rows.length} rows", or add the rows it counts.`)
   const blank = table.rows.filter(cells => cells.slice(0, 3).some(cell => !cell)).length
   if (blank) fail(`${blank} rows of the case table leave State, Event or Expected result empty.`, 'fill in the state, the event and the expected result of each row.')

@@ -1857,6 +1857,29 @@ test('pr-check wants a ## Cases table when the Cases line names rows', () => {
   assert.match(off.problems[0].fix, /Cases: 2 rows/)
 })
 
+test('pr-check reads the Cases line once, so every form it accepts is held to its place above the table', () => {
+  // The place is read from the same line the count is read from, so no form the parser accepts passes below the table
+  // (Fable 5.2 on #1514, after codex_395 and codex_396).
+  const table = caseTableText(caseRow())
+  const forms = ['Cases: 1 rows', 'Cases: `1 rows`', 'Cases: ``1 rows``', 'Cases: ```1 rows', 'cases: 1 rows', 'Cases: 1 rows', 'Cases:\f1 rows', '<!-- a -->Cases: 1 rows']
+  for (const form of forms) {
+    assert.deepEqual(casesRun(`${form}\n${table}`).problems, [], `above: ${form}`)
+    assert.deepEqual(casesRun(table.replace('## Cases\n\n', `## Cases\n\n${form}\n\n`)).problems, [], `inside, above the rows: ${form}`)
+    const below = casesRun(`${table}\n${form}\n`).problems
+    assert.equal(below.length, 1, `below: ${form}`)
+    assert.match(below[0].message, /below the case table/, `below: ${form}`)
+  }
+  // The template's placeholder above and the real line below is still below.
+  const placeholder = casesRun(`Cases: <n> rows or none, <reason>\n${table}\nCases: 1 rows\n`).problems
+  assert.equal(placeholder.length, 1)
+  assert.match(placeholder[0].message, /below the case table/)
+  // Shapes the rules do not name stay unread, above and below the table, so they cannot drift without a test failing.
+  for (const shape of ['  Cases: 1 rows', '- Cases: 1 rows', '> Cases: 1 rows']) {
+    assert.match(casesRun(`${shape}\n${table}`).problems[0]?.message ?? '', /has no `Cases:` line/, `above: ${shape}`)
+    assert.match(casesRun(`${table}\n${shape}\n`).problems[0]?.message ?? '', /has no `Cases:` line/, `below: ${shape}`)
+  }
+})
+
 // The one form of the case table pr-check reads (#1503); every other shape fails with the form in its fix.
 const formFix = /header line "\| State \| Event \| Expected result \| Test \|", the line "\|---\|---\|---\|---\|"/
 const offForm = (text, reason) => {
