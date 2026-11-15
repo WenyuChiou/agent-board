@@ -2239,6 +2239,14 @@ const parseServePort = (raw: string | undefined): number | null => {
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
 }
 
+// The code the launcher reads from a store that would not open or an owner record that could not be published.
+const storeFailureCode = (error: unknown): string => {
+  const errno = (error as NodeJS.ErrnoException | null)?.code
+  const message = error instanceof Error ? error.message : ''
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(message) ? message
+    : typeof errno === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(errno) ? errno : 'UNREADABLE'
+}
+
 const serveChild = (): void => {
   // Resolve the protected address before asynchronous callbacks can run.
   const file = serveFile()
@@ -2365,13 +2373,16 @@ const serveChild = (): void => {
         }
         process.exit(0)
       },
+      // The hub has stopped and given its lock back; the launcher shows the cause as for a store that would not open.
+      onStoreError: (error) => {
+        serveChildError(`MESSAGE_STORE_FAILED ${storeFailureCode(error)}\n`)
+        process.exitCode = 1
+        setTimeout(() => process.exit(1), 1000).unref()
+      },
     })
   } catch (error) {
     if (!(error instanceof Error) || error.cause !== 'MESSAGE_STORE_FAILED') throw error
-    const errno = (error as NodeJS.ErrnoException).code
-    const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message
-      : typeof errno === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(errno) ? errno : 'UNREADABLE'
-    serveChildError(`MESSAGE_STORE_FAILED ${code}\n`)
+    serveChildError(`MESSAGE_STORE_FAILED ${storeFailureCode(error)}\n`)
     process.exitCode = 1
   }
 }
