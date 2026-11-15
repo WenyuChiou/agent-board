@@ -4593,7 +4593,7 @@ test('a Codex receiver joins a thread only to deliver, and leaves it once the tu
     const connection = await codexConnection(board)
     // Waiting, it stays out of the thread, and the card keeps its ordinary line once the receiver's first poll has said it can take a message.
     const card = async () => (await board.call('/api/board')).body.model.asks.find(one => one.delivery?.id === connection.id)
-    await waitFor(async () => (await card())?.lineText === EN.serveLineNow('Codex'))
+    await waitFor(async () => (await card())?.lineText === EN.serveLineSoon('Codex'))
     assert.ok(!codexMethods(daemon).includes('thread/resume'))
     assert.equal(await codexSend(board, connection), 200)
     await waitFor(async () => codexMethods(daemon).includes('turn/start'))
@@ -4968,6 +4968,8 @@ test('a Codex daemon whose unload delay cannot be read gets no message, and gets
     // config/read is refused: several waits and four board polls pass, and nothing is started.
     await pause(2000)
     assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status, errors], [0, 'queued', ['UNLOAD_DELAY_UNKNOWN']])
+    // Meanwhile the card says the start waits on the board seeing the person's Codex, and that the message stays queued (#1506).
+    assert.equal((await board.call('/api/board')).body.model.asks.find(one => one.delivery?.id === connection.id)?.lineText, EN.serveLineSoon('Codex'))
     // A delay that is not a whole number of seconds is not guessed either.
     writeFileSync(configFaults, 'odd')
     await pause(1000)
@@ -6430,7 +6432,7 @@ test('every receiver record against idle, working and ended shows its line, with
     assert.equal(card.send === 'connected' || card.send === 'mailbox', canSend, label)
     if (!canSend && state !== 'ended') assert.ok(labels.includes(s.pgCopyAnswer), label + ' ' + labels.join(' | '))
     if (!isGone) {
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, none: s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, none: s.serveLineNone(name) }[route.line]
       assert.ok(page.text().includes(words), label + ' ' + words)
       assert.equal(page.text().includes(s.serveLineUnrecorded), !canSend && route.line !== 'none', label)
     }
@@ -6911,7 +6913,7 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     assert.equal(card.delivery !== undefined, canSend, `${record.source}/${surface.id}/${state}`)
     if (!(record.kind === 'mailbox' && state === 'ended')) {
       const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface.id === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: s.serveLineNone(name) }[route.line]
       assert.equal(card.line, route.line, `${record.source}/${surface.id}/${state}`)
       assert.ok(card.lineText.includes(words), `${record.source}/${surface.id}/${state}: ${card.lineText}`)
     }

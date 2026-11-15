@@ -97,12 +97,18 @@ export const sessionState = (view: View, agent: string, session: string): RowSta
 }
 // One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route
 // the record has not shown live also says only Copy is offered.
-export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: Strings, state: RowState = 'idle', reason?: Exclude<SendDecision, { canSend: true }>['reason']): string => {
+export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: Strings, state: RowState = 'idle', reason?: Exclude<SendDecision, { canSend: true }>['reason'], surface?: string): string => {
   const name = isClaudeAgent(agent) ? 'Claude' : agentLabel(agent, s)
   if (reason === 'STATE_UNKNOWN') return s.serveLineStateUnknown
   if (reason === 'SHADOWED') return s.serveLineShadowed
   if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
-  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name))
+  // Codex's daemon receiver starts a message only once it has watched the thread for one unload delay, about a minute
+  // unless Codex's config sets a longer one, and so has read a person's own Codex on it (docs/MESSAGING.md, "How long it
+  // watches first"). An idle Codex card on that surface says so, and that the message stays queued until then, instead of
+  // promising a start right away: with nobody on the thread, or a delay it cannot read, the receiver holds it, and the board
+  // is not told why (#1506). Other Codex surfaces have no such watch.
+  const isWatched = agent === 'codex' && surface === SURFACE_IDS.codexDaemon
+  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : isWatched ? s.serveLineSoon(name) : s.serveLineNow(name))
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
     : line === 'nextTurn' ? s.serveNextTurnHint(name)
     : line === 'chatOpen' ? s.serveNextOpenHint
@@ -546,7 +552,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const connection = route?.canSend === true ? found : undefined
       const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : found ? 'none' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
-      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, ask.agent, s, askState, route.canSend ? undefined : route.reason) }
+      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, ask.agent, s, askState, route.canSend ? undefined : route.reason, found.surface) }
         : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, ask.agent, s) } : { line: 'none' as const, canSend: false, lineText: '' }
       // A phone on the local network gets the id, but neither the command nor its folder.
       const hint = replyHint(ask, s, !isLan, true)
@@ -612,7 +618,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const connection = route?.canSend === true ? found : undefined
       const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : found ? 'none' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
-      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s, state, route.canSend ? undefined : route.reason) }
+      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s, state, route.canSend ? undefined : route.reason, found.surface) }
         : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, row.agent, s) } : { line: 'none' as const, canSend: false, lineText: '' }
       // A Claude session still at work that this board cannot reach: its card says so and copies.
       const isOpenClaude = !isLan && send === 'claude' && row.auto !== 'ended'
