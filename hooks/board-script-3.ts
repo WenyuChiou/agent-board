@@ -5050,7 +5050,7 @@ export const LINES = [
 "      const connection = route?.canSend === true ? found : undefined;",
 "      const mode = connection ? connection.scope === \"mailbox\" ? \"mailbox\" : \"connected\" : found ? \"none\" : isContested || !allowResume && baseMode === \"send\" ? \"open\" : baseMode;",
 "      const send = onLan(mode);",
-"      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s, state, route.canSend ? undefined : route.reason) } : send === \"send\" ? { line: \"reopen\", canSend: true, lineText: routeText(\"reopen\", true, row.agent, s) } : { line: \"none\", canSend: false, lineText: codexResumeHint(row.agent, state, s) };",
+"      const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s, state, route.canSend ? undefined : route.reason) } : send === \"send\" ? { line: \"reopen\", canSend: true, lineText: routeText(\"reopen\", true, row.agent, s) } : { line: \"none\", canSend: false, lineText: isLan && allowResume && baseMode === \"send\" ? \"\" : codexResumeHint(row.agent, state, s) };",
 "      const isOpenClaude = !isLan && send === \"claude\" && row.auto !== \"ended\";",
 "      const nextLabel = row.next === null ? undefined : clipped(row.next.step, LABEL_ROOM);",
 "      const heldBy = connection !== undefined ? address(connection.agent, connection.session) : row.nativeSession === undefined ? undefined : address(row.agent || \"claude\", row.nativeSession);",

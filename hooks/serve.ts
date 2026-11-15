@@ -616,7 +616,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : found ? 'none' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
       const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s, state, route.canSend ? undefined : route.reason) }
-        : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, row.agent, s) } : { line: 'none' as const, canSend: false, lineText: codexResumeHint(row.agent, state, s) }
+        : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, row.agent, s) } : { line: 'none' as const, canSend: false, lineText: isLan && allowResume && baseMode === 'send' ? '' : codexResumeHint(row.agent, state, s) }
       // A Claude session still at work that this board cannot reach: its card says so and copies.
       const isOpenClaude = !isLan && send === 'claude' && row.auto !== 'ended'
       const nextLabel = row.next === null ? undefined : clipped(row.next.step, LABEL_ROOM)

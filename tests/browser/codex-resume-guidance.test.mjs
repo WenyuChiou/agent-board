@@ -16,7 +16,7 @@ loader.deregister()
 
 const now = Date.parse('2026-11-15T12:00:00Z')
 const title = 'Synthetic reopened Codex conversation'
-const source = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=11111111-2222-4333-8444-555555555555 state=ended updated=2026-11-15T12:00:00Z -->\n### ${title}\n- [~] Await the next message\n<!-- /auto session=abcdef01 -->\n`
+const source = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=11111111-2222-4333-8444-555555555555 dir=%2Fsynthetic-project state=ended updated=2026-11-15T12:00:00Z -->\n### ${title}\n- [~] Await the next message\n<!-- /auto session=abcdef01 -->\n`
 
 // Real page rendering with synthetic HTTP only; this does not open or resume a native Codex session.
 test('a stopped Codex card shows the reconnect prompt beside its resume action in every language and viewport (#1505)', { timeout: 60_000 }, async () => {
@@ -46,7 +46,10 @@ test('a stopped Codex card shows the reconnect prompt beside its resume action i
           await row.locator('.row-btn').click()
           await row.getByText(s.serveCodexResumePrompt, { exact: true }).waitFor({ state: 'visible' })
           await row.getByRole('button', { name: s.serveCopyResume, exact: true }).waitFor({ state: 'visible' })
-          assert.equal(await row.locator('textarea').count(), 0, 'an ended task does not offer a misleading send box')
+          for (const name of [s.serveSend('Codex'), s.serveQueueNextTurn('Codex'), s.serveQueueNextOpen('Codex')]) {
+            assert.equal(await row.getByRole('button', { name, exact: true }).count(), 0, 'an ended task does not offer an unverified send action')
+          }
+          await row.getByRole('button', { name: s.pgCopyAnswer, exact: true }).waitFor({ state: 'visible' })
           assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), `${lang}/${width}: the instruction fits`)
           await page.screenshot({ path: join(artifacts, `synthetic-codex-resume-${lang}-${width}.png`), fullPage: true, animations: 'disabled' })
         } finally { await context.close() }

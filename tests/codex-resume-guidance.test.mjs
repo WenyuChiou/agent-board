@@ -34,10 +34,10 @@ const routes = [{ agent: 'codex', kind: 'live', routes: {
   working: { line: 'none', record: null, surfaces: [] },
   ended: { line: 'none', record: null, surfaces: [] },
 } }]
-const model = (s, state = 'ended', connections = [], isLan = false, agent = 'codex', steps = '- [~] Await the next message') => {
-  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=${agent} resume=${session} state=${state} updated=${new Date(now).toISOString()} -->\n### ${title}\n${steps}\n<!-- /auto session=abcdef01 -->\n`
+const model = (s, state = 'ended', connections = [], isLan = false, agent = 'codex', steps = '- [~] Await the next message', { allowResume = false, dir = null } = {}) => {
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=${agent} resume=${session} state=${state} updated=${new Date(now).toISOString()}${dir === null ? '' : ` dir=${encodeURIComponent(dir)}`} -->\n### ${title}\n${steps}\n<!-- /auto session=abcdef01 -->\n`
   const view = buildView(parseProgress(file), [], null, now, 0, {}, s)
-  return serveModel(view, [], s, new Set(), isLan, { connections, mailboxes: [], messages: [] }, false, { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }, routes)
+  return serveModel(view, [], s, new Set(), isLan, { connections, mailboxes: [], messages: [] }, allowResume, { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }, routes)
 }
 const rowOf = value => {
   const row = [...value.stopped, ...value.idle, ...value.groups.flatMap(one => one.rows)].find(one => one.title === title)
@@ -58,7 +58,7 @@ for (const [index, [lang, s]] of languages.entries()) test(`an ended Codex card 
 })
 
 test('an old receiver does not make an ended Codex session sendable (#1505)', () => {
-  const row = rowOf(model(EN, 'ended', [staleConnection]))
+  const row = rowOf(model(EN, 'ended', [staleConnection], false, 'codex', undefined, { dir: '/synthetic-project' }))
   assert.equal(row.lineText, hints[0])
   assert.equal(row.canSend, false)
   assert.equal(row.delivery, undefined)
@@ -74,7 +74,7 @@ test('resume guidance leaves active Codex routes and other agents unchanged (#15
 })
 
 test('the network card keeps resume commands and delivery private (#1505)', () => {
-  const row = rowOf(model(EN, 'ended', [], true))
+  const row = rowOf(model(EN, 'ended', [], true, 'codex', undefined, { dir: '/synthetic-project' }))
   assert.equal(row.lineText, hints[0])
   assert.equal(row.canSend, false)
   assert.equal(row.delivery, undefined)
@@ -105,5 +105,20 @@ test('state and ownership warnings keep priority over resume advice and verified
     assert.equal(routeText('none', false, 'codex', s, 'ended', 'SHADOWED'), s.serveLineShadowed)
     assert.equal(routeText('none', false, 'codex', s, 'ended', 'TURN_RUNNING'), s.serveSendBusy('Codex'))
     assert.equal(routeText('reopen', true, 'codex', s, 'ended'), s.serveLineReopen('Codex'))
+  }
+})
+
+test('the explicit legacy resume option keeps its computer and LAN instructions (#1505)', () => {
+  for (const [, s] of languages) {
+    const computer = rowOf(model(s, 'ended', [], false, 'codex', undefined, { allowResume: true, dir: '/synthetic-project' }))
+    assert.equal(computer.line, 'reopen')
+    assert.equal(computer.canSend, true)
+    assert.equal(computer.lineText, s.serveLineReopen('Codex'))
+    const lan = rowOf(model(s, 'ended', [], true, 'codex', undefined, { allowResume: true, dir: '/synthetic-project' }))
+    assert.equal(lan.lineText, '')
+    assert.equal(lan.canSend, false)
+    assert.equal(lan.resume, null)
+    assert.equal(lan.delivery, undefined)
+    assert.equal(lan.info, s.serveLanSend('Codex'))
   }
 })
