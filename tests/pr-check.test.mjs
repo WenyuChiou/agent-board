@@ -1731,6 +1731,11 @@ test('pr-check wants one Tier line, and the risk tier for a change to a path ris
   only(run('Tier:\nTier: normal'), /2 `Tier:` lines/)
   only(run('Tier: <risk, normal or light: the highest any change reaches>\nTier: light'), /2 `Tier:` lines/)
   only(run('Tier:'), /`Tier:` line names no tier/)
+  // A line with a lone \r or a Unicode line separator in it still counts, and still reads as its tier.
+  only(run('Tier: risk note\nTier: normal'), /2 `Tier:` lines/)
+  only(run('Tier: risk\rnote\nTier: normal'), /2 `Tier:` lines/)
+  assert.deepEqual(run('Tier: risk note', { paths: ['hooks/connect.ts'] }).problems, [])
+  assert.deepEqual(surface({ body: 'Fixes #1\nTier: risk note\n', number: TIER_FROM + 1 }).problems.map(item => item.check), ['surface'])
   only(run('Tier: medium'), /"medium", which is not a tier/)
   // The value is read as the surface, cases and round checks read it: two backticks are not a tier they see.
   only(run('Tier: ``risk``'), /"``risk``", which is not a tier/)

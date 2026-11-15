@@ -857,7 +857,8 @@ const visibleLines = (text, { isPlaceKept = false } = {}) => {
 // The tier a `Tier:` line's value names, or null. Every check reads the value with this one reader (#1531), so a
 // spelling the tier check accepts is one the surface, cases and round checks read too.
 const tierWord = value => value.match(/^`?(risk|normal|light)\b/i)?.[1].toLowerCase() ?? null
-const tierValues = body => visibleLines(body).flatMap(line => line.match(/^Tier:[ \t]*(.*)$/i)?.[1].trimEnd() ?? [])
+// The whole rest of the line: `.` stops at a lone \r or a Unicode line separator, and would drop the line.
+const tierValues = body => visibleLines(body).flatMap(line => line.match(/^Tier:[ \t]*([\s\S]*)$/i)?.[1].trimEnd() ?? [])
 // The tier as a reader sees it, for the surface check: a `Tier:` line outside fences and comments.
 const visibleTier = body => tierValues(body).map(tierWord).find(Boolean) ?? null
 // The `Surface:` lines a reader sees: every value (found), and those that are filled in (the template's own
