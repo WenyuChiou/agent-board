@@ -147,23 +147,22 @@ test('fail-first runs each named new or changed test on the merge base with the 
     'a title only in a fixture': 'missing',
     // Two files have the test, so it cannot be run by its name alone; it counts against the line too.
     'a title in two files': 'ambiguous',
-    // Its file is the same as on the base, and it passes here: not run on the base, not counted.
-    'a kept test': 'unchanged',
+    // Its file is the same as on the base, and it passes here: it still runs on the base, and passes there.
+    'a kept test': 'passes-on-base',
     // A todo test never fails a run, whether it passes or fails: not counted.
     'a todo test': 'todo',
     'a todo that fails': 'todo',
   })
   assert.match(r.git('diff', '--name-status', base, head, '--', 'tests/renamed-from.mjs', 'tests/renamed-to.mjs'), /^R/)
   assert.equal(result.counted, 3)
-  assert.equal(result.total, 10)
-  assert.equal(result.line, `Fail-first: 3 of 10 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`)
-  // Each test runs here first, the unchanged one too; only those that pass here in a changed file run on the base, after
-  // every run here.
+  assert.equal(result.total, 11)
+  assert.equal(result.line, `Fail-first: 3 of 11 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`)
+  // Each test runs here first; every one that passes here then runs on the base, after every run here.
   assert.ok(runs.some(run => run.where === r.cwd && run.title === 'a kept test'))
   const firstBase = runs.findIndex(run => run.where !== r.cwd)
   assert.ok(firstBase > 0)
   assert.ok(runs.slice(firstBase).every(run => run.where === checkouts[0]))
-  assert.deepEqual(runs.slice(firstBase).map(run => run.title).sort(), ['an old test changes', 'an old test passes', 'the added module is there', 'the old helper is gone', 'the renamed helper is gone from its old name', 'the value is a number', 'the value is two'])
+  assert.deepEqual(runs.slice(firstBase).map(run => run.title).sort(), ['a kept test', 'an old test changes', 'an old test passes', 'the added module is there', 'the old helper is gone', 'the renamed helper is gone from its old name', 'the value is a number', 'the value is two'])
   // The base checkout was a separate folder, and it is gone with its worktree record.
   assert.equal(checkouts.length, 1)
   assert.notEqual(checkouts[0], r.cwd)
@@ -188,7 +187,7 @@ test('fail-first counts a working-tree change and says so, and reports no tests 
   assert.equal(none.line, null)
 })
 
-test('fail-first calls a test unchanged only when it passes here in a file the same as the base (#1520)', { timeout: 120_000 }, async t => {
+test('fail-first runs every named test that passes here on the base, whatever its file (#1520)', { timeout: 120_000 }, async t => {
   const r = repository(t)
   r.write('scripts/value.mjs', 'export const value = 1\n')
   // A file the branch leaves as it is: a real test, one that the change breaks, and fixture lines that start with a test call.
@@ -203,21 +202,22 @@ test('fail-first calls a test unchanged only when it passes here in a file the s
   r.write('tests/mixed.test.mjs', `${header}test('an old test in a changed file', () => assert.ok(true))\ntest('a new test in it', () => assert.ok(true))\n`)
   r.commit()
   const command = (program, args, options = {}) => spawnSync(program, args, { cwd: r.cwd, env: r.env, encoding: 'utf8', timeout: 60000, ...options })
-  const names = ['kept as it was', 'the value is one', 'a phantom', 'an uncommented test', 'an old test in a changed file']
+  const names = ['kept as it was', 'the value is one', 'a phantom', 'an uncommented test', 'an old test in a changed file', 'a new test in it']
   const runs = []
   const result = await runFailFirst({ cwd: r.cwd, base, names, command, env: r.env, onRun: run => runs.push(run) })
   assert.deepEqual(Object.fromEntries(result.results.map(item => [item.title, item.state])), {
-    'kept as it was': 'unchanged',
-    // An unchanged file does not make a test that fails here, or a fixture line, unchanged.
+    // A test that passes here runs on the base, its file changed or not.
+    'kept as it was': 'passes-on-base',
+    // A test that fails here fails, and a fixture line is no test, whatever the file.
     'the value is one': 'fails-on-head',
     'a phantom': 'missing',
-    // A test whose own lines are the same on both sides runs on the base when its file changed.
     'an uncommented test': 'passes-on-base',
     'an old test in a changed file': 'passes-on-base',
+    'a new test in it': 'passes-on-base',
   })
   assert.equal(result.counted, 0)
-  assert.equal(result.total, 4)
-  // Every named test ran here; only the two in changed files ran on the base.
+  assert.equal(result.total, 6)
+  // Every named test ran here, and each that passed here ran on the base.
   assert.deepEqual(runs.filter(run => run.where === r.cwd).map(run => run.title).sort(), [...names].sort())
-  assert.deepEqual(runs.filter(run => run.where !== r.cwd).map(run => run.title).sort(), ['an old test in a changed file', 'an uncommented test'])
+  assert.deepEqual(runs.filter(run => run.where !== r.cwd).map(run => run.title).sort(), ['a new test in it', 'an old test in a changed file', 'an uncommented test', 'kept as it was'])
 })

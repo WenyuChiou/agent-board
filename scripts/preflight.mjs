@@ -976,7 +976,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
         for (const item of found.results) {
           // A span that names no test is pr-check's to report, row by row.
           if (item.state === 'unknown' || item.state === 'counted') continue
-          add(['passes-on-base', 'fails-on-head', 'missing', 'ambiguous'].includes(item.state) ? 'FAIL' : item.state === 'unchanged' ? 'PASS' : 'WARN', `${item.title}: ${stateWords[item.state]}.`)
+          add(['passes-on-base', 'fails-on-head', 'missing', 'ambiguous'].includes(item.state) ? 'FAIL' : 'WARN', `${item.title}: ${stateWords[item.state]}.`)
         }
         if (found.isDirty) add('WARN', 'fail-first ran on uncommitted changes; commit them and run preflight again, so the line is for the head you push.')
         if (!found.total) add('WARN', 'fail-first: no new or changed test that the case table names ran here; if none can fail without the change, write "Fail-first: none, <reason>" under Checks.')

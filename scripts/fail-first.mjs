@@ -1,6 +1,5 @@
-// Fail-first: each test a pull request's case table names that is new or changed since the merge base runs twice,
-// on a checkout of the merge base with the branch's tests copied in, where it should fail, and on the branch, where it
-// should pass. A test that passes on both does not check the change (CONTRIBUTING rule 8, #1520).
+// Fail-first: each test a pull request's case table names runs on the branch, where it should pass, and then on a
+// checkout of the merge base with the branch's tests copied in, where it should fail. A test that passes on both does not check the change (CONTRIBUTING rule 8, #1520).
 // It imports nothing else from this repository, so another project can copy it and pass its own `runnerFor`.
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -85,9 +84,8 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
     onRun?.({ where, title, path })
     return outcomeOf(command(program, args, { cwd: where, env: typeof env === 'function' ? env() : env, timeout, maxBuffer: big }), title)
   }
-  // A named test is new or changed when its file differs from the base, by git's own comparison. No source text decides
-  // it: a test in a file the branch changes runs on the base even when its own lines did not change.
-  const changed = new Set(differs)
+  // Every named test that passes here runs on the base, whatever its file: neither a file the branch left as it was nor
+  // any source text makes a test old, since a helper or fixture it reads may have changed (#1532).
   const results = []
   const toRun = []
   const here = new Map()
@@ -114,7 +112,7 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
   }
   // Every named test runs here first, so a title that is no test shows as missing wherever it is written.
   for (const item of toRun) if (!here.has(item.title)) here.set(item.title, runOne(cwd, item))
-  const needBase = toRun.filter(item => here.get(item.title) === 'pass' && changed.has(item.path))
+  const needBase = toRun.filter(item => here.get(item.title) === 'pass')
   const onBase = new Map()
   if (needBase.length) {
     const temp = mkdtempSync(join(tmpdir(), 'fail-first-base-'))
@@ -143,15 +141,13 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
         : head === 'todo' ? 'todo'
           : head === 'missing' ? 'missing'
             : head === 'stopped' ? 'stopped'
-              : !changed.has(item.path) ? 'unchanged'
                 : was === 'fail' ? 'counted'
                   : was === 'pass' ? 'passes-on-base'
                     : 'base-unknown'
     results.push({ ...item, state })
   }
-  // Every title found in tests/ makes the total except a test skipped on this system, a todo test, one that passes here
-  // in a file unchanged since the base, and a file this runner cannot run; one that no run finds by its name, or that
-  // more than one file has, counts against it.
+  // Every title found in tests/ makes the total except a test skipped on this system, a todo test and a file this runner
+  // cannot run; one that no run finds by its name, or that more than one file has, counts against it.
   // A span that is no title anywhere in tests/ (code beside the title in the same cell) is pr-check's to report.
   const total = results.filter(item => ['counted', 'passes-on-base', 'fails-on-head', 'stopped', 'base-unknown', 'missing', 'ambiguous'].includes(item.state)).length
   const counted = results.filter(item => item.state === 'counted').length
@@ -170,7 +166,6 @@ export const stateWords = {
   skipped: 'is skipped on this system; not counted',
   todo: 'is a todo test, which no run can fail; not counted',
   missing: 'matched no test by its exact name',
-  unchanged: 'passes here, in a test file unchanged since the base; not counted',
   'not-node': 'is not a Node test file here (a plugin test runs with `claude plugin test`); not counted',
   template: 'is a template title; not run',
   unknown: 'is not a test title in tests/; not counted',
