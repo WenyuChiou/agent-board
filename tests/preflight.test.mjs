@@ -2549,6 +2549,15 @@ test('preflight runs the tests the case table names on the merge base and here, 
   assert.equal(bodies.length, 1)
   assert.ok(bodies[0].includes(line))
   assert.equal(readFileSync(join(f.root, 'body.md'), 'utf8'), bodyOf('the value is two'))
+  // The template's placeholder takes the line; with a line already pasted under it, the body keeps one line.
+  const lineCount = text => text.split('\n').filter(item => item.startsWith('Fail-first: 1 of 1')).length
+  const template = 'Fail-first: <the line preflight prints, or none, <reason>>\n'
+  for (const body of [`${template}${bodyOf('the value is two')}`, `${template}${bodyOf('the value is two')}${line}\n`]) {
+    writeFileSync(join(f.root, 'body.md'), body)
+    await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+    assert.equal(lineCount(bodies.at(-1)), 1, bodies.at(-1))
+    assert.equal(bodies.at(-1).includes(template), body.includes(line), bodies.at(-1))
+  }
   writeFileSync(join(f.root, 'body.md'), bodyOf('the value is a number'))
   const passing = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
   assert.ok(has(passing, 'FAIL', 'the value is a number: passes on the base'), JSON.stringify(passing))

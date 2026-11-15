@@ -995,9 +995,12 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       // The body is checked as it will read with the line above pasted; the file itself is left as it is.
       if (failFirstLine) {
         const text = read(bodyPath)
+        // A filled line (pasted already, or `none, <reason>`) is checked as it is; otherwise the line takes the template's
+        // placeholder, or goes at the end. One line either way, since pr-check reads the placeholder as no line.
+        const filled = /^[ \t]*(?:[-*][ \t]+)?(?:(?:PASS|WARN|FAIL)[ \t]+)?Fail-first:[ \t]*[^<\s]/im
         const placeholder = /^([ \t]*(?:[-*][ \t]+)?)Fail-first:[ \t]*(?:<.*)?$/im
-        const pasted = placeholder.test(text) ? text.replace(placeholder, (_, lead) => `${lead}${failFirstLine}`)
-          : /^[ \t]*(?:[-*][ \t]+)?(?:(?:PASS|WARN|FAIL)[ \t]+)?Fail-first:/im.test(text) ? null : `${text.trimEnd()}\n\n${failFirstLine}\n`
+        const pasted = filled.test(text) ? null
+          : placeholder.test(text) ? text.replace(placeholder, (_, lead) => `${lead}${failFirstLine}`) : `${text.trimEnd()}\n\n${failFirstLine}\n`
         if (pasted !== null) {
           copy = mkdtempSync(join(tmpdir(), 'agent-board-preflight-body-'))
           bodyPath = join(copy, 'body.md')
