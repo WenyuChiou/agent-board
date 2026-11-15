@@ -360,6 +360,19 @@ if (args.at(-1)?.includes('SLOW_TURN')) {
 })
 })
 
+test('an idle Codex card says its message starts within about a minute, not right away, in EN, ZH_TW and ZH_CN (#1506)', async () => {
+  const { agentLabel } = await import('../hooks/strings.ts')
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    // Codex's receiver watches a thread for about a minute before it starts a message on it.
+    assert.equal(routeText('now', true, 'codex', s), s.serveLineSoon('Codex'))
+    assert.notEqual(s.serveLineSoon('Codex'), s.serveLineNow('Codex'))
+    // A turn in progress and the other agents keep their lines.
+    assert.equal(routeText('now', true, 'codex', s, 'working'), s.serveLineNowWorking('Codex'))
+    assert.equal(routeText('now', true, 'opencode', s), s.serveLineNow(agentLabel('opencode', s)))
+  }
+  assert.equal(EN.serveLineSoon('Codex'), 'Codex is waiting. It starts on this within about a minute.')
+})
+
 test('card wording explains turn runs/ran in background and to open the AI window in EN, ZH_TW, and ZH_CN', async () => {
   for (const s of [EN, ZH_TW, ZH_CN]) {
     const lineText = routeText('reopen', true, 'cursor', s)

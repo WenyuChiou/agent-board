@@ -4789,7 +4789,7 @@ export const LINES = [
 "    return s.serveLineShadowed;",
 "  if (reason === \"TURN_RUNNING\")",
 "    return s.serveSendBusy(name);",
-"  const text = line === \"now\" ? isClaudeAgent(agent) ? s.claudeSendNow : state === \"working\" ? s.serveLineNowWorking(name) : s.serveLineNow(name) : line === \"stepEnd\" ? isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name) : line === \"nextTurn\" ? s.serveNextTurnHint(name) : line === \"chatOpen\" ? s.serveNextOpenHint : line === \"reopen\" ? s.serveLineReopen(name) : s.serveLineNone(name);",
+"  const text = line === \"now\" ? isClaudeAgent(agent) ? s.claudeSendNow : state === \"working\" ? s.serveLineNowWorking(name) : agent === \"codex\" ? s.serveLineSoon(name) : s.serveLineNow(name) : line === \"stepEnd\" ? isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name) : line === \"nextTurn\" ? s.serveNextTurnHint(name) : line === \"chatOpen\" ? s.serveNextOpenHint : line === \"reopen\" ? s.serveLineReopen(name) : s.serveLineNone(name);",
 "  return canSend || line === \"none\" ? text : `${text} ${s.serveLineUnrecorded}`;",
 "};",
 "var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",

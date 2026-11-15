@@ -899,6 +899,7 @@ export const ZH_CN: Strings = {
   serveQueuingNextOpen: (agent: string): string => `正在排入 ${agent} 下次打开此会话时…`,
   serveQueuedNextOpen: (agent: string): string => `已排入 · ${agent} 会在下次打开此会话时读到这条消息。`,
   serveLineNow: (agent: string): string => `${agent} 正在等，会马上收到。`,
+  serveLineSoon: (agent: string): string => `${agent} 正在等，大约一分钟内会收到。`,
   serveLineNowWorking: (agent: string): string => `${agent} 正在工作，这条会马上加进当前这一轮。`,
   serveLineStepEnd: (agent: string): string => `${agent} 正在工作，这一步结束后会收到。`,
   serveLineReopen: (agent: string): string => `发送会在后台执行这一轮；打开 ${agent} 窗口就能看到。`,
