@@ -2120,17 +2120,22 @@ test('A29 I1 every top-level, mailbox and message field, damaged or removed one 
   const damaged = []
   const VALUES = [null, 'x', {}, -1, undefined]
   const change = (object, key, value) => { const next = { ...object }; if (value === undefined) delete next[key]; else next[key] = value; return next }
-  const inMailbox = (key, value) => ({ ...base, mailboxes: [change(base.mailboxes[0], key, value)] })
-  const inMessage = (key, value) => ({ ...base, messages: [change(base.messages[0], key, value)] })
+  // A field the board works out from the damaged one follows it, so the case is refused by the damaged field's own check and
+  // not by the other field no longer matching (#1366 round 23): a mailbox's id from its agent and session, a message's hash
+  // from its text. A removed text has no hash of its own, so that one case keeps the old hash.
+  const inMailbox = (key, value) => { const next = change(base.mailboxes[0], key, value); return { ...base, mailboxes: [['agent', 'session'].includes(key) ? { ...next, id: mailboxOf(next.agent, next.session) } : next] } }
+  const inMessage = (key, value) => { const next = change(base.messages[0], key, value); return { ...base, messages: [key === 'text' && value !== undefined ? { ...next, hash: textHash(value) } : next] } }
   for (const key of Object.keys(fresh)) for (const value of VALUES) damaged.push([`${key} ${JSON.stringify(value)}`, change(base, key, value)])
   for (const key of Object.keys(fresh.mailboxes[0])) for (const value of VALUES) damaged.push([`mailbox ${key} ${JSON.stringify(value)}`, inMailbox(key, value)])
   for (const key of Object.keys(fresh.messages[0])) for (const value of VALUES) damaged.push([`message ${key} ${JSON.stringify(value)}`, inMessage(key, value)])
+  // A text that is a string and still no text, which only the text's own check can refuse once the hash follows it.
+  damaged.push(['message text " "', inMessage('text', ' ')])
   // The board's own answer picks the cases the receiver must ask about below, so a required field the board stopped checking
   // would drop out of them unseen (#1366 round 22). Every case so far must therefore be refused, by name, but these: a value the
-  // board takes as valid for that field ('x' as an id, an address, a reply or an error; a time that has passed), a field it fills in
+  // board takes as valid for that field ('x' as an id, an agent, a session, an address, a text, a reply or an error; a time that has passed), a field it fills in
   // itself when missing (a message's origin and hash), one it does not read (a mailbox's origin), and a part it does without.
   const TAKEN = ['mailboxes undefined', 'pausePeerMessages undefined', 'mailbox surface "x"', 'mailbox expires -1', ...VALUES.map(value => `mailbox origin ${JSON.stringify(value)}`),
-    'message id "x"', 'message target "x"', 'message turn "x"', 'message from "x"', 'message to "x"', 'message reply "x"', 'message error "x"', 'message updated -1',
+    'mailbox agent "x"', 'mailbox session "x"', 'message text "x"', 'message id "x"', 'message target "x"', 'message turn "x"', 'message from "x"', 'message to "x"', 'message reply "x"', 'message error "x"', 'message updated -1',
     'message hash null', 'message hash undefined', 'message origin null', 'message origin undefined']
   for (const label of TAKEN) assert.ok(damaged.some(([one]) => one === label), `${label} is one of the cases`)
   for (const [label, store] of damaged) if (!TAKEN.includes(label)) assert.ok(isRefused(JSON.stringify(store)), `${label}: the board refuses it`)
