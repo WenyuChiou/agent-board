@@ -131,4 +131,4 @@ The message was sent once. Over the whole run the receiver sent `turn/start` 3 t
 ## After this run
 
 - #1486 (a timed-out message kept the card from sending again) was fixed by #1493, and #1506 (the card promised a start while the receiver held the message) by #1509. Both had held the default.
-- The owner turned the default on, 2026-11-15, with #1504, #1505 and #1507 still open, and #1516, which the case table for that change found (the pull request that changed the default, for #318).
+- The owner turned the default on, 2026-11-15, with #1504, #1505 and #1507 still open, and #1516, which the case table for that change found (the pull request that changed the default, for #318). Its review raised #1370 (a person's turn that starts at the moment of `turn/start` takes the message); the owner chose to turn the default on with it open too.
