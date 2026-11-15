@@ -973,7 +973,58 @@ const caseTable = body => {
   // `at` is the header row's place among visibleLines(body, { isPlaceKept: true }), the list cases() reads its line from.
   return { rows: rows.map(cells => cells.map(cell => isPlaceholderCell(cell) ? '' : cell)), at: start + 1 + first }
 }
-export const cases = ({ body = '', title = '', number = null, tier = visibleTier(body) } = {}) => {
+// The cells of each case-table row, or none when the body has no table in the accepted form; preflight reads the tests
+// to run from the Test column (#1520).
+export const caseRows = body => caseTable(body)?.rows ?? []
+// From FAIL_FIRST_FROM on, each row names its test by its exact title in backticks, and a Ready pull request carries the
+// `Fail-first:` line preflight prints for its head (CONTRIBUTING rules 2 and 8, #1520). A local --body-file run has no
+// number and is checked as new.
+export const FAIL_FIRST_FROM = 1520
+const failFirstForm = /^(\d+) of (\d+) new or changed tests? fail on ([0-9a-f]{7,40}) and pass on ([0-9a-f]{7,40})\.?$/i
+const failFirst = ({ body, rows, titles, head, isDraft, fail, output }) => {
+  if (titles) {
+    rows.forEach((cells, i) => {
+      // A row with no test at all is already reported above.
+      if (!cells[3]) return
+      const spans = [...cells[3].matchAll(/`([^`\n]+)`/g)].map(match => match[1])
+      if (spans.some(span => titleKnown(span, titles))) return
+      if (isDraft) output.info.push(`cases: row ${i + 1} of the case table names no test of tests/ yet; name its exact title in backticks once the test is written.`)
+      else fail(`row ${i + 1} of the case table names no test of tests/ in backticks.`, 'write the test\'s exact title in backticks in the Test column, as it is in tests/ at the head, with <name> for each variable of a template title; code beside it may stay (CONTRIBUTING.md rule 2).')
+    })
+  }
+  // The line comes from the run on the head that will be reviewed, so a draft has none yet.
+  if (isDraft) return
+  const how = 'run `node scripts/preflight.mjs --body-file <file> --title <title>` on the head and paste its `Fail-first:` line under Checks, or write "Fail-first: none, <reason>" when no test the table names can fail without the change (CONTRIBUTING.md rule 8).'
+  const found = visibleLines(body).flatMap(text => {
+    const match = text.match(/^[ \t]*(?:[-*][ \t]+)?(?:(?:PASS|WARN|FAIL)[ \t]+)?Fail-first:[ \t]*(.*)$/i)
+    return match ? [match[1].trim()] : []
+  })
+  const lines = found.filter(value => value !== '' && !value.startsWith('<'))
+  if (lines.length > 1) {
+    fail(`the body has ${lines.length} \`Fail-first:\` lines; it gives one, for the head.`, 'keep the line preflight printed for the head; put an example inside a code fence.')
+    return
+  }
+  if (!lines.length) {
+    fail(`a Ready risk-tier pull request with a case table has no \`Fail-first:\` line.${found.some(value => value.startsWith('<')) ? ' The template\'s placeholder is still there.' : ''}`, how)
+    return
+  }
+  const line = lines[0].replace(/`/g, '')
+  const none = line.match(/^none\b[ \t]*,?[ \t]*(.*)$/i)
+  if (none) {
+    if (!none[1].trim() || /^<[^<>]*>$/.test(none[1].trim())) fail('the `Fail-first:` line says `none` with no reason.', 'write the reason after `none`, for example "Fail-first: none, the change is a sentence only a person can judge".')
+    return
+  }
+  const counts = line.match(failFirstForm)
+  if (!counts) {
+    fail('the `Fail-first:` line is neither the line preflight prints nor "none, <reason>".', how)
+    return
+  }
+  const [, counted, total, , passOn] = counts
+  if (head && !head.toLowerCase().startsWith(passOn.toLowerCase())) fail(`the \`Fail-first:\` line is for ${passOn}, not the head ${head.slice(0, 8)}.`, 'run preflight again on the head and paste the line it prints.')
+  if (Number(total) === 0) fail('the `Fail-first:` line counts no new or changed test.', 'name in the case table a new or changed test that fails without the change, or write "Fail-first: none, <reason>".')
+  else if (Number(counted) !== Number(total)) fail(`the \`Fail-first:\` line says ${counted} of ${total}: a test it counts passes on the base too, fails here, or gave no verdict.`, 'fix or replace each test preflight names, so that it fails on the merge base and passes on the head, then run preflight again.')
+}
+export const cases = ({ body = '', title = '', number = null, tier = visibleTier(body), titles = null, head = null, isDraft = false } = {}) => {
   const output = result()
   if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= CASES_FROM)) return output
   const { filled } = surfaceLine(body)
@@ -1025,6 +1076,7 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
   // The table is written before any code, with the title of the test planned for each row, so a draft needs it too.
   const untested = table.rows.filter(cells => !cells[3]).length
   if (untested) fail(`${untested} rows of the case table name no test.`, 'name in the Test column the title of the test planned for each row; the table has it before any code is written, on a draft too (RULES.md, R6).')
+  if (number === null || number > FAIL_FIRST_FROM) failFirst({ body, rows: table.rows, titles, head, isDraft, fail, output })
   return output
 }
 
@@ -1136,7 +1188,7 @@ export const checkPr = data => {
   add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
   add(surface({ body: data.body, title: data.title, number: data.number, paths: data.paths, numstat: data.numstat }))
-  add(cases({ body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
+  add(cases({ body: data.body, title: data.title, number: data.number, isDraft: data.isDraft, titles: testTitles(data.testFiles ?? []), head: data.head }))
   if (issue.issue !== null) {
     // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
     const lookups = [...new Set(issue.issues)].map((number, index) => {
