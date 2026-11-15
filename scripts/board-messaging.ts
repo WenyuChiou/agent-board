@@ -501,6 +501,7 @@ const isClaimContention = (error: unknown): boolean => {
   const cause = (error as { cause?: unknown }).cause as NodeJS.ErrnoException | null | undefined
   return cause == null || CONTENTION_ERRNO.has(String(cause.code ?? ''))
 }
+const isClaimDamaged = (error: unknown): boolean => error instanceof Error && error.message === 'MESSAGE_STORE_CLAIM_DAMAGED'
 const errorLabel = (error: unknown): string => {
   const code = (error as NodeJS.ErrnoException | null)?.code
   if (error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message)) return error.message
@@ -614,10 +615,11 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
         let state = existsSync(file) ? parseMessageStore(readFileSync(file, 'utf8'), now) : { messages: [] }
         const next = mailboxAction(state, action, body, now)
         state = next.state
-        // A recheck that fails on a damaged claim, or on a read error, is a store error, not a
-        // contention: only a contention error, or a refusal Windows clears on its own, defers (#1484).
+        // A recheck that fails on a damaged claim is a store error; any other failure defers,
+        // so a message whose write never happened stays queued for the next turn (#1484). The
+        // check itself names a read failure that is not a refusal Windows clears as damage.
         try { claim.check(root) } catch (error) {
-          if (isClaimContention(error) || CONTENTION_ERRNO.has(String((error as NodeJS.ErrnoException | null)?.code ?? ''))) hasDeferred = true
+          if (!isClaimDamaged(error)) hasDeferred = true
           throw error
         }
         try {

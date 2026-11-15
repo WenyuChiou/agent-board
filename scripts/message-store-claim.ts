@@ -105,8 +105,12 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
       // contention: no other board retires a live owner's claim (#1484).
       let read: string
       try { read = readClaim(file) } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw damaged()
-        throw error
+        // A read failure the check itself did not already name as damage is damage too,
+        // unless Windows clears it on its own: the write path defers on anything that is
+        // not damage, so only damage may pass through unnamed (#1484).
+        if (error instanceof Error && error.message === 'MESSAGE_STORE_CLAIM_DAMAGED') throw error
+        if (TRANSIENT_ERRNO.has(String((error as NodeJS.ErrnoException).code ?? ''))) throw error
+        throw damaged()
       }
       if (read !== bytes) throw damaged()
     },
