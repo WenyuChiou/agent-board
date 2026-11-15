@@ -22,6 +22,7 @@ START_RE = re.compile(r"^<!--\s*auto\s+(.*?)\s*-->\s*$")
 END_RE = re.compile(r"^<!--\s*/auto\b(.*?)-->\s*$")
 QUESTION_RE = re.compile(r"^<!--\s*question=([a-f0-9]{64}:[1-9]\d*)\s*-->\s*$")
 NATIVE_RE = re.compile(r"^<!--\s*native=(\S*)(?:\s+options=(.*?))?\s*-->\s*$")
+OPTIONS_RE = re.compile(r"^<!--\s*options=(.*?)\s*-->\s*$")
 FENCE_RE = re.compile(r"^\s*(```|~~~)")
 PROJECT_RE = re.compile(r"^##\s+(.+?)\s*#*\s*$")
 TASK_RE = re.compile(r"^###\s+(.+?)\s*#*\s*$")
@@ -35,8 +36,10 @@ def is_cut_marker(line):
     if not line.startswith("<!--") or "-->" in line:
         return False
     marker = re.sub(r"^<!--[ \t]*", "", line.rstrip(" \t\r"))
-    return marker != "" and any(prefix.startswith(marker) or marker.startswith(prefix)
-                                     for prefix in MARKER_PREFIXES)
+    return marker != "" and (
+        marker.startswith("options=")
+        or any(prefix.startswith(marker) or marker.startswith(prefix) for prefix in MARKER_PREFIXES)
+    )
 
 
 def split_lines(text):
@@ -91,7 +94,7 @@ def classify(lines):
         if not in_comment and end_session(raw) is not None:
             kinds.append("end")
             continue
-        if not in_comment and (QUESTION_RE.match(raw) or NATIVE_RE.match(raw)):
+        if not in_comment and (QUESTION_RE.match(raw) or NATIVE_RE.match(raw) or OPTIONS_RE.match(raw)):
             kinds.append("text")
             continue
         line = raw

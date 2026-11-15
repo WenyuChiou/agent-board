@@ -3,21 +3,21 @@ import { expect, test } from 'claude-code/testing'
 import { countedText } from './fixtures/counted-work'
 
 import type { ProgressMirror, ProgressPr } from '../types'
-import { askOf } from '../hooks/ask'
+import { askOf, optionsGiven, REFUSED_OPTIONS } from '../hooks/ask'
 import { RULES } from '../hooks/rule'
-import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor } from '../hooks/board'
+import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor, type AnswerRoute } from '../hooks/board'
 import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
 import { agentHooks, boardCommands, boardScript, COLLISION, DELETE, generatedFile, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, isSetupState, isWindowsHost, NODE_MIN, nodeVersionOf, openclawPlugin, openclawPrinted, openclawSavedBy, openclawTooOld, PROBLEM_ARGS, readConfig, RELEASE_PATHS, reportCommand, reporterPs1, reporterSh, setupAgents, setupLines, withFlatHook, withGroupedHook, withHermesHooks, withoutHermesHooks, withoutOurHooks, withoutSection } from '../hooks/connect'
 import { connectDataRoots, connectRecordPath, recoveryUnreadableCode } from '../hooks/connect-pure'
 import { boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
-import { codexReport, putCodexBlock } from '../hooks/codex'
+import { codexEvent, codexReport, putCodexBlock } from '../hooks/codex'
 import { answerKey, blockId, CLAIM_MS, claimAction, isBoardAnswer, isBoardTurn, isInboxFile, isQuestionStale, isTakenFile, isTextLog, isTranscriptPath, keepInboxDone, keepInboxFailed, MAX_TRIES, promptKey, readClaim, readTurn, takenName, transcriptTail, turnsToDigest } from '../hooks/inbox'
 import { applyDigest, clearAsked, clearBackgroundJobs, finishBackgroundJob, isAskingYou, isPersonsAnswer, isWork, lastQuestion, lastQuestionInProse, markAsked, parseDigest, replyData, requestData, startBackgroundJob, turnTools } from '../hooks/digest'
 import { ciFinished, prFromGh, prWords } from '../hooks/github'
 import { appendJournal, archiveEntryCount, countDay, journalLine, missingEntries, nextPendingArchive, parseJournal, parsePendingArchive, pendingArchivePath, progressReport, unwrittenEntries } from '../hooks/journal'
 import { applyTaskCreate, applyTaskUpdate, asData, cleanContext, cleanTitle, clip, completedSince, dataBlock, emptyMirror, fromTaskList, markAnswered, nameReply, noticesOf, resumeNote, stateOf, waitsOnYou } from '../hooks/mirror'
 import { DARK, LIGHT, paletteFor } from '../hooks/palette'
-import { autoOf, doneKey, parseProgress } from '../hooks/parse'
+import { autoOf, doneKey, optionsComment, optionsOf, parseProgress, validOptions } from '../hooks/parse'
 import { LANGS, ZH_TW } from '../hooks/i18n'
 import { agentLabel, resolveLang, STRINGS } from '../hooks/strings'
 import { parseQuickAdd } from '../hooks/quick'
@@ -5252,4 +5252,396 @@ test('Settings language request on a server started with --lang en preserves pre
   expect(isOverriddenAfterReset).toBe(false)
   const resetHtml = servePage(STRINGS.en, 'nonce', false, 0, saved, isOverriddenAfterReset)
   expect(resetHtml).not.toContain('id="settings-lang-override"')
+})
+
+// #1277: buttons come only from choices an agent lists itself (Task metadata `options`, an
+// `options=` line, a Codex-family `options` list). Nothing reads them out of a reply's words.
+const AT_1277 = Date.parse('2026-10-30T12:00:00Z')
+const TEN_1277 = Array.from({ length: 10 }, (_, at) => `Option ${at + 1}`)
+// What each surface offers for the first waiting question: the pane or board row, the page's
+// buttons, and the terminal board's number key.
+const offeredOn = (view: ReturnType<typeof buildView>, pending: Parameters<typeof boardItems>[1] = []) => {
+  const items = boardItems(view, pending)
+  const at = items.findIndex(one => one.type === 'ask')
+  const drawn = pinned({ ...emptyBoardState, selected: at }, items)
+  return {
+    isAsked: view.waiting.length === 1 && at >= 0,
+    isChoose: view.waiting[0]?.kind === 'choose',
+    row: view.waiting[0]?.options,
+    page: serveModel(view, pending, STRINGS.en).asks[0]?.answers,
+    key: boardKey(drawn, '1', items, STRINGS.en).action,
+  }
+}
+const NO_BUTTONS = { isAsked: true, isChoose: false, row: [], page: [], key: null }
+const fileView = (text: string, ledger?: ReturnType<typeof emptyQuestions>) => buildView(parseProgress(text), [], null, AT_1277, 0, {}, STRINGS.en, [], {}, ledger)
+const codexStop = (input: Record<string, unknown>) => {
+  const iso = (ms: number): string => new Date(AT_1277 + ms).toISOString()
+  const start = codexEvent(null, { session_id: 's-1277', hook_event_name: 'SessionStart' }, iso(0), STRINGS.en)
+  const prompted = codexEvent(start, { session_id: 's-1277', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }, iso(1000), STRINGS.en)
+  const stop = codexEvent(prompted, { session_id: 's-1277', hook_event_name: 'Stop', turn_id: 'turn-1', ...input }, iso(2000), STRINGS.en)
+  return { stop, card: `## demo\n${putCodexBlock('', stop, 'a'.repeat(64))}\n` }
+}
+
+test('a reply that lists choices but gives no explicit options shows no buttons on the page, the terminal board, the inbox preview or the Codex card (#1277)', () => {
+  const reply = 'Checked the repo.\n\nWhich database should I use?\n1. Postgres\n2. SQLite'
+  const question = lastQuestion(reply)
+  expect(question).toBe('Which database should I use?')
+  expect(parseDigest('TITLE: Storage\nCONTEXT: fixture\nDONE: Checked the repo\nNEXT: -\nASK: Database — Which database should I use?')).not.toHaveProperty('options')
+
+  // A session with no Task list: the turn summary keeps the plain question, in the pane and in progress.md.
+  const summed = applyDigest(emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude'), { title: 'Pick DB', context: '', done: '', next: '', ask: 'Storage', why: question! }, AT_1277)
+  expect(summed).not.toHaveProperty('inferredChoices')
+  const summedFile = upsertAutoBlock('', summed, STRINGS.en)
+  expect(summedFile).not.toContain('options=')
+  expect(offeredOn(buildView([], [], summed, AT_1277, 0, {}, STRINGS.en)), 'pane, no Task list').toEqual(NO_BUTTONS)
+  expect(offeredOn(fileView(summedFile)), 'page and terminal board, no Task list').toEqual(NO_BUTTONS)
+
+  // A session with a Task list: the step in progress waits with the plain question.
+  const listed = markAsked(applyTaskUpdate(applyTaskCreate(emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude'), { subject: 'Storage choice' }, '1', AT_1277), { taskId: '1', status: 'in_progress' }, AT_1277), question!)
+  const listedFile = upsertAutoBlock('', listed, STRINGS.en)
+  expect(listedFile).not.toContain('options=')
+  expect(offeredOn(buildView([], [], listed, AT_1277, 0, {}, STRINGS.en)), 'pane, Task list').toEqual(NO_BUTTONS)
+  expect(offeredOn(fileView(listedFile)), 'page and terminal board, Task list').toEqual(NO_BUTTONS)
+
+  // The inbox preview of another agent's turn, and the copy the board keeps of it.
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'inbox-list', cwd: '/work/demo', last_assistant_message: reply }), at: AT_1277 }], undefined, undefined, STRINGS.en)
+  expect(inbox[0]).toMatchObject({ isQuestion: true, text: question })
+  expect(inbox[0]).not.toHaveProperty('options')
+  const kept = observeQuestions(emptyQuestions(), [], null, [], AT_1277, true, 'fixture:list', undefined, inbox).ledger
+  expect(JSON.stringify(kept)).not.toContain('options')
+  expect(offeredOn(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, kept, undefined, inbox), inbox), 'inbox preview').toEqual(NO_BUTTONS)
+  expect(offeredOn(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, kept)), 'kept inbox question').toEqual(NO_BUTTONS)
+
+  // The Codex card: a Stop whose reply ended on the question carries the question alone.
+  const { stop, card } = codexStop({ question })
+  expect(stop.steps.at(-1)).toBe(`- [?] ${question}`)
+  expect(stop).not.toHaveProperty('askedOptions')
+  expect(card).not.toContain('options=')
+  expect(offeredOn(fileView(card)), 'Codex card').toEqual(NO_BUTTONS)
+})
+
+test('a listed choice that redaction changes is never offered from the inbox preview (#1277)', () => {
+  const reply = 'Which key should I keep?\n- hunter2-key\n- Rotate both'
+  const scrub = (text: string): string => text.replaceAll('hunter2-key', '[hidden]')
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'inbox-redacted', cwd: '/work/demo', last_assistant_message: reply }), at: AT_1277 }], undefined, scrub, STRINGS.en)
+  expect(inbox[0]).toMatchObject({ isQuestion: true, text: 'Which key should I keep?' })
+  expect(inbox[0]?.fullText).not.toContain('hunter2-key')
+  // No label a redactor rewrote, and no part of the list, becomes an answer the board can send.
+  expect(inbox[0]).not.toHaveProperty('options')
+  const kept = observeQuestions(emptyQuestions(), [], null, [], AT_1277, true, 'fixture:redacted', undefined, inbox).ledger
+  expect(offeredOn(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, kept, undefined, inbox), inbox)).toEqual(NO_BUTTONS)
+  expect(offeredOn(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, kept))).toEqual(NO_BUTTONS)
+})
+
+test("a list the board refuses shows no buttons on any surface, even when the question's words hold a choice (#1277)", () => {
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
+  // With no list at all the question's words are read as before.
+  const worded = applyTaskCreate(base, { subject: 'Postgres or SQLite?', metadata: { waiting: 'you' } }, '1', AT_1277)
+  expect(buildView([], [], worded, AT_1277, 0, {}, STRINGS.en).waiting[0]).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+
+  // The session's own row, its line in progress.md, and the copy kept after the block is gone.
+  const mine = applyTaskCreate(base, { subject: 'Postgres or SQLite?', metadata: { waiting: 'you', options: TEN_1277 } }, '1', AT_1277)
+  expect(mine.tasks[0]?.options).toEqual(TEN_1277)
+  expect(offeredOn(buildView([], [], mine, AT_1277, 0, {}, STRINGS.en)), 'pane').toEqual(NO_BUTTONS)
+  const file = upsertAutoBlock('', mine, STRINGS.en)
+  expect(file).toContain('- [?] Postgres or SQLite?')
+  expect(file).toContain('<!-- options=[] -->')
+  expect(file).not.toContain('Option 1')
+  expect(offeredOn(fileView(file)), 'page and terminal board').toEqual(NO_BUTTONS)
+  const kept = observeQuestions(emptyQuestions(), parseProgress(file), null, [], AT_1277, true).ledger
+  expect(offeredOn(fileView('## demo\n', kept)), 'kept question').toEqual(NO_BUTTONS)
+
+  // Any agent's `options=` line the board refuses: too many, an empty entry, one entry, too long, not a list.
+  const lines = [TEN_1277, ['Alpha', '', 'Beta'], ['OnlyOne'], ['Postgres', 'x'.repeat(121)], []].map(one => `<!-- options=${JSON.stringify(one)} -->`)
+  for (const line of [...lines, '<!-- options=oops -->', '<!-- options={"a":1} -->']) {
+    const block = `## demo\n<!-- auto session=ab12cd34 agent=codex state=waiting updated=${new Date(AT_1277).toISOString()} -->\n### Storage\n- [?] Postgres or SQLite?\n${line}\n<!-- /auto session=ab12cd34 -->\n`
+    expect(offeredOn(fileView(block)), line.slice(0, 40)).toEqual(NO_BUTTONS)
+    const ledger = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true).ledger
+    expect(offeredOn(fileView('## demo\n', ledger)), `kept ${line.slice(0, 40)}`).toEqual(NO_BUTTONS)
+  }
+
+  // A Codex-family list is refused whole too, and an entry that is not a string is never filtered out.
+  for (const options of [TEN_1277, ['Alpha', 7, 'Beta'], ['Alpha', '', 'Beta']]) {
+    const { stop, card } = codexStop({ question: 'Postgres or SQLite?', options })
+    expect(stop.askedOptions, JSON.stringify(options).slice(0, 30)).toEqual([])
+    expect(card).toContain('<!-- options=[] -->')
+    expect(offeredOn(fileView(card)), `Codex card ${JSON.stringify(options).slice(0, 30)}`).toEqual(NO_BUTTONS)
+  }
+  const { stop: given, card: givenCard } = codexStop({ question: 'Which database should I use?', options: ['Postgres', 'SQLite'] })
+  expect(given.askedOptions).toEqual(['Postgres', 'SQLite'])
+  expect(fileView(givenCard).waiting[0]).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+})
+
+// The either-or question that opens like a yes or no: with a refused list it once fell to Yes and No.
+const EITHER_1277 = 'Should I use Postgres or SQLite?'
+const REPLY_ONLY = { ...NO_BUTTONS, kind: 'reply' }
+const offeredAs = (view: ReturnType<typeof buildView>) => ({ ...offeredOn(view), kind: view.waiting[0]?.kind })
+
+test('a refused list leaves only the reply box on the page, the own pane, the terminal board and the Codex card, never a yes and no read from the words (#1277)', () => {
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
+  // No list given keeps the word rule; a refused one is its own state, and an empty list is never "none given".
+  expect(askOf(EITHER_1277, '')).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+  expect(askOf(EITHER_1277, '', { options: undefined })).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+  expect(askOf(EITHER_1277, '', { options: [] })).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf(EITHER_1277, '', { options: REFUSED_OPTIONS })).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf(EITHER_1277, '', { ask: 'choose', options: REFUSED_OPTIONS })).toMatchObject({ kind: 'reply', options: [] })
+  expect(optionsGiven(undefined)).toBe(undefined)
+  expect(optionsGiven(null)).toBe(REFUSED_OPTIONS)
+  expect(optionsGiven([])).toBe(REFUSED_OPTIONS)
+  expect(optionsGiven(['Postgres', 'SQLite'])).toEqual(['Postgres', 'SQLite'])
+  // The command and the link stay with the question.
+  expect(askOf('Should I run `make db` or read https://example.test/db first?', '', { options: REFUSED_OPTIONS })).toEqual({ kind: 'reply', options: [], command: 'make db', link: 'https://example.test/db' })
+
+  // The own pane, the session's line in progress.md (the page and the terminal board), and the kept copy.
+  const mine = applyTaskCreate(base, { subject: EITHER_1277, metadata: { waiting: 'you', options: TEN_1277 } }, '1', AT_1277)
+  expect(offeredAs(buildView([], [], mine, AT_1277, 0, {}, STRINGS.en)), 'own pane').toEqual(REPLY_ONLY)
+  const file = upsertAutoBlock('', mine, STRINGS.en)
+  expect(file).toContain('<!-- options=[] -->')
+  expect(offeredAs(fileView(file)), 'page and terminal board').toEqual(REPLY_ONLY)
+  const kept = observeQuestions(emptyQuestions(), parseProgress(file), null, [], AT_1277, true).ledger
+  expect(offeredAs(fileView('## demo\n', kept)), 'kept question').toEqual(REPLY_ONLY)
+  const keptOwn = observeQuestions(emptyQuestions(), [], mine, [], AT_1277, true).ledger
+  expect(offeredAs(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, keptOwn)), 'kept own question').toEqual(REPLY_ONLY)
+
+  // Any agent's line the board refuses, the written `options=[]` among them.
+  for (const line of ['<!-- options=[] -->', `<!-- options=${JSON.stringify(TEN_1277)} -->`, '<!-- options=["OnlyOne"] -->', '<!-- options=oops -->']) {
+    const block = `## demo\n<!-- auto session=ab12cd34 agent=codex state=waiting updated=${new Date(AT_1277).toISOString()} -->\n### Storage\n- [?] ${EITHER_1277}\n${line}\n<!-- /auto session=ab12cd34 -->\n`
+    expect(offeredAs(fileView(block)), line.slice(0, 40)).toEqual(REPLY_ONLY)
+  }
+
+  // The Codex card.
+  const { card } = codexStop({ question: EITHER_1277, options: TEN_1277 })
+  expect(card).toContain('<!-- options=[] -->')
+  expect(offeredAs(fileView(card)), 'Codex card').toEqual(REPLY_ONLY)
+})
+
+test('a task that asks for a yes or no and also lists options is a confirm on its own pane and on the other board (#1277)', () => {
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
+  const yesNo = { isAsked: true, isChoose: false, row: [], page: [STRINGS.en.yesAnswer, STRINGS.en.noAnswer], kind: 'confirm' }
+  const mine = applyTaskCreate(base, { subject: 'Should I deploy it?', metadata: { waiting: 'you', ask: 'confirm', options: ['Postgres', 'SQLite'] } }, '1', AT_1277)
+  expect(mine.tasks[0]).toMatchObject({ ask: 'confirm', options: ['Postgres', 'SQLite'] })
+
+  const pane = buildView([], [], mine, AT_1277, 0, {}, STRINGS.en)
+  expect(pane.waiting[0]?.kind, 'own pane').toBe('confirm')
+  expect(serveModel(pane, [], STRINGS.en).asks[0]?.answers, 'own pane answers').toEqual(yesNo.page)
+
+  // The options line carries no kind, so it is written only for a choice.
+  const file = upsertAutoBlock('', mine, STRINGS.en)
+  expect(file).toContain('- [?] Should I deploy it?')
+  expect(file).not.toContain('options=')
+  const { key: _key, ...other } = offeredAs(fileView(file))
+  expect(other, 'other board').toEqual(yesNo)
+  const { key: _keptKey, ...kept } = offeredAs(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, observeQuestions(emptyQuestions(), [], mine, [], AT_1277, true).ledger))
+  expect(kept, 'kept own question').toEqual(yesNo)
+
+  // A choice, said or not, still writes its list.
+  for (const ask of ['choose', undefined]) {
+    const choice = applyTaskCreate(base, { subject: 'Which storage?', metadata: { waiting: 'you', ...(ask === undefined ? {} : { ask }), options: ['Postgres', 'SQLite'] } }, '1', AT_1277)
+    expect(upsertAutoBlock('', choice, STRINGS.en), String(ask)).toContain('<!-- options=["Postgres","SQLite"] -->')
+  }
+})
+
+test('a refused list leaves only the reply box on the own pane and the other board whatever the task asks for (#1277)', () => {
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
+  for (const ask of ['reply', 'confirm', 'choose', 'input', 'review', 'do']) {
+    expect(askOf(EITHER_1277, '', { ask, options: REFUSED_OPTIONS }), ask).toMatchObject({ kind: 'reply', options: [] })
+    expect(askOf(EITHER_1277, '', { ask, options: [] }), ask).toMatchObject({ kind: 'reply', options: [] })
+  }
+  for (const ask of ['reply', 'confirm']) {
+    const mine = applyTaskCreate(base, { subject: EITHER_1277, metadata: { waiting: 'you', ask, options: TEN_1277 } }, '1', AT_1277)
+    expect(mine.tasks[0]).toMatchObject({ ask, options: TEN_1277 })
+    expect(offeredAs(buildView([], [], mine, AT_1277, 0, {}, STRINGS.en)), `${ask}: own pane`).toEqual(REPLY_ONLY)
+    // The other board: the refusal is written whatever the kind, so the words are never read.
+    const file = upsertAutoBlock('', mine, STRINGS.en)
+    expect(file, ask).toContain('<!-- options=[] -->')
+    expect(file, ask).not.toContain('Option 1')
+    expect(offeredAs(fileView(file)), `${ask}: other board`).toEqual(REPLY_ONLY)
+    // The kept copies, from the block and from the owning session.
+    const keptBlock = observeQuestions(emptyQuestions(), parseProgress(file), null, [], AT_1277, true).ledger
+    expect(offeredAs(fileView('## demo\n', keptBlock)), `${ask}: kept from the block`).toEqual(REPLY_ONLY)
+    const keptOwn = observeQuestions(emptyQuestions(), [], mine, [], AT_1277, true).ledger
+    expect((JSON.parse(keptOwn.records[0]!.source!.data) as Record<string, unknown>).options, `${ask}: kept list`).toEqual([])
+    expect(offeredAs(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, keptOwn)), `${ask}: kept own question`).toEqual(REPLY_ONLY)
+  }
+})
+
+test('a kept question whose saved options are present but not a list offers only the reply box (#1277)', () => {
+  const base = emptyMirror('a1b2c3d4-1111-2222-3333-444455556666', 'demo', AT_1277, '/work/demo', 'claude')
+  const good = observeQuestions(emptyQuestions(), [], applyTaskCreate(base, { subject: EITHER_1277, metadata: { waiting: 'you', options: ['MySQL', 'DuckDB'] } }, '1', AT_1277), [], AT_1277, true).ledger
+  const retained = (ledger: ReturnType<typeof emptyQuestions>) => buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, ledger)
+  const dataOf = (): Record<string, unknown> => JSON.parse(good.records[0]!.source!.data) as Record<string, unknown>
+  const withData = (data: Record<string, unknown>) => ({ ...good, records: good.records.map(one => ({ ...one, source: { ...one.source!, data: JSON.stringify(data) } })) })
+  expect(retained(good).waiting[0]).toMatchObject({ kind: 'choose', options: ['MySQL', 'DuckDB'] })
+
+  for (const bad of ['Postgres or SQLite', { a: 'Postgres', b: 'SQLite' }, 7, true, null]) {
+    expect(offeredAs(retained(withData({ ...dataOf(), options: bad }))), JSON.stringify(bad)).toEqual(REPLY_ONLY)
+  }
+  // No `options` at all is "no list given": the question's words are read as on main.
+  const { options: _options, ...bare } = dataOf()
+  expect(retained(withData(bare)).waiting[0]).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+})
+
+test('a kept question checks its whole list of choices when it is captured and when it is read back (#1277)', () => {
+  const base = emptyMirror('a1b2c3d4-1111-2222-3333-444455556666', 'demo', AT_1277, '/work/demo', 'claude')
+  const keptOf = (options: readonly string[]) => observeQuestions(emptyQuestions(), [], applyTaskCreate(base, { subject: 'Which option should I use?', metadata: { waiting: 'you', options } }, '1', AT_1277), [], AT_1277, true).ledger
+  const retained = (ledger: ReturnType<typeof emptyQuestions>) => buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, ledger)
+  const dataOf = (ledger: ReturnType<typeof emptyQuestions>): Record<string, unknown> => JSON.parse(ledger.records[0]!.source!.data) as Record<string, unknown>
+
+  // The live session is gone: a list of ten kept from it offers nothing, not its first nine.
+  const ten = keptOf(TEN_1277)
+  expect(offeredOn(retained(ten)), 'ten captured').toEqual(NO_BUTTONS)
+  // Captured: a refused list as no choices, a valid one whole.
+  expect(dataOf(ten).options).toEqual([])
+  const good = keptOf(['Postgres', 'SQLite'])
+  expect(dataOf(good).options).toEqual(['Postgres', 'SQLite'])
+  expect(retained(good).waiting[0]).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+
+  // Read back: the copy is a file on disk, so an edited or older one is checked whole again.
+  const withOptions = (options: unknown) => ({ ...good, records: good.records.map(one => ({ ...one, source: { ...one.source!, data: JSON.stringify({ ...dataOf(good), options }) } })) })
+  for (const bad of [TEN_1277, ['Alpha', '', 'Beta'], ['Alpha', 7, 'Beta'], ['OnlyOne'], ['Postgres <!-- note', 'SQLite'], ['Postgres', 'x'.repeat(121)]]) {
+    expect(offeredOn(retained(withOptions(bad))), JSON.stringify(bad).slice(0, 30)).toEqual(NO_BUTTONS)
+  }
+  expect(retained(withOptions(['MySQL', 'DuckDB'])).waiting[0]).toMatchObject({ kind: 'choose', options: ['MySQL', 'DuckDB'] })
+
+  // A block's copy (`stepOptions`) is read back the same way.
+  const block = `## demo\n<!-- auto session=ab12cd34 agent=codex state=waiting updated=${new Date(AT_1277).toISOString()} -->\n### Storage\n- [?] Which option should I use?\n<!-- options=["Postgres","SQLite"] -->\n<!-- /auto session=ab12cd34 -->\n`
+  const blockKept = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true).ledger
+  expect(fileView('## demo\n', blockKept).waiting[0]).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+  const stepOptions = (dataOf(blockKept).stepOptions ?? {}) as Record<string, unknown>
+  expect(Object.values(stepOptions)).toEqual([['Postgres', 'SQLite']])
+  const edited = { ...blockKept, records: blockKept.records.map(one => ({ ...one, source: { ...one.source!, data: JSON.stringify({ ...dataOf(blockKept), stepOptions: Object.fromEntries(Object.keys(stepOptions).map(key => [key, TEN_1277])) }) } })) }
+  expect(offeredOn(fileView('## demo\n', edited)), 'edited block copy').toEqual(NO_BUTTONS)
+})
+
+test('pressing a choice sends the stored option unchanged', () => {
+  const labels = ['_config.yml', '**/*.ts', 'README.']
+  const mirror = applyTaskCreate(emptyMirror('ab12cd34', 'demo', AT_1277, '/work/demo', 'codex'), { subject: 'Which file should I edit?', metadata: { waiting: 'you', options: labels } }, '1', AT_1277)
+  const block = `## demo\n${renderAutoBlock(mirror).join('\n')}\n`
+  const view = buildView(parseProgress(block), [], null, AT_1277, 0, {}, STRINGS.en)
+  expect(view.waiting[0]?.options).toEqual(labels)
+  const items = boardItems(view, [])
+  const askModel = serveModel(view, [], STRINGS.en).asks[0]!
+  expect(askModel.answers).toEqual(labels)
+
+  const askItem = items.find(one => one.type === 'ask')!
+  expect(askItem.type).toBe('ask')
+  if (askItem.type === 'ask') {
+    const conn = { id: 'conn-1', agent: 'codex', session: 'ab12cd34', turn: 'turn-1', scope: 'live' as const, state: 'waiting' as const, seen: AT_1277 }
+    expect(serveAction(items, { type: 'message', key: askItem.key, text: askModel.answers[0]!, fp: fingerprint(askItem, items), connection: 'conn-1', turn: 'turn-1', session: 'ab12cd34', asked: askItem.ask.text }, STRINGS.en, false, [conn], true)).toMatchObject({
+      type: 'message',
+      text: '_config.yml',
+    })
+  }
+
+  const chooseIndex = items.findIndex(one => one.type === 'ask' && one.ask.kind === 'choose')
+  const drawn = pinned({ ...emptyBoardState, selected: chooseIndex }, items)
+  expect(boardKey(drawn, '1', items, STRINGS.en).action).toEqual({ type: 'copy', text: '_config.yml' })
+  expect(boardKey(drawn, '2', items, STRINGS.en).action).toEqual({ type: 'copy', text: '**/*.ts' })
+  if (askItem.type === 'ask') {
+    const route: AnswerRoute = { mode: 'connected', agent: 'codex', session: 'ab12cd34', asked: askItem.ask.text, fp: drawn.seen![askItem.key]!, delivery: { id: 'conn-1', turn: 'turn-1', agent: 'codex' } }
+    expect(boardKey(drawn, '3', items, STRINGS.en, { [askItem.key]: route }).action).toEqual({
+      type: 'send',
+      key: askItem.key,
+      text: 'README.',
+      route,
+    })
+  }
+})
+
+test('an options line with a comment opening or over-long entry offers no buttons', () => {
+  expect(validOptions(['Postgres <!-- note -->', 'SQLite'])).toBeNull()
+  expect(validOptions(['Postgres --> note', 'SQLite'])).toBeNull()
+  expect(validOptions(['x'.repeat(121), 'SQLite'])).toBeNull()
+  expect(optionsComment(['Postgres <!-- note -->', 'SQLite'])).toBe('')
+  expect(optionsOf('<!-- options=["Postgres \\u003c!-- note","SQLite"] -->')).toBeNull()
+  expect(optionsOf(`<!-- options=${JSON.stringify(['x'.repeat(121), 'SQLite'])} -->`)).toBeNull()
+
+  const block = [
+    '## demo',
+    '<!-- auto session=ab12cd34 agent=codex state=waiting updated=2026-10-30T12:00:00.000Z -->',
+    '### Storage',
+    '- [?] Which database should I use?',
+    `<!-- options=${JSON.stringify(['Postgres', 'x'.repeat(121)])} -->`,
+    '<!-- /auto session=ab12cd34 -->',
+  ].join('\n')
+  expect(offeredOn(fileView(block))).toEqual(NO_BUTTONS)
+})
+
+test('nine choices are all offered, and a list of ten or more offers none (#1277)', () => {
+  const nine = TEN_1277.slice(0, 9)
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
+  const fileOf = (options: readonly string[]): string => upsertAutoBlock('', applyTaskCreate(base, { subject: 'Which option should I use?', metadata: { waiting: 'you', options } }, '1', AT_1277), STRINGS.en)
+  expect(fileView(fileOf(nine)).waiting[0]).toMatchObject({ kind: 'choose', options: nine })
+  for (const count of [10, 12]) {
+    const file = fileOf(Array.from({ length: count }, (_, at) => `Option ${at + 1}`))
+    expect(file, `${count}`).toContain('<!-- options=[] -->')
+    expect(offeredOn(fileView(file)), `${count}`).toEqual(NO_BUTTONS)
+  }
+})
+
+test("a task's own options survive a re-ask, with or without ask", () => {
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'codex')
+  const ownOpts = ['Postgres', 'SQLite']
+
+  const withAsk = applyTaskCreate(base, { subject: 'Which storage?', metadata: { waiting: 'you', ask: 'choose', options: ownOpts } }, '1', AT_1277)
+  const reAskedWithAsk = markAsked(withAsk, 'Which storage?')
+  expect(reAskedWithAsk.tasks[0]?.options).toEqual(ownOpts)
+  expect(upsertAutoBlock('', reAskedWithAsk, STRINGS.en)).toContain('<!-- options=["Postgres","SQLite"] -->')
+
+  const withEmptyAsk = applyTaskCreate(base, { subject: 'Which storage?', metadata: { waiting: 'you', ask: 'choose', options: [] } }, '1', AT_1277)
+  const reAskedEmptyAsk = markAsked(withEmptyAsk, 'Which storage?')
+  expect(reAskedEmptyAsk.tasks[0]?.options).toEqual([])
+  expect(upsertAutoBlock('', reAskedEmptyAsk, STRINGS.en)).not.toContain('options=')
+
+  const withoutAsk = applyTaskCreate(base, { subject: 'Which database should I use?', metadata: { waiting: 'you', options: ownOpts } }, '1', AT_1277)
+  const reAskedNew = markAsked(withoutAsk, 'Which database should I use?')
+  expect(reAskedNew.tasks[0]?.options).toEqual(ownOpts)
+  expect(buildView([], [], reAskedNew, AT_1277, 0, {}, STRINGS.en).waiting[0]).toMatchObject({ kind: 'choose', options: ownOpts })
+})
+
+test('the pane and progress.md offer the same choices', () => {
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
+  const cases: { name: string; mirror: ProgressMirror; expected: string[] }[] = [
+    {
+      name: 'a question a reply ended on',
+      mirror: markAsked(base, 'Which config?'),
+      expected: [],
+    },
+    {
+      name: 'a turn summary',
+      mirror: applyDigest(base, { title: 'demo', context: '', done: '', next: 'Continue', ask: 'Config', why: 'Which config?' }, AT_1277),
+      expected: [],
+    },
+    {
+      name: 'own task options',
+      mirror: applyTaskCreate(base, { subject: 'Which DB?', metadata: { waiting: 'you', ask: 'choose', options: ['Postgres', 'SQLite'] } }, '1', AT_1277),
+      expected: ['Postgres', 'SQLite'],
+    },
+    {
+      name: 'own task options without ask',
+      mirror: applyTaskCreate(base, { subject: 'Which DB?', metadata: { waiting: 'you', options: ['_config.yml', 'package.json'] } }, '1', AT_1277),
+      expected: ['_config.yml', 'package.json'],
+    },
+    {
+      name: 'invalid single-item task options',
+      mirror: applyTaskCreate(base, { subject: 'Which DB?', metadata: { waiting: 'you', ask: 'choose', options: ['OnlyOne'] } }, '1', AT_1277),
+      expected: [],
+    },
+    {
+      name: 'ten task options over a question whose words hold a choice',
+      mirror: applyTaskCreate(base, { subject: 'Postgres or SQLite?', metadata: { waiting: 'you', options: TEN_1277 } }, '1', AT_1277),
+      expected: [],
+    },
+  ]
+
+  for (const one of cases) {
+    const paneView = buildView([], [], one.mirror, AT_1277, 0, {}, STRINGS.en)
+    const fileBlock = upsertAutoBlock('', one.mirror, STRINGS.en)
+    const fromFile = buildView(parseProgress(fileBlock), [], null, AT_1277, 0, {}, STRINGS.en)
+    // Both rows must be there: two missing rows would otherwise compare equal.
+    expect(paneView.waiting.length, `${one.name} pane row`).toBe(1)
+    expect(fromFile.waiting.length, `${one.name} progress.md row`).toBe(1)
+    expect(paneView.waiting[0]!.options, `${one.name} pane`).toEqual(one.expected)
+    expect(fromFile.waiting[0]!.options, `${one.name} progress.md`).toEqual(one.expected)
+  }
 })

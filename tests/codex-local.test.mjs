@@ -5989,6 +5989,86 @@ test('Grok reopens a done block for a closing question and keeps it done for a p
   assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
 }))
 
+test('Codex, Cursor and --agent-status keep the plain closing question when a reply only lists choices (#1277)', () => fixture(f => {
+  // Buttons come only from a list the agent gives itself: a list in the reply's text adds no options line.
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-list-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-list-1', { last_assistant_message: 'Which database should I use?\n1. Postgres\n2. SQLite' }).status, 0)
+  const codexAsked = readFileSync(f.progress, 'utf8')
+  assert.match(codexAsked, /- \[\?\] Which database should I use\?\n<!-- question=[a-f0-9]{64}:\d+ -->/)
+  assert.doesNotMatch(codexAsked, /<!-- options=/)
+  assert.equal(f.event('UserPromptSubmit', 'turn-list-2').status, 0)
+  assert.equal(f.event('Stop', 'turn-list-2', { last_assistant_message: 'Done using Postgres.' }).status, 0)
+  const codexSettled = readFileSync(f.progress, 'utf8')
+  assert.ok(codexSettled.includes('- [x] Which database should I use?'))
+  assert.doesNotMatch(codexSettled, /<!-- options=/)
+
+  // Cursor: a list before the closing question.
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const cursorId = 'synthetic-cursor-list-choices'
+  const cursorSend = (event, generation, extra = {}) => f.command(['--codex-event', '--agent', 'cursor'], { conversation_id: cursorId, generation_id: generation, hook_event_name: event, ...extra })
+  assert.equal(cursorSend('beforeSubmitPrompt', 'gen-1').status, 0)
+  assert.equal(cursorSend('afterAgentResponse', 'gen-1', { text: 'Pick the next step:\n\n- Parser\n- Tests\n\nWhich one first?' }).status, 0)
+  const cursorAsked = readFileSync(f.progress, 'utf8')
+  assert.ok(cursorAsked.includes('- [?] Which one first?'), cursorAsked)
+  assert.doesNotMatch(cursorAsked, /<!-- options=/)
+
+  // --agent-status: Grok and OpenCode replies that list choices, in Chinese and in English.
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const grokId = 'synthetic-grok-list-choices'
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: grokId, hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'waiting'], {
+    sessionId: grokId,
+    hookEventName: 'Stop',
+    lastAssistantMessage: '你要選哪個方案？\n1. 中文選項甲丠\n2. Option B',
+  }).status, 0)
+  const grokBoard = readFileSync(f.progress, 'utf8')
+  assert.ok(grokBoard.includes('- [?] 你要選哪個方案？\n'), grokBoard)
+  assert.doesNotMatch(grokBoard, /<!-- options=/)
+
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const opencodeId = 'synthetic-opencode-list-choices'
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'working'], { session_id: opencodeId, prompt_submitted: true }).status, 0)
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'waiting'], {
+    session_id: opencodeId,
+    last_assistant_message: 'Which option should I use?\n1. Alpha\n2. Beta',
+  }).status, 0)
+  const opencodeBoard = readFileSync(f.progress, 'utf8')
+  assert.ok(opencodeBoard.includes('- [?] Which option should I use?'), opencodeBoard)
+  assert.doesNotMatch(opencodeBoard, /<!-- options=/)
+  assert.ok(!opencodeBoard.includes('Alpha'), opencodeBoard)
+}))
+
+test('a Codex-family block writes a list its agent gave after checking it as text, and refuses an invalid one whole (#1277)', async () => {
+  const { codexEvent, putCodexBlock } = await importTs('../hooks/codex.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const owner = 'c'.repeat(64)
+  const latin1 = value => Buffer.from(value, 'utf8').toString('latin1')
+  const stopWith = options => {
+    const start = codexEvent(null, { session_id: 's-1277', hook_event_name: 'SessionStart' }, '2026-11-06T00:00:00Z', STRINGS.en)
+    const prompted = codexEvent(start, { session_id: 's-1277', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }, '2026-11-06T00:00:01Z', STRINGS.en)
+    return codexEvent(prompted, { session_id: 's-1277', hook_event_name: 'Stop', turn_id: 'turn-1', question: 'Which option should I use?', options }, '2026-11-06T00:00:02Z', STRINGS.en)
+  }
+  // The local reporter writes bytes as latin1 text: 41 CJK characters are 123 bytes, and stay one valid choice.
+  const cjk41 = '甲'.repeat(41)
+  const asked = stopWith([cjk41, 'Option B'])
+  assert.deepEqual(asked.askedOptions, [cjk41, 'Option B'])
+  const written = Buffer.from(putCodexBlock('', { ...asked, title: latin1(asked.title), project: latin1(asked.project), steps: asked.steps.map(latin1) }, owner, false, undefined, latin1), 'latin1').toString('utf8')
+  assert.ok(written.includes(`<!-- options=["${cjk41}","Option B"] -->`), written)
+  assert.deepEqual(parseProgress(written)[0]?.tasks[0]?.steps.at(-1)?.options, [cjk41, 'Option B'])
+  // 121 characters, ten choices, or an entry that is not a string: no part of the list is written.
+  for (const bad of [['x'.repeat(121), 'Option B'], Array.from({ length: 10 }, (_, at) => `Option ${at + 1}`), ['Alpha', 7, 'Beta']]) {
+    const refused = stopWith(bad)
+    assert.deepEqual(refused.askedOptions, [])
+    const text = putCodexBlock('', refused, owner, false, undefined, latin1)
+    assert.ok(text.includes('<!-- options=[] -->'), text)
+    assert.deepEqual(parseProgress(text)[0]?.tasks[0]?.steps.at(-1)?.options, [])
+  }
+  // No list given: no line.
+  assert.doesNotMatch(putCodexBlock('', stopWith(undefined), owner), /options=/)
+})
+
 test('a Codex turn that starts from a board delivery still shows its closing question', () => fixture(f => {
   f.install('--apply')
   const prompt = deliveryText({ id: 'AB-1', from: 'board', to: 'codex:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' })

@@ -45,6 +45,7 @@ import {
   completionOverlay,
   confirmStep,
   connectDataRoots,
+  EDITED,
   effectivePromptMirror,
   emptyMirror,
   emptyQuestions,
@@ -2218,6 +2219,39 @@ test('a choice answer containing double colons shows its result next to its own 
     expect(besideButton(await ui.findAll({ type: 'Box' }), key)).toContain(EN.pressSessionGone)
     await clock.advance(2100)
     expect(besideButton(await ui.findAll({ type: 'Box' }), key)).toContain(EN.pressSessionGone)
+  } finally { await ui.unmount() }
+})
+
+test('a Claude turn ending on a question over a list keeps the plain question in a session with a Task list (#1277)', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true, lang: 'en' } }
+  const clock = engineBeneath(on, world)
+  await start($, 'Pick a storage engine')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Storage choice', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' })
+  await $.turn.complete({ answer: 'Checked the repo.\n\nWhich database should I use?\n1. Postgres\n2. SQLite', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  const file = world.files.get(FILE) ?? ''
+  expect(file).toContain('Which database should I use?')
+  expect(file).not.toContain('options=')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(await ui.find({ type: 'Button', key: 'mine::1::Postgres' })).toBeUndefined()
+  } finally { await ui.unmount() }
+})
+
+test('a Claude turn ending on a question over a list keeps the plain question in a session with no Task list (#1277)', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: EDITED, store: { autoConnectOff: true, lang: 'en' }, reply: prompt => prompt.includes('TITLE:') ? 'TITLE: Storage\nCONTEXT: fixture\nDONE: Checked the repo\nNEXT: -\nASK: Database — Which database should I use?' : undefined }
+  const clock = engineBeneath(on, world)
+  await start($, 'Pick a storage engine')
+  await $.turn.complete({ answer: 'Checked the repo.\n\nWhich database should I use?\n1. Postgres\n2. SQLite', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10)
+  const file = world.files.get(FILE) ?? ''
+  expect(file).toContain('- [?] ')
+  expect(file).toContain('Which database should I use?')
+  expect(file).not.toContain('options=')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    for (const id of ['1', 't1', 't2', 'auto-question']) expect(await ui.find({ type: 'Button', key: `mine::${id}::Postgres` })).toBeUndefined()
   } finally { await ui.unmount() }
 })
 

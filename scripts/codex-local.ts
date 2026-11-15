@@ -955,7 +955,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
                 : placeholder
               : step
           )
-      const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
+      const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision, false, payload.options, previous?.askedOptions)
       // Keep the recovery format. Causality uses the host event's milliseconds,
       // which the display clock can round or carry forward.
       const base = mode === '--codex-event' ? codexEvent(previous, isDelivery ? { ...payload, delivery_request: true } : isBoardPrompt ? { ...payload, board_request: true } : payload, clock, s, sourceAt, { lastAppliedAt: original?.appliedAt, observedAt })
@@ -965,6 +965,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           ...(previous ?? codexReport(null, session, { title: s.localAgentTask(agent), project: agent, state, steps: question.steps }, clock, s)),
           state: state as CodexReport['state'], steps: question.steps, updated: clock, asked: question.asked,
           ...(question.askedRevision === undefined ? {} : { askedRevision: question.askedRevision }),
+          askedOptions: question.askedOptions,
         }, session) : codexReport(previous, session, given, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)
@@ -1011,7 +1012,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? { folder: name, folderDigest, folderCanonicalDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
-      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
       if (entry === current) {
         reportCut = cut
@@ -1070,7 +1071,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A replay can skip writes only after a board completion reached the cache too.
       // A new hook event is not a replay even when the block reads the same: its record keeps the event.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? null) === JSON.stringify(report.askedOptions ?? null) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }
@@ -1078,7 +1079,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
         ...report, title: encoded(report.title), project: encoded(report.project), ...(report.context === undefined ? {} : { context: encoded(report.context) }), steps: report.steps.map(encoded),
-      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project, report.context === undefined ? undefined : encoded(s.contextNote(report.context))), 'latin1')
+      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project, report.context === undefined ? undefined : encoded(s.contextNote(report.context)), encoded), 'latin1')
       saveFullText()
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
       try { atomic(progress, next, checkDeadline) } catch (error) {
@@ -1113,6 +1114,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.
       && (entry.mode !== '--codex-event' || [undefined, entry.session].includes(object(entry.payload).session_id as string | undefined))
+      && (object(entry.payload).options === undefined || Array.isArray(object(entry.payload).options) && (object(entry.payload).options as unknown[]).every(value => typeof value === 'string'))
     // Raw Codex events can precede a newer turn too. Milliseconds settle events in
     // the same second; older records and pending entries retain their timestamp fallback.
     const isOverdue = (entry: Pending): boolean => {

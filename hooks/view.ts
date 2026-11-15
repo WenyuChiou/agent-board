@@ -1,5 +1,5 @@
 import type { NativeAsk, ProgressAuto, ProgressMirror, ProgressProject, ProgressStep, ProgressStepStatus, ProgressTask, QuestionRecord } from '../types'
-import { askOf, askRank } from './ask'
+import { askOf, askRank, optionsGiven } from './ask'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { agentLabel } from './strings'
@@ -11,11 +11,11 @@ import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, validOptions } from './parse'
 import { cellsOf, plainBar } from './progress-bar'
 import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
-import { inboxQuestionOrigin, observeQuestions, partsKey2, partsKey3, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceSnapshot } from './questions'
+import { inboxQuestionOrigin, observeQuestions, partsKey2, partsKey3, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceOptions, sourceSnapshot } from './questions'
 import type { QuestionLedger, QuestionProofs } from './questions'
 import { questionAge } from './question-aging'
 import { identity, isSilenceTask, isWorkingTask } from './grouping'
@@ -659,7 +659,9 @@ const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, strin
       when: '',
       ...askOf(task.subject, task.why ?? '', {
         ask: task.ask ?? undefined,
-        options: (task.options ?? []).length > 0 ? task.options : undefined,
+        // A list the task gave and the board refuses is its own state: `askOf` then offers no
+        // answer buttons, neither choices nor a yes and no read from the question's words (#1277).
+        options: (task.options ?? []).length > 0 ? optionsGiven(validOptions(task.options)) : undefined,
         command: task.command ?? undefined,
         link: task.link ?? undefined,
       }),
@@ -1144,7 +1146,7 @@ export const buildView = (
           when,
           ...(lastActive === undefined ? {} : { at: lastActive }),
           dir: task.auto?.dir ?? null,
-          ...askOf(parts.text, parts.note),
+          ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: optionsGiven(validOptions(step.options)) }),
           ...(step.native === undefined ? {} : { native: step.native }),
           where: isManual ? 'manual' : 'other',
           agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
@@ -1479,7 +1481,8 @@ export const buildView = (
     }
     const rowStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
     const stage = rowStopped ? 'older' : age.stage
-    const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, dir: recordFolder(record) ?? saved?.auto?.dir ?? null, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), at: record.firstObserved, ...askOf(parts.text, parts.note), where: 'other', agent: agent === 'claude' ? '' : agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
+    const retainedOptions = sourceOptions(source, record.occurrence)
+    const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, dir: recordFolder(record) ?? saved?.auto?.dir ?? null, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), at: record.firstObserved, ...askOf(parts.text, parts.note, retainedOptions === undefined ? undefined : { options: optionsGiven(retainedOptions) }), where: 'other', agent: agent === 'claude' ? '' : agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
     // The inbox file can be gone while its ledger copy still waits for the report.
     // Require the full binding and a newer source clock before moving its Resolve action.
     const origin = replyRows.size > 0 && !rowStopped ? inboxQuestionOrigin(source) : null

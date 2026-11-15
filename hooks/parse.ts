@@ -29,29 +29,70 @@ export const isCutMarker = (line: string): boolean => {
   while (end > 0 && (line[end - 1] === ' ' || line[end - 1] === '\t' || line[end - 1] === '\r')) end--
   const marker = line.slice(0, end).replace(/^<!--[ \t]*/, '')
   // A bare comment opening is still how people hide examples.
-  return marker !== '' && MARKER_PREFIXES.some(prefix => prefix.startsWith(marker) || marker.startsWith(prefix))
+  return marker !== '' && (marker.startsWith('options=') || MARKER_PREFIXES.some(prefix => prefix.startsWith(marker) || marker.startsWith(prefix)))
 }
 export const AUTO_START = /^<!--\s*auto\s+(.*?)\s*-->\s*$/
 export const AUTO_END = /^<!--\s*\/auto\b.*?-->\s*$/
 export const QUESTION = /^<!--\s*question=([a-f0-9]{64}:[1-9]\d*)\s*-->\s*$/
 // `<!-- native=claude options=["a","b"] -->`: the question above is answered in that agent's own window.
+// `<!-- options=["a","b"] -->`: the choices the agent itself listed for the waiting question step above (#1277).
 // Any line of this shape is read as the annotation, so a malformed one is dropped and never turns into text.
 export const NATIVE = /^<!--\s*native=(\S*)(?:\s+options=(.*?))?\s*-->\s*$/
+export const OPTIONS = /^<!--\s*options=(.*?)\s*-->\s*$/
 const NATIVE_AGENTS: readonly string[] = ['claude', 'codex']
+
+// One list of choices, kept whole or refused whole (null). A character is a Unicode code point, as
+// `docs/FORMAT.md` and Python's `len` count it, so an emoji or a rare CJK character is one.
+export const validOptions = (list: readonly string[]): string[] | null => {
+  const normalized = list.map(one => one.replace(/\s+/g, ' ').trim())
+  if (
+    normalized.length < 2 ||
+    normalized.length > 9 ||
+    normalized.some(one => one === '' || [...one].length > 120 || one.includes('<!--') || one.includes('-->'))
+  ) {
+    return null
+  }
+  return normalized
+}
+
+// A comment must not hold `--` or `>`, so both are written as JSON escapes.
+export const escapeOptionsJson = (options: readonly string[]): string =>
+  JSON.stringify(options).replace(/-/g, '\\u002d').replace(/>/g, '\\u003e')
+
+// What a writer puts for a list it refuses: readers offer no choices for that step.
+export const NO_OPTIONS = '<!-- options=[] -->'
+
+export const optionsComment = (options: readonly string[]): string => {
+  const valid = validOptions(options)
+  return valid === null ? '' : `<!-- options=${escapeOptionsJson(valid)} -->`
+}
+
+const parseOptionsJson = (raw: string, limit?: number): string[] | null => {
+  try {
+    const list: unknown = JSON.parse(raw)
+    if (!Array.isArray(list) || !list.every((one): one is string => typeof one === 'string')) return null
+
+    return limit === undefined ? list : list.slice(0, limit)
+  } catch {
+    return null
+  }
+}
 
 // Null for an unreadable line: an unknown agent, or options that are not a list of strings.
 export const nativeOf = (line: string): NativeAsk | null => {
   const found = NATIVE.exec(line)
   if (found === null || found[1] === undefined || !NATIVE_AGENTS.includes(found[1])) return null
   if (found[2] === undefined) return { agent: found[1], options: [] }
-  try {
-    const list: unknown = JSON.parse(found[2])
-    if (!Array.isArray(list) || !list.every((one): one is string => typeof one === 'string')) return null
+  const options = parseOptionsJson(found[2], 8)
+  return options === null ? null : { agent: found[1], options: options.map(one => one.slice(0, 120)) }
+}
 
-    return { agent: found[1], options: list.slice(0, 8).map(one => one.slice(0, 120)) }
-  } catch {
-    return null
-  }
+// Null for an unreadable line or an invalid choice list.
+export const optionsOf = (line: string): string[] | null => {
+  const found = OPTIONS.exec(line)
+  if (found === null || found[1] === undefined) return null
+  const parsed = parseOptionsJson(found[1])
+  return parsed === null ? null : validOptions(parsed)
 }
 const DUE = /(?:截止|\bdue)[:：\s]*((?:\d{4}[-/])?\d{1,2}[-/]\d{1,2})/i
 
@@ -176,7 +217,7 @@ export const readable = (lines: readonly string[], isDiagnostic = false): Array<
       if (end < 0) return null
       isComment = false
       line = line.slice(end + 3)
-    } else if (AUTO_START.test(raw) || AUTO_END.test(raw) || QUESTION.test(raw) || NATIVE.test(raw)) {
+    } else if (AUTO_START.test(raw) || AUTO_END.test(raw) || QUESTION.test(raw) || NATIVE.test(raw) || OPTIONS.test(raw)) {
       return raw
     }
     if (isCutMarker(raw)) {
@@ -298,6 +339,14 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
       const native = nativeOf(line)
       const previous = task?.steps.at(-1)
       if (native !== null && openSession !== null && task?.auto?.session === openSession && previous?.status === 'waiting') previous.native = native
+      return
+    }
+    if (OPTIONS.test(line)) {
+      // A refused line still says the agent listed its choices: the step offers none (an empty
+      // list), and the board does not read any from the question's words in their place.
+      const options = optionsOf(line) ?? []
+      const previous = task?.steps.at(-1)
+      if (openSession !== null && task?.auto?.session === openSession && previous?.status === 'waiting') previous.options = options
       return
     }
 
