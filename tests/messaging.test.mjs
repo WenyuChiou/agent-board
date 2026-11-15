@@ -435,6 +435,15 @@ test('hookMailbox defers only when the store is busy or times out, and exposes s
     assert.equal(corruptBox.hasDeferred, false)
     assert.equal(corruptBox.error, 'INVALID_MESSAGE_STORE')
 
+    // A claim file with invalid JSON is a damaged store, not a contention to wait out (#1484).
+    const damagedClaim = join(dir, 'damaged-claim')
+    mkdirSync(damagedClaim)
+    writeFileSync(join(damagedClaim, '.message-claim-123456789-abcdef0123456789abcdef0123456789.json'), '{not json')
+    const damagedClaimBox = hookMailbox(damagedClaim, 500)
+    assert.equal(await damagedClaimBox.turn('codex', 's-damaged-claim', 'CLI', Date.now()), null)
+    assert.equal(damagedClaimBox.hasDeferred, false)
+    assert.equal(damagedClaimBox.error, 'MESSAGE_STORE_CLAIM_DAMAGED')
+
     const unsafe = join(dir, 'unsafe')
     mkdirSync(unsafe)
     mkdirSync(join(unsafe, 'messages.json'))
@@ -518,6 +527,47 @@ test('hookMailbox defers only when the store is busy or times out, and exposes s
       assert.equal(httpBox.error, 'MAILBOX_FAILED')
     } finally {
       await new Promise(done => httpServer.close(done))
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a claim whose file no longer holds its bytes fails its check as a store error (#1484)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-claim-check-'))
+  try {
+    const claim = claimMessageStore(dir)
+    try {
+      const name = readdirSync(dir).find(one => one.startsWith('.message-claim-'))
+      assert.ok(name !== undefined)
+      writeFileSync(join(dir, name), '{damaged')
+      assert.throws(() => claim.check(dir), /MESSAGE_STORE_CLAIM_DAMAGED/)
+    } finally { try { claim.release() } catch {} }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a damaged own claim whose release also throws is a store error, not deferred (#1484)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-claim-aggregate-'))
+  try {
+    // Damage the claim file the scan itself reads, so the scan fails on the board's own
+    // claim and the cleanup release fails on the same damaged file: without the fix the
+    // two errors are wrapped as a contention and the mailbox defers (#1484).
+    const realLstat = fs.lstatSync
+    let damaged = false
+    fs.lstatSync = (path, ...rest) => {
+      if (!damaged && typeof path === 'string' && basename(String(path)).startsWith('.message-claim-') && String(path).endsWith('.json')) {
+        damaged = true
+        writeFileSync(path, '{damaged')
+      }
+      return realLstat(path, ...rest)
+    }
+    syncBuiltinESMExports()
+    try {
+      const box = hookMailbox(dir, 500)
+      assert.equal(await box.turn('codex', 's-aggregate', 'CLI', Date.now()), null)
+      assert.equal(box.hasDeferred, false)
+      assert.equal(box.error, 'MESSAGE_STORE_CLAIM_DAMAGED')
+    } finally {
+      fs.lstatSync = realLstat
+      syncBuiltinESMExports()
     }
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
@@ -847,18 +897,19 @@ test("a private folder check reads the local Administrator's own entry, which Wi
 })
 
 test('a store failure gives advice that fits its cause', () => {
-  for (const [s, permission, damaged, busy] of [
-    [EN, "Check that the folder is your account's own and that no other account can open it, then try again.", 'Its message file may be damaged. Move messages.json out of that folder, then try again.', 'The computer may be busy'],
-    [ZH_TW, '請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。', '訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。', '電腦可能正忙'],
-    [ZH_CN, '请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。', '消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。', '电脑可能正忙'],
+  for (const [s, permission, damaged, busy, claim] of [
+    [EN, "Check that the folder is your account's own and that no other account can open it, then try again.", 'Its message file may be damaged. Move messages.json out of that folder, then try again.', 'The computer may be busy', 'Remove a malformed claim only after confirming no hub is running.'],
+    [ZH_TW, '請確認這個資料夾屬於你的帳號，而且其他帳號無法開啟，再試一次。', '訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。', '電腦可能正忙', '才能移除損壞的 claim'],
+    [ZH_CN, '请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。', '消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。', '电脑可能正忙', '才能移除损坏的 claim'],
   ]) {
     const folder = 'synthetic-store'
-    for (const code of ['MESSAGE_STORE_IN_USE', 'MESSAGE_STORE_ACL', 'ACL_CHECK_TIMEOUT', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM', 'UNREADABLE', 'INVALID_MESSAGE_STORE']) {
+    for (const code of ['MESSAGE_STORE_IN_USE', 'MESSAGE_STORE_ACL', 'ACL_CHECK_TIMEOUT', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM', 'UNREADABLE', 'INVALID_MESSAGE_STORE', 'MESSAGE_STORE_CLAIM_BLOCKED', 'MESSAGE_STORE_CLAIM_DAMAGED']) {
       const text = s.serveStoreFailed(code, folder)
       assert.ok(text.includes(folder) && text.includes(code), text)
       assert.equal(text.includes('server.lock'), code === 'MESSAGE_STORE_IN_USE', text)
       assert.equal(text.includes(permission), ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code), text)
       assert.equal(text.includes(damaged), ['UNREADABLE', 'INVALID_MESSAGE_STORE'].includes(code), text)
+      assert.equal(text.includes(claim), ['MESSAGE_STORE_CLAIM_BLOCKED', 'MESSAGE_STORE_CLAIM_DAMAGED'].includes(code), text)
       // A check that ran out of time is not called a folder another account can open (#799).
       assert.equal(text.includes(busy), code === 'ACL_CHECK_TIMEOUT', text)
     }
@@ -3557,16 +3608,22 @@ test('message store claims refuse another contender and release only their own n
 
 test('empty malformed and mismatched message claims block startup without being deleted', () => {
   const nonce = 'e'.repeat(32)
-  for (const raw of ['', '{bad', JSON.stringify({ version: 2, pid: process.pid, nonce }), JSON.stringify({ version: 1, pid: process.pid + 1, nonce })]) {
+  const check = (raw, expected) => {
     const dir = mkdtempSync(join(tmpdir(), 'board-message-unknown-claim-'))
     const name = claimName(process.pid, nonce)
     try {
       writeFileSync(join(dir, name), raw)
-      assert.throws(() => claimMessageStore(dir), /MESSAGE_STORE_CLAIM_BLOCKED/)
+      assert.throws(() => claimMessageStore(dir), expected)
       assert.deepEqual(storeClaims(dir), [name])
       assert.equal(readFileSync(join(dir, name), 'utf8'), raw)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   }
+  // An empty claim is a removal still in progress, so the start still waits behind it.
+  check('', /MESSAGE_STORE_CLAIM_BLOCKED/)
+  // A malformed or mismatched claim is a damaged store, not a contention (#1484).
+  check('{bad', /MESSAGE_STORE_CLAIM_DAMAGED/)
+  check(JSON.stringify({ version: 2, pid: process.pid, nonce }), /MESSAGE_STORE_CLAIM_DAMAGED/)
+  check(JSON.stringify({ version: 1, pid: process.pid + 1, nonce }), /MESSAGE_STORE_CLAIM_DAMAGED/)
 })
 
 test('an unknown message claim probe refuses startup and preserves its evidence', () => {
@@ -4103,7 +4160,7 @@ test('a pending claim left by a writer that died is removed and a live writer\'s
   } finally { claim?.release(); rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('a dead message claim changed during verification remains blocked and is not deleted', () => {
+test('a dead message claim changed during verification is a store error and is not deleted', () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-message-changed-claim-'))
   let pid = 2147483000
   for (;;) {
@@ -4123,7 +4180,7 @@ test('a dead message claim changed during verification remains blocked and is no
       }
       return probe(target, signal)
     }
-    assert.throws(() => claimMessageStore(dir), /MESSAGE_STORE_CLAIM_BLOCKED/)
+    assert.throws(() => claimMessageStore(dir), /MESSAGE_STORE_CLAIM_DAMAGED/)
     assert.deepEqual(storeClaims(dir), [name])
     assert.equal(readFileSync(file, 'utf8'), 'changed')
   } finally { process.kill = probe; rmSync(dir, { recursive: true, force: true }) }

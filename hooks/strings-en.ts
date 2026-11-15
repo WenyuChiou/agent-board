@@ -808,11 +808,13 @@ export const EN: Strings = {
       ? `The board has stopped (${code}): ${folder}. Start it again with agent-board. Uncertain messages have not been resent.`
       : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
         ? `The board could not verify a message owner (${code}): ${folder}. Stop all board servers before inspecting .message-claim-*.json in that folder. Remove a malformed claim only after confirming no hub is running. Keep messages.json and do not resend uncertain messages.`
-        : code === 'ACL_CHECK_TIMEOUT'
-          ? `Windows took too long to check who can open the board's message folder (${code}): ${folder}. The computer may be busy, for example with a virus scan. Try again in a moment.`
-          : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
-            ? `The board could not open its message folder (${code}): ${folder}. Check that the folder is your account's own and that no other account can open it, then try again.`
-            : `The board could not open its message folder (${code}): ${folder}. Its message file may be damaged. Move messages.json out of that folder, then try again.`,
+        : code === 'MESSAGE_STORE_CLAIM_DAMAGED'
+          ? `The board could not read a message claim (${code}): ${folder}. Stop all board servers before inspecting .message-claim-*.json in that folder. Remove a malformed claim only after confirming no hub is running. Keep messages.json and do not resend uncertain messages.`
+          : code === 'ACL_CHECK_TIMEOUT'
+            ? `Windows took too long to check who can open the board's message folder (${code}): ${folder}. The computer may be busy, for example with a virus scan. Try again in a moment.`
+            : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
+              ? `The board could not open its message folder (${code}): ${folder}. Check that the folder is your account's own and that no other account can open it, then try again.`
+              : `The board could not open its message folder (${code}): ${folder}. Its message file may be damaged. Move messages.json out of that folder, then try again.`,
   serveOffline: "Can't reach the board. Run agent-board again; it opens a new page, and you can close this one.",
   serveOfflineLan: "Can't reach the board. On the computer, run agent-board --lan again and open the new address.",
   barStyleInk: 'Ink',
