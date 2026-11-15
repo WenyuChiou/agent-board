@@ -13,6 +13,7 @@
 //              'lost' starts the turn in the daemon and ends the proxy before it has said anything of it, answer or notice: the
 //              delivery's own turn, or with lostTurn 'person' the person's own, begun at that moment, which the text only joins
 //              (with lostTurn 'bare' a turn that thread/turns/list shows with no user message)
+//              'heard' is 'lost' with the turn's start, and nothing else, told to the connection before the proxy ends
 //   startDelay ms the answer to turn/start is held back on an idle thread, while the turn has begun and its notices (its start, its
 //              first user message, an approval it waits on) have gone out
 //   joinOnStart when true, the person's own turn starts just before the first turn/start is handled, so the call joins it
@@ -227,14 +228,17 @@ const handle = (value, emit) => {
     log({ startedInRunningTurn: Boolean(running) || Boolean((config.joinOnStart || config.joinLate) && !hasRaced) })
     if (config.start === 'mute') return
     if (config.start === 'die') process.exit(0)
-    if (config.start === 'lost' && !running) {
+    if ((config.start === 'lost' || config.start === 'heard') && !running) {
       // Nothing is written to the connection. The exit handler saves the daemon's side: the turn runs on there, and the next
       // proxy finds it.
       running = config.lostTurn === 'person' ? 'turn-person' : config.lostTurn === 'bare' ? 'turn-bare' : 'turn-delivery'
       first = config.lostTurn === 'bare' ? null : (config.lostTurn === 'person' ? typedBy(threadId) : userMessage(threadId, running, value.params.input, value.params.clientUserMessageId)).params.item
       stamp += 1
       isWaiting = config.approval === 'hold'
-      process.exit(0)
+      if (config.start === 'lost') process.exit(0)
+      notice({ method: 'turn/started', params: { threadId, turn: { id: running } } })
+      setTimeout(() => process.exit(0), 150)
+      return
     }
     if (config.start === 'endFirst' && !running) {
       const id = 'turn-delivery'

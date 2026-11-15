@@ -237,9 +237,10 @@ export const startCodexReceiver = ({
   // connection, an error), the watch lives until its turn is known to be over (its end was heard, the thread was unloaded or reads
   // as not active, its interrupt was answered or given up) or known not to be this delivery's (the daemon refused the start, the
   // request never left, or the turn began with someone else's message). So a turn the receiver started is still stopped when its
-  // approval has waited too long. Its fields: message, the board message the turn carries, until someone has told the board what
+  // approval has waited too long, and only a turn shown to be the delivery's own ever is. Its fields: message, the board message the turn carries, until someone has told the board what
   // became of it; turn, the turn known to be the delivery's own (the answer to turn/start named it, or its first user message was
-  // the delivery's); heard, a turn whose start was heard since the start was sent and whose owner is not known yet; ended, the
+  // the delivery's); heard, a turn whose start was heard since the start was sent and whose owner is not known yet (it is never asked to stop
+  // while it is only that); ended, the
   // turns heard to end; finish, which ends the delivery with no receipt of its own while it still runs.
   const subs = new Map()
   const subOf = thread => {
@@ -457,7 +458,9 @@ export const startCodexReceiver = ({
       // The receiver stays in the thread until the interrupt is done, so it hears whether the turn is still running.
       const interrupt = () => {
         if (sub.watch !== watch || sub.interrupt !== null) return
-        const turn = watch.turn ?? watch.heard
+        // Only a turn shown to be the delivery's is asked to stop: the start's answer named it, or its first user message was the
+        // delivery's, heard or read (`nameTurn`). One whose start was heard and no more may be a person's.
+        const turn = watch.turn
         // No turn can be named: there is nothing to ask the daemon to stop. With no connection to ask on, the watch waits for
         // the next one, which names the turn and times its wait again.
         if (turn === null) {
@@ -468,7 +471,7 @@ export const startCodexReceiver = ({
         sub.interrupt = { turn, tries: 0, isAsking: false, watch }
         retryInterrupt(thread)
       }
-      if (watch.turn !== null || watch.heard !== null) interrupt()
+      if (watch.turn !== null) interrupt()
       else void nameTurn(thread, watch).then(interrupt)
     }, approvalMs)
     watch.timer.unref?.()
