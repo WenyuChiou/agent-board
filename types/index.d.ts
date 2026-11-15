@@ -209,7 +209,9 @@ export type ProgressMirror = {
   retainedCancelled?: string[]
   // Retained even after a task is deleted, so reusing its id cannot reuse an ask revision.
   questionSequence?: string
-  inferredChoices?: { id: string; revision: string; options: string[] }
+  // Choices read from the list a turn's question ended in (#1277), for one step of a session with
+  // no Task list. Offered only while that step keeps this id, revision and words (`offeredOptions`).
+  inferredChoices?: { id: string; revision: string; words: string; options: string[] }
   updated: number
   // Where the steps come from: Claude's Task list, or each turn summed up when the session
   // has none (`turns`). A Task call replaces the summed-up steps.

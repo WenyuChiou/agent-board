@@ -41,12 +41,14 @@ export const NATIVE = /^<!--\s*native=(\S*)(?:\s+options=(.*?))?\s*-->\s*$/
 export const OPTIONS = /^<!--\s*options=(.*?)\s*-->\s*$/
 const NATIVE_AGENTS: readonly string[] = ['claude', 'codex']
 
+// One list of choices, kept whole or refused whole (null). A character is a Unicode code point, as
+// `docs/FORMAT.md` and Python's `len` count it, so an emoji or a rare CJK character is one.
 export const validOptions = (list: readonly string[]): string[] | null => {
   const normalized = list.map(one => one.replace(/\s+/g, ' ').trim())
   if (
     normalized.length < 2 ||
     normalized.length > 9 ||
-    normalized.some(one => one === '' || one.length > 120 || one.includes('<!--') || one.includes('-->'))
+    normalized.some(one => one === '' || [...one].length > 120 || one.includes('<!--') || one.includes('-->'))
   ) {
     return null
   }

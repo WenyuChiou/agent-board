@@ -234,6 +234,24 @@ test('short comment openings like <!-- opt stay hidden while <!-- options= stays
   expect(parsed[0]?.tasks.map(task => task.title)).toEqual(['T'])
 })
 
+test('a choice is measured in characters, not UTF-16 units: 120 emoji are kept and 121 refused (#1277)', () => {
+  const emoji = '\u{1F600}'
+  expect(emoji.length).toBe(2)
+  expect(validOptions([emoji.repeat(120), 'SQLite'])).toEqual([emoji.repeat(120), 'SQLite'])
+  expect(validOptions([emoji.repeat(121), 'SQLite'])).toBeNull()
+  expect(validOptions([emoji.repeat(61), 'SQLite'])).toEqual([emoji.repeat(61), 'SQLite'])
+  // A rare CJK character outside the first plane counts as one too; ASCII and common CJK keep their bounds.
+  expect(validOptions(['\u{20BB7}'.repeat(120), '中'.repeat(120)])).toEqual(['\u{20BB7}'.repeat(120), '中'.repeat(120)])
+  expect(validOptions(['中'.repeat(121), 'SQLite'])).toBeNull()
+  expect(validOptions(['a'.repeat(121), 'SQLite'])).toBeNull()
+
+  const line = optionsComment([emoji.repeat(120), 'SQLite'])
+  expect(line).not.toBe('')
+  expect(optionsOf(line)).toEqual([emoji.repeat(120), 'SQLite'])
+  expect(optionsComment([emoji.repeat(121), 'SQLite'])).toBe('')
+  expect(optionsOf(`<!-- options=${JSON.stringify([emoji.repeat(121), 'SQLite'])} -->`)).toBeNull()
+})
+
 test('an options line with a comment opening or over-long entry is ignored whole', () => {
   expect(validOptions(['Postgres <!-- private note -->', 'SQLite'])).toBeNull()
   expect(validOptions(['Postgres --> hidden', 'SQLite'])).toBeNull()

@@ -158,16 +158,25 @@ export const isAnswered = (mirror: ProgressMirror, task: ProgressMirrorTask): bo
 export const waitsOnYou = (mirror: ProgressMirror, task: ProgressMirrorTask): boolean =>
   task.status !== 'completed' && task.waiting === 'you' && !isAnswered(mirror, task)
 
+// The key of the words a step asks with now, for a record that holds only for those words.
+export const askedKey = (task: ProgressMirrorTask): string => stepKey(askedWords(task))
+
 // Choices offered for this waiting step: explicit task options win over inferred choices.
+// Inferred choices (#1277) are offered only in a session that keeps no Task list, where each
+// turn's summary rebuilds the record whole, and only while the step still waits with the same
+// id, revision and words the record was written for. A step asked again or reworded on any path
+// stops matching, so no path has to clear the record; a Task list keeps the plain question.
 export const offeredOptions = (mirror: ProgressMirror, task: ProgressMirrorTask): string[] => {
   if (task.ask !== null || task.options.length > 0) return task.options
   const inferred = mirror.inferredChoices
   if (
+    mirror.source === 'turns' &&
     waitsOnYou(mirror, task) &&
     inferred !== undefined &&
     inferred.id === task.id &&
     task.questionRevision !== undefined &&
-    inferred.revision === task.questionRevision
+    inferred.revision === task.questionRevision &&
+    inferred.words === askedKey(task)
   ) {
     return inferred.options
   }

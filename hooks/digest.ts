@@ -1,5 +1,5 @@
 import type { ProgressMirror, ProgressMirrorTask } from '../types'
-import { cleanContext, cleanTitle, clip, markAnswered, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
+import { askedKey, cleanContext, cleanTitle, clip, markAnswered, renewQuestion, waitsOnYou, withoutMarks } from './mirror'
 import { validOptions } from './parse'
 import { answeredStep, oneLine } from './step-words'
 import { ZH_TW } from './i18n'
@@ -198,7 +198,8 @@ const scanChoiceList = (lines: readonly string[], endExclusive: number): { befor
     at -= 1
   }
 
-  return collected.length < 2 ? null : { before: at, options: collected.reverse().slice(0, 9) }
+  // The whole list goes on: `validOptions` refuses ten or more whole, so no choice is cut off.
+  return collected.length < 2 ? null : { before: at, options: collected.reverse() }
 }
 
 // The question line over a list of choices that ends the reply, or null, along with its choices.
@@ -388,7 +389,7 @@ export const applyDigest = (mirror: ProgressMirror, given: Digest, now: number, 
     isTitleFinal: mirror.isTitleFinal || digest.title !== '',
     ...(askedTask?.questionRevision === undefined ? {} : { questionSequence: askedTask.questionRevision }),
     ...(askedTask !== null && askedTask.questionRevision !== undefined && options !== null
-      ? { inferredChoices: { id: askedTask.id, revision: askedTask.questionRevision, options } }
+      ? { inferredChoices: { id: askedTask.id, revision: askedTask.questionRevision, words: askedKey(askedTask), options } }
       : {}),
     tasks: [...finished.slice(-KEEP_DONE), ...open],
     autoAsk: null,
@@ -413,9 +414,12 @@ export const applyLateDigest = (mirror: ProgressMirror, digest: Digest, now: num
 // A turn that ended on a question, in a session whose list says nothing waits on the
 // person: the step in progress (else the next one) waits on them, with the question as its
 // note, until they answer.
-export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTurnBackgroundJob = false, options: readonly string[] = []): ProgressMirror => {
+// It takes no choices (#1277): a list in the reply offers buttons only where the record is rebuilt
+// whole each turn (`applyDigest`), so a session with a Task list keeps the plain question. The
+// record another step holds is left as it is; the step asked here gets a new revision, which
+// ends any record of its own.
+export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTurnBackgroundJob = false): ProgressMirror => {
   if (hasRunningTurnBackgroundJob) return mirror
-  const valid = validOptions(options)
   const waiting = mirror.tasks.filter(one => waitsOnYou(mirror, one))
   if (waiting.length > 0) {
     const words = question.replace(/\s+/g, ' ').trim()
@@ -424,29 +428,20 @@ export const markAsked = (mirror: ProgressMirror, question: string, hasRunningTu
     const target = matching[0]
     if (target === undefined) return mirror
     const renewed = renewQuestion(target, mirror.questionSequence)
-    const { inferredChoices: _inferredChoices, ...rest } = mirror
-    const keepsOwn = target.ask !== null || target.options.length > 0
     return {
-      ...rest,
+      ...mirror,
       questionSequence: renewed.questionRevision,
-      ...(!keepsOwn && valid !== null && renewed.questionRevision !== undefined
-        ? { inferredChoices: { id: renewed.id, revision: renewed.questionRevision, options: valid } }
-        : {}),
       tasks: mirror.tasks.map(one => (one.id === target.id ? renewed : one)),
     }
   }
   // Finished work stays finished when the closing reply asks a new question.
   const target = mirror.tasks.find(one => one.status === 'in_progress') ?? mirror.tasks.find(one => one.status === 'pending') ?? task('auto-question', question, 'pending', null)
   const renewed = renewQuestion({ ...target, waiting: 'you', why: target.id === 'auto-question' ? null : question, ask: null, options: [], command: null, link: null }, mirror.questionSequence)
-  const { inferredChoices: _inferredChoices, ...rest } = mirror
 
   return {
-    ...rest,
+    ...mirror,
     autoAsk: target.id,
     questionSequence: renewed.questionRevision,
-    ...(valid !== null && renewed.questionRevision !== undefined
-      ? { inferredChoices: { id: renewed.id, revision: renewed.questionRevision, options: valid } }
-      : {}),
     // Asked again, even in the words the person answered: it waits on them again, as a plain
     // question. The kind, options, command and link Claude set were for the one they answered.
     answered: withoutMarks(mirror, [target.id]),

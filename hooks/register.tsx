@@ -4602,7 +4602,7 @@ export const register: Register = (on, options) => {
       const hasReport = !isDelivery && !e.isAborted && e.answer.trim() !== ''
       await saveMine($, one => ({ ...(hasReport ? settleChatReply(one) : one), branch }), true)
       // A turn that ended on a question waits on the person even if Claude did not mark it.
-      if (asked !== null && (mirror.source === 'tasks' || isDelivery)) await saveMine($, one => markAsked(one, asked.question, hasRunningTurnBackgroundJob, asked.options))
+      if (asked !== null && (mirror.source === 'tasks' || isDelivery)) await saveMine($, one => markAsked(one, asked.question, hasRunningTurnBackgroundJob))
       await settle($)
       if (!mirror.isTitleFinal) {
         $.clock.after(1, () => {

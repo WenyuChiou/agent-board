@@ -83,7 +83,7 @@ export const LINES = [
 "    collected.push(label);",
 "    at -= 1;",
 "  }",
-"  return collected.length < 2 ? null : { before: at, options: collected.reverse().slice(0, 9) };",
+"  return collected.length < 2 ? null : { before: at, options: collected.reverse() };",
 "};",
 "var lineOverChoices = (prose) => {",
 "  const lines = prose.split(/\\r?\\n/);",
