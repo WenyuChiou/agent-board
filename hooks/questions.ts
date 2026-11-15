@@ -3,6 +3,7 @@ import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
 import { cutOffTest, matchesSpan, scanBlocks, shortId, stepWords } from './blocks'
 import { questionToken, waitsOnYou } from './mirror'
+import { offersList } from './ask'
 import { validOptions } from './parse'
 import { withoutProcessIdentity } from './session-liveness'
 import { sha256 } from './sha256'
@@ -222,7 +223,9 @@ export const sourceOptions = (source: QuestionSource, occurrence?: number): stri
           ? (record.stepOptions as Record<string, unknown>)[`${hash}:${occurrence}`] ?? (record.stepOptions as Record<string, unknown>)[hash]
           : (record.stepOptions as Record<string, unknown>)[hash]
         : undefined
-  if (!Array.isArray(raw)) return undefined
+  if (raw === undefined) return undefined
+  // Present but not a list (the copy is a file anyone can edit): refused, not "none given".
+  if (!Array.isArray(raw)) return []
   // The copy is a file anyone can edit: the list is read whole or refused whole, as when it was kept.
   return raw.every((one): one is string => typeof one === 'string') ? validOptions(raw) ?? [] : []
 }
@@ -653,7 +656,8 @@ const ownObservations = (mine: ProgressMirror, scopeOf: QuestionScopeOf = questi
   return mine.tasks.map((task, index) => {
     const text = stepWords(task).trim()
     // The task's own list, checked whole as it is kept: a refused one is kept as an empty list.
-    const options = (task.options ?? []).length > 0 ? validOptions(task.options) ?? [] : undefined
+    // A task whose kind is not a choice (`ask: "confirm"`) keeps no list, as its block writes none.
+    const options = offersList(task.ask) && (task.options ?? []).length > 0 ? validOptions(task.options) ?? [] : undefined
     return { scope, session: own, index, text, words: questionWords(text), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text, agent: auto.agent, session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume, ...(options === undefined ? {} : { options }) }) } }
   })
 }

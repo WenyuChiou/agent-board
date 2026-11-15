@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { countedText } from './fixtures/counted-work'
 
 import type { ProgressMirror, ProgressPr } from '../types'
-import { askOf } from '../hooks/ask'
+import { askOf, optionsGiven, REFUSED_OPTIONS } from '../hooks/ask'
 import { RULES } from '../hooks/rule'
 import { boardItems, boardKey, boardScreen, boardText, CHAT_MAX, chatText, doneToday, emptyBoardState, fingerprint, fit, peekInbox, pinned, redact, turnsFor, type AnswerRoute } from '../hooks/board'
 import { addManualTask, countManualDone, HAND_KEPT_DONE_MS, isArchivable, isHandKeptMoveOn, manualTaskCount, mergeBlock, renderAutoBlock, scanBlocks, setManualStep, takeArchivable, takeManualDone, takeTask, upsertAutoBlock } from '../hooks/blocks'
@@ -5370,6 +5370,96 @@ test("a list the board refuses shows no buttons on any surface, even when the qu
   const { stop: given, card: givenCard } = codexStop({ question: 'Which database should I use?', options: ['Postgres', 'SQLite'] })
   expect(given.askedOptions).toEqual(['Postgres', 'SQLite'])
   expect(fileView(givenCard).waiting[0]).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+})
+
+// The either-or question that opens like a yes or no: with a refused list it once fell to Yes and No.
+const EITHER_1277 = 'Should I use Postgres or SQLite?'
+const REPLY_ONLY = { ...NO_BUTTONS, kind: 'reply' }
+const offeredAs = (view: ReturnType<typeof buildView>) => ({ ...offeredOn(view), kind: view.waiting[0]?.kind })
+
+test('a refused list leaves only the reply box on the page, the own pane, the terminal board and the Codex card, never a yes and no read from the words (#1277)', () => {
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
+  // No list given keeps the word rule; a refused one is its own state, and an empty list is never "none given".
+  expect(askOf(EITHER_1277, '')).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+  expect(askOf(EITHER_1277, '', { options: undefined })).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
+  expect(askOf(EITHER_1277, '', { options: [] })).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf(EITHER_1277, '', { options: REFUSED_OPTIONS })).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf(EITHER_1277, '', { ask: 'choose', options: REFUSED_OPTIONS })).toMatchObject({ kind: 'reply', options: [] })
+  expect(optionsGiven(undefined)).toBe(undefined)
+  expect(optionsGiven(null)).toBe(REFUSED_OPTIONS)
+  expect(optionsGiven([])).toBe(REFUSED_OPTIONS)
+  expect(optionsGiven(['Postgres', 'SQLite'])).toEqual(['Postgres', 'SQLite'])
+  // The command and the link stay with the question.
+  expect(askOf('Should I run `make db` or read https://example.test/db first?', '', { options: REFUSED_OPTIONS })).toEqual({ kind: 'reply', options: [], command: 'make db', link: 'https://example.test/db' })
+
+  // The own pane, the session's line in progress.md (the page and the terminal board), and the kept copy.
+  const mine = applyTaskCreate(base, { subject: EITHER_1277, metadata: { waiting: 'you', options: TEN_1277 } }, '1', AT_1277)
+  expect(offeredAs(buildView([], [], mine, AT_1277, 0, {}, STRINGS.en)), 'own pane').toEqual(REPLY_ONLY)
+  const file = upsertAutoBlock('', mine, STRINGS.en)
+  expect(file).toContain('<!-- options=[] -->')
+  expect(offeredAs(fileView(file)), 'page and terminal board').toEqual(REPLY_ONLY)
+  const kept = observeQuestions(emptyQuestions(), parseProgress(file), null, [], AT_1277, true).ledger
+  expect(offeredAs(fileView('## demo\n', kept)), 'kept question').toEqual(REPLY_ONLY)
+  const keptOwn = observeQuestions(emptyQuestions(), [], mine, [], AT_1277, true).ledger
+  expect(offeredAs(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, keptOwn)), 'kept own question').toEqual(REPLY_ONLY)
+
+  // Any agent's line the board refuses, the written `options=[]` among them.
+  for (const line of ['<!-- options=[] -->', `<!-- options=${JSON.stringify(TEN_1277)} -->`, '<!-- options=["OnlyOne"] -->', '<!-- options=oops -->']) {
+    const block = `## demo\n<!-- auto session=ab12cd34 agent=codex state=waiting updated=${new Date(AT_1277).toISOString()} -->\n### Storage\n- [?] ${EITHER_1277}\n${line}\n<!-- /auto session=ab12cd34 -->\n`
+    expect(offeredAs(fileView(block)), line.slice(0, 40)).toEqual(REPLY_ONLY)
+  }
+
+  // The Codex card.
+  const { card } = codexStop({ question: EITHER_1277, options: TEN_1277 })
+  expect(card).toContain('<!-- options=[] -->')
+  expect(offeredAs(fileView(card)), 'Codex card').toEqual(REPLY_ONLY)
+})
+
+test('a task that asks for a yes or no and also lists options is a confirm on its own pane and on the other board (#1277)', () => {
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
+  const yesNo = { isAsked: true, isChoose: false, row: [], page: [STRINGS.en.yesAnswer, STRINGS.en.noAnswer], kind: 'confirm' }
+  const mine = applyTaskCreate(base, { subject: 'Should I deploy it?', metadata: { waiting: 'you', ask: 'confirm', options: ['Postgres', 'SQLite'] } }, '1', AT_1277)
+  expect(mine.tasks[0]).toMatchObject({ ask: 'confirm', options: ['Postgres', 'SQLite'] })
+
+  const pane = buildView([], [], mine, AT_1277, 0, {}, STRINGS.en)
+  expect(pane.waiting[0]?.kind, 'own pane').toBe('confirm')
+  expect(serveModel(pane, [], STRINGS.en).asks[0]?.answers, 'own pane answers').toEqual(yesNo.page)
+
+  // The options line carries no kind, so it is written only for a choice.
+  const file = upsertAutoBlock('', mine, STRINGS.en)
+  expect(file).toContain('- [?] Should I deploy it?')
+  expect(file).not.toContain('options=')
+  const { key: _key, ...other } = offeredAs(fileView(file))
+  expect(other, 'other board').toEqual(yesNo)
+  const { key: _keptKey, ...kept } = offeredAs(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, observeQuestions(emptyQuestions(), [], mine, [], AT_1277, true).ledger))
+  expect(kept, 'kept own question').toEqual(yesNo)
+
+  // A refused list beside the yes or no changes nothing either.
+  const refused = applyTaskCreate(base, { subject: 'Should I deploy it?', metadata: { waiting: 'you', ask: 'confirm', options: TEN_1277 } }, '1', AT_1277)
+  expect(buildView([], [], refused, AT_1277, 0, {}, STRINGS.en).waiting[0]).toMatchObject({ kind: 'confirm', options: [] })
+  expect(upsertAutoBlock('', refused, STRINGS.en)).not.toContain('options=')
+
+  // A choice, said or not, still writes its list.
+  for (const ask of ['choose', undefined]) {
+    const choice = applyTaskCreate(base, { subject: 'Which storage?', metadata: { waiting: 'you', ...(ask === undefined ? {} : { ask }), options: ['Postgres', 'SQLite'] } }, '1', AT_1277)
+    expect(upsertAutoBlock('', choice, STRINGS.en), String(ask)).toContain('<!-- options=["Postgres","SQLite"] -->')
+  }
+})
+
+test('a kept question whose saved options are present but not a list offers only the reply box (#1277)', () => {
+  const base = emptyMirror('a1b2c3d4-1111-2222-3333-444455556666', 'demo', AT_1277, '/work/demo', 'claude')
+  const good = observeQuestions(emptyQuestions(), [], applyTaskCreate(base, { subject: EITHER_1277, metadata: { waiting: 'you', options: ['MySQL', 'DuckDB'] } }, '1', AT_1277), [], AT_1277, true).ledger
+  const retained = (ledger: ReturnType<typeof emptyQuestions>) => buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, ledger)
+  const dataOf = (): Record<string, unknown> => JSON.parse(good.records[0]!.source!.data) as Record<string, unknown>
+  const withData = (data: Record<string, unknown>) => ({ ...good, records: good.records.map(one => ({ ...one, source: { ...one.source!, data: JSON.stringify(data) } })) })
+  expect(retained(good).waiting[0]).toMatchObject({ kind: 'choose', options: ['MySQL', 'DuckDB'] })
+
+  for (const bad of ['Postgres or SQLite', { a: 'Postgres', b: 'SQLite' }, 7, true, null]) {
+    expect(offeredAs(retained(withData({ ...dataOf(), options: bad }))), JSON.stringify(bad)).toEqual(REPLY_ONLY)
+  }
+  // No `options` at all is "no list given": the question's words are read as on main.
+  const { options: _options, ...bare } = dataOf()
+  expect(retained(withData(bare)).waiting[0]).toMatchObject({ kind: 'choose', options: ['Postgres', 'SQLite'] })
 })
 
 test('a kept question checks its whole list of choices when it is captured and when it is read back (#1277)', () => {

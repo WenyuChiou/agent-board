@@ -1,3 +1,4 @@
+import { offersList } from './ask'
 import type { CutBlock, ProgressAuto, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressProject, ProgressTask } from '../types'
 import { prWords } from './github'
 import { ZH_TW } from './i18n'
@@ -169,9 +170,10 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
       const token = questionToken(task)
       const native = nativeLine(task)
-      // Only the task's own list (#1277). One the board refuses is written as an empty list, so no
-      // reader offers a part of it or reads choices from the question's words in its place.
-      const options = native === '' && task.waiting === 'you' && (task.options ?? []).length > 0 ? optionsComment(task.options) || NO_OPTIONS : ''
+      // Only the task's own list (#1277), and only when its kind is `choose` or not set: the line
+      // carries no kind, so a confirm with a list would read as a choice on another board. A list
+      // the board refuses is written as an empty one, which every reader shows with no answer buttons.
+      const options = native === '' && task.waiting === 'you' && offersList(task.ask) && (task.options ?? []).length > 0 ? optionsComment(task.options) || NO_OPTIONS : ''
       return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native]), ...(options === '' ? [] : [options])]
     }),
     ...retainedCancelledOf(mirror).map(text => `- [-] ${text}`),
