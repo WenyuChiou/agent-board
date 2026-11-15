@@ -10457,6 +10457,8 @@ export const LINES = [
 "        await nameTurn(thread, watch);",
 "        if (daemon !== on || sub.watch !== watch)",
 "          return;",
+"        if (watch.turn !== null && !isInside)",
+"          return;",
 "      }",
 "      if (seen.isWaiting)",
 "        waitOnApproval(thread);",

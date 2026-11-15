@@ -510,6 +510,9 @@ export const startCodexReceiver = ({
       if (watch.turn === null) {
         await nameTurn(thread, watch)
         if (daemon !== on || sub.watch !== watch) return
+        // From outside, a turn named in this look is acted on at the next one: the approval may have been answered while the
+        // lookup was out, and the read above is older than that. (In the thread, notices tell, and no later look comes.)
+        if (watch.turn !== null && !isInside) return
       }
       if (seen.isWaiting) waitOnApproval(thread)
       else if (!isInside) stopWaiting(sub)

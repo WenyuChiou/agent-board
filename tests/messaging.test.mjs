@@ -5100,6 +5100,29 @@ test('a Codex turn whose approval limit passed while the daemon could not be rea
   } finally { await receiver.close() }
 }))
 
+test('a Codex turn whose approval limit passed while the daemon could not be reached is not interrupted when its approval is answered while the next connection\'s lookup that names it is out, and its message settled once (#318)', () => codexFixture(async (board, dir) => {
+  const away = join(dir, 'away'), approvalMs = 1500, errors = []
+  // As above, and the person answers the approval between the next connection's read of the thread and the answer to its lookup.
+  const daemon = codexDaemon(dir, { approval: 'hold', start: 'heardWaiting', away, answerOnLookup: true })
+  const receiver = codexReceiver(board, daemon, { approvalMs, onError: error => errors.push(error.message) })
+  try {
+    const connection = await codexConnection(board)
+    writeFileSync(away, '')
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexStarts(daemon) === 1)
+    await pause(approvalMs + 500)
+    // The limit passed with the daemon away, and nothing had asked which turn runs: the approval is still waited on.
+    assert.deepEqual([daemon.calls().filter(one => one.argv).length, daemon.calls().some(one => one.method === 'thread/turns/list'), errors.filter(one => one === 'APPROVAL_TIMEOUT').length], [1, false, 1])
+    unlinkSync(away)
+    await waitFor(async () => daemon.calls().filter(one => one.argv).length === 2)
+    await waitFor(async () => codexLastProxy(daemon).some(one => one.method === 'thread/turns/list'))
+    // The turn runs on, answered. More than another limit passes.
+    await pause(approvalMs + 500)
+    assert.deepEqual([codexInterrupts(daemon), errors.filter(one => one === 'APPROVAL_TIMEOUT').length, errors.includes('INTERRUPT_FAILED'), codexStarts(daemon)], [[], 1, false, 1])
+    await codexUncertain(board, 'AB-CX-001', 'APPROVAL_TIMEOUT')
+  } finally { await receiver.close() }
+}))
+
 test('a look at a Codex thread that is answered more than two ticks after the look before it is time the receiver did not watch, and the wait starts again (#318)', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person'), readHold = join(dir, 'read-hold')
   writeFileSync(person, '')

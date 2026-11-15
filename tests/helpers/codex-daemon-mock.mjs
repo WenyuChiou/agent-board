@@ -15,6 +15,8 @@
 //              (with lostTurn 'bare' a turn that thread/turns/list shows with no user message)
 //              'heard' is 'lost' with the turn's start, and nothing else, told to the connection before the proxy ends;
 //              'heardWaiting' tells its wait on an approval too
+//   answerOnLookup  when true, the approval the turn waits on is answered as thread/turns/list arrives, before its answer goes
+//              out: the turn runs on and no longer waits
 //   away       a file: while it is there the daemon cannot be reached, and a proxy that starts ends at once, before its log line
 //   startDelay ms the answer to turn/start is held back on an idle thread, while the turn has begun and its notices (its start, its
 //              first user message, an approval it waits on) have gone out
@@ -163,6 +165,7 @@ const handle = (value, emit) => {
     const seconds = fault === 'odd' ? 'sixty' : config.unloadSecs ?? 0
     emit({ id: value.id, result: { config: seconds === 'none' ? {} : { thread_unload_delay_secs: seconds }, origins: {} } })
   }
+  if (value.method === 'thread/turns/list' && config.answerOnLookup) isWaiting = false
   if (value.method === 'thread/turns/list') emit({ id: value.id, result: { data: running ? [{ id: running, status: 'inProgress', items: first ? [first] : [] }] : [], nextCursor: null } })
   if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: isListed() ? config.loaded : [], nextCursor: null } })
   if (value.method === 'thread/unsubscribe') {
