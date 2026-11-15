@@ -157,7 +157,7 @@ Before you mark it ready, run the local preflight. It checks the branch against 
 node scripts/preflight.mjs --body-file ../pr-body.md --title "fix(cli): <summary>"
 ```
 
-Paste its summary under Checks and update the body (`gh pr edit`, as above). Preflight does not run `claude plugin test .`; when you changed a `.test.ts` or `.test.tsx` file it warns about that, so say under Checks whether you ran it (step 4). When the preflight shows no `FAIL`, wait until CI is green and the PR check passes, then mark it ready with the head GitHub has:
+Paste its summary under Checks and update the body (`gh pr edit`, as above). Preflight does not run `claude plugin test .`; when you changed a `.test.ts` or `.test.tsx` file it warns about that, so say under Checks whether you ran it (step 4). When the preflight shows no `FAIL`, wait until CI is green and the PR check passes or fails only for a missing approval (CONTRIBUTING rule 13), then mark it ready with the head GitHub has:
 
 ```sh
 gh pr checks <PR> -R WenyuChiou/agent-board

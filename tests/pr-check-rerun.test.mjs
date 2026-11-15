@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { isRunOf, isTrustedComment, MAX_PAGES, mentionsVerdict, newestRun, noticeText, PER_PAGE, POLL_MS, rerun, WAIT_MS } from '../scripts/pr-check-rerun.mjs'
+import { CALL_LIMIT_MS, GH_TIMEOUT_MS, ghRunner, isRunOf, isTrustedComment, MAX_PAGES, mentionsVerdict, newestRun, noticeText, PER_PAGE, POLL_MS, rerun, WAIT_MS } from '../scripts/pr-check-rerun.mjs'
 import { reviewOf } from '../scripts/pr-check.mjs'
 
 const head = 'abcdef1234567890abcdef1234567890abcdef12'
@@ -34,7 +34,7 @@ const runsPath = (page = 1) => `repos/synthetic/board/actions/workflows/pr-check
 const rerunPath = id => `repos/synthetic/board/actions/runs/${id}/rerun`
 const noticePath = 'repos/synthetic/board/issues/7/comments'
 const openPull = { number: 7, state: 'open', head: { sha: head, ref: 'fix/synthetic', label: 'synthetic:fix/synthetic', repo: { full_name: 'synthetic/board' } } }
-const run = (id, status, created_at = '2030-01-01T00:00:00Z', extra = {}) => ({ id, status, created_at, pull_requests: [{ number: 7 }], ...extra })
+const run = (id, status, created_at = '2030-01-01T00:00:00Z', extra = {}) => ({ id, status, created_at, pull_requests: [{ number: 7 }], head_branch: 'fix/synthetic', head_repository: { full_name: 'synthetic/board' }, ...extra })
 const quiet = () => {}
 const base = { [pullPath]: openPull, [filesPath()]: [{ filename: 'scripts/x.mjs' }], [sharedPath]: [{ number: 7 }], [noticePath]: {} }
 const notices = calls => calls.filter(args => args.includes(noticePath)).map(args => args.at(-1))
@@ -46,6 +46,11 @@ test('pr-check-rerun runs for any comment that mentions Review:, before or after
   // As wide as the workflow's `if`, so a job that cancels a waiting one in the concurrency group runs the check itself.
   assert.equal(mentionsVerdict(event('The reviewer will post Review: APPROVE when done.')), true)
   assert.equal(mentionsVerdict(event(`Reviewing ${head}: Codex, read-only`)), false)
+  for (const body of [`review: request changes ${head}`, `REVIEW: APPROVE ${head}`]) {
+    assert.equal(mentionsVerdict(event(body)), true, body)
+    assert.equal(mentionsVerdict(event('Withdrawn.', { action: 'edited', changes: { body: { from: body } } })), true, body)
+    assert.notEqual(reviewOf(body), null, body)
+  }
   assert.equal(mentionsVerdict(event('Thanks!')), false)
   assert.equal(mentionsVerdict(event(undefined)), false)
   assert.equal(mentionsVerdict({}), false)
@@ -68,11 +73,14 @@ test('pr-check-rerun picks the pull request\'s own newest pr-check run (#1258)',
   // A run GitHub lists on another pull request is not this one's; a fork's run lists none and is matched by its head.
   assert.equal(isRunOf(run(1, 'completed'), openPull), true)
   assert.equal(isRunOf(run(1, 'completed', undefined, { pull_requests: [{ number: 8 }] }), openPull), false)
+  // A run from another branch on the same commit that lists this pull request too is not this one's.
+  assert.equal(isRunOf(run(1, 'completed', undefined, { pull_requests: [{ number: 8 }, { number: 7 }], head_branch: 'other' }), openPull), false)
+  assert.equal(isRunOf(run(1, 'completed', undefined, { head_repository: { full_name: 'someone/board' } }), openPull), false)
   const fork = { pull_requests: [], head_branch: 'fix/synthetic', head_repository: { full_name: 'synthetic/board' } }
   assert.equal(isRunOf(run(1, 'completed', undefined, fork), openPull), true)
   assert.equal(isRunOf(run(1, 'completed', undefined, { ...fork, head_branch: 'other' }), openPull), false)
   assert.equal(isRunOf(run(1, 'completed', undefined, { ...fork, head_repository: { full_name: 'someone/board' } }), openPull), false)
-  assert.equal(isRunOf(run(1, 'completed', undefined, { pull_requests: [] }), openPull), false)
+  assert.equal(isRunOf(run(1, 'completed', undefined, { pull_requests: [], head_branch: undefined }), openPull), false)
 })
 
 test('pr-check-rerun starts the pull request\'s newest pr-check run of the current head again, after it finishes (#1258)', async () => {
@@ -80,7 +88,7 @@ test('pr-check-rerun starts the pull request\'s newest pr-check run of the curre
   const other = run(13, 'completed', '2030-01-01T00:05:00Z', { pull_requests: [{ number: 8 }] })
   const done = fake({ ...base, [runsPath()]: { workflow_runs: [run(11, 'completed', '2030-01-01T00:00:00Z'), run(12, 'completed', '2030-01-01T00:02:00Z'), other] }, [rerunPath(12)]: '' })
   assert.equal(await rerun(event(approval), { gh: done.gh, log: quiet }), 'rerun')
-  assert.deepEqual(done.calls, [['api', pullPath], ['api', filesPath()], ['api', sharedPath], ['api', runsPath()], ['api', '--method', 'POST', rerunPath(12)]])
+  assert.deepEqual(done.calls, [['api', pullPath], ['api', filesPath()], ['api', sharedPath], ['api', runsPath()], ['api', pullPath], ['api', '--method', 'POST', rerunPath(12)]])
   // A full page of the other pull request's runs: the next page holds this one's.
   const paged = fake({ ...base, [runsPath(1)]: { workflow_runs: Array.from({ length: PER_PAGE }, (_, i) => ({ ...other, id: 100 + i })) }, [runsPath(2)]: { workflow_runs: [run(51, 'completed')] }, [rerunPath(51)]: '' })
   assert.equal(await rerun(event(approval), { gh: paged.gh, log: quiet }), 'rerun')
@@ -93,6 +101,15 @@ test('pr-check-rerun starts the pull request\'s newest pr-check run of the curre
   assert.deepEqual(sleeps, [POLL_MS, POLL_MS, POLL_MS])
   assert.deepEqual(going.calls.at(-1), ['api', '--method', 'POST', rerunPath(21)])
   assert.deepEqual(notices(going.calls), [])
+  // A push, or a close, while it waits: the old head's run is not started again, since that would cancel the new
+  // head's own run (pr-check's concurrency group), which reads the comment itself.
+  for (const [name, later] of [['pushed', { ...openPull, head: { ...openPull.head, sha: 'f'.repeat(40) } }], ['closed', { ...openPull, state: 'closed' }]]) {
+    let reads = 0
+    const moved = fake(path => path === pullPath ? (++reads < 2 ? openPull : later) : path === runsPath() ? { workflow_runs: [run(22, 'completed', undefined, { conclusion: 'cancelled' })] } : base[path])
+    assert.equal(await rerun(event(approval), { gh: moved.gh, log: quiet }), 'superseded', name)
+    assert.deepEqual(posts(moved.calls), [], name)
+    assert.deepEqual(notices(moved.calls), [], name)
+  }
 })
 
 test('pr-check-rerun does nothing without a team comment or an open pull request, and says on the pull request when it cannot run the check again (#1258)', async () => {
@@ -150,6 +167,28 @@ test('pr-check-rerun does nothing without a team comment or an open pull request
   const silent = fake({ ...base, [noticePath]: undefined, [runsPath()]: { workflow_runs: [run(42, 'completed')] } })
   await assert.rejects(rerun(event(approval), { gh: silent.gh, log: line => lines.push(line) }), /gh api --method POST failed/)
   assert.match(lines.join('\n'), /could not post the notice on #7/)
+  // GitHub answering slowly: no call starts after CALL_LIMIT_MS, and the notice still goes out, so the job ends on its
+  // own before the workflow's timeout would end it with nothing said.
+  let clock = 0
+  const slow = fake({ ...base, ...Object.fromEntries(Array.from({ length: MAX_PAGES }, (_, i) => [filesPath(i + 1), fullPage])) })
+  const gh = args => { clock += 30 * 1000; return slow.gh(args) }
+  await assert.rejects(rerun(event(approval), { gh, now: () => clock, log: quiet }), /the GitHub API did not answer in time; the job stopped after 11 minutes/)
+  assert.equal(slow.calls.length - notices(slow.calls).length, CALL_LIMIT_MS / (30 * 1000))
+  assert.match(notices(slow.calls)[0], /did not answer in time/)
+  // A call that hangs: the job's runner stops the process after its timeout, and the error it returns ends the job
+  // with a notice.
+  const started = Date.now()
+  const hung = ghRunner(process.execPath, 300)(['-e', 'setTimeout(() => {}, 20000)'])
+  assert.equal(hung.error?.code, 'ETIMEDOUT')
+  assert.ok(Date.now() - started < 10 * 1000)
+  const stalled = fake(path => path === runsPath() ? undefined : base[path])
+  const timedOut = args => args.some(arg => arg === runsPath()) ? (stalled.calls.push(args), { error: hung.error, status: null, stdout: '', stderr: '' }) : stalled.gh(args)
+  await assert.rejects(rerun(event(approval), { gh: timedOut, log: quiet }), / failed: spawnSync .*ETIMEDOUT/)
+  assert.match(notices(stalled.calls)[0], /ETIMEDOUT/)
+  // A notice whose POST times out: the job fails with that reason, not an empty one.
+  const unsaid = fake({ ...base, [filesPath()]: [{ filename: '.github/workflows/pr-check.yml' }] })
+  const noticeTimesOut = args => args.includes(noticePath) ? (unsaid.calls.push(args), { error: hung.error, status: null, stdout: '', stderr: '' }) : unsaid.gh(args)
+  await assert.rejects(rerun(event(approval), { gh: noticeTimesOut, log: quiet }), /could not post the notice on #7 \(the pull request changes [^)]*\): spawnSync .*ETIMEDOUT/)
 })
 
 test('a pr-check-rerun notice is one line pr-check never reads as a verdict (#1258)', () => {
@@ -157,14 +196,15 @@ test('a pr-check-rerun notice is one line pr-check never reads as a verdict (#12
   const text = noticeText(head, reason)
   assert.equal(reviewOf(text), null)
   assert.equal(reviewOf({ body: text, user: { login: 'github-actions[bot]', type: 'Bot' } }), null)
-  const [first] = text.split('\n\n')
-  assert.doesNotMatch(first, /[\r\n\v\f\u0085\u2028\u2029]/)
+  assert.doesNotMatch(text, /[\r\n\v\f\u0085\u2028\u2029]/)
   assert.ok(noticeText(head, 'x'.repeat(1000)).length < 500)
-  assert.match(noticeText('', 'a reason'), /^The PR check did not run again after the last verdict comment: a reason\. Its result/)
+  assert.match(noticeText('', 'a reason'), /^The PR check did not run again after the last verdict comment: a reason\. Its result .* \(pr-check-rerun, #1258\)$/)
+  assert.doesNotMatch(noticeText(head, 'x'), /\n/)
 })
 
 test('the pr-check-rerun workflow runs main\'s script on the team\'s comment events with only the rights it needs (#1258)', () => {
-  const workflow = readFileSync(new URL('../.github/workflows/pr-check-rerun.yml', import.meta.url), 'utf8')
+  // A Windows checkout may turn its line ends into CRLF.
+  const workflow = readFileSync(new URL('../.github/workflows/pr-check-rerun.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   assert.match(workflow, /^on:\n {2}issue_comment:\n {4}types: \[created, edited, deleted\]\n/m)
   assert.match(workflow, /^permissions:\n {2}actions: write\n {2}contents: read\n {2}pull-requests: write\n\n/m)
   assert.match(workflow, /if: github\.repository == 'WenyuChiou\/agent-board' && github\.event\.issue\.pull_request && \(github\.event\.comment\.user\.type == 'Bot' \|\| contains\(fromJSON\('\["OWNER", "MEMBER", "COLLABORATOR"\]'\), github\.event\.comment\.author_association\)\) && \(contains\(github\.event\.comment\.body, 'Review:'\) \|\| contains\(github\.event\.changes\.body\.from, 'Review:'\)\)/)
@@ -175,6 +215,23 @@ test('the pr-check-rerun workflow runs main\'s script on the team\'s comment eve
   // It checks out main as the event gives it, never the pull request, and keeps no credentials.
   assert.doesNotMatch(workflow, /\bref:|pull_request\.head|head_ref/)
   assert.match(workflow, /persist-credentials: false/)
-  // The comment's text never enters a shell command.
+  // The comment's text never enters a shell command, nor does any other expression: they reach a step through env.
   assert.doesNotMatch(workflow, /\$\{\{ *github\.event\.comment/)
+  assert.doesNotMatch(workflow, /run:[^\n]*\$\{\{/)
+  assert.doesNotMatch(workflow, /^ {10}gh [^\n]*\$\{\{/m)
+  // A step before the script that fails still leaves a notice on the pull request; the script's own failure does not
+  // post a second one.
+  assert.match(workflow, /^ {8}id: rerun\n/m)
+  assert.match(workflow, /^ {6}- name: Say on the pull request that the check did not run again\n {8}if: failure\(\) && steps\.rerun\.outcome == 'skipped'\n/m)
+  assert.match(workflow, /body=The PR check did not run again after the last verdict comment: the pr-check-rerun job failed before its script ran\./)
+  // The steps end a job that cannot run the check again, with a notice, before the job's timeout does: a job the
+  // timeout ends is cancelled and says nothing. The checkout and Node each fail at their own limit, then either the
+  // script (its call limit, a call under way and its notice) or the notice step runs.
+  const minutes = Number(workflow.match(/^ {4}timeout-minutes: (\d+)$/m)?.[1])
+  const setup = [...workflow.matchAll(/^ {6}- uses: actions\/(?:checkout|setup-node)@[^\n]*\n {8}timeout-minutes: (\d+)\n/gm)].map(found => Number(found[1]))
+  const notice = Number(workflow.match(/if: failure\(\) && steps\.rerun\.outcome == 'skipped'\n {8}timeout-minutes: (\d+)\n/)?.[1])
+  assert.equal(setup.length, 2)
+  const before = setup.reduce((sum, value) => sum + value, 0) * 60 * 1000
+  assert.ok(minutes * 60 * 1000 > before + CALL_LIMIT_MS + 2 * GH_TIMEOUT_MS, String(minutes))
+  assert.ok(minutes * 60 * 1000 > before + notice * 60 * 1000, String(minutes))
 })

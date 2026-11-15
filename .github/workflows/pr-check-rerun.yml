@@ -22,23 +22,41 @@ permissions:
 jobs:
   rerun:
     name: run pr-check again
-    # Only comments on pull requests that may hold a verdict, from the team or an app; the script reads them line by
-    # line as pr-check does.
+    # Only comments on pull requests that mention `Review:` (in any letter case, as `contains` reads it), from the team
+    # or an app; the script admits the same comments, so a job here always does the work.
     if: github.repository == 'WenyuChiou/agent-board' && github.event.issue.pull_request && (github.event.comment.user.type == 'Bot' || contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)) && (contains(github.event.comment.body, 'Review:') || contains(github.event.changes.body.from, 'Review:'))
     # On the job, not the workflow: a comment the job skips must not cancel a verdict's run that is still waiting.
     concurrency:
       group: pr-check-rerun-${{ github.event.issue.number }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    # Above the steps' own limits: the checkout and Node, then either the script (CALL_LIMIT_MS, plus GH_TIMEOUT_MS for a
+    # call under way and for its notice) or the notice step. A job the timeout ends is cancelled and says nothing, so the
+    # steps, not the job's timeout, end a job that cannot run the check again.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 3
         with:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        timeout-minutes: 3
         with:
           node-version: 24
       - name: Run the pull request's newest pr-check on its current head again
+        id: rerun
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/pr-check-rerun.mjs --event "$GITHUB_EVENT_PATH"
+      # The script says why on the pull request whenever it cannot run the check again; this says it when a step before
+      # the script failed or hung past its limit (the checkout, Node), which would otherwise leave the check as it was
+      # with nothing said.
+      - name: Say on the pull request that the check did not run again
+        if: failure() && steps.rerun.outcome == 'skipped'
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh api --method POST "repos/$REPO/issues/$NUMBER/comments" -f "body=The PR check did not run again after the last verdict comment: the pr-check-rerun job failed before its script ran. Its result may be older than that verdict; start pr-check again by hand, or push a commit. (pr-check-rerun, #1258)"
