@@ -7,6 +7,12 @@ const PREFIX = '.message-claim-'
 const PENDING = '.message-pending-'
 const LIMIT = 1024
 const blocked = (): Error => new Error('MESSAGE_STORE_CLAIM_BLOCKED')
+// A claim file that is not what a board wrote — wrong shape, unreadable, or bytes that no longer
+// match — is a broken store, not a contention to wait out (#1484).
+const damaged = (): Error => new Error('MESSAGE_STORE_CLAIM_DAMAGED')
+// A refusal Windows clears on its own (a file being removed, a scanner holding one just written)
+// is contention, not damage: the next call tries again.
+const TRANSIENT_ERRNO = new Set(['EPERM', 'EBUSY', 'EAGAIN'])
 const canonical = (path: string): string => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path)
 
 // While its owner removes it, another board's claim can still have its name on Windows and yet
@@ -18,7 +24,7 @@ const removing = (): Error => Object.assign(new Error('MESSAGE_STORE_CLAIM_REMOV
 const readClaimOnce = (file: string, isOther: boolean): string => {
   const before = lstatSync(file)
   if (isOther && before.isFile() && !before.isSymbolicLink() && before.nlink === 0) throw removing()
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 512) throw blocked()
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > 512) throw damaged()
   const fd = openSync(file, 'r')
   try {
     const opened = fstatSync(fd)
@@ -28,18 +34,18 @@ const readClaimOnce = (file: string, isOther: boolean): string => {
       const now = (() => {
         try { return lstatSync(file) } catch (error) {
           if (['ENOENT', 'EPERM', 'EBUSY', 'EAGAIN'].includes(String((error as NodeJS.ErrnoException).code))) throw error
-          throw blocked()
+          throw damaged()
         }
       })()
       if (now.dev === opened.dev && now.ino === opened.ino) throw removing()
       throw blocked()
     }
-    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1 || opened.size > 512) throw blocked()
+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.nlink !== 1 || opened.size > 512) throw damaged()
     const buffer = Buffer.alloc(513)
     const count = readSync(fd, buffer, 0, buffer.length, 0)
     // A claim is never published empty, so another board's that reads empty is being removed.
     if (count === 0 && isOther) throw removing()
-    if (count === 0 || count > 512) throw blocked()
+    if (count === 0 || count > 512) throw damaged()
     return buffer.subarray(0, count).toString('utf8')
   } finally { closeSync(fd) }
 }
@@ -94,12 +100,20 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
   }
   const claim: MessageStoreClaim = {
     check: directory => {
-      if (isReleased || canonical(directory) !== canonical(root) || readClaim(file) !== bytes) throw blocked()
+      if (isReleased || canonical(directory) !== canonical(root)) throw blocked()
+      // A claim file that is gone or no longer holds this claim's bytes is damaged, not a
+      // contention: no other board retires a live owner's claim (#1484).
+      let read: string
+      try { read = readClaim(file) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw damaged()
+        throw error
+      }
+      if (read !== bytes) throw damaged()
     },
     release: () => {
       if (isReleased) return
       try {
-        if (readClaim(file) !== bytes) throw blocked()
+        if (readClaim(file) !== bytes) throw damaged()
         // A start that loses to a live board releases its claim just after writing it, while a
         // scanner may still hold it; a refusal here would end that start instead of letting it retry.
         patiently(() => unlinkSync(file))
@@ -128,14 +142,18 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
       let raw: string
       try { raw = readClaim(path, true) } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
-        throw blocked()
+        // A claim the reader itself refused as blocked — a name another file took while it was
+        // being read — stays blocked: that is a contention, not damage (#1484).
+        if (error instanceof Error && (error.message === 'MESSAGE_STORE_CLAIM_DAMAGED' || error.message === 'MESSAGE_STORE_CLAIM_BLOCKED')) throw error
+        if (TRANSIENT_ERRNO.has(String((error as NodeJS.ErrnoException).code ?? ''))) throw blocked()
+        throw damaged()
       }
       const match = /^\.message-claim-([1-9][0-9]*)-([a-f0-9]{32})\.json$/.exec(other)
       let value: { version?: unknown, pid?: unknown, nonce?: unknown }
-      try { value = JSON.parse(raw) as typeof value } catch { throw blocked() }
+      try { value = JSON.parse(raw) as typeof value } catch { throw damaged() }
       if (!match || !value || typeof value !== 'object' || Object.keys(value).sort().join(',') !== 'nonce,pid,version'
         || value.version !== 1 || value.pid !== Number(match[1]) || value.nonce !== match[2]
-        || !Number.isSafeInteger(value.pid) || Number(value.pid) > 2147483647) throw blocked()
+        || !Number.isSafeInteger(value.pid) || Number(value.pid) > 2147483647) throw damaged()
       try {
         process.kill(Number(value.pid), 0)
         throw new Error('MESSAGE_STORE_IN_USE')
@@ -147,10 +165,15 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
       }
       // Only a proven-dead writer's exact immutable claim can be retired.
       try {
-        if (readClaim(path, true) !== raw) throw blocked()
+        if (readClaim(path, true) !== raw) throw damaged()
         patiently(() => unlinkSync(path))
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw blocked()
+        if (error instanceof Error && (error.message === 'MESSAGE_STORE_CLAIM_DAMAGED' || error.message === 'MESSAGE_STORE_CLAIM_BLOCKED')) throw error
+        const code = String((error as NodeJS.ErrnoException).code ?? '')
+        if (code !== 'ENOENT') {
+          if (TRANSIENT_ERRNO.has(code)) throw blocked()
+          throw damaged()
+        }
       }
     }
     return claim

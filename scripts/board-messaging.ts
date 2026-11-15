@@ -614,7 +614,12 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget) 
         let state = existsSync(file) ? parseMessageStore(readFileSync(file, 'utf8'), now) : { messages: [] }
         const next = mailboxAction(state, action, body, now)
         state = next.state
-        try { claim.check(root) } catch (error) { hasDeferred = true; throw error }
+        // A recheck that fails on a damaged claim, or on a read error, is a store error, not a
+        // contention: only a contention error, or a refusal Windows clears on its own, defers (#1484).
+        try { claim.check(root) } catch (error) {
+          if (isClaimContention(error) || CONTENTION_ERRNO.has(String((error as NodeJS.ErrnoException | null)?.code ?? ''))) hasDeferred = true
+          throw error
+        }
         try {
           writeFileSync(temp, JSON.stringify({ version: 2, ...pruneMessages(state, now) }), { flag: 'wx', mode: 0o600 })
           replaceFile(temp, file)
