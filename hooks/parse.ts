@@ -35,7 +35,7 @@ export const AUTO_START = /^<!--\s*auto\s+(.*?)\s*-->\s*$/
 export const AUTO_END = /^<!--\s*\/auto\b.*?-->\s*$/
 export const QUESTION = /^<!--\s*question=([a-f0-9]{64}:[1-9]\d*)\s*-->\s*$/
 // `<!-- native=claude options=["a","b"] -->`: the question above is answered in that agent's own window.
-// `<!-- options=["a","b"] -->`: choices extracted for the waiting question step above (#1277).
+// `<!-- options=["a","b"] -->`: the choices the agent itself listed for the waiting question step above (#1277).
 // Any line of this shape is read as the annotation, so a malformed one is dropped and never turns into text.
 export const NATIVE = /^<!--\s*native=(\S*)(?:\s+options=(.*?))?\s*-->\s*$/
 export const OPTIONS = /^<!--\s*options=(.*?)\s*-->\s*$/
@@ -58,6 +58,9 @@ export const validOptions = (list: readonly string[]): string[] | null => {
 // A comment must not hold `--` or `>`, so both are written as JSON escapes.
 export const escapeOptionsJson = (options: readonly string[]): string =>
   JSON.stringify(options).replace(/-/g, '\\u002d').replace(/>/g, '\\u003e')
+
+// What a writer puts for a list it refuses: readers offer no choices for that step.
+export const NO_OPTIONS = '<!-- options=[] -->'
 
 export const optionsComment = (options: readonly string[]): string => {
   const valid = validOptions(options)
@@ -339,9 +342,11 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
       return
     }
     if (OPTIONS.test(line)) {
-      const options = optionsOf(line)
+      // A refused line still says the agent listed its choices: the step offers none (an empty
+      // list), and the board does not read any from the question's words in their place.
+      const options = optionsOf(line) ?? []
       const previous = task?.steps.at(-1)
-      if (options !== null && openSession !== null && task?.auto?.session === openSession && previous?.status === 'waiting') previous.options = options
+      if (openSession !== null && task?.auto?.session === openSession && previous?.status === 'waiting') previous.options = options
       return
     }
 

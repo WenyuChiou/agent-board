@@ -2239,13 +2239,20 @@ test('a Claude turn ending on a question over a list keeps the plain question in
   } finally { await ui.unmount() }
 })
 
-test('a Claude turn ending on a question over a list persists its choices in a session with no Task list (#1277)', { options: { language: 'en' } }, async ($, on) => {
+test('a Claude turn ending on a question over a list keeps the plain question in a session with no Task list (#1277)', { options: { language: 'en' } }, async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: false, messages: EDITED, store: { autoConnectOff: true, lang: 'en' }, reply: prompt => prompt.includes('TITLE:') ? 'TITLE: Storage\nCONTEXT: fixture\nDONE: Checked the repo\nNEXT: -\nASK: Database — Which database should I use?' : undefined }
   const clock = engineBeneath(on, world)
   await start($, 'Pick a storage engine')
   await $.turn.complete({ answer: 'Checked the repo.\n\nWhich database should I use?\n1. Postgres\n2. SQLite', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(10)
-  expect(world.files.get(FILE) ?? '').toContain('<!-- options=["Postgres","SQLite"] -->')
+  const file = world.files.get(FILE) ?? ''
+  expect(file).toContain('- [?] ')
+  expect(file).toContain('Which database should I use?')
+  expect(file).not.toContain('options=')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    for (const id of ['1', 't1', 't2', 'auto-question']) expect(await ui.find({ type: 'Button', key: `mine::${id}::Postgres` })).toBeUndefined()
+  } finally { await ui.unmount() }
 })
 
 test('two quick section presses whose first save fails leave the pane matching what was saved', { options: { language: 'en' } }, async ($, on) => {

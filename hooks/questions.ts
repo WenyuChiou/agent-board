@@ -2,7 +2,8 @@ import type { CutBlock, ProgressAuto, ProgressMirror, ProgressProject, ProgressS
 import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
 import { cutOffTest, matchesSpan, scanBlocks, shortId, stepWords } from './blocks'
-import { offeredOptions, questionToken, waitsOnYou } from './mirror'
+import { questionToken, waitsOnYou } from './mirror'
+import { validOptions } from './parse'
 import { withoutProcessIdentity } from './session-liveness'
 import { sha256 } from './sha256'
 import type { TaskRef } from './view'
@@ -199,8 +200,9 @@ export const sourceData = (task: ProgressTask): string => {
     return { step, hash: sha256(words).slice(0, 8), words, occurrence }
   })
   const stepOptions = Object.fromEntries(indexed.flatMap(({ step, hash, words, occurrence }) =>
-    step.status === 'waiting' && (step.options ?? []).length >= 2
-      ? [[(counts.get(words) ?? 0) > 1 ? `${hash}:${occurrence}` : hash, step.options!]]
+    // Kept whole or as the empty list of a refused line, never a part of a list.
+    step.status === 'waiting' && step.options !== undefined
+      ? [[(counts.get(words) ?? 0) > 1 ? `${hash}:${occurrence}` : hash, validOptions(step.options) ?? []]]
       : []
   ))
   return JSON.stringify({ auto: task.auto === null ? null : withoutProcessIdentity(task.auto), steps: task.steps.map(step => step.status), ...(Object.keys(stepOptions).length === 0 ? {} : { stepOptions }) })
@@ -212,17 +214,17 @@ export const sourceOptions = (source: QuestionSource, occurrence?: number): stri
   const record = parsed as Record<string, unknown>
   const hash = sha256(questionWords(source.text)).slice(0, 8)
   const raw = source.kind === 'own'
-    ? (record.task !== null && typeof record.task === 'object' && !Array.isArray(record.task) ? (record.task as Record<string, unknown>).options : undefined)
+    ? record.options
     : source.kind === 'inbox'
-      ? record.options
+      ? undefined
       : record.stepOptions !== null && typeof record.stepOptions === 'object' && !Array.isArray(record.stepOptions)
         ? occurrence !== undefined
           ? (record.stepOptions as Record<string, unknown>)[`${hash}:${occurrence}`] ?? (record.stepOptions as Record<string, unknown>)[hash]
           : (record.stepOptions as Record<string, unknown>)[hash]
         : undefined
   if (!Array.isArray(raw)) return undefined
-  const list = raw.filter((one): one is string => typeof one === 'string' && one.trim() !== '')
-  return list.length >= 2 ? list : undefined
+  // The copy is a file anyone can edit: the list is read whole or refused whole, as when it was kept.
+  return raw.every((one): one is string => typeof one === 'string') ? validOptions(raw) ?? [] : []
 }
 
 type SourceSnapshot = { auto: ProgressAuto | null; steps: ProgressStepStatus[] }
@@ -650,9 +652,9 @@ const ownObservations = (mine: ProgressMirror, scopeOf: QuestionScopeOf = questi
   const scope = scopeOf(mine.project, auto.agent, own, auto.resume)
   return mine.tasks.map((task, index) => {
     const text = stepWords(task).trim()
-    const offered = offeredOptions(mine, task)
-    const snapshot = offered.length === task.options.length && offered.every((one, i) => one === task.options[i]) ? task : { ...task, options: offered }
-    return { scope, session: own, index, text, words: questionWords(text), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text, agent: auto.agent, session: own, data: JSON.stringify({ task: snapshot, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume }) } }
+    // The task's own list, checked whole as it is kept: a refused one is kept as an empty list.
+    const options = (task.options ?? []).length > 0 ? validOptions(task.options) ?? [] : undefined
+    return { scope, session: own, index, text, words: questionWords(text), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text, agent: auto.agent, session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume, ...(options === undefined ? {} : { options }) }) } }
   })
 }
 

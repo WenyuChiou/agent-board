@@ -1361,7 +1361,7 @@ test('continuation guard narrows QuestionAnswerEvidence and excludes end events 
   expect(isContinuationTurn({ ...baseTurn, at: NaN })).toBe(false)
 })
 
-test('observed questions keep and clear list choice options across block, retained ledger and inbox turns (#1277)', () => {
+test('observed questions keep the choices of an options line across block and retained ledger, and an inbox turn offers none (#1277)', () => {
   const opts = ['Postgres', 'SQLite']
   const stepText = 'Which database should I use?'
   const blockWithOptions = [
@@ -1385,7 +1385,7 @@ test('observed questions keep and clear list choice options across block, retain
   const plainObserved = observe(emptyQuestions(), file('- [?] Publish now?')).ledger
   expect(JSON.parse(plainObserved.records[0]!.source!.data).stepOptions).toBeUndefined()
 
-  // Inbox turns ending on a question over a list preserve choice options until answered.
+  // An inbox turn ending on a question over a list carries no choices: nothing reads them out of the reply.
   const inbox = peekInbox([{
     name: `codex-turn-${NOW}-1.json`,
     body: JSON.stringify({
@@ -1395,12 +1395,17 @@ test('observed questions keep and clear list choice options across block, retain
     }),
     at: NOW,
   }])
-  expect(inbox[0]?.options).toEqual(opts)
+  expect(inbox[0]).toMatchObject({ isQuestion: true, text: 'Which one should I use?' })
+  expect(inbox[0]).not.toHaveProperty('options')
   const inboxObserved = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'inbox', undefined, inbox)
-  const fromInbox = buildView([], inbox, null, NOW, 0, {}, STRINGS.en, [], {}, inboxObserved.ledger)
-  expect(fromInbox.waiting[0]).toMatchObject({ kind: 'choose', options: opts })
-  const fromInboxModel = buildView([], inbox, null, NOW, 0, {}, STRINGS.en, [], {}, inboxObserved.ledger)
-  expect(fromInboxModel.waiting[0]?.text).toBe('Which one should I use?')
+  expect(JSON.stringify(inboxObserved.ledger)).not.toContain('options')
+  const fromInbox = buildView([], [], null, NOW, 0, {}, STRINGS.en, [], {}, inboxObserved.ledger, undefined, inbox)
+  expect(fromInbox.waiting).toHaveLength(1)
+  expect(fromInbox.waiting[0]).toMatchObject({ text: 'Which one should I use?', options: [] })
+  expect(fromInbox.waiting[0]?.kind).not.toBe('choose')
+  const keptInbox = buildView([], [], null, NOW, 0, {}, STRINGS.en, [], {}, inboxObserved.ledger)
+  expect(keptInbox.waiting).toHaveLength(1)
+  expect(keptInbox.waiting[0]).toMatchObject({ text: 'Which one should I use?', options: [] })
   const nextTurn = { ...inboxTurn(NOW + 1000), cwd: '/work/demo', answer: 'Using Postgres.' }
   const afterInboxAnswer = observeQuestions(inboxObserved.ledger, [], null, [], NOW + 2000, true, 'inbox-answered', undefined, inbox, [nextTurn]).ledger
   expect(afterInboxAnswer.records[0]?.isUnresolved).toBe(false)

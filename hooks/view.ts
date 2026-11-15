@@ -9,7 +9,7 @@ import type { ConfirmRef } from './blocks'
 import { isLifecycleStep } from './codex'
 import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
-import { doingTask, fallbackTitle, isAnswered, offeredOptions, waitsOnYou } from './mirror'
+import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
 import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, validOptions } from './parse'
 import { cellsOf, plainBar } from './progress-bar'
@@ -659,7 +659,9 @@ const ownWaiting = (mine: ProgressMirror, stable?: Readonly<Record<string, strin
       when: '',
       ...askOf(task.subject, task.why ?? '', {
         ask: task.ask ?? undefined,
-        options: validOptions(offeredOptions(mine, task)) ?? undefined,
+        // A list the task gave and the board refuses is no choices at all: an empty list keeps
+        // `askOf` from reading some out of the question's words (#1277).
+        options: (task.options ?? []).length > 0 ? validOptions(task.options) ?? [] : undefined,
         command: task.command ?? undefined,
         link: task.link ?? undefined,
       }),
@@ -1144,7 +1146,7 @@ export const buildView = (
           when,
           ...(lastActive === undefined ? {} : { at: lastActive }),
           dir: task.auto?.dir ?? null,
-          ...askOf(parts.text, parts.note, (step.options ?? []).length >= 2 ? { options: step.options } : undefined),
+          ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: validOptions(step.options) ?? [] }),
           ...(step.native === undefined ? {} : { native: step.native }),
           where: isManual ? 'manual' : 'other',
           agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
@@ -1401,7 +1403,7 @@ export const buildView = (
     const id = observed?.keys[pendingQuestionSlot(scope, turn.text)] ?? observed?.ledger.records.find(record => record.scope === scope && record.isUnresolved && record.producerSources?.includes(JSON.stringify(turn)))?.id
     if (id === undefined || waiting.some(item => item.questionId === id)) return []
     const parts = splitNote(turn.text)
-    return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note, (turn.options ?? []).length >= 2 ? { options: turn.options } : undefined), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
+    return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
   const isRepliedMine = mine !== null && mine.replied !== undefined && Number.isFinite(mine.replied) && (mine.updated === null || mine.replied >= (mine.updated ?? 0))
   const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).flatMap(item => {

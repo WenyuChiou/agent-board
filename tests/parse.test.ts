@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { splitLines } from '../hooks/lines'
-import { currentStepIndex, isCutMarker, isHereProject, optionsComment, optionsOf, parseProgress, progressTail, readable, validOptions } from '../hooks/parse'
+import { currentStepIndex, isCutMarker, isHereProject, NO_OPTIONS, optionsComment, optionsOf, parseProgress, progressTail, readable, validOptions } from '../hooks/parse'
 
 test('splitting progress.md into lines gives the same lines as the regular expression for every mix of CR and LF', () => {
   const alphabet = ['a', '\r', '\n']
@@ -252,7 +252,7 @@ test('a choice is measured in characters, not UTF-16 units: 120 emoji are kept a
   expect(optionsOf(`<!-- options=${JSON.stringify([emoji.repeat(121), 'SQLite'])} -->`)).toBeNull()
 })
 
-test('an options line with a comment opening or over-long entry is ignored whole', () => {
+test('an options line with a comment opening or over-long entry is refused whole', () => {
   expect(validOptions(['Postgres <!-- private note -->', 'SQLite'])).toBeNull()
   expect(validOptions(['Postgres --> hidden', 'SQLite'])).toBeNull()
   expect(validOptions(['a'.repeat(121), 'SQLite'])).toBeNull()
@@ -280,6 +280,10 @@ test('an options line with a comment opening or over-long entry is ignored whole
     '<!-- /auto session=ab12cd34 -->',
   ].join('\n')
   const parsed = parseProgress(blockWithBadOptions)
-  expect(parsed[0]?.tasks[0]?.steps[0]?.options).toBeUndefined()
-  expect(parsed[0]?.tasks[0]?.steps[1]?.options).toBeUndefined()
+  // A refused line leaves the step with no choices (an empty list), never a part of the list;
+  // a step with no line at all has none to refuse.
+  expect(parsed[0]?.tasks[0]?.steps[0]?.options).toEqual([])
+  expect(parsed[0]?.tasks[0]?.steps[1]?.options).toEqual([])
+  expect(parseProgress(blockWithBadOptions.split('\n').filter(line => !line.startsWith('<!-- options=')).join('\n'))[0]?.tasks[0]?.steps.map(step => step.options)).toEqual([undefined, undefined])
+  expect(parseProgress(blockWithBadOptions.replace(/^<!-- options=.*$/m, NO_OPTIONS))[0]?.tasks[0]?.steps[0]?.options).toEqual([])
 })

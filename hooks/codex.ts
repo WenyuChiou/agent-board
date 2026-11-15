@@ -2,7 +2,7 @@ import { LANGS } from './i18n'
 import type { Strings } from './i18n'
 import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
-import { baseName, escapeOptionsJson, parseAttrs, parseProgress, RESUME, validOptions } from './parse'
+import { baseName, escapeOptionsJson, NO_OPTIONS, parseAttrs, parseProgress, RESUME, validOptions } from './parse'
 import { scanBlocks, sectionOfProject } from './blocks'
 import { cutLine } from './step-words'
 import type { BlockSpan } from './blocks'
@@ -153,8 +153,15 @@ export const codexLifecycleStep = (state: string, s: Strings): string =>
 export const localAgentLifecycleStep = (state: string, s: Strings): string =>
   state === 'working' ? `- [ ] ${s.localAgentLifecycleWorking}` : state === 'done' ? `- [x] ${s.localAgentLifecycle}` : `- [ ] ${s.localAgentLifecycle}`
 
+// The choices an agent listed with its question (#1277): the whole list, or an empty one when the
+// board refuses it (an entry that is not a string or not valid, fewer than 2 or more than 9). Never
+// a part of a list; undefined when the agent listed nothing.
+export const givenOptions = (value: unknown): string[] | undefined =>
+  !Array.isArray(value) ? undefined : value.every((one): one is string => typeof one === 'string') ? validOptions(value) ?? [] : []
+
 // A later report keeps the same line as completion evidence, or reuses its slot
-// with a fresh revision when it asks again.
+// with a fresh revision when it asks again. `valueOptions` is only a list the agent itself gave:
+// nothing here reads choices out of the question's words.
 export const questionSteps = (
   held: readonly string[],
   previousAsked: number | undefined,
@@ -163,14 +170,13 @@ export const questionSteps = (
   isBoardPrompt = false,
   previousRevision?: string,
   isSettlingReply = false,
-  valueOptions: readonly string[] = [],
-  previousOptions?: readonly string[],
+  valueOptions?: unknown,
+  previousOptions?: unknown,
 ): { steps: string[]; asked: number | undefined; askedRevision: string | undefined; askedOptions: string[] | undefined } => {
   const steps = [...held]
   let asked = previousAsked !== undefined && Number.isInteger(previousAsked) && previousAsked >= 0 && previousAsked < steps.length ? previousAsked : undefined
   let askedRevision = previousRevision
-  const prevOptions = validOptions(previousOptions ?? [])
-  let askedOptions: string[] | undefined = asked !== undefined && steps[asked]?.startsWith('- [?] ') && prevOptions !== null ? prevOptions : undefined
+  let askedOptions: string[] | undefined = asked !== undefined && steps[asked]?.startsWith('- [?] ') ? givenOptions(previousOptions) : undefined
   if (isBoardPrompt) return { steps, asked, askedRevision, askedOptions }
   if ((state === 'working' || isSettlingReply) && asked !== undefined) {
     steps[asked] = steps[asked]!.replace(/^- \[\?\] /, '- [x] ')
@@ -178,10 +184,10 @@ export const questionSteps = (
   }
   const question = state === 'waiting' && typeof value === 'string' ? cutLine(value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
   if (question !== '' && (asked !== undefined || steps.length < 40)) {
-    const nextOptions = validOptions(valueOptions) ?? undefined
+    const nextOptions = givenOptions(valueOptions)
     // Hosts may deliver the same closing question again after Stop or an idle status.
     // A repeated question after a real reply is a new incarnation, even in the same words.
-    if (asked === undefined || steps[asked] !== `- [?] ${question}` || JSON.stringify(askedOptions ?? []) !== JSON.stringify(nextOptions ?? [])) askedRevision = nextRevision(askedRevision)
+    if (asked === undefined || steps[asked] !== `- [?] ${question}` || JSON.stringify(askedOptions ?? null) !== JSON.stringify(nextOptions ?? null)) askedRevision = nextRevision(askedRevision)
     // A model that already reported the question as its own [?] step keeps that one line.
     if (asked === undefined) asked = steps.includes(`- [?] ${question}`) ? steps.indexOf(`- [?] ${question}`) : steps.length
     steps[asked] = `- [?] ${question}`
@@ -244,8 +250,7 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
       )
   const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
   const approvalSteps = held.map((step, index) => event !== 'SessionStart' && index === earlier ? step.replace(/^- \[\?\] /, '- [x] ') : step)
-  const valueOptions = Array.isArray(input.options) ? input.options.filter((one): one is string => typeof one === 'string') : []
-  const { steps, asked, askedRevision, askedOptions } = questionSteps(approvalSteps, previous?.asked, isWorkStop ? state : 'ended', isWorkStop ? input.question : undefined, false, previous?.askedRevision, isSettlingReply, isWorkStop ? valueOptions : [], previous?.askedOptions)
+  const { steps, asked, askedRevision, askedOptions } = questionSteps(approvalSteps, previous?.asked, isWorkStop ? state : 'ended', isWorkStop ? input.question : undefined, false, previous?.askedRevision, isSettlingReply, isWorkStop ? input.options : undefined, previous?.askedOptions)
   let approval = earlier
   let approvalRevision = previous?.approvalRevision
   if (event === 'PermissionRequest') {
@@ -311,8 +316,7 @@ export const validateCodexReport = (report: CodexReport, session: string): Codex
     index !== undefined && Number.isInteger(index) && index >= 0 && Array.isArray(report.steps) && index < report.steps.length))
   if (Array.isArray(report.steps) && report.steps.length > 40 + owned.size) throw new Error('INVALID_STEPS')
   const steps = reportSteps(report.state, report.steps, 40 + owned.size)
-  const rawOptions = Array.isArray(report.askedOptions) && report.askedOptions.every((one): one is string => typeof one === 'string') ? validOptions(report.askedOptions) : null
-  const askedOptions = report.asked !== undefined && steps[report.asked]?.startsWith('- [?] ') && rawOptions !== null ? rawOptions : undefined
+  const askedOptions = report.asked !== undefined && steps[report.asked]?.startsWith('- [?] ') ? givenOptions(report.askedOptions) : undefined
   const context = typeof report.context === 'string' && report.context.trim() !== '' ? line(report.context) : undefined
   const startedAt = typeof report.startedAt === 'number' && Number.isFinite(report.startedAt) ? report.startedAt : undefined
   const { askedOptions: _drop, context: _context, startedAt: _startedAt, titleSource: _titleSource, ...rest } = report
@@ -395,10 +399,11 @@ const localBlockSpans = (lines: readonly string[], owner: string, agent: string,
 }
 
 // Validate character length and comment markers on UTF-8 strings before optional latin1 byte encoding (`codex-local`).
+// A refused list is written as an empty one, so no reader reads choices from the question's words in its place.
 const stepOptionsLine = (options: readonly string[] | undefined, encode: (value: string) => string = value => value): string => {
   if (options === undefined) return ''
   const valid = validOptions(options)
-  if (valid === null) return ''
+  if (valid === null) return NO_OPTIONS
   return `<!-- options=${escapeOptionsJson(valid.map(encode))} -->`
 }
 

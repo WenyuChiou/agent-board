@@ -5,8 +5,8 @@ import type { Strings } from './i18n'
 import { stamped, stampOf, withoutStamp } from './done-stamp'
 import { localDay } from './journal'
 import { splitLines } from './lines'
-import { fallbackTitle, isAnswered, offeredOptions, questionToken, retainedCancelledOf } from './mirror'
-import { AUTO_END, AUTO_START, autoOf, doneKey, escapeOptionsJson, isCutMarker, isTaskComplete, optionsComment, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
+import { fallbackTitle, isAnswered, questionToken, retainedCancelledOf } from './mirror'
+import { AUTO_END, AUTO_START, autoOf, doneKey, escapeOptionsJson, isCutMarker, isTaskComplete, NO_OPTIONS, optionsComment, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
@@ -169,7 +169,9 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
       const token = questionToken(task)
       const native = nativeLine(task)
-      const options = native === '' && task.waiting === 'you' ? optionsComment(offeredOptions(mirror, task)) : ''
+      // Only the task's own list (#1277). One the board refuses is written as an empty list, so no
+      // reader offers a part of it or reads choices from the question's words in its place.
+      const options = native === '' && task.waiting === 'you' && (task.options ?? []).length > 0 ? optionsComment(task.options) || NO_OPTIONS : ''
       return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native]), ...(options === '' ? [] : [options])]
     }),
     ...retainedCancelledOf(mirror).map(text => `- [-] ${text}`),

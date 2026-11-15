@@ -74,6 +74,8 @@ export type QuestionProofs = { retired: string[]; consumed: string[] }
 // `line` (0-based) and `raw` (the line as written) let a press tick exactly this line.
 // A question answered in its own agent's window (`<!-- native=… options=[…] -->` after the step): the board lists the options and where to answer, and offers no reply box.
 export type NativeAsk = { agent: string; options: string[] }
+// `options`: the choices an agent listed for a waiting step (`<!-- options=[…] -->`, #1277). An empty list is a
+// line the board refused: no choice buttons, and none read from the question's words either.
 export type ProgressStep = { text: string; status: ProgressStepStatus; depth: number; line: number; raw: string; questionToken?: string; native?: NativeAsk; options?: string[] }
 
 // working: Claude is mid-turn · waiting: idle with open steps · done: every step done ·
@@ -209,9 +211,6 @@ export type ProgressMirror = {
   retainedCancelled?: string[]
   // Retained even after a task is deleted, so reusing its id cannot reuse an ask revision.
   questionSequence?: string
-  // Choices read from the list a turn's question ended in (#1277), for one step of a session with
-  // no Task list. Offered only while that step keeps this id, revision and words (`offeredOptions`).
-  inferredChoices?: { id: string; revision: string; words: string; options: string[] }
   updated: number
   // Where the steps come from: Claude's Task list, or each turn summed up when the session
   // has none (`turns`). A Task call replaces the summed-up steps.
