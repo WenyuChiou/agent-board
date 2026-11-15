@@ -1901,6 +1901,9 @@ test('pr-check reads the template form of the case table: header in any letter c
   // A heading right under the last row ends the section, as does the end of the body.
   assert.deepEqual(casesRun(`Cases: 2 rows\n${table}## Tests\n\nWords.\n`).problems, [])
   assert.deepEqual(casesRun(`Cases: 2 rows\n${table.trimEnd()}`).problems, [])
+  // A comment line right under the last row ends the table on GitHub and shows nothing, so it passes (GitHub's renderer
+  // checked for codex_397: no extra row).
+  assert.deepEqual(casesRun(`Cases: 2 rows\n${table}<!-- a note -->\n\nWords.\n`).problems, [])
 })
 
 test('pr-check fails a line right under the case table last row, which GitHub can show as one more row', () => {

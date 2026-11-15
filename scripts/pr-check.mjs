@@ -932,7 +932,7 @@ const caseSurfaces = ['delivery', 'setup-writes', 'data', 'launch']
 // The rows are the unbroken run of lines that start with a pipe. A blank line, a code fence, a comment on its own line or
 // prose ends the table, and a line starting with a pipe after that fails, as any other shape does, with CASE_FORM as the fix.
 const CASE_COLUMNS = ['state', 'event', 'expected result', 'test']
-const CASE_FORM = 'write the table as the template has it: the header line "| State | Event | Expected result | Test |", the line "|---|---|---|---|", then one line for each case that starts and ends with "|" and has four cells. Write a pipe inside a cell as "\\|", keep blank lines, code fences, comments, prose and any second table out of the rows, and leave a blank line under the last row.'
+const CASE_FORM = 'write the table as the template has it: the header line "| State | Event | Expected result | Test |", the line "|---|---|---|---|", then one line for each case that starts and ends with "|" and has four cells. Write a pipe inside a cell as "\\|", keep blank lines, code fences, comments, prose and any second table out of the rows, and leave a blank line under the last row unless a heading or the end of the body comes next.'
 // The cells of a line with outer pipes, split at each pipe that has no backslash before it; null for any other line.
 const tableCells = line => {
   const parts = line.trim().split(/(?<!\\)\|/)
