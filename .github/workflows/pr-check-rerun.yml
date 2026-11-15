@@ -1,0 +1,44 @@
+# Runs a pull request's pr-check again when a `Review:` verdict comment is posted, edited or deleted on it (#1258).
+# pr-check runs on pull request events and a verdict is a comment, so without this a check that failed for want of an
+# approval stayed failed after the approval, and a passing check stayed green after a later request for changes.
+# An issue_comment workflow always runs main's copy of this file. It checks out main, never the pull request, and runs
+# scripts/pr-check-rerun.mjs, which reads the comment from the event file and calls only the GitHub API: it waits for
+# the pull request's newest pr-check run on its current head to finish and starts that run again. When it cannot, it
+# says why in a comment on the pull request.
+# Only a team member's comment or an app's starts it (#1535). A comment a workflow posts with its own token starts no
+# workflow (GitHub), so such a verdict waits for the next pull request event.
+# The token may re-run workflow runs, read the code and comment on pull requests; the checkout keeps no credentials.
+name: pr-check-rerun
+
+on:
+  issue_comment:
+    types: [created, edited, deleted]
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  rerun:
+    name: run pr-check again
+    # Only comments on pull requests that may hold a verdict, from the team or an app; the script reads them line by
+    # line as pr-check does.
+    if: github.repository == 'WenyuChiou/agent-board' && github.event.issue.pull_request && (github.event.comment.user.type == 'Bot' || contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)) && (contains(github.event.comment.body, 'Review:') || contains(github.event.changes.body.from, 'Review:'))
+    # On the job, not the workflow: a comment the job skips must not cancel a verdict's run that is still waiting.
+    concurrency:
+      group: pr-check-rerun-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Run the pull request's newest pr-check on its current head again
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/pr-check-rerun.mjs --event "$GITHUB_EVENT_PATH"
