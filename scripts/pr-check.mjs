@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fragmentIssue, isFragmentPath, titleCommitNumbers } from './changelog-fold.mjs'
 import { bundleFiles, isBundleFile } from './bundle-text.mjs'
+import { codeMask } from './fail-first.mjs'
 
 // Pull requests from outside the team (CONTRIBUTING.md, Outside contributors; #482): two open per GitHub login and
 // four in all. The team has no limit on open pull requests (#607).
@@ -354,7 +355,11 @@ export const testTitles = files => {
   for (const { path, text } of files) {
     if (!/^tests\/(?:.*\/)?[^/]+\.test\.(mjs|ts|tsx)$/.test(path)) continue
     const calls = /\b(?:test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|[^'\\\r\n])*'|"(?:\\[^\r\n]|[^"\\\r\n])*"|`(?:\\[^\r\n]|[^`\\\r\n])*`)/g
+    const isCode = codeMask(text)
     for (const match of text.matchAll(calls)) {
+      // A call written in a string or a comment, such as a fixture's, or a method such as `pattern.test(...)`, declares
+      // no test (#1520).
+      if (!isCode[match.index] || text[match.index - 1] === '.') continue
       const title = unescapeTitle(match[1].slice(1, -1))
       if (match[1][0] === '`' && title.match(templateVariable)) {
         // A title of variables and punctuation only, such as `${name}`, would match any span.
@@ -987,10 +992,12 @@ export const failFirstValues = body => visibleLines(body).flatMap(text => {
   const match = text.match(/^[ \t]*(?:[-*][ \t]+)?(?:(?:PASS|WARN|FAIL)[ \t]+)?Fail-first:[ \t]*(.*)$/i)
   return match ? [match[1].trim()] : []
 })
-const failFirst = ({ body, rows, titles, head, isDraft, fail, output }) => {
+const failFirst = ({ body, rows, titles, head, isDraft, fail, output, isRequired = false }) => {
+  // Where the surface requires the table, rows with no test are reported with the table's other checks.
+  const untested = isRequired ? 0 : rows.filter(cells => !cells[3]).length
+  if (untested) fail(`${untested} rows of the case table name no test.`, 'name in the Test column, in backticks, the title of the test for each row; on a draft, the title planned (CONTRIBUTING.md rule 2).')
   if (titles) {
     rows.forEach((cells, i) => {
-      // A row with no test at all is already reported above.
       if (!cells[3]) return
       const spans = [...cells[3].matchAll(/`([^`\n]+)`/g)].map(match => match[1])
       if (spans.some(span => titleKnown(span, titles))) return
@@ -1060,6 +1067,9 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
   const none = line.match(/^none\b[ \t]*,?[ \t]*(.*)$/i)
   if (none) {
     if (!none[1].trim() || /^<[^<>]*>$/.test(none[1].trim())) fail('the `Cases:` line says `none` with no reason.', 'write the reason after `none`, for example "Cases: none, the change handles one event in one state".')
+    // A case table the body has anyway is held to the same tests, as on a surface that does not require one.
+    const kept = isFailFirst ? caseTable(body) : null
+    if (kept?.rows?.length) failFirst({ body, rows: kept.rows, titles, head, isDraft, fail, output })
     return output
   }
   const rows = line.match(/^(\d+)[ \t]+rows?\b/i)
@@ -1085,7 +1095,7 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
   // The table is written before any code, with the title of the test planned for each row, so a draft needs it too.
   const untested = table.rows.filter(cells => !cells[3]).length
   if (untested) fail(`${untested} rows of the case table name no test.`, 'name in the Test column the title of the test planned for each row; the table has it before any code is written, on a draft too (RULES.md, R6).')
-  if (isFailFirst) failFirst({ body, rows: table.rows, titles, head, isDraft, fail, output })
+  if (isFailFirst) failFirst({ body, rows: table.rows, titles, head, isDraft, fail, output, isRequired: true })
   return output
 }
 

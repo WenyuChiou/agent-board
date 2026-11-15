@@ -29,6 +29,24 @@ test('fail-first reads test titles and top-level test blocks, and leaves templat
   assert.doesNotMatch(blocks.get('the value is two'), /link stays/)
 })
 
+test('fail-first reads no test from a string, a comment or a regular expression (#1520)', () => {
+  const text = [
+    "import test from 'node:test'",
+    "const sample = \"test('a title in a string', () => {})\"",
+    "// test('a title in a comment', () => {})",
+    "/* test('a title in a block comment', () => {}) */",
+    "const pattern = /test\\('a title in a pattern'/",
+    "const quote = /'/",
+    "test('after a quote in a pattern', () => {",
+    "  const fixture = `test('a title in a template', () => {})\\n${[1, 2].map(n => `${n}`).join('')}`",
+    '  assert.equal(10 / 2 / 5, 1)',
+    '})',
+    "test('the last one', () => {})",
+  ].join('\n')
+  assert.deepEqual(titlesOf(text).map(item => item.title), ['after a quote in a pattern', 'the last one'])
+  assert.deepEqual([...testBlocks(text).keys()], ['after a quote in a pattern', 'the last one'])
+})
+
 test('fail-first reads a run as pass, fail, skipped or missing from its TAP counts and exit (#1520)', () => {
   const tap = (tests, pass, fail, skipped) => `# tests ${tests}\n# pass ${pass}\n# fail ${fail}\n# skipped ${skipped}\n`
   assert.equal(outcomeOf({ status: 0, stdout: tap(1, 1, 0, 0) }), 'pass')
@@ -75,8 +93,11 @@ test('fail-first runs each named new or changed test on the merge base with the 
   const r = repository(t)
   r.write('scripts/value.mjs', 'export const value = 1\n')
   r.write('tests/old.test.mjs', `${header}test('an old test passes', () => assert.ok(true))\ntest('an old test changes', () => assert.ok(true))\n`)
+  r.write('tests/old-helper.mjs', 'export const old = true\n')
   r.commit()
   const base = r.git('rev-parse', 'HEAD')
+  rmSync(join(r.cwd, 'tests/old-helper.mjs'))
+  r.write('tests/gone.test.mjs', `${header}import { existsSync } from 'node:fs'\ntest('the old helper is gone', () => assert.equal(existsSync(new URL('./old-helper.mjs', import.meta.url)), false))\n`)
   r.write('scripts/value.mjs', 'export const value = 2\n')
   r.write('scripts/added.mjs', 'export const added = true\n')
   r.write('tests/value.test.mjs', `${header}import { value } from '../scripts/value.mjs'\ntest('the value is two', () => assert.equal(value, 2))\ntest('the value is a number', () => assert.equal(typeof value, 'number'))\ntest('the value is three', () => assert.equal(value, 3))\ntest('a test skipped everywhere', { skip: 'synthetic' }, () => {})\n`)
@@ -86,9 +107,10 @@ test('fail-first runs each named new or changed test on the merge base with the 
   r.commit()
   const head = r.git('rev-parse', 'HEAD')
   const command = (program, args, options = {}) => spawnSync(program, args, { cwd: r.cwd, env: r.env, encoding: 'utf8', timeout: 60000, ...options })
-  const names = ['the value is two', 'the value is a number', 'the value is three', 'a test skipped everywhere', 'the added module is there', 'an old test passes', 'an old test changes', 'a plugin test', 'a test nobody wrote']
+  const names = ['the value is two', 'the value is a number', 'the value is three', 'a test skipped everywhere', 'the added module is there', 'an old test passes', 'an old test changes', 'a plugin test', 'a test nobody wrote', 'the old helper is gone']
   const checkouts = []
-  const result = await runFailFirst({ cwd: r.cwd, base, names, command, env: r.env, onCheckout: path => checkouts.push(path) })
+  const runs = []
+  const result = await runFailFirst({ cwd: r.cwd, base, names, command, env: r.env, onCheckout: path => checkouts.push(path), onRun: run => runs.push(run) })
   const stateOf = Object.fromEntries(result.results.map(item => [item.title, item.state]))
   assert.deepEqual(stateOf, {
     'the value is two': 'counted',
@@ -102,10 +124,17 @@ test('fail-first runs each named new or changed test on the merge base with the 
     'an old test changes': 'counted',
     'a plugin test': 'not-node',
     'a test nobody wrote': 'unknown',
+    // The branch deleted tests/old-helper.mjs, so the base checkout lacks it too, and the test passes there.
+    'the old helper is gone': 'passes-on-base',
   })
   assert.equal(result.counted, 3)
-  assert.equal(result.total, 5)
-  assert.equal(result.line, `Fail-first: 3 of 5 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`)
+  assert.equal(result.total, 6)
+  assert.equal(result.line, `Fail-first: 3 of 6 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`)
+  // Each test runs here first; only those that pass here run on the base, after every run here.
+  const firstBase = runs.findIndex(run => run.where !== r.cwd)
+  assert.ok(firstBase > 0)
+  assert.ok(runs.slice(firstBase).every(run => run.where === checkouts[0]))
+  assert.deepEqual(runs.slice(firstBase).map(run => run.title).sort(), ['an old test changes', 'the added module is there', 'the old helper is gone', 'the value is a number', 'the value is two'])
   // The base checkout was a separate folder, and it is gone with its worktree record.
   assert.equal(checkouts.length, 1)
   assert.notEqual(checkouts[0], r.cwd)

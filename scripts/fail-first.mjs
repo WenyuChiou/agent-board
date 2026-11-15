@@ -10,18 +10,79 @@ const testFile = /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|cjs|js|ts|tsx)$/
 const titleCall = /(^|[^.\w$])(test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|[^'\\\r\n])*'|"(?:\\[^\r\n]|[^"\\\r\n])*"|`(?:\\[^\r\n]|[^`\\\r\n])*`)/gm
 const topLevelCall = /^(?:test|it)(?:\.(?:skip|only|todo))?\s*\(/gm
 const unescape = text => text.replace(/\\(.)/g, (_, char) => ({ n: '\n', t: '\t' })[char] ?? char)
+// A `/` after one of these, after a keyword, or first in the file starts a regular expression; elsewhere it divides.
+const beforeRegex = /[(,=:[!&|?{};+\-*%<>~^]/
+const regexWords = new Set(['return', 'typeof', 'case', 'in', 'of', 'new', 'delete', 'void', 'throw', 'await', 'yield', 'else', 'do'])
+
+// Which characters of a file are code, outside comments, strings and regular expressions (a template's `${…}` is code
+// again), so a test call written inside a fixture string or a comment is not read as a test.
+export const codeMask = text => {
+  const isCode = new Uint8Array(text.length)
+  const templates = []
+  let depth = 0
+  let last = ''
+  let word = ''
+  let i = 0
+  const literal = () => { last = 'x'; word = '' }
+  // Reads template text from i to its closing backtick, or to a `${`, where code starts again.
+  const template = () => {
+    while (i < text.length) {
+      if (text[i] === '\\') i += 2
+      else if (text[i] === '`') { i++; literal(); return }
+      else if (text[i] === '$' && text[i + 1] === '{') { templates.push(depth++); i += 2; last = '{'; word = ''; return }
+      else i++
+    }
+  }
+  while (i < text.length) {
+    const char = text[i]
+    const next = text[i + 1]
+    if (char === '/' && next === '/') { while (i < text.length && text[i] !== '\n') i++; continue }
+    if (char === '/' && next === '*') { const end = text.indexOf('*/', i + 2); i = end < 0 ? text.length : end + 2; continue }
+    if (char === "'" || char === '"') {
+      i++
+      while (i < text.length && text[i] !== char && text[i] !== '\n') i += text[i] === '\\' ? 2 : 1
+      i++
+      literal()
+      continue
+    }
+    if (char === '`') { i++; template(); continue }
+    if (char === '/' && (last === '' || beforeRegex.test(last) || regexWords.has(word))) {
+      let isClass = false
+      for (i++; i < text.length && text[i] !== '\n'; i++) {
+        if (text[i] === '\\') i++
+        else if (text[i] === '[') isClass = true
+        else if (text[i] === ']') isClass = false
+        else if (text[i] === '/' && !isClass) break
+      }
+      for (i++; /[a-z]/i.test(text[i] ?? ''); i++);
+      literal()
+      continue
+    }
+    isCode[i] = 1
+    if (char === '{') depth++
+    if (char === '}' && --depth === templates.at(-1)) { templates.pop(); i++; template(); continue }
+    if (/[\w$]/.test(char)) word = i > 0 && isCode[i - 1] && /[\w$]/.test(text[i - 1]) ? word + char : char
+    if (!/\s/.test(char)) { last = char; if (!/[\w$]/.test(char)) word = '' }
+    i++
+  }
+  return isCode
+}
 
 // Every test title in a file, in order; a template title (`${…}`) cannot be run by its name.
-export const titlesOf = text => [...text.matchAll(titleCall)].map(match => {
-  const raw = match[3]
-  const title = unescape(raw.slice(1, -1))
-  return { title, isTemplate: raw[0] === '`' && /\$\{/.test(title) }
-})
+export const titlesOf = text => {
+  const isCode = codeMask(text)
+  return [...text.matchAll(titleCall)].filter(match => isCode[match.index + match[1].length]).map(match => {
+    const raw = match[3]
+    const title = unescape(raw.slice(1, -1))
+    return { title, isTemplate: raw[0] === '`' && /\$\{/.test(title) }
+  })
+}
 
 // The source of each top-level test, from its call at the start of a line to the next one, by title. A test whose
 // source is the same on the base and here pins behaviour that was already there.
 export const testBlocks = text => {
-  const starts = [...text.matchAll(topLevelCall)].map(match => match.index)
+  const isCode = codeMask(text)
+  const starts = [...text.matchAll(topLevelCall)].map(match => match.index).filter(index => isCode[index])
   const blocks = new Map()
   starts.forEach((start, i) => {
     const block = text.slice(start, starts[i + 1] ?? text.length)
@@ -68,9 +129,11 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
   const tracked = linesOf(git('ls-files', '-z', '--', 'tests'))
   const untracked = linesOf(git('ls-files', '--others', '--exclude-standard', '-z', '--', 'tests'))
   const files = [...new Set([...tracked, ...untracked])].filter(path => testFile.test(path) && existsSync(join(cwd, path)))
-  // Everything under tests/ that differs from the base (helpers and fixtures too), so the base run differs from the
-  // run here only outside tests/.
-  const copies = [...new Set([...linesOf(git('diff', '--name-only', '-z', baseSha, '--', 'tests')), ...untracked])].filter(path => existsSync(join(cwd, path)))
+  // Everything under tests/ that differs from the base (helpers and fixtures too, and files the branch deleted), so
+  // the base run differs from the run here only outside tests/.
+  const differs = [...new Set([...linesOf(git('diff', '--name-only', '-z', baseSha, '--', 'tests')), ...untracked])]
+  const copies = differs.filter(path => existsSync(join(cwd, path)))
+  const deleted = differs.filter(path => !existsSync(join(cwd, path)))
   const isDirty = git('status', '--porcelain', '-z').length > 0
   const textOf = path => readFileSync(join(cwd, path), 'utf8')
   const baseText = path => {
@@ -113,6 +176,7 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
         mkdirSync(dirname(join(checkout, path)), { recursive: true })
         copyFileSync(join(cwd, path), join(checkout, path))
       }
+      for (const path of deleted) rmSync(join(checkout, path), { force: true })
       for (const item of needBase) onBase.set(item.title, runOne(checkout, item))
     } finally {
       const removed = command('git', ['worktree', 'remove', '--force', checkout], { cwd })

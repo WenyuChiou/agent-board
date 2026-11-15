@@ -985,8 +985,12 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
           add(found.counted === found.total ? 'PASS' : 'FAIL', '', found.line)
         }
       } finally {
-        for (const temp of temps) rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-        if (owner?.path) releaseTestLock(owner.path)
+        // The lock is let go even when a temp home cannot be removed.
+        try {
+          for (const temp of temps) rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+        } finally {
+          if (owner?.path) releaseTestLock(owner.path)
+        }
       }
     })
     await check('PR body check', () => {
