@@ -19,7 +19,7 @@ import type { RowState as DerivedRowState } from './row-state'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
 import { deliveryTargets } from './hook-messages'
-import { address, isMailboxSurfaceLost, isMailboxTarget, isOpen, isRecordedRoute, sendDecision, SURFACE_IDS } from './messaging'
+import { address, ENDED_UNCERTAIN_ERRORS, isEndedUncertain, isMailboxSurfaceLost, isMailboxTarget, isOpen, isRecordedRoute, sendDecision, SURFACE_IDS } from './messaging'
 import { RECEIVER_ROUTES } from './receiver-routes'
 
 // The board's page: what `agent-board` shows in a browser for agents other than
@@ -432,10 +432,13 @@ const retainedOf = (item: WaitingItem, receipt: { receipt?: Receipt } = {}): Ser
   ...(item.questionId === undefined ? {} : { questionId: item.questionId }),
 })
 
+// `handledOnly` collapses exact turn-ended codes to 'ENDED_UNCERTAIN' so LAN stays in sync with local state without exposing adapter codes.
+const isUncertainEnded = (one: Pick<Message, 'status' | 'error'>): boolean =>
+  isEndedUncertain(one) || one.status === 'uncertain' && one.error === 'ENDED_UNCERTAIN'
 // An answer that was sent, or queued for the session's next turn, no longer waits for the person (#1296). A message
-// that timed out or was refused waits again. The page, the terminal board, --status and --json all count from this.
+// that timed out, was refused, or ended its turn uncertain waits again. The page, the terminal board, --status and --json all count from this.
 const isFailedReceipt = (receipt: (Pick<Message, 'status' | 'error' | 'hasAccepted'> & { isSurfaceLost?: boolean }) | undefined): boolean =>
-  receipt !== undefined && (receipt.isSurfaceLost === true || receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.error !== '')
+  receipt !== undefined && (receipt.isSurfaceLost === true || receipt.status === 'rejected' || isUncertainEnded(receipt) || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error))
 // A question counts as handled by the message bound to it, not by any message to its session (#1296): with two
 // questions in one session, one queued answer hands over one. `holder` is true when a message still held for
 // the session's next turn answers this question. A message bound to no question answers one only when the session
@@ -443,7 +446,7 @@ const isFailedReceipt = (receipt: (Pick<Message, 'status' | 'error' | 'hasAccept
 const answersQuestion = (one: ShownMessage, to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
   to !== undefined && one.from === 'board' && one.to === to && (one.answers === undefined ? openInSession === 1 : one.answers === questionId)
 const holdsAnswer = (messages: readonly ShownMessage[], to: string | undefined, questionId: string | undefined, openInSession: number): boolean =>
-  messages.some(one => answersQuestion(one, to, questionId, openInSession) && isOpen(one) && !(one.status === 'uncertain' && one.error !== '') && !(one.status === 'accepted' && isMailboxTarget(one.target)))
+  messages.some(one => answersQuestion(one, to, questionId, openInSession) && isOpen(one) && !isUncertainEnded(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)))
 // Whether the board's latest message for this very question failed. A later message to the same session from
 // anyone else says nothing about the answer being counted.
 const answerFailed = (messages: readonly ShownMessage[], to: string | undefined, questionId: string | undefined, openInSession: number, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true): boolean => {
@@ -468,7 +471,7 @@ export const handledOnly = (messaging: Messaging): Messaging => ({
       status: one.status,
       updated: one.updated,
       reply: '',
-      error: /^(TIMEOUT|EXPIRED|DISMISSED)/.exec(one.error)?.[0] ?? (one.status === 'uncertain' && one.error !== '' ? 'UNCERTAIN' : ''),
+      error: /^(TIMEOUT|EXPIRED|DISMISSED)/.exec(one.error)?.[0] ?? (isEndedUncertain(one) ? 'ENDED_UNCERTAIN' : /TIMEOUT/.test(one.error) ? 'TIMEOUT' : ''),
       ...(one.hasAccepted === true ? { hasAccepted: true } : {}),
       ...(isSurfaceLost ? { isSurfaceLost: true as const } : {}),
       hops: 0,
@@ -595,7 +598,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
-        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'uncertain' && one.error !== '') && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
+        isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !isUncertainEnded(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
       })
       continue
@@ -677,7 +680,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         // A row says why only when a reply could otherwise be expected here.
         info: found ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
         ...lineOf,
-        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !(one.status === 'uncertain' && one.error !== '') && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
+        isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !isUncertainEnded(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
         hasCopyBox: !(row.auto === 'ended' && row.question === null && send === 'none') && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined || found !== undefined && connection === undefined),
         // A Claude row has no target, so its closed session is the block's own state=ended.
@@ -1870,11 +1873,18 @@ const PAGE_SCRIPT = String.raw`
       }, function () { say(w('pressFailed'), 'alert', key, undefined, true); });
     });
   }
-  // A finished message's attempt id is done with, so the next send of the same words is a new message. The rule
-  // lives here so a board kept from redrawing under a press still applies it (#1468).
+  // A finished message's attempt id is done with, so the next send of the same words is a new message. Transport
+  // timeouts or uncertain mid-flight failures preserve the attempt id so Retry returns the existing receipt rather than
+  // executing the same request twice; confirmed turn-ended uncertain receipts release it for an explicit new send (#1486).
+  var ENDED_UNCERTAIN_ERRORS = ${JSON.stringify(ENDED_UNCERTAIN_ERRORS)};
+  function isEndedUncertainReceipt(receipt) {
+    return !!receipt && receipt.status === 'uncertain' && (receipt.error === 'EXPIRED' || receipt.error === 'DISMISSED' || ENDED_UNCERTAIN_ERRORS.indexOf(receipt.error || '') !== -1);
+  }
   function releaseFinishedAttempt(receipt, isClaude) {
-    var isDone = isClaude ? receipt.status === 'rejected' || receipt.status === 'acknowledged' || receipt.status === 'uncertain' && Boolean(receipt.error)
-      : receipt.status === 'acknowledged' || receipt.status === 'rejected' || receipt.status === 'accepted' && receipt.isMailbox || receipt.status === 'uncertain' && Boolean(receipt.error);
+    var isDone = receipt.status === 'rejected'
+      || receipt.status === 'acknowledged'
+      || !isClaude && receipt.status === 'accepted' && receipt.isMailbox
+      || isEndedUncertainReceipt(receipt);
     if (isDone) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
   }
   // The card's line for a message to a Claude session, by what its receipt says (#316).
@@ -2344,7 +2354,7 @@ const PAGE_SCRIPT = String.raw`
     add(after, afterMk, parts.msg, parts.again);
     parts.after = fx(after, false);
     add(body, parts.ask, parts.reply, parts.after);
-    if (ask.receipt && (ask.receipt.error === 'DISMISSED' || ask.receipt.isSurfaceLost === true || !isClaudeAgent(ask.agent) && (ask.receipt.status === 'rejected' || ask.receipt.status === 'uncertain' && Boolean(ask.receipt.error))) && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
+    if (ask.receipt && (ask.receipt.error === 'DISMISSED' || ask.receipt.isSurfaceLost === true || !isClaudeAgent(ask.agent) && (ask.receipt.status === 'rejected' || isEndedUncertainReceipt(ask.receipt))) && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
     var receiptEl = ask.receipt ? receiptLine(ask.receipt, key, ask.agent, !!ask.delivery, ask.line) : null;
     if (receiptEl) {
       parts.hasReceipt = true;

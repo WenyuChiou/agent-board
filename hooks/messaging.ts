@@ -189,6 +189,20 @@ export const originOf = (value: unknown): Origin => {
   throw new Error('ORIGIN_UNSUPPORTED')
 }
 
+// Uncertain receipts whose error confirms the delivery turn itself ended (not a transport timeout,
+// disconnect, or unconfirmed join where delivery may still be active): nothing runs on the session
+// now, so the next message may go out and re-sending the same words begins a fresh delivery.
+export const ENDED_UNCERTAIN_ERRORS = [
+  'TURN_NOT_COMPLETED',
+  'TURN_STATUS_UNKNOWN',
+  'ACK_MISSING',
+  'ACK_REQUIRED',
+  'TURN_ABORTED',
+  'NATIVE_TURN_FAILED',
+] as const
+export const isEndedUncertain = (one: Pick<Message, 'status' | 'error'>): boolean =>
+  one.status === 'uncertain' && (ENDED_UNCERTAIN_ERRORS as readonly string[]).includes(one.error)
+
 export const isFinished = (one: Pick<Message, 'status' | 'error'>): boolean => ['acknowledged', 'rejected'].includes(one.status) || one.status === 'uncertain' && ['EXPIRED', 'DISMISSED'].includes(one.error)
 export const isOpen = (one: Pick<Message, 'status' | 'error'>): boolean => !isFinished(one)
 // A finished message keeps its hash, not its text, and no more of its reply than an ACK line holds.
@@ -301,7 +315,7 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   const hops = from === 'unverified' ? HOP_LIMIT : 1 + (previous?.hops ?? 0)
   if (hops > HOP_LIMIT) throw new Error('HOP_LIMIT')
   const to = address(target.agent, target.session)
-  const open = state.messages.filter(one => one.to === to && isOpen(one) && !(one.status === 'uncertain' && one.error !== '') && !isHookDelivered(one))
+  const open = state.messages.filter(one => one.to === to && isOpen(one) && !isEndedUncertain(one) && !isHookDelivered(one))
   if (open.length >= TARGET_OPEN_CAP) throw new Error('TARGET_BUSY')
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
@@ -318,7 +332,7 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   const isOwn = (one: Message): boolean => one.target === target.id && one.turn === target.turn
   // While a message of the session is in doubt, no queued message goes out. A claim can take one in doubt again
   // only when every one is this binding's and has lapsed, and only on a surface that message allows.
-  const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !(one.status === 'uncertain' && one.error !== '') && !isHookDelivered(one))
+  const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isOpen(one) && !isEndedUncertain(one) && !isHookDelivered(one))
   const canTake = (one: Message): boolean => one.status === 'queued' && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
   const pick = held.length === 0 ? state.messages.find(canTake) : held.every(one => isOwn(one) && isLapsed(one, now)) ? held.find(canReach) : undefined
   const messages = pick === undefined ? [] : [pick]
