@@ -6875,10 +6875,16 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off,
     const earlier = await fakePage({ codexSend: false }, () => blocker.close())
     const offAgain = await fakePage({ codexSend: false, noCodexSend: true }, () => writeFileSync(board.served, addressOf(earlier, process.pid + 1)))
     addressFixture(board.served, addressOf(offAgain, process.pid))
-    const keys = await new Promise(done => execFile(process.execPath, [board.script, '--keys', 'o o', '--no-open', '--port', String(port)], { env: board.env, encoding: 'utf8', timeout: 60_000 }, (error, out) => done(out)))
+    const keys = await new Promise(done => execFile(process.execPath, [board.script, '--keys', 'o o', '--no-open', '--port', String(port)], { env: board.env, encoding: 'utf8', timeout: 60_000 }, (error, out, err) => done({ error, out, err })))
     const record = JSON.parse(readFileSync(board.served, 'utf8'))
     urls.push(record.url)
-    assert.equal(record.port, port, keys)
+    // The command ran both opens and ended on its own: the first open's failure on the held port makes it exit 1, and its
+    // time limit did not stop it. Its board ends with the link of the page the second open started.
+    assert.equal(keys.error?.killed ?? false, false, keys.err)
+    assert.equal(keys.error?.signal ?? null, null, keys.err)
+    assert.equal(keys.error?.code, 1, `${keys.out}${keys.err}`)
+    assert.equal(record.port, port, keys.out)
+    assert.ok(keys.out.includes(record.url), keys.out)
     assert.equal(offAgain.closes, 1)
     assert.equal(earlier.closes, 1)
     // The page of the second launch has Send to Codex on: the page it replaced was of a build before #318, and the first
