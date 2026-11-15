@@ -60,7 +60,8 @@ export const boardClient = address => {
     expect: body => call('expect', body),
     // replaces: the { connection, secret } of this receiver's own earlier connection, from
     // credentials() before a restart, so the board ends it instead of marking both contested.
-    attach: async ({ agent, session, surface, turn, scope = 'turn', replaces, unclaimed = false, reclaim = false, verify, canReceive, deliver, onError = () => undefined }) => {
+    // pollMs: how often the board is asked for messages.
+    attach: async ({ agent, session, surface, turn, scope = 'turn', replaces, unclaimed = false, reclaim = false, pollMs = 2000, verify, canReceive, deliver, onError = () => undefined }) => {
       if (typeof verify !== 'function' || typeof deliver !== 'function' || canReceive !== undefined && typeof canReceive !== 'function' || !await verify()) throw new Error('HOST_NOT_CONNECTED')
       const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }), ...(unclaimed ? { unclaimed: true } : {}) })
       let credentials = { connection: registered.id, secret: registered.secret }, contestAfter = 0
@@ -146,7 +147,7 @@ export const boardClient = address => {
           if (isPollDue && !isClosed) { isPollDue = false; void poll() }
         }
       }
-      const timer = setInterval(() => { void poll() }, 2000)
+      const timer = setInterval(() => { void poll() }, pollMs)
       void poll()
       return {
         get id() { return credentials.connection }, agent, session, surface, turn, close,
@@ -155,6 +156,9 @@ export const boardClient = address => {
         isContested: () => isContested,
         // A function, so the secret never lands in a log of this object.
         credentials: () => ({ ...credentials }),
+        // For a receiver that says what became of a message after its delivery has ended (a turn it stopped later on). The board
+        // takes a message's receipt from any connection of its session that is not contested. Never retried here.
+        receipt: (message, status, reply, error) => receipt(message, status, reply, error),
         send: async body => {
           let isOwned = false
           try { isOwned = !isClosed && await verify() } catch { /* An unverifiable owner cannot send. */ }

@@ -19,6 +19,7 @@ import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
 import { pickSurface, AGENT_ENV_VARS, sshTargetOf, pagePortOf } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+import { replaceEntryCall } from './page-reader-fixture.mjs'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
 import { makeFolderCommand, moveFileCommand } from '../hooks/old-months-run.ts'
@@ -2285,7 +2286,7 @@ test('a view that resolves a question writes its resolved capture synchronously,
   const source = `# Progress\n\n## Synthetic\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${ago(60000)} resume=a1b2c3d4 -->\n### Answer this\n- [?] Ship it, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
   writeFileSync(path, source)
   const script = join(dir, 'worker.mjs')
-  const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  const skipped = replaceEntryCall(BOARD_SCRIPT)
   assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${skipped}\nexport { view, path };\n`)
   const previousArgs = process.argv
@@ -2343,7 +2344,7 @@ const flushWorker = async (source) => {
   const path = join(dir, 'progress.md')
   writeFileSync(path, source)
   const script = join(dir, 'worker.mjs')
-  const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  const skipped = replaceEntryCall(BOARD_SCRIPT)
   assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${skipped}\nexport { view, path, flushQuestionCaptures, pendingQuestionCaptures };\n`)
   const previousArgs = process.argv
@@ -4271,7 +4272,7 @@ const pressRuntime = async () => {
   const inside = file => typeof file === 'string' && resolve(file).startsWith(resolve(root) + sep)
   const write = (file, text) => { originalWrite(file, text); utimesSync(file, PRESS_NOW / 1000, PRESS_NOW / 1000) }
   try {
-    const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+    const skipped = replaceEntryCall(BOARD_SCRIPT)
     assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
     const old = PRESS_NOW - 10 * 86400000
     const header = `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\nconst fixtureClock = { now: ${old} };\nconst Date = class extends globalThis.Date { constructor(...args) { super(...(args.length ? args : [fixtureClock.now])); } static now() { return fixtureClock.now; } };\n`
@@ -4866,7 +4867,7 @@ test('the board script prints an unexpected error instead of exiting silently', 
     const path = join(dir, 'progress.md')
     const script = join(dir, 'agent-board.mjs')
     writeFileSync(path, FILE)
-    const broken = BOARD_SCRIPT.replace(/(try\s*\{\s*)await \w+\(\);(?=\s*\}\s*catch \(error\))/, "$1throw new TypeError('synthetic unexpected failure');")
+    const broken = replaceEntryCall(BOARD_SCRIPT, "throw new TypeError('synthetic unexpected failure');")
     assert.notEqual(broken, BOARD_SCRIPT)
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${broken}`)
     const ran = spawnSync(process.execPath, [script], { encoding: 'utf8', env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' } })
