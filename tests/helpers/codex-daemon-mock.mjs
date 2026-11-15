@@ -12,6 +12,7 @@
 //              and starts nothing, as the real daemon does (the text joins the turn).
 //              'lost' starts the turn in the daemon and ends the proxy before it has said anything of it, answer or notice: the
 //              delivery's own turn, or with lostTurn 'person' the person's own, begun at that moment, which the text only joins
+//              (with lostTurn 'bare' a turn that thread/turns/list shows with no user message)
 //   startDelay ms the answer to turn/start is held back on an idle thread, while the turn has begun and its notices (its start, its
 //              first user message, an approval it waits on) have gone out
 //   joinOnStart when true, the person's own turn starts just before the first turn/start is handled, so the call joins it
@@ -229,8 +230,8 @@ const handle = (value, emit) => {
     if (config.start === 'lost' && !running) {
       // Nothing is written to the connection. The exit handler saves the daemon's side: the turn runs on there, and the next
       // proxy finds it.
-      running = config.lostTurn === 'person' ? 'turn-person' : 'turn-delivery'
-      first = (config.lostTurn === 'person' ? typedBy(threadId) : userMessage(threadId, running, value.params.input, value.params.clientUserMessageId)).params.item
+      running = config.lostTurn === 'person' ? 'turn-person' : config.lostTurn === 'bare' ? 'turn-bare' : 'turn-delivery'
+      first = config.lostTurn === 'bare' ? null : (config.lostTurn === 'person' ? typedBy(threadId) : userMessage(threadId, running, value.params.input, value.params.clientUserMessageId)).params.item
       stamp += 1
       isWaiting = config.approval === 'hold'
       process.exit(0)

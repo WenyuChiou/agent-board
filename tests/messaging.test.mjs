@@ -5040,6 +5040,20 @@ test('a person\'s own turn found running after the daemon connection was lost wi
   } finally { await receiver.close() }
 }))
 
+test('a turn found running after the daemon connection was lost with turn/start on its way, whose summary carries no user message, is not shown to be the delivery\'s and is never interrupted, however long its approval waits (#318)', () => codexFixture(async (board, dir) => {
+  // A turn runs and waits on an approval when the proxy is gone; thread/turns/list shows it with no user message.
+  const daemon = codexDaemon(dir, { approval: 'hold', start: 'lost', lostTurn: 'bare' })
+  const receiver = codexReceiver(board, daemon, { approvalMs: 400 })
+  try {
+    assert.equal(await codexSend(board, await codexConnection(board)), 200)
+    await waitFor(async () => daemon.calls().filter(one => one.argv).length === 2)
+    await waitFor(async () => codexLastProxy(daemon).some(one => one.method === 'thread/turns/list'))
+    // Three approval limits pass.
+    await pause(1200)
+    assert.deepEqual([codexInterrupts(daemon), (await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], [[], 'uncertain', 1])
+  } finally { await receiver.close() }
+}))
+
 test('a look at a Codex thread that is answered more than two ticks after the look before it is time the receiver did not watch, and the wait starts again (#318)', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person'), readHold = join(dir, 'read-hold')
   writeFileSync(person, '')

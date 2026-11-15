@@ -419,8 +419,9 @@ export const startCodexReceiver = ({
   // Which turn a watch is for, when no answer to turn/start said: the thread's newest turn, asked for with its first user message
   // (`thread/turns/list` gives the newest turn first, and its summary of a turn carries that message). A turn that began with this
   // delivery's message is its own. One that began with someone else's is not, and the watch ends: a person's turn is never
-  // stopped. One whose first message cannot be read stays unknown, and is the turn to stop if its approval waits too long, as a
-  // turn whose start was heard is. A newest turn that is over names nothing.
+  // stopped. One whose summary carries no user message is not shown to be the delivery's (the summary has a turn's first user
+  // message whenever the turn has one, and the delivery's turn begins with its message): it names nothing, is never stopped, and
+  // the next look asks again. A newest turn that is over names nothing.
   const nameTurn = async (thread, watch) => {
     const sub = subs.get(thread), on = daemon
     try {
@@ -429,8 +430,8 @@ export const startCodexReceiver = ({
       const last = Array.isArray(turns) ? turns[0] : undefined
       if (typeof last?.id !== 'string' || OVER.has(last.status)) return
       const first = Array.isArray(last.items) ? last.items.find(item => item?.type === 'userMessage') : undefined
-      if (first === undefined) watch.heard = last.id
-      else if (isOwnInput(first, watch)) watch.turn = last.id
+      if (first === undefined) return
+      if (isOwnInput(first, watch)) watch.turn = last.id
       else endWatch(sub)
     } catch { /* Asked again at the next look. */ }
   }
