@@ -373,8 +373,11 @@ test('an idle Codex card says its message starts within about a minute, not righ
     assert.equal(routeText('now', true, 'codex', s, 'working', undefined, SURFACE_IDS.codexDaemon), s.serveLineNowWorking('Codex'))
     assert.equal(routeText('now', true, 'opencode', s), s.serveLineNow(agentLabel('opencode', s)))
   }
-  // The start waits on the receiver reading a person's Codex on the thread, so the line names that and makes no bare promise (codex_392).
-  assert.equal(EN.serveLineSoon('Codex'), 'Codex is waiting. It starts on this once the board has seen your Codex on this thread for about a minute, or longer if your Codex config keeps threads loaded longer.')
+  // The start waits on the receiver reading a person's Codex on the thread, so the line names that, and that the message stays
+  // queued until then, in each language (codex_392, codex_393).
+  assert.equal(EN.serveLineSoon('Codex'), 'Codex is waiting. It starts on this once the board has seen your Codex open on this thread for about a minute, or longer if your Codex config keeps threads loaded longer. Until then it stays queued here.')
+  assert.ok(ZH_TW.serveLineSoon('Codex').endsWith('在那之前，這則訊息會留在看板排隊。'))
+  assert.ok(ZH_CN.serveLineSoon('Codex').endsWith('在那之前，这条消息会留在看板排队。'))
 })
 
 test('card wording explains turn runs/ran in background and to open the AI window in EN, ZH_TW, and ZH_CN', async () => {

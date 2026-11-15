@@ -4968,6 +4968,8 @@ test('a Codex daemon whose unload delay cannot be read gets no message, and gets
     // config/read is refused: several waits and four board polls pass, and nothing is started.
     await pause(2000)
     assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status, errors], [0, 'queued', ['UNLOAD_DELAY_UNKNOWN']])
+    // Meanwhile the card says the start waits on the board seeing the person's Codex, and that the message stays queued (#1506).
+    assert.equal((await board.call('/api/board')).body.model.asks.find(one => one.delivery?.id === connection.id)?.lineText, EN.serveLineSoon('Codex'))
     // A delay that is not a whole number of seconds is not guessed either.
     writeFileSync(configFaults, 'odd')
     await pause(1000)
