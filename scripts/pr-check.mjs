@@ -5,7 +5,6 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fragmentIssue, isFragmentPath, titleCommitNumbers } from './changelog-fold.mjs'
 import { bundleFiles, isBundleFile } from './bundle-text.mjs'
-import { codeMask, declaresTest } from './fail-first.mjs'
 
 // Pull requests from outside the team (CONTRIBUTING.md, Outside contributors; #482): two open per GitHub login and
 // four in all. The team has no limit on open pull requests (#607).
@@ -355,11 +354,7 @@ export const testTitles = files => {
   for (const { path, text } of files) {
     if (!/^tests\/(?:.*\/)?[^/]+\.test\.(mjs|ts|tsx)$/.test(path)) continue
     const calls = /\b(?:test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|[^'\\\r\n])*'|"(?:\\[^\r\n]|[^"\\\r\n])*"|`(?:\\[^\r\n]|[^`\\\r\n])*`)/g
-    const isCode = codeMask(text)
     for (const match of text.matchAll(calls)) {
-      // A call written in a string or a comment, such as a fixture's, or a method such as `pattern.test(...)`, declares
-      // no test (#1520).
-      if (!declaresTest(text, isCode, match.index)) continue
       const title = unescapeTitle(match[1].slice(1, -1))
       if (match[1][0] === '`' && title.match(templateVariable)) {
         // A title of variables and punctuation only, such as `${name}`, would match any span.
@@ -962,7 +957,9 @@ const caseTable = body => {
   // another table, before or after this one. Under prose such as "Example:" it is prose.
   const isTableStart = (line, i) => isRuleLine(line) && typeof section[i - 1] === 'string' && section[i - 1].trim() !== '' && cellCount(section[i - 1]) === cellCount(line)
   const first = section.findIndex(isRow)
-  if (first === -1) return section.some(line => line?.includes('|')) ? { error: 'its lines do not start with "|"' } : null
+  // With no line that starts with a pipe, only a table GitHub shows (a rule line under a header) is one in the wrong
+  // form; prose with a pipe in it is no table (#1520).
+  if (first === -1) return section.some(isTableStart) ? { error: 'its lines do not start with "|"' } : null
   let last = first
   while (isRow(section[last])) last++
   if (section.slice(last).some(isRow)) return { error: 'a blank line, a code fence, a comment or prose splits its rows, or a second table follows it' }

@@ -2122,13 +2122,6 @@ test('pr-check wants each case row to name, in backticks, a test that is in test
     assert.match(checked.problems[0].message, /row 2 of the case table names no test of tests\/ in backticks/, cell)
     assert.match(checked.problems[0].fix, /exact title in backticks/)
   }
-  // A title written only in a fixture string or a comment, or passed to a method such as `pattern.test(...)`, is no test.
-  const fixtureTitles = testTitles([{ path: 'tests/x.test.mjs', text: "test('receiver keeps the turn', () => {})\nconst sample = \"test('a title in a fixture', () => {})\"\n// test('a title in a comment', () => {})\nassert.ok(/x/.test('a pattern input'))\nassert.ok(pattern . test('a spaced call input'))\nassert.ok(pattern./* a note */test('a commented call input'))\n" }])
-  assert.deepEqual(firstRun(firstLine, { titles: fixtureTitles }).problems, [])
-  for (const cell of ['`a title in a fixture`', '`a title in a comment`', '`a pattern input`', '`a spaced call input`', '`a commented call input`']) {
-    const messages = firstRun(firstLine, { rows: [caseRow(cell)], titles: fixtureTitles }).problems.map(item => item.message)
-    assert.deepEqual(messages, ['row 1 of the case table names no test of tests/ in backticks.'], cell)
-  }
   // On a draft the table comes before the code, so a test not written yet is a note.
   const draft = firstRun('', { rows: [caseRow('`a receiver that is not written`')], isDraft: true })
   assert.deepEqual(draft.problems, [])
@@ -2187,6 +2180,11 @@ test('pr-check wants a Fail-first line for the current head on a Ready risk-tier
       const messages = cases({ body: `Fixes #1\nTier: risk\n${surface}\n\n${split}${line}`, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems.map(item => item.message)
       assert.deepEqual(messages, [formError], `${surface} ${line}`)
     }
+  }
+  // Prose with a pipe in it is no table: the section has nothing to hold, on any surface.
+  for (const surface of ['Surface: delivery\nCases: none, one event in one state', 'Surface: wording']) {
+    const prose = `Fixes #1\nTier: risk\n${surface}\n\n## Cases\n\nThe receiver reads a | b as one word, so no case is new.\n`
+    assert.deepEqual(cases({ body: prose, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems, [], surface)
   }
   // checkPr reads the head's tests and the head itself.
   const risky = { ...syntheticPr(), number: FAIL_FIRST_FROM + 1, testFiles: [{ path: 'tests/x.test.mjs', text: "test('receiver keeps the turn', () => {})" }], body: `${body}Tier: risk\nSurface: data\nCases: 1 rows\n\n${caseTableText(caseRow('`receiver keeps the turn`'))}\n` }

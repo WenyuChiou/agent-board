@@ -7,125 +7,64 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 const testFile = /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|cjs|js|ts|tsx)$/
-const titleCall = /(^|[^.\w$])(test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|[^'\\\r\n])*'|"(?:\\[^\r\n]|[^"\\\r\n])*"|`(?:\\[^\r\n]|[^`\\\r\n])*`)/gm
+// The reader pr-check uses for test titles: every `test(…)` or `it(…)` call with a literal title, at any depth. It keeps
+// no state from one call to the next, so no code earlier in a file can hide a later title. It also reads a call inside a
+// string, a comment or a method call (`pattern.test('x')`); running the title settles those, since it runs no test.
+const titleCall = /\b(?:test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|[^'\\\r\n])*'|"(?:\\[^\r\n]|[^"\\\r\n])*"|`(?:\\[^\r\n]|[^`\\\r\n])*`)/g
 const topLevelCall = /^(?:test|it)(?:\.(?:skip|only|todo))?\s*\(/gm
+const startCall = /^(?:test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|[^'\\\r\n])*'|"(?:\\[^\r\n]|[^"\\\r\n])*"|`(?:\\[^\r\n]|[^`\\\r\n])*`)/
 const unescape = text => text.replace(/\\(.)/g, (_, char) => ({ n: '\n', t: '\t' })[char] ?? char)
-// A `/` after one of these, after a keyword, or first in the file starts a regular expression; elsewhere it divides.
-const beforeRegex = /[(,=:[!&|?{};+\-*%<>~^]/
-const regexWords = new Set(['return', 'typeof', 'case', 'in', 'of', 'new', 'delete', 'void', 'throw', 'await', 'yield', 'else', 'do'])
-
-// What each character of a file is: 1 code, 2 a comment, 0 the inside of a string, a template's text or a regular
-// expression (a template's `${…}` is code again), so a test call written in a fixture string or a comment is not read
-// as a test.
-export const CODE = 1
-const COMMENT = 2
-export const codeMask = text => {
-  const isCode = new Uint8Array(text.length)
-  const templates = []
-  let depth = 0
-  let last = ''
-  let lastAt = -1
-  let word = ''
-  let i = 0
-  const literal = () => { last = 'x'; word = '' }
-  // `n++ / 2` divides: a `/` right after a postfix `++` or `--` is no regular expression.
-  const isPostfix = () => (last === '+' || last === '-') && text[lastAt - 1] === last && isCode[lastAt - 1] === CODE
-  // Reads template text from i to its closing backtick, or to a `${`, where code starts again.
-  const template = () => {
-    while (i < text.length) {
-      if (text[i] === '\\') i += 2
-      else if (text[i] === '`') { i++; literal(); return }
-      else if (text[i] === '$' && text[i + 1] === '{') { templates.push(depth++); i += 2; last = '{'; word = ''; return }
-      else i++
-    }
-  }
-  while (i < text.length) {
-    const char = text[i]
-    const next = text[i + 1]
-    if (char === '/' && next === '/') { while (i < text.length && text[i] !== '\n') isCode[i++] = COMMENT; continue }
-    if (char === '/' && next === '*') {
-      const end = text.indexOf('*/', i + 2)
-      const stop = end < 0 ? text.length : end + 2
-      isCode.fill(COMMENT, i, stop)
-      i = stop
-      continue
-    }
-    if (char === "'" || char === '"') {
-      i++
-      while (i < text.length && text[i] !== char && text[i] !== '\n') i += text[i] === '\\' ? 2 : 1
-      i++
-      literal()
-      continue
-    }
-    if (char === '`') { i++; template(); continue }
-    if (char === '/' && !isPostfix() && (last === '' || beforeRegex.test(last) || regexWords.has(word))) {
-      const start = i
-      let isClass = false
-      let isClosed = false
-      for (i++; i < text.length && text[i] !== '\n'; i++) {
-        if (text[i] === '\\' && text[i + 1] !== '\n') i++
-        else if (text[i] === '[') isClass = true
-        else if (text[i] === ']') isClass = false
-        else if (text[i] === '/' && !isClass) { isClosed = true; break }
-      }
-      if (isClosed) {
-        for (i++; /[a-z]/i.test(text[i] ?? ''); i++);
-        literal()
-        continue
-      }
-      // No closing `/` on the line, so it divides after all.
-      i = start
-    }
-    isCode[i] = CODE
-    if (char === '{') depth++
-    if (char === '}' && --depth === templates.at(-1)) { templates.pop(); i++; template(); continue }
-    if (/[\w$]/.test(char)) word = i > 0 && isCode[i - 1] === CODE && /[\w$]/.test(text[i - 1]) ? word + char : char
-    if (!/\s/.test(char)) { last = char; lastAt = i; if (!/[\w$]/.test(char)) word = '' }
-    i++
-  }
-  return isCode
-}
-
-// A test call is code and not a method: `pattern.test(...)`, also with spaces or a comment before `test`, is a method.
-export const declaresTest = (text, isCode, at) => {
-  if (isCode[at] !== CODE) return false
-  let i = at - 1
-  while (i >= 0 && (isCode[i] === COMMENT || (isCode[i] === CODE && /\s/.test(text[i])))) i--
-  return !(i >= 0 && isCode[i] === CODE && text[i] === '.')
+const titleOf = raw => {
+  const title = unescape(raw.slice(1, -1))
+  return { title, isTemplate: raw[0] === '`' && /\$\{/.test(title) }
 }
 
 // Every test title in a file, in order; a template title (`${…}`) cannot be run by its name.
-export const titlesOf = text => {
-  const isCode = codeMask(text)
-  return [...text.matchAll(titleCall)].filter(match => declaresTest(text, isCode, match.index + match[1].length)).map(match => {
-    const raw = match[3]
-    const title = unescape(raw.slice(1, -1))
-    return { title, isTemplate: raw[0] === '`' && /\$\{/.test(title) }
-  })
-}
+export const titlesOf = text => [...text.matchAll(titleCall)].map(match => titleOf(match[1]))
 
-// The source of each top-level test, from its call at the start of a line to the next one, by title. A test whose
-// source is the same on the base and here pins behaviour that was already there.
+// The source of each test called at the start of a line, to the next such call, by the title on that first line.
 export const testBlocks = text => {
-  const isCode = codeMask(text)
-  const starts = [...text.matchAll(topLevelCall)].map(match => match.index).filter(index => isCode[index] === CODE)
+  const starts = [...text.matchAll(topLevelCall)].map(match => match.index)
   const blocks = new Map()
   starts.forEach((start, i) => {
     const block = text.slice(start, starts[i + 1] ?? text.length)
-    const found = titlesOf(block)[0]
+    const raw = block.match(startCall)?.[1]
+    const found = raw ? titleOf(raw) : null
     if (found && !found.isTemplate && !blocks.has(found.title)) blocks.set(found.title, block.trimEnd())
   })
   return blocks
 }
 
+// A named test that passes here is skipped on the base only when it pins behaviour that was already there: its block is
+// the same on the base and here, its title is in the file once on each side, and the block is whole JavaScript by Node's
+// own parser (`isWhole`). A block a fixture line or a call split across lines cuts short is not whole, so any misread
+// runs the test on the base, where it shows as passing there too, instead of skipping it.
+export const isUnchanged = ({ was, now, title, isWhole }) => {
+  if (was === null || was === undefined) return false
+  const block = testBlocks(now).get(title)
+  if (block === undefined || testBlocks(was).get(title) !== block) return false
+  if (![was, now].every(text => titlesOf(text).filter(item => item.title === title).length === 1)) return false
+  return isWhole(block)
+}
+
 const count = (output, name) => Number(output.match(new RegExp(`^# ${name} (\\d+)\\s*$`, 'm'))?.[1] ?? 0)
+// Each result line of a TAP report, at any depth: `not `, the name (Node escapes `\` and `#` in it) and a SKIP or TODO.
+const tapLine = /^[ \t]*(not )?ok \d+ - ((?:\\.|[^\\#\r\n])*?)[ \t]*(?:#[ \t]*(SKIP|TODO)\b[^\r\n]*)?\r?$/gim
+const tapName = text => text.replace(/\\(.)/g, (_, char) => ({ n: '\n', t: '\t', r: '\r' })[char] ?? char)
 // A run reads as pass, fail, skipped, missing (the name matched no test) or stopped (no verdict: a time limit, a
-// signal, a program that did not start).
-export const outcomeOf = ran => {
+// signal, a program that did not start). With the title, a pass needs the test's own result line: a name that matches no
+// test still exits 0, and Node then reports the file itself as one passing test.
+export const outcomeOf = (ran, title) => {
   if (ran.error || ran.signal || ran.status === null || ran.status === undefined) return 'stopped'
   const output = `${ran.stdout ?? ''}\n${ran.stderr ?? ''}`
   const [tests, pass, fail, skipped] = ['tests', 'pass', 'fail', 'skipped'].map(name => count(output, name))
   if (ran.status !== 0 || fail > 0) return 'fail'
+  if (title !== undefined) {
+    const named = [...output.matchAll(tapLine)].filter(match => tapName(match[2]) === title)
+    if (!named.length) return 'missing'
+    if (named.some(match => match[1])) return 'fail'
+    return named.every(match => match[3]?.toUpperCase() === 'SKIP') ? 'skipped' : 'pass'
+  }
   if (pass > 0) return 'pass'
   if (skipped > 0) return 'skipped'
   return tests === 0 ? 'missing' : 'fail'
@@ -142,7 +81,7 @@ export const nodeRunner = path => /\.(mjs|cjs|js)$/.test(path)
 const linesOf = text => text.split('\0').filter(Boolean)
 
 // `command(program, args, options)` runs a program and returns spawnSync's result; `env` is the environment the tests
-// get, or a function that returns a fresh one for each run. Returns each named title's state, how many were counted, the total that ran to a verdict and the line to paste.
+// get, or a function that returns a fresh one for each run. Returns each named title's state, how many were counted, the total and the line to paste.
 export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor = nodeRunner, timeout = 300000, onCheckout, onRun }) => {
   const big = 64 * 1024 * 1024
   const git = (...args) => {
@@ -168,27 +107,42 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
   }
   const owners = new Map()
   for (const path of files) for (const { title, isTemplate } of titlesOf(textOf(path))) if (!isTemplate) owners.set(title, [...(owners.get(title) ?? []), path])
-  const results = []
-  const toRun = []
-  for (const title of [...new Set(names)]) {
-    const paths = [...new Set(owners.get(title) ?? [])]
-    if (/<[^<>]+>/.test(title)) results.push({ title, state: 'template' })
-    else if (!paths.length) results.push({ title, state: 'unknown' })
-    else if (paths.length > 1) results.push({ title, state: 'ambiguous', path: paths.join(', ') })
-    else {
-      const [path] = paths
-      const was = baseText(path)
-      if (was !== null && testBlocks(was).get(title) === testBlocks(textOf(path)).get(title) && testBlocks(textOf(path)).has(title)) results.push({ title, path, state: 'unchanged' })
-      else if (!runnerFor(path)) results.push({ title, path, state: 'not-node' })
-      else toRun.push({ title, path })
-    }
-  }
   const runOne = (where, { title, path }) => {
     const [program, args] = runnerFor(path)(title)
     onRun?.({ where, title, path })
-    return outcomeOf(command(program, args, { cwd: where, env: typeof env === 'function' ? env() : env, timeout, maxBuffer: big }))
+    return outcomeOf(command(program, args, { cwd: where, env: typeof env === 'function' ? env() : env, timeout, maxBuffer: big }), title)
   }
-  const here = new Map(toRun.map(item => [item.title, runOne(cwd, item)]))
+  // Node's own parser decides whether a block is whole JavaScript; it runs none of it.
+  const isWhole = block => {
+    const ran = command(process.execPath, ['--input-type=module', '--check'], { cwd, input: block, timeout, maxBuffer: big })
+    return !ran.error && ran.status === 0
+  }
+  const results = []
+  const toRun = []
+  const here = new Map()
+  for (const title of [...new Set(names)]) {
+    const paths = [...new Set(owners.get(title) ?? [])]
+    if (/<[^<>]+>/.test(title)) { results.push({ title, state: 'template' }); continue }
+    if (!paths.length) { results.push({ title, state: 'unknown' }); continue }
+    let [path] = paths
+    if (paths.length > 1) {
+      // The reader also finds a title in a string, a comment or a method call, so the file that has the test is the one
+      // whose run finds it by name; a file this runner cannot run cannot be ruled out.
+      const found = []
+      for (const candidate of paths) {
+        if (!runnerFor(candidate)) { found.push({ candidate }); continue }
+        const outcome = runOne(cwd, { title, path: candidate })
+        if (outcome !== 'missing') found.push({ candidate, outcome })
+      }
+      if (found.length !== 1) { results.push({ title, state: found.length ? 'ambiguous' : 'missing', path: paths.join(', ') }); continue }
+      path = found[0].candidate
+      if (found[0].outcome) here.set(title, found[0].outcome)
+    }
+    if (isUnchanged({ was: baseText(path), now: textOf(path), title, isWhole })) results.push({ title, path, state: 'unchanged' })
+    else if (!runnerFor(path)) results.push({ title, path, state: 'not-node' })
+    else toRun.push({ title, path })
+  }
+  for (const item of toRun) if (!here.has(item.title)) here.set(item.title, runOne(cwd, item))
   const needBase = toRun.filter(item => here.get(item.title) === 'pass')
   const onBase = new Map()
   if (needBase.length) {
@@ -222,8 +176,10 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
                 : 'base-unknown'
     results.push({ ...item, state })
   }
-  // Ran to a verdict, or was meant to and did not finish: these make the total; skipped, missing and unrunnable do not.
-  const total = results.filter(item => ['counted', 'passes-on-base', 'fails-on-head', 'stopped', 'base-unknown'].includes(item.state)).length
+  // Every title found in tests/ makes the total except a test skipped on this system, one unchanged since the base and a
+  // file this runner cannot run; one that no run finds by its name, or that more than one file has, counts against it.
+  // A span that is no title anywhere in tests/ (code beside the title in the same cell) is pr-check's to report.
+  const total = results.filter(item => ['counted', 'passes-on-base', 'fails-on-head', 'stopped', 'base-unknown', 'missing', 'ambiguous'].includes(item.state)).length
   const counted = results.filter(item => item.state === 'counted').length
   const order = new Map([...new Set(names)].map((title, i) => [title, i]))
   results.sort((a, b) => order.get(a.title) - order.get(b.title))
@@ -238,10 +194,10 @@ export const stateWords = {
   'base-unknown': 'gave no verdict on the base',
   stopped: 'did not finish',
   skipped: 'is skipped on this system; not counted',
-  missing: 'matched no test by its exact name; not counted',
+  missing: 'matched no test by its exact name',
   unchanged: 'is unchanged since the base; not run',
   'not-node': 'is not a Node test file here (a plugin test runs with `claude plugin test`); not counted',
   template: 'is a template title; not run',
   unknown: 'is not a test title in tests/; not counted',
-  ambiguous: 'is a title in more than one file; not run',
+  ambiguous: 'is a test in more than one file, so it cannot be run by its name alone',
 }

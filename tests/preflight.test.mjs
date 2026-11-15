@@ -2529,7 +2529,7 @@ test('preflight runs the tests the case table names on the merge base and here, 
   f.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
   const base = f.git('rev-parse', 'HEAD')
   f.write('scripts/value.mjs', 'export const value = 2\n')
-  f.write('tests/value.test.mjs', "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { value } from '../scripts/value.mjs'\ntest('the value is two', () => assert.equal(value, 2))\ntest('the value is a number', () => assert.equal(typeof value, 'number'))\n")
+  f.write('tests/value.test.mjs', "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { value } from '../scripts/value.mjs'\ntest('the value is two', () => assert.equal(value, 2))\ntest('the value is a number', () => assert.equal(typeof value, 'number'))\nconst sample = \"test('a title only in a fixture')\"\n")
   f.commit()
   const head = f.git('rev-parse', 'HEAD')
   const bodyOf = test => `Fixes #1\nTier: risk\nSurface: delivery\nCases: 1 rows\n\n## Cases\n\n| State | Event | Expected result | Test |\n|---|---|---|---|\n| one | two | three | \`${test}\` |\n\n## Checks\n`
@@ -2565,6 +2565,11 @@ test('preflight runs the tests the case table names on the merge base and here, 
   const passing = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
   assert.ok(has(passing, 'FAIL', 'the value is a number: passes on the base'), JSON.stringify(passing))
   assert.ok(has(passing, 'FAIL', `Fail-first: 0 of 1 new or changed tests fail on ${base.slice(0, 8)}`))
+  // A title read from a fixture string matches no test when it runs, and it counts against the line.
+  writeFileSync(join(f.root, 'body.md'), bodyOf('a title only in a fixture'))
+  const fixtureOnly = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+  assert.ok(has(fixtureOnly, 'FAIL', 'a title only in a fixture: matched no test by its exact name'), JSON.stringify(fixtureOnly))
+  assert.ok(has(fixtureOnly, 'FAIL', `Fail-first: 0 of 1 new or changed tests fail on ${base.slice(0, 8)}`))
   // With no case table there is nothing to run.
   writeFileSync(join(f.root, 'body.md'), 'Fixes #1\n')
   assert.ok(has(await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' }), 'PASS', 'fail-first: the body has no case table'))
