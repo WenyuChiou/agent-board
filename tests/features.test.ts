@@ -5434,15 +5434,34 @@ test('a task that asks for a yes or no and also lists options is a confirm on it
   const { key: _keptKey, ...kept } = offeredAs(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, observeQuestions(emptyQuestions(), [], mine, [], AT_1277, true).ledger))
   expect(kept, 'kept own question').toEqual(yesNo)
 
-  // A refused list beside the yes or no changes nothing either.
-  const refused = applyTaskCreate(base, { subject: 'Should I deploy it?', metadata: { waiting: 'you', ask: 'confirm', options: TEN_1277 } }, '1', AT_1277)
-  expect(buildView([], [], refused, AT_1277, 0, {}, STRINGS.en).waiting[0]).toMatchObject({ kind: 'confirm', options: [] })
-  expect(upsertAutoBlock('', refused, STRINGS.en)).not.toContain('options=')
-
   // A choice, said or not, still writes its list.
   for (const ask of ['choose', undefined]) {
     const choice = applyTaskCreate(base, { subject: 'Which storage?', metadata: { waiting: 'you', ...(ask === undefined ? {} : { ask }), options: ['Postgres', 'SQLite'] } }, '1', AT_1277)
     expect(upsertAutoBlock('', choice, STRINGS.en), String(ask)).toContain('<!-- options=["Postgres","SQLite"] -->')
+  }
+})
+
+test('a refused list leaves only the reply box on the own pane and the other board whatever the task asks for (#1277)', () => {
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
+  for (const ask of ['reply', 'confirm', 'choose', 'input', 'review', 'do']) {
+    expect(askOf(EITHER_1277, '', { ask, options: REFUSED_OPTIONS }), ask).toMatchObject({ kind: 'reply', options: [] })
+    expect(askOf(EITHER_1277, '', { ask, options: [] }), ask).toMatchObject({ kind: 'reply', options: [] })
+  }
+  for (const ask of ['reply', 'confirm']) {
+    const mine = applyTaskCreate(base, { subject: EITHER_1277, metadata: { waiting: 'you', ask, options: TEN_1277 } }, '1', AT_1277)
+    expect(mine.tasks[0]).toMatchObject({ ask, options: TEN_1277 })
+    expect(offeredAs(buildView([], [], mine, AT_1277, 0, {}, STRINGS.en)), `${ask}: own pane`).toEqual(REPLY_ONLY)
+    // The other board: the refusal is written whatever the kind, so the words are never read.
+    const file = upsertAutoBlock('', mine, STRINGS.en)
+    expect(file, ask).toContain('<!-- options=[] -->')
+    expect(file, ask).not.toContain('Option 1')
+    expect(offeredAs(fileView(file)), `${ask}: other board`).toEqual(REPLY_ONLY)
+    // The kept copies, from the block and from the owning session.
+    const keptBlock = observeQuestions(emptyQuestions(), parseProgress(file), null, [], AT_1277, true).ledger
+    expect(offeredAs(fileView('## demo\n', keptBlock)), `${ask}: kept from the block`).toEqual(REPLY_ONLY)
+    const keptOwn = observeQuestions(emptyQuestions(), [], mine, [], AT_1277, true).ledger
+    expect((JSON.parse(keptOwn.records[0]!.source!.data) as Record<string, unknown>).options, `${ask}: kept list`).toEqual([])
+    expect(offeredAs(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, keptOwn)), `${ask}: kept own question`).toEqual(REPLY_ONLY)
   }
 })
 

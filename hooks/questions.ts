@@ -656,8 +656,10 @@ const ownObservations = (mine: ProgressMirror, scopeOf: QuestionScopeOf = questi
   return mine.tasks.map((task, index) => {
     const text = stepWords(task).trim()
     // The task's own list, checked whole as it is kept: a refused one is kept as an empty list.
-    // A task whose kind is not a choice (`ask: "confirm"`) keeps no list, as its block writes none.
-    const options = offersList(task.ask) && (task.options ?? []).length > 0 ? validOptions(task.options) ?? [] : undefined
+    // A task whose kind is not a choice (`ask: "confirm"`) keeps no valid list, as its block writes
+    // none; a refused one is kept as `[]` whatever the kind.
+    const checked = (task.options ?? []).length > 0 ? validOptions(task.options) ?? [] : undefined
+    const options = checked !== undefined && (checked.length === 0 || offersList(task.ask)) ? checked : undefined
     return { scope, session: own, index, text, words: questionWords(text), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text, agent: auto.agent, session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume, ...(options === undefined ? {} : { options }) }) } }
   })
 }

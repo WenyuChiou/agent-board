@@ -236,10 +236,10 @@ export const askOf = (
   const command = typeof given.command === 'string' && given.command.trim() !== '' ? given.command.trim() : (text.includes('`') ? CODE.exec(text)?.[1] ?? null : null)
   const link = typeof given.link === 'string' && given.link.trim() !== '' ? given.link.trim() : (text.includes('http') ? URL.exec(text)?.[0] ?? null : null)
   const said = kindOf(given.ask)
-  // A refused list never falls back to buttons read from the words (choices, or a yes and no).
-  // Only a kind the agent set itself that is not a choice (`ask: "confirm"`) still stands.
+  // A refused list leaves the reply box only, whatever kind the agent set: no buttons read from
+  // the words (choices, or a yes and no), and none from `ask`, which another board never sees.
   const isRefused = given.options === REFUSED_OPTIONS || (Array.isArray(given.options) && given.options.length === 0)
-  if (isRefused) return { kind: said === null || said === 'choose' ? 'reply' : said, options: [], command, link }
+  if (isRefused) return { kind: 'reply', options: [], command, link }
   if (said !== null) return { kind: said, options, command, link }
 
   const words = noteWords || subjectWords
