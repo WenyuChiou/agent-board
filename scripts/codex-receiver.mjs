@@ -510,8 +510,9 @@ export const startCodexReceiver = ({
       if (watch.turn === null) {
         await nameTurn(thread, watch)
         if (daemon !== on || sub.watch !== watch) return
-        // From outside, a turn named in this look is acted on at the next one: the approval may have been answered while the
-        // lookup was out, and the read above is older than that. (In the thread, notices tell, and no later look comes.)
+        // From outside, this look does not act on the read above for a turn it has just named (the approval may have been answered
+        // while the lookup was out); the next look reads again and acts. In the thread, notices tell, and no later look comes.
+        // A timer that was already running is not touched here: it still fires at its limit without a fresh read (#1502).
         if (watch.turn !== null && !isInside) return
       }
       if (seen.isWaiting) waitOnApproval(thread)
