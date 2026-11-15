@@ -2128,16 +2128,37 @@ test('archiving a block while its captures are still pending writes the archived
     }
   } })
   const { parseCapture } = await import('../hooks/questions.ts')
-  const board = await page()
+  const board = await page('', {}, [], undefined, `
+import { existsSync as isCaptureFlushHeld, readdirSync as captureFlushFiles } from 'node:fs'
+import { dirname as captureFlushDirectory } from 'node:path'
+const captureImmediate = globalThis.setImmediate
+globalThis.setImmediate = (callback, ...args) => captureImmediate(() => {
+  const path = globalThis.AGENT_BOARD.path
+  const isHeld = () => isCaptureFlushHeld(path + '.hold-captures')
+  const count = captureFlushFiles(captureFlushDirectory(path)).filter(name => name.includes('-questions-source-') && name.endsWith('.json')).length
+  if (!isHeld() || count < 390) return callback(...args)
+  const timer = setInterval(() => {
+    if (isHeld()) return
+    clearInterval(timer)
+    callback(...args)
+  }, 10)
+})
+${BOARD_SCRIPT}`, (_dir, path) => writeFileSync(path + '.hold-captures', ''))
   try {
     const source = bigBoard(460)
     writeFileSync(board.path, source)
     const model = (await board.call('GET', '/api/board')).json().model
-    const row = [...model.stopped, ...model.groups.flatMap(group => group.rows)].find(one => one.canArchive === true)
+    const row = [...model.stopped, ...model.groups.flatMap(group => group.rows)].filter(one => one.canArchive === true).at(-1)
     assert.ok(row !== undefined, 'the big board must have an archivable row')
+    for (let tries = 0; tries < 1200; tries++) {
+      if (readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json')).length >= 390) break
+      await delay(25)
+    }
+    const beforeAct = readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json')).length
+    assert.ok(beforeAct >= 390 && beforeAct < 400, `the background flush must pause with the last stopped block's captures still pending, got ${beforeAct}`)
     // The first view queued the captures; the archive press must drain them
     // synchronously before taking the block (R3), so all 500 are on disk the
-    // moment the press returns.
+    // moment the press returns even while the background continuation is held.
     const reply = await board.call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: '', fp: row.fp } })
     assert.equal(reply.status, 200, reply.body)
     const names = readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json'))
@@ -2163,7 +2184,10 @@ test('archiving a block while its captures are still pending writes the archived
       const hash = name.match(/([a-f0-9]{64})\.json$/)?.[1]
       assert.ok(hash !== undefined && parseCapture(text, hash) !== null, name)
     }
-  } finally { await board.close() }
+  } finally {
+    rmSync(board.path + '.hold-captures', { force: true })
+    await board.close()
+  }
 })
 
 // #921 T6: killing the page mid-flush and restarting it re-queues the missing
