@@ -6771,6 +6771,42 @@ test('a plain board command keeps a page started with --codex-send, and a plain 
   } finally { await board.end([url]) }
 })
 
+test('Send to Codex is on by default; --no-codex-send turns it off, a plain command keeps either page, and each switch replaces a page with the other setting (#318)', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  const pingOf = async url => {
+    const address = new URL(url)
+    return (await fetchAt('127.0.0.1', Number(address.port), 'GET', '/api/ping', { 'x-board-token': address.searchParams.get('t') })).json()
+  }
+  try {
+    // A page started with no switch has the receiver on.
+    const on = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(on)
+    urls.push(on)
+    assert.equal((await pingOf(on)).codexSend, true)
+    // --codex-send, the switch from before, keeps that page: it already has the receiver on.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board', '--codex-send'])), on)
+    // --no-codex-send asks for a page with it off: the running one is replaced.
+    const off = board.urlOf(await board.serve(['--quiet-board', '--no-codex-send']))
+    assert.ok(off)
+    assert.notEqual(off, on)
+    urls.push(off)
+    assert.equal((await pingOf(off)).codexSend, false)
+    const offPid = JSON.parse(readFileSync(board.served, 'utf8')).pid
+    // The plain command (the README's, and /agent-board's) keeps that page, so it does not turn the receiver back on.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board'])), off)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).pid, offPid, 'the page was not replaced')
+    // With both switches the receiver is off, so that page is kept too.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board', '--codex-send', '--no-codex-send'])), off)
+    // --codex-send, the switch from before, asks for it on: the page is replaced again.
+    const again = board.urlOf(await board.serve(['--quiet-board', '--codex-send']))
+    assert.ok(again)
+    assert.notEqual(again, off)
+    urls.push(again)
+    assert.equal((await pingOf(again)).codexSend, true)
+  } finally { await board.end(urls) }
+})
+
 test('the board command in a read-only sandbox reuses a running page\'s link', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'acl-denied.cjs')

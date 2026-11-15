@@ -6038,7 +6038,7 @@ test('a delivery prompt does not answer the person\'s question', () => {
   assert.equal(readTurn('codex-prompt-1-6.json', JSON.stringify({ session_id: 's1', cwd: '/w', hook_event_name: 'UserPromptSubmit', prompt: 'Use the second plan.' }))?.isBoardRequest, undefined)
 })
 
-test('the board runs the Codex receiver for a Codex session it knows and ends it with the page', async () => {
+test('the board runs the Codex receiver by default for a Codex session it knows, not with --no-codex-send, and ends it with the page', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-codex-receiver-'))
   const progress = join(dir, 'progress.md')
   writeFileSync(progress, `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${codexThread} state=waiting updated=${new Date().toISOString()} -->\n### A Codex task\n- [~] Keep going\n<!-- /auto session=abcdef01 -->\n`)
@@ -6048,14 +6048,15 @@ test('the board runs the Codex receiver for a Codex session it knows and ends it
   codexShortWait()
   let board
   try {
-    // Off unless asked for: without --codex-send the page starts no Codex program and joins no thread.
-    const quiet = await start(dir)
+    // Off when asked (#318): with --no-codex-send the page starts no Codex program and joins no thread.
+    const quiet = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--no-codex-send'])
     try {
       await pause(1500)
       assert.equal((await quiet.call('/api/board')).body.messaging.connections.length, 0)
       assert.equal(existsSync(join(dir, 'proxy.pid')), false)
     } finally { await quiet.close() }
-    board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send'], codexRoutes)
+    // On by default (#318): a page started with no switch runs the receiver.
+    board = await start(dir, '', ['--messages-dir', join(dir, 'messages')], codexRoutes)
     delete process.env.AGENT_BOARD_CODEX_BIN
     const connection = await codexConnection(board)
     assert.equal(connection.surface, SURFACE_IDS.codexDaemon)

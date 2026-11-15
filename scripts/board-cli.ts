@@ -83,6 +83,7 @@ const flag = (name: string): string | undefined => {
 const BOOL_FLAGS = new Set([
   '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--awaits-ack', '--chat', '--codex-doctor',
   '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
+  '--no-codex-send',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
@@ -2203,12 +2204,15 @@ const openPageState = async (server: RunningServer): Promise<PageState> => {
   return answer.wantsKeyedPage === true && !(process.env.SSH_CONNECTION || process.env.SSH_TTY) ? 'unkeyed' : 'open'
 }
 
-// The Codex program the receiver runs (#318). The receiver is off unless the page was started with `--codex-send`: whether a
-// command that needs approval still reaches the person while the board is joined is not proven on a real Codex yet (#318).
-// Then AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else, it turns the receiver off), else the one
-// on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names its own, so it never reaches the real ~/.codex.
+// Send to Codex is on unless the page was started with `--no-codex-send`: the live run of 2026-11-15 showed an approval in a
+// delivered turn reaching the person's own Codex window (docs/validation/2026-11-15-codex-send-default-live.md, #318).
+// `--codex-send`, the switch from before, is still accepted and changes nothing; with both, the receiver is off.
+const isCodexSendOn = (): boolean => !args.includes('--no-codex-send')
+// The Codex program the receiver runs (#318): AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else, it
+// turns the receiver off), else the one on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names its own,
+// so it never reaches the real ~/.codex.
 const codexReceiverExecutable = (): string | null => {
-  if (!args.includes('--codex-send')) return null
+  if (!isCodexSendOn()) return null
   const given = process.env.AGENT_BOARD_CODEX_BIN
   if (given !== undefined) return explicitCodexExecutable(given)
   return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
@@ -2288,7 +2292,7 @@ const serveChild = (): void => {
       },
       get s() { return s },
       port: requestedPort,
-      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: args.includes('--codex-send'), messagesDirectory: messagesDirectory() },
+      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: isCodexSendOn(), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       pending: (isFresh = true) => pending(undefined, isFresh),
@@ -2449,7 +2453,9 @@ const runningPage = async (isStarting = false, isReplacing = false): Promise<{ p
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
   const requestedStale = staleTimeoutMs()
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (!args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  // Send to Codex (#318): a plain command keeps a page whether its receiver is on or off, so `/agent-board` never ends a page the
+  // person turned it off for; `--codex-send` asks for a page with it on, `--no-codex-send` for one with it off.
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   return (await stays(running, serveFile(), isReplacing && replacementMove(running))) ? { page: running, isKept: true } : null
 }
 
@@ -2534,6 +2540,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
   if (args.includes('--codex-send')) rest.push('--codex-send')
+  if (args.includes('--no-codex-send')) rest.push('--no-codex-send')
   // The child runs with cwd set to the board's folder, so a relative path would resolve
   // against the board's folder instead of this command's folder. Pass the board and the
   // messages folder the parent resolved, as absolute paths, so the child serves the same
