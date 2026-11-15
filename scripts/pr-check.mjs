@@ -919,6 +919,51 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   return output
 }
 
+// Every pull request names its tier on a `Tier:` line, and one that changes a path docs/dev/risk-paths.md lists is risk
+// tier (RULES R2; #1531). Both apply to pull requests numbered above TIER_FROM, the issue they came in with, other than a
+// release, which is risk tier whatever it says. A local --body-file run, which often checks a draft body, and a small
+// docs fix from outside the team get a note for a missing line instead of a failure.
+export const TIER_FROM = 1531
+// The paths risk-paths.md lists: one per bullet, in backticks; a path ending in `/` is a folder. The large shared files
+// the page names in its prose are not on the list, and stay the reviewer's call (R2).
+export const riskPathsOf = text => linesOf(text ?? '').flatMap(line => line.trimEnd().match(/^[ \t]*[-*][ \t]+`([^`\s]+)`$/)?.[1] ?? [])
+const isRiskPath = (path, riskPaths) => riskPaths.some(listed => listed.endsWith('/') ? path.startsWith(listed) : path === listed)
+// riskPaths: the list read at the base, null when it could not be read there, undefined when not given.
+export const tier = ({ body = '', title = '', number = null, paths = [], riskPaths, isOptional = false } = {}) => {
+  const output = result()
+  if (isReleaseTitle(title) || (number !== null && number <= TIER_FROM)) return output
+  const fail = (message, fix) => output.problems.push(problem('tier', message, fix))
+  const how = 'name the tier on a line of its own in the body: `Tier: risk`, `Tier: normal` or `Tier: light`, the highest any change reaches (docs/dev/RULES.md, R2).'
+  const found = visibleLines(body).flatMap(line => line.match(/^Tier:[ \t]*(.*)$/i)?.[1].trim() ?? [])
+  const filled = found.filter(value => value !== '' && !value.startsWith('<'))
+  if (!filled.length) {
+    const message = found.length ? 'the `Tier:` line is still the template\'s placeholder.' : 'the body has no `Tier:` line.'
+    if (number === null || isOptional) output.info.push(`tier: ${message} The PR check fails a pull request without one (docs/dev/RULES.md, R2).`)
+    else fail(message, how)
+    return output
+  }
+  if (filled.length > 1) {
+    fail(`the body has ${filled.length} \`Tier:\` lines; it names its tier once.`, 'keep one `Tier:` line; put an example inside a code fence.')
+    return output
+  }
+  const named = filled[0].replace(/`/g, '').match(/^(risk|normal|light)\b/i)?.[1].toLowerCase()
+  if (!named) {
+    fail(`the \`Tier:\` line names "${filled[0]}", which is not a tier.`, how)
+    return output
+  }
+  if (named === 'risk' || riskPaths === undefined) return output
+  if (!Array.isArray(riskPaths)) {
+    output.info.push(`tier: docs/dev/risk-paths.md could not be read at the base, so \`Tier: ${named}\` was not checked against the paths it lists.`)
+    return output
+  }
+  const listed = paths.filter(path => isRiskPath(path, riskPaths))
+  if (listed.length) {
+    const names = listed.slice(0, 3).map(path => `\`${path}\``).join(', ') + (listed.length > 3 ? ` and ${listed.length - 3} more` : '')
+    fail(`\`Tier: ${named}\`, but the pull request changes ${names}, which docs/dev/risk-paths.md lists as risk tier.`, 'set `Tier: risk` with its `Surface:` line, or move the change to that path into a risk-tier pull request of its own (docs/dev/RULES.md, R2).')
+  }
+  return output
+}
+
 // A risk-tier pull request on a surface that handles events arriving in any order lists its cases before the first push
 // (CONTRIBUTING rule 2, RULES R6, #1503), and stops at ROUND_CAP review rounds. Both apply to pull requests numbered above
 // CASES_FROM, the issue they came in with; a local --body-file run has no number and is checked as new.
@@ -1135,6 +1180,7 @@ export const checkPr = data => {
   add(privateData({ added: data.added, body: data.body }))
   add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
+  add(tier({ body: data.body, title: data.title, number: data.number, paths: data.paths, riskPaths: data.riskPaths, isOptional: isSmallDocs }))
   add(surface({ body: data.body, title: data.title, number: data.number, paths: data.paths, numstat: data.numstat }))
   add(cases({ body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
   if (issue.issue !== null) {
@@ -1525,6 +1571,9 @@ export const main = async (argv = process.argv.slice(2)) => {
       return { path: diffPath(name.join('\t')), added: Number(added) || 0, deleted: Number(deleted) || 0 }
     }).filter(item => item.path)
     data.template = git(cwd, 'show', `${base}:.github/pull_request_template.md`)
+    // The risk-tier paths as the base lists them, so a pull request cannot take its own path off the list (#1531).
+    const riskList = spawnSync('git', ['show', `${base}:docs/dev/risk-paths.md`], { cwd, encoding: 'utf8', maxBuffer })
+    data.riskPaths = !riskList.error && riskList.status === 0 ? riskPathsOf(riskList.stdout) : null
     const headPaths = new Set(linesOf(git(cwd, 'ls-tree', '-r', '--name-only', data.head)).filter(Boolean).map(diffPath))
     data.headPaths = headPaths
     data.changelogText = headPaths.has('CHANGELOG.md') ? git(cwd, 'show', `${data.head}:CHANGELOG.md`) : ''
