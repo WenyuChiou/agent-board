@@ -23,8 +23,8 @@ import { classifyMessageStoreFiles, isMessageStoreClean, readMessageStoreFiles }
 import { block as writeBlock } from './e2e/lib/writers.mjs'
 import { privateRuntimeFolder, RUNTIME_FOLDER_ENV, runtimeFolderHandoff } from '../scripts/runtime-folder.ts'
 
-// The Windows exchange job runs this file in two parts, and each part runs its share of the tests:
-// the job used 75-80% of its ten-minute limit with the file whole (#1445).
+// The exchange job runs this file in parts (two on Ubuntu, three on Windows), and each part runs its share of the tests:
+// with the file whole the Windows job used 75-80% of its ten-minute limit, and Ubuntu 92-94% after #1496 (#1445).
 const test = partTest(nodeTest)
 
 // The server store and page modules use the host's extensionless imports; resolve only those
