@@ -217,12 +217,26 @@ export const originOf = (value: unknown): Origin => {
   throw new Error('ORIGIN_UNSUPPORTED')
 }
 
+// Uncertain receipts whose error confirms the delivery turn itself ended (not a transport timeout,
+// disconnect, or unconfirmed join where delivery may still be active): nothing runs on the session
+// now, so the next message may go out and re-sending the same words begins a fresh delivery.
+export const ENDED_UNCERTAIN_ERRORS = [
+  'TURN_NOT_COMPLETED',
+  'TURN_STATUS_UNKNOWN',
+  'ACK_MISSING',
+  'ACK_REQUIRED',
+  'TURN_ABORTED',
+  'NATIVE_TURN_FAILED',
+] as const
+export const isEndedUncertain = (one: Pick<Message, 'status' | 'error'>): boolean =>
+  one.status === 'uncertain' && (ENDED_UNCERTAIN_ERRORS as readonly string[]).includes(one.error)
+
 export const isFinished = (one: Pick<Message, 'status' | 'error'>): boolean => ['acknowledged', 'rejected'].includes(one.status) || one.status === 'uncertain' && ['EXPIRED', 'DISMISSED'].includes(one.error)
 export const isOpen = (one: Pick<Message, 'status' | 'error'>): boolean => !isFinished(one)
-// An open message that still holds its target: an OpenCode wake that reads "sent, not confirmed" keeps its text but no
-// longer holds the session's next message, as an open message did when it expired at the open limit (#1366 review).
-// Only the board writes that state, and only for an OpenCode wake, so any other message in it still counts.
-const isHolding = (one: Pick<Message, 'status' | 'error' | 'to' | 'ref'>): boolean => isOpen(one) && !(one.error === UNCONFIRMED && isAtMostOnce(one))
+// An open message that still holds its target: a confirmed turn-ended uncertain delivery or an OpenCode wake that reads
+// "sent, not confirmed" keeps its record/text for history, but no longer holds the session's next message (#1486, #1366).
+// Only the board writes UNCONFIRMED, and only for an OpenCode wake, so any other message in it still counts.
+const isHolding = (one: Pick<Message, 'status' | 'error' | 'to' | 'ref'>): boolean => isOpen(one) && !isEndedUncertain(one) && !(one.error === UNCONFIRMED && isAtMostOnce(one))
 // A finished message keeps its hash, not its text, and no more of its reply than an ACK line holds.
 const settled = (one: Message): Message => isFinished(one) && (one.text !== '' || one.reply.length > ACK_MAX) ? { ...one, text: '', reply: one.reply.slice(0, ACK_MAX) } : one
 export const pruneMessages = (state: MessageState, now: number): MessageState => {
@@ -357,7 +371,7 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   const isRetaken = (one: Message): boolean => isOwn(one) && (isLapsed(one, now) || isUnmarked(one))
   // While a message of the session is in doubt, no queued message goes out. A claim can take one in doubt again
   // only when every one is this binding's and can be taken again, and only on a surface that message allows. A wake
-  // that reads "sent, not confirmed" no longer holds the session (`isHolding`).
+  // that reads "sent, not confirmed" or a confirmed turn-ended uncertain delivery no longer holds the session (`isHolding`).
   const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isHolding(one) && !isHookDelivered(one))
   const canTake = (one: Message): boolean => one.status === 'queued' && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
   const pick = held.length === 0 ? state.messages.find(canTake) : held.every(isRetaken) ? held.find(canReach) : undefined
@@ -412,7 +426,7 @@ const isMarkedWake = (one: Message): boolean => isAtMostOnce(one) && one.attempt
 export const disconnectMessages = (state: MessageState, target: string, now: number, keepQueued = false): MessageState => ({
   ...state,
   messages: state.messages.map(one => {
-    if (one.target !== target || isFinished(one) || isMarkedWake(one)) return one
+    if (one.target !== target || isFinished(one) || isMarkedWake(one) || one.status === 'uncertain' && one.error !== '') return one
     if (keepQueued && one.status === 'queued') return one.leftAt === undefined ? { ...one, leftAt: now } : one
     const { leftAt: _leftAt, ...rest } = one
     return settled({
