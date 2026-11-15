@@ -28,7 +28,7 @@ import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
-import { explicitCodexExecutable, resolveCodexExecutable } from './codex-receiver.mjs'
+import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
@@ -2214,14 +2214,6 @@ const codexReceiverExecutable = (): string | null => {
   if (given !== undefined) return explicitCodexExecutable(given)
   return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
 }
-// How long the receiver watches a thread before it reads it as a person's: the daemon's own unload delay and a margin, which
-// the receiver knows. Only a page that a test process started itself, whose stand-in daemon unloads sooner, may shorten it: the
-// test names its own process id, and that must be this page's parent.
-const codexUnloadMs = (): number | undefined => {
-  const given = Number(process.env.AGENT_BOARD_CODEX_UNLOAD_MS)
-  return Number(process.env.AGENT_BOARD_TEST_PID) === process.ppid && Number.isInteger(given) && given >= 100 && given <= 65_000 ? given : undefined
-}
-
 // The detached Windows child reports startup failures through a private file too; redirecting
 // its standard handles would make Start-Process inherit the caller's extra pipes again.
 const serveChildError = (message: string): void => {
@@ -2285,7 +2277,9 @@ const serveChild = (): void => {
         // A file that is missing or cannot be read throws, so the tick keeps every thread: only a row read as ended or gone ends one.
         threads: () => parseProgress(readFileSync(path, 'utf8')).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
         executable: codexReceiverExecutable(),
-        unloadMs: codexUnloadMs(),
+        // The daemon's own unload delay and a margin, which the receiver knows, unless a test process started this page and
+        // names a shorter wait for its stand-in daemon (`testUnloadMs`).
+        unloadMs: testUnloadMs(process.env, process.ppid),
       },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests

@@ -10,10 +10,16 @@
 //              'error' (an error answer), 'empty' (an answer with no turn), 'mute' (no answer at all), 'die' (the proxy exits once
 //              the request is in), 'endFirst' (the turn's ACK and end go out before the answer, which comes last), 'ownFirst' (the turn starts, takes the delivery's own user message, ACKs and completes, all before the answer). On a running turn it answers with that turn's id
 //              and starts nothing, as the real daemon does (the text joins the turn).
+//              'lost' starts the turn in the daemon and ends the proxy before it has said anything of it, answer or notice: the
+//              delivery's own turn, or with lostTurn 'person' the person's own, begun at that moment, which the text only joins
+//   startDelay ms the answer to turn/start is held back on an idle thread, while the turn has begun and its notices (its start, its
+//              first user message, an approval it waits on) have gone out
 //   joinOnStart when true, the person's own turn starts just before the first turn/start is handled, so the call joins it
 //   joinLate   like joinOnStart, but that turn's notices (its start, its first user message) go out only after the answer
 //   readDelay  ms the answer to thread/read is held back (the thread's status is read when it is sent)
 //   readFaults  a file: while it is there, thread/read gets an error answer, or no answer at all when the file holds 'mute'
+//   readHold   a file: while it is there, the answers to thread/read are held back; they go out, with the status the thread has
+//              then, once it is gone
 //   resumeRace  when true, a turn begins as the first thread/resume arrives and ends right behind its answer, in the same write
 //   readActive  when true, the person's own turn starts as thread/read is first asked by a connection that has joined the thread
 //              (after a claim, the read right before turn/start): the answer says active, the notices follow
@@ -49,6 +55,8 @@
 //              'mute' (no answer, still subscribed), 'odd' (an answer with no status, left), or a number of ms the answer is held
 //              back (left when it is sent); the requests after them are answered at once
 //   pidFile    file that gets this process's id
+// thread/turns/list answers with the running turn alone, newest first as the real one lists them, with its first user message
+// (the summary view of the source's `TurnItemsView`; not run live), and with no turn when none runs.
 // thread/read tells the thread's true status to any connection (with `waitingOnApproval` among its `activeFlags` while a held
 // approval waits), and its `updatedAt` moves with each turn's start and end (read in the daemon's source, where it is the saved
 // thread's last update; not run live). config/read answers with the config the daemon would give a thread in the folder asked
@@ -69,10 +77,14 @@ let emitNow, hasRaced = false, isSubscribed = false, hadPerson = carried?.hadPer
 let isWaiting = carried?.isWaiting ?? false
 // Stands for the time of the saved thread's last update.
 let stamp = carried?.stamp ?? 1
+// The running turn's first user message, as thread/turns/list shows it.
+let first = carried?.first ?? null
+// The thread/read answers held back while readHold is there.
+const reads = []
 // Written whole and then renamed into place: a proxy killed in the middle of a write leaves the file before it.
 const save = () => {
   try {
-    writeFileSync(stateFile + '.' + process.pid, JSON.stringify({ running, hadPerson, unloadAt, isUnloaded, isSubscribed, isWaiting, stamp, seen: Date.now() }))
+    writeFileSync(stateFile + '.' + process.pid, JSON.stringify({ running, hadPerson, unloadAt, isUnloaded, isSubscribed, isWaiting, stamp, first, seen: Date.now() }))
     renameSync(stateFile + '.' + process.pid, stateFile)
   } catch { /* The next write, 50 ms on, carries the same state. */ }
 }
@@ -111,18 +123,21 @@ const isListed = () => {
   return false
 }
 const notice = frame => { if (isSubscribed) emitNow(frame) }
-const ended = () => { running = null; isWaiting = false; stamp += 1; restartUnload(); save() }
+const ended = () => { running = null; first = null; isWaiting = false; stamp += 1; restartUnload(); save() }
 const thread = id => ({ id, cwd: config.cwd ?? '/synthetic/project', ...(config.noMarker ? {} : { updatedAt: stamp }), status: running ? { type: 'active', activeFlags: isWaiting ? ['waitingOnApproval'] : [] } : { type: 'idle' } })
 const ackOf = text => 'ACK ' + text.match(/ACK ([0-9a-f]{6})/)[1]
 // A user message item, as the daemon reports one: the claim nonce a client gave comes back as `clientId`.
 const userMessage = (threadId, turnId, content, clientId) => ({ method: 'item/completed', params: { threadId, turnId, item: { type: 'userMessage', ...(clientId ? { clientId } : {}), content } } })
 // The person's own turn, started in their own client, with what they typed as its first user message.
+const typedBy = threadId => userMessage(threadId, 'turn-person', [{ type: 'text', text: 'A message the person typed', text_elements: [] }])
 const begin = threadId => {
   running = 'turn-person'
   stamp += 1
+  const typed = typedBy(threadId)
+  first = typed.params.item
   notice({ method: 'turn/started', params: { threadId, turn: { id: running } } })
   notice({ method: 'thread/status/changed', params: { threadId, status: { type: 'active' } } })
-  notice(userMessage(threadId, running, [{ type: 'text', text: 'A message the person typed', text_elements: [] }]))
+  notice(typed)
 }
 const finish = (id, threadId, text) => {
   if (config.approval) notice({ id: 999, method: 'item/commandExecution/requestApproval', params: { threadId, turnId: id } })
@@ -143,6 +158,7 @@ const handle = (value, emit) => {
     const seconds = fault === 'odd' ? 'sixty' : config.unloadSecs ?? 0
     emit({ id: value.id, result: { config: seconds === 'none' ? {} : { thread_unload_delay_secs: seconds }, origins: {} } })
   }
+  if (value.method === 'thread/turns/list') emit({ id: value.id, result: { data: running ? [{ id: running, status: 'inProgress', items: first ? [first] : [] }] : [], nextCursor: null } })
   if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: isListed() ? config.loaded : [], nextCursor: null } })
   if (value.method === 'thread/unsubscribe') {
     const fault = unsubscribeFaults.shift()
@@ -201,6 +217,7 @@ const handle = (value, emit) => {
       begin(threadId)
       return
     }
+    if (config.readHold && existsSync(config.readHold)) { reads.push(() => emit({ id: value.id, result: { thread: thread(threadId) } })); return }
     if (config.readDelay) { setTimeout(() => emit({ id: value.id, result: { thread: thread(threadId) } }), config.readDelay); return }
     emit({ id: value.id, result: { thread: thread(threadId) } })
   }
@@ -209,6 +226,15 @@ const handle = (value, emit) => {
     log({ startedInRunningTurn: Boolean(running) || Boolean((config.joinOnStart || config.joinLate) && !hasRaced) })
     if (config.start === 'mute') return
     if (config.start === 'die') process.exit(0)
+    if (config.start === 'lost' && !running) {
+      // Nothing is written to the connection. The exit handler saves the daemon's side: the turn runs on there, and the next
+      // proxy finds it.
+      running = config.lostTurn === 'person' ? 'turn-person' : 'turn-delivery'
+      first = (config.lostTurn === 'person' ? typedBy(threadId) : userMessage(threadId, running, value.params.input, value.params.clientUserMessageId)).params.item
+      stamp += 1
+      isWaiting = config.approval === 'hold'
+      process.exit(0)
+    }
     if (config.start === 'endFirst' && !running) {
       const id = 'turn-delivery'
       notice({ method: 'item/completed', params: { threadId, turnId: id, item: { type: 'agentMessage', text: ackOf(value.params.input[0].text) } } })
@@ -248,7 +274,10 @@ const handle = (value, emit) => {
     if (config.start === 'empty') { emit({ id: value.id, result: {} }); return }
     running = 'turn-delivery'
     stamp += 1
-    emit({ id: value.id, result: { turn: { id: running } } })
+    first = own.params.item
+    const answer = () => emit({ id: value.id, result: { turn: { id: 'turn-delivery' } } })
+    if (config.startDelay) setTimeout(answer, config.startDelay)
+    else answer()
     notice({ method: 'turn/started', params: { threadId, turn: { id: running } } })
     notice({ method: 'thread/status/changed', params: { threadId, status: { type: 'active' } } })
     notice({ ...own, params: { ...own.params, turnId: running } })
@@ -272,6 +301,7 @@ const watcher = setInterval(() => {
   if (acking && config.ackFlag && existsSync(config.ackFlag)) { unlinkSync(config.ackFlag); finish('turn-delivery', acking.threadId, acking.text); acking = null }
   if (config.closeFlag && existsSync(config.closeFlag)) { unlinkSync(config.closeFlag); emitNow({ method: 'thread/closed', params: { threadId: config.loaded[0] } }) }
   if (config.interruptFlag && existsSync(config.interruptFlag)) for (const stop of interrupts.splice(0)) stop()
+  if (reads.length > 0 && !existsSync(config.readHold)) for (const answer of reads.splice(0)) answer()
   if (!running && config.beginFlag && existsSync(config.beginFlag)) { unlinkSync(config.beginFlag); begin(config.loaded[0]) }
   if (!running || !config.endFlag || !existsSync(config.endFlag)) return
   unlinkSync(config.endFlag)
