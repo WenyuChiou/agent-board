@@ -11664,6 +11664,26 @@ test("a Claude card's line and buttons follow its message, and Take back and Dis
   assert.equal(receipt(), undefined)
 })
 
+test('an OpenCode message that reads sent, not confirmed offers Copy, and the press copies its own words (#1366 review)', async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const ask = { ...model.asks[0], key: 'ask-opencode', agent: 'opencode', send: 'connected', delivery: { id: 'o1', turn: 'session', agent: 'opencode' }, session: 'session1' }
+  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', text: 'the words to copy', when: '', isMailbox: true, status: 'uncertain', error: 'UNCONFIRMED', ...receipt } }]; return next }
+  const dom = await pageDom(html, withReceipt({}), { copyAllowed: true })
+  const box = () => dom.node('needs').querySelectorAll('[data-ref-key]')[0]
+  const receipt = () => descendants(box()).find(node => (node.className || '').split(' ').includes('receipt'))
+  const buttons = () => descendants(receipt().parentNode).filter(node => node.tag === 'button')
+  assert.equal(receipt().textContent, EN.messagesSentUnconfirmed)
+  assert.deepEqual(buttons().map(node => node.textContent), [EN.serveCopyMessage])
+  buttons()[0].click()
+  await dom.settle()
+  assert.deepEqual(dom.copies, ['the words to copy'], 'the press copied the message the person typed')
+  // Its words are gone from the board (kept only a day): the line stays and there is nothing to copy.
+  await dom.redraw(withReceipt({ text: '' }))
+  assert.equal(receipt().textContent, EN.messagesSentUnconfirmed)
+  assert.ok(!buttons().some(node => node.textContent === EN.serveCopyMessage))
+})
+
 test('an agent with no open session shows as offline and its answers copy', async () => {
   const model = redesignModel()
   // Gemini has one question and one stopped task whose session ended; nothing of it is open.

@@ -406,6 +406,19 @@ test('a hook-only target takes one message per turn, oldest first, and an accept
   assert.equal(mailboxTake(state, now + 7).message.id, 'third')
 })
 
+test('a named take with nothing at the messages folder is empty with no error, as an unnamed take is (#1366 with #1448)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-absent-'))
+  try {
+    const box = hookMailbox(join(dir, 'missing'), 500)
+    assert.equal(await box.turn('opencode', 's-absent', 'CLI', Date.now(), 'abcdef012345'), null)
+    assert.equal(box.hasNoFolder, true)
+    assert.equal(box.hasDeferred, false)
+    assert.equal(box.error, null)
+    assert.equal(await box.turnOrThrow('opencode', 's-absent', 'CLI', Date.now(), 'abcdef012345'), null)
+    assert.equal(box.error, null)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('hookMailbox defers only when the store is busy or times out, and exposes store errors (#1448)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mailbox-error-'))
   try {

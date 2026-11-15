@@ -1108,6 +1108,65 @@ test('the hook finds the same default messages folder as --serve', async () => m
   } finally { await world.close() }
 }))
 
+// OpenCode's plugin takes only while a session is idle, so a busy session opens its mailbox with open instead (#1366).
+test('--mailbox open for OpenCode opens or renews the session mailbox and leaves its queued message queued; another agent is refused', async () => mailboxFixture(async f => {
+  f.seed('opencode')
+  const file = join(f.directory, 'messages.json')
+  // The mailbox is about to run out.
+  const stored = f.state()
+  f.save(file, JSON.stringify({ ...stored, mailboxes: stored.mailboxes.map(one => ({ ...one, expires: Date.now() + 60_000 })) }))
+  const open = (agent, name) => spawnSync(process.execPath, [f.script, '--mailbox', 'open', '--agent', agent, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--session', name, '--surface', 'CLI'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const box = name => f.state().mailboxes.find(one => one.id === f.mailboxId('opencode', name))
+  const renewed = open('opencode', session)
+  assert.equal(renewed.status, 0, renewed.stderr)
+  assert.deepEqual(JSON.parse(renewed.stdout.trim().split('\n').pop()), { ok: true, enrolled: true, watch: f.directory })
+  assert.ok(box(session).expires > Date.now() + 11 * 60 * 60 * 1000, 'renewed for the mailbox lifetime')
+  assert.equal(box(session).surface, 'CLI')
+  const [message] = f.state().messages
+  assert.deepEqual([message.id, message.status, message.claimed, message.ref], ['hook-mailbox-message', 'queued', 0, undefined], 'open claims nothing')
+  // A session with no mailbox yet gets one.
+  const fresh = open('opencode', 'synthetic-open-session')
+  assert.equal(fresh.status, 0, fresh.stderr)
+  assert.ok(box('synthetic-open-session')?.expires > Date.now())
+  // Like ack, release and attempt, open is OpenCode's alone.
+  const before = readFileSync(file, 'utf8')
+  const refused = open('deepseek', session)
+  assert.notEqual(refused.status, 0)
+  assert.match(refused.stderr, /INVALID_MAILBOX_CALL/)
+  assert.equal(readFileSync(file, 'utf8'), before)
+}))
+
+// Only nothing at the folder's path reads as "no board has run here"; every other state of that path is a failure the plugin must log (#1366).
+test('--mailbox open and --mailbox end for OpenCode answer ok true only when nothing is at the messages folder, and ok false for a dead link, a link to a folder or a file in its place (#1366 review)', async () => mailboxFixture(async f => {
+  const run = (mode, name) => spawnSync(process.execPath, [f.script, '--mailbox', mode, '--agent', 'opencode', '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--session', name, '--surface', 'CLI'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const answerOf = result => JSON.parse(result.stdout.trim().split('\n').pop())
+  const link = (target, path) => symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir')
+  const cases = [
+    ['a dead link', () => { const gone = join(f.home, 'gone'); mkdirSync(gone); link(gone, f.directory); rmSync(gone, { recursive: true }) }, false],
+    ['a link to a real folder', () => { const real = join(f.home, 'real'); mkdirSync(real); writeFileSync(join(real, 'marker'), 'kept'); link(real, f.directory) }, false],
+    ['a file in its place', () => writeFileSync(f.directory, 'not a folder'), false],
+    ['no folder', () => {}, true],
+  ]
+  // Every case runs, so a failure names all the cases that are wrong, not only the first.
+  const wrong = []
+  for (const [label, arrange, isEmpty] of cases) {
+    rmSync(f.directory, { recursive: true, force: true })
+    mkdirSync(dirname(f.directory), { recursive: true })
+    arrange()
+    const opened = run('open', `${session}-${label}`), ended = run('end', `${session}-${label}`)
+    assert.equal(opened.status, 0, `${label}: ${opened.stderr}`)
+    assert.equal(ended.status, 0, `${label}: ${ended.stderr}`)
+    const open = answerOf(opened), end = answerOf(ended)
+    if (open.ok !== isEmpty) wrong.push(`${label}: open ${JSON.stringify(open)}`)
+    if (end.ok !== isEmpty) wrong.push(`${label}: end ${JSON.stringify(end)}`)
+    if (isEmpty) assert.equal(open.enrolled, false, label)
+    else if (open.ok === false) assert.match(open.code, /^[A-Z][A-Z0-9_]*$/, label)
+    if (label === 'a link to a real folder') assert.deepEqual(readdirSync(join(f.home, 'real')), ['marker'], 'the target folder is left untouched')
+    if (isEmpty) assert.ok(!existsSync(f.directory), 'no folder was created')
+  }
+  assert.deepEqual(wrong, [])
+}))
+
 test('the codex-local fixture removes its own prefix\'s folders older than six hours and keeps newer ones', async () => {
   const older = mkdtempSync(join(tmpdir(), 'codex local-'))
   const newer = mkdtempSync(join(tmpdir(), 'codex local-'))
@@ -3851,7 +3910,9 @@ test('SDK metadata and reporter execution share one deadline without a late writ
     const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
     const plugin = join(home, 'synthetic-plugin.mjs')
     writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub))
-    writeFileSync(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = {"hookVersion":1,"synthetic":true}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'late'), 1600)\n`)
+    // The plugin's OpenCode receiver (#724) calls this same script with --mailbox; those calls end at once,
+    // so only the reporter's run writes the pid and could write late.
+    writeFileSync(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = {"hookVersion":1,"synthetic":true}\nimport { writeFileSync } from 'node:fs'\nif (process.argv.includes('--mailbox')) process.exit(0)\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'late'), 1600)\n`)
     const { AgentBoardLocal } = await import(pathToFileURL(plugin))
     const adapter = await AgentBoardLocal({ client: { session: { get: async () => {
       // Leave room to start the real child on Windows; 600 + 1600 still
