@@ -6816,6 +6816,74 @@ test('Send to Codex is on by default; --no-codex-send turns it off, a plain comm
   } finally { await board.end(urls) }
 })
 
+test('a page that reports noCodexSend is replaced by one with Send to Codex off, a page of a build before #318 by one with it on, and one launch does not hand the setting to the next in the same command (#318)', { timeout: 90_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  const fakes = []
+  const pingOf = async url => {
+    const address = new URL(url)
+    return (await fetchAt('127.0.0.1', Number(address.port), 'GET', '/api/ping', { 'x-board-token': address.searchParams.get('t') })).json()
+  }
+  // A stand-in page of another build: it answers its ping with `fields`, and agrees to close after running `onClose`.
+  const fakePage = async (fields, onClose = () => {}) => {
+    const fake = createServer((req, res) => {
+      if (req.url === '/api/ping') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ path: board.path, built: 'synthetic-earlier-build', allowResume: false, ...fields }))
+      } else if (req.url === '/api/close') {
+        onClose()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{}')
+      } else {
+        res.writeHead(404)
+        res.end()
+      }
+    })
+    await new Promise(done => fake.listen(0, '127.0.0.1', done))
+    fakes.push(fake)
+    const { port } = fake.address()
+    return { port, url: `http://127.0.0.1:${port}/?t=synthetic-${port}` }
+  }
+  const addressOf = (page, pid) => JSON.stringify({ pid, port: page.port, url: page.url, path: board.path, built: 'synthetic-earlier-build' })
+  let blocker = null
+  try {
+    // A page started with --no-codex-send reports noCodexSend: a plain command that replaces it (here for a newer build) gives
+    // the new page the same switch.
+    const off = await fakePage({ codexSend: false, noCodexSend: true })
+    addressFixture(board.served, addressOf(off, process.pid))
+    const replaced = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(replaced)
+    urls.push(replaced)
+    const replacedPing = await pingOf(replaced)
+    assert.equal(replacedPing.codexSend, false)
+    assert.equal(replacedPing.noCodexSend, true)
+    await closeAt(replaced, board.served)
+
+    // `--keys "o o"` opens the page twice in one command, as `--watch` can. The first launch lets go of a page with it off;
+    // its own page cannot take the port `blocker` holds, and the page it let go of leaves the address file to a page of a
+    // build before #318, which reports no noCodexSend. The second launch replaces that one, whose closing frees the port.
+    blocker = createNetServer()
+    await new Promise(done => blocker.listen(0, '127.0.0.1', done))
+    const { port } = blocker.address()
+    const earlier = await fakePage({ codexSend: false }, () => blocker.close())
+    const offAgain = await fakePage({ codexSend: false, noCodexSend: true }, () => writeFileSync(board.served, addressOf(earlier, process.pid + 1)))
+    addressFixture(board.served, addressOf(offAgain, process.pid))
+    const keys = await new Promise(done => execFile(process.execPath, [board.script, '--keys', 'o o', '--no-open', '--port', String(port)], { env: board.env, encoding: 'utf8', timeout: 60_000 }, (error, out) => done(out)))
+    const record = JSON.parse(readFileSync(board.served, 'utf8'))
+    urls.push(record.url)
+    assert.equal(record.port, port, keys)
+    // The page of the second launch has Send to Codex on: the page it replaced was of a build before #318, and the first
+    // launch's off page is not that launch's to know.
+    const secondPing = await pingOf(record.url)
+    assert.equal(secondPing.codexSend, true)
+    assert.equal(secondPing.noCodexSend, false)
+  } finally {
+    blocker?.close()
+    for (const fake of fakes) { fake.close(); fake.closeAllConnections() }
+    await board.end(urls)
+  }
+})
+
 test('the board command in a read-only sandbox reuses a running page\'s link', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
   const board = serveIn()
   const preload = join(board.dir, 'acl-denied.cjs')
