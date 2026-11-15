@@ -103,8 +103,9 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   if (reason === 'SHADOWED') return s.serveLineShadowed
   if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
   // Codex's daemon receiver starts a message only once it has watched the thread for one unload delay, about a minute
-  // unless Codex's config sets a longer one (docs/MESSAGING.md, "How long it watches first"), so an idle Codex card on
-  // that surface does not promise a start right away (#1506). Other Codex surfaces have no such watch.
+  // unless Codex's config sets a longer one, and so has read a person's own Codex on it (docs/MESSAGING.md, "How long it
+  // watches first"). An idle Codex card on that surface says so instead of promising a start right away; with nobody on
+  // the thread, or a delay it cannot read, the receiver holds the message (#1506). Other Codex surfaces have no such watch.
   const isWatched = agent === 'codex' && surface === SURFACE_IDS.codexDaemon
   const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : isWatched ? s.serveLineSoon(name) : s.serveLineNow(name))
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
