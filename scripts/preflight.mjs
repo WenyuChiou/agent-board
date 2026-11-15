@@ -4,7 +4,7 @@ import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, mkd
 import { tmpdir, userInfo } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { addedLines, caseRows, testTitles, titleKnown } from './pr-check.mjs'
+import { addedLines, caseRows, failFirstValues, testTitles, titleKnown } from './pr-check.mjs'
 import { runFailFirst, stateWords } from './fail-first.mjs'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 import { isBundleFile } from './bundle-text.mjs'
@@ -995,12 +995,10 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       // The body is checked as it will read with the line above pasted; the file itself is left as it is.
       if (failFirstLine) {
         const text = read(bodyPath)
-        // A filled line (pasted already, or `none, <reason>`) is checked as it is; otherwise the line takes the template's
-        // placeholder, or goes at the end. One line either way, since pr-check reads the placeholder as no line.
-        const filled = /^[ \t]*(?:[-*][ \t]+)?(?:(?:PASS|WARN|FAIL)[ \t]+)?Fail-first:[ \t]*[^<\s]/im
-        const placeholder = /^([ \t]*(?:[-*][ \t]+)?)Fail-first:[ \t]*(?:<.*)?$/im
-        const pasted = filled.test(text) ? null
-          : placeholder.test(text) ? text.replace(placeholder, (_, lead) => `${lead}${failFirstLine}`) : `${text.trimEnd()}\n\n${failFirstLine}\n`
+        // A filled line (pasted already, or `none, <reason>`) is checked as it is; otherwise the line goes at the end.
+        // Lines are read as pr-check reads them, so an example in a fence is not a line and a placeholder is none.
+        const isFilled = failFirstValues(text).some(value => value !== '' && !value.startsWith('<'))
+        const pasted = isFilled ? null : `${text.trimEnd()}\n\n${failFirstLine}\n`
         if (pasted !== null) {
           copy = mkdtempSync(join(tmpdir(), 'agent-board-preflight-body-'))
           bodyPath = join(copy, 'body.md')

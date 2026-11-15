@@ -2155,6 +2155,14 @@ test('pr-check wants a Fail-first line for the current head on a Ready risk-tier
   assert.deepEqual(firstRun('', { isDraft: true }).problems, [])
   assert.deepEqual(firstRun('', { number: FAIL_FIRST_FROM }).problems, [])
   assert.deepEqual(cases({ body: 'Fixes #1\nTier: risk\nSurface: delivery\nCases: none, one event in one state\n', title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems, [])
+  // On another surface a case table is not required, but one the body has is held to the same tests.
+  const wording = `Fixes #1\nTier: risk\nSurface: wording\n\n${caseTableText(caseRow('`receiver keeps the turn`'))}\n`
+  const voluntary = (text, extra = {}) => cases({ body: `${wording}${text}`, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false, ...extra }).problems.map(item => item.message)
+  assert.deepEqual(voluntary(''), ['a Ready risk-tier pull request with a case table has no `Fail-first:` line.'])
+  assert.deepEqual(voluntary(`\n${firstLine}\n`), [])
+  assert.deepEqual(voluntary('', { isDraft: true }), [])
+  assert.deepEqual(voluntary('', { number: FAIL_FIRST_FROM }), [])
+  assert.deepEqual(cases({ body: 'Fixes #1\nTier: risk\nSurface: wording\n', title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems, [])
   // checkPr reads the head's tests and the head itself.
   const risky = { ...syntheticPr(), number: FAIL_FIRST_FROM + 1, testFiles: [{ path: 'tests/x.test.mjs', text: "test('receiver keeps the turn', () => {})" }], body: `${body}Tier: risk\nSurface: data\nCases: 1 rows\n\n${caseTableText(caseRow('`receiver keeps the turn`'))}\n` }
   assert.deepEqual(checkPr(risky).problems.filter(item => item.check === 'cases').map(item => item.message), ['a Ready risk-tier pull request with a case table has no `Fail-first:` line.'])
