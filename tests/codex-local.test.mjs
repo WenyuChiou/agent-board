@@ -6845,17 +6845,27 @@ const opencodeOneShot = (home, mode, scenario = 'default') => {
   writeFileSync(calls, '')
   writeFileSync(exits, '')
   writeFileSync(calls + '.timing', '')
+  // #576: a failing Windows run spent 2.6 s between the end of the wait and the first log write, where the
+  // only system call was this stub's own write of its timing record. While exiting, the fixture's records
+  // stay in memory and the last exit listener writes them, after the exit's end mark, so the test's own
+  // file writes are no longer part of the time it measures.
+  const record = `const exitRecords = globalThis[Symbol.for('agent-board.test-576-exit-records')] ??= []
+const record = (file, value) => { if (globalThis.isExiting) exitRecords.push([file, JSON.stringify(value) + '\\n']); else fs.appendFileSync(file, JSON.stringify(value) + '\\n') }`
   const spawnStub = `import { spawnSync as realSpawnSync } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
+${record}
 const spawnSync = (file, args, options) => {
   const { session_id, state, cwd } = JSON.parse(options.input)
-  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ session: session_id, state, isExiting: globalThis.isExiting === true }) + '\\n')
-  if (globalThis.isExiting) appendFileSync(${JSON.stringify(exits)}, JSON.stringify(cwd ?? null) + '\\n')
+  record(${JSON.stringify(calls)}, { session: session_id, state, isExiting: globalThis.isExiting === true })
+  if (globalThis.isExiting) record(${JSON.stringify(exits)}, cwd ?? null)
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'fail') return { status: 1, stdout: '', stderr: '' }
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'hang') {
     const t0 = performance.now()
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, options.timeout)
-    try { appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ wait: session_id, asked: options.timeout, t0, t1: performance.now() }) + '\\n') } catch {}
+    const t1 = performance.now()
+    record(${JSON.stringify(calls + '.timing')}, { wait: session_id, asked: options.timeout, t0, t1 })
+    // The last moment before the plugin gets the timeout back; its catch then calls hookError, whose t0 follows.
+    const returned = performance.now()
+    record(${JSON.stringify(calls + '.timing')}, { mark: 'returned', t0: returned, t1: returned })
     return { error: { code: 'ETIMEDOUT' }, status: null, signal: 'SIGKILL' }
   }
   return realSpawnSync(file, args, options)
@@ -6869,16 +6879,20 @@ const spawnSync = (file, args, options) => {
   const t0 = performance.now(), file = ${JSON.stringify(join(home, '.agent-board', 'hook-errors.log'))}
   let size = 0
   try { size = fs.statSync(file).size } catch {}
-  try { return timedHookError(code) } finally { if (globalThis.isExiting) try { fs.appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ log: code, size, t0, t1: performance.now() }) + '\\n') } catch {} }
+  try { return timedHookError(code) } finally { if (globalThis.isExiting) record(${JSON.stringify(calls + '.timing')}, { log: code, size, t0, t1: performance.now() }) }
 }
 const timedHookError = code => {`))
   writeFileSync(copy, readFileSync(plugin))
   // Exit listeners run in order, so the ones around the plugin's own time its exit work.
-  writeFileSync(main, `import { writeFileSync } from 'node:fs'
+  writeFileSync(main, `import { appendFileSync, writeFileSync } from 'node:fs'
 const marks = {}
 process.on('exit', () => { marks.start = Date.now(); marks.monotonicStart = performance.now(); globalThis.isExiting = true })
 const { AgentBoardLocal } = await import(${JSON.stringify(pathToFileURL(plugin).href)})
-process.on('exit', () => { marks.end = Date.now(); marks.monotonicEnd = performance.now(); writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks)) })
+process.on('exit', () => {
+  marks.end = Date.now(); marks.monotonicEnd = performance.now()
+  for (const [file, line] of globalThis[Symbol.for('agent-board.test-576-exit-records')] ?? []) appendFileSync(file, line)
+  writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks))
+})
 let gets = 0, release = () => {}
 const isStalled = ${JSON.stringify(scenario)} === 'stalled'
 const holdAt = { 'late-chat': 0, 'second-chat': 2 }[${JSON.stringify(scenario)}] ?? -1

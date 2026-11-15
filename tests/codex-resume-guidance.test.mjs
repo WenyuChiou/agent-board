@@ -30,7 +30,7 @@ const hints = [
 ]
 const languages = [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]
 const routes = [{ agent: 'codex', kind: 'live', routes: {
-  idle: { line: 'now', record: 'docs/validation/synthetic-codex-route.md', surfaces: [SURFACE_IDS.cli] },
+  idle: { line: 'now', record: 'docs/validation/synthetic-codex-route.md', surfaces: [SURFACE_IDS.cli, SURFACE_IDS.codexDaemon] },
   working: { line: 'none', record: null, surfaces: [] },
   ended: { line: 'none', record: null, surfaces: [] },
 } }]
@@ -120,5 +120,20 @@ test('the explicit legacy resume option keeps its computer and LAN instructions 
     assert.equal(lan.resume, null)
     assert.equal(lan.delivery, undefined)
     assert.equal(lan.info, s.serveLanSend('Codex'))
+  }
+})
+
+test('the resumed Codex daemon card preserves its watch delay alongside the ended hint (#1505)', () => {
+  for (const [, s] of languages) {
+    const connection = { ...staleConnection, surface: SURFACE_IDS.codexDaemon }
+    const ended = rowOf(model(s, 'ended', [connection]))
+    assert.equal(ended.lineText, s.serveCodexResumePrompt)
+    assert.equal(ended.canSend, false)
+    assert.equal(ended.delivery, undefined)
+    const waiting = rowOf(model(s, 'waiting', [connection]))
+    assert.equal(waiting.lineText, s.serveLineSoon('Codex'))
+    assert.equal(waiting.canSend, true)
+    assert.equal(waiting.delivery.id, connection.id)
+    assert.equal(routeText('now', true, 'codex', s, 'working', undefined, SURFACE_IDS.codexDaemon), s.serveLineNowWorking('Codex'))
   }
 })
