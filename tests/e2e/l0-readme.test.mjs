@@ -467,7 +467,7 @@ describe('L0 discover and install from the README', () => {
       'zh-CN': { pane: '`/agent-board`（看板网页）', page: '看板网页', notYet: '暂不支持', untested: '尚未测试', appNext: '卡片有“排入”时可排给它。桌面 app：实际跑过；IDE：没有单独跑过，它的 hook 把它报告成 app 的界面时，跟 app 一样处理；[什么时候交给它](docs/MESSAGING.md#agent-and-surface-support)（英文）', second: '快速开始的第二个命令' },
     }
     // Agents with a desktop app or IDE in docs/MESSAGING.md "Agent and surface support", and what that table says of each.
-    const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'appNext'], Cursor: ['page', 'untested'], OpenCode: ['page', 'notYet'] }
+    const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'notYet'], Antigravity: ['page', 'appNext'], Cursor: ['page', 'untested'], OpenCode: ['page', 'untested'] }
     // The route lines with a live note on any surface of a README row, whatever the receiver or the state: a route the
     // routes file records that no cell is worded for fails here until the cell is decided.
     const noted = (routes, agent, surfaces) => [...new Set(routes.filter(one => one.agent === agent).flatMap(one => [one.routes.idle, one.routes.working, one.routes.ended])
@@ -503,7 +503,7 @@ describe('L0 discover and install from the README', () => {
     assert.throws(() => checkCells([...RECEIVER_ROUTES, ended('opencode', 'docs/validation/synthetic-opencode.md')]), /opencode on /)
     const messaging = read('docs/MESSAGING.md')
     const appNote = 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md'
-    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Proposed', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Verified', `[${appNote}](../${appNote})`], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Proposed', 'Not tested']]) {
+    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Proposed', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Verified', `[${appNote}](../${appNote})`], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Implemented', 'Not tested']]) {
       assert.ok(messaging.split('\n').some(line => line.startsWith(`| ${host} | ${surface} | `) && line.includes(`| ${status} | ${live} |`)), `docs/MESSAGING.md: ${host} ${surface} is ${status}, ${live}`)
     }
     for (const [name, lang] of READMES) {

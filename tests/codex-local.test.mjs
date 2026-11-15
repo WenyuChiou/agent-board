@@ -1108,6 +1108,65 @@ test('the hook finds the same default messages folder as --serve', async () => m
   } finally { await world.close() }
 }))
 
+// OpenCode's plugin takes only while a session is idle, so a busy session opens its mailbox with open instead (#1366).
+test('--mailbox open for OpenCode opens or renews the session mailbox and leaves its queued message queued; another agent is refused', async () => mailboxFixture(async f => {
+  f.seed('opencode')
+  const file = join(f.directory, 'messages.json')
+  // The mailbox is about to run out.
+  const stored = f.state()
+  f.save(file, JSON.stringify({ ...stored, mailboxes: stored.mailboxes.map(one => ({ ...one, expires: Date.now() + 60_000 })) }))
+  const open = (agent, name) => spawnSync(process.execPath, [f.script, '--mailbox', 'open', '--agent', agent, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--session', name, '--surface', 'CLI'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const box = name => f.state().mailboxes.find(one => one.id === f.mailboxId('opencode', name))
+  const renewed = open('opencode', session)
+  assert.equal(renewed.status, 0, renewed.stderr)
+  assert.deepEqual(JSON.parse(renewed.stdout.trim().split('\n').pop()), { ok: true, enrolled: true, watch: f.directory })
+  assert.ok(box(session).expires > Date.now() + 11 * 60 * 60 * 1000, 'renewed for the mailbox lifetime')
+  assert.equal(box(session).surface, 'CLI')
+  const [message] = f.state().messages
+  assert.deepEqual([message.id, message.status, message.claimed, message.ref], ['hook-mailbox-message', 'queued', 0, undefined], 'open claims nothing')
+  // A session with no mailbox yet gets one.
+  const fresh = open('opencode', 'synthetic-open-session')
+  assert.equal(fresh.status, 0, fresh.stderr)
+  assert.ok(box('synthetic-open-session')?.expires > Date.now())
+  // Like ack, release and attempt, open is OpenCode's alone.
+  const before = readFileSync(file, 'utf8')
+  const refused = open('deepseek', session)
+  assert.notEqual(refused.status, 0)
+  assert.match(refused.stderr, /INVALID_MAILBOX_CALL/)
+  assert.equal(readFileSync(file, 'utf8'), before)
+}))
+
+// Only nothing at the folder's path reads as "no board has run here"; every other state of that path is a failure the plugin must log (#1366).
+test('--mailbox open and --mailbox end for OpenCode answer ok true only when nothing is at the messages folder, and ok false for a dead link, a link to a folder or a file in its place (#1366 review)', async () => mailboxFixture(async f => {
+  const run = (mode, name) => spawnSync(process.execPath, [f.script, '--mailbox', mode, '--agent', 'opencode', '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--session', name, '--surface', 'CLI'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const answerOf = result => JSON.parse(result.stdout.trim().split('\n').pop())
+  const link = (target, path) => symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir')
+  const cases = [
+    ['a dead link', () => { const gone = join(f.home, 'gone'); mkdirSync(gone); link(gone, f.directory); rmSync(gone, { recursive: true }) }, false],
+    ['a link to a real folder', () => { const real = join(f.home, 'real'); mkdirSync(real); writeFileSync(join(real, 'marker'), 'kept'); link(real, f.directory) }, false],
+    ['a file in its place', () => writeFileSync(f.directory, 'not a folder'), false],
+    ['no folder', () => {}, true],
+  ]
+  // Every case runs, so a failure names all the cases that are wrong, not only the first.
+  const wrong = []
+  for (const [label, arrange, isEmpty] of cases) {
+    rmSync(f.directory, { recursive: true, force: true })
+    mkdirSync(dirname(f.directory), { recursive: true })
+    arrange()
+    const opened = run('open', `${session}-${label}`), ended = run('end', `${session}-${label}`)
+    assert.equal(opened.status, 0, `${label}: ${opened.stderr}`)
+    assert.equal(ended.status, 0, `${label}: ${ended.stderr}`)
+    const open = answerOf(opened), end = answerOf(ended)
+    if (open.ok !== isEmpty) wrong.push(`${label}: open ${JSON.stringify(open)}`)
+    if (end.ok !== isEmpty) wrong.push(`${label}: end ${JSON.stringify(end)}`)
+    if (isEmpty) assert.equal(open.enrolled, false, label)
+    else if (open.ok === false) assert.match(open.code, /^[A-Z][A-Z0-9_]*$/, label)
+    if (label === 'a link to a real folder') assert.deepEqual(readdirSync(join(f.home, 'real')), ['marker'], 'the target folder is left untouched')
+    if (isEmpty) assert.ok(!existsSync(f.directory), 'no folder was created')
+  }
+  assert.deepEqual(wrong, [])
+}))
+
 test('the codex-local fixture removes its own prefix\'s folders older than six hours and keeps newer ones', async () => {
   const older = mkdtempSync(join(tmpdir(), 'codex local-'))
   const newer = mkdtempSync(join(tmpdir(), 'codex local-'))
@@ -3851,7 +3910,9 @@ test('SDK metadata and reporter execution share one deadline without a late writ
     const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
     const plugin = join(home, 'synthetic-plugin.mjs')
     writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub))
-    writeFileSync(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = {"hookVersion":1,"synthetic":true}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'late'), 1600)\n`)
+    // The plugin's OpenCode receiver (#724) calls this same script with --mailbox; those calls end at once,
+    // so only the reporter's run writes the pid and could write late.
+    writeFileSync(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = {"hookVersion":1,"synthetic":true}\nimport { writeFileSync } from 'node:fs'\nif (process.argv.includes('--mailbox')) process.exit(0)\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'late'), 1600)\n`)
     const { AgentBoardLocal } = await import(pathToFileURL(plugin))
     const adapter = await AgentBoardLocal({ client: { session: { get: async () => {
       // Leave room to start the real child on Windows; 600 + 1600 still
@@ -5928,6 +5989,86 @@ test('Grok reopens a done block for a closing question and keeps it done for a p
   assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
 }))
 
+test('Codex, Cursor and --agent-status keep the plain closing question when a reply only lists choices (#1277)', () => fixture(f => {
+  // Buttons come only from a list the agent gives itself: a list in the reply's text adds no options line.
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-list-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-list-1', { last_assistant_message: 'Which database should I use?\n1. Postgres\n2. SQLite' }).status, 0)
+  const codexAsked = readFileSync(f.progress, 'utf8')
+  assert.match(codexAsked, /- \[\?\] Which database should I use\?\n<!-- question=[a-f0-9]{64}:\d+ -->/)
+  assert.doesNotMatch(codexAsked, /<!-- options=/)
+  assert.equal(f.event('UserPromptSubmit', 'turn-list-2').status, 0)
+  assert.equal(f.event('Stop', 'turn-list-2', { last_assistant_message: 'Done using Postgres.' }).status, 0)
+  const codexSettled = readFileSync(f.progress, 'utf8')
+  assert.ok(codexSettled.includes('- [x] Which database should I use?'))
+  assert.doesNotMatch(codexSettled, /<!-- options=/)
+
+  // Cursor: a list before the closing question.
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const cursorId = 'synthetic-cursor-list-choices'
+  const cursorSend = (event, generation, extra = {}) => f.command(['--codex-event', '--agent', 'cursor'], { conversation_id: cursorId, generation_id: generation, hook_event_name: event, ...extra })
+  assert.equal(cursorSend('beforeSubmitPrompt', 'gen-1').status, 0)
+  assert.equal(cursorSend('afterAgentResponse', 'gen-1', { text: 'Pick the next step:\n\n- Parser\n- Tests\n\nWhich one first?' }).status, 0)
+  const cursorAsked = readFileSync(f.progress, 'utf8')
+  assert.ok(cursorAsked.includes('- [?] Which one first?'), cursorAsked)
+  assert.doesNotMatch(cursorAsked, /<!-- options=/)
+
+  // --agent-status: Grok and OpenCode replies that list choices, in Chinese and in English.
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const grokId = 'synthetic-grok-list-choices'
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: grokId, hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'waiting'], {
+    sessionId: grokId,
+    hookEventName: 'Stop',
+    lastAssistantMessage: '你要選哪個方案？\n1. 中文選項甲丠\n2. Option B',
+  }).status, 0)
+  const grokBoard = readFileSync(f.progress, 'utf8')
+  assert.ok(grokBoard.includes('- [?] 你要選哪個方案？\n'), grokBoard)
+  assert.doesNotMatch(grokBoard, /<!-- options=/)
+
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const opencodeId = 'synthetic-opencode-list-choices'
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'working'], { session_id: opencodeId, prompt_submitted: true }).status, 0)
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'waiting'], {
+    session_id: opencodeId,
+    last_assistant_message: 'Which option should I use?\n1. Alpha\n2. Beta',
+  }).status, 0)
+  const opencodeBoard = readFileSync(f.progress, 'utf8')
+  assert.ok(opencodeBoard.includes('- [?] Which option should I use?'), opencodeBoard)
+  assert.doesNotMatch(opencodeBoard, /<!-- options=/)
+  assert.ok(!opencodeBoard.includes('Alpha'), opencodeBoard)
+}))
+
+test('a Codex-family block writes a list its agent gave after checking it as text, and refuses an invalid one whole (#1277)', async () => {
+  const { codexEvent, putCodexBlock } = await importTs('../hooks/codex.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const owner = 'c'.repeat(64)
+  const latin1 = value => Buffer.from(value, 'utf8').toString('latin1')
+  const stopWith = options => {
+    const start = codexEvent(null, { session_id: 's-1277', hook_event_name: 'SessionStart' }, '2026-11-06T00:00:00Z', STRINGS.en)
+    const prompted = codexEvent(start, { session_id: 's-1277', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }, '2026-11-06T00:00:01Z', STRINGS.en)
+    return codexEvent(prompted, { session_id: 's-1277', hook_event_name: 'Stop', turn_id: 'turn-1', question: 'Which option should I use?', options }, '2026-11-06T00:00:02Z', STRINGS.en)
+  }
+  // The local reporter writes bytes as latin1 text: 41 CJK characters are 123 bytes, and stay one valid choice.
+  const cjk41 = '甲'.repeat(41)
+  const asked = stopWith([cjk41, 'Option B'])
+  assert.deepEqual(asked.askedOptions, [cjk41, 'Option B'])
+  const written = Buffer.from(putCodexBlock('', { ...asked, title: latin1(asked.title), project: latin1(asked.project), steps: asked.steps.map(latin1) }, owner, false, undefined, latin1), 'latin1').toString('utf8')
+  assert.ok(written.includes(`<!-- options=["${cjk41}","Option B"] -->`), written)
+  assert.deepEqual(parseProgress(written)[0]?.tasks[0]?.steps.at(-1)?.options, [cjk41, 'Option B'])
+  // 121 characters, ten choices, or an entry that is not a string: no part of the list is written.
+  for (const bad of [['x'.repeat(121), 'Option B'], Array.from({ length: 10 }, (_, at) => `Option ${at + 1}`), ['Alpha', 7, 'Beta']]) {
+    const refused = stopWith(bad)
+    assert.deepEqual(refused.askedOptions, [])
+    const text = putCodexBlock('', refused, owner, false, undefined, latin1)
+    assert.ok(text.includes('<!-- options=[] -->'), text)
+    assert.deepEqual(parseProgress(text)[0]?.tasks[0]?.steps.at(-1)?.options, [])
+  }
+  // No list given: no line.
+  assert.doesNotMatch(putCodexBlock('', stopWith(undefined), owner), /options=/)
+})
+
 test('a Codex turn that starts from a board delivery still shows its closing question', () => fixture(f => {
   f.install('--apply')
   const prompt = deliveryText({ id: 'AB-1', from: 'board', to: 'codex:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' })
@@ -6704,17 +6845,27 @@ const opencodeOneShot = (home, mode, scenario = 'default') => {
   writeFileSync(calls, '')
   writeFileSync(exits, '')
   writeFileSync(calls + '.timing', '')
+  // #576: a failing Windows run spent 2.6 s between the end of the wait and the first log write, where the
+  // only system call was this stub's own write of its timing record. While exiting, the fixture's records
+  // stay in memory and the last exit listener writes them, after the exit's end mark, so the test's own
+  // file writes are no longer part of the time it measures.
+  const record = `const exitRecords = globalThis[Symbol.for('agent-board.test-576-exit-records')] ??= []
+const record = (file, value) => { if (globalThis.isExiting) exitRecords.push([file, JSON.stringify(value) + '\\n']); else fs.appendFileSync(file, JSON.stringify(value) + '\\n') }`
   const spawnStub = `import { spawnSync as realSpawnSync } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
+${record}
 const spawnSync = (file, args, options) => {
   const { session_id, state, cwd } = JSON.parse(options.input)
-  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ session: session_id, state, isExiting: globalThis.isExiting === true }) + '\\n')
-  if (globalThis.isExiting) appendFileSync(${JSON.stringify(exits)}, JSON.stringify(cwd ?? null) + '\\n')
+  record(${JSON.stringify(calls)}, { session: session_id, state, isExiting: globalThis.isExiting === true })
+  if (globalThis.isExiting) record(${JSON.stringify(exits)}, cwd ?? null)
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'fail') return { status: 1, stdout: '', stderr: '' }
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'hang') {
     const t0 = performance.now()
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, options.timeout)
-    try { appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ wait: session_id, asked: options.timeout, t0, t1: performance.now() }) + '\\n') } catch {}
+    const t1 = performance.now()
+    record(${JSON.stringify(calls + '.timing')}, { wait: session_id, asked: options.timeout, t0, t1 })
+    // The last moment before the plugin gets the timeout back; its catch then calls hookError, whose t0 follows.
+    const returned = performance.now()
+    record(${JSON.stringify(calls + '.timing')}, { mark: 'returned', t0: returned, t1: returned })
     return { error: { code: 'ETIMEDOUT' }, status: null, signal: 'SIGKILL' }
   }
   return realSpawnSync(file, args, options)
@@ -6728,16 +6879,20 @@ const spawnSync = (file, args, options) => {
   const t0 = performance.now(), file = ${JSON.stringify(join(home, '.agent-board', 'hook-errors.log'))}
   let size = 0
   try { size = fs.statSync(file).size } catch {}
-  try { return timedHookError(code) } finally { if (globalThis.isExiting) try { fs.appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ log: code, size, t0, t1: performance.now() }) + '\\n') } catch {} }
+  try { return timedHookError(code) } finally { if (globalThis.isExiting) record(${JSON.stringify(calls + '.timing')}, { log: code, size, t0, t1: performance.now() }) }
 }
 const timedHookError = code => {`))
   writeFileSync(copy, readFileSync(plugin))
   // Exit listeners run in order, so the ones around the plugin's own time its exit work.
-  writeFileSync(main, `import { writeFileSync } from 'node:fs'
+  writeFileSync(main, `import { appendFileSync, writeFileSync } from 'node:fs'
 const marks = {}
 process.on('exit', () => { marks.start = Date.now(); marks.monotonicStart = performance.now(); globalThis.isExiting = true })
 const { AgentBoardLocal } = await import(${JSON.stringify(pathToFileURL(plugin).href)})
-process.on('exit', () => { marks.end = Date.now(); marks.monotonicEnd = performance.now(); writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks)) })
+process.on('exit', () => {
+  marks.end = Date.now(); marks.monotonicEnd = performance.now()
+  for (const [file, line] of globalThis[Symbol.for('agent-board.test-576-exit-records')] ?? []) appendFileSync(file, line)
+  writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks))
+})
 let gets = 0, release = () => {}
 const isStalled = ${JSON.stringify(scenario)} === 'stalled'
 const holdAt = { 'late-chat': 0, 'second-chat': 2 }[${JSON.stringify(scenario)}] ?? -1

@@ -1360,3 +1360,85 @@ test('continuation guard narrows QuestionAnswerEvidence and excludes end events 
   expect(isContinuationTurn({ ...baseTurn, at: undefined })).toBe(false)
   expect(isContinuationTurn({ ...baseTurn, at: NaN })).toBe(false)
 })
+
+test('observed questions keep the choices of an options line across block and retained ledger, and an inbox turn offers none (#1277)', () => {
+  const opts = ['Postgres', 'SQLite']
+  const stepText = 'Which database should I use?'
+  const blockWithOptions = [
+    '## demo',
+    `<!-- auto session=c0123456 agent=codex state=waiting updated=${new Date(NOW).toISOString()} dir=${encodeURIComponent('/work/demo')} -->`,
+    '### Storage choice',
+    `- [?] ${stepText}`,
+    `<!-- options=${JSON.stringify(opts)} -->`,
+    '<!-- /auto session=c0123456 -->',
+  ].join('\n')
+  const observed = observe(emptyQuestions(), blockWithOptions).ledger
+  expect(JSON.parse(observed.records[0]!.source!.data).stepOptions).toBeDefined()
+  const shown = view(observed, blockWithOptions)
+  expect(shown.waiting[0]).toMatchObject({ kind: 'choose', options: opts })
+
+  // When the block disappears before resolution, retained cards still offer the list choices.
+  const retained = view(observed, '## demo\n')
+  expect(retained.waiting[0]).toMatchObject({ kind: 'choose', options: opts })
+
+  // Without waiting options, stepOptions stays absent from source.data.
+  const plainObserved = observe(emptyQuestions(), file('- [?] Publish now?')).ledger
+  expect(JSON.parse(plainObserved.records[0]!.source!.data).stepOptions).toBeUndefined()
+
+  // An inbox turn ending on a question over a list carries no choices: nothing reads them out of the reply.
+  const inbox = peekInbox([{
+    name: `codex-turn-${NOW}-1.json`,
+    body: JSON.stringify({
+      session_id: inboxSession,
+      cwd: '/work/demo',
+      last_assistant_message: 'Done reading.\n\n- Postgres\n- SQLite\n\nWhich one should I use?',
+    }),
+    at: NOW,
+  }])
+  expect(inbox[0]).toMatchObject({ isQuestion: true, text: 'Which one should I use?' })
+  expect(inbox[0]).not.toHaveProperty('options')
+  const inboxObserved = observeQuestions(emptyQuestions(), [], null, [], NOW, true, 'inbox', undefined, inbox)
+  expect(JSON.stringify(inboxObserved.ledger)).not.toContain('options')
+  const fromInbox = buildView([], [], null, NOW, 0, {}, STRINGS.en, [], {}, inboxObserved.ledger, undefined, inbox)
+  expect(fromInbox.waiting).toHaveLength(1)
+  expect(fromInbox.waiting[0]).toMatchObject({ text: 'Which one should I use?', options: [] })
+  expect(fromInbox.waiting[0]?.kind).not.toBe('choose')
+  const keptInbox = buildView([], [], null, NOW, 0, {}, STRINGS.en, [], {}, inboxObserved.ledger)
+  expect(keptInbox.waiting).toHaveLength(1)
+  expect(keptInbox.waiting[0]).toMatchObject({ text: 'Which one should I use?', options: [] })
+  const nextTurn = { ...inboxTurn(NOW + 1000), cwd: '/work/demo', answer: 'Using Postgres.' }
+  const afterInboxAnswer = observeQuestions(inboxObserved.ledger, [], null, [], NOW + 2000, true, 'inbox-answered', undefined, inbox, [nextTurn]).ledger
+  expect(afterInboxAnswer.records[0]?.isUnresolved).toBe(false)
+  expect(buildView([], inbox, null, NOW + 2000, 0, {}, STRINGS.en, [], {}, afterInboxAnswer).waiting).toEqual([])
+
+  // Duplicate waiting question text in one block preserves distinct choices per occurrence.
+  const duplicateBlock = [
+    '## demo',
+    `<!-- auto session=d0123456 agent=codex state=waiting updated=${new Date(NOW).toISOString()} -->`,
+    '### Two matching prompts',
+    '- [?] Which one?',
+    '<!-- options=["Alpha","Beta"] -->',
+    '- [?] Which one?',
+    '<!-- options=["Red","Blue"] -->',
+    '<!-- /auto session=d0123456 -->',
+  ].join('\n')
+  const dupObserved = observe(emptyQuestions(), duplicateBlock).ledger
+  const dupRetained = view(dupObserved, '## demo\n')
+  expect(dupRetained.waiting.map(item => item.options)).toEqual([['Alpha', 'Beta'], ['Red', 'Blue']])
+  expect(view(dupObserved, '## demo\n', [dupObserved.records[1]!.id]).waiting.map(item => item.options)).toEqual([['Alpha', 'Beta']])
+
+  // With dir=, live duplicate questions preserve both distinct choice lists, while hiding the older keeps the newer.
+  const duplicateDirBlock = [
+    '## demo',
+    `<!-- auto session=d0123456 agent=codex state=waiting updated=${new Date(NOW).toISOString()} dir=${encodeURIComponent('/work/demo')} -->`,
+    '### Two matching prompts',
+    '- [?] Which one?',
+    '<!-- options=["Alpha","Beta"] -->',
+    '- [?] Which one?',
+    '<!-- options=["Red","Blue"] -->',
+    '<!-- /auto session=d0123456 -->',
+  ].join('\n')
+  const dupDirObserved = observe(emptyQuestions(), duplicateDirBlock).ledger
+  expect(view(dupDirObserved, duplicateDirBlock).waiting.map(item => item.options)).toEqual([['Alpha', 'Beta'], ['Red', 'Blue']])
+  expect(view(dupDirObserved, duplicateDirBlock, [dupDirObserved.records[0]!.id]).waiting.map(item => item.options)).toEqual([['Red', 'Blue']])
+})

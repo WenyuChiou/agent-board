@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { splitLines } from '../hooks/lines'
-import { currentStepIndex, isCutMarker, isHereProject, parseProgress, progressTail, readable } from '../hooks/parse'
+import { currentStepIndex, isCutMarker, isHereProject, NO_OPTIONS, optionsComment, optionsOf, parseProgress, progressTail, readable, validOptions } from '../hooks/parse'
 
 test('splitting progress.md into lines gives the same lines as the regular expression for every mix of CR and LF', () => {
   const alphabet = ['a', '\r', '\n']
@@ -185,4 +185,105 @@ test('steps without a ### heading still land in a task', () => {
 test('a project heading matches the repo it names', () => {
   expect(isHereProject('Persona_Framework — PFC', ['persona_framework'])).toBe(true)
   expect(isHereProject('alpha', ['persona_framework'])).toBe(false)
+})
+
+test('options markers attach cleaned choice lists to waiting steps inside owned auto blocks and round-trip safely', () => {
+  const stepText = 'Which database should I use?'
+  const block = [
+    '## synthetic-api',
+    '<!-- auto session=ab12cd34 agent=codex state=waiting updated=2026-10-30T12:00:00.000Z -->',
+    '### Pick storage',
+    `- [?] ${stepText}`,
+    '<!-- options=["Postgres","SQLite","MySQL"] -->',
+    '- [x] Done step',
+    '<!-- options=["IgnoreA","IgnoreB"] -->',
+    '<!-- /auto session=ab12cd34 -->',
+    '### Hand kept',
+    `- [?] ${stepText}`,
+    '<!-- options=["HandA","HandB"] -->',
+  ].join('\n')
+  const parsed = parseProgress(block)
+  expect(parsed[0]?.tasks[0]?.steps[0]?.options).toEqual(['Postgres', 'SQLite', 'MySQL'])
+  expect(parsed[0]?.tasks[0]?.steps[1]?.options).toBeUndefined()
+  expect(parsed[0]?.tasks[1]?.steps[0]?.options).toBeUndefined()
+  expect(readable(block.split('\n')).filter(line => line?.includes('<!-- options='))).toEqual(['<!-- options=["Postgres","SQLite","MySQL"] -->', '<!-- options=["IgnoreA","IgnoreB"] -->', '<!-- options=["HandA","HandB"] -->'])
+  expect(readable(['<!-- options=cut', '## Next', '### Keep']).slice(1)).toEqual(['## Next', '### Keep'])
+  expect(isCutMarker('<!-- options=["Postgres"')).toBe(true)
+  expect(isCutMarker('<!--   options=')).toBe(true)
+
+  const escaped = ['_config.yml', 'c -- d']
+  const escapedBlock = [
+    '## synthetic-api',
+    '<!-- auto session=ab12cd34 agent=codex state=waiting updated=2026-10-30T12:00:00.000Z -->',
+    '### Escape test',
+    `- [?] ${stepText}`,
+    optionsComment(escaped),
+    '<!-- /auto session=ab12cd34 -->',
+  ].join('\n')
+  const reparsed = parseProgress(escapedBlock)
+  expect(reparsed[0]?.tasks[0]?.steps[0]?.options).toEqual(['_config.yml', 'c -- d'])
+})
+
+test('short comment openings like <!-- opt stay hidden while <!-- options= stays a cut marker (#1277)', () => {
+  expect(isCutMarker('<!-- opt')).toBe(false)
+  expect(isCutMarker('<!-- o')).toBe(false)
+  expect(isCutMarker('<!-- options=')).toBe(true)
+
+  const parsed = parseProgress('## P\n### T\n- [x] a\n<!-- opt\n## Hidden\n### Hidden task\n- [ ] secret\n-->')
+  expect(parsed.map(project => project.name)).toEqual(['P'])
+  expect(parsed[0]?.tasks.map(task => task.title)).toEqual(['T'])
+})
+
+test('a choice is measured in characters, not UTF-16 units: 120 emoji are kept and 121 refused (#1277)', () => {
+  const emoji = '\u{1F600}'
+  expect(emoji.length).toBe(2)
+  expect(validOptions([emoji.repeat(120), 'SQLite'])).toEqual([emoji.repeat(120), 'SQLite'])
+  expect(validOptions([emoji.repeat(121), 'SQLite'])).toBeNull()
+  expect(validOptions([emoji.repeat(61), 'SQLite'])).toEqual([emoji.repeat(61), 'SQLite'])
+  // A rare CJK character outside the first plane counts as one too; ASCII and common CJK keep their bounds.
+  expect(validOptions(['\u{20BB7}'.repeat(120), '中'.repeat(120)])).toEqual(['\u{20BB7}'.repeat(120), '中'.repeat(120)])
+  expect(validOptions(['中'.repeat(121), 'SQLite'])).toBeNull()
+  expect(validOptions(['a'.repeat(121), 'SQLite'])).toBeNull()
+
+  const line = optionsComment([emoji.repeat(120), 'SQLite'])
+  expect(line).not.toBe('')
+  expect(optionsOf(line)).toEqual([emoji.repeat(120), 'SQLite'])
+  expect(optionsComment([emoji.repeat(121), 'SQLite'])).toBe('')
+  expect(optionsOf(`<!-- options=${JSON.stringify([emoji.repeat(121), 'SQLite'])} -->`)).toBeNull()
+})
+
+test('an options line with a comment opening or over-long entry is refused whole', () => {
+  expect(validOptions(['Postgres <!-- private note -->', 'SQLite'])).toBeNull()
+  expect(validOptions(['Postgres --> hidden', 'SQLite'])).toBeNull()
+  expect(validOptions(['a'.repeat(121), 'SQLite'])).toBeNull()
+  expect(validOptions(['', 'SQLite'])).toBeNull()
+  expect(validOptions(['   ', 'SQLite'])).toBeNull()
+  expect(validOptions(['OnlyOne'])).toBeNull()
+  expect(validOptions(Array.from({ length: 10 }, (_, i) => `Option ${i + 1}`))).toBeNull()
+  expect(validOptions(['  _config.yml  ', 'a'.repeat(120)])).toEqual(['_config.yml', 'a'.repeat(120)])
+
+  expect(optionsComment(['Postgres <!-- hidden -->', 'SQLite'])).toBe('')
+  expect(optionsComment(['a'.repeat(121), 'SQLite'])).toBe('')
+  expect(optionsOf(`<!-- options=${JSON.stringify(['Postgres', 'x'.repeat(121)])} -->`)).toBeNull()
+  expect(optionsOf('<!-- options=["a \\u002d\\u002d\\u003e b","SQLite"] -->')).toBeNull()
+  expect(optionsOf('<!-- options=["\\u003c!-- a","SQLite"] -->')).toBeNull()
+  expect(optionsOf(`<!-- options=${JSON.stringify(Array.from({ length: 10 }, (_, i) => `O${i}`))} -->`)).toBeNull()
+
+  const blockWithBadOptions = [
+    '## synthetic-api',
+    '<!-- auto session=ab12cd34 agent=codex state=waiting updated=2026-10-30T12:00:00.000Z -->',
+    '### Pick storage',
+    '- [?] Which database should I use?',
+    `<!-- options=${JSON.stringify(['Postgres', 'x'.repeat(121)])} -->`,
+    '- [?] Which file?',
+    '<!-- options=["\\u003c!-- bad","SQLite"] -->',
+    '<!-- /auto session=ab12cd34 -->',
+  ].join('\n')
+  const parsed = parseProgress(blockWithBadOptions)
+  // A refused line leaves the step with no choices (an empty list), never a part of the list;
+  // a step with no line at all has none to refuse.
+  expect(parsed[0]?.tasks[0]?.steps[0]?.options).toEqual([])
+  expect(parsed[0]?.tasks[0]?.steps[1]?.options).toEqual([])
+  expect(parseProgress(blockWithBadOptions.split('\n').filter(line => !line.startsWith('<!-- options=')).join('\n'))[0]?.tasks[0]?.steps.map(step => step.options)).toEqual([undefined, undefined])
+  expect(parseProgress(blockWithBadOptions.replace(/^<!-- options=.*$/m, NO_OPTIONS))[0]?.tasks[0]?.steps[0]?.options).toEqual([])
 })

@@ -1,3 +1,4 @@
+import { offersList } from './ask'
 import type { CutBlock, ProgressAuto, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressProject, ProgressTask } from '../types'
 import { prWords } from './github'
 import { ZH_TW } from './i18n'
@@ -6,7 +7,7 @@ import { stamped, stampOf, withoutStamp } from './done-stamp'
 import { localDay } from './journal'
 import { splitLines } from './lines'
 import { fallbackTitle, isAnswered, questionToken, retainedCancelledOf } from './mirror'
-import { AUTO_END, AUTO_START, autoOf, doneKey, isCutMarker, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
+import { AUTO_END, AUTO_START, autoOf, doneKey, escapeOptionsJson, isCutMarker, isTaskComplete, NO_OPTIONS, optionsComment, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
@@ -149,7 +150,7 @@ export const nativeLine = (task: ProgressMirrorTask): string => {
   if (task.native === undefined || task.waiting !== 'you') return ''
   const options = task.native.options.slice(0, 8).map(one => one.replace(/\s+/g, ' ').trim().slice(0, 120)).filter(one => one !== '')
 
-  return `<!-- native=${task.native.agent}${options.length === 0 ? '' : ` options=${JSON.stringify(options).replace(/-/g, '\\u002d').replace(/>/g, '\\u003e')}`} -->`
+  return `<!-- native=${task.native.agent}${options.length === 0 ? '' : ` options=${escapeOptionsJson(options)}`} -->`
 }
 
 export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, parent?: string): string[] => {
@@ -169,7 +170,13 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
       const token = questionToken(task)
       const native = nativeLine(task)
-      return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native])]
+      // Only the task's own list (#1277), and only when its kind is `choose` or not set: the line
+      // carries no kind, so a confirm with a list would read as a choice on another board. A list
+      // the board refuses is written as an empty one whatever the kind, which every reader shows
+      // with the reply box only.
+      const listed = native === '' && task.waiting === 'you' && (task.options ?? []).length > 0 ? optionsComment(task.options) || NO_OPTIONS : ''
+      const options = listed === NO_OPTIONS || offersList(task.ask) ? listed : ''
+      return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native]), ...(options === '' ? [] : [options])]
     }),
     ...retainedCancelledOf(mirror).map(text => `- [-] ${text}`),
     `<!-- /auto session=${id} -->`,

@@ -19,6 +19,7 @@ import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
 import { pickSurface, AGENT_ENV_VARS, sshTargetOf, pagePortOf } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+import { replaceEntryCall } from './page-reader-fixture.mjs'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
 import { makeFolderCommand, moveFileCommand } from '../hooks/old-months-run.ts'
@@ -2128,16 +2129,37 @@ test('archiving a block while its captures are still pending writes the archived
     }
   } })
   const { parseCapture } = await import('../hooks/questions.ts')
-  const board = await page()
+  const board = await page('', {}, [], undefined, `
+import { existsSync as isCaptureFlushHeld, readdirSync as captureFlushFiles } from 'node:fs'
+import { dirname as captureFlushDirectory } from 'node:path'
+const captureImmediate = globalThis.setImmediate
+globalThis.setImmediate = (callback, ...args) => captureImmediate(() => {
+  const path = globalThis.AGENT_BOARD.path
+  const isHeld = () => isCaptureFlushHeld(path + '.hold-captures')
+  const count = captureFlushFiles(captureFlushDirectory(path)).filter(name => name.includes('-questions-source-') && name.endsWith('.json')).length
+  if (!isHeld() || count < 390) return callback(...args)
+  const timer = setInterval(() => {
+    if (isHeld()) return
+    clearInterval(timer)
+    callback(...args)
+  }, 10)
+})
+${BOARD_SCRIPT}`, (_dir, path) => writeFileSync(path + '.hold-captures', ''))
   try {
     const source = bigBoard(460)
     writeFileSync(board.path, source)
     const model = (await board.call('GET', '/api/board')).json().model
-    const row = [...model.stopped, ...model.groups.flatMap(group => group.rows)].find(one => one.canArchive === true)
+    const row = [...model.stopped, ...model.groups.flatMap(group => group.rows)].filter(one => one.canArchive === true).at(-1)
     assert.ok(row !== undefined, 'the big board must have an archivable row')
+    for (let tries = 0; tries < 1200; tries++) {
+      if (readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json')).length >= 390) break
+      await delay(25)
+    }
+    const beforeAct = readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json')).length
+    assert.ok(beforeAct >= 390 && beforeAct < 400, `the background flush must pause with the last stopped block's captures still pending, got ${beforeAct}`)
     // The first view queued the captures; the archive press must drain them
     // synchronously before taking the block (R3), so all 500 are on disk the
-    // moment the press returns.
+    // moment the press returns even while the background continuation is held.
     const reply = await board.call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: '', fp: row.fp } })
     assert.equal(reply.status, 200, reply.body)
     const names = readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json'))
@@ -2163,7 +2185,10 @@ test('archiving a block while its captures are still pending writes the archived
       const hash = name.match(/([a-f0-9]{64})\.json$/)?.[1]
       assert.ok(hash !== undefined && parseCapture(text, hash) !== null, name)
     }
-  } finally { await board.close() }
+  } finally {
+    rmSync(board.path + '.hold-captures', { force: true })
+    await board.close()
+  }
 })
 
 // #921 T6: killing the page mid-flush and restarting it re-queues the missing
@@ -2261,7 +2286,7 @@ test('a view that resolves a question writes its resolved capture synchronously,
   const source = `# Progress\n\n## Synthetic\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${ago(60000)} resume=a1b2c3d4 -->\n### Answer this\n- [?] Ship it, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
   writeFileSync(path, source)
   const script = join(dir, 'worker.mjs')
-  const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  const skipped = replaceEntryCall(BOARD_SCRIPT)
   assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${skipped}\nexport { view, path };\n`)
   const previousArgs = process.argv
@@ -2319,7 +2344,7 @@ const flushWorker = async (source) => {
   const path = join(dir, 'progress.md')
   writeFileSync(path, source)
   const script = join(dir, 'worker.mjs')
-  const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  const skipped = replaceEntryCall(BOARD_SCRIPT)
   assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${skipped}\nexport { view, path, flushQuestionCaptures, pendingQuestionCaptures };\n`)
   const previousArgs = process.argv
@@ -4247,7 +4272,7 @@ const pressRuntime = async () => {
   const inside = file => typeof file === 'string' && resolve(file).startsWith(resolve(root) + sep)
   const write = (file, text) => { originalWrite(file, text); utimesSync(file, PRESS_NOW / 1000, PRESS_NOW / 1000) }
   try {
-    const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+    const skipped = replaceEntryCall(BOARD_SCRIPT)
     assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
     const old = PRESS_NOW - 10 * 86400000
     const header = `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\nconst fixtureClock = { now: ${old} };\nconst Date = class extends globalThis.Date { constructor(...args) { super(...(args.length ? args : [fixtureClock.now])); } static now() { return fixtureClock.now; } };\n`
@@ -4842,7 +4867,7 @@ test('the board script prints an unexpected error instead of exiting silently', 
     const path = join(dir, 'progress.md')
     const script = join(dir, 'agent-board.mjs')
     writeFileSync(path, FILE)
-    const broken = BOARD_SCRIPT.replace(/(try\s*\{\s*)await \w+\(\);(?=\s*\}\s*catch \(error\))/, "$1throw new TypeError('synthetic unexpected failure');")
+    const broken = replaceEntryCall(BOARD_SCRIPT, "throw new TypeError('synthetic unexpected failure');")
     assert.notEqual(broken, BOARD_SCRIPT)
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${broken}`)
     const ran = spawnSync(process.execPath, [script], { encoding: 'utf8', env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' } })
@@ -11662,6 +11687,26 @@ test("a Claude card's line and buttons follow its message, and Take back and Dis
   assert.equal(receipt().textContent, EN.claudeGotIt)
   await dom.redraw(withReceipt({ status: 'uncertain', error: 'DISMISSED' }))
   assert.equal(receipt(), undefined)
+})
+
+test('an OpenCode message that reads sent, not confirmed offers Copy, and the press copies its own words (#1366 review)', async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const ask = { ...model.asks[0], key: 'ask-opencode', agent: 'opencode', send: 'connected', delivery: { id: 'o1', turn: 'session', agent: 'opencode' }, session: 'session1' }
+  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', text: 'the words to copy', when: '', isMailbox: true, status: 'uncertain', error: 'UNCONFIRMED', ...receipt } }]; return next }
+  const dom = await pageDom(html, withReceipt({}), { copyAllowed: true })
+  const box = () => dom.node('needs').querySelectorAll('[data-ref-key]')[0]
+  const receipt = () => descendants(box()).find(node => (node.className || '').split(' ').includes('receipt'))
+  const buttons = () => descendants(receipt().parentNode).filter(node => node.tag === 'button')
+  assert.equal(receipt().textContent, EN.messagesSentUnconfirmed)
+  assert.deepEqual(buttons().map(node => node.textContent), [EN.serveCopyMessage])
+  buttons()[0].click()
+  await dom.settle()
+  assert.deepEqual(dom.copies, ['the words to copy'], 'the press copied the message the person typed')
+  // Its words are gone from the board (kept only a day): the line stays and there is nothing to copy.
+  await dom.redraw(withReceipt({ text: '' }))
+  assert.equal(receipt().textContent, EN.messagesSentUnconfirmed)
+  assert.ok(!buttons().some(node => node.textContent === EN.serveCopyMessage))
 })
 
 test('an agent with no open session shows as offline and its answers copy', async () => {

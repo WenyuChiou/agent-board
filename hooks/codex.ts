@@ -2,7 +2,7 @@ import { LANGS } from './i18n'
 import type { Strings } from './i18n'
 import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
-import { baseName, parseAttrs, parseProgress, RESUME } from './parse'
+import { baseName, escapeOptionsJson, NO_OPTIONS, parseAttrs, parseProgress, RESUME, validOptions } from './parse'
 import { scanBlocks, sectionOfProject } from './blocks'
 import { cutLine } from './step-words'
 import type { BlockSpan } from './blocks'
@@ -34,6 +34,7 @@ export type CodexReport = Origin & {
   // Separate durable incarnations: a reused approval must not retire a closing question.
   approvalRevision?: string
   askedRevision?: string
+  askedOptions?: string[]
   updated: string
   // ISO timestamp when a prompt replied to a waiting question in chat (#401).
   replied?: string
@@ -152,24 +153,47 @@ export const codexLifecycleStep = (state: string, s: Strings): string =>
 export const localAgentLifecycleStep = (state: string, s: Strings): string =>
   state === 'working' ? `- [ ] ${s.localAgentLifecycleWorking}` : state === 'done' ? `- [x] ${s.localAgentLifecycle}` : `- [ ] ${s.localAgentLifecycle}`
 
+// The choices an agent listed with its question (#1277): the whole list, or an empty one when the
+// board refuses it (an entry that is not a string or not valid, fewer than 2 or more than 9). Never
+// a part of a list; undefined when the agent listed nothing.
+export const givenOptions = (value: unknown): string[] | undefined =>
+  !Array.isArray(value) ? undefined : value.every((one): one is string => typeof one === 'string') ? validOptions(value) ?? [] : []
+
 // A later report keeps the same line as completion evidence, or reuses its slot
-// with a fresh revision when it asks again.
-export const questionSteps = (held: readonly string[], previousAsked: number | undefined, state: unknown, value: unknown, isBoardPrompt = false, previousRevision?: string, isSettlingReply = false): { steps: string[]; asked: number | undefined; askedRevision: string | undefined } => {
+// with a fresh revision when it asks again. `valueOptions` is only a list the agent itself gave:
+// nothing here reads choices out of the question's words.
+export const questionSteps = (
+  held: readonly string[],
+  previousAsked: number | undefined,
+  state: unknown,
+  value: unknown,
+  isBoardPrompt = false,
+  previousRevision?: string,
+  isSettlingReply = false,
+  valueOptions?: unknown,
+  previousOptions?: unknown,
+): { steps: string[]; asked: number | undefined; askedRevision: string | undefined; askedOptions: string[] | undefined } => {
   const steps = [...held]
   let asked = previousAsked !== undefined && Number.isInteger(previousAsked) && previousAsked >= 0 && previousAsked < steps.length ? previousAsked : undefined
   let askedRevision = previousRevision
-  if (isBoardPrompt) return { steps, asked, askedRevision }
-  if ((state === 'working' || isSettlingReply) && asked !== undefined) steps[asked] = steps[asked]!.replace(/^- \[\?\] /, '- [x] ')
+  let askedOptions: string[] | undefined = asked !== undefined && steps[asked]?.startsWith('- [?] ') ? givenOptions(previousOptions) : undefined
+  if (isBoardPrompt) return { steps, asked, askedRevision, askedOptions }
+  if ((state === 'working' || isSettlingReply) && asked !== undefined) {
+    steps[asked] = steps[asked]!.replace(/^- \[\?\] /, '- [x] ')
+    askedOptions = undefined
+  }
   const question = state === 'waiting' && typeof value === 'string' ? cutLine(value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()).text : ''
   if (question !== '' && (asked !== undefined || steps.length < 40)) {
+    const nextOptions = givenOptions(valueOptions)
     // Hosts may deliver the same closing question again after Stop or an idle status.
     // A repeated question after a real reply is a new incarnation, even in the same words.
-    if (asked === undefined || steps[asked] !== `- [?] ${question}`) askedRevision = nextRevision(askedRevision)
+    if (asked === undefined || steps[asked] !== `- [?] ${question}` || JSON.stringify(askedOptions ?? null) !== JSON.stringify(nextOptions ?? null)) askedRevision = nextRevision(askedRevision)
     // A model that already reported the question as its own [?] step keeps that one line.
     if (asked === undefined) asked = steps.includes(`- [?] ${question}`) ? steps.indexOf(`- [?] ${question}`) : steps.length
     steps[asked] = `- [?] ${question}`
+    askedOptions = nextOptions
   }
-  return { steps, asked, askedRevision }
+  return { steps, asked, askedRevision, askedOptions }
 }
 
 // Hooks describe lifecycle, not task completion. Only an explicit report can say done.
@@ -226,7 +250,7 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
       )
   const earlier = previous?.approval !== undefined && previous.approval < held.length ? previous.approval : undefined
   const approvalSteps = held.map((step, index) => event !== 'SessionStart' && index === earlier ? step.replace(/^- \[\?\] /, '- [x] ') : step)
-  const { steps, asked, askedRevision } = questionSteps(approvalSteps, previous?.asked, isWorkStop ? state : 'ended', isWorkStop ? input.question : undefined, false, previous?.askedRevision, isSettlingReply)
+  const { steps, asked, askedRevision, askedOptions } = questionSteps(approvalSteps, previous?.asked, isWorkStop ? state : 'ended', isWorkStop ? input.question : undefined, false, previous?.askedRevision, isSettlingReply, isWorkStop ? input.options : undefined, previous?.askedOptions)
   let approval = earlier
   let approvalRevision = previous?.approvalRevision
   if (event === 'PermissionRequest') {
@@ -249,6 +273,7 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
     ...(asked === undefined ? {} : { asked }),
     ...(approvalRevision === undefined ? {} : { approvalRevision }),
     ...(askedRevision === undefined ? {} : { askedRevision }),
+    ...(askedOptions === undefined ? {} : { askedOptions }),
     updated: now,
     ...(replied === undefined ? {} : { replied }),
     ...(isBoardTurn ? { isBoardTurn: true } : {}),
@@ -290,14 +315,17 @@ export const validateCodexReport = (report: CodexReport, session: string): Codex
   const owned = new Set([report.approval, report.asked].filter((index): index is number =>
     index !== undefined && Number.isInteger(index) && index >= 0 && Array.isArray(report.steps) && index < report.steps.length))
   if (Array.isArray(report.steps) && report.steps.length > 40 + owned.size) throw new Error('INVALID_STEPS')
+  const steps = reportSteps(report.state, report.steps, 40 + owned.size)
+  const askedOptions = report.asked !== undefined && steps[report.asked]?.startsWith('- [?] ') ? givenOptions(report.askedOptions) : undefined
   const context = typeof report.context === 'string' && report.context.trim() !== '' ? line(report.context) : undefined
   const startedAt = typeof report.startedAt === 'number' && Number.isFinite(report.startedAt) ? report.startedAt : undefined
-  const { context: _context, startedAt: _startedAt, titleSource: _titleSource, ...rest } = report
+  const { askedOptions: _drop, context: _context, startedAt: _startedAt, titleSource: _titleSource, ...rest } = report
   return { ...rest, session: line(session), title: line(report.title), project: line(report.project),
     ...(context === undefined ? {} : { context }),
     ...(startedAt === undefined ? {} : { startedAt }),
     ...(report.titleSource === undefined ? {} : { titleSource: report.titleSource }),
-    steps: reportSteps(report.state, report.steps, 40 + owned.size) }
+    steps,
+    ...(askedOptions === undefined ? {} : { askedOptions }) }
 }
 
 export const codexReport = (previous: CodexReport | null, session: string, input: Record<string, unknown>, now: string, s: Strings): CodexReport => {
@@ -370,16 +398,29 @@ const localBlockSpans = (lines: readonly string[], owner: string, agent: string,
   return owned
 }
 
+// Validate character length and comment markers on UTF-8 strings before optional latin1 byte encoding (`codex-local`).
+// A refused list is written as an empty one, so no reader reads choices from the question's words in its place.
+const stepOptionsLine = (options: readonly string[] | undefined, encode: (value: string) => string = value => value): string => {
+  if (options === undefined) return ''
+  const valid = validOptions(options)
+  if (valid === null) return NO_OPTIONS
+  return `<!-- options=${escapeOptionsJson(valid.map(encode))} -->`
+}
+
 // A report's step lines. The step a PermissionRequest added, while it still waits, is followed by the native line.
 const NATIVE_CODEX = '<!-- native=codex -->'
-const stepLines = (report: CodexReport, owner: string, isAsking: boolean, nativeApproval = report.approval): string[] =>
+const stepLines = (report: CodexReport, owner: string, isAsking: boolean, nativeApproval = report.approval, encode: (value: string) => string = value => value): string[] =>
   report.steps.flatMap((step, index) => {
     const kind = index === report.approval ? 'approval' : index === report.asked ? 'asked' : undefined
     const revision = kind === 'approval' ? report.approvalRevision : kind === 'asked' ? report.askedRevision : undefined
     // Old caches remain tokenless until a genuinely new ask. Never invent closure evidence.
     const token = kind !== undefined && /^[1-9]\d*$/.test(revision ?? '')
       ? [`<!-- question=${sha256(`${owner}:${kind}`)}:${revision} -->`] : []
-    return [step, ...(index === nativeApproval && (!isAsking || step.startsWith('- [?]')) ? [NATIVE_CODEX] : []), ...token]
+    const isNative = index === nativeApproval && (!isAsking || step.startsWith('- [?]'))
+    const options = !isNative && index === report.asked && step.startsWith('- [?]')
+      ? stepOptionsLine(report.askedOptions, encode)
+      : ''
+    return [step, ...(isNative ? [NATIVE_CODEX] : []), ...token, ...(options === '' ? [] : [options])]
   })
 
 // A board completion is authoritative only for this exact owned task. Lifecycle
@@ -406,7 +447,7 @@ export const boardConfirmedReport = (text: string, previous: CodexReport, owner:
 }
 
 // The full digest prevents an eight-character collision or a pasted block from acquiring ownership.
-export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false, contextLine?: string): string => {
+export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false, contextLine?: string, encode: (value: string) => string = value => value): string => {
   if (!/^[a-f0-9]{64}$/.test(owner)) throw new Error('INVALID_OWNER')
   const id = owner.slice(0, 8)
   const agent = report.agent ?? 'codex'
@@ -418,7 +459,7 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${replied}${resume}${run} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const note = contextLine ?? (report.context === undefined ? undefined : STRINGS['zh-TW'].contextNote(report.context))
-  const block = [marker, `### ${report.title}`, ...(note === undefined ? [] : [note]), ...stepLines(report, owner, true), `<!-- /auto session=${id} -->`].join(eol)
+  const block = [marker, `### ${report.title}`, ...(note === undefined ? [] : [note]), ...stepLines(report, owner, true, report.approval, encode), `<!-- /auto session=${id} -->`].join(eol)
   // Use the board's scanner: Markdown examples are not task ownership, and a
   // missing close must never reach past the next project or another agent's block.
   // Keep raw CR bytes in these lines so offsets preserve even mixed line endings.

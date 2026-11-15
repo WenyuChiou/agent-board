@@ -181,7 +181,8 @@ for (const name of RECEIVERS) assert.ok((name in NATIVE_RECEIVERS) !== (name in 
 for (const name of [...Object.keys(NATIVE_RECEIVERS), ...Object.keys(GAPS)]) assert.ok(RECEIVERS.includes(name), `${name} is missing from RECEIVERS`)
 
 const connectorSource = readFileSync(new URL('../../../scripts/message-client.mjs', import.meta.url), 'utf8')
-const connectorPoll = connectorSource.match(/setInterval\(\(\) => \{ void poll\(\) \}, (\d+)\)/)
+// The interval is `attach`'s `pollMs`, and its shipped value is that argument's default.
+const connectorPoll = /setInterval\(\(\) => \{ void poll\(\) \}, pollMs\)/.test(connectorSource) ? connectorSource.match(/\battach: async \(\{[^}\n]*\bpollMs = (\d+)\s*[,}]/) : null
 assert.ok(connectorPoll, 'Read the connector poll interval from its shipped source')
 export const CONNECTOR_POLL_MS = Number(connectorPoll[1])
 

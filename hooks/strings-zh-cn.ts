@@ -16,6 +16,7 @@ export const ZH_CN: Strings = {
   messagesTimeout: "等候回复超时，请先检查原对话",
   messagesAccepted: "等候回复",
   messagesAcceptedUnconfirmed: "已送达，尚未确认回复。",
+  messagesSentUnconfirmed: "已送出，尚未确认收到。重发前请先检查此对话。",
   messagesHandedNextTurn: '已在回合开始时交给此会话，尚未确认回复。',
   messagesHandedNow: '已交给此会话，尚未确认回复。',
   messagesAcceptedDisconnected: "连接中断。结果未确认；等候回复。",
@@ -44,6 +45,9 @@ export const ZH_CN: Strings = {
   antigravityWakeLine: 'Agent Board：看板的消息已附在这一轮，请照着处理。',
   openclawProgressTool: '把这项任务的实际进度报告给本地看板。每个实际步骤或状态改变后，把每个步骤以一行 Markdown 任务送出。回复以向用户提问收尾时，结束回合前先把问题以“- [?] <问题>”步骤（state 为 waiting）送出：看板不读回复文字，这个步骤是问题到达用户的唯一途径。需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。',
   deepseekBoardTool: '打开本地看板，或把这项任务的实际进度报告给看板。action 选 open 会启动看板网页，并返回它打印的那一行：网页链接，或没有网页的原因。action 选 report 要给 title、state 和 steps：每个实际步骤或状态改变后，把每个步骤以一行 Markdown 任务发送。回复以向用户提问收尾时，结束回合前先把问题以“- [?] <问题>”步骤（state 为 waiting）发送：看板不读回复文字，这个步骤是问题到达用户的唯一途径。需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。',
+  opencodeAckTool: '确认收到看板消息：传入消息信封里的 id 与 6 位代码，可另附一行回复摘要。',
+  opencodeAcknowledged: '已确认。',
+  opencodeAckNote: '要确认这条消息，请调用 agent_board_ack 工具，id 填 "{id}"、nonce 填 "{nonce}"（可另附一行回复摘要）。不要只回复 ACK 文本。',
   localAgentStepFormat: '一行 Markdown 任务：“- [x] 完成”、“- [~] 进行中”、“- [ ] 下一步”、“- [?] 等用户回答”、“- [!] 卡住”、“- [>] 在别处运行或已交接”、“- [-] 取消”。需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。',
   localAgentAntigravityContext: (command: string): string => `原生 hook 已将 Agent Board 绑定到当前的 Antigravity 对话。每个实际任务步骤之后与最后回复之前，将最少任务摘要以 JSON 从 stdin 传给 \`${command}\`。格式为 {"title":"任务摘要","project":"项目","state":"working","steps":["- [x] 已完成","- [~] 当前步骤"]}。等待用户时报告 state "waiting"，把待回答问句完整写成“- [?] 你的问题？”并保留已完成步骤；所有步骤完成才用 "done"。只报告摘要，不传原始对话或机密。仅使用 hook 提供给当前对话的命令；不得猜测或替换 session id、读取对话记录或绕过工具权限。原生 hooks 更新活动状态，任务步骤与问句由你明确报告。需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。`,
   localAgentMailboxDeferred: 'board: mailbox deferred',
@@ -798,11 +802,13 @@ export const ZH_CN: Strings = {
       ? `看板已停止（${code}）：${folder}。请运行 agent-board 重新启动；不确定是否送达的消息没有重新发送。`
       : code === 'MESSAGE_STORE_CLAIM_BLOCKED'
         ? `看板无法确认消息持有者（${code}）：${folder}。请先停止所有看板 server，再检查该文件夹里的 .message-claim-*.json。确认没有 hub 运行后，才能移除损坏的 claim。请保留 messages.json，不要重发不确定是否送达的消息。`
-        : code === 'ACL_CHECK_TIMEOUT'
-          ? `Windows 检查谁能打开看板的消息文件夹时用时太长（${code}）：${folder}。电脑可能正忙，例如正在扫描病毒。请稍后再试。`
-          : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
-            ? `看板无法打开消息文件夹（${code}）：${folder}。请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。`
-            : `看板无法打开消息文件夹（${code}）：${folder}。消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。`,
+        : code === 'MESSAGE_STORE_CLAIM_DAMAGED'
+          ? `看板读到的消息 claim 已损坏（${code}）：${folder}。请先停止所有看板 server，再检查该文件夹里的 .message-claim-*.json。确认没有 hub 运行后，才能移除损坏的 claim。请保留 messages.json，不要重发不确定是否送达的消息。`
+          : code === 'ACL_CHECK_TIMEOUT'
+            ? `Windows 检查谁能打开看板的消息文件夹时用时太长（${code}）：${folder}。电脑可能正忙，例如正在扫描病毒。请稍后再试。`
+            : ['MESSAGE_STORE_ACL', 'UNSAFE_MESSAGE_DIRECTORY', 'EACCES', 'EPERM'].includes(code)
+              ? `看板无法打开消息文件夹（${code}）：${folder}。请确认这个文件夹属于你的账户，而且其他账户无法打开，再试一次。`
+              : `看板无法打开消息文件夹（${code}）：${folder}。消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。`,
   serveOffline: '连不上看板。请再运行一次 agent-board；新页面会自动打开，这个标签页可以关闭。',
   serveOfflineLan: '连不上看板。请在电脑上再运行一次 agent-board --lan，再打开新地址。',
   barStyleInk: '墨',

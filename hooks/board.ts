@@ -717,7 +717,7 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLine
   const session = item.type === 'ask' ? (item.ask.target?.session ?? item.ask.session) : item.type === 'row' ? (item.row.archive?.session ?? item.row.target?.session ?? '') : ''
   const parts =
     item.type === 'ask'
-      ? [session, item.ask.target?.resume ?? '', item.ask.project, item.ask.task, item.ask.text, item.ask.note]
+      ? [session, item.ask.target?.resume ?? '', item.ask.project, item.ask.task, item.ask.text, item.ask.note, item.ask.kind, JSON.stringify(item.ask.options)]
       : item.type === 'row'
         ? [session, item.row.target?.resume ?? '', item.row.project, item.row.title, item.row.next?.step ?? '', item.row.question ?? '', item.row.resume ?? '']
         : [item.turn.agent, item.turn.project, item.turn.text]
@@ -819,8 +819,10 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
     // Where the running page can answer into the session, the key sends the answer, as the
     // page's button does; elsewhere it copies it to paste into the agent.
     const route = routes[item.key]
-    if (answer !== undefined && route !== undefined) return isSeen ? { state, action: { type: 'send', key: item.key, text: plain(answer), route } } : changed
-    if (answer !== undefined) return { state, action: { type: 'copy', text: plain(answer) } }
+    if (answer !== undefined) {
+      if (!isSeen) return changed
+      return route !== undefined ? { state, action: { type: 'send', key: item.key, text: plain(answer), route } } : { state, action: { type: 'copy', text: plain(answer) } }
+    }
     // Said only when asked: a live session's question is that session's to take off the board.
     if (key === 'a' && ask.where !== 'manual' && ask.isKept !== true && ask.canHide !== false) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
   }

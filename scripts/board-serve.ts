@@ -44,7 +44,7 @@ export type ServeOptions = {
   isDefaultMessagesDirectory?: boolean
   // The Codex receiver (#318): the Codex session ids the board knows, the Codex program to run (null: none found,
   // so nothing runs). A running turn is never steered (#1409).
-  codex?: { threads: () => string[]; executable: string | null }
+  codex?: { threads: () => string[]; executable: string | null; unloadMs?: number }
   reports?: (isFresh?: boolean) => ProgressBinding[]
   s: Strings
   port: number
@@ -912,7 +912,7 @@ export const startServer = (o: ServeOptions): void => {
     lastSeen = Date.now()
     if (o.codex?.executable) {
       // The address and token stay in this process: the Codex program is given neither.
-      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable })
+      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable, ...(o.codex.unloadMs === undefined ? {} : { unloadMs: o.codex.unloadMs, unloadMarginMs: o.codex.unloadMs }) })
       // A process that exits another way (Windows sends no SIGTERM) still ends the Codex program it started.
       process.once('exit', () => codexReceiver?.kill())
     }

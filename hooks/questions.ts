@@ -3,6 +3,8 @@ import type { PendingTurn } from './board'
 import type { AgentTurn } from './inbox'
 import { cutOffTest, matchesSpan, scanBlocks, shortId, stepWords } from './blocks'
 import { questionToken, waitsOnYou } from './mirror'
+import { offersList } from './ask'
+import { validOptions } from './parse'
 import { withoutProcessIdentity } from './session-liveness'
 import { sha256 } from './sha256'
 import type { TaskRef } from './view'
@@ -190,7 +192,43 @@ export const cutOffScopes = (projects: readonly ProgressProject[], cut: readonly
 // (finding 5): the pid, start time and host belong only in the progress file itself (PM Q3),
 // never in the ledger — a record written before this change still carries them until its next
 // observation refreshes its source.
-export const sourceData = (task: ProgressTask): string => JSON.stringify({ auto: task.auto === null ? null : withoutProcessIdentity(task.auto), steps: task.steps.map(step => step.status) })
+export const sourceData = (task: ProgressTask): string => {
+  const counts = new Map<string, number>()
+  const indexed = task.steps.map(step => {
+    const words = questionWords(step.text)
+    const occurrence = (counts.get(words) ?? 0) + 1
+    counts.set(words, occurrence)
+    return { step, hash: sha256(words).slice(0, 8), words, occurrence }
+  })
+  const stepOptions = Object.fromEntries(indexed.flatMap(({ step, hash, words, occurrence }) =>
+    // Kept whole or as the empty list of a refused line, never a part of a list.
+    step.status === 'waiting' && step.options !== undefined
+      ? [[(counts.get(words) ?? 0) > 1 ? `${hash}:${occurrence}` : hash, validOptions(step.options) ?? []]]
+      : []
+  ))
+  return JSON.stringify({ auto: task.auto === null ? null : withoutProcessIdentity(task.auto), steps: task.steps.map(step => step.status), ...(Object.keys(stepOptions).length === 0 ? {} : { stepOptions }) })
+}
+
+export const sourceOptions = (source: QuestionSource, occurrence?: number): string[] | undefined => {
+  const parsed = parsedJson(source.data)
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+  const record = parsed as Record<string, unknown>
+  const hash = sha256(questionWords(source.text)).slice(0, 8)
+  const raw = source.kind === 'own'
+    ? record.options
+    : source.kind === 'inbox'
+      ? undefined
+      : record.stepOptions !== null && typeof record.stepOptions === 'object' && !Array.isArray(record.stepOptions)
+        ? occurrence !== undefined
+          ? (record.stepOptions as Record<string, unknown>)[`${hash}:${occurrence}`] ?? (record.stepOptions as Record<string, unknown>)[hash]
+          : (record.stepOptions as Record<string, unknown>)[hash]
+        : undefined
+  if (raw === undefined) return undefined
+  // Present but not a list (the copy is a file anyone can edit): refused, not "none given".
+  if (!Array.isArray(raw)) return []
+  // The copy is a file anyone can edit: the list is read whole or refused whole, as when it was kept.
+  return raw.every((one): one is string => typeof one === 'string') ? validOptions(raw) ?? [] : []
+}
 
 type SourceSnapshot = { auto: ProgressAuto | null; steps: ProgressStepStatus[] }
 const parsedJson = (text: string): unknown => {
@@ -617,7 +655,12 @@ const ownObservations = (mine: ProgressMirror, scopeOf: QuestionScopeOf = questi
   const scope = scopeOf(mine.project, auto.agent, own, auto.resume)
   return mine.tasks.map((task, index) => {
     const text = stepWords(task).trim()
-    return { scope, session: own, index, text, words: questionWords(text), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text, agent: auto.agent, session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume }) } }
+    // The task's own list, checked whole as it is kept: a refused one is kept as an empty list.
+    // A task whose kind is not a choice (`ask: "confirm"`) keeps no valid list, as its block writes
+    // none; a refused one is kept as `[]` whatever the kind.
+    const checked = (task.options ?? []).length > 0 ? validOptions(task.options) ?? [] : undefined
+    const options = checked !== undefined && (checked.length === 0 || offersList(task.ask)) ? checked : undefined
+    return { scope, session: own, index, text, words: questionWords(text), isWaiting: waitsOnYou(mine, task) && task.blocked === null, producer: questionToken(task), source: { kind: 'own', project: mine.project, task: mine.title, context: mine.context, text, agent: auto.agent, session: own, data: JSON.stringify({ task, title: mine.title, context: mine.context, sessionId: mine.sessionId, resume: mine.resume, ...(options === undefined ? {} : { options }) }) } }
   })
 }
 

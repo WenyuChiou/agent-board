@@ -28,7 +28,7 @@ import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
-import { explicitCodexExecutable, resolveCodexExecutable } from './codex-receiver.mjs'
+import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
@@ -81,21 +81,21 @@ const flag = (name: string): string | undefined => {
   return at === -1 ? undefined : args[at + 1]
 }
 const BOOL_FLAGS = new Set([
-  '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--chat', '--codex-doctor',
+  '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--awaits-ack', '--chat', '--codex-doctor',
   '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
-  '--stop', '--stopped', '--tidy', '--version', '-v', '--watch',
+  '--stop', '--stopped', '--tidy', '--unsent', '--version', '-v', '--watch',
 ])
 const VALUE_FLAGS = new Set([
-  '--agent', '--codex-bin', '--codex-dir', '--data-dir', '--deepseek-dir', '--event',
+  '--agent', '--codex-bin', '--codex-dir', '--cwd', '--data-dir', '--deepseek-dir', '--event',
   '--grok-dir', '--hermes-dir', '--home', '--hook-deadline', '--hook-event', '--hook-started',
   '--id', '--idle-minutes', '--keys', '--lang', '--legacy-connect-request', '--mailbox',
   '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
   '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
-  '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--removing',
-  '--session', '--stale-ms', '--state', '--surface', '--theme',
+  '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--ref', '--removing',
+  '--session', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
 ])
 const unknownFlag = (argv: readonly string[]): string | undefined => {
   for (let i = 0; i < argv.length; i += 1) {
@@ -441,8 +441,7 @@ const proofFiles = immutableQuestionFiles<{ kind: keyof QuestionProofs; hash: st
   },
 })
 let questionProofCache: { files: { kind: keyof QuestionProofs; hash: string }[]; proofs: QuestionProofs } | null = null
-const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCapture['disposition']): void => {
-  const text = captureJson(record, disposition)
+const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCapture['disposition'], text = captureJson(record, disposition), capture: QuestionCapture = { version: 1, disposition, record }): void => {
   const file = capturePath(path, sha256(text))
   // The name is the hash of the bytes, so a file whose bytes differ is a
   // partial write from a process killed mid-flush (#921 T6): no valid capture
@@ -459,7 +458,7 @@ const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCaptur
       if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
     }
     if (read(file) === text) {
-      captureFiles.invalidate(basename(file))
+      captureFiles.remember(basename(file), capture)
       return
     }
     try { unlinkSync(file) } catch {}
@@ -524,7 +523,7 @@ const flushQuestionCaptures = (budget: number): void => {
     if (attempted >= budget) break
     attempted += 1
     try {
-      keepQuestionCapture(capture.record, capture.disposition)
+      keepQuestionCapture(capture.record, capture.disposition, key, capture)
     } catch (error) {
       emptyCopyCache = null
       process.stderr.write(`agent-board: could not write queued question capture ${basename(capturePath(path, sha256(key)))}: ${error instanceof Error ? error.message : String(error)}\n`)
@@ -2214,7 +2213,6 @@ const codexReceiverExecutable = (): string | null => {
   if (given !== undefined) return explicitCodexExecutable(given)
   return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
 }
-
 // The detached Windows child reports startup failures through a private file too; redirecting
 // its standard handles would make Start-Process inherit the caller's extra pipes again.
 const serveChildError = (message: string): void => {
@@ -2278,6 +2276,9 @@ const serveChild = (): void => {
         // A file that is missing or cannot be read throws, so the tick keeps every thread: only a row read as ended or gone ends one.
         threads: () => parseProgress(readFileSync(path, 'utf8')).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
         executable: codexReceiverExecutable(),
+        // The daemon's own unload delay and a margin, which the receiver knows, unless a test process started this page and
+        // names a shorter wait for its stand-in daemon (`testUnloadMs`).
+        unloadMs: testUnloadMs(process.env, process.ppid),
       },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests

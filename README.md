@@ -61,7 +61,7 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page | Not yet |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | Held for the session when its card offers it. Desktop app: checked in a live run; IDE: no run of its own, and it is treated like the app when its hook reports it as the app's surface; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page | Not tested yet |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page | Not yet |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page | Not tested yet |
 
 - Board page: run `npx @wenyuchiou/agent-board@next --html` in a terminal, the app's own included.
 - Not yet or Not tested yet: copy your answer from the board and paste it into the app.
