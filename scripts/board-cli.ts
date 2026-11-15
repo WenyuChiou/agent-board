@@ -2233,6 +2233,14 @@ const parseServePort = (raw: string | undefined): number | null => {
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
 }
 
+// The code the launcher reads from a store that would not open or an owner record that could not be published.
+const storeFailureCode = (error: unknown): string => {
+  const errno = (error as NodeJS.ErrnoException | null)?.code
+  const message = error instanceof Error ? error.message : ''
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(message) ? message
+    : typeof errno === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(errno) ? errno : 'UNREADABLE'
+}
+
 const serveChild = (): void => {
   // Resolve the protected address before asynchronous callbacks can run.
   const file = serveFile()
@@ -2358,13 +2366,16 @@ const serveChild = (): void => {
         }
         process.exit(0)
       },
+      // The hub has stopped and given its lock back; the launcher shows the cause as for a store that would not open.
+      onStoreError: (error) => {
+        serveChildError(`MESSAGE_STORE_FAILED ${storeFailureCode(error)}\n`)
+        process.exitCode = 1
+        setTimeout(() => process.exit(1), 1000).unref()
+      },
     })
   } catch (error) {
     if (!(error instanceof Error) || error.cause !== 'MESSAGE_STORE_FAILED') throw error
-    const errno = (error as NodeJS.ErrnoException).code
-    const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message
-      : typeof errno === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(errno) ? errno : 'UNREADABLE'
-    serveChildError(`MESSAGE_STORE_FAILED ${code}\n`)
+    serveChildError(`MESSAGE_STORE_FAILED ${storeFailureCode(error)}\n`)
     process.exitCode = 1
   }
 }
@@ -2379,11 +2390,14 @@ const routesStandIn = (): ReceiverRoutes[] | undefined => {
   return list
 }
 
+// Whether replacing this running server will listen on a different port, so the old page may stay open briefly to report the move (#1335).
+const replacementMove = (running: Running): boolean => !args.includes('--port') || parseServePort(flag('--port')) !== running.port
+
 // The page at that address is asked to close, and whether it agreed is answered. It refuses while
 // a reply is on its way (and then stops by itself once idle). Its file goes only when it agreed,
 // and while it still names that page: another `--serve` may have started a new one since.
-const letGo = async (running: Running, file: string): Promise<boolean> => {
-  const isClosed = await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).then(
+const letGo = async (running: Running, file: string, isMoved = false): Promise<boolean> => {
+  const isClosed = await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: isMoved ? '{"moved":true}' : '{}', signal: AbortSignal.timeout(1500) }).then(
     res => res.ok,
     () => false,
   )
@@ -2396,8 +2410,8 @@ const letGo = async (running: Running, file: string): Promise<boolean> => {
 // on its way from it, and a second page beside it would send that reply again. A number a
 // restarted computer gave to another program, with nothing of ours at the port, is not it: its
 // file goes, so a stale address never keeps the board from starting.
-const stays = async (running: Running, file: string): Promise<boolean> => {
-  if (await letGo(running, file)) return false
+const stays = async (running: Running, file: string, isMoved = false): Promise<boolean> => {
+  if (await letGo(running, file, isMoved)) return false
   const answer = await ping(running, 500)
   if (answer === 'silent' ? isRunning(running.pid) : answer !== null) return true
   unlinkIf(file, () => readRunning(file)?.pid === running.pid)
@@ -2418,7 +2432,7 @@ const keptPage = async (file: string): Promise<Running | null> => {
 // The running page of this copy for this file, or null. Any other page found in the file (one
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
-const runningPage = async (isStarting = false): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
+const runningPage = async (isStarting = false, isReplacing = false): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
   const running = readRunning()
   if (running === null) {
     // A file that has not read for ten seconds (either way, should the clock have been set
@@ -2435,7 +2449,7 @@ const runningPage = async (isStarting = false): Promise<{ page: Running; isKept:
   // An idle preference must not close a page that may hold an unsent reply.
   const requestedStale = staleTimeoutMs()
   if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (!args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
-  return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
+  return (await stays(running, serveFile(), isReplacing && replacementMove(running))) ? { page: running, isKept: true } : null
 }
 
 // `--lan`: the running page opens to the local network too, and its address there is printed
@@ -2503,8 +2517,8 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     throw runtimeFolderFailure()
   }
   const old = readRunning(oldServeFile)
-  if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
-  const found = await runningPage()
+  if (old !== null && (await stays(old, oldServeFile, replacementMove(old)))) return { url: old.url, port: old.port, isKept: true, isNew: false }
+  const found = await runningPage(false, true)
   if (found !== null) return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
   if (args.includes('--port')) {
     const requestedPort = parseServePort(flag('--port'))

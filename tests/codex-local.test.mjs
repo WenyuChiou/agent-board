@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
-import { delimiter, dirname, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -7160,6 +7160,27 @@ test('OpenClaw native metadata callbacks fence stale runs and never request conv
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
+test('OpenClaw setup asks the gateway to load the board plugin at start, also over a manifest an earlier setup wrote, and removes it (#1489)', () => fixture(f => {
+  const file = join(f.root, 'adapters', 'openclaw', 'openclaw.plugin.json')
+  const record = join(f.root, 'install-openclaw.json')
+  assert.equal(f.install('--agent', 'openclaw', '--apply').status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).activation, { onStartup: true })
+  // An earlier release wrote the manifest without activation and recorded its bytes: the next setup takes it over.
+  const earlier = `${JSON.stringify({ id: 'agent-board-local', contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}
+`
+  f.save(file, earlier)
+  const saved = JSON.parse(readFileSync(record, 'utf8'))
+  saved.files[file] = createHash('sha256').update(earlier).digest('hex')
+  f.save(record, `${JSON.stringify(saved, null, 2)}
+`)
+  const again = f.install('--agent', 'openclaw', '--apply')
+  assert.equal(again.status, 0, again.stdout)
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).activation, { onStartup: true })
+  const removed = f.install('--agent', 'openclaw', '--remove', '--apply')
+  assert.equal(removed.status, 0, removed.stdout)
+  assert.equal(existsSync(file), false)
+}))
+
 test('OpenClaw session events carry the session folder and progress_card reports to the plugin session', () => fixture(async f => {
   assert.equal(f.install('--agent', 'openclaw', '--apply').status, 0)
   const plugin = (await import(pathToFileURL(join(f.root, 'adapters', 'openclaw', 'agent-board-local.mjs')))).default
@@ -7749,6 +7770,87 @@ test('a deferred take asks again for its own session only, and a session closed 
   // Before: the late answer left a count of 1, so the same id came back with 19 asks again, not 20.
   assert.equal(takes.get('asks-c'), 22)
   for (const agent of [a, b, reopened]) hooks.get('agent/disposed')({ agent })
+}))
+
+test('hook delivery and DeepSeek take report corrupt messages.json as an error instead of deferred, while a held claim stays deferred (#1448)', () => mailboxFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  f.save(join(f.directory, 'messages.json'), '{not json')
+  const failedHook = f.call('codex', 'UserPromptSubmit')
+  assert.equal(failedHook.status, 0, failedHook.stderr)
+  assert.equal(failedHook.stdout, '')
+  assert.match(failedHook.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
+  assert.doesNotMatch(failedHook.stderr, /deferred/)
+
+  f.save(f.progress, [
+    `## ${basename(f.home)}`,
+    `<!-- auto session=a1b2c3f9 agent=codex state=working updated=${new Date().toISOString()} -->`,
+    '### Auth check',
+    '- [?] codex: Use JWT or session cookies?',
+    '<!-- /auto session=a1b2c3f9 -->',
+    '',
+  ].join('\n'))
+  const withQuestion = f.call('codex', 'UserPromptSubmit')
+  assert.equal(withQuestion.status, 0, withQuestion.stderr)
+  const questionEnvelope = JSON.parse(withQuestion.stdout)
+  assert.match(questionEnvelope.hookSpecificOutput.additionalContext, /Auth check/)
+  assert.match(withQuestion.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
+  f.save(f.progress, '')
+
+  const claim = claimMessageStore(f.directory)
+  let isHeld = true
+  try {
+    const deferredHook = f.call('codex', 'UserPromptSubmit')
+    assert.equal(deferredHook.status, 0, deferredHook.stderr)
+    assert.match(deferredHook.stderr, /board: mailbox deferred/)
+
+    const deferredTake = spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--mailbox', 'take', '--session', 'deepseek-error-session'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    assert.equal(deferredTake.status, 0, deferredTake.stderr)
+    const parsed = JSON.parse(deferredTake.stdout)
+    assert.equal(parsed.message, null)
+    assert.equal(parsed.deferred, true)
+  } finally {
+    if (isHeld) { claim.release(); isHeld = false }
+  }
+
+  const failedTake = spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--mailbox', 'take', '--session', 'deepseek-error-session'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.notEqual(failedTake.status, 0)
+  assert.equal(failedTake.stdout, '')
+  assert.match(failedTake.stderr, /INVALID_MESSAGE_STORE/)
+
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { randomUUID } = await import('node:crypto')
+  const { watch } = await import('node:fs')
+  const children = []
+  const spawnMailbox = (command, args, options = {}) => {
+    const child = spawn(command, args, { ...options, env: f.env })
+    children.push(child)
+    child.on('close', () => { child.isClosed = true })
+    return child
+  }
+  const settled = () => children.every(child => child.isClosed)
+  const takes = () => children.filter(child => child.spawnargs.includes('take'))
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), f.progress, f.home, f.script)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
+  const agent = { session: { header: { id: 'deepseek-error-session' } }, status: 'idle', received: [], followup() { throw new Error('UNUSED') } }
+  const hooks = new Map()
+  const log = join(f.home, '.agent-board', 'hook-errors.log')
+  try {
+    apply({ on: (name, fn) => hooks.set(name, fn) })
+    hooks.get('agent/created')({ agent })
+    for (const end = Date.now() + 15_000; (takes().length < 1 || !settled()) && Date.now() < end; await new Promise(done => setTimeout(done, 50))) {}
+    assert.equal(takes().length, 1)
+    assert.equal(settled(), true)
+    await new Promise(done => setTimeout(done, 600))
+    assert.equal(takes().length, 1, 'a non-deferred store failure must not ask again repeatedly')
+    const logged = existsSync(log) ? readFileSync(log, 'utf8') : ''
+    assert.equal(logged.split('MAILBOX_FAILED').length - 1, 1, logged)
+    hooks.get('agent/disposed')({ agent })
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end; await new Promise(done => setTimeout(done, 50))) {}
+  } finally {
+    for (const child of children) if (!child.isClosed) child.kill()
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
+  }
 }))
 
 // The DeepSeek receiver with a stub board script. A take is answered by plan(call) (an object, or 'fail'); with no

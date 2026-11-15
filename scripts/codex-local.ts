@@ -523,6 +523,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (action === 'take') {
       const surface = flag('--surface')
       const message = await mailbox.turn(agent, session, surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui ? surface : SURFACE_IDS.unknown, Date.now())
+      if (message === null && mailbox.error !== null) throw new Error(mailbox.error)
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
@@ -1400,7 +1401,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat)
   if (agent === 'openclaw') {
     files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
-    files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
+    // activation.onStartup: OpenClaw 2026.6.35 loads a plugin when its gateway starts only when the manifest asks for it (#1489).
+    files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', activation: { onStartup: true }, contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {
