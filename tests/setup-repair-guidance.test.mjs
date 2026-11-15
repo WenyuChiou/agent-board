@@ -109,4 +109,3 @@ test('Claude setup aliases give the plugin route in every language without writi
     }
   })
 })
-
