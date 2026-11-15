@@ -1894,10 +1894,23 @@ const offForm = (text, reason) => {
 test('pr-check reads the template form of the case table: header in any letter case, colons in the rule, prose around it', () => {
   const table = '## Cases\n\nThe cases, from the issue:\n\n| STATE | event | Expected Result | test |\n| :--- | :---: | ---: | --- |\n| attached | leave refused | stays attached | keeps the turn |\n| idle | send | starts a turn | starts it |\n'
   assert.deepEqual(casesRun(`Cases: 2 rows\n${table}`).problems, [])
-  // Prose right under the last row is prose, with a pipe in it too; it is never a row.
-  const after = casesRun(`Cases: 2 rows\n${table}Row 2 covers send | resend from the issue.\n\nMore words.\n`)
+  // Prose after a blank line under the last row is prose, with a pipe in it too.
+  const after = casesRun(`Cases: 2 rows\n${table}\nRow 2 covers send | resend from the issue.\n\nMore words.\n`)
   assert.deepEqual(after.problems, [])
   assert.deepEqual(after.info, ['cases: 2 rows.'])
+  // A heading right under the last row ends the section, as does the end of the body.
+  assert.deepEqual(casesRun(`Cases: 2 rows\n${table}## Tests\n\nWords.\n`).problems, [])
+  assert.deepEqual(casesRun(`Cases: 2 rows\n${table.trimEnd()}`).problems, [])
+})
+
+test('pr-check fails a line right under the case table last row, which GitHub can show as one more row', () => {
+  // GitHub's Markdown can join a line right under a table's last row to the table, so a blank line comes first (#1513, from codex_390).
+  const underRow = /the line right under its last row is not blank; on GitHub such a line can show as one more row/
+  for (const line of ['Row 2 covers send | resend from the issue.', 'Plain words.', '--- | ---', '```', '- a list item']) {
+    offForm(`Cases: 1 rows\n${caseTableText(caseRow())}${line}\n`, underRow)
+  }
+  // The form names the blank line, so the fix says what to write.
+  assert.match(casesRun(`Cases: 1 rows\n${caseTableText(caseRow())}Plain words.\n`).problems[0].fix, /leave a blank line under the last row/)
 })
 
 test('pr-check fails a case table without outer pipes and names the form it reads', () => {

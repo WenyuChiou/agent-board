@@ -932,7 +932,7 @@ const caseSurfaces = ['delivery', 'setup-writes', 'data', 'launch']
 // The rows are the unbroken run of lines that start with a pipe. A blank line, a code fence, a comment on its own line or
 // prose ends the table, and a line starting with a pipe after that fails, as any other shape does, with CASE_FORM as the fix.
 const CASE_COLUMNS = ['state', 'event', 'expected result', 'test']
-const CASE_FORM = 'write the table as the template has it: the header line "| State | Event | Expected result | Test |", the line "|---|---|---|---|", then one line for each case that starts and ends with "|" and has four cells. Write a pipe inside a cell as "\\|", and keep blank lines, code fences, comments, prose and any second table out of the rows.'
+const CASE_FORM = 'write the table as the template has it: the header line "| State | Event | Expected result | Test |", the line "|---|---|---|---|", then one line for each case that starts and ends with "|" and has four cells. Write a pipe inside a cell as "\\|", keep blank lines, code fences, comments, prose and any second table out of the rows, and leave a blank line under the last row.'
 // The cells of a line with outer pipes, split at each pipe that has no backslash before it; null for any other line.
 const tableCells = line => {
   const parts = line.trim().split(/(?<!\\)\|/)
@@ -961,6 +961,9 @@ const caseTable = body => {
   let last = first
   while (isRow(section[last])) last++
   if (section.slice(last).some(isRow)) return { error: 'a blank line, a code fence, a comment or prose splits its rows, or a second table follows it' }
+  // On GitHub a line right under the last row can join the table as one more row, so a blank line, a heading or the end
+  // of the section comes next (#1513).
+  if (last < section.length && (typeof section[last] !== 'string' || section[last].trim() !== '')) return { error: 'the line right under its last row is not blank; on GitHub such a line can show as one more row' }
   if (section.some((line, i) => (i < first || i >= last) && isTableStart(line, i))) return { error: 'the section has a second table, with or without outer pipes' }
   const [header, rule, ...rows] = section.slice(first, last).map(tableCells)
   if (!header || header.length !== 4 || header.some((cell, i) => cell.toLowerCase() !== CASE_COLUMNS[i])) return { error: 'its header is not "| State | Event | Expected result | Test |"' }
