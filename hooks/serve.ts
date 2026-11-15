@@ -95,6 +95,8 @@ export const sessionState = (view: View, agent: string, session: string): RowSta
     .map(one => 'steps' in one ? rowState(one as Parameters<typeof rowState>[0]) : stateOf(one.auto as Parameters<typeof stateOf>[0], (one.target as AgentTarget | null | undefined)?.isClosed === true))
   return states.length > 0 && states.every(state => state === states[0]) ? states[0] : undefined
 }
+const codexResumeHint = (agent: string, state: RowState | undefined, s: Strings): string => agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : ''
+
 // One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route
 // the record has not shown live also says only Copy is offered.
 export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: Strings, state: RowState = 'idle', reason?: Exclude<SendDecision, { canSend: true }>['reason']): string => {
@@ -102,6 +104,7 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   if (reason === 'STATE_UNKNOWN') return s.serveLineStateUnknown
   if (reason === 'SHADOWED') return s.serveLineShadowed
   if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
+  if (line === 'none' && !canSend && agent === 'codex' && state === 'ended') return codexResumeHint(agent, state, s)
   const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name))
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
     : line === 'nextTurn' ? s.serveNextTurnHint(name)
@@ -613,7 +616,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const mode = connection ? (connection.scope === 'mailbox' ? 'mailbox' : 'connected') : found ? 'none' : isContested || !allowResume && baseMode === 'send' ? 'open' : baseMode
       const send = onLan(mode)
       const lineOf = found !== undefined && route !== undefined ? { line: route.line, canSend: route.canSend, lineText: routeText(route.line, route.canSend, row.agent, s, state, route.canSend ? undefined : route.reason) }
-        : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, row.agent, s) } : { line: 'none' as const, canSend: false, lineText: '' }
+        : send === 'send' ? { line: 'reopen' as const, canSend: true, lineText: routeText('reopen', true, row.agent, s) } : { line: 'none' as const, canSend: false, lineText: codexResumeHint(row.agent, state, s) }
       // A Claude session still at work that this board cannot reach: its card says so and copies.
       const isOpenClaude = !isLan && send === 'claude' && row.auto !== 'ended'
       const nextLabel = row.next === null ? undefined : clipped(row.next.step, LABEL_ROOM)
