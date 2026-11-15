@@ -13,7 +13,9 @@
 //              'lost' starts the turn in the daemon and ends the proxy before it has said anything of it, answer or notice: the
 //              delivery's own turn, or with lostTurn 'person' the person's own, begun at that moment, which the text only joins
 //              (with lostTurn 'bare' a turn that thread/turns/list shows with no user message)
-//              'heard' is 'lost' with the turn's start, and nothing else, told to the connection before the proxy ends
+//              'heard' is 'lost' with the turn's start, and nothing else, told to the connection before the proxy ends;
+//              'heardWaiting' tells its wait on an approval too
+//   away       a file: while it is there the daemon cannot be reached, and a proxy that starts ends at once, before its log line
 //   startDelay ms the answer to turn/start is held back on an idle thread, while the turn has begun and its notices (its start, its
 //              first user message, an approval it waits on) have gone out
 //   joinOnStart when true, the person's own turn starts just before the first turn/start is handled, so the call joins it
@@ -68,6 +70,7 @@ import { appendFileSync, existsSync, readFileSync, renameSync, unlinkSync, write
 import { serveWebSocketProxy, serverFrame } from './ws-proxy-mock.mjs'
 
 const config = JSON.parse(readFileSync(process.env.CODEX_MOCK_CONFIG, 'utf8'))
+if (config.away && existsSync(config.away)) process.exit(1)
 const log = value => appendFileSync(config.log, JSON.stringify(value) + '\n')
 if (config.pidFile) writeFileSync(config.pidFile, String(process.pid))
 log({ argv: process.argv.slice(2), env: process.env })
@@ -228,15 +231,17 @@ const handle = (value, emit) => {
     log({ startedInRunningTurn: Boolean(running) || Boolean((config.joinOnStart || config.joinLate) && !hasRaced) })
     if (config.start === 'mute') return
     if (config.start === 'die') process.exit(0)
-    if ((config.start === 'lost' || config.start === 'heard') && !running) {
-      // Nothing is written to the connection. The exit handler saves the daemon's side: the turn runs on there, and the next
-      // proxy finds it.
+    if ((config.start === 'lost' || config.start === 'heard' || config.start === 'heardWaiting') && !running) {
+      // The connection is told nothing ('lost'), or the turn's start and no more ('heard'), or its start and its wait on an
+      // approval ('heardWaiting'): never the answer or the first user message. The exit handler saves the daemon's side: the
+      // turn runs on there, and the next proxy finds it.
       running = config.lostTurn === 'person' ? 'turn-person' : config.lostTurn === 'bare' ? 'turn-bare' : 'turn-delivery'
       first = config.lostTurn === 'bare' ? null : (config.lostTurn === 'person' ? typedBy(threadId) : userMessage(threadId, running, value.params.input, value.params.clientUserMessageId)).params.item
       stamp += 1
       isWaiting = config.approval === 'hold'
       if (config.start === 'lost') process.exit(0)
       notice({ method: 'turn/started', params: { threadId, turn: { id: running } } })
+      if (config.start === 'heardWaiting') notice({ method: 'thread/status/changed', params: { threadId, status: { type: 'active', activeFlags: ['waitingOnApproval'] } } })
       setTimeout(() => process.exit(0), 150)
       return
     }

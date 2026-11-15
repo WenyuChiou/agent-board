@@ -241,7 +241,7 @@ export const startCodexReceiver = ({
   // became of it; turn, the turn known to be the delivery's own (the answer to turn/start named it, or its first user message was
   // the delivery's); heard, a turn whose start was heard since the start was sent and whose owner is not known yet (it is never asked to stop
   // while it is only that); ended, the
-  // turns heard to end; finish, which ends the delivery with no receipt of its own while it still runs.
+  // turns heard to end; isOverdue, the approval limit passed with no turn named and no connection to the daemon; finish, which ends the delivery with no receipt of its own while it still runs.
   const subs = new Map()
   const subOf = thread => {
     if (!subs.has(thread)) subs.set(thread, { mayBeSubscribed: false, isInUse: false, joins: 0, leaving: null, hasLeaveFailed: false, leaveFails: 0, interrupt: null, watch: null, isChecking: false, owed: null })
@@ -376,7 +376,12 @@ export const startCodexReceiver = ({
     })()
     return sub.leaving
   }
-  const stopWaiting = sub => { if (sub.watch !== null && sub.watch.timer !== null) { clearTimeout(sub.watch.timer); sub.watch.timer = null } }
+  // An approval that is no longer waited on takes its passed limit with it: the next wait is timed anew.
+  const stopWaiting = sub => {
+    if (sub.watch === null) return
+    sub.watch.isOverdue = false
+    if (sub.watch.timer !== null) { clearTimeout(sub.watch.timer); sub.watch.timer = null }
+  }
   const endWatch = sub => { stopWaiting(sub); sub.watch = null }
   // A refused or unanswered interrupt leaves the turn waiting on an approval nobody answers: it is asked again on each tick while
   // that turn still runs (route() clears it when the turn ends), and reported once the tries are used up; the turn is then no
@@ -439,13 +444,20 @@ export const startCodexReceiver = ({
   // A delivered turn that waits on an approval may have nobody to answer it (the person quit less than one unload delay ago, or
   // set that delay for the thread in a way the receiver cannot see). After the limit the turn is interrupted and its message
   // settles as uncertain: it was delivered, and what became of it is not known. The timer belongs to the turn, not to the
-  // delivery or its board connection.
+  // delivery or its board connection. A limit that passed while no turn was named and no connection was there to ask on is not
+  // timed again: the turn is stopped as soon as a later connection has named it, also when a new wait was begun before it did.
   const waitOnApproval = thread => {
     const sub = subs.get(thread), watch = sub?.watch ?? null
-    if (watch === null || watch.timer !== null) return
+    if (watch === null) return
+    const isDue = watch.isOverdue && watch.turn !== null
+    if (watch.timer !== null) {
+      if (!isDue) return
+      clearTimeout(watch.timer)
+    }
     watch.timer = setTimeout(() => {
       watch.timer = null
       if (sub.watch !== watch) return
+      watch.isOverdue = false
       // The message settles first: the interrupt makes the turn end as interrupted, which would otherwise be what the card reads.
       // A delivery that already told the board how it ended (an unanswered start, say) has left no message here.
       if (watch.message !== null) {
@@ -462,9 +474,9 @@ export const startCodexReceiver = ({
         // delivery's, heard or read (`nameTurn`). One whose start was heard and no more may be a person's.
         const turn = watch.turn
         // No turn can be named: there is nothing to ask the daemon to stop. With no connection to ask on, the watch waits for
-        // the next one, which names the turn and times its wait again.
+        // the next one, overdue: a turn that one names as the delivery's is stopped then, and one it cannot name is timed again.
         if (turn === null) {
-          if (daemon === null || !daemon.isOpen()) return
+          if (daemon === null || !daemon.isOpen()) { watch.isOverdue = true; return }
           endWatch(sub); onError(new Error('INTERRUPT_FAILED'))
           return
         }
@@ -473,7 +485,7 @@ export const startCodexReceiver = ({
       }
       if (watch.turn !== null) interrupt()
       else void nameTurn(thread, watch).then(interrupt)
-    }, approvalMs)
+    }, isDue ? 0 : approvalMs)
     watch.timer.unref?.()
   }
   // What became of a turn this receiver started, read from the thread's own status when notices cannot tell. Out of the thread
@@ -745,7 +757,7 @@ export const startCodexReceiver = ({
               state.pending = { nonce: message.nonce, prompt: message.prompt, turn: null, begun: new Set(), firstInput: new Map(), acked: new Map(), ended: new Map(), done, reject }
               timer = setTimeout(() => reject(new Error('ACK_TIMEOUT')), ackMs)
               endWatch(sub)
-              sub.watch = watch = { message: { id: message.id, nonce: message.nonce }, nonce: message.nonce, prompt: message.prompt, turn: null, heard: null, firstInput: new Map(), ended: new Set(), timer: null, finish: () => done(undefined) }
+              sub.watch = watch = { message: { id: message.id, nonce: message.nonce }, nonce: message.nonce, prompt: message.prompt, turn: null, heard: null, firstInput: new Map(), ended: new Set(), timer: null, isOverdue: false, finish: () => done(undefined) }
             })
             void answer.catch(() => undefined)
             const prompt = deliveryPrompt(message)

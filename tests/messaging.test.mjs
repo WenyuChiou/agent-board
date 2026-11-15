@@ -5073,6 +5073,33 @@ test('a Codex turn whose start was heard before the daemon connection was lost, 
   })
 })
 
+test('a Codex turn whose approval limit passed while the daemon could not be reached and no turn was named is interrupted as soon as the next connection names it as the delivery\'s, not one more limit later, and its message settles once (#318)', () => codexFixture(async (board, dir) => {
+  const away = join(dir, 'away'), approvalMs = 4000, errors = []
+  // The turn's start and its wait on an approval are told; the proxy is gone before the answer and the turn's first user message.
+  const daemon = codexDaemon(dir, { approval: 'hold', start: 'heardWaiting', away })
+  const receiver = codexReceiver(board, daemon, { approvalMs, onError: error => errors.push(error.message) })
+  try {
+    const connection = await codexConnection(board)
+    // From here on no new proxy reaches the daemon.
+    writeFileSync(away, '')
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexStarts(daemon) === 1)
+    // The limit passes with the daemon away: the message settles, and no turn could be named or asked to stop.
+    await pause(approvalMs + 500)
+    assert.deepEqual([daemon.calls().filter(one => one.argv).length, codexInterrupts(daemon), errors.filter(one => one === 'APPROVAL_TIMEOUT').length], [1, [], 1])
+    unlinkSync(away)
+    await waitFor(async () => daemon.calls().filter(one => one.argv).length === 2)
+    const since = Date.now()
+    await waitFor(async () => codexLastProxy(daemon).some(one => one.method === 'turn/interrupt'))
+    const took = Date.now() - since
+    assert.ok(took < approvalMs * 0.6, `The turn was asked to stop ${took} ms after the next connection began; another limit is ${approvalMs} ms`)
+    await codexUncertain(board, 'AB-CX-001', 'APPROVAL_TIMEOUT')
+    // The one that named the turn asked for it first, and nothing was told twice.
+    const methods = codexLastProxy(daemon).filter(one => one.method).map(one => one.method)
+    assert.deepEqual([codexInterrupts(daemon), methods.indexOf('thread/turns/list') >= 0 && methods.indexOf('thread/turns/list') < methods.indexOf('turn/interrupt'), errors.filter(one => one === 'APPROVAL_TIMEOUT').length, codexStarts(daemon)], [['turn-delivery'], true, 1, 1])
+  } finally { await receiver.close() }
+}))
+
 test('a look at a Codex thread that is answered more than two ticks after the look before it is time the receiver did not watch, and the wait starts again (#318)', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person'), readHold = join(dir, 'read-hold')
   writeFileSync(person, '')
