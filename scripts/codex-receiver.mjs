@@ -32,8 +32,12 @@ const TICK_MS = 3000
 const APPROVAL_LIMIT_MS = 120_000
 // The first daemon whose unload delay the record read and ran live; an older or unnamed one is read as "nobody attached".
 const MIN_DAEMON = [0, 169, 0]
-// The daemon's unload delay (60 s) plus a margin for the time a request and its answer take, and for two clocks that do not run alike.
-const UNLOAD_MS = 65_000
+// The daemon's unload delay when its config names none (60 s), and the margin added to it for the time a request and its answer
+// take and for two clocks that do not run alike. A person can set the delay (`thread_unload_delay_secs` in Codex's config), so the
+// receiver asks the daemon for it and never waits less than the default with its margin (UNLOAD_MS).
+const UNLOAD_DEFAULT_SECS = 60
+const UNLOAD_MARGIN_MS = 5000
+const UNLOAD_MS = UNLOAD_DEFAULT_SECS * 1000 + UNLOAD_MARGIN_MS
 // How long the answer to a leave is waited for, and how many leaves in a row may fail before the receiver ends its connection to
 // the daemon: a connection that is gone is in no thread.
 const LEAVE_LIMIT_MS = 5000
@@ -164,6 +168,16 @@ export const hasUnloadDelay = info => {
   return true
 }
 
+// The unload delay, in ms, that the daemon's answer to `config/read` gives a thread loaded now: `thread_unload_delay_secs`, or the
+// default when the config names none. Anything else (no config in the answer, a value that is not a whole number of seconds from
+// zero up) is null: the delay is not known, and the receiver then reads nobody on the thread.
+export const unloadDelayOf = answer => {
+  const config = answer?.config
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) return null
+  const seconds = config.thread_unload_delay_secs ?? UNLOAD_DEFAULT_SECS
+  return Number.isSafeInteger(seconds) && seconds >= 0 && Number.isSafeInteger(seconds * 1000) ? seconds * 1000 : null
+}
+
 const input = prompt => [{ type: 'text', text: prompt, text_elements: [] }]
 // Whether a user message item is this delivery's own: its echoed claim nonce, or the exact text it was sent with.
 const isOwnInput = (item, pending) => item.clientId === pending.nonce
@@ -172,10 +186,12 @@ const isOwnInput = (item, pending) => item.clientId === pending.nonce
 // thread reads idle. The daemon tells nobody who is subscribed to a thread. It keeps a thread loaded while any client is subscribed
 // to it or a turn runs, and unloads it 60 s after the later of "the last one left" and "the last turn ended". So a listed thread
 // shows a person's client only when nothing else can have kept it loaded: the receiver counts a listing only if it was asked for
-// unloadMs after the start of an unbroken stretch in which the receiver itself saw all three, that it held no subscription to
-// the thread, that every status it read was idle, and that every listing showed the thread (`quiet`, `sample`). Whatever it did
-// not see starts the stretch again, and until one is complete the answer is "nobody": the message stays queued. So the first
-// message to a thread waits one unloadMs after the receiver first sees it, and so does each message after a delivery. The
+// one wait after the start of an unbroken stretch in which the receiver itself saw all three, that it held no subscription to
+// the thread, that every status it read was idle, and that every listing showed the thread (`quiet`, `sample`). The wait is the
+// unload delay the daemon's config gives the thread's folder, with a margin, and never less than unloadMs; a delay that cannot be
+// read is not guessed. Whatever the receiver did not see starts the stretch again, and until one is complete the answer is
+// "nobody": the message stays queued. So the first message to a thread waits one wait after the receiver first sees it, and so
+// does each message after a delivery. The
 // receiver stays out of the thread while it waits: it joins to deliver one message and leaves when the turn ends. A claim that
 // meets a busy thread or nobody attached is held here, never given back (the board's claim is the only change of owner), and the
 // board's own 30-minute limit on an unanswered message covers it. `threads()` gives the Codex session ids the board knows, and
@@ -183,7 +199,7 @@ const isOwnInput = (item, pending) => item.clientId === pending.nonce
 // and a running turn is never steered (#1409).
 export const startCodexReceiver = ({
   boardUrl, threads, executable, socket, env = process.env,
-  tickMs = TICK_MS, ackMs = ACK_LIMIT_MS, approvalMs = APPROVAL_LIMIT_MS, unloadMs = UNLOAD_MS, leaveMs = LEAVE_LIMIT_MS,
+  tickMs = TICK_MS, ackMs = ACK_LIMIT_MS, approvalMs = APPROVAL_LIMIT_MS, unloadMs = UNLOAD_MS, unloadMarginMs = UNLOAD_MARGIN_MS, leaveMs = LEAVE_LIMIT_MS,
   // A clock that never goes back and is not the wall clock, which a person or a time sync can move.
   now = () => performance.now(), onError = () => undefined,
 }) => {
@@ -198,18 +214,23 @@ export const startCodexReceiver = ({
   // mayBeSubscribed: set before the join is sent, and cleared only when the daemon confirms a leave or the connection is gone.
   // isInUse: a delivery is joining or running its turn, so nothing else may leave. joins: counts the joins, so the answer to a
   // leave asked before a join changes nothing. leaving: the leave in flight. interrupt: the turn an approval left waiting, still
-  // being asked to stop.
+  // being asked to stop. watch: the delivery turn this connection started, with the timer of its wait on an approval; it outlives
+  // the delivery when the board connection or the daemon connection ended under a turn that still runs, so that turn is still
+  // stopped when its approval has waited too long. isChecking: a look at that turn from outside the thread is in flight.
   const subs = new Map()
   const subOf = thread => {
-    if (!subs.has(thread)) subs.set(thread, { mayBeSubscribed: false, isInUse: false, joins: 0, leaving: null, hasLeaveFailed: false, leaveFails: 0, interrupt: null })
+    if (!subs.has(thread)) subs.set(thread, { mayBeSubscribed: false, isInUse: false, joins: 0, leaving: null, hasLeaveFailed: false, leaveFails: 0, interrupt: null, watch: null, isChecking: false })
     return subs.get(thread)
   }
   // What the receiver has seen of each thread from outside it. since: the start of the unbroken stretch described above, or null
   // when there is none yet. last: when the last look was answered. marker: the thread's `updatedAt` at that look. epoch: counts
-  // the breaks, so a look asked before one cannot start a stretch after it. sampling: the look in flight.
+  // the breaks, so a look asked before one cannot start a stretch after it. sampling: the look in flight. delay: the longest
+  // unload delay the daemon's config gave for the thread's folder at any look, or null while none could be read. The daemon fixes
+  // a thread's delay when it loads it, so a config that was changed to a shorter one since does not shorten the wait.
   const quiet = new Map()
+  let hasConfigFailed = false
   const quietOf = thread => {
-    if (!quiet.has(thread)) quiet.set(thread, { since: null, last: null, marker: undefined, epoch: 0, sampling: null })
+    if (!quiet.has(thread)) quiet.set(thread, { since: null, last: null, marker: undefined, epoch: 0, sampling: null, delay: null })
     return quiet.get(thread)
   }
   // Something happened that the stretch cannot span: it starts again at a later look.
@@ -233,13 +254,28 @@ export const startCodexReceiver = ({
   const read = async thread => {
     const found = (await ask('thread/read', { threadId: thread, includeTurns: false }))?.thread
     if (typeof found?.status?.type !== 'string') throw new Error('INVALID_OWNER_RESPONSE')
-    return { status: found.status.type, marker: found.updatedAt }
+    return { status: found.status.type, marker: found.updatedAt, cwd: found.cwd, isWaiting: Array.isArray(found.status.activeFlags) && found.status.activeFlags.includes('waitingOnApproval') }
+  }
+  // The unload delay the daemon's config gives a thread in this folder, project config included. Asked of the daemon, which reads
+  // its own config: the receiver never opens the person's Codex home. A refusal or an odd answer is reported once per connection.
+  const unloadDelay = async cwd => {
+    try {
+      if (typeof cwd !== 'string' || cwd === '') throw new Error('INVALID_OWNER_RESPONSE')
+      const delay = unloadDelayOf(await ask('config/read', { includeLayers: false, cwd }))
+      if (delay === null) throw new Error('UNLOAD_DELAY_UNKNOWN')
+      return delay
+    } catch (error) {
+      if (error?.message !== 'OWNER_DISCONNECTED' && !hasConfigFailed) { hasConfigFailed = true; onError(new Error('UNLOAD_DELAY_UNKNOWN')) }
+      return null
+    }
   }
   // One look at a thread from outside it; one at a time, a second caller gets the look in flight. It starts a stretch only when it
   // reads idle, was asked after the last break, and this receiver is out of a thread the newest listing shows. The stretch starts
-  // when the answer arrives, never earlier. A look that fails, gets no answer or reads anything but idle ends the stretch, and so
-  // does one that comes more than two ticks after the last: a turn may have run and ended in between, which starts the daemon's
-  // delay again with nobody there. A changed `updatedAt` is read the same way.
+  // when the answer arrives, never earlier. A look that fails, gets no answer or reads anything but idle ends the stretch. So does
+  // one that comes more than two ticks after the last (a tick is skipped while the one before it still runs, so one look per tick
+  // cannot be promised): the receiver was not watching. A turn that began and ended between two looks, however far apart, shows
+  // only in the thread's `updatedAt`: a changed one ends the stretch, and a thread that reports none never has one. A look that
+  // cannot read the thread's unload delay ends it too.
   const sample = thread => {
     const q = quietOf(thread)
     if (q.sampling !== null) return q.sampling
@@ -249,26 +285,29 @@ export const startCodexReceiver = ({
       // In the thread, or maybe in it, the receiver's own subscription keeps it loaded: nothing read now is about a person.
       if (subs.get(thread)?.mayBeSubscribed === true) { q.since = null; return }
       const epoch = q.epoch
-      let seen = null
+      let seen = null, delay = null
       try { seen = await read(thread) } catch { /* A look that failed saw nothing. */ }
+      if (seen?.status === 'idle') delay = await unloadDelay(seen.cwd)
       // The connection it was asked on is gone, and with it everything seen through it.
       if (daemon !== on || quiet.get(thread) !== q) return
       const at = now()
       q.last = at
-      if (seen?.status !== 'idle' || q.epoch !== epoch || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) { q.since = null; return }
+      if (delay !== null) q.delay = Math.max(q.delay ?? 0, delay)
+      const hasMarker = typeof seen?.marker === 'number' || typeof seen?.marker === 'string'
+      if (seen?.status !== 'idle' || delay === null || !hasMarker || q.epoch !== epoch || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) { q.since = null; return }
       if (seen.marker !== q.marker) { q.marker = seen.marker; q.since = null }
       if (q.since === null) q.since = at
     })().finally(() => { q.sampling = null })
     return q.sampling
   }
   // A person's client is on the thread, or left it less than 60 s ago: the receiver is out of it, the stretch is unbroken up to
-  // a look and a listing no older than two ticks, and that listing was asked for unloadMs after the stretch began. With no client
+  // a look and a listing no older than two ticks, and that listing was asked for one wait after the stretch began. With no client
   // on it and no turn, the daemon would have unloaded the thread by then. Anything not known reads as nobody.
   const isPersonAttached = thread => {
     const q = quiet.get(thread), at = now()
-    if (!canTell || q === undefined || q.since === null || q.last === null || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) return false
+    if (!canTell || q === undefined || q.since === null || q.last === null || q.delay === null || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) return false
     if (at - q.last > 2 * tickMs || at - listing.sentAt > 2 * tickMs) return false
-    return listing.sentAt >= q.since + unloadMs
+    return listing.sentAt >= q.since + Math.max(unloadMs, q.delay + unloadMarginMs)
   }
   // Whether a message can go to the thread now, from a fresh look and a listing no older than two ticks.
   const isReady = async thread => {
@@ -287,7 +326,7 @@ export const startCodexReceiver = ({
     const sub = subs.get(thread)
     if (!sub) return Promise.resolve()
     if (sub.leaving !== null) return sub.leaving
-    if (!sub.mayBeSubscribed || sub.isInUse || sub.interrupt !== null) return Promise.resolve()
+    if (!sub.mayBeSubscribed || sub.isInUse || sub.interrupt !== null || sub.watch !== null) return Promise.resolve()
     const on = daemon, joins = sub.joins
     sub.leaving = (async () => {
       try {
@@ -309,19 +348,64 @@ export const startCodexReceiver = ({
     })()
     return sub.leaving
   }
+  const stopWaiting = sub => { if (sub.watch !== null && sub.watch.timer !== null) { clearTimeout(sub.watch.timer); sub.watch.timer = null } }
+  const endWatch = sub => { stopWaiting(sub); sub.watch = null }
   // A refused or unanswered interrupt leaves the turn waiting on an approval nobody answers: it is asked again on each tick while
-  // that turn still runs (route() clears it when the turn ends), and reported once the tries are used up.
+  // that turn still runs (route() clears it when the turn ends), and reported once the tries are used up. A try that the lost
+  // connection took with it is not one of them: whether it reached the daemon is not known, and the next connection asks again.
   const retryInterrupt = thread => {
     const sub = subs.get(thread), asked = sub?.interrupt ?? null
     if (asked === null || asked.isAsking) return
     asked.tries += 1
     asked.isAsking = true
-    void ask('turn/interrupt', { threadId: thread, turnId: asked.turn }).then(() => { if (sub.interrupt === asked) sub.interrupt = null }, () => {
+    void ask('turn/interrupt', { threadId: thread, turnId: asked.turn }).then(() => {
+      if (sub.interrupt === asked) sub.interrupt = null
+      if (sub.watch !== null && sub.watch.turn === asked.turn) endWatch(sub)
+    }, error => {
       asked.isAsking = false
+      if (error?.message === 'OWNER_DISCONNECTED') { asked.tries -= 1; return }
       if (sub.interrupt !== asked || asked.tries < INTERRUPT_TRIES) return
       sub.interrupt = null
       onError(new Error('INTERRUPT_FAILED'))
     })
+  }
+  // A delivered turn that waits on an approval may have nobody to answer it (the person quit less than one unload delay ago, or
+  // set that delay for the thread in a way the receiver cannot see). After the limit the turn is interrupted and its message
+  // settles as uncertain: it was delivered, and what became of it is not known. The timer belongs to the turn, not to the board
+  // connection: a contest or a lost daemon connection under the turn leaves it running.
+  const waitOnApproval = thread => {
+    const sub = subs.get(thread), watch = sub?.watch ?? null
+    if (watch === null || watch.timer !== null) return
+    watch.timer = setTimeout(() => {
+      watch.timer = null
+      if (sub.watch !== watch) return
+      // The message settles first: the interrupt makes the turn end as interrupted, which would otherwise be what the card reads.
+      const turn = watch.turn ?? watch.heard
+      watch.reject?.(new Error('APPROVAL_TIMEOUT'))
+      // The receiver stays in the thread until the interrupt is done, so it hears whether the turn is still running.
+      if (turn) { sub.interrupt = { turn, tries: 0, isAsking: false }; retryInterrupt(thread) }
+    }, approvalMs)
+    watch.timer.unref?.()
+  }
+  // What became of a turn this receiver started and can no longer hear of, because the connection it joined the thread on is gone:
+  // the thread is read from outside. A thread that is not listed, or reads anything but active, has no running turn. One that
+  // still runs is asked to stop again when it was being asked, and otherwise its wait on an approval is timed as before.
+  const checkTurn = async (thread, isLoaded) => {
+    const sub = subs.get(thread)
+    if (!sub || sub.isChecking || sub.isInUse || sub.mayBeSubscribed || (sub.watch === null && sub.interrupt === null)) return
+    const watch = sub.watch, asked = sub.interrupt, on = daemon
+    const end = () => { if (sub.watch === watch && watch !== null) endWatch(sub); if (sub.interrupt === asked) sub.interrupt = null }
+    if (!isLoaded) { end(); return }
+    sub.isChecking = true
+    try {
+      const seen = await read(thread)
+      if (daemon !== on || sub.isInUse || sub.mayBeSubscribed) return
+      if (seen.status !== 'active') { end(); return }
+      if (sub.interrupt !== null) { retryInterrupt(thread); return }
+      if (sub.watch !== watch || watch === null) return
+      if (seen.isWaiting) waitOnApproval(thread)
+      else stopWaiting(sub)
+    } catch { /* Asked again on the next tick. */ } finally { sub.isChecking = false }
   }
 
   const route = value => {
@@ -332,7 +416,7 @@ export const startCodexReceiver = ({
       listing.set.delete(thread)
       restart(thread)
       // An unloaded thread has no turn left to stop. Whether this connection is still subscribed is asked, not assumed (the tick's leave).
-      if (sub) sub.interrupt = null
+      if (sub) { sub.interrupt = null; endWatch(sub) }
       // The daemon unloaded the thread: it is dropped at once, not on the next tick.
       if (one) void drop(thread)
       return
@@ -340,20 +424,31 @@ export const startCodexReceiver = ({
     // A turn, or a status that is not idle, heard of a thread: it was not quiet.
     if (value.method === 'turn/started' || value.method === 'turn/completed' || value.method === 'thread/status/changed' && p.status?.type !== 'idle') restart(thread)
     if (value.method === 'turn/completed' && sub && sub.interrupt !== null && sub.interrupt.turn === p.turn?.id) sub.interrupt = null
+    // The watched turn's wait on an approval is followed whether a board connection is still there for the thread or not.
+    if (sub && sub.watch !== null) {
+      if (value.method === 'thread/status/changed' && typeof p.status?.type === 'string') {
+        if (Array.isArray(p.status.activeFlags) && p.status.activeFlags.includes('waitingOnApproval')) waitOnApproval(thread)
+        else stopWaiting(sub)
+      }
+      else if (typeof value.method === 'string' && value.method.endsWith('/requestApproval')) waitOnApproval(thread)
+      else if (value.method === 'serverRequest/resolved') stopWaiting(sub)
+      else if (value.method === 'turn/started' && p.turn?.id) sub.watch.heard = p.turn.id
+      else if (value.method === 'turn/completed' && p.turn?.id) {
+        stopWaiting(sub)
+        // Kept on the watch itself: a board connection that is already gone records no turn's end for its delivery.
+        sub.watch.ended.add(p.turn.id)
+        if (sub.watch.heard === p.turn.id) sub.watch.heard = null
+        // A watch that outlived its delivery ends with its turn, and the tick's leave follows.
+        if (sub.watch.reject === null && sub.watch.turn === p.turn.id) endWatch(sub)
+      }
+    }
     if (!one) return
     const state = one.state
     // Whatever the thread reports can end a held claim's wait.
     one.wake()
-    if (value.method === 'thread/status/changed' && typeof p.status?.type === 'string') {
-      state.status = p.status.type; state.statusEvents += 1
-      if (Array.isArray(p.status.activeFlags) && p.status.activeFlags.includes('waitingOnApproval')) one.waitOnApproval()
-      else one.stopWaiting()
-    }
-    else if (typeof value.method === 'string' && value.method.endsWith('/requestApproval')) one.waitOnApproval()
-    else if (value.method === 'serverRequest/resolved') one.stopWaiting()
+    if (value.method === 'thread/status/changed' && typeof p.status?.type === 'string') { state.status = p.status.type; state.statusEvents += 1 }
     else if (value.method === 'turn/started' && p.turn?.id) { state.turn = p.turn.id; state.pending?.begun.add(p.turn.id) }
     else if (value.method === 'turn/completed' && p.turn?.id) {
-      one.stopWaiting()
       if (state.turn === p.turn.id) state.turn = null
       if (state.pending) { state.pending.ended.set(p.turn.id, typeof p.turn.status === 'string' ? p.turn.status : ''); one.settle() }
     } else if (value.method === 'item/completed' && p.item?.type === 'agentMessage' && state.pending) {
@@ -368,11 +463,14 @@ export const startCodexReceiver = ({
 
   // A lost connection has left every thread it was in (the daemon drops its subscriptions), whether the board connection for the
   // thread is still there or not. Nothing seen through it is kept: the next connection sees every thread for the first time.
+  // A turn this receiver started runs on in the daemon all the same: its watch and its interrupt are kept, and the next connection
+  // looks at the thread and asks again (`checkTurn`).
   const lost = () => {
     daemon = null
     listing = { set: new Set(), sentAt: 0 }
     quiet.clear()
-    for (const sub of subs.values()) { sub.mayBeSubscribed = false; sub.hasLeaveFailed = false; sub.leaveFails = 0; sub.interrupt = null }
+    hasConfigFailed = false
+    for (const sub of subs.values()) { sub.mayBeSubscribed = false; sub.hasLeaveFailed = false; sub.leaveFails = 0; if (sub.interrupt !== null) sub.interrupt.isAsking = false }
   }
   const connect = async () => {
     let made
@@ -401,7 +499,7 @@ export const startCodexReceiver = ({
     const waiters = new Set()
     const sub = subOf(thread)
     // deliveries: claims being handled now.
-    const one = { state, receiver: null, isLost: false, deliveries: 0, settle: () => undefined, wake: () => { for (const done of [...waiters]) done() }, waitOnApproval: () => undefined, stopWaiting: () => undefined }
+    const one = { state, receiver: null, isLost: false, deliveries: 0, settle: () => undefined, wake: () => { for (const done of [...waiters]) done() } }
     attached.set(thread, one)
     // The delivery turn settles when its own turn has ended: an ACK seen in another turn, or none, or a
     // turn that failed after its ACK never reads as a receipt. A turn may end before turn/start answers,
@@ -421,24 +519,6 @@ export const startCodexReceiver = ({
         else if (status === 'failed' || status === 'interrupted') pending.reject(new Error('TURN_NOT_COMPLETED'))
         else pending.reject(new Error('TURN_STATUS_UNKNOWN'))
       }
-    }
-    // A delivered turn that waits on an approval may have nobody to answer it (the person quit within the last 60 s). After the limit
-    // the turn is interrupted and the message settles as uncertain: it was delivered, and what became of it is not known.
-    let approvalTimer = null
-    one.stopWaiting = () => { clearTimeout(approvalTimer); approvalTimer = null }
-    one.waitOnApproval = () => {
-      const pending = state.pending
-      if (approvalTimer !== null || !pending) return
-      approvalTimer = setTimeout(() => {
-        approvalTimer = null
-        if (state.pending !== pending) return
-        // The message settles first: the interrupt makes the turn end as interrupted, which would otherwise be what the card reads.
-        const turn = pending.turn ?? state.turn
-        pending.reject(new Error('APPROVAL_TIMEOUT'))
-        // The receiver stays in the thread until the interrupt is done, so it hears whether the turn is still running.
-        if (turn) { sub.interrupt = { turn, tries: 0, isAsking: false }; retryInterrupt(thread) }
-      }, approvalMs)
-      approvalTimer.unref?.()
     }
     // Reads the thread's status from inside it, right before a turn is started. A status notice that came while the answer was on
     // its way is at least as new as the answer, which can reach this code after notices that followed it in the same read.
@@ -488,7 +568,8 @@ export const startCodexReceiver = ({
           const isDone = () => !isHeld() || Date.now() - waitsSince >= ackMs
           one.deliveries += 1
           // isMine: this delivery is the one in the thread, so only it gives the thread back.
-          let timer, isMine = false
+          // isCut: the delivery ended because its board connection or the daemon connection did, not by anything the turn did.
+          let timer, isMine = false, watch = null, pending = null, isCut = false
           const release = () => { if (isMine) { isMine = false; sub.isInUse = false } }
           try {
             for (;;) {
@@ -537,6 +618,8 @@ export const startCodexReceiver = ({
               // its first user message was this delivery.
               state.pending = { nonce: message.nonce, prompt: message.prompt, turn: null, begun: new Set(), firstInput: new Map(), acked: new Map(), ended: new Map(), done, reject }
               timer = setTimeout(() => reject(new Error('ACK_TIMEOUT')), ackMs)
+              endWatch(sub)
+              sub.watch = watch = { turn: null, heard: state.turn, ended: new Set(), timer: null, reject }
             })
             void answer.catch(() => undefined)
             const prompt = deliveryPrompt(message)
@@ -544,7 +627,7 @@ export const startCodexReceiver = ({
             // not uncertain. Anything else that goes wrong after the request left (no answer, a closed connection, an odd
             // answer) may have been delivered. The claim nonce is the message id Codex records.
             let result, begunBefore = new Set()
-            const pending = state.pending
+            pending = state.pending
             try { result = await ask('turn/start', { threadId: thread, input: input(prompt), clientUserMessageId: message.nonce }, 10_000, () => { begunBefore = new Set(pending.begun) }) } catch (error) { if (error?.message !== 'OWNER_REJECTED') begin(); throw error }
             begin()
             if (!result?.turn?.id) throw new Error('INVALID_TURN_RESPONSE')
@@ -555,16 +638,27 @@ export const startCodexReceiver = ({
             // message is heard only after the answer, settle() turns the acceptance into the same uncertain receipt.
             if (pending.firstInput.get(result.turn.id) === false || (begunBefore.has(result.turn.id) && pending.firstInput.get(result.turn.id) !== true)) throw new Error('TURN_JOINED')
             state.pending.turn = result.turn.id
+            watch.turn = result.turn.id
             if (!state.pending.ended.has(result.turn.id)) state.turn = result.turn.id
             await accepted()
             one.settle()
             return await answer
+          } catch (error) {
+            isCut = error?.message === 'OWNER_DISCONNECTED'
+            throw error
           } finally {
-            clearTimeout(timer); one.stopWaiting(); state.pending = null
+            clearTimeout(timer); state.pending = null
+            // A turn of this delivery that still runs when the delivery is cut off keeps its watch: its approval is still timed and
+            // the turn still stopped, and the receiver stays in the thread to hear of it. Every other way out ends the watch.
+            if (watch !== null && sub.watch === watch) {
+              const turn = pending?.turn ?? null
+              if (isCut && turn !== null && pending.firstInput.get(turn) !== false && !pending.ended.has(turn) && !watch.ended.has(turn)) watch.reject = null
+              else endWatch(sub)
+            }
             release()
             one.deliveries -= 1
             // On every way out (the turn ended, a refused start, a lost connection). A leave that must wait, for another delivery in
-            // the thread or for an interrupt still asked of its turn, is the tick's.
+            // the thread, for an interrupt still asked of its turn or for a turn still watched, is the tick's.
             await leave(thread)
           }
         },
@@ -578,13 +672,14 @@ export const startCodexReceiver = ({
     try {
       // Whatever the board reads as: an interrupt that was refused or got no answer is asked again while its turn still runs, and
       // so is a leave, for every thread this connection may be in, attached or not. Not awaited: one with no answer would hold
-      // every tick for its whole limit.
-      if (daemon !== null && daemon.isOpen()) for (const thread of [...subs.keys()]) { retryInterrupt(thread); void leave(thread) }
+      // every tick for its whole limit. A turn of a connection that is gone is looked at first, further down (checkTurn).
+      if (daemon !== null && daemon.isOpen()) for (const [thread, sub] of [...subs]) { if (sub.mayBeSubscribed) retryInterrupt(thread); void leave(thread) }
       let wanted = []
       // A board that cannot be read for a moment (a writer replacing the file) keeps every receiver as it is: this tick does nothing more.
       try { wanted = [...new Set(threads())].filter(id => THREAD.test(id)) } catch (error) { onError(error); return }
-      // The Codex program is not kept running for a board that knows no Codex session. Ending it leaves every thread.
-      if (wanted.length === 0 && attached.size === 0) {
+      // The Codex program is not kept running for a board that knows no Codex session. Ending it leaves every thread. It is kept
+      // while a turn this receiver started is still watched or asked to stop: nobody else would stop it.
+      if (wanted.length === 0 && attached.size === 0 && ![...subs.values()].some(sub => sub.watch !== null || sub.interrupt !== null)) {
         if (daemon !== null) { const old = daemon; daemon = null; await old.close() }
         return
       }
@@ -604,7 +699,8 @@ export const startCodexReceiver = ({
       let loaded
       try { loaded = await list() } catch (error) { onError(error); return }
       for (const [thread, one] of [...attached]) if (one.isLost || one.receiver?.isClosed() || one.receiver?.isContested() || !loaded.has(thread) || !wanted.includes(thread)) await drop(thread, !wanted.includes(thread))
-      for (const [thread, sub] of [...subs]) if (!wanted.includes(thread) && !attached.has(thread) && !sub.mayBeSubscribed && !sub.isInUse && sub.leaving === null && sub.interrupt === null) subs.delete(thread)
+      for (const thread of [...subs.keys()]) void checkTurn(thread, loaded.has(thread))
+      for (const [thread, sub] of [...subs]) if (!wanted.includes(thread) && !attached.has(thread) && !sub.mayBeSubscribed && !sub.isInUse && sub.leaving === null && sub.interrupt === null && sub.watch === null) subs.delete(thread)
       for (const thread of wanted) {
         if (isClosed || attached.has(thread) || !loaded.has(thread)) continue
         // A thread this connection may still be in is not attached again until it is out: the card would offer a thread that only

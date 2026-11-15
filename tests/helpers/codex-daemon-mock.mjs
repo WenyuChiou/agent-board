@@ -29,9 +29,16 @@
 //              A person who quits does not end their turn: it runs on until endFlag
 //   state      file that carries the daemon's side over to the next proxy process (default: the log's name with '.state' added),
 //              since the real daemon outlives a proxy: the running turn, the unload delay, and whether the connection was
-//              subscribed. A proxy that ends leaves its thread at that moment; one that was killed outright is read as having
-//              left when the next one starts
+//              subscribed. A proxy that ends leaves its thread at that moment. One that was killed outright runs no code of its
+//              own then (on Windows a kill never does), so the file also carries the time the proxy was last alive, written
+//              every 50 ms: the daemon dropped its subscription at that time, and the unload delay runs from there, not from the
+//              start of the next proxy. A person found gone by the next proxy is read as gone since that time too
 //   unloadDelay  ms the thread stays listed after that (the real daemon's 60 s; default 150)
+//   unloadSecs  what config/read reports as `thread_unload_delay_secs` (default 0: the stand-in's own delay is well under a
+//              second); 'none' leaves the key out, as a config that names no delay does
+//   configFaults  a file: while it is there, config/read gets an error answer, or a delay that is not a number when it holds 'odd'
+//   cwd        the folder thread/read reports for the thread (default '/synthetic/project')
+//   noMarker   when true, thread/read reports no `updatedAt`
 //   closeFlag  a file whose appearance sends thread/closed for the loaded thread (the list still shows it)
 //   ackDelay   ms before a delivery turn ends (default 50)
 //   ackFlag    a file whose appearance lets the delivery turn ACK and end (in place of ackDelay)
@@ -42,10 +49,12 @@
 //              'mute' (no answer, still subscribed), 'odd' (an answer with no status, left), or a number of ms the answer is held
 //              back (left when it is sent); the requests after them are answered at once
 //   pidFile    file that gets this process's id
-// thread/read tells the thread's true status to any connection, and its `updatedAt` moves with each turn's start and end (read in
-// the daemon's source, where it is the saved thread's last update; not run live).
+// thread/read tells the thread's true status to any connection (with `waitingOnApproval` among its `activeFlags` while a held
+// approval waits), and its `updatedAt` moves with each turn's start and end (read in the daemon's source, where it is the saved
+// thread's last update; not run live). config/read answers with the config the daemon would give a thread in the folder asked
+// about, as the source has it (`config.thread_unload_delay_secs`; not run live).
 // Notices about a thread go only to a connection subscribed to it, as the real daemon sends them; thread/closed goes to every one.
-import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { serveWebSocketProxy, serverFrame } from './ws-proxy-mock.mjs'
 
 const config = JSON.parse(readFileSync(process.env.CODEX_MOCK_CONFIG, 'utf8'))
@@ -56,14 +65,16 @@ const stateFile = config.state ?? config.log + '.state'
 const carried = (() => { try { return JSON.parse(readFileSync(stateFile, 'utf8')) } catch { return null } })()
 let running = carried ? carried.running : config.status === 'active' ? config.turn : null
 let emitNow, hasRaced = false, isSubscribed = false, hadPerson = carried?.hadPerson ?? false, unloadAt = carried?.unloadAt ?? 0, isUnloaded = carried?.isUnloaded ?? false
+// A delivery turn held on an approval nobody has answered.
+let isWaiting = carried?.isWaiting ?? false
 // Stands for the time of the saved thread's last update.
 let stamp = carried?.stamp ?? 1
-let written = ''
+// Written whole and then renamed into place: a proxy killed in the middle of a write leaves the file before it.
 const save = () => {
-  const text = JSON.stringify({ running, hadPerson, unloadAt, isUnloaded, isSubscribed, stamp })
-  if (text === written) return
-  written = text
-  writeFileSync(stateFile, text)
+  try {
+    writeFileSync(stateFile + '.' + process.pid, JSON.stringify({ running, hadPerson, unloadAt, isUnloaded, isSubscribed, isWaiting, stamp, seen: Date.now() }))
+    renameSync(stateFile + '.' + process.pid, stateFile)
+  } catch { /* The next write, 50 ms on, carries the same state. */ }
 }
 // The turn/interrupt requests held back until interruptFlag appears.
 const interrupts = []
@@ -71,8 +82,11 @@ const unsubscribeFaults = [...(config.unsubscribeFaults ?? [])]
 const unloadDelay = config.unloadDelay ?? 150
 // The daemon's unload delay starts again whenever a subscriber leaves or a turn ends.
 const restartUnload = () => { unloadAt = Math.max(unloadAt, Date.now() + unloadDelay) }
-// The proxy before this one was killed while its connection was subscribed: the daemon dropped that subscription with it.
-if (carried?.isSubscribed) restartUnload()
+// The proxy before this one was killed while its connection was subscribed: the daemon dropped that subscription when it died,
+// which is when it was last seen alive. A person who is gone now is read as gone since then as well, the earliest it can have been.
+if (carried?.isSubscribed) unloadAt = Math.max(unloadAt, carried.seen + unloadDelay)
+if (carried?.hadPerson && config.person && !existsSync(config.person)) { hadPerson = false; unloadAt = Math.max(unloadAt, carried.seen + unloadDelay) }
+if (carried) log({ carried: carried.isSubscribed ? 'killed' : 'left', unloadsIn: unloadAt - Date.now() })
 // A proxy that ends takes its connection's subscription with it, at that moment.
 process.on('exit', () => {
   if (isSubscribed) { isSubscribed = false; restartUnload() }
@@ -97,8 +111,8 @@ const isListed = () => {
   return false
 }
 const notice = frame => { if (isSubscribed) emitNow(frame) }
-const ended = () => { running = null; stamp += 1; restartUnload(); save() }
-const thread = id => ({ id, updatedAt: stamp, status: { type: running ? 'active' : 'idle' } })
+const ended = () => { running = null; isWaiting = false; stamp += 1; restartUnload(); save() }
+const thread = id => ({ id, cwd: config.cwd ?? '/synthetic/project', ...(config.noMarker ? {} : { updatedAt: stamp }), status: running ? { type: 'active', activeFlags: isWaiting ? ['waitingOnApproval'] : [] } : { type: 'idle' } })
 const ackOf = text => 'ACK ' + text.match(/ACK ([0-9a-f]{6})/)[1]
 // A user message item, as the daemon reports one: the claim nonce a client gave comes back as `clientId`.
 const userMessage = (threadId, turnId, content, clientId) => ({ method: 'item/completed', params: { threadId, turnId, item: { type: 'userMessage', ...(clientId ? { clientId } : {}), content } } })
@@ -123,6 +137,12 @@ const handle = (value, emit) => {
   log(value)
   const threadId = value.params?.threadId
   if (value.method === 'initialize') emit({ id: value.id, result: { userAgent: config.userAgent ?? 'codex_cli_rs/0.169.0 (synthetic)' } })
+  if (value.method === 'config/read') {
+    const fault = config.configFaults && existsSync(config.configFaults) ? readFileSync(config.configFaults, 'utf8') : null
+    if (fault !== null && fault !== 'odd') { emit({ id: value.id, error: { code: -32600, message: 'synthetic' } }); return }
+    const seconds = fault === 'odd' ? 'sixty' : config.unloadSecs ?? 0
+    emit({ id: value.id, result: { config: seconds === 'none' ? {} : { thread_unload_delay_secs: seconds }, origins: {} } })
+  }
   if (value.method === 'thread/loaded/list') emit({ id: value.id, result: { data: isListed() ? config.loaded : [], nextCursor: null } })
   if (value.method === 'thread/unsubscribe') {
     const fault = unsubscribeFaults.shift()
@@ -233,6 +253,7 @@ const handle = (value, emit) => {
     notice({ method: 'thread/status/changed', params: { threadId, status: { type: 'active' } } })
     notice({ ...own, params: { ...own.params, turnId: running } })
     if (config.approval === 'hold') {
+      isWaiting = true
       notice({ method: 'thread/status/changed', params: { threadId, status: { type: 'active', activeFlags: ['waitingOnApproval'] } } })
       notice({ id: 998, method: 'item/commandExecution/requestApproval', params: { threadId, turnId: running } })
       return
@@ -244,10 +265,10 @@ const handle = (value, emit) => {
 // The daemon's side is saved as soon as a request has changed it: a proxy can be killed at any moment.
 serveWebSocketProxy({ onHandshake: request => log({ handshake: request }), onMessage: (value, emit) => { handle(value, emit); save() } })
 const watcher = setInterval(() => {
-  if (!emitNow) return
-  // Notes a person who quit, so the unload delay starts when they did and not at the next listing.
+  // Notes a person who quit, so the unload delay starts when they did and not at the next listing; and that this proxy is alive.
   isListed()
   save()
+  if (!emitNow) return
   if (acking && config.ackFlag && existsSync(config.ackFlag)) { unlinkSync(config.ackFlag); finish('turn-delivery', acking.threadId, acking.text); acking = null }
   if (config.closeFlag && existsSync(config.closeFlag)) { unlinkSync(config.closeFlag); emitNow({ method: 'thread/closed', params: { threadId: config.loaded[0] } }) }
   if (config.interruptFlag && existsSync(config.interruptFlag)) for (const stop of interrupts.splice(0)) stop()

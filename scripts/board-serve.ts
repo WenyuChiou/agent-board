@@ -912,7 +912,7 @@ export const startServer = (o: ServeOptions): void => {
     lastSeen = Date.now()
     if (o.codex?.executable) {
       // The address and token stay in this process: the Codex program is given neither.
-      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable, ...(o.codex.unloadMs === undefined ? {} : { unloadMs: o.codex.unloadMs }) })
+      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable, ...(o.codex.unloadMs === undefined ? {} : { unloadMs: o.codex.unloadMs, unloadMarginMs: o.codex.unloadMs }) })
       // A process that exits another way (Windows sends no SIGTERM) still ends the Codex program it started.
       process.once('exit', () => codexReceiver?.kill())
     }
