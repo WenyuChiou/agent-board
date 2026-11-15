@@ -6,7 +6,7 @@ const loader = registerHooks({ resolve(specifier, context, next) {
   if (context.parentURL?.startsWith(new URL('../hooks/', import.meta.url).href) && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/i.test(specifier)) return next(`${specifier}.ts`, context)
   return next(specifier, context)
 } })
-const { askOf } = await import('../hooks/ask.ts')
+const { askOf, isSameAskDrawn } = await import('../hooks/ask.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
 const { serveModel } = await import('../hooks/serve.ts')
@@ -111,4 +111,14 @@ test('Chinese and English questions offer clean choices or a yes and no', () => 
       assert.deepEqual({ kind: result.kind, options: result.options }, { kind, options }, text)
     }
   }
+})
+
+test('a choice drawn from options that have since changed is not the same ask (#1483)', () => {
+  const drawn = { key: 'mine::1', questionId: undefined, text: 'Database choice', note: 'Which database should I use?', kind: 'choose', options: ['A', 'B'] }
+  assert.equal(isSameAskDrawn({ ...drawn }, drawn), true)
+  assert.equal(isSameAskDrawn({ ...drawn, options: ['C', 'B'] }, drawn), false)
+  assert.equal(isSameAskDrawn({ ...drawn, options: ['B', 'A'] }, drawn), false)
+  assert.equal(isSameAskDrawn({ ...drawn, options: ['A'] }, drawn), false)
+  assert.equal(isSameAskDrawn({ ...drawn, kind: 'reply', options: [] }, drawn), false)
+  assert.equal(isSameAskDrawn({ ...drawn, text: 'Other choice' }, drawn), false)
 })

@@ -14,6 +14,7 @@ import type { EngineInterface, PluginOptions, PromptSubmitResult, Register } fro
 import type { RenderSurface } from 'claude-code'
 
 import type { CutBlock, ProgressAnswer, ProgressMirror, ProgressPr, ProgressSnapshot, ResolveResult } from '../types'
+import { isSameAskDrawn } from './ask'
 import {
   addManualTask,
   confirmMatches,
@@ -5017,9 +5018,11 @@ export const register: Register = (on, options) => {
           if (before === null || task === undefined || task.subject !== item.text || (task.why ?? '') !== item.note) return failure(s.boardLineChanged)
           const source = JSON.stringify({ session: before.sessionId, project: before.project, title: before.title, context: before.context, task })
           const matches = (one: ProgressMirror): boolean => source === JSON.stringify({ session: one.sessionId, project: one.project, title: one.title, context: one.context, task: one.tasks.find(row => row.id === id) })
+          // A button drawn from options that have since changed is stale: the kind and the
+          // ordered options it was drawn from must still match, or the press is refused.
           const isSameAsk = async (one: ProgressMirror): Promise<boolean> => {
             const view = boardView([], [], one, await $.clock.now(), 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, await progressPath($)), [], new Set(), new Set())
-            return [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].some(ask => ask.key === item.key && ask.questionId === item.questionId && ask.text === item.text && ask.note === item.note)
+            return [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].some(ask => isSameAskDrawn(ask, item))
           }
           if (!(await isSameAsk(before))) return failure(s.boardLineChanged)
           const entered = await submitOwn($, s.answerText(item.text, text)).catch(() => ({ drop: s.pressSessionGone }))

@@ -257,3 +257,10 @@ export const askOf = (
 // How urgent: something the person can settle now comes before something that waits on
 // someone else.
 export const askRank = (kind: AskKind): number => (kind === 'wait' ? 2 : kind === 'reply' || kind === 'input' ? 1 : 0)
+
+// Whether the ask the mirror holds is still the ask the pane drew: the same question, the
+// same kind, and the same options in the same order. A button drawn from options that have
+// since changed is stale, even when the question words are unchanged (#1483).
+export type AskDrawn = { key: string; questionId?: string; text: string; note: string; kind: AskKind; options: string[] }
+export const isSameAskDrawn = (current: AskDrawn, drawn: AskDrawn): boolean =>
+  current.key === drawn.key && current.questionId === drawn.questionId && current.text === drawn.text && current.note === drawn.note && current.kind === drawn.kind && current.options.length === drawn.options.length && current.options.every((option, index) => option === drawn.options[index])

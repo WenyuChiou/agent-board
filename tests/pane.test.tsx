@@ -2222,6 +2222,27 @@ test('a choice answer containing double colons shows its result next to its own 
   } finally { await ui.unmount() }
 })
 
+test('a press on a choice drawn from options that have since changed is refused and the pane redraws (#1483)', { options: { language: 'en' } }, async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true, lang: 'en' } }
+  const clock = engineBeneath(on, world)
+  let submitted = 0
+  on('prompt.submit', () => { submitted += 1; return { drop: 'synthetic session refusal' } })
+  await start($, 'Pick a database')
+  await $.tool.call({ tool: 'TaskCreate', subject: 'Database choice', description: '' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'choose', options: ['A', 'B'], why: 'Which database should I use?' } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(await ui.find({ type: 'Button', key: 'mine::1::A' })).toBeDefined()
+    await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'choose', options: ['C', 'B'], why: 'Which database should I use?' } })
+    await ui.press({ key: 'mine::1::A' })
+    expect(besideButton(await ui.findAll({ type: 'Box' }), 'mine::1::A')).toContain(EN.boardLineChanged)
+    expect(submitted).toBe(0)
+    await clock.advance(2100)
+    expect(await ui.find({ type: 'Button', key: 'mine::1::C' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'mine::1::A' })).toBeUndefined()
+  } finally { await ui.unmount() }
+})
+
 test('a Claude turn ending on a question over a list keeps the plain question in a session with a Task list (#1277)', { options: { language: 'en' } }, async ($, on) => {
   const world: World = { files: new Map(), mtime: 1, hasTasks: true, store: { autoConnectOff: true, lang: 'en' } }
   const clock = engineBeneath(on, world)
