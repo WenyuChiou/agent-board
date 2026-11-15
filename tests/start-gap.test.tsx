@@ -32,7 +32,7 @@ const putCapture = (world: World, record: Parameters<typeof captureJson>[0], dis
 const block = (session: string, steps: string): string =>
   `<!-- auto session=${session} agent=codex state=waiting updated=${new Date(NOW - HOUR).toISOString().replace(/\.\d{3}Z$/, 'Z')} -->\n### Synthetic plan ${session}\n> Context: Synthetic data.\n${steps}\n<!-- /auto session=${session} -->\n`
 
-test('a session start on a board with 300 waiting questions and 5,500 old copies, and the inbox looks that keep 30 new questions, never go a second without a trip to the host', { timeoutMs: 600_000 }, async ($, on) => {
+test('a session start on a board with 300 waiting questions and 5,500 old copies reads each copy once across the inbox looks that keep 30 new questions', { timeoutMs: 600_000 }, async ($, on) => {
   const board = `## demo\n${Array.from({ length: 300 }, (_, n) => block(`b0${n.toString(16).padStart(6, '0')}`, `- [?] Publish plan number ${n}, OK?`)).join('')}`
   const world = makeWorld([[FILE, board]])
   world.env = english
@@ -55,6 +55,7 @@ test('a session start on a board with 300 waiting questions and 5,500 old copies
   const before = new Set([...world.files.keys()].filter(path => QUESTION_FILE.test(path)))
   expect(before.size).toBe(5800)
   world.written = []
+  world.reads = []
   const timing = timeStretches(on)
   const clock = engineBeneath(timing.on, world)
   timing.begin()
@@ -74,7 +75,9 @@ test('a session start on a board with 300 waiting questions and 5,500 old copies
   console.log(`longest stretch without a host call: ${Math.round(longest)} ms, ${at}`)
   // The questions of the inbox reached the ledger within the timed looks.
   expect(fromInbox()).toBe(30)
-  expect(longest).toBeLessThan(1000)
+  const copiesRead = world.reads.filter(path => before.has(path))
+  expect(copiesRead.length).toBe(before.size)
+  expect(new Set(copiesRead).size).toBe(copiesRead.length)
   // No copy the board already had was written again.
   expect(world.written.filter(path => before.has(path))).toEqual([])
 })

@@ -11,6 +11,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { localProgressPath, runCodexLocal, setupFailure } from './codex-local'
 import { withLocalLock } from './local-lock'
+import { goneBlocksOf } from './session-liveness'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
 import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -20,21 +21,27 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
 import { boardLanguage, isLanguageOverridden, settingsLangOf, withBoardSettings } from '../hooks/board-settings'
 import type { SettingsLang } from '../hooks/board-settings'
-import { barStyleName, barStyleOf, nextBarStyle, withBarStyle } from '../hooks/progress-bar'
+import { barStyleName, barStyleOf, nextBarStyle } from '../hooks/progress-bar'
 import type { BarStyle } from '../hooks/progress-bar'
 import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, manualStepRef, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
 import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
-import { moveLockAside } from './board-messaging'
+import { moveLockAside, readQueuedMessaging } from './board-messaging'
+import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
+import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
-import { isTimeout, privateFolderHandoff } from './private-folder'
+import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder'
+import { dockArguments, dockCommand, probeOf, windowPath, windowPlaceOf } from '../hooks/board-dock'
+import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
+import { isReceiverRoutes } from '../hooks/messaging'
+import type { ReceiverRoutes } from '../hooks/messaging'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pagePortOf, pickSurface, sshTargetOf } from '../hooks/surface'
 import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
@@ -51,9 +58,10 @@ import type { PendingArchiveRecord } from '../hooks/journal'
 import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, RETENTION, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
 import { qrModules, qrText } from '../hooks/qr'
-import { agentLabel, langOf, plainReason, STRINGS } from '../hooks/strings'
+import { agentLabel, langOf, plainReadReason, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
-import type { TaskRef } from '../hooks/view'
+import type { TaskRef, View } from '../hooks/view'
+import type { Strings } from '../hooks/i18n'
 import { acknowledgementKeys, archiveQuestionsKept, refTasks, captureHashOf, captureJson, capturePath, compactQuestionsJson, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, migratedAnswered, observeQuestions, parseQuestions, questionProofJson, questionProofOf, questionProofPath, questionsPath, resolvedQuestionsToRetire, runQuestionsClosed } from '../hooks/questions'
 import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
@@ -71,6 +79,43 @@ const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hoo
 const flag = (name: string): string | undefined => {
   const at = args.indexOf(name)
   return at === -1 ? undefined : args[at + 1]
+}
+const BOOL_FLAGS = new Set([
+  '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--awaits-ack', '--chat', '--codex-doctor',
+  '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
+  '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
+  '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
+  '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
+  '--stop', '--stopped', '--tidy', '--unsent', '--version', '-v', '--watch',
+])
+const VALUE_FLAGS = new Set([
+  '--agent', '--codex-bin', '--codex-dir', '--cwd', '--data-dir', '--deepseek-dir', '--event',
+  '--grok-dir', '--hermes-dir', '--home', '--hook-deadline', '--hook-event', '--hook-started',
+  '--id', '--idle-minutes', '--keys', '--lang', '--legacy-connect-request', '--mailbox',
+  '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
+  '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
+  '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--ref', '--removing',
+  '--session', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
+])
+const unknownFlag = (argv: readonly string[]): string | undefined => {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!
+    if (arg === '--') break
+    if (!arg.startsWith('-')) continue
+    if (VALUE_FLAGS.has(arg)) { i += 1; continue }
+    if (arg === '--days') {
+      const next = argv[i + 1]
+      if (next !== undefined && !next.startsWith('--')) i += 1
+      continue
+    }
+    if (arg === '--lan') {
+      const next = argv[i + 1]
+      if (next !== undefined && /^[\d.]+$/.test(next)) i += 1
+      continue
+    }
+    if (!BOOL_FLAGS.has(arg)) return arg
+  }
+  return undefined
 }
 const idleMs = (): number => {
   const value = flag('--idle-minutes')
@@ -97,7 +142,10 @@ const systemLang = (env: unknown) => {
 
 const path = progressFile()
 const savedLanguage = (): SettingsLang | null => {
-  try { return settingsLangOf(readFileSync(settingsPath(path), 'utf8')) } catch { return null }
+  try {
+    const found = readSettings(settingsPath(path))
+    return found.kind === 'ok' ? settingsLangOf(found.text) : null
+  } catch { return null }
 }
 const langFlag = flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang'))
 const wordsNow = () => STRINGS[boardLanguage(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))]
@@ -113,7 +161,7 @@ class BoardFileError extends Error {
   readonly isLocked: boolean
   // Set once a press took back everything it wrote before this failure (#248).
   isUnchanged = false
-  constructor(readonly file: string, readonly code: string, isRead = false) {
+  constructor(readonly file: string, readonly code: string, readonly isRead = false) {
     super(code)
     this.isLocked = isRead && writes === 0 && (code === 'EBUSY' || code === 'EAGAIN')
   }
@@ -128,11 +176,13 @@ const plainFile = (file: string): string => {
     : full === resolve(questionsPath(path)) ? s.fileQuestions : s.fileNamed(basename(file))
 }
 
-// The terminal board and the page say the same about a file they could not read or write.
-const storageNote = (error: BoardFileError): string =>
-  error.isLocked ? s.boardLocked(plainFile(error.file))
+// The terminal board and the page say the same about a file they could not read or write. A held settings lock is
+// named as the writer names it (the folder's real path), so the note names the lock that blocks.
+const storageNote = (error: BoardFileError, isLan = false): string =>
+  error.code === 'SETTINGS_LOCKED' ? s.settingsLocked(isLan ? basename(settingsLockName(error.file)) : settingsLockName(error.file))
+    : error.isLocked ? s.boardLocked(plainFile(error.file))
     : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code))
-    : s.boardStorageFailed(plainFile(error.file), plainReason(s, error.code))
+    : s.boardStorageFailed(plainFile(error.file), error.isRead ? plainReadReason(s, error.code) : plainReason(s, error.code))
 
 const read = (file: string): string => {
   try {
@@ -391,8 +441,7 @@ const proofFiles = immutableQuestionFiles<{ kind: keyof QuestionProofs; hash: st
   },
 })
 let questionProofCache: { files: { kind: keyof QuestionProofs; hash: string }[]; proofs: QuestionProofs } | null = null
-const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCapture['disposition']): void => {
-  const text = captureJson(record, disposition)
+const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCapture['disposition'], text = captureJson(record, disposition), capture: QuestionCapture = { version: 1, disposition, record }): void => {
   const file = capturePath(path, sha256(text))
   // The name is the hash of the bytes, so a file whose bytes differ is a
   // partial write from a process killed mid-flush (#921 T6): no valid capture
@@ -409,7 +458,7 @@ const keepQuestionCapture = (record: QuestionRecord, disposition: QuestionCaptur
       if ((error as { code?: string } | null)?.code !== 'EEXIST') throw fileError(file, error)
     }
     if (read(file) === text) {
-      captureFiles.invalidate(basename(file))
+      captureFiles.remember(basename(file), capture)
       return
     }
     try { unlinkSync(file) } catch {}
@@ -474,7 +523,7 @@ const flushQuestionCaptures = (budget: number): void => {
     if (attempted >= budget) break
     attempted += 1
     try {
-      keepQuestionCapture(capture.record, capture.disposition)
+      keepQuestionCapture(capture.record, capture.disposition, key, capture)
     } catch (error) {
       emptyCopyCache = null
       process.stderr.write(`agent-board: could not write queued question capture ${basename(capturePath(path, sha256(key)))}: ${error instanceof Error ? error.message : String(error)}\n`)
@@ -540,6 +589,25 @@ const keepAskedQuestions = (projects: ReturnType<typeof parseProgress>, ref: Tas
 }
 let progressProjectCache: { source: string; projects: ReturnType<typeof parseProgress> } | null = null
 let progressHealthCache: { source: string; isCutSettled: boolean; frozen: ReadonlySet<string>; isSnapshot: boolean; tail: ReturnType<typeof progressTail>; lines: string[] } | null = null
+// Sole `buildView` caller in `board-cli.ts` (#1092): passes `gone` (from `goneBlocksOf`) so every
+// board view built by the CLI treats processes gone on this machine as stopped consistently.
+const viewFor = (
+  projects: readonly ProgressProject[],
+  hereProjects: readonly string[],
+  now: number,
+  todayCount: number,
+  doneSeenMap: Readonly<Record<string, number>>,
+  s: Strings,
+  answeredList: readonly string[],
+  seenMap: Readonly<Record<string, number>>,
+  questions: QuestionLedger | undefined,
+  proofs: QuestionProofs | null,
+  turns: readonly PendingTurn[],
+  frozen: ReadonlySet<string>,
+  observe: typeof observeQuestions = observeQuestions,
+  gone: ReadonlySet<string> = goneBlocksOf(projects),
+): View => buildView(projects, hereProjects, null, now, todayCount, doneSeenMap, s, answeredList, seenMap, questions, proofs, turns, frozen, observe, staleTimeoutMs(), undefined, gone)
+
 const observeWriterQuestions = reusableQuestionObservation()
 const observeViewQuestions = reusableQuestionObservation()
 const readBoardView = (source: string, now: number) => {
@@ -607,6 +675,10 @@ const readBoardView = (source: string, now: number) => {
   const previewProofs = proofs
   if (record !== null) lastQuestions = record
   const frozen = progressHealthCache.frozen
+  // Blocks whose claimed live process is gone on this machine (#1092): worked out once
+  // per read, from the pid each block carries, and passed to `viewFor` as data.
+  // The start-time lookup runs only for live pids, once per claim.
+  const gone = goneBlocksOf(projects)
   let questions: QuestionLedger | null = null
   // Chat and a one-shot read never write. Interactive readers persist before accepting hides.
   if (proofs !== null && isWritingQuestions) {
@@ -702,7 +774,7 @@ const readBoardView = (source: string, now: number) => {
   const dropped = inboxDropped(droppedLogCache.text, prunedSince(now))
   const pruned = prunedNote({ ...prunedTotal(pageState.pruned, now), turns: dropped.age + dropped.cap }, s)
   // Proof writes above refresh this snapshot; drawing need not list the directory again.
-  return { ...buildView(projects, [basename(process.cwd())], null, now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, viewQuestions, proofs, turns, frozen, observeViewQuestions, staleTimeoutMs()), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
+  return { ...viewFor(projects, [basename(process.cwd())], now, countDay(journalToday(now), now), manualDoneSeen(projects, seen, now, s), s, answered, seen, viewQuestions, proofs, turns, frozen, observeViewQuestions, gone), ...(warnings.length === 0 ? {} : { warning: warnings.join(' · ') }), ...(large.length === 0 ? {} : { isLarge: true as const }), ...(large.length === 0 && finished === 0 ? {} : { isCleanable: true as const }), ...(details === undefined ? {} : { details }), ...(pruned === null ? {} : { pruned }), ...(health.length === 0 ? {} : { health }) }
 }
 
 const view = (source = read(path), now = Date.now()) => {
@@ -732,34 +804,89 @@ const settingsNow = (): string | null => {
   const now = Date.now()
   if (settingsKept !== null && now - settingsKept.at < SETTINGS_MS) return settingsKept.text
   let text: string | null
-  try { text = read(settingsPath(path)) } catch { text = null }
+  try {
+    const found = readSettings(settingsPath(path))
+    text = found.kind === 'ok' ? found.text : null
+  } catch { text = null }
   settingsKept = { text, at: now }
   return text
 }
 const barStyleNow = (): BarStyle => barStyleOf(settingsNow())
-// The pick from the page or the `s` key: the settings file's other keys are kept. False when the
-// file exists but does not read as a JSON object, or is a symlinked or non-regular file: it is left
-// as it is. A read or write error throws.
-const saveBarStyle = (style: BarStyle): boolean => {
+// The pick from the page or the `s` key: the settings file's other keys are kept. 'invalid' when the
+// file exists but does not read as a JSON object, 'unsafe' when it is a link or a non-regular file: it is
+// left as it is either way. A read or write error throws.
+type SaveResult = ReturnType<typeof updateSettings>
+const saveSettings = (patch: Record<string, unknown>): SaveResult => {
   const file = settingsPath(path)
-  if (isSymlinkOrNonRegular(file)) return false
-  const next = withBarStyle(read(file), style)
-  if (next === null) return false
-  try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
-  settingsKept = { text: next, at: Date.now() }
+  // The change is worked out from the file as it is when written, so a save made meanwhile is kept (#1276).
+  // A failed read or write names the file on the page.
+  let saved: ReturnType<typeof updateSettings>
+  try { saved = updateSettings(file, text => withBoardSettings(text, patch)) } catch (error) { throw fileError(file, error) }
+  if (saved.result === 'ok') settingsKept = { text: saved.text ?? null, at: Date.now() }
+  return saved
+}
+const saveBarStyle = (style: BarStyle): SaveResult => saveSettings({ style })
+
+const saveLanguage = (lang: SettingsLang): SaveResult => {
+  const saved = saveSettings({ lang })
+  if (saved.result === 'ok') s = wordsNow()
+  return saved
+}
+
+// The answers queued for a session's next turn, which the page counts as handled: the terminal board, --status,
+// --json and the chat view read them from the store's file so every surface shows one count (#1296).
+// It names the folder without making it, as a plain print makes no folder (the page's own default, worked out
+// by the same rule); a folder that is not there holds no queued answer.
+const queuedMessaging = () => {
+  try {
+    const flagged = flag('--messages-dir')
+    return readQueuedMessaging(flagged !== undefined ? resolve(flagged) : defaultMessagesDirectory(path, homedir(), process.env, process.platform), Date.now())
+  } catch { return undefined }
+}
+
+// A window file this writer may replace: missing, or a regular file with this one name. A
+// symlink, a folder or a file with another hard link (whose other names would change too) is not.
+const isOwnWindowFile = (file: string): boolean => {
+  try {
+    const stat = lstatSync(file)
+    return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1
+  } catch (error) {
+    return (error as { code?: string } | null)?.code === 'ENOENT'
+  }
+}
+
+// The docked window's place (#1084), in a file of its own (`windowPath`), never in the settings
+// file: only this script writes it, so a setting another writer saves meanwhile is never put back
+// and a settings file the person secured is never replaced. The place goes to a temp file of this
+// process's own, flushed, then renamed over the window file, so a cut-off write never leaves half
+// a place, and no other writer's temp file is ever touched. A window file that is not this
+// writer's own (above), looked at again just before the rename, is left as it is: false, and the
+// page sends the place again later.
+const saveWindow = (place: Rect): boolean => {
+  const file = windowPath(path)
+  if (!isOwnWindowFile(file)) return false
+  const temp = `${file}.${process.pid}-${randomUUID()}.tmp`
+  let isOwned = false
+  try {
+    const fd = openSync(temp, 'wx', 0o600)
+    isOwned = true
+    try {
+      writeFileSync(fd, JSON.stringify(place))
+      fsyncSync(fd)
+    } finally { closeSync(fd) }
+    if (!isOwnWindowFile(file)) throw new Error('changed')
+    renameSync(temp, file)
+    isOwned = false
+  } catch {
+    if (isOwned) { try { unlinkSync(temp) } catch {} }
+    return false
+  }
   return true
 }
 
-const saveLanguage = (lang: SettingsLang): boolean => {
-  const file = settingsPath(path)
-  if (isSymlinkOrNonRegular(file)) return false
-  const next = withBoardSettings(read(file), { lang })
-  if (next === null) return false
-  // A failed write names the file on the page, as a failed read does.
-  try { writeFileSync(file, next) } catch (error) { throw fileError(file, error) }
-  settingsKept = { text: next, at: Date.now() }
-  s = wordsNow()
-  return true
+// The remembered place for the next open: none when the window file is missing or unreadable.
+const windowNow = (): string | null => {
+  try { return readFileSync(windowPath(path), 'utf8') } catch { return null }
 }
 
 const options = () => ({
@@ -768,6 +895,7 @@ const options = () => ({
   barStyle: barStyleNow(),
   isIdleOpen: args.includes('--all'),
   routes,
+  messaging: queuedMessaging(),
 })
 
 // How many times `rewrite` makes a change; it tells the change which try is the last.
@@ -795,7 +923,11 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
       })
     } catch (error) {
       if (error instanceof BoardFileError) throw error
-      throw fileError(file, error instanceof Error && error.message === 'LOCK_BUSY' ? { code: 'EBUSY' } : error, true)
+      // Only a busy lock is a lock error: it still reads as locked (#342). Any other
+      // failure to take the lock is a write failure, so it must not say the file
+      // cannot be read.
+      const isLockBusy = error instanceof Error && error.message === 'LOCK_BUSY'
+      throw fileError(file, isLockBusy ? { code: 'EBUSY' } : error, isLockBusy)
     }
   }
   let failure: unknown = { code: 'EAGAIN' }
@@ -998,10 +1130,68 @@ const watchWindowsLaunch = (child: ChildProcess, done: (isOpen: boolean) => void
   child.once('spawn', () => child.unref())
 }
 
+// The board's own browser profile (#1084), in the board's private runtime folder and made private
+// like the message store. Null when it cannot be: the window then opens as it did before.
+const browserProfile = (): string | null => {
+  try {
+    const runtime = process.env.XDG_RUNTIME_DIR
+    const dir = join(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'), 'browser')
+    privateFolder(dir)
+    return dir
+  } catch {
+    return null
+  }
+}
+
+// The window docked on the right, or at the place the person last gave it (#1084), in one
+// PowerShell run, as windowsStart: it first prints the screens' work areas, then reads the
+// browser's arguments back as one base64 line and starts the first program that starts: today's
+// plain app window when there is no dock (hooks/board-dock.ts, dockCommand).
+const dockLaunch = (programs: string[], target: string, done: (isOpen: boolean) => void): void => {
+  const list = programs.map(bin => isAddress(bin) ? psLiteral(bin) : psWildcardLiteral(bin)).join(', ')
+  const command = dockCommand(list, psWildcardLiteral(dirname(path)), LAUNCH_GRACE_MS)
+  let child: ChildProcess
+  try {
+    child = spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
+      cwd: dirname(path), stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+    })
+  } catch {
+    return done(false)
+  }
+  let isSettled = false
+  const finish = (isOpen: boolean): void => {
+    if (isSettled) return
+    isSettled = true
+    clearTimeout(timer)
+    done(isOpen)
+  }
+  // PowerShell's start, Add-Type's compile and the browser's grace: about 2 s on a slow machine.
+  const timer = setTimeout(() => { child.kill(); finish(false) }, 8000)
+  child.once('error', () => finish(false))
+  child.once('exit', code => finish(code === 0))
+  child.stdin?.on('error', () => {})
+  // The profile folder is made private while PowerShell starts.
+  const profile = browserProfile()
+  let output = ''
+  let isAnswered = false
+  child.stdout?.on('data', (chunk: Buffer) => {
+    if (isAnswered) return
+    output += chunk.toString('utf8')
+    const end = output.indexOf('\n')
+    if (end < 0) return
+    isAnswered = true
+    const argv = dockArguments(target, windowPlaceOf(windowNow()), probeOf(output.slice(0, end)), profile)
+    child.stdin?.end(`${Buffer.from(argv.map(windowsArgument).join(' '), 'utf16le').toString('base64')}\n`)
+  })
+}
+
 // A file or a page's address in the browser.
+// Over SSH no window would reach the person, and a board a test started never opens one on the
+// tester's screen (#959).
+const isNoWindowHere = (): boolean => Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY || process.env.AGENT_BOARD_TEST_PID)
+
 const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = false): void => {
-  // A board a test started never opens a window on the tester's screen (#959).
-  if (process.env.SSH_CONNECTION || process.env.SSH_TTY || process.env.AGENT_BOARD_TEST_PID) return done(false)
+  if (isNoWindowHere()) return done(false)
   const fallback = () => {
     if (process.platform === 'win32') {
       try { watchWindowsLaunch(windowsStart(target, []), done) } catch { done(false) }
@@ -1057,11 +1247,15 @@ const openInBrowser = (target: string, done: (isOpen: boolean) => void, asApp = 
   if (process.platform === 'win32') {
     const programs = [...new Set(candidates)].filter(isInstalled)
     if (programs.length === 0) return fallback()
-    try {
-      watchWindowsLaunch(windowsStart(programs, [`--app=${target}`], { graceMs: LAUNCH_GRACE_MS }), isOpen => isOpen ? done(true) : fallback())
-    } catch {
-      fallback()
+    const asToday = (): void => {
+      try {
+        watchWindowsLaunch(windowsStart(programs, [`--app=${target}`], { graceMs: LAUNCH_GRACE_MS }), isOpen => isOpen ? done(true) : fallback())
+      } catch {
+        fallback()
+      }
     }
+    // Docked first (#1084); a dock that cannot start, or a screen too narrow for one, opens as before.
+    dockLaunch(programs, target, isOpen => isOpen ? done(true) : asToday())
     return
   }
 
@@ -1223,7 +1417,10 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     try {
       wrote = rewrite(path, text => {
         if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-        const next = confirmTask(text, action.ref, now, s, lastSeen, staleTimeoutMs())
+        // The gone set comes from the text this retry reads, so a session that
+        // resumed since the press was drawn is never confirmed as gone (#1092).
+        const gone = goneBlocksOf(parseProgress(text))
+        const next = confirmTask(text, action.ref, now, s, lastSeen, staleTimeoutMs(), gone)
         if (next === null) return null
         const lines = next.entries.map(entry => journalLine(entry, now, s))
         rewrite(journal, past => {
@@ -1305,7 +1502,8 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         retentionFailed = true
         return { text, entries: [] }
       }
-      return takeTask(text, action.ref, now, s, lastSeen, staleTimeoutMs())
+      const gone = goneBlocksOf(current)
+      return takeTask(text, action.ref, now, s, lastSeen, staleTimeoutMs(), gone)
     }, now)
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
@@ -1318,7 +1516,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       const latest = readQuestions(questionsPath(path))
       const proofs = readQuestionProofs()
       const frozen = cutOffScopes(after, cutOffSpans(source, isCutSettledAt(now)))
-      const kept = latest === null || proofs === null ? 0 : keptQuestionCount(buildView(after, [], null, now, 0, {}, s, parseAnswered(read(answeredPath(path))) ?? [], {}, latest, proofs, pending(), frozen, undefined, staleTimeoutMs()), action.ref, s)
+      const kept = latest === null || proofs === null ? 0 : keptQuestionCount(viewFor(after, [], now, 0, {}, s, parseAnswered(read(answeredPath(path))) ?? [], {}, latest, proofs, pending(), frozen), action.ref, s)
       return done(kept > 0 ? s.archivedKeptQuestions(action.title, kept) : s.archivedOne(action.title))
     } catch {
       return done(s.archivedOne(action.title))
@@ -1345,7 +1543,9 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       const source = read(path)
       const projects = parseProgress(source)
       const frozen = cutOffScopes(projects, cutOffSpans(source, isCutSettledAt(now)))
-      const fresh = buildView(projects, [], null, now, 0, {}, s, answered ?? [], {}, latest, proofs, pending(), frozen, undefined, staleTimeoutMs())
+      // A session whose agent is gone stops immediately (#1092): the hide check reads
+      // the same gone set as the board read, so its question is found under Older.
+      const fresh = viewFor(projects, [], now, 0, {}, s, answered ?? [], {}, latest, proofs, pending(), frozen, undefined, goneBlocksOf(projects))
       if (isHidden && keys.some(key => ![...fresh.waiting, ...(fresh.reminder ?? []), ...(fresh.older ?? []), ...fresh.hidden].some(item => item.canHide !== false && item.hideKey === key))) return null
       const aliases = observeQuestions(latest, projects, null, answered ?? [], now, true, 'preview', undefined, [], [], frozen).ledger
       return answered === null ? null : answeredJson(withAnswered(answered, isHidden ? keys : keys.flatMap(key => acknowledgementKeys(aliases, key)), isHidden))
@@ -1412,7 +1612,8 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
   let historyDays = HISTORY_DAYS
   if (!isNow && !isCleanUp) {
     try {
-      historyDays = historyDaysOf(read(settingsPath(path)))
+      const found = readSettings(settingsPath(path))
+      historyDays = historyDaysOf(found.kind === 'ok' ? found.text : '')
     } catch {}
   }
   const count = archiveOut((text, isLast) => {
@@ -1560,7 +1761,9 @@ const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind:
       if (fresh === undefined) return null
       const freshProjects = parseProgress(text)
       if (fresh.asks && !keepAskedQuestions(freshProjects, fresh.ref, now, cutOffScopes(freshProjects, cutOffSpans(text, isCutSettledAt(now))))) return null
-      const again = takeTask(text, fresh.ref, now, s, {}, staleMs)
+      // The gone set comes from the text this retry reads, as in the archive press.
+      const gone = goneBlocksOf(freshProjects)
+      const again = takeTask(text, fresh.ref, now, s, {}, staleMs, gone)
       if (again === null) return null
       if (isLast) return { text: again.text, entries: again.entries }
       if (read(path) !== text) return AGAIN
@@ -1695,11 +1898,13 @@ const press = (state: BoardState, key: string): { state: BoardState; isQuit: boo
     settingsKept = null
     const style = nextBarStyle(barStyleNow())
     try {
-      if (!saveBarStyle(style)) return { state: { ...next, note: s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+      const saved = saveBarStyle(style)
+      if (saved.result !== 'ok') return { state: { ...next, note: saved.result === 'unsafe' ? s.barStyleUnsafe : s.barStyleUnreadable, tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
+      const note = `${s.barStyleKey(barStyleName(style, s))}${saved.lockLeft === undefined ? '' : ` ${s.settingsLockLeft(saved.lockLeft)}`}`
+      return { state: { ...next, note, tone: 'done' }, isQuit: false, isHtml: false, isWrite: false }
     } catch (error) {
       return { state: { ...next, note: failureNote(error), tone: 'alert' }, isQuit: false, isHtml: false, isWrite: false }
     }
-    return { state: { ...next, note: s.barStyleKey(barStyleName(style, s)), tone: 'done' }, isQuit: false, isHtml: false, isWrite: false }
   }
   if (action.type === 'tidy') {
     let note: string
@@ -1921,6 +2126,39 @@ const readRunning = (file = serveFile()): Running | null => {
 
 const tokenOf = (url: string): string => new URL(url).searchParams.get('t') ?? ''
 
+// The board opens its own page, with a one-time approval key the address file never holds, so only
+// that page can answer approvals (D3, #1318). A page started by an older copy has no such route:
+// the page is opened here, as before, and cannot answer approvals. Over SSH and in tests nothing
+// opens, as before.
+// `canOpenHere`: false when a page is open already and only one that can answer approvals is wanted:
+// if the board cannot open that one, the open page stays the only window.
+const openThroughBoard = async (url: string, asApp: boolean, canOpenHere = true): Promise<boolean> => {
+  if (!isNoWindowHere()) {
+    try {
+      const answer = await fetch(`http://127.0.0.1:${new URL(url).port}/api/open`, {
+        method: 'POST',
+        headers: { 'x-board-token': tokenOf(url), 'content-type': 'application/json' },
+        body: JSON.stringify({ asApp }),
+        signal: AbortSignal.timeout(15_000),
+      })
+      if (answer.ok) {
+        const reply = (await answer.json()) as { isOpen?: unknown; hasTried?: unknown }
+        if (reply.isOpen === true) return true
+        // The board tried this computer's browsers and none opened: trying them again from here
+        // fails the same way, or opens a second window when a launcher reported an error after all.
+        // A board started where no display reaches (a stale DISPLAY in tmux) now leaves the person the
+        // printed link rather than a window from here that could not answer approvals.
+        if (reply.hasTried === true) return false
+      }
+    } catch {}
+  }
+  // An older board (no such route, or no `hasTried`), or one that opens no window where it runs (a
+  // test's board, #959): this process opens the page as before, with this caller's browsers, and
+  // that page cannot answer approvals.
+  if (!canOpenHere) return false
+  return new Promise<boolean>(done => openInBrowser(url, done, asApp))
+}
+
 const isRunning = (pid: number): boolean => {
   try {
     process.kill(pid, 0)
@@ -1953,12 +2191,28 @@ const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unk
 // 3 seconds; a hidden or minimized one does not count, so opening the board then shows a window (#265). Only a test
 // process may shorten it.
 const PAGE_OPEN_MS = (): number => (process.env.AGENT_BOARD_TEST_PID && Number(process.env.AGENT_BOARD_PAGE_OPEN_MS) > 0 ? Math.min(Number(process.env.AGENT_BOARD_PAGE_OPEN_MS), 10_000) : 10_000)
-const pageIsOpen = async (server: RunningServer): Promise<boolean> => {
-  if (server.isNew) return false
+// 'open': a page reported itself in front lately. 'unkeyed': one did, but a host is asking for
+// approvals and that page cannot answer them (opened from the printed address, or reloaded, which
+// drops its secret), so the board is asked to open one that can (D3, #1318). Over SSH the board opens
+// nothing, so an open page counts as open. 'none': no page.
+type PageState = 'none' | 'open' | 'unkeyed'
+const openPageState = async (server: RunningServer): Promise<PageState> => {
+  if (server.isNew) return 'none'
   const answer = await ping({ pid: 0, port: server.port, url: server.url, path: '', built: '' })
-  return answer !== null && answer !== 'silent' && typeof answer.pageAgo === 'number' && answer.pageAgo >= 0 && answer.pageAgo < PAGE_OPEN_MS()
+  if (answer === null || answer === 'silent' || typeof answer.pageAgo !== 'number' || answer.pageAgo < 0 || answer.pageAgo >= PAGE_OPEN_MS()) return 'none'
+  return answer.wantsKeyedPage === true && !(process.env.SSH_CONNECTION || process.env.SSH_TTY) ? 'unkeyed' : 'open'
 }
 
+// The Codex program the receiver runs (#318). The receiver is off unless the page was started with `--codex-send`: whether a
+// command that needs approval still reaches the person while the board is joined is not proven on a real Codex yet (#318).
+// Then AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else, it turns the receiver off), else the one
+// on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names its own, so it never reaches the real ~/.codex.
+const codexReceiverExecutable = (): string | null => {
+  if (!args.includes('--codex-send')) return null
+  const given = process.env.AGENT_BOARD_CODEX_BIN
+  if (given !== undefined) return explicitCodexExecutable(given)
+  return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
+}
 // The detached Windows child reports startup failures through a private file too; redirecting
 // its standard handles would make Start-Process inherit the caller's extra pipes again.
 const serveChildError = (message: string): void => {
@@ -1971,12 +2225,32 @@ const serveChildError = (message: string): void => {
   }
 }
 
+const parseServePort = (raw: string | undefined): number | null => {
+  if (raw === undefined || !/^[1-9]\d*$/.test(raw)) return null
+  const port = Number(raw)
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null
+}
+
+// The code the launcher reads from a store that would not open or an owner record that could not be published.
+const storeFailureCode = (error: unknown): string => {
+  const errno = (error as NodeJS.ErrnoException | null)?.code
+  const message = error instanceof Error ? error.message : ''
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(message) ? message
+    : typeof errno === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(errno) ? errno : 'UNREADABLE'
+}
+
 const serveChild = (): void => {
   // Resolve the protected address before asynchronous callbacks can run.
   const file = serveFile()
   // A child that could not protect the folder cannot start a page: its address file would
   // be unprotected. The parent reuses a running page itself; a child on its own refuses.
   if (runtimeUnprotected) throw runtimeFolderFailure()
+  const requestedPort = args.includes('--port') ? parseServePort(flag('--port')) : 0
+  if (requestedPort === null) {
+    serveChildError(`PORT_INVALID ${flag('--port') ?? ''}\n`)
+    process.exitCode = 1
+    return
+  }
   // A page a test started stops once that test's process is gone, even after a killed run (#959).
   // Only tests set AGENT_BOARD_TEST_PID, to their own process id.
   const testPid = Number(process.env.AGENT_BOARD_TEST_PID)
@@ -1994,8 +2268,18 @@ const serveChild = (): void => {
   try {
     startServer({
       allowResume: args.includes('--allow-resume'),
+      routes: routesStandIn(),
       messagesDirectory: messagesDirectory(),
       isDefaultMessagesDirectory: flag('--messages-dir') === undefined,
+      codex: {
+        // Read now, not the page's cache: a tick has no page poll behind it, so a cache would keep an ended session attached and miss a new one.
+        // A file that is missing or cannot be read throws, so the tick keeps every thread: only a row read as ended or gone ends one.
+        threads: () => parseProgress(readFileSync(path, 'utf8')).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
+        executable: codexReceiverExecutable(),
+        // The daemon's own unload delay and a margin, which the receiver knows, unless a test process started this page and
+        // names a shorter wait for its stand-in daemon (`testUnloadMs`).
+        unloadMs: testUnloadMs(process.env, process.ppid),
+      },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests
         // still read current bytes instead of accepting an older page's baseline.
@@ -2003,8 +2287,8 @@ const serveChild = (): void => {
         return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
       },
       get s() { return s },
-      port: Number(flag('--port') ?? 0) || 0,
-      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), messagesDirectory: messagesDirectory() },
+      port: requestedPort,
+      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: args.includes('--codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       pending: (isFresh = true) => pending(undefined, isFresh),
@@ -2018,6 +2302,7 @@ const serveChild = (): void => {
       // With no pick saved, the panel shows the setup language the board uses, not Automatic.
       language: () => settingsLangOf(settingsNow()) ?? langOf(BAKED.lang) ?? 'auto',
       setLanguage: saveLanguage,
+      setWindow: saveWindow,
       isLangOverridden: () => isLanguageOverridden(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG)),
       agents: createSettingsAgents({ args, progress: path, script: process.argv[1]!, words: () => s, readProgress: () => read(path) }),
       sweep: () => { tidyCount(false, true); moveOldMonths() },
@@ -2026,8 +2311,17 @@ const serveChild = (): void => {
       // The page names a file it could not read or write the way the terminal board does, for a
       // press and for the board it shows. The page is answered, so the exit code and stderr are
       // left alone. File labels and reasons stay the same on local and network pages.
-      failure: error => (error instanceof BoardFileError ? storageNote(error) : null),
+      failure: (error, isLan) => (error instanceof BoardFileError ? storageNote(error, isLan) : null),
       idleMs: idleMs(),
+      // The page that can answer approvals is the one the board opens itself (D3, #1318).
+      // A board that opens no window where it runs says it tried nothing, so the caller opens the page.
+      open: (url, asApp) => (isNoWindowHere() ? Promise.resolve(null) : new Promise<boolean>(done => openInBrowser(url, done, asApp))),
+      // An approval answered on the board: a line marked apart from finished steps, with the
+      // command's hash and first words only.
+      journal: entry => {
+        const now = Date.now()
+        rewrite(partOf(journalPath(path, now)), past => appendJournal(past, [journalLine({ ...entry, isEvidence: true }, now, s)], s))
+      },
       onReady: (url, port) => {
         // Without its address file no later `--serve` finds this page, and each would start one
         // more; so it does not start at all. Nor when the file is there already: another
@@ -2064,22 +2358,47 @@ const serveChild = (): void => {
         unlinkIf(file, () => readRunning(file)?.pid === process.pid)
         process.exit(0)
       },
+      onListenError: (error) => {
+        unlinkIf(file, () => readRunning(file)?.pid === process.pid)
+        if (error.code === 'EADDRINUSE' || error.code === 'EACCES') {
+          serveChildError(`PORT_FAILED ${error.code} ${requestedPort}\n`)
+          process.exitCode = 1
+          return
+        }
+        process.exit(0)
+      },
+      // The hub has stopped and given its lock back; the launcher shows the cause as for a store that would not open.
+      onStoreError: (error) => {
+        serveChildError(`MESSAGE_STORE_FAILED ${storeFailureCode(error)}\n`)
+        process.exitCode = 1
+        setTimeout(() => process.exit(1), 1000).unref()
+      },
     })
   } catch (error) {
     if (!(error instanceof Error) || error.cause !== 'MESSAGE_STORE_FAILED') throw error
-    const errno = (error as NodeJS.ErrnoException).code
-    const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message
-      : typeof errno === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(errno) ? errno : 'UNREADABLE'
-    serveChildError(`MESSAGE_STORE_FAILED ${code}\n`)
+    serveChildError(`MESSAGE_STORE_FAILED ${storeFailureCode(error)}\n`)
     process.exitCode = 1
   }
 }
 
+// AGENT_BOARD_ROUTES names a JSON file of receiver routes used in place of the recorded ones (the tests'
+// stand-in, like AGENT_BOARD_GROK in board-serve.ts). A file that is missing or is no list stops the board.
+const routesStandIn = (): ReceiverRoutes[] | undefined => {
+  const file = process.env.AGENT_BOARD_ROUTES
+  if (file === undefined || file === '') return undefined
+  const list: unknown = JSON.parse(readFileSync(file, 'utf8'))
+  if (!isReceiverRoutes(list)) throw new Error('INVALID_ROUTES')
+  return list
+}
+
+// Whether replacing this running server will listen on a different port, so the old page may stay open briefly to report the move (#1335).
+const replacementMove = (running: Running): boolean => !args.includes('--port') || parseServePort(flag('--port')) !== running.port
+
 // The page at that address is asked to close, and whether it agreed is answered. It refuses while
 // a reply is on its way (and then stops by itself once idle). Its file goes only when it agreed,
 // and while it still names that page: another `--serve` may have started a new one since.
-const letGo = async (running: Running, file: string): Promise<boolean> => {
-  const isClosed = await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).then(
+const letGo = async (running: Running, file: string, isMoved = false): Promise<boolean> => {
+  const isClosed = await fetch(`http://127.0.0.1:${running.port}/api/close`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: isMoved ? '{"moved":true}' : '{}', signal: AbortSignal.timeout(1500) }).then(
     res => res.ok,
     () => false,
   )
@@ -2092,8 +2411,8 @@ const letGo = async (running: Running, file: string): Promise<boolean> => {
 // on its way from it, and a second page beside it would send that reply again. A number a
 // restarted computer gave to another program, with nothing of ours at the port, is not it: its
 // file goes, so a stale address never keeps the board from starting.
-const stays = async (running: Running, file: string): Promise<boolean> => {
-  if (await letGo(running, file)) return false
+const stays = async (running: Running, file: string, isMoved = false): Promise<boolean> => {
+  if (await letGo(running, file, isMoved)) return false
   const answer = await ping(running, 500)
   if (answer === 'silent' ? isRunning(running.pid) : answer !== null) return true
   unlinkIf(file, () => readRunning(file)?.pid === running.pid)
@@ -2114,7 +2433,7 @@ const keptPage = async (file: string): Promise<Running | null> => {
 // The running page of this copy for this file, or null. Any other page found in the file (one
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
-const runningPage = async (isStarting = false): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
+const runningPage = async (isStarting = false, isReplacing = false): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
   const running = readRunning()
   if (running === null) {
     // A file that has not read for ten seconds (either way, should the clock have been set
@@ -2130,8 +2449,8 @@ const runningPage = async (isStarting = false): Promise<{ page: Running; isKept:
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
   const requestedStale = staleTimeoutMs()
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
-  return (await stays(running, serveFile())) ? { page: running, isKept: true } : null
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (!args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  return (await stays(running, serveFile(), isReplacing && replacementMove(running))) ? { page: running, isKept: true } : null
 }
 
 // `--lan`: the running page opens to the local network too, and its address there is printed
@@ -2165,12 +2484,14 @@ interface RunningServer {
   idleMs?: number | undefined
 }
 
-type ServeFailure = { storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
+type ServeFailure = { invalidPort?: string; portError?: { code: 'EADDRINUSE' | 'EACCES'; port: number }; storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
 
-// The note a failed start prints: the message folder's failure first, then the child's
+// The note a failed start prints: `--port` failures and message folder failures first, then the child's
 // own folder failure, then the generic line. The child prints its folder failure in the
 // command's language, so the parent matches the same words.
 const serveFailureNote = (failure: ServeFailure): string => {
+  if (failure.invalidPort !== undefined) return s.serveFailed(s.serveInvalidPort(failure.invalidPort))
+  if (failure.portError !== undefined) return s.serveFailed(failure.portError.code === 'EACCES' ? s.servePortDenied(failure.portError.port) : s.servePortInUse(failure.portError.port))
   if (failure.storeCode !== undefined) return s.serveStoreFailed(failure.storeCode, messagesDirectory())
   if (failure.isChildCheckTimeout) return s.serveFailed(s.serveRuntimeCheckTimeout)
   if (failure.isChildCheckDenied) return s.serveFailed(s.serveRuntimeDenied)
@@ -2197,14 +2518,22 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     throw runtimeFolderFailure()
   }
   const old = readRunning(oldServeFile)
-  if (old !== null && (await stays(old, oldServeFile))) return { url: old.url, port: old.port, isKept: true, isNew: false }
-  const found = await runningPage()
+  if (old !== null && (await stays(old, oldServeFile, replacementMove(old)))) return { url: old.url, port: old.port, isKept: true, isNew: false }
+  const found = await runningPage(false, true)
   if (found !== null) return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
+  if (args.includes('--port')) {
+    const requestedPort = parseServePort(flag('--port'))
+    if (requestedPort === null) {
+      if (failure !== undefined) failure.invalidPort = flag('--port') ?? ''
+      return null
+    }
+  }
   const rest = ['--lang', '--port', '--idle-minutes', '--stale-ms'].flatMap(name => {
     const value = flag(name)
     return value === undefined ? [] : [name, value]
   })
   if (args.includes('--allow-resume')) rest.push('--allow-resume')
+  if (args.includes('--codex-send')) rest.push('--codex-send')
   // The child runs with cwd set to the board's folder, so a relative path would resolve
   // against the board's folder instead of this command's folder. Pass the board and the
   // messages folder the parent resolved, as absolute paths, so the child serves the same
@@ -2317,6 +2646,11 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   while (performance.now() < deadline) {
     const { url, stderr, readyBy } = await startPage()
     if (url !== null) return { url, port: Number(new URL(url).port), isKept: false, isNew: true }
+    const portFailed = /^PORT_FAILED (EADDRINUSE|EACCES) (\d+)\r?$/m.exec(stderr)
+    if (portFailed !== null) {
+      if (failure !== undefined) failure.portError = { code: portFailed[1] as 'EADDRINUSE' | 'EACCES', port: Number(portFailed[2]) }
+      return null
+    }
     // Another `--serve` started at the same moment may have written its address first: this
     // page stopped then, and that one is the page to show. When it took the message folder
     // first, this page stopped before that one had written its address, so it is given the
@@ -2398,14 +2732,15 @@ const serveBoard = async (): Promise<void> => {
   // command and prints no text board before the address (#868). `--quiet-board` is now a no-op.
   const serverPromise = ensureServer(failure)
   // The note goes above the address, so the address stays the last line an agent shows.
-  const show = async (url: string, isKept = false, actualIdle?: number, isPageOpen = false): Promise<void> => {
+  const show = async (url: string, isKept = false, actualIdle?: number, page: PageState = 'none'): Promise<void> => {
     const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60_000)}\n` : ''
     process.stdout.write(`\n${isKept ? `${s.serveKept}\n` : ''}${idleNote}${s.serveAt(url)}\n`)
     // The address comes from a file and goes to a shell on Windows: only the shape this server
     // writes is opened.
-    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && !isPageOpen) {
-      const isOpen = await new Promise<boolean>(done => openInBrowser(url, done))
-      if (!isOpen && !process.env.AGENT_BOARD_TEST_PID && !process.env.SSH_CONNECTION && !process.env.SSH_TTY) {
+    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && page !== 'open') {
+      const isOpen = await openThroughBoard(url, true, page === 'none')
+      // With a page already open, no window is missing.
+      if (!isOpen && page === 'none' && !isNoWindowHere()) {
         process.stderr.write(`${s.serveBrowserNone(url)}\n`)
       }
     }
@@ -2418,7 +2753,7 @@ const serveBoard = async (): Promise<void> => {
     process.stdout.write(`\n${serveFailureNote(failure)}\n`)
     return
   }
-  await show(server.url, server.isKept, server.idleMs, await pageIsOpen(server))
+  await show(server.url, server.isKept, server.idleMs, await openPageState(server))
 }
 
 const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string }> => {
@@ -2432,9 +2767,12 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
   const isNoOpen = args.includes('--no-open')
   const isShape = !isNoOpen && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
   // The page is already in a window: point at it rather than opening another one that would poll too.
-  if (isShape && await pageIsOpen(server)) return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
-  const isOpen = isShape ? await new Promise<boolean>(done => openInBrowser(address, done, true)) : false
-  const isSuppressed = Boolean(process.env.AGENT_BOARD_TEST_PID || process.env.SSH_CONNECTION || process.env.SSH_TTY)
+  const page = isShape ? await openPageState(server) : 'none'
+  if (page === 'open') return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
+  const isOpen = isShape ? await openThroughBoard(address, true, page === 'none') : false
+  // The board could not open a page that answers approvals beside the open one: point at that one.
+  if (!isOpen && page === 'unkeyed') return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
+  const isSuppressed = isNoWindowHere()
   const note = isOpen
     ? s.boardPageWindowOpened(address)
     : isNoOpen || (isSuppressed && !isOpen)
@@ -2492,13 +2830,13 @@ const chat = (): void => {
     // A reply is hidden whole, before its question is picked and cut to length.
     const source = read(path)
     const updates = pending(text => redact(text, home, isWin))
-    process.stdout.write(chatText(view(source, now), updates, doneToday(journalToday(now), now, s), s, home, isWin, CHAT_MAX, now))
+    process.stdout.write(chatText(view(source, now), updates, doneToday(journalToday(now), now, s), s, home, isWin, CHAT_MAX, now, queuedMessaging()))
   } catch (error) {
     process.exitCode = 1
     const code = (error as { code?: unknown } | null)?.code
     const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0]?.slice(0, 160) || error.name : 'UNKNOWN'
     // Nothing here writes, so the board's own advice (files "may already have changed") is not told.
-    const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
+    const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReadReason(s, error.code)) : s.chatFailed(reason)
     process.stdout.write(`${redact(told, homeOrNone(), isWin)}\n`)
   }
 }
@@ -2508,7 +2846,7 @@ const jsonFailureDocument = (error: unknown) => {
   const isWin = process.platform === 'win32'
   const code = (error as { code?: unknown } | null)?.code
   const reason = typeof code === 'string' ? code : error instanceof Error ? error.message.split('\n')[0] || error.name : 'UNKNOWN'
-  const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReason(s, error.code)) : s.chatFailed(reason)
+  const told = error instanceof BoardFileError ? error.isLocked ? s.boardLocked(plainFile(error.file)) : s.chatReadFailed(plainFile(error.file), plainReadReason(s, error.code)) : s.chatFailed(reason)
   return { schemaVersion: BOARD_JSON_SCHEMA, error: redact(clipped(plain(told), home, isWin), home, isWin) }
 }
 const jsonFailure = (error: unknown): void => {
@@ -2586,7 +2924,7 @@ const boardJson = (days?: number, projectFilter?: string) => {
     }
     finished = collectFinished(source, journalTexts, archiveTexts, days, now, projectFilter, home, isWin)
   }
-  return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group, finished)
+  return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group, finished, queuedMessaging())
 }
 const json = (): void => {
   try {
@@ -2687,6 +3025,16 @@ const runWatchTerminal = async (): Promise<void> => {
 }
 
 const run = async (): Promise<void> => {
+  const badFlag = unknownFlag(args)
+  if (badFlag !== undefined) {
+    process.stderr.write(`${s.boardUnknownFlag(badFlag)}\n`)
+    process.exitCode = 2
+    return
+  }
+  if (args.includes('--version') || args.includes('-v')) {
+    process.stdout.write(`agent-board ${boardVersion}\n`)
+    return
+  }
   if (args.includes('--days')) {
     const daysIndex = args.indexOf('--days')
     const nextArg = args[daysIndex + 1]
@@ -2743,7 +3091,10 @@ const run = async (): Promise<void> => {
     } catch {
       turns = []
     }
-    process.stdout.write(`${boardStatus(read(path), Date.now(), s, staleTimeoutMs(), answeredText, questionsText, turns)}\n`)
+    // A session whose agent is gone leaves the waiting count too (#1092): the
+    // status line reads the same gone set as the board read.
+    const statusText = read(path)
+    process.stdout.write(`${boardStatus(statusText, Date.now(), s, staleTimeoutMs(), answeredText, questionsText, turns, queuedMessaging(), goneBlocksOf(parseProgress(statusText)))}\n`)
     return
   }
   const request = flag('--legacy-connect-request')
@@ -2754,7 +3105,7 @@ const run = async (): Promise<void> => {
     return
   }
   if (await runCodexLocal(args, path, s)) return
-  if (args.includes('--help') && !args.includes('--chat')) {
+  if ((args.includes('--help') || args.includes('-h')) && !args.includes('--chat')) {
     process.stdout.write(args.includes('all') ? `${s.boardUsageAll}\n` : `${s.boardUsage}\n`)
   } else if (args[0] === 'stop' || args.includes('--stop')) {
     await stopBoard()

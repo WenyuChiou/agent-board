@@ -4,6 +4,7 @@ import { addressFileName, addressFolder, addressKey, createReceiver, emptyReceiv
 import type { BoardAddress, Receiver } from './receiver'
 import { sha256 } from './sha256'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE, workerRequest, workerStage } from './connect-worker'
+import { SETTINGS_CHANGED, SETTINGS_LOCKED, SETTINGS_LOCK_LEFT, SETTINGS_READ, SETTINGS_UNSAFE, SETTINGS_WRITE } from './settings-script'
 import { LEDGER_LINK, LEDGER_RENAMES, LINK_EXISTS, LINK_KEPT_SOURCE, PENDING_COMMIT, PENDING_STAGE, pendingStage } from './ledger-move'
 import type { PendingStage } from './ledger-move'
 import type { LegacyConnectRequest, ConnectState } from '../scripts/connect-transaction'
@@ -82,10 +83,13 @@ import {
   noticesOf,
   resumeNote,
   stateOf,
+  withAgentIdentity,
 } from './mirror'
 import type { ListedTask } from './mirror'
 import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_MS } from './parse'
 import { othersNote, sessionPushNote } from './others'
+import type { AgentClaim } from './session-liveness'
+import { goneBlocks, hostHashOf, withoutProcessIdentity } from './session-liveness'
 import type { ProgressProject } from '../types'
 import { boardRun } from './board-commands'
 import { peekInbox, redact, turnsFor } from './board'
@@ -97,7 +101,7 @@ import type { PressOutcome } from '../types'
 import { isQuickAdd, parseQuickAdd, quickAddWords } from './quick'
 import type { Lang, Strings } from './i18n'
 import { RULE_ID, RULES } from './rule'
-import { chosenLang, langOf, plainReason, resolveLang, STRINGS } from './strings'
+import { chosenLang, langOf, plainReadReason, plainReason, resolveLang, STRINGS } from './strings'
 import { answerTurns, applyDigest, applyLateDigest, clearBackgroundJobs, cleanHandoff, finishBackgroundJob, isPersonsAnswer, isWork, lastQuestion, markAsked, needsRefresh, noteChatReply, parseDigest, replyData, requestData, settleChatReply, startBackgroundJob, closeToolQuestions, clearApproval, closeApproval, retainApproval, markApproval, raiseApproval, toolQuestions, turnTools } from './digest'
 import type { Digest } from './digest'
 import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
@@ -145,7 +149,7 @@ import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
-import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionProofs, QuestionRecord } from './questions'
+import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
 const POLL_MS = 2000
@@ -199,6 +203,7 @@ const doneSeen = atom({ plugin: 'agent-board', key: 'doneSeen' } as const, {} as
 // beside progress.md, which every session on this machine and the board script share.
 const hiddenAsks = atom({ plugin: 'agent-board', key: 'hiddenAsks' } as const, [] as string[])
 const questionLedger = atom({ plugin: 'agent-board', key: 'questionLedger' } as const, emptyQuestions())
+const goneSessions = atom({ plugin: 'agent-board', key: 'goneSessions' } as const, [] as string[])
 const hasQuestionsProblem = atom({ plugin: 'agent-board', key: 'hasQuestionsProblem' } as const, false)
 const hasPendingQuestionsProblem = atom({ plugin: 'agent-board', key: 'hasPendingQuestionsProblem' } as const, false)
 const firstSeen = atom({ plugin: 'agent-board', key: 'firstSeen' } as const, {} as Record<string, number>)
@@ -996,7 +1001,8 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
   }
   if (!(await pollQuestions($, snap.path || (await progressPath($)), snap.projects))) return { isDone: false, reason: 'ledgerUnreadable' }
   const ledger = await read($, questionLedger)
-  const currentView = buildView(snap.projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, ledger, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), cutOffScopes(snap.projects, snap.cutSpans ?? []))
+  const gone = await pluginGoneBlocks($, snap.projects)
+  const currentView = boardView(snap.projects, [], await read($, mine), await $.clock.now(), 0, {}, await wordsOf($), await read($, hiddenAsks), {}, ledger, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), cutOffScopes(snap.projects, snap.cutSpans ?? []), gone)
   if (![...currentView.waiting, ...(currentView.reminder ?? []), ...(currentView.older ?? []), ...currentView.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) return { isDone: false, reason: 'notFound' }
   const file = answeredPath(snap.path || (await progressPath($)))
   let reason: 'notFound' | 'progressUnreadable' | 'ledgerUnreadable' | 'writeFailed' = 'writeFailed'
@@ -1017,7 +1023,8 @@ const setAnswered = async ($: EngineInterface, item: WaitingItem, isHidden: bool
     const latest = await read($, questionLedger)
     const at = await $.clock.now()
     const frozen = cutOffScopes(fresh, cutOffSpans(source, progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS))
-    const current = buildView(fresh, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, latest, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), frozen)
+    const retryGone = await pluginGoneBlocks($, fresh)
+    const current = boardView(fresh, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, latest, await questionProofsFor($, snap.path || (await progressPath($))), await pendingTurns($), frozen, retryGone)
     if (![...current.waiting, ...(current.reminder ?? []), ...(current.older ?? []), ...current.hidden].some(one => (!isHidden || one.canHide !== false) && one.hideKey === item.hideKey && one.project === item.project && one.text === item.text && one.note === item.note)) { reason = 'notFound'; return null }
     await rewrite(
       $,
@@ -1165,7 +1172,7 @@ const pollBarStyle = async ($: EngineInterface, path: string): Promise<void> => 
   const stat = await $.fs.stat(file).catch(() => undefined)
   const seen = stat === undefined ? '' : `${stat.mtimeMs}:${stat.size}`
   if (seen === barStyleSeen) return
-  const style = barStyleOf(stat === undefined ? null : await readText($, file).catch(() => null))
+  const style = barStyleOf(stat === undefined ? null : await readSettingsText($, file).catch(() => null))
   barStyleSeen = seen
   if ((await read($, barStyle)) === style) return
   await update($, barStyle, () => style)
@@ -1226,6 +1233,14 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       if (!isCurrent()) return
       await questionPass($, path, previous.projects)
       if (!isCurrent()) return
+      const gone = [...(await pluginGoneBlocks($, previous.projects))].sort()
+      if (!isCurrent()) return
+      if (JSON.stringify(gone) !== JSON.stringify(await read($, goneSessions))) {
+        await update($, goneSessions, () => gone)
+        await refreshStatus($)
+        await remind($)
+      }
+      if (!isCurrent()) return
       if (isPrunePending) {
         isPrunePending = false
         // Not waited on: poll also runs inside queued jobs, which the prune would queue behind.
@@ -1258,11 +1273,14 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       if (!isCurrent()) return
       await questionPass($, path, projects)
       if (!isCurrent()) return
+      const gone = [...(await pluginGoneBlocks($, projects))].sort()
+      if (!isCurrent()) return
+      if (JSON.stringify(gone) !== JSON.stringify(await read($, goneSessions))) await update($, goneSessions, () => gone)
       const result = await read($, resolveResult)
       if (result !== null) {
         const at = await $.clock.now()
         const frozen = cutOffScopes(projects, cutOffSpans(source, at - changedAt >= CUT_SETTLE_MS))
-        const view = buildView(projects, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen)
+        const view = boardView(projects, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen, new Set(gone))
         const rows = [...view.stopped, ...view.recent]
         const isDrawn = result.kind === 'changed'
           ? rows.some(row => result.key.startsWith(`${row.key}::`))
@@ -1330,6 +1348,27 @@ const pendingTurns = async ($: EngineInterface): Promise<PendingTurn[]> => {
 }
 
 const views = viewCache()
+// Sole `buildView` / `views.view` caller in `register.tsx` (#1092), so every view reads `gone`.
+const boardView = (
+  projects: readonly ProgressProject[],
+  hereProjects: readonly string[],
+  own: ProgressMirror | null,
+  at: number,
+  todayCount: number,
+  doneSeenMap: Readonly<Record<string, number>>,
+  s: Strings,
+  answeredList: readonly string[],
+  seenMap: Readonly<Record<string, number>>,
+  questions: QuestionLedger | undefined,
+  proofs: QuestionProofs | null,
+  turns: readonly PendingTurn[],
+  frozen: ReadonlySet<string>,
+  gone: ReadonlySet<string>,
+  cached = false,
+): View => {
+  const args: Parameters<typeof buildView> = [projects, hereProjects, own, at, todayCount, doneSeenMap, s, answeredList, seenMap, questions, proofs, turns, frozen, undefined, undefined, undefined, gone]
+  return cached ? views.view(...args) : buildView(...args)
+}
 // The store file's size at the last sweep (sweepFiles), for the warning above the board.
 let measuredStore = 0
 // What the board cleared in the last 7 days, read at the last sweep and after each prune (refreshPruned).
@@ -1611,7 +1650,7 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
   let text = isPaneOpen
     ? undefined
     : statusLine(
-        views.view(
+        boardView(
           snap.projects,
           await read($, here),
           await read($, mine),
@@ -1625,6 +1664,8 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
           await questionProofsFor($, await progressPath($)),
           await pendingTurns($),
           cutOffScopes(snap.projects, snap.cutSpans ?? []),
+          new Set(await read($, goneSessions)),
+          true,
         ),
         s,
       )
@@ -1648,6 +1689,18 @@ const readText = async ($: EngineInterface, path: string): Promise<string> => {
     if (!(await $.fs.exists(path))) return ''
     throw error
   }
+}
+
+// The board's settings file as text, read by the guarded script: the host's own read follows a link and waits on a
+// FIFO (#1276). A missing file, a link or a file that is not a plain one read as empty, as nothing to read; a read
+// that fails throws. A process starts only when the caller reads, which the callers do on a change or a sweep.
+const readSettingsText = async ($: EngineInterface, file: string): Promise<string> => {
+  // No file, no process: a board with no settings file starts nothing to read it.
+  if (!(await $.fs.exists(file))) return ''
+  const found = await $.process.run(['node', '-e', SETTINGS_READ, '--', file], { timeoutMs: 10000 })
+  if (found.exitCode !== 0 || found.isStdoutTruncated) throw new Error('SETTINGS_UNREADABLE')
+  const body = JSON.parse(found.stdout) as { kind?: unknown; text?: unknown }
+  return body.kind === 'ok' && typeof body.text === 'string' ? body.text : ''
 }
 
 // Every write this session makes (its block, a tick, an archive) goes through one queue,
@@ -1941,7 +1994,10 @@ const saveMine = async (
     return ready === undefined ? kept : raiseApproval(kept, ready[1])
   })
   if (next === null || current === null) return
-  await $.store.set(`mirror:${next.sessionId}`, { ...next, board: boardTag(await progressPath($)) })
+  // The stored mirror drops the process identity (finding 5): only the progress
+  // file may carry it. The in-memory mirror keeps it, and the next load stamps
+  // the current process's identity again.
+  await $.store.set(`mirror:${next.sessionId}`, { ...withoutProcessIdentity(next), board: boardTag(await progressPath($)) })
   if (!quiet) {
     const finished = completedSince(current, next)
     const title = next.title || fallbackTitle(next)
@@ -2000,6 +2056,50 @@ const detectHere = async ($: EngineInterface): Promise<void> => {
   await update($, here, () => [...names].filter(name => name !== ''))
 }
 
+// The reading machine's host hash, from the environment, as agentIdentity reads
+// it (COMPUTERNAME on Windows, HOSTNAME elsewhere). A missing name leaves the
+// session without an identity, so it keeps the 12 h backstop.
+const readingHostHash = async ($: EngineInterface): Promise<string | null> => {
+  const platform = typeof process !== 'undefined' && typeof process.platform === 'string' ? process.platform : ''
+  const computer = await $.env.get('COMPUTERNAME').catch(() => undefined)
+  const hostnameEnv = await $.env.get('HOSTNAME').catch(() => undefined)
+  return hostHashOf(platform, platform === 'win32' ? computer : hostnameEnv)
+}
+
+// The agent process identity for liveness (#1092): the plugin runs in-process, so
+// `process.pid` is Claude Code's own pid and `performance.timeOrigin` is when it
+// started. A missing global or name leaves the session without an identity, so it
+// keeps the 12 h backstop; nothing here throws.
+const agentIdentity = async ($: EngineInterface): Promise<AgentClaim | null> => {
+  const pid = typeof process !== 'undefined' && typeof process.pid === 'number' && Number.isSafeInteger(process.pid) && process.pid > 0 ? process.pid : null
+  if (pid === null) return null
+  const host = await readingHostHash($)
+  if (host === null) return null
+  const started = typeof performance !== 'undefined' && typeof performance.timeOrigin === 'number' && Number.isFinite(performance.timeOrigin) && performance.timeOrigin > 0 ? Math.round(performance.timeOrigin) : undefined
+  return { pid, ...(started === undefined ? {} : { started }), host }
+}
+
+// The gone blocks this plugin can prove from its own process (#1092): a pid
+// `process.kill` says is gone, on this host. No start-time check — the plugin
+// cannot read one without a spawn (PM Q5) — so a reused pid keeps the card, and
+// only a gone pid folds. Inside hosts where `process` is unavailable, nothing
+// is proven gone and the 12 h backstop remains. A kill that refuses for any reason
+// other than ESRCH is a live or uncertain process, so the card is kept.
+const pluginGoneBlocks = async ($: EngineInterface, projects: readonly ProgressProject[]): Promise<ReadonlySet<string>> => {
+  const hostHash = await readingHostHash($)
+  if (hostHash === null) return new Set()
+  const probe = (claim: AgentClaim) => {
+    if (typeof process === 'undefined' || typeof process.kill !== 'function') return { alive: true, actual: null }
+    try {
+      process.kill(claim.pid, 0)
+      return { alive: true, actual: null }
+    } catch (error) {
+      return { alive: (error as { code?: string }).code !== 'ESRCH', actual: null }
+    }
+  }
+  return goneBlocks(projects, probe, hostHash)
+}
+
 // The mirror outlives a reload in $.state and a restart in $.store. A mirror stored by an
 // older version gets the fields it lacks from a fresh one.
 const loadMine = async ($: EngineInterface, cwd: string): Promise<void> => {
@@ -2016,7 +2116,10 @@ const loadMine = async ($: EngineInterface, cwd: string): Promise<void> => {
   // Background processes belong to the old host, even when the conversation resumes.
   // A print-mode session (`claude -p`) is a run an agent started for itself, not a conversation a person
   // typed into (#501); its mirror stays local and writeMine writes no block.
-  await update($, mine, () => withRunMark(stored === undefined ? fresh : { ...clearBackgroundJobs({ ...fresh, ...stored }), isTurnRunning: false, cwd: stored.cwd || cwd }, !isInteractiveSession))
+  // A resumed session is stamped with this process's identity, so the old pid never
+  // outlives the process that wrote it (#1092).
+  const identity = await agentIdentity($)
+  await update($, mine, () => withAgentIdentity(withRunMark(stored === undefined ? fresh : { ...clearBackgroundJobs({ ...fresh, ...stored }), isTurnRunning: false, cwd: stored.cwd || cwd }, !isInteractiveSession), identity))
   // Reloads happen between turns: a retained approval is closure work left by the old host.
   hasApprovalStep = stored?.tasks.some(one => one.id === 'approval') === true
 }
@@ -3204,7 +3307,7 @@ const archiveOld = async ($: EngineInterface, isNow = false, isCleanUp = false):
   // began moves no hand-kept task, rather than falling back to the times the pane kept in memory.
   const observed = isCleanUp ? (parseSeen(await readText($, seenPath(path))) ?? {}) : await read($, firstSeen)
   // Read on the sweep only, never on a poll; a missing or unreadable file means the default.
-  const historyDays = isNow || isCleanUp ? HISTORY_DAYS : historyDaysOf(await readText($, settingsPath(path)).catch(() => ''))
+  const historyDays = isNow || isCleanUp ? HISTORY_DAYS : historyDaysOf(await readSettingsText($, settingsPath(path)).catch(() => ''))
   // Counted with their number: two done blocks with the same title and steps make one entry text,
   // and both leave (#231).
   const archived = new Map<string, number>()
@@ -3419,7 +3522,10 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
       // Another agent's write while the question check ran is not written over with the older text.
       if (await readText($, path) !== text) return AGAIN
     }
-    const taken = takeTask(text, ref, at, s, observed)
+    // A session whose agent process is gone has stopped (#1092): the row offers
+    // the press, and the write guard checks the same gone set on this text.
+    const gone = await pluginGoneBlocks($, projects)
+    const taken = takeTask(text, ref, at, s, observed, undefined, gone)
     if (taken === null) return null
     pendingEntries = taken.entries
     return taken.text
@@ -3448,7 +3554,10 @@ const confirmOne = async ($: EngineInterface, ref: ConfirmRef): Promise<(Confirm
   const s = await wordsOf($)
   const original = await readText($, path)
   const observed = await read($, firstSeen)
-  const candidate = confirmTask(original, ref, at, s, observed)
+  // A session whose agent process is gone has stopped (#1092): the row offers the
+  // press, and the write guard checks the same gone set on the read text.
+  const gone = await pluginGoneBlocks($, parseProgress(original))
+  const candidate = confirmTask(original, ref, at, s, observed, undefined, gone)
   if (candidate === null) return null
   const selected = confirmedTarget(original, ref, s)
   const mirrors = new Map<string, { stored: ProgressMirror | undefined; seen: string }>()
@@ -3462,9 +3571,12 @@ const confirmOne = async ($: EngineInterface, ref: ConfirmRef): Promise<(Confirm
     }
   }
   let confirmed: ConfirmedTask | null = null
-  await rewrite($, path, text => {
+  await rewrite($, path, async text => {
     if (confirmed !== null && confirmMatches(text, confirmed.ref, s)) return text
-    const next = confirmTask(text, ref, at, s, observed)
+    // The gone set comes from the text this retry reads, so a session that
+    // resumed since the press was drawn is never confirmed as gone (#1092).
+    const retryGone = await pluginGoneBlocks($, parseProgress(text))
+    const next = confirmTask(text, ref, at, s, observed, undefined, retryGone)
     if (next === null) return null
     confirmed = next
     return next.text
@@ -3510,7 +3622,7 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
   const at = await $.clock.now()
   const s = await wordsOf($)
   const snap = await read($, snapshot)
-  const view = views.view(
+  const view = boardView(
     snap.projects,
     await read($, here),
     await read($, mine),
@@ -3524,6 +3636,8 @@ const remindNow = async ($: EngineInterface): Promise<void> => {
     await questionProofsFor($, await progressPath($)),
     await pendingTurns($),
     cutOffScopes(snap.projects, snap.cutSpans ?? []),
+    new Set(await read($, goneSessions)),
+    true,
   )
   await breathe($)
   const stored = await $.store.get('told')
@@ -4131,6 +4245,10 @@ export const register: Register = (on, options) => {
     // one's passes back.
     questionsRunning = null
     questionPassing = null
+    // The status line belongs to this session: a new session announces it
+    // even when it reads the same as the last one's, or a restart with an
+    // unchanged status never re-emits it (#1406).
+    lastStatus = undefined
     progressCutSettled = false
     questionFailures = 0
     questionRaces = 0
@@ -4272,15 +4390,35 @@ export const register: Register = (on, options) => {
       const style = barStyleFrom(styleArg[1] ?? '')
       if (style === null) return { text: s.barStyleUnknown }
       const file = settingsPath(await progressPath($))
-      // A file that exists but cannot be read, or does not read as JSON, is left as it is.
-      let text: string
-      try { text = await readText($, file) } catch { return { text: s.barStyleUnreadable } }
-      const next = withBarStyle(text, style)
-      if (next === null) return { text: s.barStyleUnreadable }
-      try { await $.fs.write(file, next) } catch { return { text: s.pressFailed } }
+      // A file that is a link or a folder, cannot be read, or does not read as JSON, is left as it is.
+      // The host's own file calls follow a link and wait on a FIFO, so Node reads and writes it (#1276).
+      // The change is worked out from the file as it is read just before the write; when another save got
+      // in between, the write is refused and the change is worked out again, so that save is kept.
+      let lockLeft: string | undefined
+      for (let attempt = 0; ; attempt++) {
+        if (attempt >= 4) return { text: s.pressFailed }
+        const found = await $.process.run(['node', '-e', SETTINGS_READ, '--', file], { timeoutMs: 10000 }).catch(() => null)
+        let current: { kind?: unknown; text?: unknown } | null = null
+        if (found?.exitCode === 0 && !found.isStdoutTruncated) {
+          try { current = JSON.parse(found.stdout) as { kind?: unknown; text?: unknown } } catch {}
+        }
+        if (current === null || (current.kind !== 'missing' && current.kind !== 'unsafe' && current.kind !== 'ok')) return { text: s.pressFailed }
+        if (current.kind === 'unsafe') return { text: s.barStyleUnsafe }
+        const base = current.kind === 'ok' && typeof current.text === 'string' ? current.text : null
+        const next = withBarStyle(base, style)
+        if (next === null) return { text: s.barStyleUnreadable }
+        // The texts go on stdin: process arguments can be listed by other users, and the file is private.
+        const wrote = await $.process.run(['node', '-e', SETTINGS_WRITE, '--', file, base === null ? 'missing' : 'ok'], { timeoutMs: 10000, stdin: JSON.stringify({ next, base }) }).catch(() => null)
+        if (wrote?.exitCode === SETTINGS_UNSAFE) return { text: s.barStyleUnsafe }
+        if (wrote?.exitCode === SETTINGS_CHANGED) continue
+        if (wrote?.exitCode === SETTINGS_LOCKED && !wrote.isStdoutTruncated) return { text: s.settingsLocked(wrote.stdout) }
+        if (wrote?.exitCode === SETTINGS_LOCK_LEFT && !wrote.isStdoutTruncated) { lockLeft = wrote.stdout; break }
+        if (wrote?.exitCode !== 0) return { text: s.pressFailed }
+        break
+      }
       await update($, barStyle, () => style)
       $.ui.invalidate('ui.render')
-      return { text: s.barStyleSet(barStyleName(style, s)) }
+      return { text: `${s.barStyleSet(barStyleName(style, s))}${lockLeft === undefined ? '' : ` ${s.settingsLockLeft(lockLeft)}`}` }
     }
     if (/^(整理|archive|tidy)$/i.test(arg)) {
       const moved = await enqueue(() => archiveOld($, true)).catch(() => null)
@@ -4698,7 +4836,7 @@ export const register: Register = (on, options) => {
       const currentAt = (await read($, now)) || (await $.clock.now())
       const seen = await read($, firstSeen)
       return {
-        ...views.view(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), seen, await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($), cutOffScopes(latest.projects, latest.cutSpans ?? [])),
+        ...boardView(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), seen, await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($), cutOffScopes(latest.projects, latest.cutSpans ?? []), new Set(await read($, goneSessions)), true),
         ...warningOf(latest, s, seen, currentAt),
       }
     }
@@ -4719,7 +4857,7 @@ export const register: Register = (on, options) => {
           <Text color={palette.alert}>{s.fileUnreadable}</Text>
           {await read($, hasPendingQuestionsProblem) && <Text color={palette.alert}>{s.inboxQuestionNotKept}</Text>}
           {await read($, hasQuestionsProblem) && <Text color={palette.alert}>{s.questionsUnreadable()}</Text>}
-          {why !== undefined && <Text color={palette.muted}>{plainReason(s, why)}</Text>}
+          {why !== undefined && <Text color={palette.muted}>{plainReadReason(s, why)}</Text>}
         </Box>
       )
     }
@@ -4880,7 +5018,7 @@ export const register: Register = (on, options) => {
           const source = JSON.stringify({ session: before.sessionId, project: before.project, title: before.title, context: before.context, task })
           const matches = (one: ProgressMirror): boolean => source === JSON.stringify({ session: one.sessionId, project: one.project, title: one.title, context: one.context, task: one.tasks.find(row => row.id === id) })
           const isSameAsk = async (one: ProgressMirror): Promise<boolean> => {
-            const view = buildView([], [], one, await $.clock.now(), 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, await progressPath($)))
+            const view = boardView([], [], one, await $.clock.now(), 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, await progressPath($)), [], new Set(), new Set())
             return [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].some(ask => ask.key === item.key && ask.questionId === item.questionId && ask.text === item.text && ask.note === item.note)
           }
           if (!(await isSameAsk(before))) return failure(s.boardLineChanged)
@@ -4913,7 +5051,8 @@ export const register: Register = (on, options) => {
           if (!(await pollQuestions($, path, projects))) return result(await savedResolution() ? 'resolved' : 'failed')
           const at = await $.clock.now()
           const frozen = cutOffScopes(projects, cutOffSpans(source, progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS))
-          const view = buildView(projects, [], await read($, mine), at, 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen)
+          const gone = await pluginGoneBlocks($, projects)
+          const view = boardView(projects, [], await read($, mine), at, 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen, gone)
           const items = [...(view.provisional ?? []), ...view.stopped.flatMap(row => row.questions ?? []), ...view.recent.flatMap(row => row.questions ?? [])]
           if (item.questionId === undefined || !items.some(question => question.questionId === item.questionId && question.text === item.text && question.note === item.note)) return result('changed')
           if (!(await pollQuestions($, path, projects, false, [], [], questionId))) return result(await savedResolution() ? 'resolved' : 'failed')

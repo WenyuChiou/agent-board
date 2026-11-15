@@ -38,9 +38,9 @@ test('an upgrade from 0.24.0 in the same home keeps every listed agent\'s card a
 // agent's command and skill files, and the owner's rule is that an update never breaks the board.
 // The home is set up by the 0.24.2 tag's own setup, then upgraded by this tree's setup.
 const OLD = 'agent-board--v0.24.2'
-const upgradeIds = ['codex', 'opencode', 'gemini', 'antigravity']
-const oldCommands = { opencode: '.config/opencode/commands/board.md', gemini: '.gemini/commands/board.toml' }
-const newCommands = { opencode: '.config/opencode/commands/agent-board.md', gemini: '.gemini/commands/agent-board.toml' }
+const upgradeIds = ['codex', 'opencode', 'antigravity']
+const oldCommands = { opencode: '.config/opencode/commands/board.md' }
+const newCommands = { opencode: '.config/opencode/commands/agent-board.md' }
 // Codex and Antigravity have no /board file: their skill is what ran --serve.
 const skills = { codex: '.agents/skills/agent-board/SKILL.md', antigravity: '.gemini/config/skills/agent-board/SKILL.md' }
 const handKept = ['## Quarterly work', '### Prepare the quarterly report', '- [x] Collect the numbers', '- [ ] Write the summary', '- [?] Send it to Dana or to the whole team?']
@@ -60,13 +60,11 @@ const oldRelease = t => {
   return folder
 }
 
-// A home that 0.24.2's setup made for Codex, OpenCode, Gemini CLI and Antigravity (Claude Code gets
+// A home that 0.24.2's setup made for Codex, OpenCode and Antigravity (Claude Code gets
 // its /agent-board command from the plugin, so setup writes nothing for it), with one hand-kept task
 // that asks a question and one waiting turn each from Codex and Antigravity.
 const oldHome = async old => {
   const f = fixture(['.claude', '.codex', '.gemini/antigravity-cli', '.config/opencode'])
-  mkdirSync(join(f.home, '.gemini'), { recursive: true })
-  writeFileSync(join(f.home, '.gemini', 'settings.json'), '{}')
   await apply(f, upgradeIds, old)
   for (const id of ['codex', 'antigravity']) await report(f, id, 'waiting')
   appendFileSync(f.progress, `\n${handKept.join('\n')}\n`)
@@ -121,8 +119,6 @@ test('0.24.2 to this release: the old /board files and skills still open the pag
   // The board script of this release, before setup has rewritten a command file: that is the state after
   // the plugin or package updates and before the person runs setup. Every old command line still opens the page.
   const ahead = fixture(['.claude', '.codex', '.gemini/antigravity-cli', '.config/opencode'])
-  mkdirSync(join(ahead.home, '.gemini'), { recursive: true })
-  writeFileSync(join(ahead.home, '.gemini', 'settings.json'), '{}')
   await apply(ahead, upgradeIds)
   for (const file of [...Object.values(oldCommands), ...Object.values(skills)]) await openPage(f, ahead.script, flagsIn(f, file), `old ${file}`)
 
@@ -130,7 +126,7 @@ test('0.24.2 to this release: the old /board files and skills still open the pag
   const plan = await apply(f, upgradeIds)
   assert.equal(readFileSync(f.progress, 'utf8'), before, 'setup leaves progress.md as it was')
   const removed = plan.plans.flatMap(target => target.changes.filter(change => change.action === 'remove')).map(change => resolve(change.file)).sort()
-  assert.deepEqual(removed, Object.values(oldCommands).map(file => resolve(join(f.home, file))).sort(), 'setup retires exactly the two old /board files')
+  assert.deepEqual(removed, Object.values(oldCommands).map(file => resolve(join(f.home, file))).sort(), 'setup retires exactly the old /board file')
   for (const file of Object.values(oldCommands)) assert.ok(!existsSync(join(f.home, file)), `${file} is gone`)
   assert.ok(plan.plans.every(target => !target.keptEdited?.length), 'nothing edited was kept, so nothing is named')
 
@@ -153,18 +149,17 @@ test("an upgrade from 0.24.2 keeps a /board file the person changed and names it
   const old = oldRelease(t)
   if (!old) return
   const f = await oldHome(old)
-  const edited = join(f.home, oldCommands.gemini)
+  const edited = join(f.home, oldCommands.opencode)
   appendFileSync(edited, '\n# my own note\n')
   const plan = await apply(f, upgradeIds)
   assert.ok(existsSync(edited), 'the edited /board file stays')
   assert.ok(readFileSync(edited, 'utf8').endsWith('# my own note\n'), 'and keeps its edit')
-  assert.ok(!existsSync(join(f.home, oldCommands.opencode)), 'the unchanged one next to it is retired')
-  const gemini = plan.plans.find(target => target.agent === 'gemini')
-  assert.deepEqual(gemini.keptEdited.map(file => resolve(file)), [resolve(edited)], 'the plan names the kept file')
-  assert.deepEqual(gemini.conflicts, [])
+  const opencode = plan.plans.find(target => target.agent === 'opencode')
+  assert.deepEqual(opencode.keptEdited.map(file => resolve(file)), [resolve(edited)], 'the plan names the kept file')
+  assert.deepEqual(opencode.conflicts, [])
   const output = await setup(f, ['--apply'])
   assert.ok(output.includes('your edited old /board command; setup leaves it; the command is now /agent-board'), `setup's output names it\n${output}`)
-  assert.ok(output.includes('board.toml'), output)
-  assert.ok(existsSync(join(f.home, newCommands.gemini)), 'the new /agent-board command is there beside it')
-  await openPage(f, f.script, flagsIn(f, newCommands.gemini), 'new gemini command')
+  assert.ok(output.includes('board.md'), output)
+  assert.ok(existsSync(join(f.home, newCommands.opencode)), 'the new /agent-board command is there beside it')
+  await openPage(f, f.script, flagsIn(f, newCommands.opencode), 'new opencode command')
 })

@@ -10,6 +10,24 @@ import { seenWithin, noMachineIds, noSilentPress } from './expect.mjs'
 import { PANE_MS } from './budget.mjs'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
+// On Linux a process that has exited but that its parent has not collected yet still answers
+// signal 0; it is gone all the same (#1478).
+export const isZombie = pid => {
+  if (process.platform !== 'linux') return false
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).startsWith('Z')
+  } catch { return false }
+}
+// What /proc says about a process, for a teardown failure message: its state and its parent.
+const procState = pid => {
+  if (process.platform !== 'linux') return 'no /proc here'
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const [state, parent] = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    return `state ${state}, parent ${parent}`
+  } catch { return 'no /proc entry' }
+}
 const ownedChildren = new Set()
 const ownedServers = new Set()
 process.once('exit', () => {
@@ -51,7 +69,7 @@ export const visibleHtml = source => source.replace(/<(script|style)\b[^>]*>[\s\
 export const terminal = {
   screen: async (world, args = []) => successful(await run(world, ['--print', ...args])),
   keys: async (world, keys, args = []) => successful(await run(world, ['--keys', keys, ...args])),
-  watch: (world, { onFrame } = {}) => {
+  watch: (world, { onFrame, onClose } = {}) => {
     const preload = world.write('tty.mjs', `Object.defineProperty(process.stdin, 'isTTY', { value: true })\nObject.defineProperty(process.stdout, 'isTTY', { value: true })\nprocess.stdin.setRawMode = () => {}\n`)
     const child = spawnIsolated(process.execPath, ['--import', pathToFileURL(preload).href, world.script, '--watch'], { env: world.env, cwd: world.root, stdio: ['pipe', 'pipe', 'pipe'] })
     ownedChildren.add(child)
@@ -70,18 +88,33 @@ export const terminal = {
       onFrame?.(frame)
     })
     child.stderr.setEncoding('utf8').on('data', chunk => { errors += chunk })
-    const exited = new Promise(done => child.once('close', () => { ownedChildren.delete(child); done() }))
+    const exited = new Promise(done => child.once('close', () => {
+      ownedChildren.delete(child)
+      onClose?.({ exitCode: child.exitCode, signalCode: child.signalCode, errors })
+      done()
+    }))
     let isStopped = false
     const watchdog = setTimeout(() => child.kill(), 20000)
+    watchdog.unref?.()
     const stop = async () => {
       if (isStopped) return
       isStopped = true
       clearTimeout(watchdog)
+      child.stdin.destroy()
+      const pipeFallback = setTimeout(() => {
+        child.stdout.destroy()
+        child.stderr.destroy()
+      }, 1000)
+      pipeFallback.unref?.()
       try {
         if (child.exitCode === null) child.kill()
         await exited
         assert.ok(child.exitCode !== null || child.signalCode !== null)
-      } finally { child.stdin.destroy() }
+      } finally {
+        clearTimeout(pipeFallback)
+        child.stdout.destroy()
+        child.stderr.destroy()
+      }
     }
     world.cleanups.push(stop)
     return {
@@ -356,7 +389,8 @@ export const serve = {
     }
     const alive = () => {
       if (!Number.isInteger(pid) || pid <= 0) return false
-      try { process.kill(pid, 0); return true } catch { return false }
+      try { process.kill(pid, 0) } catch { return false }
+      return !isZombie(pid)
     }
     const isRecorded = () => {
       if (!recordPath || !url) return false
@@ -381,13 +415,14 @@ export const serve = {
       clearTimeout(timer)
       discover()
       try {
-        if (url) await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).catch(() => {})
+        const isCloseTaken = url ? await fetch(new URL('/api/close', url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(1500) }).then(response => response.ok, () => false) : false
         if (pid) {
           for (let n = 0; n < 30 && alive(); n++) await pause(50)
           // Recheck the record and authenticated endpoint before killing a detached server.
           await owner.killRecorded()
           for (let n = 0; n < 30 && alive(); n++) await pause(50)
-          assert.ok(!alive(), `Owned server ${pid} survived teardown`)
+          // Say what teardown saw, so a server that outlives it names its own cause (#1478).
+          if (alive()) assert.fail(`Owned server ${pid} survived teardown (close ${isCloseTaken ? 'answered OK' : 'not answered OK'}; record ${isRecorded() ? 'still names it' : 'gone'}; ${procState(pid)})`)
         }
         isStopped = true
       } finally { ownedServers.delete(owner) }

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
-import { delimiter, dirname, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -13,12 +13,13 @@ import { neverShown } from './fixtures/never-shown.mjs'
 import { hookOrDeferred, turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
+import { deliveryText } from '../hooks/messaging.ts'
 import { HOOK_INPUT_TIMEOUT, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
-import { assertClassifierExited, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
+import { assertClassifierExited, classifierStartMs, observeClassifierExit } from './fixtures/classifier-exit-proof.mjs'
 import { partTest } from '../scripts/ci-impact.mjs'
 
 // The Windows board job runs this file in two parts, and each part runs its share of the tests: the
@@ -117,7 +118,10 @@ const isolatedEnv = (home, pathValue) => {
     OPENCLAW_STATE_DIR: join(home, '.openclaw'), DSH_HOME: join(home, '.dsh'),
   }
   for (const key of Object.keys(env)) {
-    if (key.toLowerCase() === 'path') delete env[key]
+    // Read from Codex 0.167's source, not seen in a live run: the Codex app, the editor and Codex's
+    // background service on Windows mark the Codex they start. With such a mark left in the
+    // environment, no hook in these tests would read as the terminal.
+    if (key.toLowerCase() === 'path' || ['CODEX_INTERNAL_ORIGINATOR_OVERRIDE', 'CODEX_DAEMON_SHUTDOWN_SOCKET'].includes(key.toUpperCase())) delete env[key]
   }
   env[pathKey] = cleanPath
   return env
@@ -739,11 +743,11 @@ const mailboxFixture = async fn => fixture(async f => {
   f.save(progress, '')
   const env = { ...f.env, XDG_RUNTIME_DIR: join(f.home, 'runtime') }
   const directory = defaultMessagesDirectory(progress, f.home, env, process.platform)
-  const call = (agent, event, extra = {}, flags = []) => spawnSync(process.execPath, [script,
+  const call = (agent, event, extra = {}, flags = [], extraEnv = {}) => spawnSync(process.execPath, [script,
     '--home', f.home, '--data-dir', f.root, '--progress-file', progress, '--agent', agent,
     ...(['codex', 'cursor'].includes(agent) ? ['--codex-event'] : ['--agent-status', '--state', /SessionEnd|sessionEnd/.test(event) ? 'ended' : /SessionStart|Stop|AfterAgent/.test(event) ? 'waiting' : 'working']),
     ...(agent === 'antigravity' ? ['--event', event] : []), ...flags,
-  ], { cwd: f.home, env, input: JSON.stringify({ session_id: session, conversation_id: session, conversationId: session, hook_event_name: event, turn_id: 'mailbox-turn', generation_id: 'mailbox-turn', ...extra }), encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  ], { cwd: f.home, env: { ...env, ...extraEnv }, input: JSON.stringify({ session_id: session, conversation_id: session, conversationId: session, hook_event_name: event, turn_id: 'mailbox-turn', generation_id: 'mailbox-turn', ...extra }), encoding: 'utf8', windowsHide: true, timeout: 15000 })
   const seed = (agent = 'codex') => {
     const now = Date.now()
     const state = enrollMailbox({ messages: [] }, agent, session, 'CLI', now, 43_200_000)
@@ -805,6 +809,80 @@ test('turn-start hooks deliver queued mailbox messages for Codex, Antigravity, G
       if (agent === 'gemini') assert.equal(output.decision, 'allow')
     }
   }
+}))
+
+test('a Codex hook mailbox is the CLI only when its history file names the terminal and no other client or background service marks the hook, so a session the app, the editor or the background service marks gets no Queue (#826)', async () => mailboxFixture(async f => {
+  const { sendDecision } = await importTs('../hooks/messaging.ts')
+  const { RECEIVER_ROUTES } = await importTs('../hooks/receiver-routes.ts')
+  const history = join(f.home, 'codex-history')
+  mkdirSync(history, { recursive: true })
+  const file = join(history, `rollout-2026-11-12T00-00-00-${session}.jsonl`)
+  const mailboxOf = () => f.state().mailboxes?.find(one => one.agent === 'codex' && one.session === session)
+  // Read from Codex 0.167's source, not seen in a live run: the desktop app and the editor extension
+  // mark the Codex they start with the client variable,
+  // and Codex's background service on Windows with the daemon variable; the terminal sets neither.
+  // A resumed session keeps the file of the client that started it (also read from the source), so
+  // a written file plus the variables stand in for terminal → app, terminal → editor and
+  // app → terminal. No case here resumes a real session.
+  const cases = [
+    ['codex-tui', undefined, undefined, 'CLI'], ['codex-tui', 'codex-tui', undefined, 'CLI'], ['Codex Desktop', undefined, undefined, 'unknown'],
+    ['codex_vscode', undefined, undefined, 'unknown'], [null, undefined, undefined, 'unknown'],
+    ['codex-tui', 'Codex Desktop', undefined, 'unknown'], ['codex-tui', 'codex_vscode', undefined, 'unknown'], ['codex-tui', '', undefined, 'unknown'],
+    ['codex-tui', undefined, '1', 'unknown'], ['codex-tui', 'codex-tui', '1', 'unknown'],
+  ]
+  for (const [originator, client, daemon, surface] of cases) {
+    const label = `${originator} in ${client}, daemon ${daemon}`
+    f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, messages: [] }))
+    if (originator !== null) writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { id: session, originator, source: 'vscode' } }) + '\n')
+    const env = { ...(client === undefined ? {} : { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: client }), ...(daemon === undefined ? {} : { CODEX_DAEMON_SHUTDOWN_SOCKET: daemon }) }
+    await hookOrDeferred(() => f.call('codex', 'UserPromptSubmit', originator === null ? {} : { transcript_path: file }, [], env), () => mailboxOf() !== undefined)
+    const box = mailboxOf()
+    assert.equal(box?.surface, surface, label)
+    const decision = sendDecision(box.id, [], f.state().mailboxes, () => 'idle', RECEIVER_ROUTES, Date.now())
+    assert.equal(decision.canSend, surface === 'CLI', label)
+    if (!decision.canSend) assert.equal(decision.reason, 'SURFACE_UNKNOWN', label)
+  }
+}))
+
+test('an Antigravity hook mailbox is agy TUI when its transcript lies in the CLI folder, and the app and the editor stay IDE', async () => mailboxFixture(async f => {
+  const { antigravitySurface } = await importTs('../scripts/hook-delivery.ts')
+  const brain = folder => [f.home, '.gemini', folder, 'brain', 'synthetic-conversation'].join('/')
+  const mailboxOf = () => f.state().mailboxes?.find(one => one.agent === 'antigravity' && one.session === session)
+  for (const [payload, surface, event = 'PreInvocation'] of [
+    [{ transcriptPath: `${brain('antigravity-cli')}/.system_generated/logs/transcript.jsonl` }, 'agy TUI'],
+    [{ transcriptPath: `${brain('antigravity-ide')}/.system_generated/logs/transcript.jsonl` }, 'IDE'],
+    [{ artifactDirectoryPath: brain('antigravity-cli') }, 'agy TUI'],
+    [{}, 'unknown'],
+    [{ transcriptPath: `${brain('antigravity-cli')}/.system_generated/logs/transcript.jsonl` }, 'agy TUI', 'SessionStart'],
+  ]) {
+    f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, messages: [] }))
+    await hookOrDeferred(() => f.call('antigravity', event, payload), () => mailboxOf() !== undefined)
+    assert.equal(mailboxOf()?.surface, surface, `${event} ${JSON.stringify(payload)}`)
+  }
+  // Either separator and any letter case; whole folder names only; the artifact folder decides when the transcript cannot.
+  assert.equal(antigravitySurface('C:\\Synthetic\\.Gemini\\Antigravity-CLI\\brain\\x\\transcript.jsonl', undefined), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity/brain/x/transcript.jsonl', undefined), 'IDE')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-cli-old/brain/x/transcript.jsonl', undefined), 'unknown')
+  assert.equal(antigravitySurface('/home/synthetic/antigravity-cli/brain/x/transcript.jsonl', undefined), 'unknown')
+  assert.equal(antigravitySurface(42, '/home/synthetic/.gemini/antigravity-ide/brain/x'), 'IDE')
+  assert.equal(antigravitySurface('', ''), 'unknown')
+  // `.` and `..` are resolved first, so a folder the path leaves again is not the surface; an inherited name is no folder.
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-cli/../antigravity/brain/x/transcript.jsonl', undefined), 'IDE')
+  assert.equal(antigravitySurface('C:\\Synthetic\\.gemini\\antigravity\\.\\..\\antigravity-cli\\brain\\x\\transcript.jsonl', undefined), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/constructor/brain/x/transcript.jsonl', undefined), 'unknown')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/__proto__/brain/x', '/home/synthetic/.gemini/toString/brain/x'), 'unknown')
+  // The transcript decides over the artifact folder when both name a known folder, either way round; a transcript
+  // string with no known folder leaves it to the artifact folder.
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-cli/brain/x/transcript.jsonl', '/home/synthetic/.gemini/antigravity-ide/brain/x'), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-ide/brain/x/transcript.jsonl', '/home/synthetic/.gemini/antigravity-cli/brain/x'), 'IDE')
+  assert.equal(antigravitySurface('/home/synthetic/project/transcript.jsonl', '/home/synthetic/.gemini/antigravity-cli/brain/x'), 'agy TUI')
+  // A path is read from its end: the last `.gemini` folder followed by a known name decides, one followed by another
+  // name is passed over, and a path that ends at `.gemini` names no surface.
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity/brain/.gemini/antigravity-cli/x/transcript.jsonl', undefined), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini/antigravity-cli/brain/.gemini/other/x/transcript.jsonl', undefined), 'agy TUI')
+  assert.equal(antigravitySurface('/home/synthetic/.gemini', undefined), 'unknown')
+  // Letter case is ignored on every system by choice, also with forward slashes, where Linux and macOS tell the folders apart.
+  assert.equal(antigravitySurface('/home/synthetic/.Gemini/Antigravity-CLI/brain/x/transcript.jsonl', undefined), 'agy TUI')
 }))
 
 test('a held mailbox store claim reports deferral and the next turn delivers after release', async () => mailboxFixture(async f => {
@@ -1030,6 +1108,65 @@ test('the hook finds the same default messages folder as --serve', async () => m
   } finally { await world.close() }
 }))
 
+// OpenCode's plugin takes only while a session is idle, so a busy session opens its mailbox with open instead (#1366).
+test('--mailbox open for OpenCode opens or renews the session mailbox and leaves its queued message queued; another agent is refused', async () => mailboxFixture(async f => {
+  f.seed('opencode')
+  const file = join(f.directory, 'messages.json')
+  // The mailbox is about to run out.
+  const stored = f.state()
+  f.save(file, JSON.stringify({ ...stored, mailboxes: stored.mailboxes.map(one => ({ ...one, expires: Date.now() + 60_000 })) }))
+  const open = (agent, name) => spawnSync(process.execPath, [f.script, '--mailbox', 'open', '--agent', agent, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--session', name, '--surface', 'CLI'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const box = name => f.state().mailboxes.find(one => one.id === f.mailboxId('opencode', name))
+  const renewed = open('opencode', session)
+  assert.equal(renewed.status, 0, renewed.stderr)
+  assert.deepEqual(JSON.parse(renewed.stdout.trim().split('\n').pop()), { ok: true, enrolled: true, watch: f.directory })
+  assert.ok(box(session).expires > Date.now() + 11 * 60 * 60 * 1000, 'renewed for the mailbox lifetime')
+  assert.equal(box(session).surface, 'CLI')
+  const [message] = f.state().messages
+  assert.deepEqual([message.id, message.status, message.claimed, message.ref], ['hook-mailbox-message', 'queued', 0, undefined], 'open claims nothing')
+  // A session with no mailbox yet gets one.
+  const fresh = open('opencode', 'synthetic-open-session')
+  assert.equal(fresh.status, 0, fresh.stderr)
+  assert.ok(box('synthetic-open-session')?.expires > Date.now())
+  // Like ack, release and attempt, open is OpenCode's alone.
+  const before = readFileSync(file, 'utf8')
+  const refused = open('deepseek', session)
+  assert.notEqual(refused.status, 0)
+  assert.match(refused.stderr, /INVALID_MAILBOX_CALL/)
+  assert.equal(readFileSync(file, 'utf8'), before)
+}))
+
+// Only nothing at the folder's path reads as "no board has run here"; every other state of that path is a failure the plugin must log (#1366).
+test('--mailbox open and --mailbox end for OpenCode answer ok true only when nothing is at the messages folder, and ok false for a dead link, a link to a folder or a file in its place (#1366 review)', async () => mailboxFixture(async f => {
+  const run = (mode, name) => spawnSync(process.execPath, [f.script, '--mailbox', mode, '--agent', 'opencode', '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--session', name, '--surface', 'CLI'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const answerOf = result => JSON.parse(result.stdout.trim().split('\n').pop())
+  const link = (target, path) => symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir')
+  const cases = [
+    ['a dead link', () => { const gone = join(f.home, 'gone'); mkdirSync(gone); link(gone, f.directory); rmSync(gone, { recursive: true }) }, false],
+    ['a link to a real folder', () => { const real = join(f.home, 'real'); mkdirSync(real); writeFileSync(join(real, 'marker'), 'kept'); link(real, f.directory) }, false],
+    ['a file in its place', () => writeFileSync(f.directory, 'not a folder'), false],
+    ['no folder', () => {}, true],
+  ]
+  // Every case runs, so a failure names all the cases that are wrong, not only the first.
+  const wrong = []
+  for (const [label, arrange, isEmpty] of cases) {
+    rmSync(f.directory, { recursive: true, force: true })
+    mkdirSync(dirname(f.directory), { recursive: true })
+    arrange()
+    const opened = run('open', `${session}-${label}`), ended = run('end', `${session}-${label}`)
+    assert.equal(opened.status, 0, `${label}: ${opened.stderr}`)
+    assert.equal(ended.status, 0, `${label}: ${ended.stderr}`)
+    const open = answerOf(opened), end = answerOf(ended)
+    if (open.ok !== isEmpty) wrong.push(`${label}: open ${JSON.stringify(open)}`)
+    if (end.ok !== isEmpty) wrong.push(`${label}: end ${JSON.stringify(end)}`)
+    if (isEmpty) assert.equal(open.enrolled, false, label)
+    else if (open.ok === false) assert.match(open.code, /^[A-Z][A-Z0-9_]*$/, label)
+    if (label === 'a link to a real folder') assert.deepEqual(readdirSync(join(f.home, 'real')), ['marker'], 'the target folder is left untouched')
+    if (isEmpty) assert.ok(!existsSync(f.directory), 'no folder was created')
+  }
+  assert.deepEqual(wrong, [])
+}))
+
 test('the codex-local fixture removes its own prefix\'s folders older than six hours and keeps newer ones', async () => {
   const older = mkdtempSync(join(tmpdir(), 'codex local-'))
   const newer = mkdtempSync(join(tmpdir(), 'codex local-'))
@@ -1206,17 +1343,17 @@ const detectedSetupFixture = fn => fixture(f => {
 })
 
 test('a setup preview in a new home lists the agents installed on the PATH', () => detectedSetupFixture(f => {
-  f.fake('gemini')
+  f.fake('codex')
   f.fake('agy')
   const preview = f.run()
   assert.equal(preview.status, 0, preview.stderr)
   assert.equal(preview.stderr, '')
-  assert.match(preview.stdout, /^Gemini CLI:/m)
+  assert.match(preview.stdout, /^Codex:/m)
   assert.match(preview.stdout, /^Antigravity:/m)
-  assert.doesNotMatch(preview.stdout, /^(Codex|Cursor|OpenCode|Grok Build|Muse Code|Hermes Agent|OpenClaw|DeepSeek):/m)
+  assert.doesNotMatch(preview.stdout, /^(Gemini CLI|Cursor|OpenCode|Grok Build|Muse Code|Hermes Agent|OpenClaw|DeepSeek):/m)
   const json = f.run('--json')
   assert.equal(json.status, 0, json.stderr)
-  assert.deepEqual(JSON.parse(json.stdout).targets, ['gemini', 'antigravity'])
+  assert.deepEqual(JSON.parse(json.stdout).targets, ['codex', 'antigravity'])
   f.fake('claude')
   const claude = f.run()
   assert.equal(claude.status, 0, claude.stderr)
@@ -1328,8 +1465,8 @@ test('setup on Windows counts every command spelling and not a bare name', { ski
       return JSON.parse(result.stdout).targets
     } finally { rmSync(file) }
   }
-  for (const extension of ['.exe', '.cmd', '.bat', '.com', '.ps1']) assert.deepEqual(targetsWith(`gemini${extension}`), ['gemini'], extension)
-  assert.deepEqual(targetsWith('gemini'), [])
+  for (const extension of ['.exe', '.cmd', '.bat', '.com', '.ps1']) assert.deepEqual(targetsWith(`codex${extension}`), ['codex'], extension)
+  assert.deepEqual(targetsWith('codex'), [])
 }))
 
 test('a removed Antigravity is not listed again once its emptied hooks file is gone', () => fixture(f => {
@@ -1344,15 +1481,64 @@ test('a removed Antigravity is not listed again once its emptied hooks file is g
 }))
 
 test('a command on the PATH is listed once setup applies it, and again as already set up', () => detectedSetupFixture(f => {
-  f.fake('gemini')
+  f.fake('grok')
   const applied = f.run('--apply')
   assert.equal(applied.status, 0, applied.stderr)
-  assert.match(applied.stdout, /^Gemini CLI: created/m)
-  assert.equal(existsSync(join(f.root, 'install-gemini.json')), true)
+  assert.match(applied.stdout, /^Grok Build: created/m)
+  assert.equal(existsSync(join(f.root, 'install-grok.json')), true)
   const second = f.run()
   assert.equal(second.status, 0, second.stderr)
   assert.equal(second.stderr, '')
-  assert.match(second.stdout, /^Gemini CLI: already set up/m)
+  assert.match(second.stdout, /^Grok Build: already set up/m)
+}))
+
+test('setup no longer finds Gemini CLI, and still finds and sets up Antigravity in a home that has both (#1327)', () => fixture(f => {
+  f.save(join(f.home, '.gemini', 'settings.json'), '{}')
+  const only = setupAgent(f, '--json')
+  assert.equal(only.status, 0, only.stderr)
+  assert.deepEqual(JSON.parse(only.stdout).targets, [])
+  mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
+  const both = setupAgent(f, '--json')
+  assert.equal(both.status, 0, both.stderr)
+  assert.deepEqual(JSON.parse(both.stdout).targets, ['antigravity'])
+  const applied = setupAgent(f, '--lang', 'en', '--apply')
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.match(applied.stdout, /^Antigravity:/m)
+  assert.doesNotMatch(applied.stdout, /Gemini CLI/)
+  assert.equal(existsSync(join(f.root, 'install-antigravity.json')), true)
+  assert.equal(existsSync(join(f.root, 'install-gemini.json')), false)
+}))
+
+test('a gemini command on the PATH is not listed by setup (#1327)', () => detectedSetupFixture(f => {
+  f.fake('gemini')
+  const json = f.run('--json')
+  assert.equal(json.status, 0, json.stderr)
+  assert.deepEqual(JSON.parse(json.stdout).targets, [])
+  assert.deepEqual(readdirSync(f.home), [])
+}))
+
+for (const [lang, retired] of [['en', 'Gemini CLI is retired'], ['zh-TW', 'Gemini CLI 已退役'], ['zh-CN', 'Gemini CLI 已退役']]) {
+  test(`setup --agent gemini is refused as retired in ${lang} and changes no file (#1327)`, () => fixture(f => {
+    f.save(join(f.home, '.gemini', 'settings.json'), '{}')
+    const before = tree774(f.home)
+    for (const selector of ['gemini', 'codex,gemini', 'gemini,gemini']) for (const extra of [[], ['--apply'], ['--json']]) {
+      const result = setupAgent(f, '--lang', lang, '--agent', selector, ...extra)
+      assert.equal(result.status, 1, result.stdout)
+      assert.equal(result.stdout, '')
+      assert.ok(result.stderr.includes(retired), result.stderr)
+      assert.ok(result.stderr.includes('Antigravity CLI'), result.stderr)
+      assert.ok(result.stderr.includes('--agent antigravity'), result.stderr)
+      if (extra.includes('--json')) assert.equal(JSON.parse(result.stderr).error.code, 'RETIRED_AGENT')
+    }
+    assert.deepEqual(tree774(f.home), before)
+  }))
+}
+
+test('a report from an existing Gemini CLI install is still accepted after setup stopped offering it (#1327)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  const report = f.command(['--codex-report', '--agent', 'gemini', '--session', 'gemini-retired-session'], { title: 'Still reporting', state: 'working', steps: ['- [~] Keep going'] })
+  assert.equal(report.status, 0, report.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /agent=gemini/)
 }))
 
 const systemLanguageEnv = () => ({ LANG: '', NODE_OPTIONS: `--require ${JSON.stringify(resolve('tests/fixtures/system-lang-zh-tw.cjs'))}` })
@@ -2508,12 +2694,15 @@ test('setup still refuses a malformed host config that starts with a BOM', async
     assert.notEqual(applied.status, 0)
     assert.deepEqual(readFileSync(config), original)
     assert.equal(existsSync(f.root), false)
-    const common = setupAgent(f, '--lang', 'en', '--agent', host, '--json')
-    assertSetupStatus(common, 1)
-    assert.equal(common.stderr, '')
-    assert.equal(JSON.parse(common.stdout).applied, false)
-    assert.deepEqual(readFileSync(config), original)
-    assert.equal(existsSync(f.root), false)
+    // The independent installer no longer takes Gemini CLI by name (#1327); only the engine above reads its config.
+    if (host !== 'gemini') {
+      const common = setupAgent(f, '--lang', 'en', '--agent', host, '--json')
+      assertSetupStatus(common, 1)
+      assert.equal(common.stderr, '')
+      assert.equal(JSON.parse(common.stdout).applied, false)
+      assert.deepEqual(readFileSync(config), original)
+      assert.equal(existsSync(f.root), false)
+    }
   })
 })
 
@@ -3268,20 +3457,25 @@ test('two Antigravity sessions in one folder show different titles before either
   const ownerOf = id => createHash('sha256').update(`antigravity:${id}`).digest('hex')
   const firstRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(first)}.json`), 'utf8'))
   const secondRecord = JSON.parse(readFileSync(join(f.root, 'sessions', `${ownerOf(second)}.json`), 'utf8'))
-  assert.notEqual(firstRecord.title, secondRecord.title)
+  assert.equal(firstRecord.title, 'Local antigravity task')
+  assert.equal(secondRecord.title, 'Local antigravity task')
+  assert.notEqual(firstRecord.startedAt, secondRecord.startedAt)
+  assert.notEqual(firstRecord.context, secondRecord.context)
   // No hash in the title: a default view shows no session id, hash or file
   // path (parity checklist; dot's Question on #849). The distinction is the
   // session's start time, to the millisecond — second precision would let two
   // sessions started in the same second share a title.
   for (const [record, id] of [[firstRecord, first], [secondRecord, second]]) {
     assert.ok(!record.title.includes(ownerOf(id).slice(0, 8)), record.title)
-    assert.match(record.title, / · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, record.title)
+    assert.ok(Number.isSafeInteger(record.startedAt))
+    assert.match(record.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, record.context)
   }
   const text = readFileSync(f.progress, 'utf8')
   assert.ok(text.includes(`### ${firstRecord.title}`), text)
-  assert.ok(text.includes(`### ${secondRecord.title}`), text)
-  // Both distinct titles reach the default terminal view in every language, and
-  // the rendered output passes the never-shown check.
+  assert.ok(text.includes(`> Context: ${firstRecord.context}`), text)
+  assert.ok(text.includes(`> Context: ${secondRecord.context}`), text)
+  // Both distinct start times reach the default terminal view when two rows share a title,
+  // and the rendered output passes the never-shown check in every language.
   const { parseProgress } = await importTs('../hooks/parse.ts')
   const { buildView } = await importTs('../hooks/view.ts')
   const { boardText, boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
@@ -3291,8 +3485,8 @@ test('two Antigravity sessions in one folder show different titles before either
     const s = STRINGS[lang]
     const view = buildView(parseProgress(text), [], null, Date.now(), 0, {}, s)
     for (const drawn of [boardText(view, [], s, { width: 80, isColor: false }), boardScreen(view, [], emptyBoardState, s, { width: 80, isColor: false })]) {
-      assert.ok(drawn.includes(firstRecord.title), `${lang}: first title drawn`)
-      assert.ok(drawn.includes(secondRecord.title), `${lang}: second title drawn`)
+      assert.ok(drawn.includes(firstRecord.context), `${lang}: first context drawn`)
+      assert.ok(drawn.includes(secondRecord.context), `${lang}: second context drawn`)
       assert.deepEqual(neverShown(drawn), [], lang)
     }
   }
@@ -3319,10 +3513,13 @@ test('an Antigravity session created before the distinct title still gets one on
   const after = JSON.parse(readFileSync(recordFile, 'utf8'))
   // The re-title is a start time, not the old hash suffix: it differs from the
   // first event's title, carries no hash, and then stays put on later events.
-  assert.notEqual(after.title, 'Local antigravity task')
+  assert.equal(after.title, 'Local antigravity task')
   assert.ok(!after.title.includes(owner.slice(0, 8)), after.title)
-  assert.match(after.title, / · \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, after.title)
-  assert.ok(readFileSync(f.progress, 'utf8').includes(`### ${after.title}`))
+  assert.ok(Number.isSafeInteger(after.startedAt))
+  assert.match(after.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/, after.context)
+  const afterBoard = readFileSync(f.progress, 'utf8')
+  assert.ok(afterBoard.includes(`### ${after.title}`))
+  assert.ok(afterBoard.includes(`> Context: ${after.context}`))
   assert.equal(report('working', 'PostInvocation').status, 0)
   assert.equal(JSON.parse(readFileSync(recordFile, 'utf8')).title, after.title)
 }))
@@ -3545,6 +3742,23 @@ test('raw replay classifies board requests and ordinary prompts like live events
   }
 }))
 
+test('a prompt that is a board delivery leaves the question open, like a board request', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  holdAutomaticRecovery(f)
+  const at = Date.now() - 4050
+  const states = []
+  for (const [index, prompt] of ['Continue the task', deliveryText({ id: 'AB-1', from: 'board', to: 'gemini:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' })].entries()) {
+    const session_id = `delivery-prompt-session-${index}`
+    const report = f.command(['--codex-report', '--agent', 'gemini', '--session', session_id, '--hook-started', String(at - 1000)], { title: 'Question', state: 'waiting', steps: ['- [?] Choose a path'] })
+    assert.equal(report.status, 0, report.stderr)
+    const live = f.command(['--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress], { session_id, hook_event_name: 'BeforeAgent', prompt })
+    assert.equal(live.status, 0, live.stderr)
+    states.push(JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`gemini:${session_id}`).digest('hex')}.json`))).state)
+  }
+  // The person's own words start work again; a delivered board message is not the person's and does not.
+  assert.deepEqual(states, ['working', 'waiting'])
+}))
+
 test('raw replay accepts clock skew and removes only old pending temporary files', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   const pending = join(f.root, 'pending'), at = Date.now() + 50000
@@ -3697,7 +3911,9 @@ test('SDK metadata and reporter execution share one deadline without a late writ
     const stub = 'const tool = Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } })'
     const plugin = join(home, 'synthetic-plugin.mjs')
     writeFileSync(plugin, source.replace("import { tool } from '@opencode-ai/plugin'", stub))
-    writeFileSync(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = {"hookVersion":1,"synthetic":true}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'late'), 1600)\n`)
+    // The plugin's OpenCode receiver (#724) calls this same script with --mailbox; those calls end at once,
+    // so only the reporter's run writes the pid and could write late.
+    writeFileSync(join(root, 'agent-board.mjs'), `globalThis.AGENT_BOARD = {"hookVersion":1,"synthetic":true}\nimport { writeFileSync } from 'node:fs'\nif (process.argv.includes('--mailbox')) process.exit(0)\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetTimeout(() => writeFileSync(${JSON.stringify(marker)}, 'late'), 1600)\n`)
     const { AgentBoardLocal } = await import(pathToFileURL(plugin))
     const adapter = await AgentBoardLocal({ client: { session: { get: async () => {
       // Leave room to start the real child on Windows; 600 + 1600 still
@@ -3787,6 +4003,30 @@ const legacyReporterProbe = (isPowerShell = process.platform === 'win32', shell 
   assert.ok(!errors.includes('PRIVATE_') && !errors.includes(home), errors)
 })
 
+// A prompt's JSON check now runs after the classifier starts (#1080): a payload cut short must still be refused, not promoted.
+test('the PowerShell reporter refuses a prompt cut short as INCOMPLETE_INPUT and leaves nothing in its inbox', { skip: process.platform !== 'win32' }, () => fixture(f => {
+  const inbox = join(f.home, '.claude', 'progress-inbox')
+  const script = join(f.home, '.claude', 'progress-report.ps1')
+  f.save(script, reporterPs1())
+  const input = join(f.home, 'partial-prompt.txt')
+  f.save(input, '{"session_id":"synthetic-partial-prompt","prompt":"PRIVATE_PARTIAL_WORDS"')
+  const descriptor = openSync(input, 'r')
+  const powershell = join(process.env.SystemRoot || 'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  let result
+  try {
+    result = spawnSync(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], {
+      env: isolatedEnv(f.home), stdio: [descriptor, 'pipe', 'pipe'], encoding: 'utf8', windowsHide: true, timeout: 30000,
+    })
+  } finally { closeSync(descriptor) }
+  assert.equal(result.error, undefined, hookFailure(result))
+  assert.equal(result.status, 0, hookFailure(result))
+  assert.equal(result.stdout.trim(), '{}')
+  const left = existsSync(inbox) ? readdirSync(inbox).filter(name => /\.(?:json|tmp|receipt|fallback|timeout)$/.test(name)) : []
+  assert.deepEqual(left, [], `${hookFailure(result)}; hookLog=${hookLog(f)}`)
+  assert.match(hookLog(f), /INCOMPLETE_INPUT/)
+  assert.ok(!hookLog(f).includes('PRIVATE_'), hookLog(f))
+}))
+
 test('the PowerShell reporter reads a complete input before it loads any module', { skip: process.platform !== 'win32' }, () => fixture(f => {
   const modules = join(f.home, 'modules'), inbox = join(f.home, '.claude', 'progress-inbox')
   const script = join(f.home, '.claude', 'progress-report.ps1')
@@ -3824,6 +4064,27 @@ test('the PowerShell reporter calls no cmdlet between its input clock and the pa
   const end = source.indexOf('$Payload = [Text.Encoding]::UTF8.GetString', start)
   assert.ok(start >= 0 && end > start, 'the reporter has an input clock and payload decode')
   assert.doesNotMatch(source.slice(start, end), /\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/)
+})
+
+// The first cmdlet loads a module, 0.7 to 3.9 s on a fresh runner. On a prompt that must happen while the
+// classifier already runs, so the shared 2 s clock never ends before Start() (#1080).
+test('the PowerShell reporter calls no cmdlet between its input clock and the classifier start on a prompt', () => {
+  const source = reporterPs1()
+  const cmdlet = /\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/
+  const ownFunctions = /\bWrite-Exclusive\b|\bRead-PromptReceipt\b/g
+  const clock = source.indexOf('$clock = [Diagnostics.Stopwatch]::StartNew()')
+  const call = source.indexOf('$receipt = Read-PromptReceipt $tmp $clock', clock)
+  assert.ok(clock >= 0 && call > clock, 'the prompt path calls the classifier after the input clock')
+  assert.doesNotMatch(source.slice(clock, call).replace(ownFunctions, ''), cmdlet, 'main flow, clock to classifier call')
+  const bodyFrom = (signature, endMarker) => {
+    const begin = source.indexOf(signature), end = source.indexOf(endMarker, begin)
+    assert.ok(begin >= 0 && end > begin, `${signature} reaches ${endMarker}`)
+    return source.slice(source.indexOf('\n', begin), end)
+  }
+  assert.doesNotMatch(bodyFrom('function Write-Exclusive(', '\n}\n'), cmdlet, 'the exclusive write uses .NET only')
+  assert.doesNotMatch(bodyFrom('function Read-PromptReceipt(', '$isStarted = $process.Start()'), cmdlet, 'entry of the classifier function to Start()')
+  assert.ok(source.indexOf('ConvertFrom-Json', clock) > call, 'JSON parsing runs after the classifier is started')
+  assert.ok(source.indexOf('& $Prepare') > source.indexOf('$isStarted = $process.Start()'), 'the caller work runs after Start()')
 })
 
 test('legacy reporters bound an unfinished input and keep Cursor responses and errors local', () => legacyReporterProbe())
@@ -4025,18 +4286,21 @@ test('a reporter sweeps scratch files older than a minute from the inbox and kee
   const held = join(inbox, 'codex-prompt-1-3.tmp')
   f.save(held, 'held'); utimesSync(held, old, old)
   f.save(script, isWindows ? reporterPs1() : reporterSh(inbox))
-  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'prompt'] : [script, 'codex', 'prompt']
+  // A turn event, not a prompt (#1235): the sweep runs after every event, while a prompt first waits up to 2 s for its
+  // classifier, and on a cold Windows runner that wait ran the reporter out of time before it swept, leaving
+  // codex-prompt-1-1.tmp. The prompt's own timing has its own tests (#1080).
+  const args = isWindows ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'codex', 'turn'] : [script, 'codex', 'turn']
   const lock = isWindows ? openSync(held, 0x10000000) : undefined
   let out
   try {
-    out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, f.env, JSON.stringify({ session_id: 'synthetic-scratch-sweep', prompt: 'PRIVATE_RAW_PROMPT' }))
+    out = await nativeProcess(isWindows ? 'powershell.exe' : '/bin/sh', args, f.env, JSON.stringify({ session_id: 'synthetic-scratch-sweep' }))
   } finally {
     if (lock !== undefined) closeSync(lock)
   }
   assert.equal(out.error, undefined, hookFailure(out))
   assert.equal(out.status, 0, hookFailure(out))
   const files = readdirSync(inbox)
-  for (const name of names) assert.equal(files.includes(name), false, name)
+  for (const name of names) assert.equal(files.includes(name), false, `${name} was not swept; hook log: ${hookLog(f)}`)
   assert.equal(files.includes('codex-prompt-1-2.tmp'), true)
   assert.equal(files.includes('notes.txt'), true)
   assert.equal(files.filter(name => name.endsWith('.json')).length, 1)
@@ -4158,7 +4422,7 @@ const timedOutClassifierCases = isWindows => {
   ]
 }
 for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of timedOutClassifierCases(process.platform === 'win32').entries()) {
-  test(`a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board, case ${index}`, () => fixture(async f => {
+  test(`a timed-out prompt classifier saves a metadata receipt that marks a board request but not a folder named agent-board, case ${index}`, t => fixture(async f => {
     const isWindows = process.platform === 'win32'
     const inbox = join(f.root, 'progress-inbox'), script = join(f.root, isWindows ? 'progress-report.ps1' : 'progress-report.sh')
     const pidFile = join(f.home, 'classifier.pid'), preload = join(f.home, 'hang-classifier.cjs')
@@ -4179,11 +4443,14 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
       assert.equal(out.error, undefined, hookFailure(out))
       assert.equal(out.status, 0, hookFailure(out))
       assert.equal(out.stdout.trim(), '{}')
-      // On Windows the 2 s budget is shared with the reporter's own JSON work, so on a loaded runner Node can be
-      // killed at the deadline before its preload writes a PID (#1080). The reporter's own record that it started
+      // On Windows the classifier starts before the reporter's JSON work, but a loaded runner can still kill Node
+      // at the deadline before its preload writes a PID (#1080). The reporter's own record that it started
       // and ended the process is the proof there, as in the interrupted-PID test below.
-      if (isWindows) assertClassifierExited(exitProof)
-      else {
+      if (isWindows) {
+        // The shipped clock is unchanged; this shows on every run how much of it the reporter used before Node started.
+        t.diagnostic(`classifier started ${classifierStartMs(exitProof)} ms into the 2000 ms clock, case ${index}`)
+        assertClassifierExited(exitProof)
+      } else {
         assert.equal(existsSync(pidFile), true, `exercise the real classifier process, case ${index}: ${hookLog(f)}`)
         assert.equal(isReporterAlive(Number(readFileSync(pidFile, 'utf8'))), false)
       }
@@ -4208,7 +4475,7 @@ for (const [index, { key = 'session_id', payload, kept, isBoard = false }] of ti
   }))
 }
 
-test('a classifier interrupted while publishing its PID marker still proves its owned process exited', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+test('a classifier interrupted while publishing its PID marker still proves its owned process exited', { skip: process.platform !== 'win32' }, t => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), pidFile = join(f.home, 'classifier.pid')
   const exitProof = join(f.home, 'classifier-exit.json'), preload = join(f.home, 'partial-classifier-pid.cjs')
   f.save(script, observeClassifierExit(reporterPs1(), exitProof))
@@ -4216,6 +4483,7 @@ test('a classifier interrupted while publishing its PID marker still proves its 
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
     JSON.stringify({ session_id: 'synthetic-partial-pid', prompt: 'PRIVATE_RAW_PROMPT' }))
+  t.diagnostic(`classifier started ${classifierStartMs(exitProof)} ms into the 2000 ms clock`)
   assertClassifierExited(exitProof)
   assert.equal(out.error, undefined, hookFailure(out))
   assert.equal(out.status, 0, hookFailure(out))
@@ -4229,7 +4497,7 @@ test('a classifier interrupted while publishing its PID marker still proves its 
 }))
 
 // A loaded machine can kill the classifier before its own code writes anything, so the proof must not need it (#1080).
-test('a classifier that never writes anything still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+test('a classifier that never writes anything still proves its owned process exited and saves the receipt', { skip: process.platform !== 'win32' }, t => fixture(async f => {
   const script = join(f.root, 'progress-report.ps1'), exitProof = join(f.home, 'classifier-exit.json')
   const preload = join(f.home, 'silent-classifier.cjs')
   f.save(script, observeClassifierExit(reporterPs1(), exitProof))
@@ -4237,6 +4505,7 @@ test('a classifier that never writes anything still proves its owned process exi
   const env = { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload.replaceAll('\\', '/'))}` }
   const out = await nativeProcess('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, 'cursor', 'prompt'], env,
     JSON.stringify({ session_id: 'synthetic-silent-classifier', prompt: 'PRIVATE_RAW_PROMPT' }))
+  t.diagnostic(`classifier started ${classifierStartMs(exitProof)} ms into the 2000 ms clock`)
   assertClassifierExited(exitProof)
   assert.equal(out.error, undefined, hookFailure(out))
   assert.equal(out.status, 0, hookFailure(out))
@@ -5721,6 +5990,95 @@ test('Grok reopens a done block for a closing question and keeps it done for a p
   assert.equal(board.match(/- \[\?\] Blue or green\?/g)?.length, 1)
 }))
 
+test('Codex, Cursor and --agent-status keep the plain closing question when a reply only lists choices (#1277)', () => fixture(f => {
+  // Buttons come only from a list the agent gives itself: a list in the reply's text adds no options line.
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-list-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-list-1', { last_assistant_message: 'Which database should I use?\n1. Postgres\n2. SQLite' }).status, 0)
+  const codexAsked = readFileSync(f.progress, 'utf8')
+  assert.match(codexAsked, /- \[\?\] Which database should I use\?\n<!-- question=[a-f0-9]{64}:\d+ -->/)
+  assert.doesNotMatch(codexAsked, /<!-- options=/)
+  assert.equal(f.event('UserPromptSubmit', 'turn-list-2').status, 0)
+  assert.equal(f.event('Stop', 'turn-list-2', { last_assistant_message: 'Done using Postgres.' }).status, 0)
+  const codexSettled = readFileSync(f.progress, 'utf8')
+  assert.ok(codexSettled.includes('- [x] Which database should I use?'))
+  assert.doesNotMatch(codexSettled, /<!-- options=/)
+
+  // Cursor: a list before the closing question.
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const cursorId = 'synthetic-cursor-list-choices'
+  const cursorSend = (event, generation, extra = {}) => f.command(['--codex-event', '--agent', 'cursor'], { conversation_id: cursorId, generation_id: generation, hook_event_name: event, ...extra })
+  assert.equal(cursorSend('beforeSubmitPrompt', 'gen-1').status, 0)
+  assert.equal(cursorSend('afterAgentResponse', 'gen-1', { text: 'Pick the next step:\n\n- Parser\n- Tests\n\nWhich one first?' }).status, 0)
+  const cursorAsked = readFileSync(f.progress, 'utf8')
+  assert.ok(cursorAsked.includes('- [?] Which one first?'), cursorAsked)
+  assert.doesNotMatch(cursorAsked, /<!-- options=/)
+
+  // --agent-status: Grok and OpenCode replies that list choices, in Chinese and in English.
+  assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
+  const grokId = 'synthetic-grok-list-choices'
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'working'], { sessionId: grokId, hookEventName: 'UserPromptSubmit' }).status, 0)
+  assert.equal(f.command(['--agent-status', '--agent', 'grok', '--state', 'waiting'], {
+    sessionId: grokId,
+    hookEventName: 'Stop',
+    lastAssistantMessage: '你要選哪個方案？\n1. 中文選項甲丠\n2. Option B',
+  }).status, 0)
+  const grokBoard = readFileSync(f.progress, 'utf8')
+  assert.ok(grokBoard.includes('- [?] 你要選哪個方案？\n'), grokBoard)
+  assert.doesNotMatch(grokBoard, /<!-- options=/)
+
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const opencodeId = 'synthetic-opencode-list-choices'
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'working'], { session_id: opencodeId, prompt_submitted: true }).status, 0)
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'waiting'], {
+    session_id: opencodeId,
+    last_assistant_message: 'Which option should I use?\n1. Alpha\n2. Beta',
+  }).status, 0)
+  const opencodeBoard = readFileSync(f.progress, 'utf8')
+  assert.ok(opencodeBoard.includes('- [?] Which option should I use?'), opencodeBoard)
+  assert.doesNotMatch(opencodeBoard, /<!-- options=/)
+  assert.ok(!opencodeBoard.includes('Alpha'), opencodeBoard)
+}))
+
+test('a Codex-family block writes a list its agent gave after checking it as text, and refuses an invalid one whole (#1277)', async () => {
+  const { codexEvent, putCodexBlock } = await importTs('../hooks/codex.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const owner = 'c'.repeat(64)
+  const latin1 = value => Buffer.from(value, 'utf8').toString('latin1')
+  const stopWith = options => {
+    const start = codexEvent(null, { session_id: 's-1277', hook_event_name: 'SessionStart' }, '2026-11-06T00:00:00Z', STRINGS.en)
+    const prompted = codexEvent(start, { session_id: 's-1277', hook_event_name: 'UserPromptSubmit', turn_id: 'turn-1' }, '2026-11-06T00:00:01Z', STRINGS.en)
+    return codexEvent(prompted, { session_id: 's-1277', hook_event_name: 'Stop', turn_id: 'turn-1', question: 'Which option should I use?', options }, '2026-11-06T00:00:02Z', STRINGS.en)
+  }
+  // The local reporter writes bytes as latin1 text: 41 CJK characters are 123 bytes, and stay one valid choice.
+  const cjk41 = '甲'.repeat(41)
+  const asked = stopWith([cjk41, 'Option B'])
+  assert.deepEqual(asked.askedOptions, [cjk41, 'Option B'])
+  const written = Buffer.from(putCodexBlock('', { ...asked, title: latin1(asked.title), project: latin1(asked.project), steps: asked.steps.map(latin1) }, owner, false, undefined, latin1), 'latin1').toString('utf8')
+  assert.ok(written.includes(`<!-- options=["${cjk41}","Option B"] -->`), written)
+  assert.deepEqual(parseProgress(written)[0]?.tasks[0]?.steps.at(-1)?.options, [cjk41, 'Option B'])
+  // 121 characters, ten choices, or an entry that is not a string: no part of the list is written.
+  for (const bad of [['x'.repeat(121), 'Option B'], Array.from({ length: 10 }, (_, at) => `Option ${at + 1}`), ['Alpha', 7, 'Beta']]) {
+    const refused = stopWith(bad)
+    assert.deepEqual(refused.askedOptions, [])
+    const text = putCodexBlock('', refused, owner, false, undefined, latin1)
+    assert.ok(text.includes('<!-- options=[] -->'), text)
+    assert.deepEqual(parseProgress(text)[0]?.tasks[0]?.steps.at(-1)?.options, [])
+  }
+  // No list given: no line.
+  assert.doesNotMatch(putCodexBlock('', stopWith(undefined), owner), /options=/)
+})
+
+test('a Codex turn that starts from a board delivery still shows its closing question', () => fixture(f => {
+  f.install('--apply')
+  const prompt = deliveryText({ id: 'AB-1', from: 'board', to: 'codex:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' })
+  assert.equal(f.event('UserPromptSubmit', 'turn-1', { prompt }).status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Which build should I use?' }).status, 0)
+  // The delivery is no board lookup: what Codex asks at the end of its turn reaches the board.
+  assert.ok(readFileSync(f.progress, 'utf8').includes('- [?] Which build should I use?'))
+}))
+
 test('the approval step and the question step close and reuse their own lines in either order', () => fixture(f => {
   f.install('--apply')
   const question = { last_assistant_message: 'Which folder should I use?' }
@@ -5914,7 +6272,7 @@ test('local status preserves cached session and step validation after owned-slot
 test('Antigravity reads only a current closing question from a bounded transcript tail', () => fixture(f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const file = join(f.home, 'conversation', 'transcript.jsonl')
-  const user = { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'SYNTHETIC-PRIVATE-PROMPT' }
+  const user = { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Closing question check\nSYNTHETIC-PRIVATE-PROMPT-BODY' }
   const model = content => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', content })
   const save = entries => f.save(file, entries.map(entry => typeof entry === 'string' ? entry : JSON.stringify(entry)).join('\n') + '\n')
   const send = (id, state, event, transcriptPath = file) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId: id, transcriptPath })
@@ -6944,6 +7302,27 @@ test('OpenClaw native metadata callbacks fence stale runs and never request conv
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
+test('OpenClaw setup asks the gateway to load the board plugin at start, also over a manifest an earlier setup wrote, and removes it (#1489)', () => fixture(f => {
+  const file = join(f.root, 'adapters', 'openclaw', 'openclaw.plugin.json')
+  const record = join(f.root, 'install-openclaw.json')
+  assert.equal(f.install('--agent', 'openclaw', '--apply').status, 0)
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).activation, { onStartup: true })
+  // An earlier release wrote the manifest without activation and recorded its bytes: the next setup takes it over.
+  const earlier = `${JSON.stringify({ id: 'agent-board-local', contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}
+`
+  f.save(file, earlier)
+  const saved = JSON.parse(readFileSync(record, 'utf8'))
+  saved.files[file] = createHash('sha256').update(earlier).digest('hex')
+  f.save(record, `${JSON.stringify(saved, null, 2)}
+`)
+  const again = f.install('--agent', 'openclaw', '--apply')
+  assert.equal(again.status, 0, again.stdout)
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).activation, { onStartup: true })
+  const removed = f.install('--agent', 'openclaw', '--remove', '--apply')
+  assert.equal(removed.status, 0, removed.stdout)
+  assert.equal(existsSync(file), false)
+}))
+
 test('OpenClaw session events carry the session folder and progress_card reports to the plugin session', () => fixture(async f => {
   assert.equal(f.install('--agent', 'openclaw', '--apply').status, 0)
   const plugin = (await import(pathToFileURL(join(f.root, 'adapters', 'openclaw', 'agent-board-local.mjs')))).default
@@ -7303,15 +7682,26 @@ test('deepseekLocalPlugin ignores subagents and gives a waiting board message to
     return child
   }
   const settled = () => children.every(child => child.isClosed)
+  // A wait that runs out says where the message stopped (#1429): its status, what each session got, every board
+  // call's action and exit code, and the codes in the hook log.
+  const agents = []
+  const where = () => {
+    const log = join(f.home, '.agent-board', 'hook-errors.log')
+    const calls = children.map(child => `${child.spawnargs[child.spawnargs.indexOf('--mailbox') + 1]}:${child.isClosed ? child.exitCode : 'running'}`)
+    const codes = existsSync(log) ? readFileSync(log, 'utf8').match(/[A-Z][A-Z0-9_]{3,}/g) ?? [] : []
+    const statuses = existsSync(file) ? store().messages.map(one => `${one.id}=${one.status}`) : []
+    return `messages [${statuses}]; received [${agents.map(one => `${one.session.header.id}=${one.received.length}`)}]; calls [${calls}]; hook log [${codes}]`
+  }
   const until = async (check, label) => {
     for (const end = Date.now() + 30_000; Date.now() < end; await new Promise(done => setTimeout(done, 50))) if (check()) return
-    assert.fail(label)
+    assert.fail(`${label}: ${where()}`)
   }
   const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, board)
-  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'watch', 'join']
-  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, watch, join)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
   const fake = (id, header = {}) => {
     const agent = { session: { header: { id, ...header } }, status: 'idle', received: [], followup(message) { agent.received.push(message); agent.status = 'running' } }
+    agents.push(agent)
     return agent
   }
   const root = fake('deepseek-root-session'), sub = fake('deepseek-subagent-session', { origin: 'subagent', parentSession: 'deepseek-root-session' })
@@ -7358,7 +7748,7 @@ test('deepseekLocalPlugin ignores subagents and gives a waiting board message to
     if (existsSync(log)) assert.ok(!readFileSync(log, 'utf8').includes('MAILBOX_FAILED'), readFileSync(log, 'utf8'))
     // A board script that cannot answer is logged, once, however often the session asks.
     const broken = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, join(f.home, 'missing-board.mjs'))
-    const failed = new Function(...names, `${broken.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, watch, join)
+    const failed = new Function(...names, `${broken.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
     const failedHooks = new Map()
     failed.apply({ on: (name, fn) => failedHooks.set(name, fn) })
     const lonely = fake('deepseek-lonely-session')
@@ -7393,6 +7783,339 @@ test('deepseekLocalPlugin ignores subagents and gives a waiting board message to
   }
 }))
 
+test('deepseekLocalPlugin asks again when the board answers a take as deferred, and gives the message once the store is free (#1429)', () => fixture(async f => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  const { randomUUID } = await import('node:crypto')
+  const { watch } = await import('node:fs')
+  const board = join(f.home, 'deepseek-deferred-board.mjs')
+  f.save(board, bundleFromDir(new URL('..', import.meta.url)))
+  const progress = join(f.home, 'deepseek-deferred-progress.md')
+  f.save(progress, '')
+  const directory = defaultMessagesDirectory(progress, f.home, process.env, process.platform)
+  const file = join(directory, 'messages.json')
+  const status = () => JSON.parse(readFileSync(file, 'utf8')).messages.find(one => one.id === 'deferred-message')?.status
+  const enrolled = enrollMailbox({ messages: [] }, 'deepseek', 'deepseek-deferred-session', 'dsh', Date.now(), 43_200_000)
+  const target = enrolled.mailboxes.find(one => one.id === mailboxId('deepseek', 'deepseek-deferred-session'))
+  f.save(file, JSON.stringify({ version: 2, ...queueMessage(enrolled, { id: 'deferred-message', target: target.id, turn: 'session', text: 'Synthetic deferred answer' }, 'board', target, Date.now()).state }))
+  const children = []
+  const spawnMailbox = (...args) => {
+    const child = spawn(...args)
+    children.push(child)
+    child.on('close', () => { child.isClosed = true })
+    return child
+  }
+  const settled = () => children.every(child => child.isClosed)
+  const takes = () => children.filter(child => child.spawnargs.includes('take'))
+  const until = async (check, label) => {
+    for (const end = Date.now() + 30_000; Date.now() < end; await new Promise(done => setTimeout(done, 50))) if (check()) return
+    assert.fail(`${label}: message ${status()}, ${takes().length} takes`)
+  }
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, board)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
+  const agent = { session: { header: { id: 'deepseek-deferred-session' } }, status: 'idle', received: [], followup(message) { agent.received.push(message); agent.status = 'running' } }
+  const hooks = new Map()
+  // A live claim on the messages folder: every take the board script makes finds the store busy and answers deferred.
+  const claim = claimMessageStore(directory)
+  let isHeld = true
+  try {
+    apply({ on: (name, fn) => hooks.set(name, fn) })
+    hooks.get('agent/created')({ agent })
+    await until(() => takes().length >= 1 && settled(), 'the first take ran while the store was held')
+    assert.deepEqual(agent.received, [])
+    assert.equal(status(), 'queued')
+    const taken = takes().length
+    claim.release()
+    isHeld = false
+    // Nothing from dsh and no write to messages.json happens now: only the plugin asking again can deliver.
+    await until(() => status() === 'accepted' && settled(), 'the plugin asked again after the store was free')
+    assert.equal(agent.received.length, 1)
+    assert.ok(agent.received[0].content[0].text.includes('Synthetic deferred answer'))
+    assert.ok(takes().length > taken)
+    hooks.get('agent/disposed')({ agent })
+    await until(settled, 'the session ended')
+  } finally {
+    if (isHeld) claim.release()
+    for (const child of children) if (!child.isClosed) child.kill()
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
+  }
+}))
+
+test('a deferred take asks again for its own session only, and a session closed while its take ran leaves no count for the next one (#1429)', () => fixture(async f => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { EventEmitter } = await import('node:events')
+  const { randomUUID } = await import('node:crypto')
+  const progress = join(f.home, 'deepseek-asks-progress.md')
+  f.save(progress, '')
+  const directory = join(f.home, 'deepseek-asks-mailbox')
+  // Every session has a message waiting, so each ask again finds something worth a take.
+  f.save(join(directory, 'messages.json'), JSON.stringify({ messages: ['asks-a', 'asks-b', 'asks-c'].map(id => ({ status: 'queued', to: 'deepseek:' + id })) }))
+  const takes = new Map(), held = new Map()
+  // A stand-in board script: every take finds the store busy and answers deferred; a held session's take waits.
+  const spawnMailbox = (_node, args) => {
+    const child = new EventEmitter()
+    child.stdout = Object.assign(new EventEmitter(), { setEncoding() {} })
+    child.kill = () => {}
+    const action = args[args.indexOf('--mailbox') + 1], session = args[args.indexOf('--session') + 1]
+    if (action === 'take') takes.set(session, (takes.get(session) ?? 0) + 1)
+    const answer = () => {
+      child.stdout.emit('data', JSON.stringify(action === 'take' ? { watch: directory, message: null, deferred: true } : { ok: true }) + '\n')
+      child.emit('close', 0)
+    }
+    if (action === 'take' && held.has(session)) held.set(session, answer)
+    else setImmediate(answer)
+    return child
+  }
+  const watch = () => Object.assign(new EventEmitter(), { close() {} })
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, join(f.home, 'deepseek-asks-board.mjs'))
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
+  const hooks = new Map()
+  apply({ on: (name, fn) => hooks.set(name, fn) })
+  const session = id => ({ session: { header: { id } }, status: 'idle', followup() { throw new Error('UNUSED') } })
+  // Settled: no take for 1 s, four times the 250 ms between asks.
+  const settled = async () => {
+    for (const end = Date.now() + 30_000; Date.now() < end;) {
+      const before = JSON.stringify([...takes])
+      await new Promise(done => setTimeout(done, 1000))
+      if (JSON.stringify([...takes]) === before) return
+    }
+    assert.fail(`takes never settled: ${JSON.stringify([...takes])}`)
+  }
+  const a = session('asks-a'), b = session('asks-b')
+  hooks.get('agent/created')({ agent: a })
+  await settled()
+  // The first take and 20 asks again.
+  assert.equal(takes.get('asks-a'), 21)
+  hooks.get('agent/created')({ agent: b })
+  await settled()
+  assert.equal(takes.get('asks-b'), 21)
+  // Before: each of b's asks again took for a too, 41 takes in all.
+  assert.equal(takes.get('asks-a'), 21)
+  held.set('asks-c', null)
+  const closed = session('asks-c')
+  hooks.get('agent/created')({ agent: closed })
+  for (const end = Date.now() + 10_000; held.get('asks-c') === null && Date.now() < end;) await new Promise(done => setTimeout(done, 20))
+  hooks.get('agent/disposed')({ agent: closed })
+  const late = held.get('asks-c')
+  held.delete('asks-c')
+  late()
+  await settled()
+  assert.equal(takes.get('asks-c'), 1)
+  const reopened = session('asks-c')
+  hooks.get('agent/created')({ agent: reopened })
+  await settled()
+  // Before: the late answer left a count of 1, so the same id came back with 19 asks again, not 20.
+  assert.equal(takes.get('asks-c'), 22)
+  for (const agent of [a, b, reopened]) hooks.get('agent/disposed')({ agent })
+}))
+
+test('hook delivery and DeepSeek take report corrupt messages.json as an error instead of deferred, while a held claim stays deferred (#1448)', () => mailboxFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  f.save(join(f.directory, 'messages.json'), '{not json')
+  const failedHook = f.call('codex', 'UserPromptSubmit')
+  assert.equal(failedHook.status, 0, failedHook.stderr)
+  assert.equal(failedHook.stdout, '')
+  assert.match(failedHook.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
+  assert.doesNotMatch(failedHook.stderr, /deferred/)
+
+  f.save(f.progress, [
+    `## ${basename(f.home)}`,
+    `<!-- auto session=a1b2c3f9 agent=codex state=working updated=${new Date().toISOString()} -->`,
+    '### Auth check',
+    '- [?] codex: Use JWT or session cookies?',
+    '<!-- /auto session=a1b2c3f9 -->',
+    '',
+  ].join('\n'))
+  const withQuestion = f.call('codex', 'UserPromptSubmit')
+  assert.equal(withQuestion.status, 0, withQuestion.stderr)
+  const questionEnvelope = JSON.parse(withQuestion.stdout)
+  assert.match(questionEnvelope.hookSpecificOutput.additionalContext, /Auth check/)
+  assert.match(withQuestion.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
+  f.save(f.progress, '')
+
+  const claim = claimMessageStore(f.directory)
+  let isHeld = true
+  try {
+    const deferredHook = f.call('codex', 'UserPromptSubmit')
+    assert.equal(deferredHook.status, 0, deferredHook.stderr)
+    assert.match(deferredHook.stderr, /board: mailbox deferred/)
+
+    const deferredTake = spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--mailbox', 'take', '--session', 'deepseek-error-session'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+    assert.equal(deferredTake.status, 0, deferredTake.stderr)
+    const parsed = JSON.parse(deferredTake.stdout)
+    assert.equal(parsed.message, null)
+    assert.equal(parsed.deferred, true)
+  } finally {
+    if (isHeld) { claim.release(); isHeld = false }
+  }
+
+  const failedTake = spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--mailbox', 'take', '--session', 'deepseek-error-session'], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  assert.notEqual(failedTake.status, 0)
+  assert.equal(failedTake.stdout, '')
+  assert.match(failedTake.stderr, /INVALID_MESSAGE_STORE/)
+
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { randomUUID } = await import('node:crypto')
+  const { watch } = await import('node:fs')
+  const children = []
+  const spawnMailbox = (command, args, options = {}) => {
+    const child = spawn(command, args, { ...options, env: f.env })
+    children.push(child)
+    child.on('close', () => { child.isClosed = true })
+    return child
+  }
+  const settled = () => children.every(child => child.isClosed)
+  const takes = () => children.filter(child => child.spawnargs.includes('take'))
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), f.progress, f.home, f.script)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
+  const agent = { session: { header: { id: 'deepseek-error-session' } }, status: 'idle', received: [], followup() { throw new Error('UNUSED') } }
+  const hooks = new Map()
+  const log = join(f.home, '.agent-board', 'hook-errors.log')
+  try {
+    apply({ on: (name, fn) => hooks.set(name, fn) })
+    hooks.get('agent/created')({ agent })
+    for (const end = Date.now() + 15_000; (takes().length < 1 || !settled()) && Date.now() < end; await new Promise(done => setTimeout(done, 50))) {}
+    assert.equal(takes().length, 1)
+    assert.equal(settled(), true)
+    await new Promise(done => setTimeout(done, 600))
+    assert.equal(takes().length, 1, 'a non-deferred store failure must not ask again repeatedly')
+    const logged = existsSync(log) ? readFileSync(log, 'utf8') : ''
+    assert.equal(logged.split('MAILBOX_FAILED').length - 1, 1, logged)
+    hooks.get('agent/disposed')({ agent })
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end; await new Promise(done => setTimeout(done, 50))) {}
+  } finally {
+    for (const child of children) if (!child.isClosed) child.kill()
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
+  }
+}))
+
+// The DeepSeek receiver with a stub board script. A take is answered by plan(call) (an object, or 'fail'); with no
+// answer from the plan it is held until the test calls its answer. Watchers opened are listed, the log is read back.
+const deepseekStub = async (f, tag, queued) => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { EventEmitter } = await import('node:events')
+  const { randomUUID } = await import('node:crypto')
+  const progress = join(f.home, `deepseek-${tag}-progress.md`)
+  f.save(progress, '')
+  const directory = join(f.home, `deepseek-${tag}-mailbox`)
+  f.save(join(directory, 'messages.json'), JSON.stringify({ messages: queued.map(id => ({ status: 'queued', to: 'deepseek:' + id })) }))
+  const stub = { directory, takes: [], watched: [], plan: () => undefined, hooks: new Map() }
+  const spawnMailbox = (_node, args) => {
+    const child = new EventEmitter()
+    child.stdout = Object.assign(new EventEmitter(), { setEncoding() {} })
+    child.kill = () => {}
+    const action = args[args.indexOf('--mailbox') + 1]
+    const call = { action, session: args[args.indexOf('--session') + 1] }
+    call.answer = body => {
+      if (body !== 'fail') child.stdout.emit('data', JSON.stringify(body) + '\n')
+      child.emit('close', body === 'fail' ? 1 : 0)
+    }
+    if (action !== 'take') setImmediate(() => call.answer({ ok: true }))
+    else {
+      stub.takes.push(call)
+      const body = stub.plan(call)
+      if (body !== undefined) setImmediate(() => call.answer(body))
+    }
+    return child
+  }
+  const watch = dir => { stub.watched.push(dir); return Object.assign(new EventEmitter(), { close() {} }) }
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, join(f.home, `deepseek-${tag}-board.mjs`))
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'existsSync', 'readFileSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, existsSync, readFileSync, watch, join)
+  apply({ on: (name, fn) => stub.hooks.set(name, fn) })
+  stub.session = id => ({ session: { header: { id } }, status: 'idle', received: [], followup() { throw new Error('UNUSED') } })
+  stub.log = () => existsSync(join(f.home, '.agent-board', 'hook-errors.log')) ? readFileSync(join(f.home, '.agent-board', 'hook-errors.log'), 'utf8') : ''
+  stub.until = async (check, label, limit = 5000) => {
+    for (const end = Date.now() + limit; Date.now() < end; await new Promise(done => setTimeout(done, 20))) if (check()) return true
+    if (label !== undefined) assert.fail(label)
+    return false
+  }
+  return stub
+}
+
+test('a take that returns after its last session was removed opens no watcher and logs no failure (#1442)', () => fixture(async f => {
+  const s = await deepseekStub(f, 'late', [])
+  for (const [id, late] of [['late-a', { watch: s.directory, message: null }], ['late-b', 'fail']]) {
+    const agent = s.session(id)
+    s.hooks.get('agent/created')({ agent })
+    await s.until(() => s.takes.some(call => call.session === id), `no take for ${id}`)
+    s.hooks.get('agent/disposed')({ agent })
+    s.takes.find(call => call.session === id).answer(late)
+    // Settled: nothing the late answer starts is slower than this.
+    await new Promise(done => setTimeout(done, 300))
+    assert.deepEqual(s.watched, [], `${id}: a watcher was opened for a closed session`)
+    assert.doesNotMatch(s.log(), /MAILBOX_FAILED/, `${id}: a closed session's take was logged as failed`)
+  }
+}))
+
+test('a session added again with the same id gets its waiting message without a watcher event or tick while the old take is out (#1442)', () => fixture(async f => {
+  const s = await deepseekStub(f, 'again', ['again-s'])
+  const old = s.session('again-s')
+  const fresh = s.session('again-s')
+  fresh.followup = message => { fresh.received.push(message); fresh.status = 'running' }
+  // The first take (the old agent's) is held; the next one finds the message.
+  s.plan = () => s.takes.length === 1 ? undefined : { watch: s.directory, message: { id: 'again-message', nonce: 'again-nonce', text: 'Synthetic waiting message' } }
+  s.hooks.get('agent/created')({ agent: old })
+  await s.until(() => s.takes.length === 1, 'the old agent took')
+  s.hooks.get('agent/created')({ agent: fresh })
+  s.takes[0].answer({ watch: s.directory, message: null })
+  const isGiven = await s.until(() => fresh.received.length === 1, undefined, 3000)
+  assert.equal(isGiven, true, `the new agent was not given the waiting message, ${s.takes.length} takes`)
+  s.hooks.get('agent/disposed')({ agent: fresh })
+}))
+
+test('a deferred answer then a plain one before 250 ms leaves no timer that starts another take (#1442)', () => fixture(async f => {
+  const s = await deepseekStub(f, 'timer', ['timer-s'])
+  const agent = s.session('timer-s')
+  s.plan = () => s.takes.length === 1 ? { watch: s.directory, message: null, deferred: true } : { watch: s.directory, message: null }
+  s.hooks.get('agent/created')({ agent })
+  await s.until(() => s.takes.length === 1, 'the first take ran')
+  // The deferred answer arms the 250 ms timer; a plain answer follows well inside it.
+  await new Promise(done => setTimeout(done, 40))
+  s.hooks.get('agent/status')({ agent, status: 'idle' })
+  await s.until(() => s.takes.length === 2, 'the second take ran')
+  await new Promise(done => setTimeout(done, 900))
+  assert.equal(s.takes.length, 2, 'the earlier timer started a take after a plain answer')
+  s.hooks.get('agent/disposed')({ agent })
+}))
+
+test('a mailbox accept the board did not take prints ok false, and ok true once it did (#1430)', async () => mailboxFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  f.seed('deepseek')
+  const run = (...args) => spawnSync(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--session', session, '--mailbox', ...args], { cwd: f.home, env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const take = () => {
+    const took = run('take', '--surface', 'Web')
+    assert.equal(took.status, 0, took.stderr)
+    return JSON.parse(took.stdout)
+  }
+  // A take the store answers too slowly is deferred by design and asked again (#902): accept one, and check it was one (#1476).
+  const first = take()
+  if (first.message === null) {
+    assert.equal(first.deferred, true, 'a take with no message was not deferred')
+    assert.equal(f.state().messages[0].status, 'queued')
+  }
+  const { message } = first.message === null ? take() : first
+  assert.equal(message.id, 'hook-mailbox-message')
+  const accept = () => run('accept', '--id', message.id, '--nonce', message.nonce)
+  const claim = claimMessageStore(f.directory)
+  try {
+    const refused = accept()
+    assert.equal(refused.status, 0, refused.stderr)
+    assert.deepEqual(JSON.parse(refused.stdout), { ok: false })
+    assert.equal(f.state().messages[0].status, 'uncertain')
+  } finally { claim.release() }
+  const done = accept()
+  assert.equal(done.status, 0, done.stderr)
+  assert.deepEqual(JSON.parse(done.stdout), { ok: true })
+  assert.equal(f.state().messages[0].status, 'accepted')
+}))
+
 test('Grok prompt hooks return a waiting session to working through the native shell shape', () => fixture(f => {
   assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
   const hooks = JSON.parse(readFileSync(join(f.home, '.grok', 'hooks', 'agent-board-local.json'))).hooks
@@ -7410,7 +8133,7 @@ test('Grok prompt hooks return a waiting session to working through the native s
   assert.ok(!readFileSync(f.progress, 'utf8').includes('PRIVATE_PAYLOAD'))
 }))
 
-test('auto setup does not mistake an Antigravity profile or the shared gemini directory for Gemini CLI', () => fixture(f => {
+test('auto setup finds an Antigravity profile and does not list Gemini CLI for the shared gemini directory', () => fixture(f => {
   mkdirSync(join(f.home, '.gemini', 'antigravity-cli'), { recursive: true })
   const args = [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--json']
   const run = () => spawnSync(process.execPath, args, { env: f.env, encoding: 'utf8', windowsHide: true })
@@ -7419,7 +8142,7 @@ test('auto setup does not mistake an Antigravity profile or the shared gemini di
   assert.deepEqual(JSON.parse(result.stdout).targets, ['antigravity'])
   assert.equal(existsSync(join(f.home, '.gemini', 'settings.json')), false)
   f.save(join(f.home, '.gemini', 'settings.json'), '{}')
-  assert.deepEqual(JSON.parse(run().stdout).targets, ['gemini', 'antigravity'])
+  assert.deepEqual(JSON.parse(run().stdout).targets, ['antigravity'])
 }))
 
 test('all targets initialize one shared board and name each adapter capability', () => fixture(f => {
@@ -7427,20 +8150,21 @@ test('all targets initialize one shared board and name each adapter capability',
   const result = spawnSync(process.execPath, [installer, '--agent', 'all', '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--apply', '--json'], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
   assert.equal(result.status, 0, `${JSON.stringify({ error: result.error?.code, signal: result.signal })}\n${result.stderr}`)
   const plans = JSON.parse(result.stdout).plans
-  assert.equal(plans.length, 10)
+  assert.equal(plans.length, 9)
+  assert.ok(!plans.some(plan => plan.agent === 'gemini'))
   assert.equal(new Set(plans.map(plan => plan.progress)).size, 1)
   assert.equal(plans.find(plan => plan.agent === 'hermes').capabilities.lifecycle, 'adapter-installed-unverified')
   for (const agent of ['openclaw', 'deepseek']) assert.equal(plans.find(plan => plan.agent === agent).capabilities.lifecycle, 'adapter-installed-unverified')
   assert.equal(plans.find(plan => plan.agent === 'antigravity').capabilities.lifecycle, 'adapter-installed-unverified')
-  assert.ok(existsSync(join(f.home, '.gemini', 'commands', 'agent-board.toml')))
+  assert.equal(existsSync(join(f.home, '.gemini', 'commands', 'agent-board.toml')), false)
   assert.ok(existsSync(join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')))
   assert.match(readFileSync(join(f.home, '.hermes', 'config.yaml'), 'utf8'), /^hooks:\n {2}on_session_start:\n/)
-  for (const agent of ['gemini', 'grok', 'muse']) {
+  for (const agent of ['grok', 'muse']) {
     const response = f.command(['--agent-status', '--agent', agent, '--state', 'waiting'], { session_id: `shared-${agent}-session-123`, prompt: 'PRIVATE_PAYLOAD' })
     assert.equal(response.status, 0, response.stderr)
   }
   const text = readFileSync(f.progress, 'utf8')
-  for (const agent of ['gemini', 'grok', 'muse']) assert.ok(text.includes(`agent=${agent} `))
+  for (const agent of ['grok', 'muse']) assert.ok(text.includes(`agent=${agent} `))
   assert.ok(!text.includes('PRIVATE_PAYLOAD'))
 }))
 
@@ -9407,7 +10131,7 @@ test('setup keeps each installer\'s board when the connector and independent ins
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const before = JSON.parse(f.install('--agent', 'antigravity').stdout)
   mkdirSync(join(f.home, '.codex'), { recursive: true })
-  f.save(join(f.home, '.gemini', 'settings.json'), '{}')
+  mkdirSync(join(f.home, '.cursor'), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
   legacyConnect(f, progress)
 
@@ -9415,7 +10139,7 @@ test('setup keeps each installer\'s board when the connector and independent ins
     const result = setupAgent(f, '--json', ...(apply ? ['--apply'] : []))
     assert.equal(result.status, 0, result.stderr + result.stdout)
     const plans = JSON.parse(result.stdout).plans
-    for (const agent of ['codex', 'gemini']) {
+    for (const agent of ['codex', 'cursor']) {
       const plan = plans.find(one => one.agent === agent)
       assert.equal(plan.managedBy, 'connector', agent)
       assert.equal(plan.progress, progress, agent)
@@ -9477,8 +10201,8 @@ test('setup previews the connector board without duplicate hooks or conflicts fo
   for (const folder of ['.codex', '.cursor', '.gemini/antigravity', '.grok/sessions', '.config/muse', '.config/opencode', '.hermes']) mkdirSync(join(f.home, folder), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
   legacyConnect(f, progress)
-  const agents = ['codex', 'cursor', 'gemini', 'grok', 'muse', 'opencode', 'hermes', 'antigravity']
-  const files = [f.hooks, join(f.home, '.cursor', 'hooks.json'), join(f.home, '.gemini', 'settings.json'), join(f.home, '.grok', 'hooks', 'agent-board.json'), join(f.home, '.config', 'opencode', 'plugin', 'agent-board.js'), join(f.home, '.gemini', 'config', 'hooks.json')]
+  const agents = ['codex', 'cursor', 'grok', 'muse', 'opencode', 'hermes', 'antigravity']
+  const files = [f.hooks, join(f.home, '.cursor', 'hooks.json'), join(f.home, '.grok', 'hooks', 'agent-board.json'), join(f.home, '.config', 'opencode', 'plugin', 'agent-board.js'), join(f.home, '.gemini', 'config', 'hooks.json')]
   const before = files.map(file => readFileSync(file, 'utf8'))
   const preview = setupAgent(f, '--agent', agents.join(','), '--json')
   assert.equal(preview.status, 0, preview.stderr + preview.stdout)
@@ -9503,14 +10227,13 @@ test('after setup apply each connected hook delivers one synthetic event to the 
   for (const folder of ['.codex', '.cursor', '.gemini/antigravity', '.grok/sessions', '.config/muse']) mkdirSync(join(f.home, folder), { recursive: true })
   const progress = join(f.home, '.claude', 'progress.md')
   legacyConnect(f, progress)
-  const agents = ['codex', 'cursor', 'gemini', 'grok', 'muse', 'antigravity']
+  const agents = ['codex', 'cursor', 'grok', 'muse', 'antigravity']
   const applied = setupAgent(f, '--agent', agents.join(','), '--apply', '--json')
   assert.equal(applied.status, 0, applied.stderr + applied.stdout)
   assert.equal(JSON.parse(applied.stdout).applied, true)
   const definitions = [
     ['codex', f.hooks, 'Stop'],
     ['cursor', join(f.home, '.cursor', 'hooks.json'), 'afterAgentResponse'],
-    ['gemini', join(f.home, '.gemini', 'settings.json'), 'AfterAgent'],
     ['grok', join(f.home, '.grok', 'hooks', 'agent-board.json'), 'Stop'],
     ['muse', join(f.home, '.config', 'muse', 'settings.json'), 'Stop'],
   ]
@@ -11754,8 +12477,8 @@ for (const agent of ['gemini', 'opencode']) {
     assert.deepEqual(plan.conflicts, [])
     assert.deepEqual(plan.changes.filter(change => change.file === old.old), [{ file: old.old, action: 'remove' }])
     assert.deepEqual(plan.changes.filter(change => change.file === old.now), [{ file: old.now, action: 'create' }])
-    const plain = setupAgent(f, '--lang', 'en', '--agent', agent)
-    assert.match(plain.stdout, /board\.(toml|md) \(the old \/board command; setup removes it\)/, plain.stdout)
+    const plain = agent === 'gemini' ? null : setupAgent(f, '--lang', 'en', '--agent', agent)
+    if (plain) assert.match(plain.stdout, /board\.(toml|md) \(the old \/board command; setup removes it\)/, plain.stdout)
     assert.equal(existsSync(old.old), true, 'a preview changes nothing')
     const applied = f.install('--agent', agent, '--apply', '--json')
     assert.equal(applied.status, 0, applied.stderr)
@@ -11773,8 +12496,8 @@ for (const agent of ['gemini', 'opencode']) {
     assert.deepEqual(plan.conflicts, [])
     assert.deepEqual(plan.keptEdited, [old.old])
     assert.equal(plan.changes.some(change => change.file === old.old), false)
-    const plain = setupAgent(f, '--lang', 'en', '--agent', agent)
-    assert.match(plain.stdout, /board\.(toml|md) \(your edited old \/board command; setup leaves it; the command is now \/agent-board\)/, plain.stdout)
+    const plain = agent === 'gemini' ? null : setupAgent(f, '--lang', 'en', '--agent', agent)
+    if (plain) assert.match(plain.stdout, /board\.(toml|md) \(your edited old \/board command; setup leaves it; the command is now \/agent-board\)/, plain.stdout)
     const applied = f.install('--agent', agent, '--apply', '--json')
     assert.equal(applied.status, 0, applied.stderr)
     assert.equal(readFileSync(old.old, 'utf8'), `${old.text}\nMy own line\n`)
@@ -11851,3 +12574,593 @@ test('the local agent instructions tell Cursor to report from the project folder
     assert.ok(skill.includes('board --codex-report --agent cursor'), lang)
   }
 })
+
+const pbVarint = value => {
+  let n = BigInt.asUintN(64, BigInt(value))
+  const out = []
+  while (n >= 0x80n) {
+    out.push(Number((n & 0x7fn) | 0x80n))
+    n >>= 7n
+  }
+  out.push(Number(n))
+  return Buffer.from(out)
+}
+const pbTag = (field, wire) => pbVarint((field << 3) | wire)
+const pbBytes = (field, buf) => Buffer.concat([pbTag(field, 2), pbVarint(buf.length), buf])
+const pbSummaries = entries => Buffer.concat(entries.map(({ id, title, withUnknown = false }) => {
+  const inner = []
+  if (withUnknown) {
+    inner.push(pbTag(7, 0), pbVarint(-1n))
+    inner.push(pbTag(8, 5), Buffer.from([1, 2, 3, 4]))
+  }
+  if (title !== undefined) inner.push(pbBytes(1, Buffer.from(title, 'utf8')))
+  if (withUnknown) inner.push(pbTag(9, 1), Buffer.alloc(8, 0xaa))
+  const entry = [
+    ...(withUnknown ? [pbTag(4, 0), pbVarint(42)] : []),
+    pbBytes(1, Buffer.from(id, 'utf8')),
+    ...(withUnknown ? [pbTag(6, 5), Buffer.from([9, 8, 7, 6])] : []),
+    pbBytes(2, Buffer.concat(inner)),
+  ]
+  return pbBytes(1, Buffer.concat(entry))
+}))
+
+test('Antigravity protobuf and CLI JSON summary readers skip foreign entries and reject malformed data (#1401)', async () => {
+  const { findProtobufTitle, findCliJsonTitle, clientLocationFromPath } = await importTs('../scripts/antigravity-meta.ts')
+  const buf = pbSummaries([
+    { id: 'synthetic-foreign-1', title: 'SYNTHETIC-FOREIGN-TITLE-ONE', withUnknown: true },
+    { id: 'synthetic-target-id', title: '  Blue\nOr\x07Green\x85Title  ', withUnknown: true },
+    { id: 'synthetic-foreign-2', title: 'SYNTHETIC-FOREIGN-TITLE-TWO', withUnknown: true },
+  ])
+  assert.equal(findProtobufTitle(buf, 'synthetic-target-id'), 'Blue Or Green Title')
+  assert.equal(findProtobufTitle(buf, 'synthetic-missing-id'), null)
+  assert.equal(findProtobufTitle(Buffer.from([0x08, 0x80]), 'synthetic-target-id'), null)
+  assert.equal(findProtobufTitle(Buffer.from([0x00]), 'synthetic-target-id'), null)
+  assert.equal(findProtobufTitle(buf.subarray(0, buf.length - 5), 'synthetic-target-id'), 'Blue Or Green Title')
+
+  const jsonBuf = Buffer.from(JSON.stringify({
+    conversations: {
+      'synthetic-foreign-1': { summary: { Title: 'SYNTHETIC-FOREIGN-JSON' } },
+      'synthetic-cli-id': { summary: { Title: '  CLI\r\nTitle  ' } },
+    },
+  }))
+  assert.equal(findCliJsonTitle(jsonBuf, 'synthetic-cli-id'), 'CLI Title')
+  assert.equal(findCliJsonTitle(jsonBuf, 'synthetic-missing-id'), null)
+  assert.equal(findCliJsonTitle(Buffer.from('not-json{'), 'synthetic-cli-id'), null)
+  const unc = clientLocationFromPath('//srv/share/.gemini/antigravity-cli/brain/synthetic-id/transcript.jsonl')
+  assert.equal(unc?.kind, 'antigravity-cli')
+  if (process.platform === 'win32') assert.equal(unc?.clientDir, '\\\\srv\\share\\.gemini\\antigravity-cli')
+  else assert.equal(unc?.clientDir, '/srv/share/.gemini/antigravity-cli')
+})
+
+test('Antigravity desktop, IDE, and CLI rows use client summary titles and keep secondary start times (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const appId = 'synthetic-ag-app-1401'
+  const ideId = 'synthetic-ag-ide-1401'
+  const cliPbId = 'synthetic-ag-cli-pb-1401'
+  const cliJsonId = 'synthetic-ag-cli-json-1401'
+
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: 'synthetic-foreign-app', title: 'SYNTHETIC-FOREIGN-APP', withUnknown: true },
+    { id: appId, title: 'App Summary Title', withUnknown: true },
+  ]))
+  f.save(join(f.home, '.gemini', 'antigravity-ide', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: ideId, title: 'IDE Summary Title', withUnknown: true },
+  ]))
+  f.save(join(f.home, '.gemini', 'antigravity-cli', 'jetbox_summaries_proto.pb'), pbSummaries([
+    { id: cliPbId, title: 'CLI Proto Title' },
+  ]))
+  f.save(join(f.home, '.gemini', 'antigravity-cli', 'cache', 'conversation_metadata.json'), JSON.stringify({
+    conversations: {
+      [cliPbId]: { summary: { Title: 'CLI Json Secondary' } },
+      [cliJsonId]: { summary: { Title: 'CLI Json Title' } },
+      'synthetic-foreign-cli': { summary: { Title: 'SYNTHETIC-FOREIGN-CLI' } },
+    },
+  }))
+
+  const fire = (id, path) => f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: id,
+    transcriptPath: path,
+  })
+  const cases = [
+    [appId, join(f.home, '.gemini', 'antigravity', 'brain', appId, '.system_generated', 'logs', 'transcript.jsonl'), 'App Summary Title'],
+    [ideId, join(f.home, '.gemini', 'antigravity-ide', 'brain', ideId, '.system_generated', 'logs', 'transcript.jsonl'), 'IDE Summary Title'],
+    [cliPbId, join(f.home, '.gemini', 'antigravity-cli', 'brain', cliPbId, 'transcript.jsonl'), 'CLI Proto Title'],
+    [cliJsonId, join(f.home, '.gemini', 'antigravity-cli', 'brain', cliJsonId, 'transcript.jsonl'), 'CLI Json Title'],
+  ]
+  for (const [id, transcriptPath, expectedTitle] of cases) {
+    assert.equal(fire(id, transcriptPath).status, 0)
+    const owner = createHash('sha256').update(`antigravity:${id}`).digest('hex')
+    const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+    assert.equal(record.title, expectedTitle)
+    assert.equal(record.titleSource, 'summary')
+    assert.match(record.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/)
+  }
+  const board = readFileSync(f.progress, 'utf8')
+  for (const [, , expectedTitle] of cases) assert.ok(board.includes(`### ${expectedTitle}`), board)
+  assert.ok(!board.includes('SYNTHETIC-FOREIGN'))
+  assert.ok(!board.includes('Local antigravity task'))
+}))
+
+test('two Antigravity sessions with the same summary title show distinct start times on terminal and web boards (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const first = 'synthetic-ag-same-1-1401'
+  const second = 'synthetic-ag-same-2-1401'
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: first, title: 'Shared Summary Title' },
+    { id: second, title: 'Shared Summary Title' },
+  ]))
+  const fire = id => f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: id,
+    transcriptPath: join(f.home, '.gemini', 'antigravity', 'brain', id, 'transcript.jsonl'),
+  })
+  assert.equal(fire(first).status, 0)
+  const recordOf = id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`), 'utf8'))
+  const r1 = recordOf(first)
+  assert.equal(r1.title, 'Shared Summary Title')
+
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardText, boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { serveModel, servePage } = await importTs('../hooks/serve.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { LANGS } = await importTs('../hooks/i18n.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+
+  // When only a single session uses that title (even appearing in both working and open),
+  // collapsed rows do not surface its secondary Started context unnecessarily.
+  const webGroup = { now: Date.now(), repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null } }
+  const singleText = readFileSync(f.progress, 'utf8')
+  const singleView = buildView(parseProgress(singleText), [], null, webGroup.now, 0, {}, STRINGS.en)
+  const singleScreen = boardScreen(singleView, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  assert.ok(singleScreen.includes('Shared Summary Title'))
+  assert.ok(!singleScreen.includes(r1.context))
+  const singleDom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), serveModel(singleView, [], STRINGS.en, new Set(), false, undefined, false, webGroup))
+  const singleVisible = singleDom.visible()
+  assert.ok(singleVisible.includes('Shared Summary Title'))
+  assert.ok(!singleVisible.includes(r1.context))
+
+  await new Promise(done => setTimeout(done, 15))
+  assert.equal(fire(second).status, 0)
+  const r2 = recordOf(second)
+  assert.equal(r2.title, 'Shared Summary Title')
+  assert.notEqual(r1.context, r2.context)
+
+  const text = readFileSync(f.progress, 'utf8')
+  for (const lang of LANGS) {
+    const s = STRINGS[lang]
+    const view = buildView(parseProgress(text), [], null, webGroup.now, 0, {}, s)
+    for (const drawn of [boardText(view, [], s, { width: 100, isColor: false }), boardScreen(view, [], emptyBoardState, s, { width: 100, isColor: false })]) {
+      assert.ok(drawn.includes('Shared Summary Title'), lang)
+      assert.ok(drawn.includes(r1.context), `${lang}: first context in terminal`)
+      assert.ok(drawn.includes(r2.context), `${lang}: second context in terminal`)
+      assert.deepEqual(neverShown(drawn), [], lang)
+    }
+    const dom = await pageDom(servePage(s, 'synthetic-nonce'), serveModel(view, [], s, new Set(), false, undefined, false, webGroup))
+    const visible = dom.visible()
+    assert.ok(visible.includes(r1.context), `${lang}: first context visible on web`)
+    assert.ok(visible.includes(r2.context), `${lang}: second context visible on web`)
+  }
+}))
+
+test('Antigravity prompt fallback clips first line, upgrades to summary preserving startedAt, and respects explicit reports (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const id = 'synthetic-ag-upgrade-1401'
+  const transcript = join(f.home, '.gemini', 'antigravity', 'brain', id, 'transcript_full.jsonl')
+  const longPrompt = `Prompt Title Edge Check: ${'A'.repeat(60)}\nSECRET-LINE-2-BODY`
+  f.save(transcript, [
+    { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: `\n  ${longPrompt}` },
+    { source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'SECRET-MODEL-REPLY' },
+    { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'SECRET-FOLLOWUP-PROMPT' },
+  ].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+
+  const fire = state => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', 'PreInvocation'], {
+    conversationId: id,
+    transcriptPath: transcript,
+    prompt: 'SECRET-STDIN-PROMPT',
+  })
+  assert.equal(fire('working').status, 0)
+  const owner = createHash('sha256').update(`antigravity:${id}`).digest('hex')
+  const recordFile = join(f.root, 'sessions', `${owner}.json`)
+  const fromPrompt = JSON.parse(readFileSync(recordFile, 'utf8'))
+  assert.equal(fromPrompt.titleSource, 'prompt')
+  assert.equal(fromPrompt.title, 'Prompt Title Edge Check…')
+  assert.ok(fromPrompt.title.length <= 48)
+  const startedAt = fromPrompt.startedAt
+  assert.ok(Number.isSafeInteger(startedAt))
+  assert.match(fromPrompt.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/)
+  let board = readFileSync(f.progress, 'utf8')
+  assert.ok(!board.includes('SECRET-'))
+
+  // Once a summary title appears in .pb, the row upgrades while preserving startedAt.
+  const pbPath = join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb')
+  f.save(pbPath, pbSummaries([{ id, title: 'Summary Upgraded Title' }]))
+  assert.equal(fire('working').status, 0)
+  const fromSummary = JSON.parse(readFileSync(recordFile, 'utf8'))
+  assert.equal(fromSummary.title, 'Summary Upgraded Title')
+  assert.equal(fromSummary.titleSource, 'summary')
+  assert.equal(fromSummary.startedAt, startedAt)
+
+  const wrappedTranscript = join(f.home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-wrapped-1401', 'transcript.jsonl')
+  f.save(wrappedTranscript, JSON.stringify({
+    source: 'USER_EXPLICIT',
+    type: 'USER_INPUT',
+    content: '<USER_REQUEST>\nTrim request framing first\nSECRET-LINE-2\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nSECRET-METADATA\n</ADDITIONAL_METADATA>',
+  }) + '\n')
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: 'synthetic-wrapped-1401',
+    transcriptPath: wrappedTranscript,
+  }).status, 0)
+  const wrappedRec = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update('antigravity:synthetic-wrapped-1401').digest('hex')}.json`), 'utf8'))
+  assert.equal(wrappedRec.titleSource, 'prompt')
+  assert.equal(wrappedRec.title, 'Trim request framing first')
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('SECRET-'))
+
+  // An explicit --codex-report title is never overwritten back by summary or prompt titles.
+  assert.equal(f.command(['--codex-report', '--agent', 'antigravity', '--session', id], {
+    title: 'Explicit Agent Report', project: 'demo', state: 'working', steps: ['- [~] Step'],
+  }).status, 0)
+  assert.equal(fire('working').status, 0)
+  const afterExplicit = JSON.parse(readFileSync(recordFile, 'utf8'))
+  assert.equal(afterExplicit.title, 'Explicit Agent Report')
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('SECRET-'))
+}))
+
+test('Antigravity unreadable, malformed, symlinked, or missing title files safely fall back and keep localization (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const dir = join(f.home, '.gemini', 'antigravity', 'brain', 'synthetic-fallback-1401')
+  const secret = join(f.home, 'synthetic-symlink-target.jsonl')
+  f.save(secret, JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-SYMLINK-CONTENT' }) + '\n')
+  const linkedTranscript = join(dir, 'transcript.jsonl')
+  mkdirSync(dir, { recursive: true })
+  try { symlinkSync(secret, linkedTranscript) } catch { /* symlinks may require privilege on some Windows hosts; malformed test covers fallback too */ }
+
+  const badTranscript = join(f.home, '.gemini', 'antigravity', 'brain', 'synthetic-bad-1401', 'transcript.jsonl')
+  f.save(badTranscript, '{not valid json\n')
+  const emptyWrappedTranscript = join(f.home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-empty-wrapped-1401', 'transcript.jsonl')
+  f.save(emptyWrappedTranscript, JSON.stringify({
+    source: 'USER_EXPLICIT',
+    type: 'USER_INPUT',
+    content: '<USER_REQUEST>\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nSECRET-METADATA-BODY\n</ADDITIONAL_METADATA>',
+  }) + '\n')
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), Buffer.from('corrupted-pb'))
+
+  const foreignTranscript = join(f.home, '.gemini', 'antigravity', 'brain', 'synthetic-other-session-1401', 'transcript.jsonl')
+  f.save(foreignTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-FOREIGN-SESSION-PROMPT' })}\n`)
+  const outsideTranscript = join(f.home, 'outside', 'transcript.jsonl')
+  f.save(outsideTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-OUTSIDE-PATH-PROMPT' })}\n`)
+  const fakeHomeTranscript = join(f.home, 'fake-home', '.gemini', 'antigravity', 'brain', 'synthetic-fake-home-1401', 'transcript.jsonl')
+  f.save(fakeHomeTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'SECRET-FAKE-HOME-PROMPT' })}\n`)
+  const systemGeneratedTranscript = join(f.home, '.gemini', 'antigravity-ide', 'brain', 'synthetic-sysgen-1401', '.system_generated', 'logs', 'transcript.jsonl')
+  f.save(systemGeneratedTranscript, `${JSON.stringify({ type: 'USER_INPUT', content: 'System generated prompt title' })}\n`)
+
+  const { isSessionAntigravityTranscript, readAntigravityFirstPrompt } = await importTs('../scripts/antigravity-meta.ts')
+  assert.equal(isSessionAntigravityTranscript(systemGeneratedTranscript, 'synthetic-sysgen-1401', f.home), true)
+  assert.equal(readAntigravityFirstPrompt(systemGeneratedTranscript, 'synthetic-sysgen-1401', f.home), 'System generated prompt title')
+  for (const [id, badPath] of [
+    ['synthetic-mismatch-1401', foreignTranscript],
+    ['synthetic-outside-1401', outsideTranscript],
+    ['synthetic-fake-home-1401', fakeHomeTranscript],
+    ['../synthetic-other-session-1401', foreignTranscript],
+    ['', foreignTranscript],
+    ['synthetic-sysgen-1401', join(f.home, '.gemini', 'antigravity-ide', 'brain', 'synthetic-sysgen-1401', '..', 'synthetic-other-session-1401', 'transcript.jsonl')],
+  ]) {
+    assert.equal(isSessionAntigravityTranscript(badPath, id, f.home), false, id)
+    assert.equal(readAntigravityFirstPrompt(badPath, id, f.home), null, id)
+  }
+
+  for (const [id, transcriptPath] of [
+    ['synthetic-fallback-1401', linkedTranscript],
+    ['synthetic-bad-1401', badTranscript],
+    ['synthetic-missing-1401', 'relative/transcript.jsonl'],
+    ['synthetic-empty-wrapped-1401', emptyWrappedTranscript],
+    ['synthetic-mismatch-1401', foreignTranscript],
+    ['synthetic-outside-1401', outsideTranscript],
+    ['synthetic-fake-home-1401', fakeHomeTranscript],
+  ]) {
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+      conversationId: id,
+      transcriptPath,
+    }).status, 0)
+    const owner = createHash('sha256').update(`antigravity:${id}`).digest('hex')
+    const rec = JSON.parse(readFileSync(join(f.root, 'sessions', `${owner}.json`), 'utf8'))
+    assert.equal(rec.title, 'Local antigravity task')
+    assert.match(rec.context, /^Started \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/)
+  }
+  const boardAfterRejected = readFileSync(f.progress, 'utf8')
+  assert.ok(!boardAfterRejected.includes('SECRET-SYMLINK-CONTENT'))
+  assert.ok(!boardAfterRejected.includes('SECRET-FOREIGN-SESSION-PROMPT'))
+  assert.ok(!boardAfterRejected.includes('SECRET-OUTSIDE-PATH-PROMPT'))
+  assert.ok(!boardAfterRejected.includes('SECRET-FAKE-HOME-PROMPT'))
+
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+    conversationId: 'synthetic-sysgen-1401',
+    transcriptPath: systemGeneratedTranscript,
+  }).status, 0)
+  const sysgenRec = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update('antigravity:synthetic-sysgen-1401').digest('hex')}.json`), 'utf8'))
+  assert.equal(sysgenRec.title, 'System generated prompt title')
+  assert.equal(sysgenRec.titleSource, 'prompt')
+
+  // Localized Started context writes clean UTF-8 in zh-TW and zh-CN.
+  for (const [lang, expected] of [['zh-TW', '> 背景：開始於 20'], ['zh-CN', '> 背景：开始于 20']]) {
+    const res = f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart', '--lang', lang], {
+      conversationId: `synthetic-i18n-${lang}-1401`,
+    }, { LANG: lang })
+    assert.equal(res.status, 0, res.stderr)
+    const board = readFileSync(f.progress, 'utf8')
+    assert.ok(board.includes(expected), `${lang}: expected ${expected} in\n${board}`)
+  }
+
+  // artifactDirectoryPath-only resolution, corrupt protobuf fallback to conversation_metadata.json,
+  // ask + row same-title disambiguation, plan-event preserving prompt upgrades, and legacy explicit context.
+  const cliPbCorrupt = 'synthetic-cli-corrupt-1401'
+  f.save(join(f.home, '.gemini', 'antigravity-cli', 'jetbox_summaries_proto.pb'), Buffer.from('corrupt-pb'))
+  f.save(join(f.home, '.gemini', 'antigravity-cli', 'cache', 'conversation_metadata.json'), JSON.stringify({
+    conversations: { [cliPbCorrupt]: { summary: { Title: 'Recovered CLI Title' } } },
+  }))
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: cliPbCorrupt,
+    artifactDirectoryPath: join(f.home, '.gemini', 'antigravity-cli', 'brain', cliPbCorrupt),
+  }).status, 0)
+  const corruptRec = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${cliPbCorrupt}`).digest('hex')}.json`), 'utf8'))
+  assert.equal(corruptRec.title, 'Recovered CLI Title')
+  assert.equal(corruptRec.titleSource, 'summary')
+
+  const planUpgradeId = 'synthetic-plan-upgrade-1401'
+  const planTranscript = join(f.home, '.gemini', 'antigravity', 'brain', planUpgradeId, 'transcript.jsonl')
+  f.save(planTranscript, `${JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Audit payment retries' })}\n`)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: planUpgradeId,
+    transcriptPath: planTranscript,
+  }).status, 0)
+  assert.equal(f.command(['--codex-report', '--agent', 'antigravity', '--session', planUpgradeId], {
+    state: 'working',
+    project: 'antigravity',
+    title: 'Ignored plan title',
+    planTitle: 'Ignored plan title',
+    steps: ['- [~] Check queue'],
+  }).status, 0)
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: planUpgradeId, title: 'Payment Retry Audit' },
+  ]))
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: planUpgradeId,
+    transcriptPath: planTranscript,
+  }).status, 0)
+  assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${planUpgradeId}`).digest('hex')}.json`), 'utf8')).title, 'Payment Retry Audit')
+
+  const legacyExplicitId = 'synthetic-legacy-explicit-1401'
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+    conversationId: legacyExplicitId,
+  }).status, 0)
+  const legacyOwner = createHash('sha256').update(`antigravity:${legacyExplicitId}`).digest('hex')
+  const legacyRecFile = join(f.root, 'sessions', `${legacyOwner}.json`)
+  const legacyRec = JSON.parse(readFileSync(legacyRecFile, 'utf8'))
+  delete legacyRec.titleSource
+  legacyRec.title = 'Legacy Explicit Title'
+  legacyRec.context = 'Custom pre-1401 context'
+  writeFileSync(legacyRecFile, `${JSON.stringify(legacyRec, null, 2)}\n`)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: legacyExplicitId,
+  }).status, 0)
+  const afterLegacy = JSON.parse(readFileSync(legacyRecFile, 'utf8'))
+  assert.equal(afterLegacy.title, 'Legacy Explicit Title')
+  assert.equal(afterLegacy.context, 'Custom pre-1401 context')
+}))
+
+test('asking Antigravity row and working twin with the same title show start times on terminal and web boards (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const askId = 'synthetic-ag-ask-twin-1401'
+  const workId = 'synthetic-ag-work-twin-1401'
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: askId, title: 'Shared Ask Title' },
+    { id: workId, title: 'Shared Ask Title' },
+  ]))
+  const askTranscript = join(f.home, '.gemini', 'antigravity', 'brain', askId, 'transcript.jsonl')
+  f.save(askTranscript, [
+    JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Check release gate' }),
+    JSON.stringify({ source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Deploy now, OK?' }),
+  ].join('\n') + '\n')
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+    conversationId: askId,
+    transcriptPath: askTranscript,
+  }).status, 0)
+  await new Promise(done => setTimeout(done, 15))
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: workId,
+    transcriptPath: join(f.home, '.gemini', 'antigravity', 'brain', workId, 'transcript.jsonl'),
+  }).status, 0)
+  const recOf = id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`), 'utf8'))
+  const rAsk = recOf(askId)
+  const rWork = recOf(workId)
+  assert.notEqual(rAsk.context, rWork.context)
+
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { serveModel, servePage } = await importTs('../hooks/serve.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+
+  const view = buildView(parseProgress(readFileSync(f.progress, 'utf8')), [], null, Date.now(), 0, {}, STRINGS.en)
+  const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  assert.ok(screen.includes(rAsk.context), screen)
+  assert.ok(screen.includes(rWork.context), screen)
+  const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
+    now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },
+  }))
+  const visible = dom.visible()
+  assert.ok(visible.includes(rAsk.context), visible)
+  assert.ok(visible.includes(rWork.context), visible)
+}))
+
+test('upgrading a pre-#1401 Antigravity record preserves its legacy start time, and two asking twins with identical questions keep two web cards (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recOf = id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`), 'utf8'))
+  const recFileOf = id => join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`)
+
+  for (const [id, legacyTitle, expectedStamp] of [
+    ['synthetic-legacy-upgrade-en-1401', 'Local antigravity task · 2026-10-15 08:09:10.123', '2026-10-15 08:09:10.123'],
+    ['synthetic-legacy-upgrade-tw-1401', 'antigravity 本機任務 · 2026-10-15 08:09:11.456', '2026-10-15 08:09:11.456'],
+    ['synthetic-legacy-upgrade-cn-1401', 'antigravity 本地任务 · 2026-10-15 08:09:12.789', '2026-10-15 08:09:12.789'],
+  ]) {
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'SessionStart'], {
+      conversationId: id,
+    }).status, 0)
+    const legacy = recOf(id)
+    delete legacy.startedAt
+    delete legacy.titleSource
+    delete legacy.context
+    legacy.title = legacyTitle
+    writeFileSync(recFileOf(id), `${JSON.stringify(legacy, null, 2)}\n`)
+    if (id.endsWith('-en-1401')) {
+      f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+        { id, title: 'Upgraded Antigravity Title' },
+      ]))
+    }
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+      conversationId: id,
+    }).status, 0)
+    const upgraded = recOf(id)
+    assert.equal(upgraded.title, id.endsWith('-en-1401') ? 'Upgraded Antigravity Title' : 'Local antigravity task')
+    assert.equal(upgraded.context, `Started ${expectedStamp}`)
+  }
+
+  const askOneId = 'synthetic-ag-two-asks-one-1401'
+  const askTwoId = 'synthetic-ag-two-asks-two-1401'
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: askOneId, title: 'Shared Closing Question' },
+    { id: askTwoId, title: 'Shared Closing Question' },
+  ]))
+  for (const id of [askOneId, askTwoId]) {
+    const transcript = join(f.home, '.gemini', 'antigravity', 'brain', id, 'transcript.jsonl')
+    f.save(transcript, [
+      JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Check deployment readiness' }),
+      JSON.stringify({ source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Ship release now, OK?' }),
+    ].join('\n') + '\n')
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+      conversationId: id,
+      transcriptPath: transcript,
+    }).status, 0)
+    if (id === askOneId) await new Promise(done => setTimeout(done, 15))
+  }
+  const rOne = recOf(askOneId)
+  const rTwo = recOf(askTwoId)
+  assert.notEqual(rOne.context, rTwo.context)
+
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { serveModel, servePage } = await importTs('../hooks/serve.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+
+  const view = buildView(parseProgress(readFileSync(f.progress, 'utf8')), [], null, Date.now(), 0, {}, STRINGS.en)
+  const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  assert.ok(screen.includes(rOne.context), screen)
+  assert.ok(screen.includes(rTwo.context), screen)
+  const model = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
+    now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },
+  })
+  assert.equal(model.view?.needs.cards.length, 2)
+  const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), model)
+  const visible = dom.visible()
+  assert.ok(visible.includes(rOne.context), visible)
+  assert.ok(visible.includes(rTwo.context), visible)
+}))
+
+test('readAntigravityFirstPrompt stops at an empty first USER_INPUT and codexEvent preserves context (#1401)', () => fixture(async f => {
+  const { readAntigravityFirstPrompt } = await importTs('../scripts/antigravity-meta.ts')
+  const { codexEvent, codexReport } = await importTs('../hooks/codex.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const emptyFirstId = 'synthetic-ag-empty-first-1401'
+  const emptyFirstPath = join(f.home, '.gemini', 'antigravity', 'brain', emptyFirstId, 'transcript.jsonl')
+  f.save(emptyFirstPath, [
+    JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\n</USER_REQUEST>' }),
+    JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Private second prompt must never become title' }),
+  ].join('\n') + '\n')
+  assert.equal(readAntigravityFirstPrompt(emptyFirstPath, emptyFirstId, f.home), null)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation'], {
+    conversationId: emptyFirstId,
+    transcriptPath: emptyFirstPath,
+  }).status, 0)
+  const rec = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${emptyFirstId}`).digest('hex')}.json`), 'utf8'))
+  assert.equal(rec.title, 'Local antigravity task')
+  assert.equal(rec.titleSource, 'fallback')
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('Private second prompt'))
+
+  const reported = codexReport(null, 'synthetic-context-1401', {
+    title: 'Context task',
+    project: 'agent-board',
+    context: 'Keep this context',
+    state: 'working',
+    steps: ['- [~] Working'],
+  }, '2026-11-14T03:00:00.000Z', STRINGS.en)
+  const afterEvent = codexEvent(reported, {
+    session_id: 'synthetic-context-1401',
+    hook_event_name: 'UserPromptSubmit',
+    turn_id: 'turn-context-1',
+  }, '2026-11-14T03:00:01.000Z', STRINGS.en)
+  assert.equal(afterEvent.context, 'Keep this context')
+}))
+
+test('two asking Antigravity sessions with question notes keep start times visible on terminal and web boards (#1401)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const noteOneId = 'synthetic-ag-note-asks-one-1401'
+  const noteTwoId = 'synthetic-ag-note-asks-two-1401'
+  const recOf = id => JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${id}`).digest('hex')}.json`), 'utf8'))
+  const pbSummaries = items => Buffer.concat(items.map(({ id, title }) => {
+    const idBuf = Buffer.from(id, 'utf8')
+    const idField = Buffer.concat([Buffer.from([0x0a, idBuf.length]), idBuf])
+    const tBuf = Buffer.from(title, 'utf8')
+    const sumBuf = Buffer.concat([Buffer.from([0x0a, tBuf.length]), tBuf])
+    const sumField = Buffer.concat([Buffer.from([0x12, sumBuf.length]), sumBuf])
+    const entry = Buffer.concat([idField, sumField])
+    return Buffer.concat([Buffer.from([0x0a, entry.length]), entry])
+  }))
+  f.save(join(f.home, '.gemini', 'antigravity', 'agyhub_summaries_proto.pb'), pbSummaries([
+    { id: noteOneId, title: 'Shared Note Question' },
+    { id: noteTwoId, title: 'Shared Note Question' },
+  ]))
+  for (const id of [noteOneId, noteTwoId]) {
+    const transcript = join(f.home, '.gemini', 'antigravity', 'brain', id, 'transcript.jsonl')
+    f.save(transcript, [
+      JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Prepare release rollout' }),
+      JSON.stringify({ source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Deploy release — should I proceed?' }),
+    ].join('\n') + '\n')
+    assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+      conversationId: id,
+      transcriptPath: transcript,
+    }).status, 0)
+    if (id === noteOneId) await new Promise(done => setTimeout(done, 15))
+  }
+  const rOne = recOf(noteOneId)
+  const rTwo = recOf(noteTwoId)
+  assert.notEqual(rOne.context, rTwo.context)
+
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { buildView } = await importTs('../hooks/view.ts')
+  const { boardScreen, emptyBoardState } = await importTs('../hooks/board.ts')
+  const { serveModel, servePage } = await importTs('../hooks/serve.ts')
+  const { STRINGS } = await importTs('../hooks/strings.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+
+  const view = buildView(parseProgress(readFileSync(f.progress, 'utf8')), [], null, Date.now(), 0, {}, STRINGS.en)
+  assert.equal(view.waiting[0]?.note, 'should I proceed?')
+  assert.equal(view.waiting[1]?.note, 'should I proceed?')
+  const screen = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
+  assert.ok(screen.includes('should I proceed?'), screen)
+  assert.equal(screen.split(rOne.context).length - 1, 1, screen)
+  assert.equal(screen.split(rTwo.context).length - 1, 1, screen)
+
+  const model = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
+    now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },
+  })
+  assert.equal(model.view?.needs.cards.length, 2)
+  const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), model)
+  const visible = dom.visible()
+  assert.ok(visible.includes('should I proceed?'), visible)
+  assert.ok(visible.includes(rOne.context), visible)
+  assert.ok(visible.includes(rTwo.context), visible)
+}))

@@ -177,7 +177,11 @@ export const settingsScript = String.raw`
       if (!data.ok) { settingsLanguage.value = languageKept; settingsSay(data.note || w('pressFailed'), true); return; }
       languageKept = lang;
       settingsSay(data.note);
-      try { sessionStorage.setItem('agent-board.settings-changed', data.isOverridden ? 'overridden' : 'language'); } catch (error) {}
+      try {
+        sessionStorage.setItem('agent-board.settings-changed', data.isOverridden ? 'overridden' : 'language');
+        if (data.lockLeft) sessionStorage.setItem('agent-board.settings-lock-left', data.note);
+        else sessionStorage.removeItem('agent-board.settings-lock-left');
+      } catch (error) { if (data.lockLeft) return; }
       window.location.reload();
     }, function () { settingsLanguage.value = languageKept; settingsSay(w('pressFailed'), true); }).finally(function () { settingsLanguage.disabled = false; });
   });
@@ -185,8 +189,10 @@ export const settingsScript = String.raw`
     var changed = sessionStorage.getItem('agent-board.settings-changed');
     if (changed) {
       sessionStorage.removeItem('agent-board.settings-changed');
+      var lockLeftNote = sessionStorage.getItem('agent-board.settings-lock-left');
+      sessionStorage.removeItem('agent-board.settings-lock-left');
       openSettings();
-      settingsSay(w(changed === 'overridden' ? 'settingsLanguageOverridden' : 'settingsLanguageChanged'));
+      settingsSay(lockLeftNote || w(changed === 'overridden' ? 'settingsLanguageOverridden' : 'settingsLanguageChanged'));
     }
   } catch (error) {}
   function notificationState() {

@@ -3,19 +3,28 @@ import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ackLine, boardClient, deliveryPrompt } from './message-client.mjs'
 import { openWebSocketStdio } from './ws-stdio.mjs'
+import { SURFACE_IDS } from '../hooks/messaging.ts'
 
 /** @type {import('./message-client.mjs').MessagingReceiverRecord} */
 export const messagingReceiver = {
   host: 'Codex',
-  surfaces: [{ name: 'Existing-owner proxy (active turn only)', evidence: 'docs/validation/2026-11-04-codex-cli-proxy-live.md' }],
+  surfaces: [{ name: 'Existing-owner proxy (active turn only)', id: SURFACE_IDS.codexProxy, evidence: 'docs/validation/2026-11-04-codex-cli-proxy-live.md' }],
   tier: 2,
   primitive: 'unknown',
   isImplemented: true,
+  agent: 'codex',
+  kind: 'turn',
+  // It steers a running turn only: an idle session has no route (the run steered a 420 s command's turn).
+  routes: {
+    idle: { line: 'none', record: null, surfaces: [] },
+    working: { line: 'now', record: 'docs/validation/2026-11-04-codex-cli-proxy-live.md', surfaces: [SURFACE_IDS.codexProxy] },
+    ended: { line: 'none', record: null, surfaces: [] },
+  },
 }
 
 // Connects only to an already-running Codex control socket. `proxy` does not start,
 // resume or search saved threads. No credential file or transcript is opened here.
-export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, surface = 'Codex local proxy', socket, onError }) => {
+export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, surface = SURFACE_IDS.codexProxy, socket, reclaimMs = 10_000, onError }) => {
   if (!isAbsolute(executable) || !/^[a-f0-9-]{36}$/i.test(thread) || !/^[A-Za-z0-9_-]{1,128}$/.test(turn)) throw new Error('EXPLICIT_BINDING_REQUIRED')
   const args = ['app-server', 'proxy', ...(socket ? ['--sock', socket] : [])]
   const child = /\.m?js$/i.test(executable) ? spawn(process.execPath, [executable, ...args], { windowsHide: true }) : spawn(executable, args, { windowsHide: true })
@@ -99,7 +108,7 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
     if (!await verify()) throw new Error('TARGET_MISMATCH')
     await request('thread/resume', { threadId: thread, excludeTurns: true })
     session = await boardClient(boardUrl).attach({
-      agent: 'codex', session: thread, turn, surface, verify, onError,
+      agent: 'codex', session: thread, turn, surface, verify, onError, reclaim: reclaimMs,
       deliver: async (message, accepted, begin) => {
         if (message.turn !== turn || !await verify()) throw new Error('TARGET_MISMATCH')
         let ackEntry
@@ -124,7 +133,8 @@ export const connectCodexProxy = async ({ boardUrl, executable, thread, turn, su
         }
       },
     })
-    return { ...session, close: async () => {
+    // id is read through the session: a reclaimed connection has a new one.
+    return { ...session, get id() { return session.id }, close: async () => {
       try { await session.close() }
       finally { websocket.close(); lost(); child.kill(); await exited }
     } }

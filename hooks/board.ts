@@ -1,6 +1,7 @@
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { boardCounts } from './board-status'
+import type { QueuedMessaging } from './board-status'
 import { lastQuestionInProse, normalizeReply } from './digest'
 import { withoutStamp } from './done-stamp'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail, turnOrder } from './inbox'
@@ -103,7 +104,7 @@ export type AnswerRoute = { mode: 'connected' | 'send'; agent: string; session: 
 // `depth` and `theme` pick the page's colours for a terminal; `routes` are the questions the
 // running page can answer into their session, by line key; `agents` the agents that reported to
 // this board, which an empty board names.
-export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; isQuestionsOpen?: boolean; depth?: ColorDepth; theme?: Theme; barStyle?: BarStyle; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[] }
+export type BoardOptions = { width: number; isColor: boolean; isIdleOpen?: boolean; isQuestionsOpen?: boolean; depth?: ColorDepth; theme?: Theme; barStyle?: BarStyle; routes?: Readonly<Record<string, AnswerRoute>>; agents?: readonly string[]; messaging?: QueuedMessaging }
 
 export const remainingInbox = (view: View, pending: readonly PendingTurn[]): readonly PendingTurn[] => view.hasPendingQuestions ? pending.filter(turn => !turn.isQuestion) : pending
 
@@ -281,14 +282,16 @@ const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelv
 
 // The line of counts at the top of the board.
 // It is bold throughout, as the page's is.
-const countLine = (view: View, pending: readonly PendingTurn[], s: Strings, c: ReturnType<typeof paint>): string => {
+const countLine = (view: View, pending: readonly PendingTurn[], s: Strings, c: ReturnType<typeof paint>, messaging?: QueuedMessaging): string => {
   const { due, today } = view.overview
   // A row that needs the person is counted as waiting, as the page does, and not as moving too.
-  const counts = boardCounts(view, pending, s)
+  const counts = boardCounts(view, pending, s, view.now, messaging)
   const active = counts.working
   const waiting = counts.needs
+  // An answer queued for the session's next turn is handled for the person: it leaves the waiting count and shows here.
+  const queued = counts.queued > 0 ? `  ${c('quiet', `◌ ${s.boardQueuedCount(counts.queued)}`, true)}` : ''
 
-  return `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`, true)}  ${c('accent', `▸ ${active} ${s.countActive}`, true)}  ${c('alert', `⚑ ${due} ${s.countDue}`, true)}  ${c('done', `✓ ${today} ${s.countToday}`, true)}`
+  return `${c('bold', s.paneTitle)}  ${c('waiting', `● ${waiting} ${s.countWaiting}`, true)}${queued}  ${c('accent', `▸ ${active} ${s.countActive}`, true)}  ${c('alert', `⚑ ${due} ${s.countDue}`, true)}  ${c('done', `✓ ${today} ${s.countToday}`, true)}`
 }
 
 // The rows still live, each once: a row can be both due and in its group, and one on the idle or
@@ -322,7 +325,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   const c = paint(o)
   const isWide = isWideLang(s)
   const cut = (raw: string, width: number): string => fit(raw, width, isWide)
-  const lines: string[] = [countLine(view, pending, s, c), '']
+  const lines: string[] = [countLine(view, pending, s, c, o.messaging), '']
   if (view.warning) lines.push(c('alert', view.warning), '')
   if (view.details) lines.push(c('quiet', view.details), '')
 
@@ -531,6 +534,7 @@ export const chatText = (
   isWindows = false,
   max = CHAT_MAX,
   now?: number,
+  messaging?: QueuedMessaging,
 ): string => {
   const line = (text: string, indent = 0): string => chatLine(text, indent, home, isWindows)
   // A session started in the home folder is named after it, and the folder's name is the person's.
@@ -540,7 +544,7 @@ export const chatText = (
   const asks = asksOf(view, pending, s, named)
   const rows = [...view.due.map(row => ({ row, mark: '⚑' })), ...view.groups.flatMap(group => group.rows.map(row => ({ row, mark: '▸' })))]
   // Each item is cut whole, never in the middle. A heading belongs to its first item.
-  const items: string[] = [chatLine(countLine(view, pending, s, paint({ isColor: false })), 0, home, isWindows)]
+  const items: string[] = [chatLine(countLine(view, pending, s, paint({ isColor: false }), messaging), 0, home, isWindows)]
   if (view.warning) items[0] += `\n${view.warning}`
   if (view.details) items[0] += `\n${view.details}`
   // Questions marked answered are left out and counted, as on the terminal board.
@@ -713,7 +717,7 @@ export const fingerprint = (item: BoardItem, items: readonly BoardItem[], isLine
   const session = item.type === 'ask' ? (item.ask.target?.session ?? item.ask.session) : item.type === 'row' ? (item.row.archive?.session ?? item.row.target?.session ?? '') : ''
   const parts =
     item.type === 'ask'
-      ? [session, item.ask.target?.resume ?? '', item.ask.project, item.ask.task, item.ask.text, item.ask.note]
+      ? [session, item.ask.target?.resume ?? '', item.ask.project, item.ask.task, item.ask.text, item.ask.note, item.ask.kind, JSON.stringify(item.ask.options)]
       : item.type === 'row'
         ? [session, item.row.target?.resume ?? '', item.row.project, item.row.title, item.row.next?.step ?? '', item.row.question ?? '', item.row.resume ?? '']
         : [item.turn.agent, item.turn.project, item.turn.text]
@@ -815,8 +819,10 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
     // Where the running page can answer into the session, the key sends the answer, as the
     // page's button does; elsewhere it copies it to paste into the agent.
     const route = routes[item.key]
-    if (answer !== undefined && route !== undefined) return isSeen ? { state, action: { type: 'send', key: item.key, text: plain(answer), route } } : changed
-    if (answer !== undefined) return { state, action: { type: 'copy', text: plain(answer) } }
+    if (answer !== undefined) {
+      if (!isSeen) return changed
+      return route !== undefined ? { state, action: { type: 'send', key: item.key, text: plain(answer), route } } : { state, action: { type: 'copy', text: plain(answer) } }
+    }
     // Said only when asked: a live session's question is that session's to take off the board.
     if (key === 'a' && ask.where !== 'manual' && ask.isKept !== true && ask.canHide !== false) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
   }
@@ -890,7 +896,8 @@ export const routesOf = (model: unknown): Record<string, AnswerRoute> => {
     if (key === '') continue
     const fields = { agent: text(ask.agent), session: text(ask.session), asked: text(ask.text), fp: text(ask.fp) }
     const delivery = ask.delivery as Record<string, unknown> | null | undefined
-    if (ask.send === 'connected' && delivery != null && typeof delivery === 'object' && text(delivery.id) !== '' && text(delivery.turn) !== '') routes[key] = { mode: 'connected', ...fields, delivery: { id: text(delivery.id), turn: text(delivery.turn), agent: text(delivery.agent) } }
+    // A mailbox card (a hook or plugin that takes the message at a turn) is answered by the same message route as a live one.
+    if ((ask.send === 'connected' || ask.send === 'mailbox') && delivery != null && typeof delivery === 'object' && text(delivery.id) !== '' && text(delivery.turn) !== '') routes[key] = { mode: 'connected', ...fields, delivery: { id: text(delivery.id), turn: text(delivery.turn), agent: text(delivery.agent) } }
     else if (ask.send === 'send') routes[key] = { mode: 'send', ...fields }
   }
 
@@ -931,9 +938,26 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
   const routes = o.routes ?? {}
   const items = boardItems(view, pending, state.isIdleOpen ?? false, state.isOlderOpen ?? false)
   const shelved = new Set([...view.idle, ...view.stopped].map(row => row.key))
+  const titleCounts = new Map<string, number>()
+  const seenTaskTitles = new Set<string>()
+  for (const item of items) {
+    if (item.type === 'row') {
+      const session = item.row.target?.session || item.row.confirm?.session || item.row.archive?.session || ''
+      const taskKey = session !== '' ? `s:${session}` : item.row.key
+      if (seenTaskTitles.has(taskKey)) continue
+      seenTaskTitles.add(taskKey)
+      titleCounts.set(item.row.title, (titleCounts.get(item.row.title) ?? 0) + 1)
+    } else if (item.type === 'ask' && !item.key.startsWith('older:') && item.ask.task !== '') {
+      const session = item.ask.target?.session || item.ask.sessionId || item.ask.session
+      const taskKey = session !== '' ? `s:${session}` : item.ask.key.replace(/::\d+$/, '')
+      if (seenTaskTitles.has(taskKey)) continue
+      seenTaskTitles.add(taskKey)
+      titleCounts.set(item.ask.task, (titleCounts.get(item.ask.task) ?? 0) + 1)
+    }
+  }
   const at = chosen(state, items)
   const lines: string[] = [
-    countLine(view, pending, s, c),
+    countLine(view, pending, s, c, o.messaging),
     ...(view.warning ? [c('alert', view.warning)] : []),
     ...(view.details ? [c('quiet', view.details)] : []),
     ...((view.stoppedAsking ?? 0) > 0 ? [c('quiet', `${s.stoppedAsking(view.stoppedAsking!)} · ${s.boardKeyOlder}`)] : []),
@@ -1006,6 +1030,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       lines.push(`${mark} ${titled(2, `${s.chip(s.ask[ask.kind])}${ask.text}`, [name, ask.when === s.questionAgeUnknown ? '' : ask.when].filter(part => part !== '').join(' · '), isHere)}`)
       if (result?.key === item.key) resultLines('    ')
       lines.push(`    ${c('project', cut(ask.project + (ask.task ? ` › ${ask.task}` : ''), o.width - 6))}`)
+      if (ask.task && ask.context && (titleCounts.get(ask.task) ?? 0) > 1) lines.push(`    ${c('quiet', cut(ask.context, o.width - 6))}`)
       if (isOpen || isHere) {
         if (ask.canHide === false) lines.push(`    ${c('quiet', cut(s.questionReviewOnly, o.width - 6))}`)
         if (ask.note) lines.push(`    ${cut(ask.note, o.width - 6)}`)
@@ -1044,7 +1069,10 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       // Under In progress a row also names its project, which has no heading there.
       const lead = [(isWorking || isStuck) && !isSameName(row.project, row.title) ? row.project : '', row.total > 0 ? `${row.done}/${row.total}` : ''].filter(part => part !== '').map(part => `${part} · `).join('')
       // The step it is on, in the accent colour, where its status only says that it works.
-      const step = needs === null && row.isChatReplied !== true && (row.tone === 'quiet' || row.tone === 'accent')
+      // An unsure row keeps its derived status: the step it is on is the lifecycle
+      // placeholder, which would hide the unsure wording with its age (#1317).
+      const isUnsureRow = row.rowState === 'unsure' && row.auto !== 'ended'
+      const step = needs === null && !isUnsureRow && row.isChatReplied !== true && (row.tone === 'quiet' || row.tone === 'accent')
         ? row.steps.find(one => one.isCurrent && one.isReplyPending !== true && (one.status === 'doing' || one.status === 'todo')) : undefined
       const bar = rowBar(row, o, isWide)
       const barRoom = bar.width === 0 ? 0 : bar.width + 1
@@ -1052,6 +1080,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const quiet = status.startsWith(lead) ? lead : ''
       lines.push(`    ${bar.width === 0 ? '' : `${bar.text} `}${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
       if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
+      if (!isOpen && row.context && (titleCounts.get(row.title) ?? 0) > 1) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
       if (isOpen) rowDetails(row)
       return
     }

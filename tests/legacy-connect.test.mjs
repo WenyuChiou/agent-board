@@ -146,7 +146,8 @@ const setupThenProbe = agent => withSetup(agent, ({ f, run, owned, before }) => 
 test('a connector probe leaves Grok with only the setup hook and reports its installer', () => setupThenProbe('grok'))
 test('a connector probe leaves Hermes with only the setup hooks and reports its installer', () => setupThenProbe('hermes'))
 
-const BOTH_INSTALLERS = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw']
+// Setup no longer installs Gemini CLI (#1327); the connector's own Gemini tests are below.
+const BOTH_INSTALLERS = ['codex', 'cursor', 'opencode', 'grok', 'muse', 'hermes', 'openclaw']
 test('connect and automatic probes leave setup managed agents unchanged', async t => {
   for (const agent of BOTH_INSTALLERS) await t.test(agent, () => setupThenProbe(agent))
 })
@@ -375,7 +376,7 @@ for (const [agent, folder, parts, reporterParts] of [['codex', '.codex', ['hooks
   }, home => ['--data-dir', join(home, folder)]))
 }
 
-const DATA_DIR_HOSTS = { codex: '.codex', cursor: '.cursor', gemini: '.gemini', muse: 'muse', grok: '.grok', opencode: 'opencode', openclaw: '.openclaw' }
+const DATA_DIR_HOSTS = { codex: '.codex', cursor: '.cursor', muse: 'muse', grok: '.grok', opencode: 'opencode', openclaw: '.openclaw' }
 for (const [agent, folder] of Object.entries(DATA_DIR_HOSTS)) {
   test(`${agent} set up with its own data folder gets no second hook`, () => withSetup(agent, ({ f, run, before }) => {
     assert.equal(run('auto').state.setup.agents.find(one => one.agent === agent).hook, 'setup')
@@ -424,7 +425,7 @@ test('a setup record that cannot be read leaves Codex without fallback instructi
   assert.ok(existsSync(join(f.home, '.codex', 'AGENTS.md')))
 }))
 
-for (const [agent, parts] of [['gemini', ['.gemini', 'commands', 'agent-board.toml']], ['opencode', ['.config', 'opencode', 'commands', 'agent-board.md']]]) test(`${agent} remove leaves no board command naming the script it deleted`, () => withSetup(agent, ({ f, run, recordFile, owned, before }) => {
+for (const [agent, parts] of [['opencode', ['.config', 'opencode', 'commands', 'agent-board.md']]]) test(`${agent} remove leaves no board command naming the script it deleted`, () => withSetup(agent, ({ f, run, recordFile, owned, before }) => {
   // A record from setup beside a /board command the connector wrote.
   const command = join(f.home, ...parts)
   const record = readFileSync(recordFile, 'utf8')
@@ -465,8 +466,8 @@ for (const [agent, sign, parts] of [['gemini', '.gemini', ['commands', 'board.to
   assert.equal(readFileSync(old, 'utf8'), `${text}# mine\n`)
 }))
 
-test('remove keeps a board command naming setup, and an edited one keeps the board script it runs', () => withSetup('gemini', ({ f, run, recordFile, before }) => {
-  const command = join(f.home, '.gemini', 'commands', 'agent-board.toml')
+test('remove keeps a board command naming setup, and an edited one keeps the board script it runs', () => withSetup('opencode', ({ f, run, recordFile, before }) => {
+  const command = join(f.home, '.config', 'opencode', 'commands', 'agent-board.md')
   const script = join(dirname(f.progress), 'agent-board.mjs')
   assert.deepEqual(run('remove').result.problems, [])
   assert.equal(readFileSync(command, 'utf8'), before[command])

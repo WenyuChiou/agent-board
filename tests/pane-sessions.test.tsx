@@ -475,6 +475,54 @@ for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) for (const days of [4, 8])
   await ui.unmount()
 })
 
+test('a closed Claude session question folds into Older unanswered when its session has ended with file unchanged, updates status and reminders, and can be hidden (#1092)', async ($, on) => {
+  // The session has ended with its question unanswered and the file
+  // unchanged: the next poll folds the question, updates the status line
+  // and reminders, and drops the waiting card from the pane. The fold
+  // re-keys the card under Older (older::demo::Release::0): the live key
+  // no longer draws an ask button once the session is closed. Hiding the
+  // folded card lists it again under its live key (demo::Release::0),
+  // because the hidden shelf keeps the task step's own key.
+  // This stages the fold with state=ended, not with a dead pid: the
+  // mock engine's process.kill never reports the claimed pid dead (probes
+  // v1-v4), so no dead-pid staging reaches the pane in this harness — the
+  // alive leg cannot be staged either (a fake kill patched in the test's
+  // realm never reaches the plugin probe, round 3). The dead-pid probe
+  // path itself is covered by the pure tests (1317-repro, question-aging,
+  // row-states-surfaces), and the alive status rendering by
+  // pane.test.tsx:3074.
+  const recentAt = Date.parse('2026-10-16T11:55:00Z')
+  const board = `## demo\n<!-- auto session=a1b2c3d4 agent=claude state=ended updated=2026-10-16T11:55:00Z -->\n### Release\n- [?] Publish, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
+  const world: World = {
+    files: new Map([[FILE, board]]),
+    mtime: 1,
+    hasTasks: true,
+    at: recentAt + 5 * 60_000,
+    env: { HOME: '/home/me', LANG: 'en_US.UTF-8', COMPUTERNAME: 'testhost', HOSTNAME: 'testhost' },
+    store: { lang: 'en', inboxDone: {}, opened: ['older', 'hidden'], told: { seed: recentAt - 10_000 } },
+  }
+  const clock = engineBeneath(on, world)
+  const seen = outside(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(6100)
+  const id = storedQuestion(world, 'Publish, OK?')
+  expect(id.startsWith('question:')).toBe(true)
+  const notifiedBefore = seen.notified.length
+  await clock.advance(6100)
+  expect(seen.status.join('')).not.toContain('1 waiting on you')
+  expect(seen.notified.slice(notifiedBefore)).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  expect(await ui.find({ type: 'Button', key: 'section::waiting' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'section::older' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'section::stoppedAsking' })).toBeDefined()
+  await ui.press({ key: 'ask::older::demo::Release::0' })
+  expect(await ui.find({ type: 'Button', key: 'older::demo::Release::0::hide' })).toBeDefined()
+  await ui.press({ key: 'older::demo::Release::0::hide' })
+  expect(JSON.parse(world.files.get(ANSWERED) ?? '{}').answered).toEqual([id])
+  expect(await ui.find({ type: 'Button', key: 'demo::Release::0::unhide' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a pane hide survives step movement and whitespace and a corrupt identity file refuses a new hide', async ($, on) => {
   const board = `## data-pipeline\n<!-- auto session=a1b2c3d4 state=waiting updated=2026-10-16T11:50:00Z -->\n### Ship\n- [x] Read\n- [?] Ship it, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
   const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { opened: ['waiting', 'hidden'] } }

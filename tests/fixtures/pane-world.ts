@@ -4,6 +4,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import { CONNECT_BOOTSTRAP, CONNECT_EXECUTE } from '../../hooks/connect-worker'
 import { LEDGER_LINK, LINK_EXISTS, LINK_KEPT_SOURCE, LINK_UNSUPPORTED, PENDING_COMMIT, PENDING_STAGE } from '../../hooks/ledger-move'
 import { sha256 } from '../../hooks/sha256'
+import { SETTINGS_READ } from '../../hooks/settings-script'
 import { memoryConnect } from './connect-memory'
 import type { LegacyConnectRequest } from '../../scripts/connect-transaction'
 
@@ -33,6 +34,8 @@ export const PROPS: RenderPropsOf['Pane'] = {
 
 export type World = {
   files: Map<string, string>
+  // Paths that are a link, a FIFO or a folder: the guarded settings read says `unsafe` for them (#1276).
+  unsafeFiles?: Set<string>
   dirs?: Set<string>
   unlistable?: Set<string>
   mtime: number
@@ -201,6 +204,11 @@ export const engineBeneath = (on: On, world: World): MockClock => {
   }))
   on('process.run', async ($, e) => {
     // The pane's hard-link ledger move acts on the files in memory as the real Node child would.
+    if (e.argv[0] === 'node' && e.argv[2] === SETTINGS_READ && e.argv[3] === '--') {
+      const file = posix(e.argv[4] ?? '')
+      const text = world.files.get(file)
+      return { value: { exitCode: 0, stdout: JSON.stringify(world.unsafeFiles?.has(file) === true ? { kind: 'unsafe' } : text === undefined ? { kind: 'missing' } : { kind: 'ok', text }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (e.argv[0] === 'node' && e.argv[2] === LEDGER_LINK && e.argv[3] === '--') {
       world.ran?.push([...e.argv])
       const from = posix(e.argv[4] ?? '')

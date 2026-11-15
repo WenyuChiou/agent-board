@@ -15,6 +15,7 @@ import { reporterTail } from './reporter-tail'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
 import type { RunSignal } from '../hooks/runs'
+import { antigravitySidecarConfig, antigravitySidecarSource, ANTIGRAVITY_SIDECAR_ID } from '../hooks/antigravity-sidecar'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, planEvents, planPlugins, statusEvents, windowsHookCommand } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
@@ -23,20 +24,21 @@ import { discoverCodexBinary, inspectCodexConfigToml, trustCodex } from './codex
 import { withLocalLock } from './local-lock'
 import { installControlRoot, withInstallLock } from './install-control'
 import { ConnectTransaction } from './connect-transaction'
-import { boardPromptHelper, boardRequestWords, boardRun, isBoardRequest } from '../hooks/board-commands'
+import { boardPromptHelper, boardRequestWords, boardRun, deliveryRequestWords, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
 import { windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
-import { deliveryText } from '../hooks/messaging'
+import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { deliverTurnEvent } from './hook-delivery'
-import { hookMailbox } from './board-messaging'
+import { checkStoreFile, hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
 import { currentPart } from '../hooks/retention'
 import { lastQuestion } from '../hooks/digest'
+import { ANTIGRAVITY_TRANSCRIPTS, resolveAntigravityTitle } from './antigravity-meta'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -81,9 +83,8 @@ const hash = (text: string): string => createHash('sha256').update(text).digest(
 
 // Antigravity hooks name their own transcript but do not carry the reply text.
 // agy 1.5.2 names transcript_full.jsonl, which has the same line shape as transcript.jsonl.
-const antigravityTranscripts = new Set(['transcript.jsonl', 'transcript_full.jsonl'])
 const antigravityQuestion = (path: unknown): string | null => {
-  if (typeof path !== 'string' || !isAbsolute(path) || !antigravityTranscripts.has(basename(path))) return null
+  if (typeof path !== 'string' || !isAbsolute(path) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(path))) return null
   try {
     if (!lstatSync(path).isFile()) return null
     const fd = openSync(path, 'r')
@@ -127,6 +128,18 @@ const pad3 = (value: number): string => String(value).padStart(3, '0')
 const distinctStarted = (at: number): string => {
   const date = new Date(at)
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}.${pad3(date.getMilliseconds())}`
+}
+
+// Recover the original millisecond start time encoded in a pre-#1401 generic local task title
+// ("Local antigravity task · YYYY-MM-DD HH:MM:SS.mmm") so upgrading never resets Started times.
+const legacyStartedAt = (title: string, agent: LocalAgent): number | undefined => {
+  const prefix = Object.values(STRINGS).map(one => `${one.localAgentTask(agent)} · `).find(text => title.startsWith(text))
+  if (prefix === undefined) return undefined
+  const stamp = title.slice(prefix.length)
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\.(\d{3})$/.exec(stamp)
+  if (match === null) return undefined
+  const at = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]), Number(match[7])).getTime()
+  return Number.isFinite(at) && distinctStarted(at) === stamp ? at : undefined
 }
 const readBytes = (file: string): Buffer | null => {
   try { return readFileSync(file) } catch (error) {
@@ -504,21 +517,102 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // messages.json changes when the board queues a message.
   if (mode === '--mailbox') {
     const action = flag('--mailbox'), session = flag('--session')
-    if (agent !== 'deepseek' || session === undefined || !['take', 'accept', 'end'].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
+    // OpenCode's plugin (#724) also acknowledges for its own session: ack upgrades an accepted message.
+    // open (OpenCode's too) opens or renews the mailbox of a session that is busy, where the plugin takes nothing (#1366).
+    // verify (OpenCode's too) answers whether the board accepts its messages file as it is now, and writes nothing (#1366).
+    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'release', 'attempt', 'open', 'verify'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
     const directory = defaultMessagesDirectory(progress, home, process.env, process.platform)
-    const mailbox = hookMailbox(directory, 5000)
+    // This path runs in the plugin's own process with seconds to spare, so it waits for a busy board or store (a turn-start hook cannot).
+    const mailbox = hookMailbox(directory, 5000, 2000, 2000)
     const answer = (value: unknown): void => { process.stdout.write(`${JSON.stringify(value)}\n`) }
+    // A failed call answers ok false with the board's own code, never a bare failure and never ok true.
+    const codeOf = (error: unknown): string => error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING'
+    // The surface a take or an open records for the mailbox.
+    const surfaceOf = (surface: string | undefined): string => surface === SURFACE_IDS.web || surface === SURFACE_IDS.tui || agent === 'opencode' && surface === SURFACE_IDS.cli ? surface : SURFACE_IDS.unknown
     if (action === 'take') {
-      const message = await mailbox.turn(agent, session, 'dsh', Date.now())
+      const surface = flag('--surface'), ref = flag('--ref')
+      // OpenCode's plugin names the claim (12 hex), so it can release it again.
+      if (ref !== undefined && (agent !== 'opencode' || !/^[0-9a-f]{12}$/.test(ref))) throw new Error('INVALID_MAILBOX_CALL')
+      let message: Awaited<ReturnType<typeof mailbox.turnOrThrow>>
+      if (agent !== 'opencode') {
+        // DeepSeek's receiver reads a failed take from the exit status and the code on stderr; a deferred take answers null (#1448).
+        message = await mailbox.turn(agent, session, surfaceOf(surface), Date.now())
+        if (message === null && mailbox.error !== null) throw new Error(mailbox.error)
+      } else {
+        try {
+          message = await mailbox.turnOrThrow(agent, session, surfaceOf(surface), Date.now(), ref)
+        } catch (error) {
+          // A failed take is not an empty mailbox: the plugin tries again on its own clock.
+          // A take the board deferred (its store was busy) is asked again by a plugin that reads deferred (#1429).
+          answer({ ok: false, code: error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message) ? error.message : 'BOARD_NOT_RUNNING', watch: directory, message: null, deferred: mailbox.hasDeferred })
+          return true
+        }
+      }
       // The one line DeepSeek's page shows for the message, kept to the 120 characters dsh allows a notice.
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
-      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary } })
-    } else if (action === 'accept') {
+      // deferred: the board's store was busy, so null here is "not checked", not "nothing waiting"; the plugin asks again (#1429).
+      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary }, deferred: message === null && mailbox.hasDeferred })
+    } else if (action === 'open') {
+      // OpenCode's plugin only. It claims nothing, and the plugin reads the board's file to see whether it worked. The answer
+      // names the folder to watch. With no board folder at all no board can queue a message, so nothing is enrolled yet
+      // (enrolled false), as for end.
+      try {
+        await mailbox.open(agent, session, surfaceOf(flag('--surface')), Date.now())
+        answer({ ok: true, enrolled: true, watch: directory })
+      } catch (error) {
+        answer(mailbox.hasNoFolder ? { ok: true, enrolled: false, watch: directory } : { ok: false, code: codeOf(error), watch: directory })
+      }
+    } else if (action === 'verify') {
+      // OpenCode's plugin only. mark is the hash of the text the board accepted (null: no file there); the plugin trusts what
+      // it read only for that same text. A file the board refuses answers ok false with its code. No lock, no write.
+      try {
+        answer({ ok: true, ...checkStoreFile(directory, Date.now()) })
+      } catch (error) {
+        answer({ ok: false, code: codeOf(error) })
+      }
+    } else if (action === 'release' || action === 'attempt') {
+      // OpenCode's plugin only. release hands a claim back (--unsent: the host was never called, so even a started wake goes back);
+      // attempt marks the wake it is about to start, and answers CLAIM_LOST when the ref is no longer the claim (#724).
+      const ref = flag('--ref')
+      if (ref === undefined || !/^[0-9a-f]{12}$/.test(ref)) throw new Error('INVALID_MAILBOX_CALL')
+      try {
+        if (action === 'attempt') await mailbox.attempt(agent, session, ref, Date.now())
+        else await mailbox.release(agent, session, ref, Date.now(), args.includes('--unsent'))
+        answer({ ok: true })
+      } catch (error) {
+        answer({ ok: false, code: codeOf(error) })
+      }
+    } else if (action === 'accept' && agent !== 'opencode') {
       const id = flag('--id'), nonce = flag('--nonce')
       if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
-      await mailbox.accept(agent, session, id, nonce, Date.now())
-      answer({ ok: true })
+      answer({ ok: await mailbox.accept(agent, session, id, nonce, Date.now()) })
+    } else if (action === 'accept' || action === 'ack') {
+      // The plugin passes free text as base64, so a word that starts with two hyphens is not read as a flag.
+      const text = (name: string): string | undefined => { const value = flag(name); return value === undefined ? undefined : Buffer.from(value, 'base64').toString('utf8') }
+      try {
+        if (action === 'accept') {
+          // OpenCode's plugin reports a message as given only after the board saved its acceptance.
+          const id = flag('--id'), nonce = flag('--nonce')
+          if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
+          await mailbox.acceptOrThrow(agent, session, id, nonce, Date.now(), args.includes('--awaits-ack'))
+        } else {
+          const id = flag('--id'), nonce = flag('--nonce'), summary = text('--summary-b64')
+          if (id === undefined || nonce === undefined) throw new Error('INVALID_MAILBOX_CALL')
+          await mailbox.ack(agent, session, id, nonce, `ACK ${nonce}${summary ? ` ${summary}` : ''}`, Date.now())
+        }
+        answer({ ok: true })
+      } catch (error) {
+        answer({ ok: false, code: codeOf(error) })
+      }
+    } else if (agent === 'opencode') {
+      // A write that failed is not an end: the plugin asks again. With no board folder at all there is no mailbox to end.
+      try {
+        await mailbox.endOrThrow(agent, session, Date.now())
+        answer({ ok: true })
+      } catch (error) {
+        answer(mailbox.hasNoFolder ? { ok: true } : { ok: false, code: codeOf(error) })
+      }
     } else {
       await mailbox.end(agent, session, Date.now())
       answer({ ok: true })
@@ -553,7 +647,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const openclawDir = resolve(flag('--openclaw-dir') ?? (process.env.OPENCLAW_STATE_DIR || join(home, '.openclaw')))
   const deepseekDir = resolve(flag('--deepseek-dir') ?? (process.env.DSH_HOME || join(home, '.dsh')))
   const skill = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
-  const manifest: Manifest = { files: object(loaded.files ?? {}) as Record<string, string>, groups: object(loaded.groups ?? {}), foreignGroups: object(loaded.foreignGroups ?? {}) }
+  // The sidecar's own record (see runSidecarOnly): where it exists, this install keeps and removes those files too.
+  const sidecarRecord = join(root, 'install-antigravity-sidecar.json')
+  const manifest: Manifest = { files: { ...(agent === 'antigravity' ? object(jsonInitial(sidecarRecord).files ?? {}) : {}), ...object(loaded.files ?? {}) } as Record<string, string>, groups: object(loaded.groups ?? {}), foreignGroups: object(loaded.foreignGroups ?? {}) }
   // A check must not fail on the words of its next step: an argument a shell would expand or eat goes through boardRun's code points.
   const nextCommand = (nextMode: string, extra: string[] = []): string => {
     const rest = [nextMode, ...args.filter(arg => arg !== mode && arg !== '--apply' && arg !== '--json' && arg !== '--plain'), ...extra]
@@ -567,6 +663,57 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
   }
 
+  // The sidecar's two files (#1396) have a record of their own, apart from the agent's install record, so an
+  // Antigravity the connector manages can have them without setup taking over the connector's hooks. Later runs
+  // keep them current; --remove takes them out. The sidecar never sees a message's text; setup never switches it on.
+  const sidecarDirectory = join(home, '.gemini', 'config', 'sidecars', ANTIGRAVITY_SIDECAR_ID)
+  const sidecarOnlyFiles = [join(sidecarDirectory, 'sidecar.json'), join(sidecarDirectory, 'sidecar.mjs')]
+  const runSidecarOnly = (progressFile: string, isRemoving: boolean, connector: boolean): void => {
+    const recorded = object(jsonInitial(sidecarRecord).files ?? {}) as Record<string, string>
+    const desired = [antigravitySidecarConfig(process.execPath, progressFile, home, fileWords.antigravitySidecarDescription), antigravitySidecarSource(fileWords.antigravityWakeLine)]
+    const sidecarChanges: { file: string; action: string }[] = []
+    const sidecarConflicts: string[] = []
+    sidecarOnlyFiles.forEach((file, i) => {
+      const existing = initial(file)
+      const isOwned = existing !== null && hash(existing) === recorded[file]
+      if (existing !== null && !isOwned && (isRemoving || existing !== desired[i])) sidecarConflicts.push(file)
+      else if (isRemoving ? isOwned : existing !== desired[i]) sidecarChanges.push({ file, action: isRemoving ? 'remove' : existing === null ? 'create' : 'update' })
+    })
+    const nextRecord = `${JSON.stringify({ files: Object.fromEntries(sidecarOnlyFiles.map((file, i) => [file, hash(desired[i]!)])), progress: progressFile }, null, 2)}\n`
+    if (isRemoving ? initial(sidecarRecord) !== null : initial(sidecarRecord) !== nextRecord) sidecarChanges.push({ file: sidecarRecord, action: isRemoving ? 'remove' : initial(sidecarRecord) === null ? 'create' : 'update' })
+    const sidecarPlan: LocalPlan & Json = {
+      mode: isRemoving ? 'remove' : 'install', agent, progress: progressFile, data: root, changes: sidecarChanges, conflicts: sidecarConflicts, alreadyGone: [],
+      ...(connector ? { managedBy: 'connector', script: join(dirname(progressFile), 'agent-board.mjs') } : {}),
+      notice: s.setupSummary.connector.replace('{progress}', progressFile), privacy: s.codexPrivacy,
+      capabilities: { lifecycle: lifecycleCapability(agent), liveReply: false },
+    }
+    if (args.includes('--apply') && !sidecarConflicts.length) {
+      withInstallLock(home, () => {
+        for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
+        // Each file is read again just before its change and checked after it, so an edit made while setup runs
+        // is never overwritten or removed, and a change that did not land is not reported as applied.
+        for (const change of sidecarChanges) {
+          const unchanged = (): void => { if (readLocal(change.file) !== before.get(change.file)) throw new Error('INSTALL_CHANGED') }
+          const text = change.action === 'remove' ? null : change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!
+          if (text === null) { unchanged(); unlinkSync(change.file) }
+          else atomic(change.file, text, unchanged)
+          if (readLocal(change.file) !== text) throw new Error('INSTALL_CHANGED')
+        }
+      })
+      if (isRemoving) try { rmdirSync(sidecarDirectory) } catch {}
+      sidecarPlan.applied = true
+    }
+    if (args.includes('--json') || !isRemoving) output(sidecarPlan)
+    else process.stdout.write(codexRemoveOutput(sidecarPlan, s, nextCommand('--codex-remove')))
+    if (sidecarConflicts.length && args.includes('--apply')) throw new Error('INSTALL_CONFLICT')
+  }
+  const wantsSidecarOnly = agent === 'antigravity' && (args.includes('--antigravity-sidecar') || initial(sidecarRecord) !== null)
+  // A remove for an Antigravity with no install record of its own: only the sidecar's files are left to take out.
+  if (mode === '--codex-remove' && agent === 'antigravity' && initial(manifestFile) === null && initial(sidecarRecord) !== null) {
+    runSidecarOnly(typeof jsonInitial(sidecarRecord).progress === 'string' ? jsonInitial(sidecarRecord).progress as string : progress, true, false)
+    return true
+  }
+
   // Keep the connector as the sole writer for its agents, including its next automatic probe.
   if (activeConnection?.setup?.agents.some(one => one.agent === agent && one.hook === 'configured') && initial(manifestFile) === null) {
     const connectedProgress = localProgressPath(undefined, connectorProgress!)
@@ -576,6 +723,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       process.stdout.write(`${s.localSummary.removal(s.agentNames[agent] ?? agent, s.setupSummary.connector.replace('{progress}', connectedProgress))}\n${s.localSummary.connectRepair}\n`)
       return true
     }
+    if (wantsSidecarOnly && !args.includes('--plain')) { runSidecarOnly(connectedProgress, false, true); return true }
     output({
       mode: 'install', agent, progress: connectedProgress, data: root, script: join(dirname(connectedProgress), 'agent-board.mjs'),
       managedBy: 'connector', changes: [], conflicts: [],
@@ -612,7 +760,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     checkDeadline()
     type Pending = {
       version: number; progress: string; mode: string; agent: LocalAgent; session: string; now: string; at?: number
-      status: unknown; event?: string; folder?: string; folderDigest?: string; folderCanonicalDigest?: string; isBoardPrompt: boolean; isPrompt: boolean; payload: Json
+      status: unknown; event?: string; folder?: string; folderDigest?: string; folderCanonicalDigest?: string; isBoardPrompt: boolean; isDelivery?: boolean; isPrompt: boolean; payload: Json
       // Who started the session, as far as the host's own words say (#399); absent when they say nothing.
       run?: RunSignal
     }
@@ -638,6 +786,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const folder = filesByFolder(mode, agent) ? folderProject(rawCwd) : ''
       // Only metadata selected below is retained. Save no prompts, tool inputs,
       // or permission decisions from a hook payload, and nothing of a reply but its closing question.
+      // Board approvals (#1318) are a separate route, Claude Code's plugin hook: its journal line
+      // keeps the decision, the tool, the command's first words and its hash, never the command.
       // The plan mirror is the
       // one place a tool input is read (--plan-event, before this): only each step's text and status,
       // which a report carries. transcript_path is
@@ -659,7 +809,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (event !== undefined && statusEvents.antigravity?.[event] !== status) throw new Error('INVALID_EVENT_STATE')
       // Classify before Cursor's adapter drops prompt text; retain lifecycle
       // ordering without treating a board lookup as an answer to the question.
-      const isBoardPrompt = (isPromptEvent(raw) || raw.prompt_submitted === true) && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
+      const isPromptLike = isPromptEvent(raw) || raw.prompt_submitted === true
+      const isBoardCommand = isPromptLike && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
+      // A delivered board message is not the person's reply, yet the turn it starts is real work: its closing question still counts.
+      const isDelivery = isPromptLike && !isBoardCommand && isBoardRequest(raw, deliveryRequestWords(Object.values(STRINGS)))
+      const isBoardPrompt = isBoardCommand || isDelivery
       // No longer changes any step (#243); kept so events queued by an older version still validate.
       const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
       // Only Codex says it, and only as a session opens or takes a prompt; the other local agents
@@ -678,8 +832,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         : mode === '--codex-event' && agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' ? lastQuestion(String(raw.text ?? ''))
           : mode === '--agent-status' && status === 'waiting' && (agent === 'grok' || agent === 'opencode' || agent === 'hermes') ? lastQuestion(message)
             : mode === '--agent-status' && status === 'waiting' && agent === 'antigravity' && (event === undefined || event === 'Stop') ? antigravityQuestion(raw.transcriptPath) : null
+      const antigravityTitle = mode === '--agent-status' && agent === 'antigravity'
+        ? resolveAntigravityTitle(session, raw.transcriptPath, raw.artifactDirectoryPath, home)
+        : null
       return {
-        version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, isPrompt,
+        version: 1, progress, mode, agent, session, now, at, status: mode === '--agent-status' ? status : undefined, event, isBoardPrompt, ...(isDelivery ? { isDelivery } : {}), isPrompt,
         ...(filesByFolder(mode, agent) ? { folder } : {}),
         ...(identity !== undefined && (agent !== 'codex' || folderProject(rawCwd) !== '') ? identity : {}),
         ...(run === undefined ? {} : { run }),
@@ -688,7 +845,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
           ...(hasResponse ? { has_response: true } : {}),
           ...(question === null ? {} : { question }),
-        } : { ...(question === null ? {} : { question }) },
+        } : {
+          ...(antigravityTitle === null ? {} : antigravityTitle),
+          ...(question === null ? {} : { question }),
+        },
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
@@ -742,7 +902,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     let reportCut = 0
     let reportDropped = 0
     const apply = (entry: Pending, isRawReplay = false): CodexReport => {
-      const { mode, agent, session, now, at, status, event, folder = '', folderDigest, folderCanonicalDigest, isBoardPrompt, payload, run } = entry
+      const { mode, agent, session, now, at, status, event, folder = '', folderDigest, folderCanonicalDigest, isBoardPrompt, isDelivery = false, payload, run } = entry
       const displayAt = Date.parse(now)
       const sourceAt = at ?? displayAt
       const observedAt = Date.now()
@@ -777,10 +937,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const text = bytes.toString('utf8')
       const previous = original === null || mode === '--codex-report' || isRun ? original : boardConfirmedReport(text, original, owner)
       const clock = previous === null ? now : new Date(Math.max(displayAt, Date.parse(previous.updated))).toISOString()
-      // A mirrored plan keeps the block's own title, unless it is still the generic one a lifecycle event wrote.
+      const isGenericTitle = (title: string): boolean => Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(title) || title.startsWith(`${one.localAgentTask(agent)} · `))
+      // A mirrored plan keeps the block's own title, unless it is still the generic or fallback one a lifecycle event wrote.
       const given = typeof payload.planTitle !== 'string' ? payload : {
         state: payload.state, steps: payload.steps,
-        title: previous !== null && !Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(previous.title)) ? previous.title : payload.planTitle,
+        title: previous !== null && !isGenericTitle(previous.title) && previous.titleSource !== 'fallback' ? previous.title : payload.planTitle,
         ...(typeof payload.planProject === 'string' ? { project: previous?.project ?? payload.planProject } : {}),
       }
       // A reply that ends on a question waits for the person, even after the agent reported its own steps done.
@@ -795,34 +956,54 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
                 : placeholder
               : step
           )
-      const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision)
+      const question = questionSteps(held, previous?.asked, state, payload.question, isBoardPrompt, previous?.askedRevision, false, payload.options, previous?.askedOptions)
       // Keep the recovery format. Causality uses the host event's milliseconds,
       // which the display clock can round or carry forward.
-      const base = mode === '--codex-event' ? codexEvent(previous, isBoardPrompt ? { ...payload, board_request: true } : payload, clock, s, sourceAt, { lastAppliedAt: original?.appliedAt, observedAt })
+      const base = mode === '--codex-event' ? codexEvent(previous, isDelivery ? { ...payload, delivery_request: true } : isBoardPrompt ? { ...payload, board_request: true } : payload, clock, s, sourceAt, { lastAppliedAt: original?.appliedAt, observedAt })
         : mode === '--agent-status' ? validateCodexReport({
           // These are already validated stored steps, including up to two owned lines beyond
           // the explicit report's forty user steps. A status is not a fresh task report.
           ...(previous ?? codexReport(null, session, { title: s.localAgentTask(agent), project: agent, state, steps: question.steps }, clock, s)),
           state: state as CodexReport['state'], steps: question.steps, updated: clock, asked: question.asked,
           ...(question.askedRevision === undefined ? {} : { askedRevision: question.askedRevision }),
+          askedOptions: question.askedOptions,
         }, session) : codexReport(previous, session, given, clock, s)
       // A queued folder is cleaned again: the queue file is not trusted to hold a clean name.
       const name = folderProject(folder)
-      // An Antigravity session keeps no folder (its hook binds only the conversation
-      // id), so a new one would otherwise read as every other unreported Antigravity
-      // session. A session that still carries only the generic title is re-titled
-      // the same way on its next lifecycle event (#814). The distinct part is the
-      // session's start time in local time, to the millisecond: second precision
-      // would let two sessions started in the same second share a title, and a
-      // hash prefix is not shown on a default view. The title is set once and kept
-      // by later events (stillGeneric only matches the generic title), and an
-      // explicit report title still wins; no new data is retained, and the
-      // translated fallback needs no new string.
-      const stillGeneric = previous !== null && Object.values(STRINGS).some(one => one.localAgentTask(agent) === previous.title)
-      const distinctAntigravity = mode === '--agent-status' && agent === 'antigravity' && (previous === null || stillGeneric)
-      const initial = (filesByFolder(mode, agent) && !previous) || distinctAntigravity ? validateCodexReport({
-        ...base, title: sessionTitle(name, s.localAgentTask(agent), distinctAntigravity ? distinctStarted(sourceAt) : ''), project: previous?.project ?? (name || agent),
-      }, session) : base
+      // Antigravity hooks carry no folder or title (#814, #1401): name each row by the client's
+      // conversation summary title, else the clipped first line of its first prompt, else the
+      // fallback name, and keep its millisecond start time as secondary context text.
+      const antigravityState = (() => {
+        if (mode !== '--agent-status' || agent !== 'antigravity') return null
+        const startedAt = previous === null
+          ? sourceAt
+          : previous.startedAt ?? legacyStartedAt(previous.title, agent) ?? (Number.isFinite(Date.parse(previous.updated)) ? Date.parse(previous.updated) : undefined) ?? sourceAt
+        const isGeneric = previous !== null && isGenericTitle(previous.title)
+        const isExplicit = previous !== null && !isGeneric && previous.titleSource !== 'fallback' && previous.titleSource !== 'prompt' && previous.titleSource !== 'summary'
+        const context = isExplicit && previous.context ? previous.context : s.localAgentStarted(distinctStarted(startedAt))
+        const incoming = typeof payload.title === 'string' && (payload.titleSource === 'summary' || payload.titleSource === 'prompt') ? { title: payload.title, source: payload.titleSource } : null
+        const picked: { title: string; titleSource: CodexReport['titleSource'] } = isExplicit
+          ? { title: previous.title, titleSource: previous.titleSource }
+          : incoming?.source === 'summary'
+            ? { title: incoming.title, titleSource: 'summary' }
+            : previous?.titleSource === 'summary' && !isGeneric
+              ? { title: previous.title, titleSource: 'summary' }
+              : incoming?.source === 'prompt'
+                ? { title: incoming.title, titleSource: 'prompt' }
+                : previous?.titleSource === 'prompt' && !isGeneric
+                  ? { title: previous.title, titleSource: 'prompt' }
+                  : { title: sessionTitle(name, s.localAgentTask(agent)), titleSource: 'fallback' }
+        return { ...picked, startedAt, context }
+      })()
+      const initial = antigravityState !== null ? validateCodexReport({
+        ...base, ...antigravityState, project: previous?.project ?? (name || agent),
+      }, session) : filesByFolder(mode, agent) && !previous ? validateCodexReport({
+        ...base, title: sessionTitle(name, s.localAgentTask(agent)), project: previous?.project ?? (name || agent),
+      }, session) : mode === '--codex-report' ? {
+        ...base, titleSource: typeof payload.planTitle === 'string'
+          ? (previous !== null && !isGenericTitle(previous.title) && previous.titleSource !== 'fallback' && previous.titleSource !== undefined ? previous.titleSource : 'plan' as const)
+          : 'report' as const,
+      } : base
       const priorActivity = previous?.activity ?? []
       // Only a weak hint needs a parent; a strong run keeps its record without a block.
       const parent = origin.origin !== 'run' ? undefined : isRun ? origin.parent : origin.parent ?? pickParent(parseProgress(text), initial.project, Date.parse(clock), [owner, owner.slice(0, 8), session]) ?? undefined
@@ -832,7 +1013,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? { folder: name, folderDigest, folderCanonicalDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
-      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
       if (entry === current) {
         reportCut = cut
@@ -891,15 +1072,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A replay can skip writes only after a board completion reached the cache too.
       // A new hook event is not a replay even when the block reads the same: its record keeps the event.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? null) === JSON.stringify(report.askedOptions ?? null) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }
       // Encode only the new report; existing bytes, including partial UTF-8, pass through unchanged.
       const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
-        ...report, title: encoded(report.title), project: encoded(report.project), steps: report.steps.map(encoded),
-      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project), 'latin1')
+        ...report, title: encoded(report.title), project: encoded(report.project), ...(report.context === undefined ? {} : { context: encoded(report.context) }), steps: report.steps.map(encoded),
+      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project, report.context === undefined ? undefined : encoded(s.contextNote(report.context)), encoded), 'latin1')
       saveFullText()
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
       try { atomic(progress, next, checkDeadline) } catch (error) {
@@ -934,6 +1115,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.
       && (entry.mode !== '--codex-event' || [undefined, entry.session].includes(object(entry.payload).session_id as string | undefined))
+      && (object(entry.payload).options === undefined || Array.isArray(object(entry.payload).options) && (object(entry.payload).options as unknown[]).every(value => typeof value === 'string'))
     // Raw Codex events can precede a newer turn too. Milliseconds settle events in
     // the same second; older records and pending entries retain their timestamp fallback.
     const isOverdue = (entry: Pending): boolean => {
@@ -1298,10 +1480,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script, fileWords)
   if (agent === 'openclaw') {
     files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
-    files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
+    // activation.onStartup: OpenClaw 2026.6.35 loads a plugin when its gateway starts only when the manifest asks for it (#1489).
+    files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', activation: { onStartup: true }, contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {
@@ -1310,6 +1493,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   if (agent === 'hermes') files[join(hermesDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   if (agent === 'antigravity') files[antigravitySkill] = skillText
+  // The sidecar is written only on the person's flag, or kept as it is where an earlier setup wrote it (#1396). Setup never switches it on: the person does, in Antigravity's Automations page.
+  if (agent === 'antigravity') {
+    const sidecarDir = join(home, '.gemini', 'config', 'sidecars', ANTIGRAVITY_SIDECAR_ID)
+    const sidecarFiles = [join(sidecarDir, 'sidecar.json'), join(sidecarDir, 'sidecar.mjs')]
+    if (args.includes('--antigravity-sidecar') || sidecarFiles.some(file => Object.hasOwn(manifest.files, file))) {
+      files[sidecarFiles[0]!] = antigravitySidecarConfig(process.execPath, progress, home, fileWords.antigravitySidecarDescription)
+      files[sidecarFiles[1]!] = antigravitySidecarSource(fileWords.antigravityWakeLine)
+    }
+  }
   if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)}}\n'''\n`
   if (agent === 'opencode') files[join(opencodeDir, 'commands', 'agent-board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)}\`\n`
   // 0.24.2 and earlier wrote /board here. The command is now /agent-board, so setup takes the old file
@@ -1367,6 +1559,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
   const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
+  if (remove && agent === 'antigravity' && initial(sidecarRecord) !== null) changes.push({ file: sidecarRecord, action: 'remove' })
   const removedDirs = new Set<string>()
   let handover: { file: string; text: string } | undefined
   if (remove) {

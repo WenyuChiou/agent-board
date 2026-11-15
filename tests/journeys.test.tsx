@@ -451,7 +451,7 @@ test('L7 pane: an unreadable progress file is named in words, with no path and n
   try {
     const visible = visiblePaneText(await ui.drawn())
     expect(visible).toContain(EN.fileUnreadable)
-    expect(visible).toContain(EN.storageReadOnly)
+    expect(visible).toContain(EN.storageUnreadable)
     expect(visible).not.toContain(FILE)
     expect(visible).not.toContain('EACCES')
     noMachineIds(visible, world)
@@ -482,9 +482,10 @@ test('L7 pane: an unreadable progress file never shows a word from its path or a
     try {
       const visible = visiblePaneText(await ui.drawn())
       expect(visible).toContain(EN.fileUnreadable)
-      if (index === 0) expect(visible).toContain(EN.storageReadOnly)
+      if (index === 0) expect(visible).toContain(EN.storageUnreadable)
       else {
         expect(visible).not.toContain(EN.storageReadOnly)
+        expect(visible).not.toContain(EN.storageUnreadable)
         expect(visible).not.toContain(EN.storageBusy)
         expect(visible).not.toContain(EN.storageFull)
         expect(visible.trim()).toBe(EN.fileUnreadable)

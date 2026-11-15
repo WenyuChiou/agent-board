@@ -11,7 +11,7 @@ import { discoverCodexBinary } from './codex-host'
 import { runCodexLocal, setupFailure } from './codex-local'
 import type { LocalPlan } from './codex-local'
 import { ConnectTransaction } from './connect-transaction'
-import { discoverSetupAgents, findOnPath, hasBoardPlugin, isBoardPluginDisabled, setupAgents, setupRecordChanges } from './setup-discovery.mjs'
+import { discoverSetupAgents, findOnPath, hasBoardPlugin, isBoardPluginDisabled, retiredAgents, setupAgents, setupRecordChanges } from './setup-discovery.mjs'
 
 type AgentPlan = LocalPlan & { data: string; installed?: boolean; hooksTrusted?: boolean | 'unknown'; managedBy?: string }
 type AgentResult = { status: number; note: string; count?: number }
@@ -35,7 +35,12 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
     if (value !== undefined) context.push(name, value)
   }
   const record = (agent: string): string => join(data, `install-${agent}.json`)
-  const isKnown = (agent: unknown): agent is string => typeof agent === 'string' && (agent === 'claude' || setupAgents.some(one => one === agent))
+  // A retired agent (Gemini CLI, #1327) is never offered for setup, but an install an earlier
+  // release wrote still counts as an install: Settings shows its row with Remove only, and it
+  // keeps the board needed when another agent is removed.
+  const recorded: readonly string[] = [...setupAgents, ...retiredAgents]
+  const isKnown = (agent: unknown, action: unknown): agent is string => typeof agent === 'string'
+    && (agent === 'claude' || setupAgents.some(one => one === agent) || action === 'remove' && retiredAgents.some(one => one === agent))
   const execute = async (agent: string, mode: string, isApplying = false): Promise<AgentPlan> => {
     let result: unknown
     const binary = agent === 'codex' && mode === '--codex-trust'
@@ -59,7 +64,7 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
     return process.platform === 'win32' ? path.toLowerCase() : path
   }
   const protectRemoval = (agent: string, plan: LocalPlan): void => {
-    const isLast = !setupAgents.some(other => other !== agent && existsSync(record(other)))
+    const isLast = !recorded.some(other => other !== agent && existsSync(record(other)))
     const needed = [o.script, join(dirname(o.progress), 'agent-board.mjs'), o.progress].map(identity)
     const removesNeeded = plan.changes.some(change => change.action === 'remove' && needed.some(file => {
       const from = relative(identity(change.file), file)
@@ -81,7 +86,7 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
       // show. The row counts as set up, since setup itself refuses to touch that agent until the
       // record is moved away, and its note says so.
       const broken = new Set<string>()
-      for (const agent of setupAgents) if (existsSync(record(agent))) {
+      for (const agent of recorded) if (existsSync(record(agent))) {
         installed.add(agent)
         try {
           const manifest = JSON.parse(readFileSync(record(agent), 'utf8')) as { files?: unknown }
@@ -118,8 +123,8 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
     const snapshot = cached!
     const lines = o.readProgress().split('\n')
     const onBoard = new Set(scanBlocks(lines).map(span => span.agent))
-    const agents: string[] = [...setupAgents, ...(snapshot.hasClaude ? ['claude'] : [])]
     const setUp = new Set([...snapshot.installed, ...snapshot.connected])
+    const agents: string[] = [...setupAgents, ...retiredAgents.filter(agent => setUp.has(agent)), ...(snapshot.hasClaude ? ['claude'] : [])]
     return agents.map(agent => {
       const isSetUp = agent === 'claude' || setUp.has(agent)
       const state = settingsAgentState(isSetUp, onBoard.has(agent), agent === 'codex' && snapshot.isUntrusted, snapshot.found.has(agent), o.words())
@@ -132,7 +137,7 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
   }
   const failed = (error: unknown, agent: string): AgentResult => ({ status: 409, note: (error as { note?: string })?.note ?? setupFailure(error, agent, o.words()).message })
   const preview = async (agent: unknown, action: unknown): Promise<AgentResult> => {
-    if (!isKnown(agent) || action !== 'setup' && action !== 'remove') return { status: 400, note: o.words().settingsAgentInvalid }
+    if (!isKnown(agent, action) || action !== 'setup' && action !== 'remove') return { status: 400, note: o.words().settingsAgentInvalid }
     if (isBusy) return { status: 409, note: o.words().settingsAgentsBusy }
     if (agent === 'claude') return { status: 409, note: refusal(agent) }
     try {
@@ -143,7 +148,7 @@ export const createSettingsAgents = (o: { args: string[]; progress: string; scri
     } catch (error) { return failed(error, agent) }
   }
   const change = async (agent: unknown, action: 'setup' | 'remove'): Promise<AgentResult> => {
-    if (!isKnown(agent)) return { status: 400, note: o.words().settingsAgentInvalid }
+    if (!isKnown(agent, action)) return { status: 400, note: o.words().settingsAgentInvalid }
     if (isBusy) return { status: 409, note: o.words().settingsAgentsBusy }
     if (agent === 'claude') return { status: 409, note: refusal(agent) }
     isBusy = true

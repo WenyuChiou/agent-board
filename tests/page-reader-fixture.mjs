@@ -10,6 +10,14 @@ import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 export const PAGE_NOW = Math.floor(Date.now() / 1000) * 1000
 const NOW = PAGE_NOW
 
+// The CLI's entry call is the last `await name();` before a catch in the bundle: the bundle ends with it, and shipped code above
+// it can have the same shape (the Codex receiver's reads do). Only that call is replaced, by default with nothing.
+export const replaceEntryCall = (script, replacement = '') => {
+  const last = [...script.matchAll(/await \w+\(\);(?=\s*\}\s*catch \(error\))/g)].at(-1)
+  assert.ok(last, 'the generated entry point must be found in the bundle')
+  return script.slice(0, last.index) + replacement + script.slice(last.index + last[0].length)
+}
+
 // Only the CLI's entry call is disabled. The reader, API handler and page script are shipped code.
 export const pageFixture = async (file = '', inbox = {}, state) => {
   const root = mkdtempSync(join(tmpdir(), 'board-page-regression-'))
@@ -20,7 +28,7 @@ export const pageFixture = async (file = '', inbox = {}, state) => {
   utimesSync(path, (NOW - 20000) / 1000, (NOW - 20000) / 1000)
   for (const [name, body] of Object.entries(inbox)) writeFileSync(join(root, 'progress-inbox', name), body)
   if (state) writeFileSync(join(root, 'progress-page-state.json'), JSON.stringify(state))
-  const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  const skipped = replaceEntryCall(BOARD_SCRIPT)
   assert.notEqual(skipped, BOARD_SCRIPT)
   const script = join(root, 'reader.mjs')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${skipped}\nexport { view, pending, serveModel, servePage, boardDocument, startServer, s };\n`)

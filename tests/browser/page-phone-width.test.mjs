@@ -64,5 +64,16 @@ test('at phone widths nothing on the page runs past its edge', { timeout: 180_00
     await page.waitForFunction(() => scrollY > 0)
     const top = await page.locator('nav#agents').evaluate(element => element.getBoundingClientRect().top)
     assert.ok(Math.abs(top) <= 2, `the icon row is at ${top}px`)
+
+    // Picking a view from the phone drawer closes the drawer and hides the other sections.
+    await page.evaluate(() => scrollTo(0, 0))
+    await page.locator('#drawer-btn').click()
+    await page.locator('#view-done').waitFor({ state: 'visible' })
+    await page.locator('#view-done').click()
+    await page.locator('#drawer-btn[aria-expanded="false"]').waitFor({ state: 'attached' })
+    await page.locator('[data-sec="needs"]').waitFor({ state: 'hidden' })
+    await page.locator('#drawer-btn').click()
+    await page.locator('#view-all').click()
+    await page.locator('[data-sec="needs"]').waitFor({ state: 'visible' })
   })
 })

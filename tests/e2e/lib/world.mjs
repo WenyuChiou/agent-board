@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { rm } from 'node:fs/promises'
 import { BOARD_SCRIPT } from '../../../hooks/board-script.ts'
 import { clockPreload, clockText, jump } from './clock.mjs'
@@ -46,7 +46,7 @@ export const makeWorld = ({ lang = 'en' } = {}) => {
   const modules = process.platform === 'win32' && modulePath()
   if (modules) env.PSModulePath = modules
   // AGENT_BOARD_TEST_PID: a board this world starts opens no window and stops once this test process is gone (#959).
-  Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid) })
+  Object.assign(env, directories, { CLAUDE_PROGRESS_FILE: path, NO_COLOR: '1', AGENT_BOARD_TEST_PID: String(process.pid), AGENT_BOARD_ROUTES: fileURLToPath(new URL('../../helpers/recorded-routes.json', import.meta.url)) })
   const inside = file => {
     const rel = relative(root, resolve(file))
     assert.ok(rel && rel !== '..' && !rel.startsWith('..\\') && !rel.startsWith('../') && !isAbsolute(rel), `Outside world: ${file}`)
@@ -124,7 +124,8 @@ syncBuiltinESMExports()
     // Serve and desktop launch paths must stay inside the test process.
     const browserCalls = [...BOARD_SCRIPT.matchAll(/openInBrowser\(([^,]+),/g)]
     assert.equal(browserCalls.length, 2, 'Review every browser launch when the bundle changes')
-    assert.deepEqual(browserCalls.map(match => match[1]).sort(), ['address', 'url'])
+    // Both open through openThroughBoard or the serve options' open (D3, #1318): the board's own page and the shape page.
+    assert.deepEqual(browserCalls.map(match => match[1]).sort(), ['url', 'url'])
     // The bytes stay identical across worlds; only the isolated environment
     // supplies this instance's baked configuration.
     world.write('agent-board.mjs', `globalThis.AGENT_BOARD = { path: process.env.E2E_BOARD_PATH, lang: process.env.E2E_BOARD_LANG }\n${BOARD_SCRIPT.replace(/openInBrowser\(([^,]+),/g, '((target, done) => done(false))($1,')}`)

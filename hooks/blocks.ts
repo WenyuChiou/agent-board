@@ -1,4 +1,5 @@
-import type { CutBlock, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressProject, ProgressTask } from '../types'
+import { offersList } from './ask'
+import type { CutBlock, ProgressAuto, ProgressMirror, ProgressMirrorTask, ProgressSessionState, ProgressProject, ProgressTask } from '../types'
 import { prWords } from './github'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
@@ -6,14 +7,14 @@ import { stamped, stampOf, withoutStamp } from './done-stamp'
 import { localDay } from './journal'
 import { splitLines } from './lines'
 import { fallbackTitle, isAnswered, questionToken, retainedCancelledOf } from './mirror'
-import { AUTO_END, AUTO_START, autoOf, doneKey, isCutMarker, isTaskComplete, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
+import { AUTO_END, AUTO_START, autoOf, doneKey, escapeOptionsJson, isCutMarker, isTaskComplete, NO_OPTIONS, optionsComment, parseAttrs, parseProgress, projectHead, readable, RESUME, STALE_MS } from './parse'
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
 import { isOutranked, pickParent } from './runs'
 import { cutLine, oneLine, plain } from './step-words'
 import { isSilenceTask, isWorkingTask } from './grouping'
-import { isStale, observedTime } from './parse'
+import { isStopped, observedTime } from './parse'
 import type { JournalEntry } from './journal'
 
 // Each session's mod owns one block of the file, between its own markers, and rewrites
@@ -100,6 +101,11 @@ const markerOf = (mirror: ProgressMirror, parent?: string): string => {
     pr === null ? '' : `pr=${pr.number} ci=${pr.ci}`,
     mirror.source === 'turns' ? 'source=turns' : '',
     mirror.replied !== undefined && Number.isFinite(mirror.replied) ? `replied=${new Date(mirror.replied).toISOString()}` : '',
+    // The liveness claim (#1092): only Claude Code records one (PM Q4), and only
+    // when the mirror carries it. It never appears in visible text.
+    (mirror.agent || 'claude') === 'claude' && mirror.agentPid !== undefined && Number.isSafeInteger(mirror.agentPid) && mirror.agentPid > 0 ? `agentpid=${mirror.agentPid}` : '',
+    (mirror.agent || 'claude') === 'claude' && mirror.agentStarted !== undefined && Number.isSafeInteger(mirror.agentStarted) && mirror.agentStarted > 0 ? `agentstarted=${mirror.agentStarted}` : '',
+    (mirror.agent || 'claude') === 'claude' && mirror.host !== undefined && /^[0-9a-f]{64}$/.test(mirror.host) ? `host=${mirror.host}` : '',
     // A session an agent started for itself (#399); a person's has no such mark.
     mirror.isRun === true ? 'origin=run' : '',
     mirror.isRun === true && parent !== undefined && RESUME.test(parent) ? `parent=${parent}` : '',
@@ -144,7 +150,7 @@ export const nativeLine = (task: ProgressMirrorTask): string => {
   if (task.native === undefined || task.waiting !== 'you') return ''
   const options = task.native.options.slice(0, 8).map(one => one.replace(/\s+/g, ' ').trim().slice(0, 120)).filter(one => one !== '')
 
-  return `<!-- native=${task.native.agent}${options.length === 0 ? '' : ` options=${JSON.stringify(options).replace(/-/g, '\\u002d').replace(/>/g, '\\u003e')}`} -->`
+  return `<!-- native=${task.native.agent}${options.length === 0 ? '' : ` options=${escapeOptionsJson(options)}`} -->`
 }
 
 export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, parent?: string): string[] => {
@@ -164,7 +170,13 @@ export const renderAutoBlock = (mirror: ProgressMirror, s: Strings = ZH_TW, pare
 
       const token = questionToken(task)
       const native = nativeLine(task)
-      return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native])]
+      // Only the task's own list (#1277), and only when its kind is `choose` or not set: the line
+      // carries no kind, so a confirm with a list would read as a choice on another board. A list
+      // the board refuses is written as an empty one whatever the kind, which every reader shows
+      // with the reply box only.
+      const listed = native === '' && task.waiting === 'you' && (task.options ?? []).length > 0 ? optionsComment(task.options) || NO_OPTIONS : ''
+      const options = listed === NO_OPTIONS || offersList(task.ask) ? listed : ''
+      return [`- [${markOf(task)}] ${stepWords(task, s)}`, ...(token === '' ? [] : [`<!-- question=${token} -->`]), ...(native === '' ? [] : [native]), ...(options === '' ? [] : [options])]
     }),
     ...retainedCancelledOf(mirror).map(text => `- [-] ${text}`),
     `<!-- /auto session=${id} -->`,
@@ -508,9 +520,9 @@ export type ConfirmedTask = { text: string; ref: ConfirmRef; entries: Array<Omit
 
 // A person's completion changes only the exact task drawn, and only after its agent
 // stopped. Recheck here, inside each caller's read/change/write retry.
-export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS): ConfirmedTask | null => {
+export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): ConfirmedTask | null => {
   const task = confirmedTarget(text, ref, s)
-  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStale(task.auto, now, observedTime(task.auto, now, seen).updated, staleMs)) return null
+  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStopped(task.auto, now, observedTime(task.auto, now, seen).updated, staleMs, gone)) return null
   const lines = linesOf(text)
   const spans = scanBlocks(lines)
   const span = ref.session === null ? undefined : spans.find(one => one.session === ref.session)
@@ -675,7 +687,7 @@ export const takeManualDone = (
 // null when it cannot be found for sure: a block without its end marker, a heading that is
 // gone or has a twin, a heading inside some session's block, or a session id two blocks
 // share when the row's project and each block's first heading cannot tell them apart.
-export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS): Archived | null => {
+export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
@@ -717,7 +729,9 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       // as the row does (#1051, #1000).
       const isSilence = span.state === 'working' && task !== undefined && isSilenceTask(task.steps, updated, now)
       // The quiet-time path needs a readable time: unknown age never archives (#1000).
-      const stopped = isTwin || auto !== null && isStale(auto, now, updated, staleMs) || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
+      // A session whose agent process is gone has certainly stopped, so its archive
+      // goes through even when the silence check would keep the row for review (#1092).
+      const stopped = isTwin || isStopped(auto, now, updated, staleMs, gone) || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
       if (auto === null || !stopped) return null
     }
 

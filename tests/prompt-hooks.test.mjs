@@ -412,6 +412,15 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
   assert.ok(saved.some(({ file, body }) => readTurn(file, body).turnKey !== undefined), diagnostics.join('; '))
 }))
 
+// The sh reporter hands the whole script to powershell.exe as one -Command argument, and a Windows command line holds
+// 32,767 characters: past that Windows starts nothing and the receipt is silently missing. 2,048 of them stay free
+// for the probes these tests insert (the classifier probe adds about 1,900) (#1444).
+test('the sh reporter PowerShell command leaves 2,048 characters free in a Windows command line', async () => {
+  const { powershellReporter } = await import('../hooks/hook-reporters.ts')
+  const line = `powershell.exe -NoLogo -NoProfile -NonInteractive -Command "${powershellReporter(true).replaceAll('"', '\\"')}"`
+  assert.ok(line.length <= 32_767 - 2_048, `${line.length} characters`)
+})
+
 test('the PowerShell reporter writes a prompt receipt with no prompt words', { skip: process.platform !== 'win32' }, () => fixture(async home => {
   const { reporterPs1 } = await import('../hooks/connect-pure.ts')
   const { readTurn } = await import('../hooks/inbox.ts')

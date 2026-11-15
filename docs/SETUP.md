@@ -17,8 +17,10 @@ since commands and apps belong to the account running setup. It does not read
 conversations or credentials. A found command or app is a candidate, not an active
 session or account access. Run setup without `--apply` first: its preview lists each file;
 a bare `--apply` writes to the same agents and prints only how many files changed.
-A `.gemini` directory alone does not identify Gemini CLI: Antigravity uses that parent
-too. Finding nothing exits 0 without writing anything and names the next command to
+Gemini CLI is retired and setup never lists it. Gemini CLI and Antigravity share the
+`.gemini` directory; setup finds Antigravity by its own folders in it (`antigravity-cli`,
+`antigravity`, `antigravity-ide`), by `agy` or `antigravity` on the PATH, or by its app, and an
+install an earlier release wrote for Gemini CLI can still be removed. Finding nothing exits 0 without writing anything and names the next command to
 run. You can also select a known target with `--agent <name>`.
 `--agent all` previews all supported targets; it does not install the AI applications.
 
@@ -246,7 +248,7 @@ Start a new session of each agent: a session that was already open is not connec
 
 Open the board in the new session with `/agent-board`, or `$agent-board` in Codex. Cursor has no such command: use `npx @wenyuchiou/agent-board@next` in a terminal. In Hermes Agent, ask it for the Agent Board skill.
 
-- **Claude Code** connects through its plugin, which a yes to setup installs. If you did not answer yes (setup only previewed, or ran `--apply` without a terminal): `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`.
+- **Claude Code** connects through its plugin, which a yes to setup installs. If you did not answer yes (setup only previewed, or ran `--apply` without a terminal): `claude plugin marketplace add WenyuChiou/agent-board`, then `claude plugin install agent-board@agent-board`. The plugin adds a `PermissionRequest` hook: when the page the board opened is in front of you and has drawn a request, Claude Code waits up to 30 seconds for Allow once or Deny there; otherwise, and in `bypassPermissions` or `dontAsk` mode, it asks in its own window as before. The page shows the command in full while it waits; the journal keeps only the decision, the tool, the command's first three words and a 12-character hash.
 - **Codex:** a yes to setup trusts its hooks. If you did not answer yes, trust them in `/hooks` ([how](CODEX.md)).
 - **OpenCode, OpenClaw:** reload their plugins.
 - **dot and other web chats:** paste [the last section of AGENTS.md](../AGENTS.md#report-your-progress-to-the-progress-pane) into the agent's instructions, then save each block it writes and merge it into the progress file as [Remote reporters](REMOTE_REPORTERS.md#chat-relay-a-prompt-to-paste) shows.
@@ -271,7 +273,9 @@ To add a task of your own, write a `### title` with `- [ ] step` lines in `progr
 
 Select one target or a comma-separated list, such as `--agent opencode,openclaw,grok,deepseek`.
 They share the selected progress file. Each target's preview still lists its own persistent
-changes; no receiving connection or model call is added by setup.
+changes. The OpenCode and DeepSeek Harness plugins also receive a message the board queued for
+their session ([MESSAGING.md](MESSAGING.md)); for OpenClaw and Grok Build setup adds no receiving connection,
+and it adds no model call for any target.
 
 | Target | Native configuration | Override |
 | --- | --- | --- |
@@ -374,23 +378,29 @@ command once one is possible.
 Codex's commands carry no wrapper from this installer. No PowerShell profile or
 execution-policy setting is changed.
 
-The reporter binds the native `conversationId`, ignoring transcript paths, prompts,
-workspace paths, tool inputs and model text. Its own session record retains at most 16
+The reporter binds the native `conversationId`, ignoring hook stdin prompts,
+workspace paths, tool inputs and full model text. To name the conversation row instead
+of `Local antigravity task`, it reads only a matching title from the client's local
+summary file (`agyhub_summaries_proto.pb` / `jetbox_summaries_proto.pb`, bounded regular read skipping foreign protobuf entries
+without decoding them, or `cache/conversation_metadata.json`, bounded regular read parsed whole in memory keeping only the matching title) or,
+while untitled, only the clipped first line of the first `USER_INPUT` entry from the
+start of that conversation's own `transcript.jsonl`. Its own session record retains at most 16
 event/state/timestamp observations. SessionStart and Stop mean waiting; PreInvocation
 and PostInvocation mean working. PostInvocation may precede tools, so only Stop settles
 the loop. Stop never marks the conversation ended; no undocumented SessionEnd is added.
 
 The App, CLI and IDE share the global path but load it independently. Already-open
-sessions may need reload. These hooks report activity; semantic task steps remain explicit
-agent reports. No permission handler, transcript reader or remote-control tunnel is installed.
+sessions may need reload. These hooks report activity and closing questions from the
+conversation transcript as noted above; semantic task steps remain explicit
+agent reports. No permission handler or remote-control tunnel is installed.
 
-## Legacy Gemini CLI compatibility
+## Gemini CLI is retired
 
 Google's [consumer transition announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)
-ended free individual and Google AI Pro/Ultra Gemini CLI service on June 18, 2026. Supported
-enterprise and paid API-key use remains separate. The explicit `--agent gemini` target is
-retained for those hosts. It does not stand for Antigravity, and a binary starting does
-not prove its account can run a model.
+ended free individual and Google AI Pro/Ultra Gemini CLI service on June 18, 2026, and
+Antigravity CLI is Google's CLI now. Setup no longer finds or offers Gemini CLI, and
+`--agent gemini` is refused with a message that names `--agent antigravity`; no file changes.
+A Gemini CLI install from an earlier release keeps reporting to the board.
 
 ## Verify the result
 

@@ -14,7 +14,7 @@ const safePath = value => {
   if (typeof value !== 'string' || !value || /[\0\r\n\\:]/.test(value) || isAbsolute(value) || value.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('invalid repository path')
   return value
 }
-const groupForTest = path => {
+export const groupForTest = path => {
   if (path === 'tests/ci-impact.test.mjs') return null
   if (/^tests\/browser\/[^/]+\.test\.mjs$/.test(path)) return 'browser'
   if (/^tests\/e2e\/[^/]+\.test\.mjs$/.test(path)) return 'journeys'
@@ -68,6 +68,11 @@ export const makePlan = (files, options = {}) => {
       select('generated', path)
       known = true
     }
+    // The plugin step's own runner: a change to it must run the plugin job (the walk only reaches its board test).
+    if (path === 'scripts/plugin-tests.mjs') {
+      select('plugin', path)
+      known = true
+    }
     const testGroup = groupForTest(path)
     if (testGroup) {
       select(testGroup, path)
@@ -87,7 +92,7 @@ export const makePlan = (files, options = {}) => {
       known = true
     }
     if (known) continue
-    if (/^(?:README(?:\.[\w-]+)?\.md|CHANGELOG\.md|LICENSE|CODE_OF_CONDUCT\.md|SECURITY\.md)$/.test(path) || /^(?:docs|changelog\.d)\/.*\.(?:md|svg|png|jpg|webp|gif)$/.test(path)) continue
+    if (/^(?:README(?:\.[\w-]+)?\.md|CHANGELOG\.md|LICENSE|CODE_OF_CONDUCT\.md|SECURITY\.md|greptile\.json)$/.test(path) || /^(?:docs|changelog\.d)\/.*\.(?:md|svg|png|jpg|webp|gif)$/.test(path)) continue
     full = true
     reasons.push({ group: 'full', path, reason: 'unclassified path' })
   }
@@ -99,7 +104,7 @@ export const makePlan = (files, options = {}) => {
   // its modules) and its line-ending policy at run time, under the Claude Code version test.yml pins, and a
   // Windows-only load failure (a CRLF bundle, #589) passed on Ubuntu twice. Test files and docs that only select the
   // plugin group stay on Ubuntu, and a hooks/ file the plugin does not load selects no plugin check at all.
-  const reachesPluginRuntime = files.some(path => path.startsWith('hooks/') || path.startsWith('.claude-plugin/') || path === 'package.json' || path === '.gitattributes' || path === '.github/workflows/test.yml' || options.pluginRuntime?.has(path))
+  const reachesPluginRuntime = files.some(path => path.startsWith('hooks/') || path.startsWith('.claude-plugin/') || path === 'package.json' || path === '.gitattributes' || path === '.github/workflows/test.yml' || path === 'scripts/plugin-tests.mjs' || options.pluginRuntime?.has(path))
   if (checks.installers && (full || !installers.size || files.some(path => options.deps?.installers?.has(path) && !/^(?:scripts\/setup|tests\/setup\.check)\.(?:sh|ps1)$/.test(path)))) {
     for (const system of systems) installers.add(system)
   }
@@ -127,8 +132,8 @@ export const checkResults = (plan, results) => {
   return { ok: errors.length === 0, errors }
 }
 
-// The time check (#902 step 4): a board part that takes longer than its budget, or one of its files
-// longer than its own budget, fails the plan check and names the slow files. The file budgets come
+// The time check (#902 step 4): a board part over its budget fails the check. A file over 70% of
+// its budget fails a pull request and is reported on other events (#1323). The file budgets come
 // from step 1's Windows board job logs (run 41985005370, main 63c29bb, then four parts): a file's total
 // there is summed across the eight board jobs, so one job's share is the total / 8 for a self-parted file (a quarter
 // of its tests in every job) and / 2 for a file that runs in one part per Node version. Each budget
@@ -136,16 +141,31 @@ export const checkResults = (plan, results) => {
 // board files step 1 never measured (added since) and keeps a small file from tripping on runner
 // jitter — the slowest unmeasured file, mcp-tools, took 12.6 s on a Linux VM. Step 1 predates #957's
 // speedups, so the budgets are upper bounds for the four files it touched, not tight fits.
+// Re-derived (#1364): a budget of 1.5x one run puts its 70% line at 1.05x that run, while the same file on the
+// same code varies far more between Windows runs (legacy-connect 105.6-148.0 s, prompt-hooks 29.1-46.2 s in the
+// six test runs after #1361), so pull requests failed on runner speed alone. Every file whose slowest Windows
+// Node 24 time in those runs, x 1.3, was over its 70% line now has budget = that slowest time x 1.3 / 0.7,
+// rounded up to five seconds (board and codex-local: one part's share): it fails a pull request only when it
+// runs 30% slower than its slowest recent run. page-regressions (6.5 s at most) keeps its old budget.
 export const BOARD_FILE_BUDGETS_MS = Object.freeze({
-  'tests/codex-local.test.mjs': 170_000,
-  'tests/board.test.mjs': 140_000,
-  'tests/legacy-connect.test.mjs': 185_000,
+  'tests/codex-local.test.mjs': 225_000, // slowest 120.4 s
+  'tests/board.test.mjs': 200_000, // slowest 105.5 s
+  'tests/legacy-connect.test.mjs': 275_000, // slowest 148.0 s
   'tests/page-regressions.test.mjs': 90_000,
-  'tests/codex-fallback.test.mjs': 80_000,
-  'tests/prompt-hooks.test.mjs': 65_000,
-  // Grew past the floor with #1162's terminal setup tests: 45.3 s and 52.3 s in the two Windows
-  // runs of main a89f4199 (run 42472161465, Node 22 and 24), x 1.5 and rounded up (#1159).
-  'tests/setup-guidance.test.mjs': 80_000,
+  'tests/codex-fallback.test.mjs': 115_000, // slowest 60.0 s
+  'tests/prompt-hooks.test.mjs': 90_000, // slowest 46.2 s
+  // Grew past the floor with #1162's terminal setup tests (#1159); slowest 52.6 s after #1361.
+  'tests/setup-guidance.test.mjs': 100_000,
+  'tests/host-upgrade.test.mjs': 80_000, // slowest 42.6 s
+  'tests/setup-terminal.test.mjs': 70_000, // slowest 36.0 s
+  // Grew with #1339's lock tests (several wait out the 2 s bounded lock wait): 43.4 s on Windows Node 24 (run 43190652904).
+  'tests/settings-symlink.test.mjs': 85_000, // slowest 43.4 s
+  // New with #1366 and self-parted since its round 18, so this is one part's share. The whole file took 164.0 s on
+  // Windows Node 24 (run 43644841624); dealt out six ways by its tests' times there, R33 one test per call, the largest
+  // share is 40.6 s, about 44 s with the file's start. An estimate until a parted run is timed: 44 x 1.3 / 0.7.
+  'tests/opencode-receiver.test.mjs': 85_000, // one part's share, about 44 s
+  // New with #1438 (merge-check runs git in temporary repositories): 46.1 and 46.4 s on Windows Node 24 (#1464).
+  'tests/merge-check.test.mjs': 90_000, // slowest 46.4 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
@@ -158,20 +178,26 @@ export const BOARD_PART_BUDGET_MS = 480_000
 
 const seconds = ms => (ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)
 
-export const checkBoardTimes = timings => {
+export const checkBoardTimes = (timings, { isPullRequest = true } = {}) => {
   const errors = []
-  if (!timings || typeof timings !== 'object' || !Array.isArray(timings.files) || typeof timings.totalMs !== 'number') return { ok: false, errors: ['missing or invalid board timings'] }
+  const warnings = []
+  if (!timings || typeof timings !== 'object' || !Array.isArray(timings.files) || typeof timings.totalMs !== 'number') return { ok: false, errors: ['missing or invalid board timings'], warnings }
   const boardFiles = timings.files.filter(file => groupForTest(file.path) === 'board')
   const timed = boardFiles.filter(file => typeof file.ms === 'number')
   for (const file of timed) {
     const budget = BOARD_FILE_BUDGETS_MS[file.path] ?? BOARD_FILE_BUDGET_DEFAULT_MS
-    if (file.ms > budget) errors.push(file.path + ' took ' + seconds(file.ms) + 's, over its ' + seconds(budget) + 's budget')
+    const limit = budget * 7 / 10
+    if (file.ms > limit) {
+      const message = file.path + ' took ' + seconds(file.ms) + 's, over 70% of its ' + seconds(budget) + 's budget (' + seconds(limit) + 's)'
+      if (isPullRequest) errors.push(message)
+      else warnings.push(message)
+    }
   }
   if (boardFiles.length && timings.totalMs > BOARD_PART_BUDGET_MS) {
     const slowest = [...timed].sort((a, b) => b.ms - a.ms).slice(0, 5)
     errors.push('board part ' + (timings.part || '1/1') + ' took ' + seconds(timings.totalMs) + 's, over its ' + seconds(BOARD_PART_BUDGET_MS) + 's budget' + (slowest.length ? '; slowest files: ' + slowest.map(file => file.path + ' ' + seconds(file.ms) + 's').join(', ') : ''))
   }
-  return { ok: errors.length === 0, errors }
+  return { ok: errors.length === 0, errors, warnings }
 }
 
 // Where one run leaves its per-file times for the time check step below: the runner's temp folder
@@ -367,8 +393,10 @@ const parsePart = part => {
 }
 
 // The files that split their own tests with partTest: on Windows codex-local took about 8 minutes and
-// board about 5, each far longer than any other file (#899).
-export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs']
+// board about 5, each far longer than any other file (#899). messaging joined when the Windows exchange
+// job used 75-80% of its 10 minutes (#1445). opencode-receiver joined when its fault matrix took it to 157.7 and
+// 164.0 s, and the Windows board part that held it to 448.6 s of its 480 s (#1366, runs 43641832826, 43644841624).
+export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
 
 export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
   const { index, total } = parsePart(part)
@@ -458,11 +486,32 @@ const main = async () => {
       }
       throw error
     }
-    const result = checkBoardTimes(timings)
+    const result = checkBoardTimes(timings, { isPullRequest: process.env.GITHUB_EVENT_NAME === 'pull_request' })
     const slowest = (timings.files ?? []).filter(file => typeof file.ms === 'number').sort((a, b) => b.ms - a.ms).slice(0, 3)
     console.log('board part ' + (timings.part || '1/1') + ': total ' + seconds(timings.totalMs) + 's of ' + seconds(BOARD_PART_BUDGET_MS) + 's budget' + (slowest.length ? '; slowest files: ' + slowest.map(file => file.path + ' ' + seconds(file.ms) + 's').join(', ') : '; per-file times are recorded on serial runs only'))
     for (const error of result.errors) console.log('time budget: ' + error)
+    for (const warning of result.warnings) console.log('time budget (reported only): ' + warning)
     if (!result.ok) process.exitCode = 1
+    return
+  }
+  if (process.argv[2] === 'summary') {
+    // One summary line: the time the run step recorded and its share of the job's limit in seconds (#1445).
+    const limitMs = Number(process.argv[3]) * 1000
+    if (!(limitMs > 0)) throw new Error('summary needs the job limit in seconds, such as 600')
+    // The line only reports: whatever the timings file holds, or a summary file that cannot be written,
+    // a job whose tests passed stays green, with a warning instead of the line.
+    let line = null
+    try {
+      const timings = readBoardTimings()
+      const totalMs = timings?.totalMs
+      if (typeof totalMs !== 'number' || !Number.isFinite(totalMs) || totalMs < 0) throw new Error('the test timings have no run time')
+      const part = typeof timings.part === 'string' && /^\d+\/\d+$/.test(timings.part) ? timings.part : '1/1'
+      line = 'part ' + part + ': tests ran ' + seconds(totalMs) + 's, ' + Math.round(totalMs / limitMs * 100) + '% of the ' + seconds(limitMs) + 's job limit'
+      console.log(line)
+      if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, '- ' + line + '\n')
+    } catch (error) {
+      console.log(error?.code === 'ENOENT' && line === null ? 'no test timings recorded; no summary line' : '::warning::no summary line: ' + String(error?.message ?? error).replace(/\s+/g, ' '))
+    }
     return
   }
   if (process.argv[2] === 'verify') {
@@ -471,7 +520,7 @@ const main = async () => {
     if (!result.ok) process.exitCode = 1
     return
   }
-  if (process.argv[2] !== 'plan') throw new Error('use plan, run, check or verify')
+  if (process.argv[2] !== 'plan') throw new Error('use plan, run, check, summary or verify')
   const roots = JSON.parse(process.env.CI_SOURCE_ROOTS)
   const files = process.env.CI_CHANGED_FILES ? JSON.parse(process.env.CI_CHANGED_FILES) : process.env.CI_FORCE_FULL === 'true' ? [] : gitPaths(roots.at(-1), process.env.CI_BASE_SHA, process.env.CI_HEAD_SHA)
   emitPlan(await buildPlan(files, { roots, forceFull: process.env.CI_FORCE_FULL === 'true' }))

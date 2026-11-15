@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
-import { address, deliveryText, messageId, senderLabel } from '../hooks/messaging'
+import { MCP_SURFACE, address, deliveryText, messageId, senderLabel } from '../hooks/messaging'
 import type { Message } from '../hooks/messaging'
 import type { Strings } from '../hooks/i18n'
 import { MCP_LEASE_MS, mcpRequest, rpcError, toolResult } from '../hooks/mcp-tools'
@@ -60,7 +60,7 @@ export const createMcpServer = (o: Options) => {
   // Two names for one folder are one workspace, as they are for a reporter's owner.
   const identity = folderIdentity(o.cwd)
   const folderDigest = identity?.folderCanonicalDigest ?? identity?.folderDigest
-  const binding = () => ({ agent, session, surface: 'mcp' })
+  const binding = () => ({ agent, session, surface: MCP_SURFACE })
   const renew = async (now: number) => {
     if (level === 'unbound' || isRevoked) return
     if (until <= now) {

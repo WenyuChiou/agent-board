@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import { registerHooks, createRequire } from 'node:module'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
@@ -65,8 +67,8 @@ test('deepseekLocalPlugin holds delivery when a root becomes busy during take an
     assert.fail(label)
   }
   const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, board)
-  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'watch', 'join']
-  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, watch, join)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'existsSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, existsSync, watch, join)
   const fake = (id, header = {}) => {
     const agent = { session: { header: { id, ...header } }, status: 'idle', received: [], followup(message) { agent.received.push(message); agent.status = 'running' } }
     return agent
@@ -138,8 +140,8 @@ test('deepseekLocalPlugin drops stashed message when dismissed while busy and do
     assert.fail(label)
   }
   const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, board)
-  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'watch', 'join']
-  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, watch, join)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'existsSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, existsSync, watch, join)
   const fake = (id, header = {}) => {
     const agent = { session: { header: { id, ...header } }, status: 'idle', received: [], followup(message) { agent.received.push(message); agent.status = 'running' } }
     return agent
@@ -175,5 +177,104 @@ test('deepseekLocalPlugin drops stashed message when dismissed while busy and do
   } finally {
     for (const child of children) if (!child.isClosed) child.kill()
     for (const end = Date.now() + 10_000; !settled() && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
+  }
+}))
+
+test('the DeepSeek receiver stops watching the board folder once it is removed, so its host is not kept busy', () => fixture(async f => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const directory = join(f.home, 'board-messages')
+  const board = join(f.home, 'board.mjs')
+  mkdirSync(directory)
+  f.save(board, `process.stdout.write(JSON.stringify({ watch: ${JSON.stringify(directory)}, message: null }))`)
+  const children = []
+  const watchers = []
+  const spawnMailbox = (...args) => {
+    const child = spawn(...args)
+    children.push(child)
+    child.on('close', () => { child.isClosed = true })
+    return child
+  }
+  const watchBoard = (...args) => {
+    const current = watch(...args)
+    current.on('close', () => { current.isClosed = true })
+    watchers.push(current)
+    return current
+  }
+  const until = async (check, label) => {
+    for (const end = Date.now() + 2000; Date.now() < end; await new Promise(done => setTimeout(done, 20))) if (check()) return
+    assert.fail(label)
+  }
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'hook.mjs'), join(f.home, 'progress.md'), f.home, board)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'existsSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, existsSync, watchBoard, join)
+  const root = { session: { header: { id: 'deepseek-removed-session' } }, status: 'idle', followup() {} }
+  const hooks = new Map()
+  apply({ on: (event, handler) => hooks.set(event, handler) })
+  try {
+    hooks.get('agent/created')({ agent: root })
+    await until(() => watchers.length === 1, 'the board folder was watched')
+    assert.notEqual(watchers[0].isClosed, true)
+    rmSync(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+    await until(() => watchers[0].isClosed === true, 'the watcher of the removed board folder was closed')
+  } finally {
+    hooks.get('agent/disposed')({ agent: root })
+    for (const current of watchers) current.close()
+    for (const child of children) if (!child.isClosed) child.kill()
+    for (const end = Date.now() + 2000; children.some(child => !child.isClosed) && Date.now() < end;) await new Promise(done => setTimeout(done, 20))
+  }
+}))
+
+test('a late DeepSeek watcher event or error cannot close its replacement', () => fixture(async f => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const first = join(f.home, 'first')
+  const second = join(f.home, 'second')
+  mkdirSync(first)
+  mkdirSync(second)
+  const watchers = []
+  let takes = 0
+  const spawnMailbox = (_node, args) => {
+    const child = new EventEmitter()
+    child.stdout = new PassThrough()
+    child.kill = () => {}
+    const directory = args[2] === 'take' && ++takes === 1 ? first : second
+    setImmediate(() => {
+      child.stdout.end(JSON.stringify({ watch: directory, message: null }))
+      child.emit('close', 0)
+    })
+    return child
+  }
+  const watchBoard = (_directory, _options, listener) => {
+    const current = new EventEmitter()
+    current.on('change', listener)
+    current.close = () => { current.isClosed = true }
+    watchers.push(current)
+    return current
+  }
+  const until = async (check, label) => {
+    for (const end = Date.now() + 2000; Date.now() < end; await new Promise(done => setTimeout(done, 20))) if (check()) return
+    assert.fail(label)
+  }
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'hook.mjs'), join(f.home, 'progress.md'), f.home, join(f.home, 'board.mjs'))
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'existsSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, existsSync, watchBoard, join)
+  const root = { session: { header: { id: 'deepseek-replacement-session' } }, status: 'idle', followup() {} }
+  const hooks = new Map()
+  apply({ on: (event, handler) => hooks.set(event, handler) })
+  try {
+    hooks.get('agent/created')({ agent: root })
+    await until(() => watchers.length === 1, 'the first folder was watched')
+    hooks.get('agent/status')({ agent: root, status: 'idle' })
+    await until(() => watchers.length === 2, 'the replacement folder was watched')
+    rmSync(first, { recursive: true, force: true })
+    watchers[0].emit('change', 'rename', 'first')
+    watchers[0].emit('error', new Error('late old watcher error'))
+    assert.notEqual(watchers[1].isClosed, true)
+    hooks.get('agent/status')({ agent: root, status: 'idle' })
+    await until(() => takes === 3, 'the replacement was checked again')
+    await new Promise(done => setImmediate(done))
+    assert.equal(watchers.length, 2)
+  } finally {
+    hooks.get('agent/disposed')({ agent: root })
+    await new Promise(done => setImmediate(done))
   }
 }))

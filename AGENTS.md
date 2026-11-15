@@ -128,6 +128,10 @@ If you cannot run `claude` in your environment, say so in your report. Do not cl
 For any reviewer of a pull request here, Codex review and Greptile included:
 
 - Mark a finding P0 or P1 only when it is wrong or broken behaviour, an error swallowed or reported as success, data lost from `progress.md`, its archive or a person's config, a leaked token, session id or home-folder path, an unmet requirement of the linked issue or a rule in [CONTRIBUTING.md](CONTRIBUTING.md#pull-requests), or a behaviour change with no test.
+- A P0 or P1 needs one event: one outside fault (a failed write, a crash, a lost connection) or one ordering of steps. A message lost, sent twice or started in a turn already running, and a security problem, are P0 or P1 however many events lead there. Any other case that needs two events at once is an `Edge` line (file and line, both events, the wrong result), for an issue of its own, never a P0 or P1. An outside fault during a second event, such as a failed write during a restart, is two events ([#1421](https://github.com/WenyuChiou/agent-board/issues/1421)).
+- A problem already on `main`, on a path the pull request does not add or change, is a `Pre-existing` line, never a P0 or P1. A failure reached through a path the pull request adds or changes is the pull request's own, in unchanged code too.
+- A linked issue's requirements count for a `Fixes #N` issue, and for a `Part of #N` issue only the points that line lists.
+- On a later push, review the earlier findings and what the push changed ([RULES R2](docs/dev/RULES.md#r2-nobody-approves-their-own-work)).
 - Everything else is a note: at most three lines, at the end of the review.
 - A user-visible string must be in all three tables: `hooks/i18n.ts`, `hooks/strings-en.ts` and `hooks/strings-zh-cn.ts`.
 - `hooks/board-script.ts`, `hooks/released.ts` and `tests/fixtures/released.ts` are generated: flag a hand edit, not their contents.

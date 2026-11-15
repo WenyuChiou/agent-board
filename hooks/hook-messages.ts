@@ -1,4 +1,4 @@
-import { address, claimMessages, disconnectMessages, messageReceipt } from './messaging'
+import { address, claimMessages, disconnectMessages, MAILBOX_LEASE_MS, messageReceipt } from './messaging'
 import type { Connection, Message, MessageState } from './messaging'
 import { sha256 } from './sha256'
 
@@ -33,12 +33,30 @@ export const takeMailboxMessage = (state: MessageState, agent: string, session: 
   return { state: claimed.state, message: claimed.messages[0] ?? null }
 }
 // A hook that stopped waiting never showed what the board claimed for it, so it hands the claim back
-// and the next turn has the message at once (#990). The ACK code stays, for a message shown before.
-export const releaseMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number): MessageState => {
+// and the message is queued again for a later hook (#990). The ACK code stays, for a message shown before.
+// A started OpenCode wake (marked by attemptMailboxMessage) is handed back only with isUnsent, which the plugin sets
+// when it knows the host was never called (#724); a plain release leaves it as it is. Only an active started wake goes back:
+// once it reads "sent, not confirmed" (after 30 minutes) it is the person's to copy, and the board never hands it out again,
+// so a hand resend cannot run twice (#1366 review).
+export const releaseMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number, isUnsent = false): MessageState => {
   const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && message.error === '')
-  if (one === undefined) return state
-  const { ref: _ref, ...kept } = one
-  return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, claimed: 0, updated: now } : message) }
+  if (one === undefined || one.attempted !== undefined && !isUnsent) return state
+  const { ref: _ref, attempted: _attempted, ...kept } = one
+  return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, error: '', claimed: 0, updated: now } : message) }
+}
+// The OpenCode plugin tells the board it is about to wake the session with the message it holds under ref. Only the
+// current claim can be marked; asking again with the same ref answers the same, and any other ref has lost the claim.
+export const attemptMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number): MessageState => {
+  const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref)
+  if (one === undefined) throw new Error('CLAIM_LOST')
+  // Answered again only while it is still an active started wake; a message dismissed or read "sent, not confirmed"
+  // since is offered to the person to copy, so a receiver that repeats its attempt must not wake it.
+  if (one.attempted !== undefined) {
+    if (one.status === 'uncertain' && one.error === '') return state
+    throw new Error('CLAIM_LOST')
+  }
+  if (one.status !== 'uncertain' || one.error !== '' || now - one.claimed >= MAILBOX_LEASE_MS) throw new Error('CLAIM_LOST')
+  return { ...state, messages: state.messages.map(message => message === one ? { ...one, attempted: now, updated: now } : message) }
 }
 export const acceptMailboxMessage = (state: MessageState, agent: string, session: string, id: string, nonce: string, now: number): MessageState => {
   const target = state.mailboxes?.find(one => one.id === mailboxId(agent, session))
@@ -48,9 +66,15 @@ export const acceptMailboxMessage = (state: MessageState, agent: string, session
 export const endMailbox = (state: MessageState, agent: string, session: string, now: number): MessageState => ({
   ...disconnectMessages(state, mailboxId(agent, session), now), mailboxes: state.mailboxes?.filter(one => one.id !== mailboxId(agent, session)),
 })
-export const deliveryTargets = (connections: readonly Connection[], mailboxes: readonly Connection[] = []): Connection[] => [
-  ...connections, ...mailboxes.filter(one => !connections.some(live => address(live.agent, live.session) === address(one.agent, one.session))),
-]
+// `shadows`: whether a live connection takes the place of its session's mailbox (only on a route its record shows, #318).
+// One that does not is left out while the mailbox is there, so the card keeps the mailbox's own route.
+export const deliveryTargets = (connections: readonly Connection[], mailboxes: readonly Connection[] = [], shadows: (live: Connection) => boolean = () => true): Connection[] => {
+  const isSame = (a: Connection, b: Connection): boolean => address(a.agent, a.session) === address(b.agent, b.session)
+  return [
+    ...connections.filter(live => shadows(live) || !mailboxes.some(one => isSame(one, live))),
+    ...mailboxes.filter(one => !connections.some(live => isSame(live, one) && shadows(live))),
+  ]
+}
 export const isTurnStart = (agent: string, event: string): boolean => ({
   codex: ['SessionStart', 'UserPromptSubmit'], antigravity: ['SessionStart', 'PreInvocation'],
   gemini: ['SessionStart', 'BeforeAgent'], muse: ['UserPromptSubmit'], cursor: ['sessionStart'],

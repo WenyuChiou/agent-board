@@ -35,6 +35,7 @@ Owner, 2026-11-03: 「AI還能夠從agent-board了解其他AI的session的進度
 
 - **Reading and sending:** any agent can read the other sessions' progress whenever it needs to, and can send to them through the board. Muse or dot can hand work to a local session the same way (#869, #317, #866).
 - **What an agent may not do:** it never approves tool use (owner, 2026-11-03).
+- **What the person can do from the board:** Allow once or Deny a Claude Code tool request that waits, with an optional reason the agent reads, on the page the board opened on this computer. Never "always" and never "for this session". The page on the network says only that an approval waits, and an agent's own board tools offer no approve action (#1318).
 - **Planned with it (#869, #317):** a message from an agent shows as from that agent, not from the person. What another agent wrote reaches a model as quoted data, never as an instruction.
 - **Cloud agents:** a cloud agent sees only the rows that the person marked as shared, and those rows are redacted. Connecting one never asks the person to open an account they do not already have (#209, row C).
 

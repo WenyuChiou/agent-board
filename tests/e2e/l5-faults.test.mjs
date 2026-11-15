@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { EN } from '../../hooks/strings-en.ts'
+import { SURFACE_IDS } from '../../hooks/messaging.ts'
 import { STALE_MS } from '../../hooks/parse.ts'
 import { makeWorld } from './lib/world.mjs'
 import { observeHookRecovery } from './lib/recovery-observation.mjs'
@@ -201,7 +202,8 @@ test('L5 hub killed mid-delivery: the restarted --serve recovers the stale lock,
       const answer = await server.post(`/api/messages/${action}`, body)
       return { status: answer.status, body: answer.json() }
     }
-    const receiver = { agent: 'codex', session: '00000001-2222-4333-8444-555555555555', surface: 'Synthetic receiver', turn: 'turn-1' }
+    const receiver = { agent: 'codex', session: '00000001-2222-4333-8444-555555555555', surface: SURFACE_IDS.codexProxy, turn: 'turn-1' }
+    block(world, { agent: receiver.agent, session: 'a1000001', resume: receiver.session, dir: world.root, title: 'Task', steps: ['- [~] Continue'] })
     const first = await serve.start(world, ['--messages-dir', messages])
     const before = (await call(first, 'register', receiver)).body
     assert.equal(before.contested, false)
@@ -218,7 +220,7 @@ test('L5 hub killed mid-delivery: the restarted --serve recovers the stale lock,
     // Transport acceptance before the kill
     const accepted = await call(first, 'receipt', { connection: before.id, secret: before.secret, id, nonce, status: 'accepted' })
     assert.equal(accepted.status, 200, JSON.stringify(accepted.body))
-    world.write('progress.md', `## Synthetic\n<!-- auto session=${receiver.session} agent=${receiver.agent} state=waiting updated=${new Date().toISOString()} -->\n### Task\n- [?] Continue, OK?\n<!-- /auto session=${receiver.session} -->\n`)
+    block(world, { agent: receiver.agent, session: 'a1000001', resume: receiver.session, dir: world.root, state: 'waiting', title: 'Task', steps: ['- [?] Continue, OK?'] })
 
     // The hub dies before its receiver has answered; it cannot remove its lock.
     assert.equal(await killServe(first), true, 'The first hub was not ended')

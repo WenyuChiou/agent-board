@@ -19,6 +19,7 @@ import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
 import { pickSurface, AGENT_ENV_VARS, sshTargetOf, pagePortOf } from '../hooks/surface.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+import { replaceEntryCall } from './page-reader-fixture.mjs'
 import { boardRun, geminiBoardCommand, normalizeCommandPath, opencodeBoardCommand } from '../hooks/board-commands.ts'
 import { RELEASED } from '../hooks/released.ts'
 import { makeFolderCommand, moveFileCommand } from '../hooks/old-months-run.ts'
@@ -617,25 +618,24 @@ test('the board script prints the board from the file it was written for, in its
   assert.ok(run('en', ['--lang', 'zh-CN']).startsWith('进度'))
 })
 
-test('a --serve whose server cannot start says so without mentioning a page', () => {
-  const lines = {
-    en: "Couldn't open the board page: its server did not start.",
-    'zh-TW': '開不了看板網頁：伺服器沒有啟動。',
-    'zh-CN': '打不开看板网页：服务器没有启动。',
-  }
-  for (const [lang, line] of Object.entries(lines)) {
-    let text = ''
-    try {
-      run(lang, ['--serve', '--no-open', '--port', '65536'])
-      assert.fail('a --serve that started no page exits non-zero (#1292)')
-    } catch (error) {
-      if (error.code === 'ERR_ASSERTION') throw error
-      assert.equal(error.status, 1, 'a --serve that started no page exits 1 (#1292)')
-      text = error.stdout
+test('a --serve with an invalid --port says why and what to try without mentioning a page (#1295)', () => {
+  const strings = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }
+  for (const [lang, locale] of Object.entries(strings)) {
+    for (const bad of ['65536', '0', 'abc', undefined]) {
+      const cliArgs = bad === undefined ? ['--serve', '--no-open', '--port'] : ['--serve', '--no-open', '--port', bad]
+      let text = ''
+      try {
+        run(lang, cliArgs)
+        assert.fail('a --serve that started no page exits non-zero (#1292)')
+      } catch (error) {
+        if (error.code === 'ERR_ASSERTION') throw error
+        assert.equal(error.status, 1, 'a --serve that started no page exits 1 (#1292)')
+        text = error.stdout
+      }
+      assert.equal(text.trim().split('\n').at(-1), locale.serveFailed(locale.serveInvalidPort(bad ?? '')))
+      assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
+      assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
     }
-    assert.equal(text.trim().split('\n').at(-1), line)
-    assert.ok(!text.includes('--serve'), 'startup failure gives no instructions for an existing page')
-    assert.ok(!text.includes('http://127.0.0.1:'), 'no page address was created')
   }
 })
 
@@ -1555,7 +1555,7 @@ syncBuiltinESMExports()`)
       const out = play(fault)
       const said = out.stdout + out.stderr
       assert.equal(out.status, 1, said)
-      assert.ok(said.includes('progress-answered.json') && said.includes(code === 'EACCES' ? EN.storageReadOnly : EN.storageUnknown) && !said.includes(list), said)
+      assert.ok(said.includes('progress-answered.json') && said.includes(code === 'EACCES' ? EN.storageUnreadable : EN.storageUnknown) && !said.includes(list), said)
       assert.ok(!said.includes('Hidden:'), said)
       // The board is drawn after the press, with the question still on it.
       assert.ok(out.stdout.includes('Per-key limit'), said)
@@ -2129,16 +2129,37 @@ test('archiving a block while its captures are still pending writes the archived
     }
   } })
   const { parseCapture } = await import('../hooks/questions.ts')
-  const board = await page()
+  const board = await page('', {}, [], undefined, `
+import { existsSync as isCaptureFlushHeld, readdirSync as captureFlushFiles } from 'node:fs'
+import { dirname as captureFlushDirectory } from 'node:path'
+const captureImmediate = globalThis.setImmediate
+globalThis.setImmediate = (callback, ...args) => captureImmediate(() => {
+  const path = globalThis.AGENT_BOARD.path
+  const isHeld = () => isCaptureFlushHeld(path + '.hold-captures')
+  const count = captureFlushFiles(captureFlushDirectory(path)).filter(name => name.includes('-questions-source-') && name.endsWith('.json')).length
+  if (!isHeld() || count < 390) return callback(...args)
+  const timer = setInterval(() => {
+    if (isHeld()) return
+    clearInterval(timer)
+    callback(...args)
+  }, 10)
+})
+${BOARD_SCRIPT}`, (_dir, path) => writeFileSync(path + '.hold-captures', ''))
   try {
     const source = bigBoard(460)
     writeFileSync(board.path, source)
     const model = (await board.call('GET', '/api/board')).json().model
-    const row = [...model.stopped, ...model.groups.flatMap(group => group.rows)].find(one => one.canArchive === true)
+    const row = [...model.stopped, ...model.groups.flatMap(group => group.rows)].filter(one => one.canArchive === true).at(-1)
     assert.ok(row !== undefined, 'the big board must have an archivable row')
+    for (let tries = 0; tries < 1200; tries++) {
+      if (readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json')).length >= 390) break
+      await delay(25)
+    }
+    const beforeAct = readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json')).length
+    assert.ok(beforeAct >= 390 && beforeAct < 400, `the background flush must pause with the last stopped block's captures still pending, got ${beforeAct}`)
     // The first view queued the captures; the archive press must drain them
     // synchronously before taking the block (R3), so all 500 are on disk the
-    // moment the press returns.
+    // moment the press returns even while the background continuation is held.
     const reply = await board.call('POST', '/api/act', { body: { key: row.key, type: 'archive', text: '', session: '', fp: row.fp } })
     assert.equal(reply.status, 200, reply.body)
     const names = readdirSync(board.dir).filter(name => name.includes('-questions-source-') && name.endsWith('.json'))
@@ -2164,7 +2185,10 @@ test('archiving a block while its captures are still pending writes the archived
       const hash = name.match(/([a-f0-9]{64})\.json$/)?.[1]
       assert.ok(hash !== undefined && parseCapture(text, hash) !== null, name)
     }
-  } finally { await board.close() }
+  } finally {
+    rmSync(board.path + '.hold-captures', { force: true })
+    await board.close()
+  }
 })
 
 // #921 T6: killing the page mid-flush and restarting it re-queues the missing
@@ -2262,7 +2286,7 @@ test('a view that resolves a question writes its resolved capture synchronously,
   const source = `# Progress\n\n## Synthetic\n<!-- auto session=a1b2c3d4 agent=codex state=waiting updated=${ago(60000)} resume=a1b2c3d4 -->\n### Answer this\n- [?] Ship it, OK?\n<!-- /auto session=a1b2c3d4 -->\n`
   writeFileSync(path, source)
   const script = join(dir, 'worker.mjs')
-  const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  const skipped = replaceEntryCall(BOARD_SCRIPT)
   assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${skipped}\nexport { view, path };\n`)
   const previousArgs = process.argv
@@ -2320,7 +2344,7 @@ const flushWorker = async (source) => {
   const path = join(dir, 'progress.md')
   writeFileSync(path, source)
   const script = join(dir, 'worker.mjs')
-  const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+  const skipped = replaceEntryCall(BOARD_SCRIPT)
   assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
   writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${skipped}\nexport { view, path, flushQuestionCaptures, pendingQuestionCaptures };\n`)
   const previousArgs = process.argv
@@ -3410,7 +3434,7 @@ syncBuiltinESMExports()
   try {
     const seen = await board.call('GET', '/api/board')
     assert.equal(seen.status, 409, seen.body)
-    assert.match(seen.json().note, /^Couldn't safely read or update .*-journal-.*\(it is read-only or locked\)/)
+    assert.match(seen.json().note, /^Couldn't safely read or update .*-journal-.*\(it cannot be read\)/)
     // The page says that note, and "offline" only when the board sent none.
     const home = await board.call('GET', `/?t=${board.token}`, { headers: { 'x-board-token': '' } })
     const dom = await pageDom(home.body, null, { getBoard: async () => ({ ok: false, json: async () => seen.json() }) })
@@ -3424,7 +3448,7 @@ syncBuiltinESMExports()
       const lan = new URL(opened.json().url)
       const far = await fetchAt(lan.hostname, Number(lan.port), 'GET', '/api/board', { 'x-board-token': lan.searchParams.get('t') })
       assert.equal(far.status, 409, far.body)
-      assert.match(far.json().note, /^Couldn't safely read or update progress-journal-\d{4}-\d{2}\.md \(it is read-only or locked\)/)
+      assert.match(far.json().note, /^Couldn't safely read or update “progress-journal-\d{4}-\d{2}\.md” \(it cannot be read\)/)
       assert.ok(!far.json().note.includes(board.dir), far.json().note)
     }
   } finally {
@@ -3707,7 +3731,8 @@ const viewed = model => {
     recent,
     view: {
       now: 0, n: cards.length, questions: cards.length, stuck: 0, versions: { board: '0.0.0', package: null }, agents,
-      needs: { n: cards.length, questions: cards.length, stuck: 0, cards, older: older.map(one => one.ref) },
+      // The server lists the cards whose answer is on its way (sent, or queued) and not refused or timed out (#1296).
+      needs: { n: cards.length, questions: cards.length, stuck: 0, cards, older: older.map(one => one.ref), handled: asks.filter(one => one.item.isSending === true && !(one.item.receipt && (one.item.receipt.status === 'rejected' || one.item.receipt.status === 'uncertain' && one.item.receipt.hasAccepted !== true && /TIMEOUT/.test(one.item.receipt.error || '')))).map(one => one.ref.key) },
       working: [], all: { ...all, isHidden: agents.length < 2 }, own, projects: [],
     },
   }
@@ -3720,7 +3745,7 @@ const viewed = model => {
 // The stub now reads every static button with its attributes (#1163). The bulk tidy's confirm and
 // cancel start disabled and wait for a preview, online or not, so the offline checks leave them out.
 const WAITS_FOR_PREVIEW = ['tidy-confirm', 'tidy-cancel']
-const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now, notification, sessionStore, onReload, onFocus } = {}) => {
+const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = false, currentModel, currentBoard, getBoard, clipboard = false, readClipboard, width, storage, motion, now, notification, sessionStore, onReload, onFocus, hash = '' } = {}) => {
   const nodes = new Map()
   class Element {
     constructor(tag) {
@@ -3805,7 +3830,10 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     }
     blur() { if (document.activeElement === this) document.activeElement = null }
     scrollIntoView() { this.scrolled = true }
-    setSelectionRange() {}
+    setSelectionRange(start, end) {
+      this.selectionStart = start
+      this.selectionEnd = end
+    }
     select() { this.isSelected = true }
     cloneNode() {
       const copy = new Element(this.tag)
@@ -3905,7 +3933,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(found => found[1]).find(code => code.includes('(function ()'))
   runInNewContext(script, {
     document,
-    location: { search: '?t=x' },
+    location: { search: '?t=x', pathname: '/', hash },
     URLSearchParams,
     navigator: clipboard ? { clipboard: { writeText: async text => { copied.push(text) }, ...(readClipboard ? { readText: readClipboard } : {}) } } : {},
     window: win,
@@ -3967,18 +3995,26 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       return prevented
     },
     key: event => {
-      document.events.keydown?.(event)
+      const originalPrevent = event.preventDefault
+      const dispatched = {
+        ...event,
+        defaultPrevented: Boolean(event.defaultPrevented),
+        preventDefault() { this.defaultPrevented = true; originalPrevent?.call(this) },
+      }
+      document.events.keydown?.(dispatched)
       if (['Enter', ' '].includes(event.key) && document.activeElement?.tag === 'button') document.activeElement.click()
     },
+    body: document.body,
     active: () => document.activeElement,
     title: () => document.title,
     delays,
     get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
-    leave: () => windowEvents.pagehide?.(),
+    leave: event => windowEvents.pagehide?.(event),
     restore: persisted => windowEvents.pageshow?.({ persisted }),
     sent,
     setNow: value => { clockNow = value },
+    pointer: (name, event) => document.events[name]?.(event),
     hideTab: () => { document.hidden = true; document.events.visibilitychange?.() },
     showTab: () => { document.hidden = false; document.events.visibilitychange?.() },
     flush,
@@ -4236,7 +4272,7 @@ const pressRuntime = async () => {
   const inside = file => typeof file === 'string' && resolve(file).startsWith(resolve(root) + sep)
   const write = (file, text) => { originalWrite(file, text); utimesSync(file, PRESS_NOW / 1000, PRESS_NOW / 1000) }
   try {
-    const skipped = BOARD_SCRIPT.replace(/await \w+\(\);(?=\s*\}\s*catch \(error\))/, '')
+    const skipped = replaceEntryCall(BOARD_SCRIPT)
     assert.notEqual(skipped, BOARD_SCRIPT, 'the generated entry point must be disabled before import')
     const old = PRESS_NOW - 10 * 86400000
     const header = `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\nconst fixtureClock = { now: ${old} };\nconst Date = class extends globalThis.Date { constructor(...args) { super(...(args.length ? args : [fixtureClock.now])); } static now() { return fixtureClock.now; } };\n`
@@ -4551,8 +4587,8 @@ test('every serve page action on every card kind from every agent answers with a
             return { ok: false, json: async () => ({ note: serverNote }) }
           } finally { fixture.disable(); refreshed = runtime.serveModel(runtime.view(), runtime.pending(), runtime.s) }
         } })
-        // The line after a copy (Copy again, Answered) only exists once something was copied; it is not an offered action.
-        const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain, runtime.s.pgAnswered]
+        // Copy again lives inside .state and only appears once something was copied; it is not an offered action.
+        const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain]
         const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent)).flatMap(button =>
           button.className === 'answer-send'
             ? pressWalk(pageCard(button)).filter(node => node.className === 'choice').map(choice => ({ button, choice }))
@@ -4601,7 +4637,7 @@ test('every serve page action on every card kind from every agent answers with a
       }
       if (projected.expected === 0) {
         const dom = await pageDom(html, projected.model)
-        assert.equal(dom.buttons().filter(button => ![runtime.s.pgCopyAgain, runtime.s.pgAnswered].includes(button.textContent)).length, 0, `${cell.title}: the retained shelf is explicitly read-only`)
+        assert.equal(dom.buttons().filter(button => ![runtime.s.pgCopyAgain].includes(button.textContent)).length, 0, `${cell.title}: the retained shelf is explicitly read-only`)
       }
     }
     assert.deepEqual([...seen].sort(), PRESS_CELLS.map(cell => cell.title).sort())
@@ -4831,7 +4867,7 @@ test('the board script prints an unexpected error instead of exiting silently', 
     const path = join(dir, 'progress.md')
     const script = join(dir, 'agent-board.mjs')
     writeFileSync(path, FILE)
-    const broken = BOARD_SCRIPT.replace(/(try\s*\{\s*)await \w+\(\);(?=\s*\}\s*catch \(error\))/, "$1throw new TypeError('synthetic unexpected failure');")
+    const broken = replaceEntryCall(BOARD_SCRIPT, "throw new TypeError('synthetic unexpected failure');")
     assert.notEqual(broken, BOARD_SCRIPT)
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path, lang: 'en' })}\n${broken}`)
     const ran = spawnSync(process.execPath, [script], { encoding: 'utf8', env: { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' } })
@@ -5091,7 +5127,7 @@ syncBuiltinESMExports()
     writeFileSync(flag, '')
     const read = await board.call('GET', '/api/board')
     assert.equal(read.status, 409, read.body)
-    assert.equal(read.json().note, EN.boardStorageFailed(EN.fileNamed(journal), EN.storageReadOnly))
+    assert.equal(read.json().note, EN.boardStorageFailed(EN.fileNamed(journal), EN.storageUnreadable))
     assert.ok(!read.json().note.includes(board.dir), read.body)
   } finally {
     await board.close()
@@ -5259,6 +5295,64 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   dom.restore(false)
   await dom.settle()
   assert.equal(polls.length, same)
+})
+
+test('a paired page restored from the back/forward cache drops its approval secret and ignores late moved replies from its earlier page id (#1436 review)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  const polls = []
+  let holdNextPoll = null
+  let moveRestored = false
+  const dom = await pageDom(html, null, {
+    width: 1000,
+    hash: '#k=synthetic-key',
+    getBoard: async options => {
+      polls.push(options.headers)
+      if (holdNextPoll !== null) {
+        const next = holdNextPoll
+        holdNextPoll = null
+        return await next
+      }
+      if (moveRestored) return { ok: true, json: async () => ({ moved: true }) }
+      return { ok: true, json: async () => ({ model: { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }, now: 1 }) }
+    },
+    post: async req => {
+      if (req.path === '/api/approvals/pair') return { ok: true, json: async () => ({ secret: 'sec-initial' }) }
+      return { ok: true, json: async () => ({}) }
+    },
+  })
+  await dom.settle()
+  const first = polls[0]['x-board-page']
+  assert.equal(polls[0]['x-board-approve'], 'sec-initial')
+
+  // An in-flight poll that left before pagehide and receives { moved: true } after pageshow must not close the restored page (#1436 review).
+  let releaseStale
+  holdNextPoll = new Promise(resolve => { releaseStale = resolve })
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+
+  dom.leave({ persisted: true })
+  await dom.flush()
+  assert.ok(dom.requests.some(r => r.path === '/api/page-gone'))
+
+  const before = polls.length
+  dom.restore(true)
+  await dom.flush()
+  releaseStale({ ok: true, json: async () => ({ moved: true }) })
+  await dom.settle()
+  assert.equal(dom.node('side').hidden, false)
+  assert.equal(dom.sent.some(s => s.path === '/api/approvals/restore'), false)
+  assert.ok(polls.length > before)
+  for (const poll of polls.slice(before)) {
+    assert.notEqual(poll['x-board-page'], first)
+    assert.equal(poll['x-board-approve'], undefined)
+  }
+
+  // A moved reply for the restored page id itself closes it.
+  moveRestored = true
+  await dom.redraw({ asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] })
+  assert.equal(dom.node('side').hidden, true)
 })
 
 test('a page the board says was replaced stops asking and shows one line (#265)', async () => {
@@ -5801,7 +5895,9 @@ const phaseLog = (budgetMs, more = () => []) => {
 
 // Cursor's shell has two extra inheritable pipes as well as stdout and stderr. `mark` takes one line
 // per event, so a failure says which pipe stayed open and when the others closed.
-const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = () => {}) => {
+// `signal` is the test's own abort signal: a command that never exits is ended with its whole process
+// tree when it fires, so the test runner's timeout does not leave the child and its pipes alive (#1439).
+const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = () => {}, signal) => {
   const found = spawnSync('where.exe', ['bash.exe'], { encoding: 'utf8', windowsHide: true })
   const bash = found.stdout.split(/\r?\n/).find(file => /[\\/]Git[\\/].*[\\/]bash\.exe$/i.test(file))
   assert.ok(bash, 'Git Bash is needed to reproduce Cursor on Windows')
@@ -5819,11 +5915,31 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
     child.once('exit', (code, signal) => { open.delete('bash exit'); mark(`bash exit code=${code} signal=${signal}`); done({ code, signal }) })
     child.once('error', fail)
   })
+  const closed = [end(child.stdout, 'stdout'), end(child.stderr, 'stderr'), end(child.stdio[3], 'fd3'), end(child.stdio[4], 'fd4')]
+  // A pipe that fails while the command is still running is reported below; this only stops it counting as unhandled first.
+  for (const pipe of closed) pipe.catch(() => {})
   let timer
+  let abort
+  const stopped = new Promise((_, fail) => {
+    abort = () => {
+      if (child.exitCode !== null || child.signalCode !== null) return
+      mark('test abort: ending the command')
+      if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+      else child.kill('SIGKILL')
+      fail(new Error("the Cursor shell command was stopped by the test's abort"))
+    }
+    if (signal?.aborted) abort()
+    else signal?.addEventListener('abort', abort, { once: true })
+  })
+  stopped.catch(() => {})
   try {
-    const [result] = await Promise.race([
-      Promise.all([exited, end(child.stdout, 'stdout'), end(child.stderr, 'stderr'), end(child.stdio[3], 'fd3'), end(child.stdio[4], 'fd4')]),
-      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
+    // The #1158 promise is that the pipes close once the command returns, so the 5 seconds count from
+    // that exit. How long the command itself takes is not this helper's to limit: the test's own limit
+    // and the phase log cover a command that hangs (#1439).
+    const result = await Promise.race([exited, stopped])
+    await Promise.race([
+      Promise.all(closed),
+      new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds after bash exit; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
     ])
     assert.equal(result.code, 0, stderr)
     return { stdout, stderr }
@@ -5834,6 +5950,7 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
     throw error
   } finally {
     clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
     if (child.exitCode === null && child.signalCode === null) child.kill()
     child.stdout.destroy()
     child.stderr.destroy()
@@ -5940,7 +6057,7 @@ const browserFixture = board => {
 
 // Runs `--html` the way Cursor does against the fixture's browsers, with the launcher log loaded into
 // the `--html` process; `pid` is the stand-in that stays running, or undefined. Every step is marked.
-const htmlThroughCursor = async (board, fixture, log) => {
+const htmlThroughCursor = async (board, fixture, log, signal) => {
   writeFileSync(fixture.preload, launchLogPreload(fixture.launchLog))
   writeFileSync(board.script, `import { writeFileSync as recordLauncherPid } from 'node:fs'\nif (process.argv.includes('--html')) recordLauncherPid(${JSON.stringify(fixture.launcher)}, String(process.pid))\n${readFileSync(board.script, 'utf8')}`)
   const served = await board.serve()
@@ -5961,7 +6078,7 @@ const htmlThroughCursor = async (board, fixture, log) => {
     await closeFixturePage(board)
     await delay(200)
   }
-  const result = await cursorShell(board, ['--html'], env, stop, log.mark)
+  const result = await cursorShell(board, ['--html'], env, stop, log.mark, signal)
   for (let tries = 0; !existsSync(fixture.marker) && tries < 20; tries++) await delay(100)
   if (existsSync(fixture.marker)) pid = Number(readFileSync(fixture.marker, 'utf8'))
   log.mark(`stand-in ${pid === undefined ? 'never started' : `${pid} started, ${processAlive(pid) ? 'alive' : 'gone'}`}`)
@@ -5969,7 +6086,13 @@ const htmlThroughCursor = async (board, fixture, log) => {
 }
 
 // What the `--html` process's launcher log holds so far, for the phase log.
-const launcherLines = fixture => existsSync(fixture.launchLog) ? readFileSync(fixture.launchLog, 'utf8').trim().split('\n').filter(Boolean).map(entry => entry.replace(' ', ' launcher: ')) : []
+const readLauncherLines = fixture => existsSync(fixture.launchLog) ? readFileSync(fixture.launchLog, 'utf8').trim().split('\n').filter(Boolean).map(entry => entry.replace(' ', ' launcher: ')) : []
+
+// A log that cannot be read (a failed disk read, a folder in its place) is noted, never thrown: the cleanup
+// that follows must run, and the body's own error must stay the one reported.
+const launcherLines = fixture => {
+  try { return readLauncherLines(fixture) } catch (error) { return [`${Date.now()} launcher log unreadable: ${error.code ?? error.message}`] }
+}
 
 // Stops the stand-in and the `--html` process the fixture may have left, then removes the fixture.
 const endBrowserFixture = async (board, fixture, log, pid) => {
@@ -5990,18 +6113,21 @@ const endBrowserFixture = async (board, fixture, log, pid) => {
 
 // Runs a browser-startup test body with the phase log; a failure, in the body or in the cleanup,
 // carries the whole log, and the cleanup never hides the body's error.
-const browserStartupTest = async body => {
+const browserStartupTest = async (body, signal) => {
   const board = serveIn()
   const fixture = browserFixture(board)
-  const log = phaseLog(23_000, () => launcherLines(fixture))
+  // The cleanup removes the fixture folder and the launcher log with it, so the lines are read first.
+  let launched
+  const log = phaseLog(23_000, () => launched ?? launcherLines(fixture))
   let pid
   let failure
   try {
-    pid = await body(board, fixture, log)
+    pid = await body(board, fixture, log, signal)
   } catch (error) {
     failure = error
   } finally {
     log.end()
+    launched = launcherLines(fixture)
     try { await endBrowserFixture(board, fixture, log, pid) } catch (error) { log.mark(`cleanup failed: ${error.message.split('\n')[0]}`); failure ??= error }
   }
   if (failure !== undefined) {
@@ -6010,14 +6136,101 @@ const browserStartupTest = async body => {
   }
 }
 
-test('Windows server startup releases Cursor pipes while its page stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
+test('Windows server startup releases Cursor pipes while its page stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
   const board = serveIn()
   try {
-    const result = await cursorShell(board, ['--serve', '--no-open'], {}, () => closeFixturePage(board))
+    const result = await cursorShell(board, ['--serve', '--no-open'], {}, () => closeFixturePage(board), () => {}, t.signal)
     assert.ok(board.urlOf(result.stdout), result.stdout)
     const server = JSON.parse(readFileSync(board.served, 'utf8'))
     assert.ok(processAlive(server.pid), 'the page must outlive the caller pipes')
   } finally { await board.end([]) }
+})
+
+// The helper times the #1158 promise (pipes close once the command returns), not the runner (#1439).
+// A stand-in for the board script is a tiny Node file, run the way Cursor runs the real one.
+const fakeBoard = (board, source) => {
+  const script = join(board.dir, 'fake-command.mjs')
+  writeFileSync(script, source)
+  return { ...board, script }
+}
+
+test('the Cursor shell helper accepts a command that runs longer than 5 seconds and then returns with its pipes closed', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
+  const board = serveIn()
+  try {
+    const marks = []
+    const result = await cursorShell(fakeBoard(board, "console.log('done'); setTimeout(() => process.exit(0), 5600)"), [], {}, async () => {}, line => marks.push(line), t.signal)
+    assert.equal(result.stdout.trim(), 'done')
+    assert.ok(marks.some(line => line.startsWith('bash exit code=0')), marks.join('\n'))
+  } finally { await board.end([]) }
+})
+
+test('the Cursor shell helper stops a command that never exits when its abort signal fires, ends the whole process and rejects at once', { skip: process.platform !== 'win32', timeout: 15_000 }, async () => {
+  const board = serveIn()
+  const pidFile = join(board.dir, 'hung.pid')
+  const controller = new AbortController()
+  let pid, run
+  try {
+    const began = performance.now()
+    const hung = `import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))
+setInterval(() => {}, 1000)`
+    run = cursorShell(fakeBoard(board, hung), [], {}, async () => {}, () => {}, controller.signal)
+    run.catch(() => {})
+    for (let tries = 0; !(existsSync(pidFile) && readFileSync(pidFile, 'utf8')) && tries < 80; tries++) await delay(100)
+    pid = Number(readFileSync(pidFile, 'utf8'))
+    assert.ok(pid > 0 && processAlive(pid), 'the stand-in command must be running before the abort')
+    controller.abort()
+    await assert.rejects(run, /stopped by the test's abort/)
+    for (let tries = 0; processAlive(pid) && tries < 30; tries++) await delay(100)
+    assert.ok(!processAlive(pid), 'the stand-in command must be gone after the abort')
+    assert.ok(performance.now() - began < 12_000, 'the abort must end the helper promptly')
+  } finally {
+    // Whatever failed above (a pid file that cannot be read, too), the stand-in is stopped and settled before the fixture goes.
+    controller.abort()
+    await run?.catch(() => {})
+    if (pid && processAlive(pid)) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true })
+    await board.end([])
+  }
+})
+
+test('the Cursor shell helper still fails, naming the pipe, when a command returns at once and a detached child holds fd3', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
+  const board = serveIn()
+  try {
+    const marks = []
+    const holder = "import { spawn } from 'node:child_process'\nspawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' }).unref()"
+    await assert.rejects(
+      () => cursorShell(fakeBoard(board, holder), [], {}, async () => {}, line => marks.push(line), t.signal),
+      // Windows lets the detached child inherit every inheritable handle, so fd3 is named among the open pipes and bash exit is not.
+      error => /did not all reach EOF in 5 seconds after bash exit; still open: [^;]*fd3[^;]*;/.test(error.message) && !error.message.includes('still open: bash exit') && !/still open: [^;]*bash exit/.test(error.message),
+    )
+    assert.ok(marks.some(line => line.includes('bash exit code=0')), `bash had already exited: ${marks.join('\n')}`)
+  } finally { await board.end([]) }
+})
+
+test('a browser startup failure keeps the launcher lines the launcher log held before the cleanup removed it', async () => {
+  const line = 'powershell 4242 started, stdio "ignore"'
+  await assert.rejects(
+    () => browserStartupTest(async (board, fixture) => {
+      writeFileSync(fixture.launchLog, `${Date.now()} ${line}\n`)
+      throw new Error('the body failed')
+    }),
+    error => error.message.startsWith('the body failed') && error.message.includes(' launcher: ') && error.message.includes(line),
+  )
+})
+
+test('a launcher log that cannot be read still lets the browser cleanup run and keeps the body error as the one reported', async () => {
+  let dir
+  try {
+    await assert.rejects(
+      () => browserStartupTest(async (board, fixture) => {
+        dir = board.dir
+        mkdirSync(fixture.launchLog)
+        throw new Error('the body failed')
+      }),
+      error => error.message.startsWith('the body failed') && error.message.includes('launcher log unreadable: EISDIR'),
+    )
+    assert.ok(!existsSync(dir), 'the cleanup must still remove the fixture folder')
+  } finally { if (dir) rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('on Windows the page address reaches the shell exactly as served, with no wildcard escaping', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
@@ -6025,9 +6238,10 @@ test('on Windows the page address reaches the shell exactly as served, with no w
   const opened = join(board.dir, 'opened.txt')
   const preload = join(board.dir, 'record-open.cjs')
   // The launcher's own PowerShell runs, so its escaping is the real one, but Start-Process is swapped
-  // for a function that only notes -FilePath: no window opens on the tester's screen.
+  // for a function that refuses the app-window browsers and notes the fallback -FilePath: no window
+  // opens on the tester's screen.
   const needle = 'Microsoft.PowerShell.Management\\Start-Process'
-  const recorder = `function Record-Start { param($FilePath, $ArgumentList, $WorkingDirectory, [switch]$PassThru, $WindowStyle) [IO.File]::AppendAllText('${opened}', $FilePath + [Environment]::NewLine) }; `
+  const recorder = `function Record-Start { param($FilePath, $ArgumentList, $WorkingDirectory, [switch]$PassThru, $WindowStyle) if ($ArgumentList) { throw 'no app browser' }; [IO.File]::AppendAllText('${opened}', $FilePath + [Environment]::NewLine) }; `
   writeFileSync(preload, `const cp = require('node:child_process')
 const spawn = cp.spawn
 cp.spawn = function (file, args, options) {
@@ -6047,7 +6261,12 @@ require('node:module').syncBuiltinESMExports()
     url = board.urlOf(out)
     assert.ok(url, out)
     for (let tries = 0; !existsSync(opened) && tries < 50; tries++) await delay(100)
-    assert.deepEqual(readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean), [url], 'the address must not gain backticks')
+    // The board opens its own page, with its one-time approval key after the # (D3, #1318), which it
+    // never prints: the address before the key is the one served, and nothing gains backticks.
+    const recorded = readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean)
+    assert.equal(recorded.length, 1, `one launch: ${JSON.stringify(recorded)}`)
+    assert.ok(recorded[0].startsWith(`${url}#k=`), `the address must not gain backticks: ${recorded[0]}`)
+    assert.match(recorded[0].slice(`${url}#k=`.length), /^[\w-]{32}$/, 'the key is the only addition')
   } finally {
     await board.end(url ? [url] : [])
   }
@@ -6077,27 +6296,27 @@ test('a Windows page starts from a folder whose name holds a curly apostrophe, b
   }
 })
 
-test('Windows browser startup releases Cursor pipes while the browser stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+test('Windows browser startup releases Cursor pipes while the browser stays running', { skip: process.platform !== 'win32', timeout: 25_000 }, t => browserStartupTest(async (board, fixture, log, signal) => {
   // The Edge slot holds a file that is not a program, so the launcher has to move on to Chrome.
   mkdirSync(resolve(fixture.edge, '..'), { recursive: true })
   writeFileSync(fixture.edge, 'synthetic invalid executable')
   compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
   log.mark('stand-in browser compiled')
-  const result = await htmlThroughCursor(board, fixture, log)
+  const result = await htmlThroughCursor(board, fixture, log, signal)
   assert.ok(board.urlOf(result.stdout), result.stdout)
   assert.match(result.stdout, /Opened Agent Board/, result.stdout)
   assert.ok(result.pid() !== undefined, `the stand-in browser must start: ${result.stdout} ${result.stderr}`)
   assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
   return result.pid()
-}))
+}, t.signal))
 
-test('a Windows browser that exits with an error at once gives way to the next browser, and Cursor pipes are still released', { skip: process.platform !== 'win32', timeout: 25_000 }, () => browserStartupTest(async (board, fixture, log) => {
+test('a Windows browser that exits with an error at once gives way to the next browser, and Cursor pipes are still released', { skip: process.platform !== 'win32', timeout: 25_000 }, t => browserStartupTest(async (board, fixture, log, signal) => {
   // Start-Process returns once the program exists, so a browser that exits with an error right
   // away (no display, no sandbox) would otherwise count as opened and the person would see nothing.
   compileStandIn(board, fixture.edge, FAILING_BROWSER)
   compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
   log.mark('stand-in browsers compiled')
-  const result = await htmlThroughCursor(board, fixture, log)
+  const result = await htmlThroughCursor(board, fixture, log, signal)
   assert.ok(board.urlOf(result.stdout), result.stdout)
   assert.match(result.stdout, /Opened Agent Board/, result.stdout)
   assert.ok(existsSync(fixture.failed), 'the failing Edge stand-in must have been tried first')
@@ -6105,7 +6324,7 @@ test('a Windows browser that exits with an error at once gives way to the next b
   assert.ok(result.pid() !== undefined, `the Chrome stand-in must start after Edge failed: ${result.stdout} ${result.stderr}`)
   assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
   return result.pid()
-}))
+}, t.signal))
 
 test('Windows page startup times out without leaving its child or ready files', { skip: process.platform !== 'win32', timeout: 25_000 }, async () => {
   const board = serveIn()
@@ -6130,6 +6349,32 @@ test('Windows page startup times out without leaving its child or ready files', 
     if (pid === undefined && existsSync(marker)) pid = Number(readFileSync(marker, 'utf8'))
     if (pid && processAlive(pid)) process.kill(pid)
     if (pid) for (let tries = 0; processAlive(pid) && tries < 50; tries++) await delay(100)
+    await board.end([])
+  }
+})
+test('a --serve on a busy --port says why and what to try in all languages (#1295)', { timeout: 25_000 }, async () => {
+  const strings = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }
+  const blocker = createNetServer()
+  await new Promise((done, fail) => {
+    blocker.once('error', fail)
+    blocker.listen(0, '127.0.0.1', done)
+  })
+  const busyPort = blocker.address().port
+  const board = serveIn()
+  try {
+    for (const [lang, locale] of Object.entries(strings)) {
+      const began = performance.now()
+      const { status, out } = await board.serveFailing(['--lang', lang, '--port', String(busyPort)])
+      const elapsed = performance.now() - began
+      assert.equal(status, 1, 'busy --port exits 1 (#1295)')
+      assert.ok(elapsed < 10_000, `busy --port must fail quickly without 20s retry (${elapsed}ms)`)
+      assert.equal(out.trim().split('\n').at(-1), locale.serveFailed(locale.servePortInUse(busyPort)))
+      assert.ok(!out.includes('--serve'), 'busy --port failure gives no instructions for an existing page')
+      assert.ok(!out.includes('http://127.0.0.1:'), 'no page address was created')
+      assert.ok(locale.servePortDenied(80).includes('--port'), 'permission denied message names a next step')
+    }
+  } finally {
+    await new Promise(done => blocker.close(() => done()))
     await board.end([])
   }
 })
@@ -6503,6 +6748,27 @@ require('node:module').syncBuiltinESMExports()
       assert.deepEqual(readdirSync(join(board.env.XDG_RUNTIME_DIR, 'agent-board')), [])
     }
   } finally { await board.end([]) }
+})
+
+test('a plain board command keeps a page started with --codex-send, and a plain stop ends it', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  let url = null
+  try {
+    // Steering a running turn is not part of this release (#1409): the flag is refused like any unknown one, and no page starts.
+    const steer = spawnSync(process.execPath, [board.script, '--serve', '--codex-send', '--codex-steer', '--no-open', '--quiet-board'], { env: board.env, encoding: 'utf8', timeout: 20_000 })
+    assert.equal(steer.status, 2, steer.stderr)
+    assert.equal(steer.stderr, `${EN.boardUnknownFlag('--codex-steer')}
+`)
+    assert.ok(!existsSync(board.served))
+    url = board.urlOf(await board.serve(['--quiet-board', '--codex-send']))
+    assert.ok(url)
+    const before = JSON.parse(readFileSync(board.served, 'utf8'))
+    // The command the README tells (and /agent-board) does not know the flag: it must not replace the page and end Send to Codex.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board'])), url)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).pid, before.pid, 'the page was not replaced')
+    const stopped = await new Promise((done, fail) => execFile(process.execPath, [board.script, 'stop'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+    assert.equal(stopped.trim(), EN.serveStopped)
+  } finally { await board.end([url]) }
 })
 
 test('the board command in a read-only sandbox reuses a running page\'s link', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
@@ -7825,7 +8091,10 @@ const timer = setInterval(() => {
   }
 }
 
-test('an answer key on the terminal board sends to a connected session through the open page and says what it sent; with the page closed it only copies', { timeout: 60_000 }, async () => {
+// The send path is tested on the recorded-routes table; the shipped table has no live note for these Codex routes.
+const ROUTES_ENV = { AGENT_BOARD_ROUTES: fileURLToPath(new URL('./helpers/recorded-routes.json', import.meta.url)) }
+
+test('an answer key on a route with no live record only copies, even with a connected session (#1351)', { timeout: 60_000 }, async () => {
   const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
   const board = await page(`
 ## Demo
@@ -7835,9 +8104,30 @@ test('an answer key on the terminal board sends to a connected session through t
 <!-- /auto session=e5f6a7b8 -->
 `, {}, ['--messages-dir', messages])
   const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  try {
+    await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })
+    const out = spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', 'y'], { env, encoding: 'utf8', timeout: 30_000 }).stdout
+    assert.ok(out.includes('copies the answer'), out)
+    assert.ok(!out.includes('You answered'), out)
+  } finally {
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('an answer key on the terminal board sends to a connected session through the open page and says what it sent; with the page closed it only copies', { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, ROUTES_ENV, ['--messages-dir', messages])
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
   const play = keys => spawnSync(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }).stdout
   try {
-    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })).json()
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
     const sent = play('y')
     assert.ok(sent.includes('You answered “Yes, go ahead”.'), sent)
     const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
@@ -7862,7 +8152,7 @@ test('an answer key the page refuses shows the page note, sends nothing and neve
 ### Ship the docs
 - [?] Publish them, OK?
 <!-- /auto session=e5f6a7b8 -->
-`, {}, ['--messages-dir', messages])
+`, ROUTES_ENV, ['--messages-dir', messages])
   // A page in front of the real one that refuses every press, as the page does for a line,
   // question or session that no longer matches.
   const front = createServer((req, res) => {
@@ -7883,7 +8173,7 @@ test('an answer key the page refuses shows the page note, sends nothing and neve
   // Not spawnSync: the page in front answers from this process.
   const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
   try {
-    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'Synthetic terminal', turn: 'turn1' } })).json()
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
     const refused = await play('y')
     assert.ok(refused.includes('Synthetic refusal from the page'), refused)
     assert.ok(!refused.includes('You answered'), refused)
@@ -10341,6 +10631,58 @@ test('reopening a board replaces an explicit resume opt-in when that flag is rem
   } finally { await board.end(urls) }
 })
 
+test('a replaced server tells an open tab the board moved instead of dropping offline, and closes once notified', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  try {
+    const first = board.urlOf(await board.serve([]))
+    assert.ok(first)
+    urls.push(first)
+    const firstAddress = new URL(first)
+    const pageHeaders = { 'x-board-token': firstAddress.searchParams.get('t'), 'x-board-page': 'tab-1', 'x-board-visible': '1' }
+    const polled = await fetchAt('127.0.0.1', Number(firstAddress.port), 'GET', '/api/board', pageHeaders)
+    assert.equal(polled.status, 200)
+    assert.ok(polled.json().model)
+
+    const second = board.urlOf(await board.serve(['--codex-send']))
+    assert.ok(second)
+    assert.notEqual(second, first)
+    urls.push(second)
+
+    const moved = await fetchAt('127.0.0.1', Number(firstAddress.port), 'GET', '/api/board', pageHeaders)
+    assert.equal(moved.status, 200)
+    assert.deepEqual(moved.json(), { moved: true })
+
+    // Once its open tab has been told `{ moved: true }`, the old server closes on its own.
+    let closedOwn = false
+    for (let tries = 0; tries < 30; tries++) {
+      try {
+        await fetchAt('127.0.0.1', Number(firstAddress.port), 'GET', '/api/ping', { 'x-board-token': firstAddress.searchParams.get('t') })
+        await delay(50)
+      } catch {
+        closedOwn = true
+        break
+      }
+    }
+    assert.ok(closedOwn, 'replaced server closes once its open tab has been notified')
+
+    const secondAddress = new URL(second)
+    const ping = await fetchAt('127.0.0.1', Number(secondAddress.port), 'GET', '/api/ping', { 'x-board-token': secondAddress.searchParams.get('t') })
+    assert.equal(ping.json().codexSend, true)
+
+    // When `--port` explicitly reuses the running port, replacement closes immediately without holding that port even with an open tab.
+    const secondHeaders = { 'x-board-token': secondAddress.searchParams.get('t'), 'x-board-page': 'tab-2', 'x-board-visible': '1' }
+    const secondPoll = await fetchAt('127.0.0.1', Number(secondAddress.port), 'GET', '/api/board', secondHeaders)
+    assert.equal(secondPoll.status, 200)
+    assert.ok(secondPoll.json().model)
+    const samePort = String(secondAddress.port)
+    const third = board.urlOf(await board.serve(['--port', samePort, '--allow-resume']))
+    assert.ok(third)
+    assert.equal(new URL(third).port, samePort)
+    urls.push(third)
+  } finally { await board.end(urls) }
+})
+
 const redesignPage = () => run('en', ['--chat'], {}, FILE, `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`)
 const themeScript = html => html.match(/<head>[\s\S]*?<script[^>]*>([\s\S]*?)<\/script>/)[1]
 const themeDom = (html, storage = new Map(), isBlocked = false, jar = { value: '' }, system = 'light') => {
@@ -10582,7 +10924,7 @@ test('a question card puts choices before its copy button and the hide button la
   const dom = await pageDom(await sourcePage(), cardsModel())
   const card = cardWithKey(dom, 'ask')
   // The answers come first; what More holds follows: the command, the link, the resume command, then Already answered, hide.
-  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(cardActionNodes(card).map(node => node.textContent), [EN.pgCopyChoice, EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
   const answers = card.childNodes.flatMap(node => pressWalk(node)).find(node => node.className === 'answers')
   assert.deepEqual(answers.childNodes[0].childNodes.slice(0, 2).map(node => node.textContent), ['Yes', 'No'])
   assert.equal(answers.childNodes.at(-1).getAttribute('aria-label'), EN.pgCopyChoice)
@@ -10602,7 +10944,7 @@ test('a card with more than three actions shows three and the rest behind More',
   const card = cardWithKey(dom, 'ask')
   const actions = cardActionNodes(card)
   // Three answers show; the command, the link, the resume command and Already answered, hide wait behind More.
-  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), ['↑'])
+  assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
   assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No', 'Maybe'])
   const more = cardMore(card)
   assert.equal(more.length, 1)
@@ -10678,7 +11020,7 @@ test('a card with nothing behind More shows no More button', async () => {
     const card = cardWithKey(dom, 'ask')
     // Already answered, hide alone still goes behind More.
     assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice').map(node => node.textContent), ['Yes', 'No'])
-    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
+    assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
     assert.equal(cardMore(card).length, canHide ? 1 : 0)
     assert.equal(cardActionNodes(card).length, canHide ? 2 : 1)
     const row = cardWithKey(dom, 'row')
@@ -10695,13 +11037,13 @@ test('a question with four answers shows three and keeps the fourth behind More'
   const card = cardWithKey(dom, 'ask')
   const visibleChoices = () => pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent)
   assert.deepEqual(visibleChoices(), ['A', 'B', 'C'])
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑'])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
   const more = cardMore(card)[0]
   assert.ok(more)
   more.click()
   assert.equal(more.getAttribute('aria-expanded'), 'true')
   assert.deepEqual(visibleChoices(), ['A', 'B', 'C', 'D'])
-  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), ['↑', EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice, EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
 })
 
 test('More opens and closes by keyboard and keeps its state across a refresh', async () => {
@@ -10977,6 +11319,18 @@ test('Working now says an agent waits on you or just stopped, and that no agent 
       if (label !== 'none') assert.ok(!working.includes(EN.pgNoWorking), `${label}: ${working}`)
     } finally { await board.close() }
   }
+})
+
+// Review of #1339 (codex_128, finding 10): with every question's answer on its way, Working now said that no agent did
+// anything in 30 minutes although another agent had stopped two minutes ago.
+test('Working now names the agent that just stopped when every question has its answer on the way', async () => {
+  const { board, model, html } = await groupedPage([quietAsking(), quietStopped()].join('\n'))
+  try {
+    model.view.needs.handled = model.view.needs.cards.map(card => card.key)
+    const working = sectionWords(await pageDom(html, model), 'working')
+    assert.ok(working.includes(EN.pgQuietStopped(EN.agentNames.gemini, 2)), working)
+    assert.ok(!working.includes(EN.pgNoWorking), working)
+  } finally { await board.close() }
 })
 
 test('a working Codex session with no block of its own names its project once and does not say it waits', async () => {
@@ -11333,6 +11687,26 @@ test("a Claude card's line and buttons follow its message, and Take back and Dis
   assert.equal(receipt().textContent, EN.claudeGotIt)
   await dom.redraw(withReceipt({ status: 'uncertain', error: 'DISMISSED' }))
   assert.equal(receipt(), undefined)
+})
+
+test('an OpenCode message that reads sent, not confirmed offers Copy, and the press copies its own words (#1366 review)', async () => {
+  const html = await sourcePage()
+  const model = redesignModel()
+  const ask = { ...model.asks[0], key: 'ask-opencode', agent: 'opencode', send: 'connected', delivery: { id: 'o1', turn: 'session', agent: 'opencode' }, session: 'session1' }
+  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', text: 'the words to copy', when: '', isMailbox: true, status: 'uncertain', error: 'UNCONFIRMED', ...receipt } }]; return next }
+  const dom = await pageDom(html, withReceipt({}), { copyAllowed: true })
+  const box = () => dom.node('needs').querySelectorAll('[data-ref-key]')[0]
+  const receipt = () => descendants(box()).find(node => (node.className || '').split(' ').includes('receipt'))
+  const buttons = () => descendants(receipt().parentNode).filter(node => node.tag === 'button')
+  assert.equal(receipt().textContent, EN.messagesSentUnconfirmed)
+  assert.deepEqual(buttons().map(node => node.textContent), [EN.serveCopyMessage])
+  buttons()[0].click()
+  await dom.settle()
+  assert.deepEqual(dom.copies, ['the words to copy'], 'the press copied the message the person typed')
+  // Its words are gone from the board (kept only a day): the line stays and there is nothing to copy.
+  await dom.redraw(withReceipt({ text: '' }))
+  assert.equal(receipt().textContent, EN.messagesSentUnconfirmed)
+  assert.ok(!buttons().some(node => node.textContent === EN.serveCopyMessage))
 })
 
 test('an agent with no open session shows as offline and its answers copy', async () => {
@@ -11854,8 +12228,13 @@ test('picking a view shows only that section', async () => {
   const { board, model, html } = await groupedPage()
   try {
     const dom = await pageDom(html, model, { width: 1280 })
-    // The page hides every section but the chosen one; Overview shows them all.
-    for (const view of ['needs', 'working', 'others', 'done']) assert.ok(html.includes(`.shell[data-view="${view}"] #board>[data-sec]:not([data-sec="${view}"])`), view)
+    // The page hides every section but the chosen one at every width (outside the 560px+ block); Overview shows them all.
+    const wideAt = html.indexOf('@media (min-width:560px)')
+    for (const view of ['needs', 'working', 'others', 'done']) {
+      const rule = `.shell[data-view="${view}"] #board>[data-sec]:not([data-sec="${view}"])`
+      const at = html.indexOf(rule)
+      assert.ok(at !== -1 && at < wideAt, `${view} view rule applies below 560px too`)
+    }
     for (const name of ['needs', 'working', 'others', 'done', 'all']) {
       dom.node(`view-${name}`).click()
       await dom.flush()
@@ -12296,6 +12675,186 @@ test('the sidebar folds to a rail at the docked width', async () => {
     // The rail is a narrow column; the grid follows the fold.
     assert.ok(html.includes('.shell[data-rail="1"]{grid-template-columns:64px minmax(0,1fr)}'))
     assert.ok(html.includes('grid-template-columns:232px minmax(0,1fr)'))
+  } finally { await board.close() }
+})
+
+test('under 560 px the sidebar opens as a drawer from the button at the top left', async () => {
+  const { board, model, html } = await groupedPage()
+  try {
+    // The button sits at the top left of the header, before the heading, labelled with the sidebar's own words, and says whether the drawer is open.
+    assert.match(html, /<button[^>]*id="drawer-btn"[^>]*aria-expanded="false"[^>]*aria-controls="side"/)
+    const topbar = html.slice(html.indexOf('<header class="head"'), html.indexOf('</header>'))
+    assert.ok(topbar.indexOf('id="drawer-btn"') < topbar.indexOf('class="brand"'), 'the button is at the top left, before the heading')
+    assert.ok(topbar.includes(EN.sideTitle), 'the button is labelled with the sidebar title')
+    // The drawer is the same aside the wide page shows, with a backdrop behind it and a Close button at its top.
+    assert.ok(html.includes('<aside class="side" id="side"'), 'the drawer is the sidebar itself')
+    assert.ok(html.includes('id="drawer-backdrop"'), 'there is a backdrop')
+    assert.ok(html.includes('id="drawer-close"'), 'there is a Close button')
+    // Reduced motion removes transitions so the drawer opens and closes immediately.
+    const reduced = mediaBlocks(html, '(prefers-reduced-motion:reduce)').join('\n')
+    assert.ok(reduced.includes('transition:none!important'), 'reduced motion disables transitions')
+    const dom = await pageDom(html, model, { width: 400 })
+    const shell = dom.node('shell')
+    const btn = dom.node('drawer-btn')
+    const side = dom.node('side')
+    // Shut at first: the sidebar is off screen and out of the tab order, the footer under the work.
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(btn.getAttribute('aria-expanded'), 'false')
+    assert.equal(side.inert, true)
+    assert.equal(dom.node('pfoot').parentNode, dom.node('main'))
+    // The button opens it: focus moves inside, and the footer moves to the foot of the drawer.
+    btn.click()
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    assert.equal(btn.getAttribute('aria-expanded'), 'true')
+    assert.equal(side.inert, false)
+    assert.equal(dom.active(), dom.node('drawer-close'))
+    assert.equal(dom.node('pfoot').parentNode, dom.node('side-foot'))
+    // The drawer shows the same views, agents and projects as the wide sidebar, with the same counts.
+    assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
+    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
+    assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => node.getAttribute('data-project')), ['client-repo', 'deep-project', 'docs-repo', 'shared-repo'])
+    // The button again shuts it, and focus goes back to the button.
+    btn.click()
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(btn.getAttribute('aria-expanded'), 'false')
+    assert.equal(side.inert, true)
+    assert.equal(dom.active(), btn)
+    assert.equal(dom.node('pfoot').parentNode, dom.node('main'))
+  } finally { await board.close() }
+})
+
+test('a pick in the drawer filters the board and closes the drawer', async () => {
+  const { board, model, html } = await groupedPage()
+  try {
+    // A view pick applies and closes the drawer, and focus goes back to the button.
+    const views = await pageDom(html, model, { width: 400 })
+    views.node('drawer-btn').click()
+    assert.equal(views.node('shell').getAttribute('data-drawer'), '1')
+    views.node('view-needs').click()
+    assert.equal(views.node('shell').getAttribute('data-view'), 'needs')
+    assert.equal(views.node('view-needs').getAttribute('aria-pressed'), 'true')
+    assert.equal(views.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(views.active(), views.node('drawer-btn'))
+    // An agent pick does the same, and the chips on the page show it.
+    const agents = await pageDom(html, model, { width: 400 })
+    agents.node('drawer-btn').click()
+    sideAgent(agents, 'codex').click()
+    assert.equal(sideAgent(agents, 'codex').getAttribute('aria-pressed'), 'true')
+    assert.equal(rowAgent(agents, 'codex').getAttribute('aria-pressed'), 'true')
+    assert.equal(agents.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(agents.active(), agents.node('drawer-btn'))
+    // A project pick does the same.
+    const projects = await pageDom(html, model, { width: 400 })
+    projects.node('drawer-btn').click()
+    const docs = projects.node('side-projects').querySelectorAll('[data-project]').find(node => node.getAttribute('data-project') === 'docs-repo')
+    docs.click()
+    assert.equal(docs.getAttribute('aria-pressed'), 'true')
+    assert.equal(projects.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(projects.active(), projects.node('drawer-btn'))
+  } finally { await board.close() }
+})
+
+test('Esc and the backdrop close the drawer and focus goes back to its button', async () => {
+  const { board, model, html } = await groupedPage()
+  try {
+    const dom = await pageDom(html, model, { width: 400 })
+    const shell = dom.node('shell')
+    const btn = dom.node('drawer-btn')
+    // Esc closes it and focus goes back to the button.
+    btn.click()
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    dom.key({ key: 'Escape' })
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // The backdrop does the same.
+    btn.click()
+    dom.node('drawer-backdrop').click()
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // The Close button does the same.
+    btn.click()
+    dom.node('drawer-close').click()
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // Tab stays inside: from the last control it wraps to the first, and back again.
+    btn.click()
+    assert.equal(dom.active(), dom.node('drawer-close'))
+    const last = dom.node('side-projects').querySelectorAll('[data-project]').at(-1)
+    last.focus()
+    dom.key({ key: 'Tab' })
+    assert.equal(dom.active(), dom.node('drawer-close'))
+    dom.key({ key: 'Tab', shiftKey: true })
+    assert.equal(dom.active(), last)
+    // Settings opened from inside the drawer owns Tab and Esc until it closes; the drawer stays open behind it.
+    dom.node('settings-toggle').click()
+    assert.equal(dom.node('settings').hidden, false)
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    assert.equal(dom.active(), dom.node('settings-close'))
+    let prevented = false
+    dom.key({ key: 'Tab', preventDefault: () => { prevented = true } })
+    assert.equal(prevented, false, 'Tab advances inside Settings instead of wrapping the inert drawer')
+    dom.key({ key: 'Escape', preventDefault() {} })
+    assert.equal(dom.node('settings').hidden, true)
+    assert.equal(shell.getAttribute('data-drawer'), '1')
+    assert.equal(dom.active(), dom.node('settings-toggle'))
+    dom.key({ key: 'Escape' })
+    assert.equal(shell.getAttribute('data-drawer'), '')
+    assert.equal(dom.active(), btn)
+    // Closing the board from inside the drawer clears the drawer, backdrop state and scroll lock.
+    const closer = await pageDom(html, model, { width: 400, post: () => ({ ok: true, json: async () => ({ ok: true }) }) })
+    closer.node('drawer-btn').click()
+    assert.equal(closer.node('shell').getAttribute('data-drawer'), '1')
+    assert.equal(closer.body.style.overflow, 'hidden')
+    closer.node('close').click()
+    await closer.settle()
+    assert.equal(closer.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(closer.body.style.overflow, '')
+    assert.equal(closer.node('side').hidden, true)
+    // A newer page taking over clears an open drawer too.
+    let isMoved = false
+    const moved = await pageDom(html, model, { width: 400, currentBoard: () => isMoved ? { moved: true } : {} })
+    moved.node('drawer-btn').click()
+    assert.equal(moved.node('shell').getAttribute('data-drawer'), '1')
+    assert.equal(moved.body.style.overflow, 'hidden')
+    isMoved = true
+    await moved.redraw(model)
+    await moved.settle()
+    assert.equal(moved.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(moved.body.style.overflow, '')
+    assert.equal(moved.node('side').hidden, true)
+  } finally { await board.close() }
+})
+
+test('from 560 px up the sidebar shows as before and there is no drawer button', async () => {
+  const html = await sourcePage()
+  const { board, model } = await groupedPage()
+  try {
+    // From 560px the sidebar shows (a rail of icons first, 232px from 800px) and the header, with its drawer button, gives way.
+    const wide = mediaBlocks(html, '(min-width:560px)').join('\n')
+    assert.ok(wide.includes('.side{display:flex'), 'the sidebar shows from 560px')
+    assert.ok(wide.includes('.head,.agents-in{display:none}'), 'the header and its drawer button give way to the sidebar')
+    // The drawer rules live below 560px only, hiding the offscreen sidebar from screen readers and pointer clicks when shut.
+    const narrow = mediaBlocks(html, '(max-width:559px)').join('\n')
+    assert.ok(narrow.includes('.shell[data-drawer="1"] .side{transform:none'), 'the drawer slides in below 560px')
+    assert.ok(narrow.includes('visibility:hidden'), 'the shut drawer stays hidden from screen readers and visible queries')
+    assert.ok(narrow.includes('.drawer-backdrop'), 'the backdrop is a narrow-window rule')
+    // At 560px and at 1280px the drawer never opens: the button does nothing and the sidebar stays live.
+    for (const width of [560, 1280]) {
+      const dom = await pageDom(html, model, { width })
+      const shell = dom.node('shell')
+      dom.node('drawer-btn').click()
+      assert.equal(shell.getAttribute('data-drawer'), '', `no drawer at ${width}px`)
+      assert.equal(dom.node('drawer-btn').getAttribute('aria-expanded'), 'false', `the button stays shut at ${width}px`)
+      assert.equal(dom.node('side').inert, false, `the sidebar stays live at ${width}px`)
+    }
+    // A resize from narrow to wide shuts a drawer left open.
+    const dom = await pageDom(html, model, { width: 400 })
+    dom.node('drawer-btn').click()
+    assert.equal(dom.node('shell').getAttribute('data-drawer'), '1')
+    dom.resize(700)
+    assert.equal(dom.node('shell').getAttribute('data-drawer'), '')
+    assert.equal(dom.node('side').inert, false)
+    assert.equal(dom.node('pfoot').parentNode, dom.node('main'))
   } finally { await board.close() }
 })
 
@@ -12995,6 +13554,55 @@ test('the agent first page keeps step notes and card notes on one line with thei
   } finally { await board.close() }
 })
 
+test('closing a clipped step or step fold right before a redraw stays closed and ignores its stale toggle (#1456)', async () => {
+  const step = 'Review the complete synthetic rollout plan'
+  const note = 'Detailed note repeated '.repeat(8).trim()
+  const source = groupedBlock('47700911', 'codex', 'working', 'clip-repo', 'Close race plan', [
+    `- [~] ${step} — ${note}`,
+    '- [ ] Second synthetic open step',
+    '- [ ] Third synthetic open step',
+  ])
+  const { board, model, html } = await groupedPage(source)
+  try {
+    const dom = await pageDom(html, model)
+    const findClip = () => clipsOf(dom).find(node => pressWalk(node).some(child => child.className === 'whole' && child.textContent?.includes(step)))
+    const findFold = () => pressWalk(dom.node('board')).find(node => node.tag === 'details' && !node.className?.includes('clip') && pressWalk(node).some(child => child.textContent?.includes('Second synthetic open step')))
+    const clip = findClip()
+    const fold = findFold()
+    assert.ok(clip && fold)
+    clip.open = true
+    clip.events.toggle()
+    fold.open = true
+    fold.events.toggle()
+    await dom.redraw(model)
+    const clipBefore = findClip()
+    const foldBefore = findFold()
+    assert.equal(clipBefore.open, true)
+    assert.equal(foldBefore.open, true)
+
+    // User closes both synchronously, and a redraw runs before either queued toggle event fires.
+    clipBefore.open = false
+    foldBefore.open = false
+    await dom.redraw(model)
+    const clipAfter = findClip()
+    const foldAfter = findFold()
+    assert.equal(clipAfter.open, false)
+    assert.equal(foldAfter.open, false)
+
+    // Even if the user re-opens them on the new DOM before the detached elements' stale toggles fire,
+    // the stale toggle events cannot overwrite the new open state.
+    clipAfter.open = true
+    clipAfter.events.toggle()
+    foldAfter.open = true
+    foldAfter.events.toggle()
+    clipBefore.events.toggle()
+    foldBefore.events.toggle()
+    await dom.redraw(model)
+    assert.equal(findClip().open, true)
+    assert.equal(findFold().open, true)
+  } finally { await board.close() }
+})
+
 test('a step longer than one line shows one line on the card and its full text on open', async () => {
   const dom = await pageDom(await sourcePage('en'), await sourceModel(ONE_LINE_FILE, ONE_LINE_NOW))
   const steps = pressWalk(dom.node('board')).filter(node => node.tag === 'li' && node.parentNode?.className === 'steps')
@@ -13535,4 +14143,568 @@ test('Settings notifications stay off after denial or dismissal without another 
   }
   const insecure = await pageDom(servePage(EN, 'synthetic', true), redesignModel(), { notification: InsecureNotification })
   assert.equal(insecure.node('settings-notifications').hidden, true)
+})
+
+test('the board script answers --version and rejects unknown flags without starting a server (#1275)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-flags-'))
+  try {
+    const script = join(dir, 'agent-board.mjs')
+    const progress = join(dir, 'progress.md')
+    writeFileSync(progress, '## Demo\n### Open task\n- [ ] Step\n')
+    const baked = lang => `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang })}\n${BOARD_SCRIPT}`
+    const runScript = (args, lang = 'en') => {
+      writeFileSync(script, baked(lang))
+      return spawnSync(process.execPath, [script, ...args], {
+        env: { ...process.env, HOME: dir, USERPROFILE: dir, CLAUDE_CONFIG_DIR: dir, LANG: lang === 'zh-TW' ? 'zh_TW.UTF-8' : lang === 'zh-CN' ? 'zh_CN.UTF-8' : 'C' },
+        encoding: 'utf8',
+        timeout: 15_000,
+        windowsHide: true,
+      })
+    }
+    const pkgVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+    for (const flag of ['--version', '-v', '--help']) {
+      const ran = runScript(flag === '--help' ? ['--version', '--help'] : [flag])
+      assert.equal(ran.status, 0, ran.stderr)
+      assert.equal(ran.stdout, `agent-board ${pkgVersion}\n`)
+      assert.equal(ran.stderr, '')
+    }
+    for (const [lang, expected] of [
+      ['en', EN.boardUnknownFlag('--bogus')],
+      ['zh-TW', ZH_TW.boardUnknownFlag('--bogus')],
+      ['zh-CN', ZH_CN.boardUnknownFlag('--bogus')],
+    ]) {
+      const ran = runScript(['--bogus'], lang)
+      assert.notEqual(ran.status, 0)
+      assert.equal(ran.stdout, '')
+      assert.equal(ran.stderr, `${expected}\n`)
+      assert.ok(ran.stderr.includes('npx @wenyuchiou/agent-board --version') && ran.stderr.includes('--help'), ran.stderr)
+    }
+    for (const args of [['--days', '7', '--bogus'], ['--lan', '--bogus'], ['-x']]) {
+      const ran = runScript(args)
+      assert.notEqual(ran.status, 0)
+      assert.equal(ran.stdout, '')
+      assert.match(ran.stderr, /--bogus|-x/)
+    }
+    // Known display and plugin options and flag values still run cleanly without opening a page.
+    const printed = runScript(['--print', '--quiet-board', '--no-color', '--theme', 'dark', '--project', '--bogus', '-h'])
+    assert.equal(printed.status, 0, printed.stderr)
+    // No server address or runtime files were written.
+    assert.deepEqual(readdirSync(dir).sort(), ['agent-board.mjs', 'progress.md'])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('the answer picker labels its confirm button Copy when the agent cannot receive (#1268)', async () => {
+  const { servePage } = await sourceBoard()
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const html = servePage(words, 'synthetic')
+    const copyModel = cardsModel()
+    copyModel.asks[0] = { ...copyModel.asks[0], send: 'none', answers: ['Yes', 'No'] }
+    const dom = await pageDom(html, copyModel)
+    const card = cardWithKey(dom, 'ask')
+    const button = pressWalk(card).find(node => node.className === 'answer-send')
+    assert.ok(button)
+    assert.equal(button.textContent, words.pgCopyChoice)
+    assert.equal(button.getAttribute('aria-label'), words.pgCopyChoice)
+    assert.equal(button.title, words.pgCopyChoice)
+    assert.equal(button.getAttribute('data-copy'), '1')
+    assert.notEqual(button.textContent, '↑')
+
+    const sendModel = cardsModel()
+    sendModel.asks[0] = { ...sendModel.asks[0], send: 'send', answers: ['Yes', 'No'] }
+    const sendDom = await pageDom(html, sendModel)
+    const sendBtn = pressWalk(cardWithKey(sendDom, 'ask')).find(node => node.className === 'answer-send')
+    assert.ok(sendBtn)
+    assert.equal(sendBtn.textContent, '↑')
+    assert.equal(sendBtn.getAttribute('aria-label'), words.pgSendChoice)
+    assert.equal(sendBtn.title, words.pgSendChoice)
+    assert.equal(sendBtn.getAttribute('data-copy'), null)
+  }
+})
+
+test('#1363: a waiting card keeps one hide button named answeredHide across Copy, Send, Queue and Cancel, and hiding shows only one working Show again button', async () => {
+  const { servePage } = await sourceBoard()
+  const insideClass = (node, cls) => {
+    for (let cur = node; cur; cur = cur.parentNode) if (String(cur.className || '').split(' ').includes(cls)) return true
+    return false
+  }
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const html = servePage(s, 'synthetic')
+    const base = redesignModel()
+    const cardButtons = (dom, key) => {
+      const card = pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === key)
+      assert.ok(card, `card ${key}`)
+      return pressWalk(card).filter(node => node.tag === 'button')
+    }
+
+    // 1. One hide button per card, always answeredHide (never pgAnswered), moving between .more and .state.
+    const agentLabel = s.agentNames.codex || 'Codex'
+    for (const variant of [
+      { key: 'copy-card', send: 'copy', where: 'none', delivery: undefined, line: undefined, action: 'copy', submitLabel: s.pgCopyAnswer },
+      { key: 'send-card', send: 'send', where: 'pane-1', delivery: undefined, line: undefined, action: 'send', submitLabel: s.serveSend(agentLabel) },
+      { key: 'queue-card', send: 'mailbox', where: 'mailbox', delivery: { id: 'c1', agent: 'codex', turn: 't1' }, line: 'chatOpen', action: 'queue', submitLabel: s.serveQueueNextOpen(agentLabel) },
+    ]) {
+      const model = {
+        ...base,
+        asks: [{
+          ...base.asks[0],
+          key: variant.key,
+          agent: 'codex',
+          send: variant.send,
+          canHide: true,
+          unhideKey: `hidden:${variant.key}`,
+          where: variant.where,
+          delivery: variant.delivery,
+          line: variant.line,
+          answers: ['Proceed', 'Skip'],
+          isSending: false,
+        }],
+        hidden: [],
+      }
+      const dom = await pageDom(html, model, {
+        copyAllowed: true,
+        post: async request => {
+          assert.equal(request.path, '/api/act')
+          return { ok: true, json: async () => ({ ok: true, note: 'OK' }) }
+        },
+      })
+      const checkHideState = (expectInState, label) => {
+        const btns = cardButtons(dom, variant.key)
+        const hides = btns.filter(btn => btn.textContent === s.answeredHide)
+        assert.equal(hides.length, 1, `${label}: exactly one hide button`)
+        assert.equal(btns.some(btn => btn.textContent === s.pgAnswered), false, `${label}: never pgAnswered`)
+        assert.equal(insideClass(hides[0], 'state'), expectInState, `${label}: inside .state === ${expectInState}`)
+        assert.equal(insideClass(hides[0], 'more'), !expectInState, `${label}: inside .more === ${!expectInState}`)
+      }
+      checkHideState(false, `${variant.key} initial`)
+      const writeBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === s.pgWriteOwn)
+      assert.ok(writeBtn, `${variant.key}: write button`)
+      writeBtn.click()
+      checkHideState(false, `${variant.key} write`)
+      const cancelBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === s.pgCancel)
+      cancelBtn.click()
+      checkHideState(false, `${variant.key} cancel back to ask`)
+
+      writeBtn.click()
+      const card = pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === variant.key)
+      const textarea = pressWalk(card).find(node => node.tag === 'textarea')
+      textarea.value = 'Synthetic reply'
+      const submitBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === variant.submitLabel)
+      assert.ok(submitBtn, `${variant.key}: submit button ${variant.submitLabel}`)
+      submitBtn.click()
+      await dom.settle()
+      checkHideState(true, `${variant.key} after ${variant.action}`)
+      await dom.redraw(model)
+      checkHideState(true, `${variant.key} redraw while after`)
+    }
+
+    // 2. First Show again appears once (never duplicated in hiddenShelf while the active notice is shown), and works.
+    let liveModel = {
+      ...base,
+      asks: [{ ...base.asks[0], key: 'ask-hide-1', text: 'Hide me once?', canHide: true, unhideKey: 'hidden:h1', isSending: false }],
+      hidden: [],
+    }
+    const calls = []
+    const hideDom = await pageDom(html, liveModel, {
+      copyAllowed: true,
+      currentModel: () => liveModel,
+      post: async request => {
+        calls.push(request)
+        if (request.body.type === 'hide') {
+          liveModel = {
+            ...liveModel,
+            asks: [],
+            hidden: [{ key: 'hidden:h1', project: 'repo', agent: 'claude', task: 'Task 1', text: 'Hide me once?' }],
+          }
+          return { ok: true, json: async () => ({ ok: true, note: s.hidQuestion || 'Hidden' }) }
+        }
+        liveModel = {
+          ...liveModel,
+          asks: [{ ...base.asks[0], key: 'ask-hide-1', text: 'Hide me once?', canHide: true, unhideKey: 'hidden:h1', isSending: false }],
+          hidden: [],
+        }
+        return { ok: true, json: async () => ({ ok: true, note: 'Shown again' }) }
+      },
+    })
+    const hideBtn = cardButtons(hideDom, 'ask-hide-1').find(btn => btn.textContent === s.answeredHide)
+    hideBtn.click()
+    await hideDom.settle()
+    const countShowAgain = dom => pressWalk(dom.node('board')).filter(node => node.tag === 'button' && node.textContent === s.showAgain)
+    const shelfNode = dom => pressWalk(dom.node('board')).find(node => node.tag === 'section' && String(node.className || '').split(' ').includes('shelf') && node.textContent.includes(s.hiddenCount(1)))
+    const shelfShowAgain = dom => pressWalk(shelfNode(dom)).filter(node => node.tag === 'button' && node.textContent === s.showAgain)
+
+    assert.equal(countShowAgain(hideDom).length, 1, 'only one Show again button right after hiding')
+    assert.equal(shelfShowAgain(hideDom).length, 0, 'no duplicate Show again in collapsed hidden shelf')
+    const shelfToggle = pressWalk(shelfNode(hideDom)).find(node => node.tag === 'button' && String(node.className || '').includes('shelf-head'))
+    assert.ok(shelfToggle, 'hidden shelf toggle')
+    shelfToggle.click()
+    assert.equal(countShowAgain(hideDom).length, 1, 'still one Show again button after opening hidden shelf')
+    assert.equal(shelfShowAgain(hideDom).length, 0, 'no duplicate Show again in open hidden shelf')
+
+    countShowAgain(hideDom)[0].click()
+    await hideDom.settle()
+    assert.deepEqual(calls.map(c => ({ key: c.body.key, type: c.body.type })), [
+      { key: 'ask-hide-1', type: 'hide' },
+      { key: 'hidden:h1', type: 'unhide' },
+    ])
+
+    // Reloading with hidden items renders Show again inside hiddenShelf as normal.
+    const reloaded = await pageDom(html, {
+      ...base,
+      asks: [],
+      hidden: [{ key: 'hidden:h1', project: 'repo', agent: 'claude', task: 'Task 1', text: 'Hide me once?' }],
+    })
+    assert.equal(shelfShowAgain(reloaded).length, 1, 'hidden shelf renders Show again when no active notice is present')
+  }
+})
+
+test('busy or connected card shows one honest message status after Send instead of Sent above queued (#1362)', async () => {
+  const { servePage } = await sourceBoard()
+  const countMatches = (haystack, needle) => needle ? haystack.split(needle).length - 1 : 0
+  const findCard = (dom, key) => pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === key)
+
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const html = servePage(s, 'synthetic')
+    const base = redesignModel()
+    const replyText = 'Keep the old session cookie'
+    const claudeName = s.agentNames.claude
+    const codexName = s.agentNames.codex
+
+    // 1. Claude card starts waiting (claudeSendNow), user clicks Write & Send, then receipt moves queued -> accepted -> acknowledged, and Take back restores ask mode.
+    const claudeAsk = {
+      ...base.asks[0],
+      key: 'ask-busy-claude',
+      agent: 'claude',
+      send: 'connected',
+      where: 'in Claude',
+      line: 'now',
+      lineText: s.claudeSendNow,
+      delivery: { id: 'c-claude', turn: 't1', agent: 'claude' },
+      canHide: true,
+      unhideKey: 'hidden:c-claude',
+      isSending: false,
+      answers: ['Proceed'],
+    }
+    let currentClaude = { ...base, asks: [claudeAsk] }
+    let lastMsgId = ''
+    const claudeDom = await pageDom(html, currentClaude, {
+      currentModel: () => currentClaude,
+      post: async request => {
+        if (request.path === '/api/act' && request.body.type === 'message') {
+          lastMsgId = request.body.id
+          return { ok: true, json: async () => ({ ok: true, note: s.messagesQueued }) }
+        }
+        if (request.path === '/api/messages/dismiss') {
+          currentClaude = { ...base, asks: [claudeAsk] }
+          return { ok: true, json: async () => ({ ok: true }) }
+        }
+        return { ok: true, json: async () => ({ ok: true }) }
+      },
+    })
+    assert.ok(shownWords(findCard(claudeDom, claudeAsk.key)).includes(s.claudeSendNow))
+
+    pressWalk(findCard(claudeDom, claudeAsk.key)).find(n => n.tag === 'button' && n.textContent === s.pgWriteOwn).click()
+    pressWalk(findCard(claudeDom, claudeAsk.key)).find(n => n.tag === 'textarea').value = replyText
+    pressWalk(findCard(claudeDom, claudeAsk.key)).find(n => n.tag === 'button' && n.textContent === s.serveSend('Claude')).click()
+    await claudeDom.settle()
+
+    const afterSendWords = shownWords(findCard(claudeDom, claudeAsk.key))
+    assert.equal(countMatches(afterSendWords, s.messagesQueued), 1, `right after Send: single queued status (${afterSendWords})`)
+    assert.equal(afterSendWords.includes(s.claudeSendNow), false, 'pre-send line hides after Send')
+    assert.equal(afterSendWords.includes(s.pgSentTo(claudeName, replyText)), false, 'never pgSentTo on connected card')
+
+    currentClaude = {
+      ...base,
+      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, isSending: true, receipt: { id: lastMsgId, status: 'queued', text: replyText, when: '' } }],
+    }
+    await claudeDom.redraw(currentClaude)
+    const queuedWords = shownWords(findCard(claudeDom, claudeAsk.key))
+    assert.equal(countMatches(queuedWords, s.claudeSendWorking), 1, `queued receipt: single claudeSendWorking (${queuedWords})`)
+    assert.equal(queuedWords.includes(s.pgSentTo(claudeName, replyText)), false, 'no pgSentTo above queued receipt')
+    assert.equal(queuedWords.includes(s.claudeSendNow), false, 'no stale claudeSendNow')
+    assert.equal(queuedWords.includes(s.messagesQueued), false, 'no duplicate messagesQueued alongside receipt')
+    assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
+
+    // Take back restores the card back to ask mode cleanly.
+    pressWalk(findCard(claudeDom, claudeAsk.key)).find(n => n.tag === 'button' && n.textContent === s.messageTakeBack).click()
+    await claudeDom.settle()
+    assert.ok(shownWords(findCard(claudeDom, claudeAsk.key)).includes(s.claudeSendNow), 'Take back restores ask view')
+
+    // Send again via quick answer, then progress queued -> accepted -> acknowledged.
+    selectAnswer(findCard(claudeDom, claudeAsk.key), 'Proceed').click()
+    await claudeDom.settle()
+    currentClaude = {
+      ...base,
+      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, receipt: { id: lastMsgId, status: 'accepted', text: 'Proceed', when: 'just now' } }],
+    }
+    await claudeDom.redraw(currentClaude)
+    const acceptedWords = shownWords(findCard(claudeDom, claudeAsk.key))
+    assert.equal(countMatches(acceptedWords, s.claudeDelivered), 1, `delivered once (${acceptedWords})`)
+    assert.equal(acceptedWords.includes(s.claudeSendWorking), false, 'route note stays hidden on delivered receipt')
+    assert.equal(acceptedWords.includes(s.pgSentTo(claudeName, 'Proceed')), false)
+    assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
+
+    currentClaude = {
+      ...base,
+      asks: [{ ...claudeAsk, line: 'now', lineText: s.claudeSendNow, receipt: { id: lastMsgId, status: 'acknowledged', reply: 'Done', text: 'Proceed', when: '' } }],
+    }
+    await claudeDom.redraw(currentClaude)
+    const repliedWords = shownWords(findCard(claudeDom, claudeAsk.key))
+    assert.equal(countMatches(repliedWords, s.claudeReplied('Done')), 1, `replied once (${repliedWords})`)
+    assert.equal(repliedWords.includes(s.claudeDelivered), false)
+    assert.equal(repliedWords.includes(s.claudeSendNow), false)
+    assert.equal(repliedWords.includes(s.pgSentTo(claudeName, 'Proceed')), false)
+    assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
+
+    // 2. Busy stepEnd card for another agent (Codex): shows serveLineStepEnd once, never pgSentTo.
+    const codexAsk = {
+      ...base.asks[0],
+      key: 'ask-busy-codex',
+      agent: 'codex',
+      send: 'connected',
+      where: 'in Codex',
+      line: 'stepEnd',
+      lineText: s.serveLineStepEnd(codexName),
+      delivery: { id: 'c-codex', turn: 't1', agent: 'codex' },
+      canHide: true,
+      isSending: false,
+      answers: ['Ship it'],
+    }
+    let currentCodex = { ...base, asks: [codexAsk] }
+    const codexDom = await pageDom(html, currentCodex, {
+      currentModel: () => currentCodex,
+      post: async request => {
+        lastMsgId = request.body.id
+        return { ok: true, json: async () => ({ ok: true, note: s.messagesQueued }) }
+      },
+    })
+    selectAnswer(findCard(codexDom, codexAsk.key), 'Ship it').click()
+    await codexDom.settle()
+    const codexAfterSend = shownWords(findCard(codexDom, codexAsk.key))
+    assert.equal(countMatches(codexAfterSend, s.serveLineStepEnd(codexName)), 1, `busy codex after Send (${codexAfterSend})`)
+    assert.equal(codexAfterSend.includes(s.pgSentTo(codexName, 'Ship it')), false, 'never pgSentTo on busy stepEnd codex card')
+    assert.equal(codexAfterSend.includes(s.messagesQueued), false, 'no redundant Queued line beside serveLineStepEnd')
+
+    currentCodex = {
+      ...base,
+      asks: [{ ...codexAsk, receipt: { id: lastMsgId, status: 'queued', line: 'stepEnd', isMailbox: true } }],
+    }
+    await codexDom.redraw(currentCodex)
+    const codexReceiptWords = shownWords(findCard(codexDom, codexAsk.key))
+    assert.equal(countMatches(codexReceiptWords, s.serveLineStepEnd(codexName)), 1, `busy codex queued receipt (${codexReceiptWords})`)
+    assert.equal(codexReceiptWords.includes(s.pgSentTo(codexName, 'Ship it')), false)
+  }
+})
+
+test('a finished message seen only under a held press still frees its id, so the same words sent again are a new message (#1468)', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const base = redesignModel()
+  const ask = { ...base.asks[0], key: 'ask-held', agent: 'claude', send: 'connected', line: 'now', delivery: { id: 'c-held', turn: 't1', agent: 'claude' }, canHide: true, isSending: false, answers: ['Proceed'] }
+  const ids = []
+  let current = { ...base, asks: [ask] }
+  const dom = await pageDom(html, current, {
+    currentModel: () => current,
+    post: async request => {
+      if (request.path === '/api/act' && request.body.type === 'message') ids.push(request.body.id)
+      return { ok: true, json: async () => ({ ok: true }) }
+    },
+  })
+  const card = () => pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === ask.key)
+  selectAnswer(card(), 'Proceed').click()
+  await dom.settle()
+  // The reply comes back and a newer receipt follows it, all while a press is held: nothing is drawn.
+  dom.pointer('pointerdown', { pointerId: 1 })
+  current = { ...base, asks: [{ ...ask, receipt: { id: ids[0], status: 'acknowledged', text: 'Proceed' } }] }
+  await dom.redraw(current)
+  // The press ends with no release seen (a move with no button), then the board draws the ask again.
+  dom.pointer('pointermove', { pointerId: 1, buttons: 0 })
+  current = { ...base, asks: [{ ...ask, line: 'stepEnd' }] }
+  await dom.redraw(current)
+  selectAnswer(card(), 'Proceed').click()
+  await dom.settle()
+  assert.equal(ids.length, 2)
+  assert.notEqual(ids[1], ids[0])
+})
+
+test('serveModel projects a live in-flight receiver claim as queued instead of flickering uncertain (#1335)', async () => {
+  const { serveModel, buildView, parseProgress, CLAIM_HANDOFF_MS } = await sourceBoard()
+  const now = Date.parse('2026-11-14T12:00:00Z')
+  const text = [
+    '## Work',
+    '<!-- auto session=thread-1 agent=codex state=working updated=2026-11-14T12:00:00Z -->',
+    '### Ship feature',
+    '- [ ] Check status',
+    '<!-- /auto session=thread-1 -->',
+    '',
+    '<!-- auto session=thread-2 agent=codex state=waiting updated=2026-11-14T12:00:00Z -->',
+    '### Review PR',
+    '- [?] Deploy now, OK?',
+    '<!-- /auto session=thread-2 -->',
+    '',
+  ].join('\n')
+  const view = buildView(parseProgress(text), [], null, now, 0, {}, EN)
+  const firstRow = model => [...model.groups.flatMap(g => g.rows), ...model.idle, ...model.stopped][0]
+  const baseMessage = {
+    id: 'm1',
+    target: 'conn-1',
+    turn: 'turn-1',
+    from: 'board',
+    to: 'codex:thread-1',
+    text: 'Continue',
+    origin: 'local',
+    status: 'uncertain',
+    updated: now,
+    reply: '',
+    error: '',
+    hops: 0,
+    claimed: now,
+  }
+  const askMessage = { ...baseMessage, id: 'm2', target: 'conn-2', to: 'codex:thread-2', ...(view.waiting[0]?.questionId ? { answers: view.waiting[0].questionId } : {}) }
+  const liveConnection = { id: 'conn-1', agent: 'codex', session: 'thread-1', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
+  const askConnection = { id: 'conn-2', agent: 'codex', session: 'thread-2', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
+  for (const probe of [now, now + CLAIM_HANDOFF_MS - 1]) {
+    const inFlight = serveModel(view, [], EN, new Set(), false, { connections: [{ ...liveConnection, expires: probe + 60_000 }, { ...askConnection, expires: probe + 60_000 }], messages: [baseMessage, askMessage] }, false, { now: probe, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+    assert.equal(firstRow(inFlight)?.receipt?.status, 'queued', `at +${probe - now}ms`)
+    assert.equal(inFlight.asks[0]?.receipt?.status, 'queued', `ask at +${probe - now}ms`)
+  }
+
+  // Lost /api/messages/poll response: the receiver retries and keeps renewing the same connection without ever receiving or accepting the claim;
+  // once CLAIM_HANDOFF_MS elapses, the board must surface uncertain rather than keeping queued until OPEN_LIMIT_MS.
+  const later = now + CLAIM_HANDOFF_MS
+  const renewedRowConn = { ...liveConnection, expires: later + 60_000 }
+  const renewedAskConn = { ...askConnection, expires: later + 60_000 }
+  const expiredHandoff = serveModel(view, [], EN, new Set(), false, { connections: [renewedRowConn, renewedAskConn], messages: [baseMessage, askMessage] }, false, { now: later, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+  assert.equal(firstRow(expiredHandoff)?.receipt?.status, 'uncertain', 'lost poll response after handoff window')
+  assert.equal(expiredHandoff.asks[0]?.receipt?.status, 'uncertain', 'lost poll response ask after handoff window')
+
+  const cases = [
+    { name: 'error', connections: [liveConnection], message: { ...baseMessage, error: 'ACK_MISSING' } },
+    { name: 'disconnected', connections: [], message: { ...baseMessage, error: 'DISCONNECTED' } },
+    { name: 'no connection', connections: [], message: baseMessage },
+    { name: 'contested', connections: [{ ...liveConnection, contested: true }], message: baseMessage },
+    { name: 'expired connection', connections: [{ ...liveConnection, expires: now }], message: baseMessage },
+    { name: 'later uncertain receipt', connections: [liveConnection], message: { ...baseMessage, updated: now + 10 } },
+    { name: 'mailbox claim', connections: [{ ...liveConnection, id: 'mailbox_' + 'a'.repeat(24) }], message: { ...baseMessage, target: 'mailbox_' + 'a'.repeat(24) } },
+    { name: 'missing clock fails closed', connections: [liveConnection], message: baseMessage, now: 0 },
+  ]
+  for (const entry of cases) {
+    const model = serveModel(view, [], EN, new Set(), false, { connections: entry.connections, messages: [entry.message] }, false, { now: entry.now ?? now, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+    assert.equal(firstRow(model)?.receipt?.status, 'uncertain', entry.name)
+  }
+})
+
+test('a press held on a lost-result button survives a rebuild of the lost results (#1473)', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const base = redesignModel()
+  const askOne = { ...base.asks[0], key: 'ask-hide-1', text: 'Hide me first?', task: 'First plan', canHide: true, unhideKey: 'hidden:h1', isSending: false }
+  const askTwo = { ...base.asks[0], key: 'ask-gone-2', text: 'Answer me later?', task: 'Second plan', isSending: false }
+  let liveModel = { ...base, asks: [askOne, askTwo], hidden: [] }
+  let boardExtra = {}
+  const calls = []
+  const dom = await pageDom(html, liveModel, {
+    currentModel: () => liveModel,
+    currentBoard: () => boardExtra,
+    post: async request => {
+      calls.push(request)
+      if (request.body.type === 'hide') {
+        const ask = liveModel.asks.find(one => one.key === request.body.key)
+        liveModel = {
+          ...liveModel,
+          asks: liveModel.asks.filter(one => one.key !== request.body.key),
+          hidden: [...liveModel.hidden, { key: ask.unhideKey, project: ask.project, agent: ask.agent, task: ask.task, text: ask.text }],
+        }
+        return { ok: true, json: async () => ({ ok: true, note: EN.hidQuestion || 'Hidden' }) }
+      }
+      liveModel = {
+        ...liveModel,
+        asks: [...liveModel.asks, askOne],
+        hidden: liveModel.hidden.filter(one => one.key !== request.body.key),
+      }
+      return { ok: true, json: async () => ({ ok: true, note: 'Shown again' }) }
+    },
+  })
+  const cardButtons = (key) => {
+    const card = pressWalk(dom.node('board')).find(node => node.getAttribute?.('data-card-key') === key)
+    assert.ok(card, `card ${key}`)
+    return pressWalk(card).filter(node => node.tag === 'button')
+  }
+  const showAgainOf = label => {
+    const found = pageLostResults(dom, label).flatMap(node => pressWalk(node).filter(one => one.tag === 'button' && one.textContent === EN.showAgain))
+    assert.equal(found.length, 1, `${label}: exactly one Show again button`)
+    return found[0]
+  }
+  // Hide the first ask: it leaves a lost result with its own Show again button.
+  cardButtons('ask-hide-1').find(button => button.textContent === EN.answeredHide).click()
+  await dom.settle()
+  // The second ask's card leaves the board with no press of its own (a redraw drops it).
+  liveModel = { ...liveModel, asks: [] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  const firstShowAgain = showAgainOf('First plan')
+  assert.ok(pressWalk(dom.node('board')).includes(firstShowAgain), 'the first lost card is drawn before the hold')
+  // Hold a press on the first card's Show again, then let a background reply for the gone second card arrive.
+  dom.pointer('pointerdown', { pointerId: 1 })
+  boardExtra = { replies: [{ at: 2, note: 'Background answer', ok: true, key: 'ask-gone-2' }] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(pressWalk(dom.node('board')).includes(firstShowAgain), 'the held button is not replaced by the rebuild')
+  // Ending the hold runs the deferred rebuild: the first card is drawn again, now as a new button,
+  // and the background reply's lost card appears beside it.
+  dom.pointer('pointermove', { pointerId: 1, buttons: 0 })
+  const rebuilt = showAgainOf('First plan')
+  assert.notEqual(rebuilt, firstShowAgain, 'the deferred rebuild replaces the button only after the release')
+  assert.ok(pageLostResults(dom, '').some(node => node.textContent.includes('Background answer')), 'the deferred rebuild draws the background reply')
+  rebuilt.click()
+  await dom.settle()
+  assert.ok(calls.some(request => request.body.type === 'unhide' && request.body.key === 'hidden:h1'), 'the rebuilt first button still unhides its card')
+})
+
+test('a deferred lost-results rebuild keeps the focused copy field and its selection (#1473)', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const base = redesignModel()
+  const askCopy = { ...base.asks[0], key: 'ask-copy-1', text: 'Copy me?', task: 'Copy plan', command: 'echo synthetic-copy', canHide: true, isSending: false }
+  const askTwo = { ...base.asks[0], key: 'ask-gone-2', text: 'Answer me later?', task: 'Second plan', isSending: false }
+  let liveModel = { ...base, asks: [askCopy, askTwo], hidden: [] }
+  let boardExtra = {}
+  const dom = await pageDom(html, liveModel, {
+    currentModel: () => liveModel,
+    currentBoard: () => boardExtra,
+  })
+  const walk = node => [node, ...node.childNodes.flatMap(walk)]
+  const copyField = () => walk(dom.node('board')).find(node => node.tag === 'textarea' && node.value === 'echo synthetic-copy')
+  // The failed copy leaves a manual-copy textarea in the card's result slot.
+  const copyButton = dom.buttons().find(button => button.textContent === EN.serveCopyCommand)
+  assert.ok(copyButton, 'the copy command button is on the card')
+  copyButton.click()
+  await dom.settle()
+  assert.ok(copyField(), 'the failed copy draws its textarea in the slot')
+  // Both cards leave the board: the copy result becomes a lost result with its own copy field.
+  liveModel = { ...liveModel, asks: [] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(pageLostResults(dom, 'Copy plan'), 'the copy result leaves a lost card')
+  const area = copyField()
+  assert.ok(area, 'the lost card keeps the copy field')
+  // Focus the lost copy field and select a range, then hold a press in it while a background reply for the
+  // gone second card arrives.
+  area.focus()
+  area.setSelectionRange(2, 8)
+  assert.equal(dom.active(), area, 'the copy field is focused before the hold')
+  dom.pointer('pointerdown', { pointerId: 1 })
+  boardExtra = { replies: [{ at: 2, note: 'Background answer', ok: true, key: 'ask-gone-2' }] }
+  await dom.redraw(liveModel)
+  await dom.settle()
+  assert.ok(walk(dom.node('board')).includes(area), 'the held copy field is not replaced by the rebuild')
+  assert.equal(dom.active(), area, 'the copy field stays focused under the hold')
+  // Ending the hold runs the deferred rebuild: the copy field is drawn again, focused, with its selection.
+  dom.pointer('pointermove', { pointerId: 1, buttons: 0 })
+  const rebuilt = copyField()
+  assert.ok(rebuilt, 'the deferred rebuild draws the copy field again')
+  assert.notEqual(rebuilt, area, 'the deferred rebuild replaces the copy field only after the release')
+  assert.equal(dom.active(), rebuilt, 'the rebuilt copy field is focused again')
+  assert.equal(rebuilt.selectionStart, 2, 'the rebuilt copy field keeps the selection start')
+  assert.equal(rebuilt.selectionEnd, 8, 'the rebuilt copy field keeps the selection end')
+  assert.ok(pageLostResults(dom, '').some(node => node.textContent.includes('Background answer')), 'the deferred rebuild draws the background reply')
 })

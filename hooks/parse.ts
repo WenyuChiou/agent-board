@@ -11,6 +11,7 @@ import type {
 } from '../types'
 import { sha256 } from './sha256.ts'
 import { splitLines } from './lines.ts'
+import { blockKey } from './session-liveness.ts'
 
 // `## project` / `### task` / `> note` / `- [x] step`, plus the auto markers a session's
 // mod writes around its own block. Everything else is ignored, so free text never breaks
@@ -28,29 +29,70 @@ export const isCutMarker = (line: string): boolean => {
   while (end > 0 && (line[end - 1] === ' ' || line[end - 1] === '\t' || line[end - 1] === '\r')) end--
   const marker = line.slice(0, end).replace(/^<!--[ \t]*/, '')
   // A bare comment opening is still how people hide examples.
-  return marker !== '' && MARKER_PREFIXES.some(prefix => prefix.startsWith(marker) || marker.startsWith(prefix))
+  return marker !== '' && (marker.startsWith('options=') || MARKER_PREFIXES.some(prefix => prefix.startsWith(marker) || marker.startsWith(prefix)))
 }
 export const AUTO_START = /^<!--\s*auto\s+(.*?)\s*-->\s*$/
 export const AUTO_END = /^<!--\s*\/auto\b.*?-->\s*$/
 export const QUESTION = /^<!--\s*question=([a-f0-9]{64}:[1-9]\d*)\s*-->\s*$/
 // `<!-- native=claude options=["a","b"] -->`: the question above is answered in that agent's own window.
+// `<!-- options=["a","b"] -->`: the choices the agent itself listed for the waiting question step above (#1277).
 // Any line of this shape is read as the annotation, so a malformed one is dropped and never turns into text.
 export const NATIVE = /^<!--\s*native=(\S*)(?:\s+options=(.*?))?\s*-->\s*$/
+export const OPTIONS = /^<!--\s*options=(.*?)\s*-->\s*$/
 const NATIVE_AGENTS: readonly string[] = ['claude', 'codex']
+
+// One list of choices, kept whole or refused whole (null). A character is a Unicode code point, as
+// `docs/FORMAT.md` and Python's `len` count it, so an emoji or a rare CJK character is one.
+export const validOptions = (list: readonly string[]): string[] | null => {
+  const normalized = list.map(one => one.replace(/\s+/g, ' ').trim())
+  if (
+    normalized.length < 2 ||
+    normalized.length > 9 ||
+    normalized.some(one => one === '' || [...one].length > 120 || one.includes('<!--') || one.includes('-->'))
+  ) {
+    return null
+  }
+  return normalized
+}
+
+// A comment must not hold `--` or `>`, so both are written as JSON escapes.
+export const escapeOptionsJson = (options: readonly string[]): string =>
+  JSON.stringify(options).replace(/-/g, '\\u002d').replace(/>/g, '\\u003e')
+
+// What a writer puts for a list it refuses: readers offer no choices for that step.
+export const NO_OPTIONS = '<!-- options=[] -->'
+
+export const optionsComment = (options: readonly string[]): string => {
+  const valid = validOptions(options)
+  return valid === null ? '' : `<!-- options=${escapeOptionsJson(valid)} -->`
+}
+
+const parseOptionsJson = (raw: string, limit?: number): string[] | null => {
+  try {
+    const list: unknown = JSON.parse(raw)
+    if (!Array.isArray(list) || !list.every((one): one is string => typeof one === 'string')) return null
+
+    return limit === undefined ? list : list.slice(0, limit)
+  } catch {
+    return null
+  }
+}
 
 // Null for an unreadable line: an unknown agent, or options that are not a list of strings.
 export const nativeOf = (line: string): NativeAsk | null => {
   const found = NATIVE.exec(line)
   if (found === null || found[1] === undefined || !NATIVE_AGENTS.includes(found[1])) return null
   if (found[2] === undefined) return { agent: found[1], options: [] }
-  try {
-    const list: unknown = JSON.parse(found[2])
-    if (!Array.isArray(list) || !list.every((one): one is string => typeof one === 'string')) return null
+  const options = parseOptionsJson(found[2], 8)
+  return options === null ? null : { agent: found[1], options: options.map(one => one.slice(0, 120)) }
+}
 
-    return { agent: found[1], options: list.slice(0, 8).map(one => one.slice(0, 120)) }
-  } catch {
-    return null
-  }
+// Null for an unreadable line or an invalid choice list.
+export const optionsOf = (line: string): string[] | null => {
+  const found = OPTIONS.exec(line)
+  if (found === null || found[1] === undefined) return null
+  const parsed = parseOptionsJson(found[1])
+  return parsed === null ? null : validOptions(parsed)
 }
 const DUE = /(?:截止|\bdue)[:：\s]*((?:\d{4}[-/])?\d{1,2}[-/]\d{1,2})/i
 
@@ -107,6 +149,11 @@ export const autoOf = (raw: string): ProgressAuto | null => {
   const state = SESSION_STATES.find(one => one === attrs.state) ?? 'waiting'
   const updated = Date.parse(attrs.updated ?? '')
   const pr = Number(attrs.pr)
+  // The liveness claim (#1092): a pid and start time that are not safe positive
+  // integers, or a host that is not a 64-hex hash, are no claim at all.
+  const agentPid = Number(attrs.agentpid)
+  const agentStarted = Number(attrs.agentstarted)
+  const host = attrs.host
   // `origin=run` is the one value that means anything (#399); `parent` only matters beside it.
   const isRun = attrs.origin === 'run'
   const replied = attrs.replied !== undefined
@@ -126,6 +173,9 @@ export const autoOf = (raw: string): ProgressAuto | null => {
     dir: folderOf(attrs.dir),
     pr: Number.isInteger(pr) && pr > 0 ? pr : null,
     ci: CI_STATES.find(one => one === attrs.ci) ?? null,
+    ...(Number.isSafeInteger(agentPid) && agentPid > 0 ? { agentPid } : {}),
+    ...(Number.isSafeInteger(agentStarted) && agentStarted > 0 ? { agentStarted } : {}),
+    ...(host !== undefined && /^[0-9a-f]{64}$/.test(host) ? { host } : {}),
     ...(isRun ? { isRun: true as const } : {}),
     ...(isRun && attrs.parent !== undefined && RESUME.test(attrs.parent) ? { parent: attrs.parent } : {}),
     ...(replied !== null && Number.isFinite(replied) ? { replied } : {}),
@@ -167,7 +217,7 @@ export const readable = (lines: readonly string[], isDiagnostic = false): Array<
       if (end < 0) return null
       isComment = false
       line = line.slice(end + 3)
-    } else if (AUTO_START.test(raw) || AUTO_END.test(raw) || QUESTION.test(raw) || NATIVE.test(raw)) {
+    } else if (AUTO_START.test(raw) || AUTO_END.test(raw) || QUESTION.test(raw) || NATIVE.test(raw) || OPTIONS.test(raw)) {
       return raw
     }
     if (isCutMarker(raw)) {
@@ -291,6 +341,14 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
       if (native !== null && openSession !== null && task?.auto?.session === openSession && previous?.status === 'waiting') previous.native = native
       return
     }
+    if (OPTIONS.test(line)) {
+      // A refused line still says the agent listed its choices: the step offers none (an empty
+      // list), and the board does not read any from the question's words in their place.
+      const options = optionsOf(line) ?? []
+      const previous = task?.steps.at(-1)
+      if (openSession !== null && task?.auto?.session === openSession && previous?.status === 'waiting') previous.options = options
+      return
+    }
 
     const projectMatch = PROJECT.exec(line)
     // A session's block never holds a `##`, so one always starts a project, and ends a block
@@ -406,6 +464,9 @@ export const observedTime = (auto: ProgressAuto | null, now: number, seen: Reado
 
 export const isStale = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0, staleMs: number = STALE_MS): boolean =>
   auto !== null && (auto.state === 'working' || auto.state === 'waiting') && updated > 0 && now - updated > staleMs
+
+export const isStopped = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): boolean =>
+  isStale(auto, now, updated, staleMs) || (auto !== null && (auto.state === 'working' || auto.state === 'waiting') && gone.has(blockKey(auto)))
 
 // The key a finished hand-kept task is remembered by, to archive it a day later.
 export const doneKey = (project: string, title: string): string => `done:${project}::${title}`

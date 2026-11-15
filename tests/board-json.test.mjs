@@ -52,14 +52,14 @@ test('the board document has a schema version, the questions that need the perso
   assert.equal(document.schemaVersion, 1)
   assert.equal(document.generatedAt, new Date(NOW).toISOString())
   assert.equal(document.lang, 'en')
-  assert.deepEqual(document.counts, { needs: 2, questions: 1, stuck: 1, working: 1, waiting: 2, stopped: 1, doneRecently: 2 })
+  assert.deepEqual(document.counts, { needs: 2, questions: 1, stuck: 1, queued: 0, working: 1, waiting: 2, stopped: 1, doneRecently: 2 })
   assert.deepEqual(document.needs.map(one => one.kind), ['question', 'stuck'])
   assert.deepEqual(document.needs[0].options, ['100', '300 a minute'])
   assert.equal(document.needs[0].askedAt, new Date(NOW - MINUTE).toISOString())
   assert.equal(document.needs[1].note, 'Need the sample file')
   assert.deepEqual(document.working[0], {
     agent: 'opencode', project: 'synthetic-api', title: 'Check endpoints', step: 'Compare responses',
-    done: 1, total: 2, updatedAt: new Date(NOW - 4 * MINUTE).toISOString(), age: '4 min ago', isUnsure: false,
+    done: 1, total: 2, updatedAt: new Date(NOW - 4 * MINUTE).toISOString(), age: '4 min ago', state: 'working', isUnsure: false,
   })
   assert.equal(document.waiting.find(one => one.title === 'Wait for CI').isUnsure, false)
   const unknown = document.waiting.find(one => one.title === 'Undated task')
@@ -83,6 +83,28 @@ test('the board document has a schema version, the questions that need the perso
     assert.ok(s.boardUsageAll.includes('[--print]'))
     assert.ok(!s.boardUsage.includes('--chat') && !s.boardUsageAll.includes('--chat'))
   }
+})
+
+test('the board document marks a quiet placeholder row unsure with its age and state (#1317)', () => {
+  // The Antigravity closed-window case: Stop was the last event, only the
+  // hook's placeholder is open, quiet past 30 min, no live process.
+  const view = viewOf(`## synthetic\n${block('a1000009', 'antigravity', 'waiting', 'Closed window work', '- [ ] Waiting for the next instruction', NOW - 31 * MINUTE)}`)
+  const document = documentOf(view)
+  const row = document.waiting.find(one => one.title === 'Closed window work')
+  assert.ok(row, 'the unsure row stays on its shelf, outside Needs you')
+  assert.equal(row.state, 'unsure')
+  assert.equal(row.isUnsure, true)
+  assert.equal(row.age, '31 min ago')
+  assert.equal(document.counts.needs, 0)
+  assert.equal(document.counts.working, 0)
+  assert.equal(document.counts.waiting, 1)
+
+  // The same row 29 min quiet is still waiting, not unsure.
+  const fresh = documentOf(viewOf(`## synthetic\n${block('a1000009', 'antigravity', 'waiting', 'Closed window work', '- [ ] Waiting for the next instruction', NOW - 29 * MINUTE)}`))
+  const still = fresh.waiting.find(one => one.title === 'Closed window work')
+  assert.equal(still.state, 'waiting')
+  assert.equal(still.isUnsure, false)
+  assert.equal(still.age, '29 min ago')
 })
 
 test('the board document hides the home folder and known credential forms, as the chat board does', () => {
@@ -413,4 +435,27 @@ test('undated manual completed tasks in progress.md are not fabricated as today 
 `
   const finished = collectFinished(manualUndated, [], [], 1, NOW, undefined, '/synthetic-home', false)
   assert.equal(finished.length, 0, 'undated tasks should not be fabricated as today')
+})
+
+test('a waiting step with <!-- options=... --> exposes each choice in boardDocument and --json (#1277)', () => {
+  const source = `## synthetic-api
+${block('c0123456', 'codex', 'waiting', 'Pick storage', '- [?] Which database should I use?\n<!-- options=["Postgres","SQLite"] -->', NOW - MINUTE)}
+${block('c0123457', 'cursor', 'waiting', 'Open question', '- [?] What should the output folder be named?', NOW - 2 * MINUTE)}
+`
+  const view = viewOf(source)
+  const document = documentOf(view)
+  assert.equal(document.needs[0]?.kind, 'question')
+  assert.deepEqual(document.needs[0]?.options, ['Postgres', 'SQLite'])
+  assert.deepEqual(document.needs[1]?.options, [])
+
+  const cliNow = Date.now()
+  const cliSource = `## synthetic-api
+${block('c0123456', 'codex', 'waiting', 'Pick storage', '- [?] Which database should I use?\n<!-- options=["Postgres","SQLite"] -->', cliNow - MINUTE)}
+${block('c0123457', 'cursor', 'waiting', 'Open question', '- [?] What should the output folder be named?', cliNow - 2 * MINUTE)}
+`
+  const ran = jsonRun(['--json'], { files: { 'progress.md': cliSource } })
+  assert.equal(ran.status, 0, ran.stderr)
+  const cliDoc = JSON.parse(ran.stdout)
+  assert.deepEqual(cliDoc.needs[0]?.options, ['Postgres', 'SQLite'])
+  assert.deepEqual(cliDoc.needs[1]?.options, [])
 })

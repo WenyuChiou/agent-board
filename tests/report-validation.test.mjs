@@ -113,45 +113,59 @@ test('an omitted state uses the waiting age limit and rejects the whole batch wi
 }))
 
 test('rapid reporter updates and retirement merge under the same clock at every part of a second', () => {
-  const code = `import contextlib, io, json, os, sys, tempfile
+  const code = `import contextlib, io, json, os, sys, tempfile, time
+t0 = time.perf_counter()
 from datetime import datetime, timezone
 from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
 import merge, reporter
-results = []
-for micros in (0, 500000, 999999):
-    now = datetime(2026, 11, 1, 20, 0, 0, micros, tzinfo=timezone.utc)
-    class Clock(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return now
-    with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {'AGENT_BOARD_REMOTE_DIR': home, 'BOARD_PROJECT': 'Synthetic'}), patch.object(reporter, 'datetime', Clock), patch.object(merge, 'datetime', Clock), contextlib.redirect_stdout(io.StringIO()):
-        steps = os.path.join(home, 'steps.txt')
-        with open(steps, 'w', encoding='utf-8') as f:
-            f.write('- Check synthetic work\\n')
-        board = os.path.join(home, 'progress.md')
-        stamps = []
-        for index in range(12):
-            reporter.cmd_update('synthetic-chat', 'waiting', f'Synthetic update {index}', steps)
-            frag = reporter.fragment_path(reporter.session_for('synthetic-chat'))
-            merge.merge_file(board, [frag])
-            text = reporter.read_text(frag)
-            assert reporter.read_text(board).endswith(text.split('\\n', 2)[2])
-            _, lines = reporter.fragment_parts(text)
-            stamps.append(merge.updated_time(lines[0]))
-        reporter.cmd_retire('synthetic-chat', 'Synthetic work stopped')
+print(f"timing import={time.perf_counter() - t0:.4f}s", file=sys.stderr, flush=True)
+micros = int(sys.argv[2])
+now = datetime(2026, 11, 1, 20, 0, 0, micros, tzinfo=timezone.utc)
+class Clock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return now
+t_upd = t_mrg = t_ret = 0.0
+with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {'AGENT_BOARD_REMOTE_DIR': home, 'BOARD_PROJECT': 'Synthetic'}), patch.object(reporter, 'datetime', Clock), patch.object(merge, 'datetime', Clock), contextlib.redirect_stdout(io.StringIO()):
+    steps = os.path.join(home, 'steps.txt')
+    with open(steps, 'w', encoding='utf-8') as f:
+        f.write('- Check synthetic work\\n')
+    board = os.path.join(home, 'progress.md')
+    stamps = []
+    for index in range(12):
+        step_t0 = time.perf_counter()
+        reporter.cmd_update('synthetic-chat', 'waiting', f'Synthetic update {index}', steps)
+        t_upd += time.perf_counter() - step_t0
+        frag = reporter.fragment_path(reporter.session_for('synthetic-chat'))
+        step_t0 = time.perf_counter()
         merge.merge_file(board, [frag])
-        assert 'state=ended' in reporter.read_text(board)
-        _, ended = reporter.fragment_parts(reporter.read_text(frag))
-        stamps.append(merge.updated_time(ended[0]))
-        assert all(a < b for a, b in zip(stamps, stamps[1:]))
-        assert all(stamp.replace(microsecond=0) <= now.replace(microsecond=0) for stamp in stamps)
-        results.append([stamp.isoformat() for stamp in stamps])
-print(json.dumps(results))`
-  const result = spawnSync(python, ['-B', '-c', code, dirname(mergeScript)], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } })
-  assert.equal(result.error, undefined)
-  assert.equal(result.status, 0, result.stderr)
-  const histories = JSON.parse(result.stdout)
+        t_mrg += time.perf_counter() - step_t0
+        text = reporter.read_text(frag)
+        assert reporter.read_text(board).endswith(text.split('\\n', 2)[2])
+        _, lines = reporter.fragment_parts(text)
+        stamps.append(merge.updated_time(lines[0]))
+    step_t0 = time.perf_counter()
+    reporter.cmd_retire('synthetic-chat', 'Synthetic work stopped')
+    t_ret += time.perf_counter() - step_t0
+    step_t0 = time.perf_counter()
+    merge.merge_file(board, [frag])
+    t_mrg += time.perf_counter() - step_t0
+    assert 'state=ended' in reporter.read_text(board)
+    _, ended = reporter.fragment_parts(reporter.read_text(frag))
+    stamps.append(merge.updated_time(ended[0]))
+    assert all(a < b for a, b in zip(stamps, stamps[1:]))
+    assert all(stamp.replace(microsecond=0) <= now.replace(microsecond=0) for stamp in stamps)
+    print(f"timing micros={micros} update={t_upd:.4f}s merge={t_mrg:.4f}s retire={t_ret:.4f}s", file=sys.stderr, flush=True)
+print(json.dumps([stamp.isoformat() for stamp in stamps]))`
+  // Split the three clock fractions into separate Python children so each child stays well under
+  // the 10-second limit on busy Windows runners while timing each stage on stderr if it stalls.
+  const histories = [0, 500000, 999999].map(micros => {
+    const result = spawnSync(python, ['-B', '-c', code, dirname(mergeScript), String(micros)], { encoding: 'utf8', timeout: 10_000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } })
+    assert.equal(result.error, undefined, result.stderr)
+    assert.equal(result.status, 0, result.stderr)
+    return JSON.parse(result.stdout)
+  })
   assert.equal(histories.length, 3)
   for (const stamps of histories) {
     assert.equal(stamps.length, 13)
@@ -207,3 +221,38 @@ test('remote clock errors are generated from all three string tables and deliver
     }
   }
 }))
+
+test('validate.py accepts a valid options line after a [?] step and treats cut options= as a cut marker', () => {
+  const code = `import sys, json
+sys.path.insert(0, sys.argv[1])
+import validate
+valid = """<!-- auto session=1234abcd agent=codex state=waiting updated=2026-10-30T12:00:00Z -->
+### Pick storage
+- [?] Which database should I use?
+<!-- options=["Postgres","SQLite"] -->
+<!-- /auto session=1234abcd -->"""
+errs = validate.validate_block(valid.splitlines(), strict=True)
+cut_tail = """## Project
+<!-- auto session=1234abcd agent=codex state=working updated=2026-10-30T12:00:00Z -->
+### Task 1
+- [?] Pick?
+<!-- options=["Postgres"
+<!-- auto session=abcd1234 agent=codex state=working updated=2026-10-30T12:00:00Z -->
+### Task 2
+- [ ] Next
+<!-- /auto session=abcd1234 -->"""
+blocks = validate.scan_blocks(cut_tail.splitlines())
+print(json.dumps({
+    "errs": errs,
+    "isCut": validate.is_cut_marker('<!-- options=["Postgres"'),
+    "blocks": [b["session"] for b in blocks],
+}))`
+  const result = spawnSync(python, ['-B', '-c', code, join(root, 'scripts/remote-reporter')], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+  })
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout), { errs: [], isCut: true, blocks: ['1234abcd', 'abcd1234'] })
+})

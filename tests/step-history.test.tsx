@@ -161,3 +161,18 @@ test('a missing progress-settings.json keeps the 7 days in the pane', async ($, 
   await clock.advance(1)
   expect(world.files.get(FILE)).toBe('## synthetic-project\n### Synthetic task\n- [x] Four days old <!-- done 2026-10-12 -->\n1 earlier step archived (from 10-07 to 10-07)\n- [ ] Still open\n')
 })
+
+// Review of #1339: the sweep reads historyDays through the guarded script. A settings path that is a link or a FIFO
+// reads as nothing, so the target's `historyDays` is not honoured and the host's read (which follows a link and
+// waits on a FIFO) is never made. Before the guard the host read the file and archived the 4-day-old step at 3 days.
+test('a settings file that is a link or a FIFO keeps the 7 days in the sweep and is not read by the host', async ($, on) => {
+  const text = '## synthetic-project\n### Synthetic task\n- [x] Four days old <!-- done 2026-10-12 -->\n- [ ] Still open\n'
+  const settings = `${DIR}/progress-settings.json`
+  const world = makeWorld([[FILE, text], [settings, '{"historyDays": 3}']])
+  world.unsafeFiles = new Set([settings])
+  world.env = english
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  await clock.advance(1)
+  expect(world.files.get(FILE)).toBe(text)
+})

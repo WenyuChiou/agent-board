@@ -193,7 +193,7 @@ claude plugin install agent-board@agent-board
 
 獨立安裝：將乾淨 checkout 更新到指定版本，預覽 `node scripts/setup-agent.mjs`，再套用已核准範圍。修改過的檔案列為衝突，不覆寫。host 可能要重新載入；不安裝自動更新器或開機服務。
 
-透過 `@wenyuchiou/agent-board remove` 一次預覽／套用所有設定過之 agent 的移除，或指定 `--agent` 只移除特定 agent（`codex`、`cursor`、`opencode`、`gemini`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
+透過 `@wenyuchiou/agent-board remove` 一次預覽／套用所有設定過之 agent 的移除，或指定 `--agent` 只移除特定 agent（`codex`、`cursor`、`opencode`、`grok`、`muse`、`hermes`、`openclaw`、`antigravity`、`deepseek`）：
 
 ```sh
 npx @wenyuchiou/agent-board remove
@@ -308,7 +308,7 @@ claude plugin marketplace remove agent-board
 - **沒有原生側欄：** 非 Claude host 使用互動網頁或終端看板，網頁面板不等於原生側欄。
 - **寫到一半被截斷的工作：** session 寫自己的區塊時如果中途停掉（當掉或被強制關閉），區塊可能少了結束標記。看板會把它讀成在它最後一行結束，照原樣顯示，並列在側欄最下方的「看板狀態」。要自己補上，就在它最後一行的下一行加上 `<!-- /auto session=<id> -->`；id 在區塊的開始標記裡。如果那個 session 先重寫了自己的區塊，新區塊下方留下的幾行會重複它舊的步驟：請自己刪掉。
 - **同一個 agent 出現兩次：** 可能兩種方式都接上了：Claude 外掛的 `/progress connect` 和安裝程式（setup）。`/progress connect status` 會列出外掛接了哪些；用 `/progress connect remove` 拿掉其中一個，或用 `npx @wenyuchiou/agent-board@next remove --agent <name>` 先預覽要移除什麼，再加上 `--apply` 執行。
-- **有個問題一直不消失：** 在它自己的對話裡回答，再按**已回覆，先隱藏**（終端機看板按 `h`）。對話已停止的問題、agent 在自己視窗裡問的問題，以及在看板上按過**傳送**或**排到下一輪**之後，這顆按鈕直接在卡片上；按過**複製**之後，同一顆按鈕寫的是**已回答**；其他時候它在**更多**裡。3 天後它會移到**較早的未答問題**，7 天後移到**更早、尚未回答的問題**。
+- **有個問題一直不消失：** 在它自己的對話裡回答，再按**已回覆，先隱藏**（終端機看板按 `h`）。對話已停止的問題、agent 在自己視窗裡問的問題，以及在看板上按過**複製**、**傳送**或**排到下一輪**之後，這顆按鈕直接在卡片上；其他時候它在**更多**裡。3 天後它會移到**較早的未答問題**，7 天後移到**更早、尚未回答的問題**。
 
 ### 安全地回報問題
 
