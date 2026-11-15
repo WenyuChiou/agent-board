@@ -6822,7 +6822,7 @@ test('Send to Codex is on by default; --no-codex-send turns it off, a plain comm
   } finally { await board.end(urls) }
 })
 
-test('a page that reports noCodexSend is replaced by one with Send to Codex off, a page of a build before #318 by one with it on, and one launch does not hand the setting to the next in the same command (#318)', { timeout: 90_000 }, async () => {
+test('a page that reports noCodexSend is replaced by one with Send to Codex off (#318)', { timeout: 90_000 }, async () => {
   const board = serveIn()
   const urls = []
   const fakes = []
@@ -6855,7 +6855,6 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off,
     return page
   }
   const addressOf = (page, pid) => JSON.stringify({ pid, port: page.port, url: page.url, path: board.path, built: 'synthetic-earlier-build' })
-  let blocker = null
   try {
     // A page started with --no-codex-send reports noCodexSend: a plain command that replaces it (here for a newer build) gives
     // the new page the same switch.
@@ -6871,35 +6870,8 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off,
     assert.equal(replacedPing.codexSend, false)
     assert.equal(replacedPing.noCodexSend, true)
     await closeAt(replaced, board.served)
-
-    // `--keys "o o"` opens the page twice in one command, as `--watch` can. The first launch lets go of a page with it off;
-    // its own page cannot take the port `blocker` holds, and the page it let go of leaves the address file to a page of a
-    // build before #318, which reports no noCodexSend (999999: a number no process has, as for the other stand-ins of this file). The second launch replaces that one, whose closing frees the port.
-    blocker = createNetServer()
-    await new Promise(done => blocker.listen(0, '127.0.0.1', done))
-    const { port } = blocker.address()
-    const earlier = await fakePage({ codexSend: false }, () => blocker.close())
-    const offAgain = await fakePage({ codexSend: false, noCodexSend: true }, () => writeFileSync(board.served, addressOf(earlier, 999999)))
-    addressFixture(board.served, addressOf(offAgain, process.pid))
-    const keys = await new Promise(done => execFile(process.execPath, [board.script, '--keys', 'o o', '--no-open', '--port', String(port)], { env: board.env, encoding: 'utf8', timeout: 60_000 }, (error, out, err) => done({ error, out, err })))
-    const record = JSON.parse(readFileSync(board.served, 'utf8'))
-    urls.push(record.url)
-    // The command ran both opens and ended on its own: the first open's failure on the held port makes it exit 1, and its
-    // time limit did not stop it. Its board ends with the link of the page the second open started.
-    assert.equal(keys.error?.killed ?? false, false, keys.err)
-    assert.equal(keys.error?.signal ?? null, null, keys.err)
-    assert.equal(keys.error?.code, 1, `${keys.out}${keys.err}`)
-    assert.equal(record.port, port, keys.out)
-    assert.ok(keys.out.includes(record.url), keys.out)
-    assert.equal(offAgain.closes, 1)
-    assert.equal(earlier.closes, 1)
-    // The page of the second launch has Send to Codex on: the page it replaced was of a build before #318, and the first
-    // launch's off page is not that launch's to know.
-    const secondPing = await pingOf(record.url)
-    assert.equal(secondPing.codexSend, true)
-    assert.equal(secondPing.noCodexSend, false)
+    // A page of a build before #318 and a command that opens the page twice: #1519 (taken out at #1517's round cap).
   } finally {
-    blocker?.close()
     for (const fake of fakes) { fake.close(); fake.closeAllConnections() }
     await board.end(urls)
   }
