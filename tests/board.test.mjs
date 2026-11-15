@@ -6813,6 +6813,12 @@ test('Send to Codex is on by default; --no-codex-send turns it off, a plain comm
     assert.notEqual(again, resumed)
     urls.push(again)
     assert.equal((await pingOf(again)).codexSend, true)
+    // Both switches ask for a page with it off, so the page with it on is replaced by one that has it off.
+    const both = board.urlOf(await board.serve(['--quiet-board', '--codex-send', '--no-codex-send']))
+    assert.ok(both)
+    assert.notEqual(both, again)
+    urls.push(both)
+    assert.equal((await pingOf(both)).codexSend, false)
   } finally { await board.end(urls) }
 })
 
@@ -6868,12 +6874,12 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off,
 
     // `--keys "o o"` opens the page twice in one command, as `--watch` can. The first launch lets go of a page with it off;
     // its own page cannot take the port `blocker` holds, and the page it let go of leaves the address file to a page of a
-    // build before #318, which reports no noCodexSend. The second launch replaces that one, whose closing frees the port.
+    // build before #318, which reports no noCodexSend (999999: a number no process has, as for the other stand-ins of this file). The second launch replaces that one, whose closing frees the port.
     blocker = createNetServer()
     await new Promise(done => blocker.listen(0, '127.0.0.1', done))
     const { port } = blocker.address()
     const earlier = await fakePage({ codexSend: false }, () => blocker.close())
-    const offAgain = await fakePage({ codexSend: false, noCodexSend: true }, () => writeFileSync(board.served, addressOf(earlier, process.pid + 1)))
+    const offAgain = await fakePage({ codexSend: false, noCodexSend: true }, () => writeFileSync(board.served, addressOf(earlier, 999999)))
     addressFixture(board.served, addressOf(offAgain, process.pid))
     const keys = await new Promise(done => execFile(process.execPath, [board.script, '--keys', 'o o', '--no-open', '--port', String(port)], { env: board.env, encoding: 'utf8', timeout: 60_000 }, (error, out, err) => done({ error, out, err })))
     const record = JSON.parse(readFileSync(board.served, 'utf8'))
