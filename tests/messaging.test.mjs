@@ -531,6 +531,34 @@ test('a claim whose file no longer holds its bytes fails its check as a store er
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('a damaged own claim whose release also throws is a store error, not deferred (#1484)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-claim-aggregate-'))
+  try {
+    // Damage the claim file the scan itself reads, so the scan fails on the board's own
+    // claim and the cleanup release fails on the same damaged file: without the fix the
+    // two errors are wrapped as a contention and the mailbox defers (#1484).
+    const realLstat = fs.lstatSync
+    let damaged = false
+    fs.lstatSync = (path, ...rest) => {
+      if (!damaged && typeof path === 'string' && basename(String(path)).startsWith('.message-claim-') && String(path).endsWith('.json')) {
+        damaged = true
+        writeFileSync(path, '{damaged')
+      }
+      return realLstat(path, ...rest)
+    }
+    syncBuiltinESMExports()
+    try {
+      const box = hookMailbox(dir, 500)
+      assert.equal(await box.turn('codex', 's-aggregate', 'CLI', Date.now()), null)
+      assert.equal(box.hasDeferred, false)
+      assert.equal(box.error, 'MESSAGE_STORE_CLAIM_DAMAGED')
+    } finally {
+      fs.lstatSync = realLstat
+      syncBuiltinESMExports()
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('an uncertain mailbox message still blocks its target and is never handed out again', () => {
   const now = Date.now()
   const first = mailboxTake(mailboxQueue(mailboxSeed(now), 'uncertain-first'), now + 1)

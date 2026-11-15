@@ -13,6 +13,24 @@ const damaged = (): Error => new Error('MESSAGE_STORE_CLAIM_DAMAGED')
 // A refusal Windows clears on its own (a file being removed, a scanner holding one just written)
 // is contention, not damage: the next call tries again.
 const TRANSIENT_ERRNO = new Set(['EPERM', 'EBUSY', 'EAGAIN'])
+// The errnos that make a refusal a contention, as in `isClaimContention`
+// (`scripts/board-messaging.ts`): a refusal Windows clears on its own, or a name
+// another file took.
+const CONTENTION_ERRNO = new Set(['EEXIST', 'EPERM', 'EBUSY', 'EAGAIN'])
+
+// Whether a scan failure is itself a contention: a live owner, a blocked error with no
+// cause or a contention cause, or a raw refusal in the contention set. Anything else —
+// damage, EIO, a generic failure — is not, so the cleanup failure must not wrap it into
+// one (#1484).
+const isContention = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false
+  if (error.message === 'MESSAGE_STORE_IN_USE') return true
+  if (error.message === 'MESSAGE_STORE_CLAIM_BLOCKED') {
+    const cause = (error as { cause?: unknown }).cause as NodeJS.ErrnoException | null | undefined
+    return cause == null || CONTENTION_ERRNO.has(String(cause.code ?? ''))
+  }
+  return CONTENTION_ERRNO.has(String((error as NodeJS.ErrnoException).code ?? ''))
+}
 const canonical = (path: string): string => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path)
 
 // While its owner removes it, another board's claim can still have its name on Windows and yet
@@ -182,7 +200,12 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
     }
     return claim
   } catch (error) {
-    try { claim.release() } catch (cleanup) { throw new AggregateError([error, cleanup], 'MESSAGE_STORE_CLAIM_BLOCKED') }
+    try { claim.release() } catch (cleanup) {
+      // The cleanup failure must not turn a damaged store into a contention: only a
+      // first error that is itself one is wrapped, so it still defers (#1484).
+      if (!isContention(error)) throw error
+      throw new AggregateError([error, cleanup], 'MESSAGE_STORE_CLAIM_BLOCKED')
+    }
     throw error
   }
 }
