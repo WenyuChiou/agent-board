@@ -6824,13 +6824,16 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off,
     const address = new URL(url)
     return (await fetchAt('127.0.0.1', Number(address.port), 'GET', '/api/ping', { 'x-board-token': address.searchParams.get('t') })).json()
   }
-  // A stand-in page of another build: it answers its ping with `fields`, and agrees to close after running `onClose`.
+  // A stand-in page of another build: it answers its ping with `fields`, and agrees to close after running `onClose`; `closes`
+  // counts the requests to close it.
   const fakePage = async (fields, onClose = () => {}) => {
+    const page = { port: 0, url: '', closes: 0 }
     const fake = createServer((req, res) => {
       if (req.url === '/api/ping') {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ path: board.path, built: 'synthetic-earlier-build', allowResume: false, ...fields }))
       } else if (req.url === '/api/close') {
+        page.closes++
         onClose()
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end('{}')
@@ -6841,8 +6844,9 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off,
     })
     await new Promise(done => fake.listen(0, '127.0.0.1', done))
     fakes.push(fake)
-    const { port } = fake.address()
-    return { port, url: `http://127.0.0.1:${port}/?t=synthetic-${port}` }
+    page.port = fake.address().port
+    page.url = `http://127.0.0.1:${page.port}/?t=synthetic-${page.port}`
+    return page
   }
   const addressOf = (page, pid) => JSON.stringify({ pid, port: page.port, url: page.url, path: board.path, built: 'synthetic-earlier-build' })
   let blocker = null
@@ -6854,6 +6858,9 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off,
     const replaced = board.urlOf(await board.serve(['--quiet-board']))
     assert.ok(replaced)
     urls.push(replaced)
+    // A new page, not the stand-in: it was asked to close, and the address names another page.
+    assert.equal(off.closes, 1)
+    assert.notEqual(new URL(replaced).port, String(off.port))
     const replacedPing = await pingOf(replaced)
     assert.equal(replacedPing.codexSend, false)
     assert.equal(replacedPing.noCodexSend, true)
@@ -6872,6 +6879,8 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off,
     const record = JSON.parse(readFileSync(board.served, 'utf8'))
     urls.push(record.url)
     assert.equal(record.port, port, keys)
+    assert.equal(offAgain.closes, 1)
+    assert.equal(earlier.closes, 1)
     // The page of the second launch has Send to Codex on: the page it replaced was of a build before #318, and the first
     // launch's off page is not that launch's to know.
     const secondPing = await pingOf(record.url)
