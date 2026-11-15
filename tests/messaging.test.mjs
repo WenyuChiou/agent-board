@@ -6055,6 +6055,18 @@ test('the board runs the Codex receiver by default for a Codex session it knows,
       assert.equal((await quiet.call('/api/board')).body.messaging.connections.length, 0)
       assert.equal(existsSync(join(dir, 'proxy.pid')), false)
     } finally { await quiet.close() }
+    // No Codex program found (#318): AGENT_BOARD_CODEX_BIN that names none, as a computer with no Codex on PATH, leaves the
+    // receiver with no program. The page still serves, with no Codex program started and no thread joined.
+    process.env.AGENT_BOARD_CODEX_BIN = 'codex'
+    const none = await start(dir, '', ['--messages-dir', join(dir, 'messages')])
+    try {
+      await pause(1500)
+      const served = await none.call('/api/board')
+      assert.equal(served.status, 200)
+      assert.equal(served.body.messaging.connections.length, 0)
+      assert.equal(existsSync(join(dir, 'proxy.pid')), false)
+    } finally { await none.close() }
+    process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
     // On by default (#318): a page started with no switch runs the receiver.
     board = await start(dir, '', ['--messages-dir', join(dir, 'messages')], codexRoutes)
     delete process.env.AGENT_BOARD_CODEX_BIN

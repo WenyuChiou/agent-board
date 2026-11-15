@@ -6771,7 +6771,7 @@ test('a plain board command keeps a page started with --codex-send, and a plain 
   } finally { await board.end([url]) }
 })
 
-test('Send to Codex is on by default; --no-codex-send turns it off, a plain command keeps either page, and each switch replaces a page with the other setting (#318)', { timeout: 60_000 }, async () => {
+test('Send to Codex is on by default; --no-codex-send turns it off, a plain command keeps either page, a replacement for another reason keeps it off, and each switch replaces a page with the other setting (#318)', { timeout: 60_000 }, async () => {
   const board = serveIn()
   const urls = []
   const pingOf = async url => {
@@ -6798,10 +6798,19 @@ test('Send to Codex is on by default; --no-codex-send turns it off, a plain comm
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).pid, offPid, 'the page was not replaced')
     // With both switches the receiver is off, so that page is kept too.
     assert.equal(board.urlOf(await board.serve(['--quiet-board', '--codex-send', '--no-codex-send'])), off)
+    // A command with no switch that replaces the page for another reason (here --allow-resume) gives the new page the
+    // switch the old one was started with, so the replacement does not turn the receiver back on.
+    const resumed = board.urlOf(await board.serve(['--quiet-board', '--allow-resume']))
+    assert.ok(resumed)
+    assert.notEqual(resumed, off)
+    urls.push(resumed)
+    const resumedPing = await pingOf(resumed)
+    assert.equal(resumedPing.allowResume, true)
+    assert.equal(resumedPing.codexSend, false)
     // --codex-send, the switch from before, asks for it on: the page is replaced again.
     const again = board.urlOf(await board.serve(['--quiet-board', '--codex-send']))
     assert.ok(again)
-    assert.notEqual(again, off)
+    assert.notEqual(again, resumed)
     urls.push(again)
     assert.equal((await pingOf(again)).codexSend, true)
   } finally { await board.end(urls) }
@@ -8284,6 +8293,9 @@ test('a newer --serve does not start a second page while the page it would repla
     assert.notEqual(url, board.url.href)
     assert.ok(!next.includes('already open is kept'), next)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+    // The page it replaced was started with no switch, as every page before #318 was: the new page has Send to Codex on.
+    const address = new URL(url)
+    assert.equal((await fetchAt('127.0.0.1', Number(address.port), 'GET', '/api/ping', { 'x-board-token': address.searchParams.get('t') })).json().codexSend, true)
     await held.exited()
   } finally {
     for (const url of urls) await closeAt(url, board.served)
@@ -10671,7 +10683,8 @@ test('a replaced server tells an open tab the board moved instead of dropping of
   const board = serveIn()
   const urls = []
   try {
-    const first = board.urlOf(await board.serve([]))
+    // Started with Send to Codex off, so --codex-send below asks for a page with another setting (#318).
+    const first = board.urlOf(await board.serve(['--no-codex-send']))
     assert.ok(first)
     urls.push(first)
     const firstAddress = new URL(first)
