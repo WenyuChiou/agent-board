@@ -363,14 +363,17 @@ if (args.at(-1)?.includes('SLOW_TURN')) {
 test('an idle Codex card says its message starts within about a minute, not right away, in EN, ZH_TW and ZH_CN (#1506)', async () => {
   const { agentLabel } = await import('../hooks/strings.ts')
   for (const s of [EN, ZH_TW, ZH_CN]) {
-    // Codex's receiver watches a thread for about a minute before it starts a message on it.
-    assert.equal(routeText('now', true, 'codex', s), s.serveLineSoon('Codex'))
+    // Codex's daemon receiver watches a thread for about a minute, or a longer configured delay, before it starts a message.
+    assert.equal(routeText('now', true, 'codex', s, 'idle', undefined, SURFACE_IDS.codexDaemon), s.serveLineSoon('Codex'))
     assert.notEqual(s.serveLineSoon('Codex'), s.serveLineNow('Codex'))
+    // Another Codex surface has no such watch, also when only Copy is offered (codex_389).
+    assert.equal(routeText('now', true, 'codex', s, 'idle', undefined, SURFACE_IDS.codexSession), s.serveLineNow('Codex'))
+    assert.equal(routeText('now', false, 'codex', s, 'idle', 'SURFACE_UNKNOWN', 'Synthetic Codex'), `${s.serveLineNow('Codex')} ${s.serveLineUnrecorded}`)
     // A turn in progress and the other agents keep their lines.
-    assert.equal(routeText('now', true, 'codex', s, 'working'), s.serveLineNowWorking('Codex'))
+    assert.equal(routeText('now', true, 'codex', s, 'working', undefined, SURFACE_IDS.codexDaemon), s.serveLineNowWorking('Codex'))
     assert.equal(routeText('now', true, 'opencode', s), s.serveLineNow(agentLabel('opencode', s)))
   }
-  assert.equal(EN.serveLineSoon('Codex'), 'Codex is waiting. It starts on this within about a minute.')
+  assert.equal(EN.serveLineSoon('Codex'), 'Codex is waiting. It starts on this within about a minute, or later if your Codex config keeps threads loaded longer.')
 })
 
 test('card wording explains turn runs/ran in background and to open the AI window in EN, ZH_TW, and ZH_CN', async () => {
