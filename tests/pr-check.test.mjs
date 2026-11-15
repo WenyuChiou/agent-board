@@ -2128,7 +2128,7 @@ test('pr-check wants each case row to name, in backticks, a test that is in test
   assert.ok(draft.info.some(line => /row 1 .*no test of tests\/ yet/.test(line)), draft.info.join('\n'))
   // Pull requests up to FAIL_FIRST_FROM keep the rules they opened with.
   assert.deepEqual(firstRun('', { rows: [caseRow('not a title')], number: FAIL_FIRST_FROM }).problems, [])
-  assert.deepEqual(caseRows(`## Cases\n\n${caseTableText(caseRow('`receiver keeps the turn`'))}`).map(cells => cells[3]), ['`receiver keeps the turn`'])
+  assert.deepEqual(caseRows(caseTableText(caseRow('`receiver keeps the turn`'))).map(cells => cells[3]), ['`receiver keeps the turn`'])
   assert.deepEqual(caseRows('no table here'), [])
 })
 

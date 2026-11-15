@@ -86,7 +86,7 @@ const has = (checks, state, text) => checks.some(item => item.state === state &&
 const mainFixture = (t, { isSame = false, hasImportFailure = false, mainSource } = {}) => {
   const f = fixture(t)
   const local = readFileSync(script, 'utf8')
-  for (const name of ['pr-check.mjs', 'changelog-fold.mjs', 'bundle-text.mjs', 'preflight-lock-policy.mjs']) {
+  for (const name of ['pr-check.mjs', 'fail-first.mjs', 'changelog-fold.mjs', 'bundle-text.mjs', 'preflight-lock-policy.mjs']) {
     f.write(`scripts/${name}`, readFileSync(new URL(`../scripts/${name}`, import.meta.url), 'utf8'))
   }
   const main = mainSource ?? (isSame ? local : `import { message } from './main-only-message.mjs'\n${local.replace("'the branch contains the base.'", 'message')}`)
