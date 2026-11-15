@@ -1845,6 +1845,11 @@ test('pr-check wants a ## Cases table when the Cases line names rows', () => {
   const full = casesRun(`Cases: 2 rows\n${caseTableText(caseRow(), caseRow('second test'))}`)
   assert.deepEqual(full.problems, [])
   assert.deepEqual(full.info, ['cases: 2 rows.'])
+  // The line goes above the table: below it fails, and inside the section above the rows passes (codex_395).
+  const below = casesRun(`${caseTableText(caseRow())}\nCases: 1 rows\n`)
+  assert.equal(below.problems.length, 1)
+  assert.match(below.problems[0].message, /`Cases:` line is below the case table/)
+  assert.deepEqual(casesRun(caseTableText(caseRow()).replace('## Cases\n\n', '## Cases\n\nCases: 1 rows\n\n')).problems, [])
   // A count that differs from the table is a problem.
   const off = casesRun(`Cases: 3 rows\n${caseTableText(caseRow(), caseRow())}`)
   assert.equal(off.problems.length, 1)
@@ -2005,6 +2010,9 @@ test('pr-check counts one round per head with REQUEST CHANGES over the whole pul
   // A person's review state counts as reviewOf reads it; a bot's review, as a state or a written line, starts no round.
   const states = [{ state: 'CHANGES_REQUESTED', commit_id: 'd1'.padEnd(40, '0'), user: { login: 'x' } }, { state: 'CHANGES_REQUESTED', commit_id: 'd2'.padEnd(40, '0'), user: { login: 'bot[bot]', type: 'Bot' } }, { body: `Review: REQUEST CHANGES ${'d4'.padEnd(40, '0')}`, user: { login: 'reviewer-bot[bot]' } }, { state: 'APPROVED', commit_id: 'd3'.padEnd(40, '0'), user: { login: 'y' } }, ...roundHeads(2)]
   assert.deepEqual(roundsRun(states).info, ['review rounds: 3 of 5.'])
+  // A review that requests changes counts by its state even when its body quotes an earlier approval (codex_395).
+  const quotesApproval = { state: 'CHANGES_REQUESTED', commit_id: 'f9'.padEnd(40, '0'), user: { login: 'x' }, body: `Review: APPROVE ${'a0'.padEnd(40, '0')} was the last verdict.\nA new P1.` }
+  assert.deepEqual(roundsRun([quotesApproval, ...roundHeads(2)]).info, ['review rounds: 3 of 5.'])
   // A verdict quoted in a code fence or an HTML comment is an example and starts no round.
   const quoted = [{ body: `An example:\n\`\`\`\nReview: REQUEST CHANGES ${'e1'.padEnd(40, '0')}\n\`\`\`` }, { body: `<!--\nReview: REQUEST CHANGES ${'e2'.padEnd(40, '0')}\n-->` }, `\`\`\`\nReview: REQUEST CHANGES ${'e3'.padEnd(40, '0')}\n\`\`\``, ...roundHeads(2)]
   assert.deepEqual(roundsRun(quoted).info, [])

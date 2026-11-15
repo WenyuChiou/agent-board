@@ -1009,6 +1009,12 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
     return output
   }
   output.info.push(`cases: ${table.rows.length} rows.`)
+  // The line goes above the table (CONTRIBUTING rule 2), so a reader meets the count before the rows.
+  const placed = visibleLines(body, { isPlaceKept: true })
+  const at = placed.findIndex(value => typeof value === 'string' && /^Cases:[ \t]*`?\d/i.test(value))
+  const heading = placed.findIndex(value => typeof value === 'string' && /^ {0,3}##[ \t]+Cases[ \t]*#*[ \t]*$/i.test(value))
+  const top = placed.findIndex((value, i) => i > heading && typeof value === 'string' && /^ {0,3}\|/.test(value))
+  if (at > top) fail('the `Cases:` line is below the case table.', 'move "Cases: <n> rows" above the table, as in the template (CONTRIBUTING.md rule 2).')
   if (Number(rows[1]) !== table.rows.length) fail(`the \`Cases:\` line says ${rows[1]} rows; the table has ${table.rows.length}.`, `make the line say "Cases: ${table.rows.length} rows", or add the rows it counts.`)
   const blank = table.rows.filter(cells => cells.slice(0, 3).some(cell => !cell)).length
   if (blank) fail(`${blank} rows of the case table leave State, Event or Expected result empty.`, 'fill in the state, the event and the expected result of each row.')
@@ -1023,14 +1029,16 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
 // the reviewer, not a verdict (team-process, From claim to merge), so it starts no round.
 export const roundsOf = comments => {
   const heads = []
+  const add = head => { if (!heads.some(sha => sha.startsWith(head) || head.startsWith(sha))) heads.push(head) }
   for (const comment of comments ?? []) {
     if (comment && typeof comment === 'object' && isBotUser(comment.user)) continue
     // A verdict quoted in a code fence or an HTML comment is an example, not a round.
     const shown = typeof comment === 'string' ? visibleLines(comment).join('\n')
       : comment && typeof comment.body === 'string' ? { ...comment, body: visibleLines(comment.body).join('\n') } : comment
     const review = reviewOf(shown)
-    if (review?.kind !== 'REQUEST CHANGES') continue
-    if (!heads.some(sha => sha.startsWith(review.sha) || review.sha.startsWith(sha))) heads.push(review.sha)
+    if (review?.kind === 'REQUEST CHANGES') add(review.sha)
+    // A review that requests changes is a round whatever its text says, even when its body quotes an earlier approval.
+    if (comment && typeof comment === 'object' && comment.state === 'CHANGES_REQUESTED' && typeof comment.commit_id === 'string' && comment.commit_id) add(comment.commit_id.toLowerCase())
   }
   return heads.length
 }
