@@ -7,7 +7,7 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { syncBuiltinESMExports } from 'node:module'
 import os from 'node:os'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, leftToCi, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
 
@@ -2568,4 +2568,20 @@ test('preflight runs the tests the case table names on the merge base and here, 
   // With no case table there is nothing to run.
   writeFileSync(join(f.root, 'body.md'), 'Fixes #1\n')
   assert.ok(has(await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' }), 'PASS', 'fail-first: the body has no case table'))
+  // A temp home that cannot be removed fails the check, and the test lock is still let go.
+  const remove = fs.rmSync
+  const removeMock = t.mock.method(fs, 'rmSync', (path, ...args) => {
+    if (/^agent-board-preflight-(?!body-|main-)/.test(basename(String(path)))) throw Object.assign(new Error('synthetic busy folder'), { code: 'EBUSY' })
+    return remove(path, ...args)
+  })
+  syncBuiltinESMExports()
+  try {
+    writeFileSync(join(f.root, 'body.md'), bodyOf('the value is two'))
+    const busy = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+    assert.ok(has(busy, 'FAIL', 'fail-first could not finish'), JSON.stringify(busy))
+    assert.deepEqual(existsSync(f.lockPath) ? readdirSync(f.lockPath).filter(name => name.endsWith('.lock')) : [], [])
+  } finally {
+    removeMock.mock.restore()
+    syncBuiltinESMExports()
+  }
 })

@@ -41,10 +41,22 @@ test('fail-first reads no test from a string, a comment or a regular expression 
     "  const fixture = `test('a title in a template', () => {})\\n${[1, 2].map(n => `${n}`).join('')}`",
     '  assert.equal(10 / 2 / 5, 1)',
     '})',
+    // A counter divided is a division, not a pattern that runs into the next line.
+    'let n = 4',
+    'n++ / 2',
+    "test('after a division by a counter', () => {})",
+    'n-- / 2',
+    "test('after a division by a falling counter', () => {})",
+    // A method call stays one across spaces and comments; a dot inside a string is not a call.
+    "pattern . test('a title after a spaced dot')",
+    "pattern./* a note */test('a title after a commented dot')",
+    "const said = 'a sentence that ends with a dot.'",
+    "test('after a string that ends with a dot', () => {})",
     "test('the last one', () => {})",
   ].join('\n')
-  assert.deepEqual(titlesOf(text).map(item => item.title), ['after a quote in a pattern', 'the last one'])
-  assert.deepEqual([...testBlocks(text).keys()], ['after a quote in a pattern', 'the last one'])
+  const expected = ['after a quote in a pattern', 'after a division by a counter', 'after a division by a falling counter', 'after a string that ends with a dot', 'the last one']
+  assert.deepEqual(titlesOf(text).map(item => item.title), expected)
+  assert.deepEqual([...testBlocks(text).keys()], expected)
 })
 
 test('fail-first reads a run as pass, fail, skipped or missing from its TAP counts and exit (#1520)', () => {
@@ -94,10 +106,13 @@ test('fail-first runs each named new or changed test on the merge base with the 
   r.write('scripts/value.mjs', 'export const value = 1\n')
   r.write('tests/old.test.mjs', `${header}test('an old test passes', () => assert.ok(true))\ntest('an old test changes', () => assert.ok(true))\n`)
   r.write('tests/old-helper.mjs', 'export const old = true\n')
+  r.write('tests/renamed-from.mjs', 'export const helperBeforeItsRename = { name: "synthetic", count: 3 }\n')
   r.commit()
   const base = r.git('rev-parse', 'HEAD')
   rmSync(join(r.cwd, 'tests/old-helper.mjs'))
-  r.write('tests/gone.test.mjs', `${header}import { existsSync } from 'node:fs'\ntest('the old helper is gone', () => assert.equal(existsSync(new URL('./old-helper.mjs', import.meta.url)), false))\n`)
+  rmSync(join(r.cwd, 'tests/renamed-from.mjs'))
+  r.write('tests/renamed-to.mjs', 'export const helperBeforeItsRename = { name: "synthetic", count: 3 }\n')
+  r.write('tests/gone.test.mjs', `${header}import { existsSync } from 'node:fs'\ntest('the old helper is gone', () => assert.equal(existsSync(new URL('./old-helper.mjs', import.meta.url)), false))\ntest('the renamed helper is gone from its old name', () => assert.equal(existsSync(new URL('./renamed-from.mjs', import.meta.url)), false))\n`)
   r.write('scripts/value.mjs', 'export const value = 2\n')
   r.write('scripts/added.mjs', 'export const added = true\n')
   r.write('tests/value.test.mjs', `${header}import { value } from '../scripts/value.mjs'\ntest('the value is two', () => assert.equal(value, 2))\ntest('the value is a number', () => assert.equal(typeof value, 'number'))\ntest('the value is three', () => assert.equal(value, 3))\ntest('a test skipped everywhere', { skip: 'synthetic' }, () => {})\n`)
@@ -107,7 +122,7 @@ test('fail-first runs each named new or changed test on the merge base with the 
   r.commit()
   const head = r.git('rev-parse', 'HEAD')
   const command = (program, args, options = {}) => spawnSync(program, args, { cwd: r.cwd, env: r.env, encoding: 'utf8', timeout: 60000, ...options })
-  const names = ['the value is two', 'the value is a number', 'the value is three', 'a test skipped everywhere', 'the added module is there', 'an old test passes', 'an old test changes', 'a plugin test', 'a test nobody wrote', 'the old helper is gone']
+  const names = ['the value is two', 'the value is a number', 'the value is three', 'a test skipped everywhere', 'the added module is there', 'an old test passes', 'an old test changes', 'a plugin test', 'a test nobody wrote', 'the old helper is gone', 'the renamed helper is gone from its old name']
   const checkouts = []
   const runs = []
   const result = await runFailFirst({ cwd: r.cwd, base, names, command, env: r.env, onCheckout: path => checkouts.push(path), onRun: run => runs.push(run) })
@@ -126,15 +141,18 @@ test('fail-first runs each named new or changed test on the merge base with the 
     'a test nobody wrote': 'unknown',
     // The branch deleted tests/old-helper.mjs, so the base checkout lacks it too, and the test passes there.
     'the old helper is gone': 'passes-on-base',
+    // A renamed helper is gone from its old path on the base checkout too.
+    'the renamed helper is gone from its old name': 'passes-on-base',
   })
+  assert.match(r.git('diff', '--name-status', base, head, '--', 'tests/renamed-from.mjs', 'tests/renamed-to.mjs'), /^R/)
   assert.equal(result.counted, 3)
-  assert.equal(result.total, 6)
-  assert.equal(result.line, `Fail-first: 3 of 6 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`)
+  assert.equal(result.total, 7)
+  assert.equal(result.line, `Fail-first: 3 of 7 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`)
   // Each test runs here first; only those that pass here run on the base, after every run here.
   const firstBase = runs.findIndex(run => run.where !== r.cwd)
   assert.ok(firstBase > 0)
   assert.ok(runs.slice(firstBase).every(run => run.where === checkouts[0]))
-  assert.deepEqual(runs.slice(firstBase).map(run => run.title).sort(), ['an old test changes', 'the added module is there', 'the old helper is gone', 'the value is a number', 'the value is two'])
+  assert.deepEqual(runs.slice(firstBase).map(run => run.title).sort(), ['an old test changes', 'the added module is there', 'the old helper is gone', 'the renamed helper is gone from its old name', 'the value is a number', 'the value is two'])
   // The base checkout was a separate folder, and it is gone with its worktree record.
   assert.equal(checkouts.length, 1)
   assert.notEqual(checkouts[0], r.cwd)

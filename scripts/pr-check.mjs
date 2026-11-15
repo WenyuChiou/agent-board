@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fragmentIssue, isFragmentPath, titleCommitNumbers } from './changelog-fold.mjs'
 import { bundleFiles, isBundleFile } from './bundle-text.mjs'
-import { codeMask } from './fail-first.mjs'
+import { codeMask, declaresTest } from './fail-first.mjs'
 
 // Pull requests from outside the team (CONTRIBUTING.md, Outside contributors; #482): two open per GitHub login and
 // four in all. The team has no limit on open pull requests (#607).
@@ -359,7 +359,7 @@ export const testTitles = files => {
     for (const match of text.matchAll(calls)) {
       // A call written in a string or a comment, such as a fixture's, or a method such as `pattern.test(...)`, declares
       // no test (#1520).
-      if (!isCode[match.index] || text[match.index - 1] === '.') continue
+      if (!declaresTest(text, isCode, match.index)) continue
       const title = unescapeTitle(match[1].slice(1, -1))
       if (match[1][0] === '`' && title.match(templateVariable)) {
         // A title of variables and punctuation only, such as `${name}`, would match any span.
@@ -1042,10 +1042,15 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
   const on = named.filter(value => caseSurfaces.includes(value))
   const fail = (message, fix) => output.problems.push(problem('cases', message, fix))
   const isFailFirst = number === null || number > FAIL_FIRST_FROM
+  // A case table the body has where none is required (another surface, or under `Cases: none`) is held to the same
+  // tests, and to the form pr-check reads (#1520).
+  const heldAnyway = () => {
+    const table = isFailFirst ? caseTable(body) : null
+    if (table?.error) fail(`the "## Cases" table is not in the form pr-check reads: ${table.error}.`, CASE_FORM)
+    else if (table?.rows?.length) failFirst({ body, rows: table.rows, titles, head, isDraft, fail, output })
+  }
   if (!on.length) {
-    // On another surface a case table is not required, but one the body has is held to the same tests (#1520).
-    const voluntary = isFailFirst ? caseTable(body) : null
-    if (voluntary?.rows?.length) failFirst({ body, rows: voluntary.rows, titles, head, isDraft, fail, output })
+    heldAnyway()
     return output
   }
   const how = 'write "Cases: <n> rows" above a "## Cases" table, or "Cases: none, <reason>" when the change handles no event that can arrive while another is under way (CONTRIBUTING.md rule 2).'
@@ -1067,9 +1072,7 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
   const none = line.match(/^none\b[ \t]*,?[ \t]*(.*)$/i)
   if (none) {
     if (!none[1].trim() || /^<[^<>]*>$/.test(none[1].trim())) fail('the `Cases:` line says `none` with no reason.', 'write the reason after `none`, for example "Cases: none, the change handles one event in one state".')
-    // A case table the body has anyway is held to the same tests, as on a surface that does not require one.
-    const kept = isFailFirst ? caseTable(body) : null
-    if (kept?.rows?.length) failFirst({ body, rows: kept.rows, titles, head, isDraft, fail, output })
+    heldAnyway()
     return output
   }
   const rows = line.match(/^(\d+)[ \t]+rows?\b/i)

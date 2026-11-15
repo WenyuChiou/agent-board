@@ -14,16 +14,22 @@ const unescape = text => text.replace(/\\(.)/g, (_, char) => ({ n: '\n', t: '\t'
 const beforeRegex = /[(,=:[!&|?{};+\-*%<>~^]/
 const regexWords = new Set(['return', 'typeof', 'case', 'in', 'of', 'new', 'delete', 'void', 'throw', 'await', 'yield', 'else', 'do'])
 
-// Which characters of a file are code, outside comments, strings and regular expressions (a template's `${…}` is code
-// again), so a test call written inside a fixture string or a comment is not read as a test.
+// What each character of a file is: 1 code, 2 a comment, 0 the inside of a string, a template's text or a regular
+// expression (a template's `${…}` is code again), so a test call written in a fixture string or a comment is not read
+// as a test.
+export const CODE = 1
+const COMMENT = 2
 export const codeMask = text => {
   const isCode = new Uint8Array(text.length)
   const templates = []
   let depth = 0
   let last = ''
+  let lastAt = -1
   let word = ''
   let i = 0
   const literal = () => { last = 'x'; word = '' }
+  // `n++ / 2` divides: a `/` right after a postfix `++` or `--` is no regular expression.
+  const isPostfix = () => (last === '+' || last === '-') && text[lastAt - 1] === last && isCode[lastAt - 1] === CODE
   // Reads template text from i to its closing backtick, or to a `${`, where code starts again.
   const template = () => {
     while (i < text.length) {
@@ -36,8 +42,14 @@ export const codeMask = text => {
   while (i < text.length) {
     const char = text[i]
     const next = text[i + 1]
-    if (char === '/' && next === '/') { while (i < text.length && text[i] !== '\n') i++; continue }
-    if (char === '/' && next === '*') { const end = text.indexOf('*/', i + 2); i = end < 0 ? text.length : end + 2; continue }
+    if (char === '/' && next === '/') { while (i < text.length && text[i] !== '\n') isCode[i++] = COMMENT; continue }
+    if (char === '/' && next === '*') {
+      const end = text.indexOf('*/', i + 2)
+      const stop = end < 0 ? text.length : end + 2
+      isCode.fill(COMMENT, i, stop)
+      i = stop
+      continue
+    }
     if (char === "'" || char === '"') {
       i++
       while (i < text.length && text[i] !== char && text[i] !== '\n') i += text[i] === '\\' ? 2 : 1
@@ -46,32 +58,46 @@ export const codeMask = text => {
       continue
     }
     if (char === '`') { i++; template(); continue }
-    if (char === '/' && (last === '' || beforeRegex.test(last) || regexWords.has(word))) {
+    if (char === '/' && !isPostfix() && (last === '' || beforeRegex.test(last) || regexWords.has(word))) {
+      const start = i
       let isClass = false
+      let isClosed = false
       for (i++; i < text.length && text[i] !== '\n'; i++) {
-        if (text[i] === '\\') i++
+        if (text[i] === '\\' && text[i + 1] !== '\n') i++
         else if (text[i] === '[') isClass = true
         else if (text[i] === ']') isClass = false
-        else if (text[i] === '/' && !isClass) break
+        else if (text[i] === '/' && !isClass) { isClosed = true; break }
       }
-      for (i++; /[a-z]/i.test(text[i] ?? ''); i++);
-      literal()
-      continue
+      if (isClosed) {
+        for (i++; /[a-z]/i.test(text[i] ?? ''); i++);
+        literal()
+        continue
+      }
+      // No closing `/` on the line, so it divides after all.
+      i = start
     }
-    isCode[i] = 1
+    isCode[i] = CODE
     if (char === '{') depth++
     if (char === '}' && --depth === templates.at(-1)) { templates.pop(); i++; template(); continue }
-    if (/[\w$]/.test(char)) word = i > 0 && isCode[i - 1] && /[\w$]/.test(text[i - 1]) ? word + char : char
-    if (!/\s/.test(char)) { last = char; if (!/[\w$]/.test(char)) word = '' }
+    if (/[\w$]/.test(char)) word = i > 0 && isCode[i - 1] === CODE && /[\w$]/.test(text[i - 1]) ? word + char : char
+    if (!/\s/.test(char)) { last = char; lastAt = i; if (!/[\w$]/.test(char)) word = '' }
     i++
   }
   return isCode
 }
 
+// A test call is code and not a method: `pattern.test(...)`, also with spaces or a comment before `test`, is a method.
+export const declaresTest = (text, isCode, at) => {
+  if (isCode[at] !== CODE) return false
+  let i = at - 1
+  while (i >= 0 && (isCode[i] === COMMENT || (isCode[i] === CODE && /\s/.test(text[i])))) i--
+  return !(i >= 0 && isCode[i] === CODE && text[i] === '.')
+}
+
 // Every test title in a file, in order; a template title (`${…}`) cannot be run by its name.
 export const titlesOf = text => {
   const isCode = codeMask(text)
-  return [...text.matchAll(titleCall)].filter(match => isCode[match.index + match[1].length]).map(match => {
+  return [...text.matchAll(titleCall)].filter(match => declaresTest(text, isCode, match.index + match[1].length)).map(match => {
     const raw = match[3]
     const title = unescape(raw.slice(1, -1))
     return { title, isTemplate: raw[0] === '`' && /\$\{/.test(title) }
@@ -82,7 +108,7 @@ export const titlesOf = text => {
 // source is the same on the base and here pins behaviour that was already there.
 export const testBlocks = text => {
   const isCode = codeMask(text)
-  const starts = [...text.matchAll(topLevelCall)].map(match => match.index).filter(index => isCode[index])
+  const starts = [...text.matchAll(topLevelCall)].map(match => match.index).filter(index => isCode[index] === CODE)
   const blocks = new Map()
   starts.forEach((start, i) => {
     const block = text.slice(start, starts[i + 1] ?? text.length)
@@ -129,9 +155,9 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
   const tracked = linesOf(git('ls-files', '-z', '--', 'tests'))
   const untracked = linesOf(git('ls-files', '--others', '--exclude-standard', '-z', '--', 'tests'))
   const files = [...new Set([...tracked, ...untracked])].filter(path => testFile.test(path) && existsSync(join(cwd, path)))
-  // Everything under tests/ that differs from the base (helpers and fixtures too, and files the branch deleted), so
-  // the base run differs from the run here only outside tests/.
-  const differs = [...new Set([...linesOf(git('diff', '--name-only', '-z', baseSha, '--', 'tests')), ...untracked])]
+  // Everything under tests/ that differs from the base (helpers and fixtures too, and files the branch deleted or
+  // renamed: --no-renames lists a rename's old path too), so the base run differs from the run here only outside tests/.
+  const differs = [...new Set([...linesOf(git('diff', '--name-only', '--no-renames', '-z', baseSha, '--', 'tests')), ...untracked])]
   const copies = differs.filter(path => existsSync(join(cwd, path)))
   const deleted = differs.filter(path => !existsSync(join(cwd, path)))
   const isDirty = git('status', '--porcelain', '-z').length > 0

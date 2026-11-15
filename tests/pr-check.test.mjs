@@ -2123,9 +2123,9 @@ test('pr-check wants each case row to name, in backticks, a test that is in test
     assert.match(checked.problems[0].fix, /exact title in backticks/)
   }
   // A title written only in a fixture string or a comment, or passed to a method such as `pattern.test(...)`, is no test.
-  const fixtureTitles = testTitles([{ path: 'tests/x.test.mjs', text: "test('receiver keeps the turn', () => {})\nconst sample = \"test('a title in a fixture', () => {})\"\n// test('a title in a comment', () => {})\nassert.ok(/x/.test('a pattern input'))\n" }])
+  const fixtureTitles = testTitles([{ path: 'tests/x.test.mjs', text: "test('receiver keeps the turn', () => {})\nconst sample = \"test('a title in a fixture', () => {})\"\n// test('a title in a comment', () => {})\nassert.ok(/x/.test('a pattern input'))\nassert.ok(pattern . test('a spaced call input'))\nassert.ok(pattern./* a note */test('a commented call input'))\n" }])
   assert.deepEqual(firstRun(firstLine, { titles: fixtureTitles }).problems, [])
-  for (const cell of ['`a title in a fixture`', '`a title in a comment`', '`a pattern input`']) {
+  for (const cell of ['`a title in a fixture`', '`a title in a comment`', '`a pattern input`', '`a spaced call input`', '`a commented call input`']) {
     const messages = firstRun(firstLine, { rows: [caseRow(cell)], titles: fixtureTitles }).problems.map(item => item.message)
     assert.deepEqual(messages, ['row 1 of the case table names no test of tests/ in backticks.'], cell)
   }
@@ -2179,6 +2179,15 @@ test('pr-check wants a Fail-first line for the current head on a Ready risk-tier
   const underNone = `Fixes #1\nTier: risk\nSurface: delivery\nCases: none, one event in one state\n\n${caseTableText(caseRow('`a receiver that is not written`'))}\n`
   const keptMessages = cases({ body: underNone, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems.map(item => item.message)
   assert.deepEqual(keptMessages, ['row 1 of the case table names no test of tests/ in backticks.', 'a Ready risk-tier pull request with a case table has no `Fail-first:` line.'])
+  // A table pr-check cannot read fails under `Cases: none` and on another surface too, with or without the line.
+  const split = `${caseTableText(caseRow('`receiver keeps the turn`'))}\n${caseRow('`receiver keeps the turn`')}\n`
+  const formError = 'the "## Cases" table is not in the form pr-check reads: a blank line, a code fence, a comment or prose splits its rows, or a second table follows it.'
+  for (const surface of ['Surface: delivery\nCases: none, one event in one state', 'Surface: wording']) {
+    for (const line of ['', `\n${firstLine}\n`]) {
+      const messages = cases({ body: `Fixes #1\nTier: risk\n${surface}\n\n${split}${line}`, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems.map(item => item.message)
+      assert.deepEqual(messages, [formError], `${surface} ${line}`)
+    }
+  }
   // checkPr reads the head's tests and the head itself.
   const risky = { ...syntheticPr(), number: FAIL_FIRST_FROM + 1, testFiles: [{ path: 'tests/x.test.mjs', text: "test('receiver keeps the turn', () => {})" }], body: `${body}Tier: risk\nSurface: data\nCases: 1 rows\n\n${caseTableText(caseRow('`receiver keeps the turn`'))}\n` }
   assert.deepEqual(checkPr(risky).problems.filter(item => item.check === 'cases').map(item => item.message), ['a Ready risk-tier pull request with a case table has no `Fail-first:` line.'])
