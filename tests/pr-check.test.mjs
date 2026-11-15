@@ -1727,7 +1727,15 @@ test('pr-check wants one Tier line, and the risk tier for a change to a path ris
   only(run('<!--\nTier: normal\n-->'), /no `Tier:` line/)
   only(run('Tier: <risk, normal or light: the highest any change reaches>'), /template's placeholder/)
   only(run('Tier: normal\nTier: risk'), /2 `Tier:` lines/)
+  // An empty line or the placeholder counts as a line too, so a second one cannot hide behind it.
+  only(run('Tier:\nTier: normal'), /2 `Tier:` lines/)
+  only(run('Tier: <risk, normal or light: the highest any change reaches>\nTier: light'), /2 `Tier:` lines/)
+  only(run('Tier:'), /`Tier:` line names no tier/)
   only(run('Tier: medium'), /"medium", which is not a tier/)
+  // The value is read as the surface, cases and round checks read it: two backticks are not a tier they see.
+  only(run('Tier: ``risk``'), /"``risk``", which is not a tier/)
+  const doubled = checkPr({ ...syntheticPr(), number: TIER_FROM + 1, body: `${body}Tier: \`\`risk\`\`\n` })
+  assert.ok(doubled.problems.some(item => item.check === 'tier' && /which is not a tier/.test(item.message)))
   assert.deepEqual(run('Tier: `normal`').problems, [])
   assert.deepEqual(run('Tier: light').problems, [])
   // A listed file, a file under a listed folder; the risk tier on either passes.
@@ -1738,6 +1746,7 @@ test('pr-check wants one Tier line, and the risk tier for a change to a path ris
   // Unread at the base: a note, never a pass in silence; not given (a caller with no list): nothing.
   assert.deepEqual(run('Tier: normal', { paths: ['hooks/connect.ts'], riskPaths: null }).problems, [])
   assert.match(run('Tier: normal', { paths: ['hooks/connect.ts'], riskPaths: null }).info.join('\n'), /could not be read at the base/)
+  assert.match(run('Tier: risk', { paths: ['hooks/connect.ts'], riskPaths: null }).info.join('\n'), /could not be read at the base/)
   assert.deepEqual(run('Tier: normal', { paths: ['hooks/connect.ts'], riskPaths: undefined }), { problems: [], info: [] })
   // A release, and a pull request from before the rule, are not checked.
   assert.deepEqual(run('', { title: 'chore(release): 1.2.3' }).problems, [])

@@ -854,8 +854,12 @@ const visibleLines = (text, { isPlaceKept = false } = {}) => {
   }
   return shown
 }
+// The tier a `Tier:` line's value names, or null. Every check reads the value with this one reader (#1531), so a
+// spelling the tier check accepts is one the surface, cases and round checks read too.
+const tierWord = value => value.match(/^`?(risk|normal|light)\b/i)?.[1].toLowerCase() ?? null
+const tierValues = body => visibleLines(body).flatMap(line => line.match(/^Tier:[ \t]*(.*)$/i)?.[1].trimEnd() ?? [])
 // The tier as a reader sees it, for the surface check: a `Tier:` line outside fences and comments.
-const visibleTier = body => visibleLines(body).map(line => line.match(/^Tier:[ \t]*`?(risk|normal|light)\b/i)?.[1].toLowerCase()).find(Boolean) ?? null
+const visibleTier = body => tierValues(body).map(tierWord).find(Boolean) ?? null
 // The `Surface:` lines a reader sees: every value (found), and those that are filled in (the template's own
 // `Surface: <...>` line is a placeholder, not a value).
 const surfaceLine = body => {
@@ -934,28 +938,30 @@ export const tier = ({ body = '', title = '', number = null, paths = [], riskPat
   if (isReleaseTitle(title) || (number !== null && number <= TIER_FROM)) return output
   const fail = (message, fix) => output.problems.push(problem('tier', message, fix))
   const how = 'name the tier on a line of its own in the body: `Tier: risk`, `Tier: normal` or `Tier: light`, the highest any change reaches (docs/dev/RULES.md, R2).'
-  const found = visibleLines(body).flatMap(line => line.match(/^Tier:[ \t]*(.*)$/i)?.[1].trim() ?? [])
-  const filled = found.filter(value => value !== '' && !value.startsWith('<'))
-  if (!filled.length) {
-    const message = found.length ? 'the `Tier:` line is still the template\'s placeholder.' : 'the body has no `Tier:` line.'
+  // Every visible `Tier:` line counts, an empty one or the template's placeholder too, so a second line cannot hide.
+  const found = tierValues(body)
+  if (found.length > 1) {
+    fail(`the body has ${found.length} \`Tier:\` lines; it names its tier once.`, 'keep one `Tier:` line; put an example inside a code fence.')
+    return output
+  }
+  const value = found[0] ?? ''
+  if (value.trim() === '' || value.startsWith('<')) {
+    const message = !found.length ? 'the body has no `Tier:` line.' : value.trim() === '' ? 'the `Tier:` line names no tier.' : 'the `Tier:` line is still the template\'s placeholder.'
     if (number === null || isOptional) output.info.push(`tier: ${message} The PR check fails a pull request without one (docs/dev/RULES.md, R2).`)
     else fail(message, how)
     return output
   }
-  if (filled.length > 1) {
-    fail(`the body has ${filled.length} \`Tier:\` lines; it names its tier once.`, 'keep one `Tier:` line; put an example inside a code fence.')
-    return output
-  }
-  const named = filled[0].replace(/`/g, '').match(/^(risk|normal|light)\b/i)?.[1].toLowerCase()
+  const named = tierWord(value)
   if (!named) {
-    fail(`the \`Tier:\` line names "${filled[0]}", which is not a tier.`, how)
+    fail(`the \`Tier:\` line names "${value}", which is not a tier.`, how)
     return output
   }
-  if (named === 'risk' || riskPaths === undefined) return output
+  if (riskPaths === undefined) return output
   if (!Array.isArray(riskPaths)) {
-    output.info.push(`tier: docs/dev/risk-paths.md could not be read at the base, so \`Tier: ${named}\` was not checked against the paths it lists.`)
+    output.info.push('tier: docs/dev/risk-paths.md could not be read at the base, so the changed paths were not checked against the paths it lists.')
     return output
   }
+  if (named === 'risk') return output
   const listed = paths.filter(path => isRiskPath(path, riskPaths))
   if (listed.length) {
     const names = listed.slice(0, 3).map(path => `\`${path}\``).join(', ') + (listed.length > 3 ? ` and ${listed.length - 3} more` : '')
