@@ -2120,16 +2120,22 @@ test('A29 I1 every top-level, mailbox and message field, damaged or removed one 
   const damaged = []
   const VALUES = [null, 'x', {}, -1, undefined]
   const change = (object, key, value) => { const next = { ...object }; if (value === undefined) delete next[key]; else next[key] = value; return next }
-  for (const key of Object.keys(base)) for (const value of VALUES) damaged.push([`${key} ${JSON.stringify(value)}`, change(base, key, value)])
-  for (const key of Object.keys(base.mailboxes[0])) for (const value of VALUES) damaged.push([`mailbox ${key} ${JSON.stringify(value)}`, { ...base, mailboxes: [change(base.mailboxes[0], key, value)] }])
-  for (const key of Object.keys(base.messages[0])) for (const value of VALUES) damaged.push([`message ${key} ${JSON.stringify(value)}`, { ...base, messages: [change(base.messages[0], key, value)] }])
+  const inMailbox = (key, value) => ({ ...base, mailboxes: [change(base.mailboxes[0], key, value)] })
+  const inMessage = (key, value) => ({ ...base, messages: [change(base.messages[0], key, value)] })
+  for (const key of Object.keys(fresh)) for (const value of VALUES) damaged.push([`${key} ${JSON.stringify(value)}`, change(base, key, value)])
+  for (const key of Object.keys(fresh.mailboxes[0])) for (const value of VALUES) damaged.push([`mailbox ${key} ${JSON.stringify(value)}`, inMailbox(key, value)])
+  for (const key of Object.keys(fresh.messages[0])) for (const value of VALUES) damaged.push([`message ${key} ${JSON.stringify(value)}`, inMessage(key, value)])
   damaged.push(['two messages with one id', { ...base, messages: [base.messages[0], base.messages[0]] }])
   damaged.push(['two mailboxes with one id', { ...base, mailboxes: [base.mailboxes[0], base.mailboxes[0]] }])
   // The board's own answer picks the cases the receiver must ask about, so a field the board stopped checking would drop
-  // out of them unseen. Each optional field's damage is therefore named here and must be refused.
-  const stores = new Map(damaged)
-  const named = [...Object.keys(MESSAGE_EXTRAS).map(key => `message ${key}`), ...Object.keys(MAILBOX_EXTRAS).map(key => `mailbox ${key}`)]
-  for (const label of named.flatMap(name => [`${name} null`, `${name} {}`])) assert.ok(isRefused(JSON.stringify(stores.get(label))), `${label}: the board refuses it`)
+  // out of them unseen. Each optional field's damage is therefore named here and must be refused. The receiver learns of a
+  // refusal only from the board's one answer, whatever the field, so the board's refusal is checked for every optional
+  // field and a tick for a few of them: the two the receiver reads itself, one more of the message and one of the mailbox.
+  const TICKED = ['message attempted', 'message ref', 'message surface', 'mailbox folderDigest']
+  for (const [name, object, damage] of [['message', MESSAGE_EXTRAS, inMessage], ['mailbox', MAILBOX_EXTRAS, inMailbox]]) for (const key of Object.keys(object)) {
+    for (const value of [null, {}]) assert.ok(isRefused(JSON.stringify(damage(key, value))), `${name} ${key} ${JSON.stringify(value)}: the board refuses it`)
+    if (TICKED.includes(`${name} ${key}`)) damaged.push([`${name} ${key} null`, damage(key, null)])
+  }
   const wrong = []
   let refused = 0
   for (const [label, store] of damaged) {
@@ -2309,6 +2315,30 @@ test('A38 I4 a text the board refused that shows a message queued for an idle se
   assert.equal(f.calls.promptAsync.length, 1, 'woken once')
   assert.equal(f.calls.sent.length, 1)
 }, { watch: false }))
+
+test('A39 I4 a message queued for an idle session while a verify is out is taken and woken at the next tick, before the verify answers, and exactly once (#1366 round 21)', () => fixture(async f => {
+  const session = 'ses_a39'
+  await settleIdle(f, session)
+  // A new text with nothing owed, so the tick asks the board about it; the answer is kept back until the test lets it go.
+  write(f, withFinished(session))
+  let open
+  f.calls.hold.verify = new Promise(done => { open = done })
+  const verifies = f.count('verify'), takes = f.count('take')
+  f.tick()
+  await f.until(() => f.count('verify') > verifies, 'the tick asked for a verify')
+  assert.equal(f.settled(), false, 'the verify is still out')
+  f.queue(session, 'a39-message', 'Synthetic text for A39')
+  f.tick()
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('a39-message').status === 'accepted', 'the message was woken while the verify was out')
+  assert.ok(f.count('take') > takes, 'the take was made before the verify answered')
+  assert.equal(f.count('verify'), verifies + 1, 'no second verify was asked meanwhile')
+  assert.equal(f.settled(), false, 'the verify was still out when the turn was woken')
+  open()
+  await f.quiet()
+  for (let round = 0; round < 3; round++) { f.tick(); await f.quiet() }
+  assert.equal(f.calls.promptAsync.length, 1, 'woken once')
+  assert.equal(f.calls.sent.length, 1)
+}, { timing: { boardMs: 20000 }, watch: false }))
 
 test('A27 the test board stand-in refuses a link or a file at the messages folder in its default mode too, as the board script does (#1366 review)', async () => {
   assert.deepEqual(await folderCases(false), [])
