@@ -11,8 +11,6 @@ const testFile = /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|cjs|js|ts|tsx)$/
 // no state from one call to the next, so no code earlier in a file can hide a later title. It also reads a call inside a
 // string, a comment or a method call (`pattern.test('x')`); running the title settles those, since it runs no test.
 const titleCall = /\b(?:test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|[^'\\\r\n])*'|"(?:\\[^\r\n]|[^"\\\r\n])*"|`(?:\\[^\r\n]|[^`\\\r\n])*`)/g
-const topLevelCall = /^(?:test|it)(?:\.(?:skip|only|todo))?\s*\(/gm
-const startCall = /^(?:test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|[^'\\\r\n])*'|"(?:\\[^\r\n]|[^"\\\r\n])*"|`(?:\\[^\r\n]|[^`\\\r\n])*`)/
 const unescape = text => text.replace(/\\(.)/g, (_, char) => ({ n: '\n', t: '\t' })[char] ?? char)
 const titleOf = raw => {
   const title = unescape(raw.slice(1, -1))
@@ -22,48 +20,27 @@ const titleOf = raw => {
 // Every test title in a file, in order; a template title (`${…}`) cannot be run by its name.
 export const titlesOf = text => [...text.matchAll(titleCall)].map(match => titleOf(match[1]))
 
-// The source of each test called at the start of a line, to the next such call, by the title on that first line.
-export const testBlocks = text => {
-  const starts = [...text.matchAll(topLevelCall)].map(match => match.index)
-  const blocks = new Map()
-  starts.forEach((start, i) => {
-    const block = text.slice(start, starts[i + 1] ?? text.length)
-    const raw = block.match(startCall)?.[1]
-    const found = raw ? titleOf(raw) : null
-    if (found && !found.isTemplate && !blocks.has(found.title)) blocks.set(found.title, block.trimEnd())
-  })
-  return blocks
-}
-
-// A named test that passes here is skipped on the base only when it pins behaviour that was already there: its block is
-// the same on the base and here, its title is in the file once on each side, and the block is whole JavaScript by Node's
-// own parser (`isWhole`). A block a fixture line or a call split across lines cuts short is not whole, so any misread
-// runs the test on the base, where it shows as passing there too, instead of skipping it.
-export const isUnchanged = ({ was, now, title, isWhole }) => {
-  if (was === null || was === undefined) return false
-  const block = testBlocks(now).get(title)
-  if (block === undefined || testBlocks(was).get(title) !== block) return false
-  if (![was, now].every(text => titlesOf(text).filter(item => item.title === title).length === 1)) return false
-  return isWhole(block)
-}
-
 const count = (output, name) => Number(output.match(new RegExp(`^# ${name} (\\d+)\\s*$`, 'm'))?.[1] ?? 0)
 // Each result line of a TAP report, at any depth: `not `, the name (Node escapes `\` and `#` in it) and a SKIP or TODO.
 const tapLine = /^[ \t]*(not )?ok \d+ - ((?:\\.|[^\\#\r\n])*?)[ \t]*(?:#[ \t]*(SKIP|TODO)\b[^\r\n]*)?\r?$/gim
 const tapName = text => text.replace(/\\(.)/g, (_, char) => ({ n: '\n', t: '\t', r: '\r' })[char] ?? char)
-// A run reads as pass, fail, skipped, missing (the name matched no test) or stopped (no verdict: a time limit, a
+// A run reads as pass, fail, skipped, todo, missing (the name matched no test) or stopped (no verdict: a time limit, a
 // signal, a program that did not start). With the title, a pass needs the test's own result line: a name that matches no
-// test still exits 0, and Node then reports the file itself as one passing test.
+// test still exits 0, and Node then reports the file itself as one passing test. A todo result never fails a run, so it
+// is neither pass nor fail. The output is read, not proved: a test file can print such a line itself, and the
+// `Fail-first:` line is pasted by hand anyway.
 export const outcomeOf = (ran, title) => {
   if (ran.error || ran.signal || ran.status === null || ran.status === undefined) return 'stopped'
   const output = `${ran.stdout ?? ''}\n${ran.stderr ?? ''}`
   const [tests, pass, fail, skipped] = ['tests', 'pass', 'fail', 'skipped'].map(name => count(output, name))
   if (ran.status !== 0 || fail > 0) return 'fail'
   if (title !== undefined) {
-    const named = [...output.matchAll(tapLine)].filter(match => tapName(match[2]) === title)
+    // TAP drops the spaces at the end of a name.
+    const named = [...output.matchAll(tapLine)].filter(match => tapName(match[2]).trimEnd() === title.trimEnd())
     if (!named.length) return 'missing'
-    if (named.some(match => match[1])) return 'fail'
-    return named.every(match => match[3]?.toUpperCase() === 'SKIP') ? 'skipped' : 'pass'
+    if (named.some(match => match[1] && !match[3])) return 'fail'
+    if (named.some(match => !match[3])) return 'pass'
+    return named.some(match => match[3].toUpperCase() === 'TODO') ? 'todo' : 'skipped'
   }
   if (pass > 0) return 'pass'
   if (skipped > 0) return 'skipped'
@@ -101,10 +78,6 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
   const deleted = differs.filter(path => !existsSync(join(cwd, path)))
   const isDirty = git('status', '--porcelain', '-z').length > 0
   const textOf = path => readFileSync(join(cwd, path), 'utf8')
-  const baseText = path => {
-    const ran = command('git', ['show', `${baseSha}:${path}`], { cwd, maxBuffer: big })
-    return ran.error || ran.status !== 0 ? null : ran.stdout
-  }
   const owners = new Map()
   for (const path of files) for (const { title, isTemplate } of titlesOf(textOf(path))) if (!isTemplate) owners.set(title, [...(owners.get(title) ?? []), path])
   const runOne = (where, { title, path }) => {
@@ -112,11 +85,9 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
     onRun?.({ where, title, path })
     return outcomeOf(command(program, args, { cwd: where, env: typeof env === 'function' ? env() : env, timeout, maxBuffer: big }), title)
   }
-  // Node's own parser decides whether a block is whole JavaScript; it runs none of it.
-  const isWhole = block => {
-    const ran = command(process.execPath, ['--input-type=module', '--check'], { cwd, input: block, timeout, maxBuffer: big })
-    return !ran.error && ran.status === 0
-  }
+  // A named test is new or changed when its file differs from the base, by git's own comparison. No source text decides
+  // it: a test in a file the branch changes runs on the base even when its own lines did not change.
+  const changed = new Set(differs)
   const results = []
   const toRun = []
   const here = new Map()
@@ -138,12 +109,12 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
       path = found[0].candidate
       if (found[0].outcome) here.set(title, found[0].outcome)
     }
-    if (isUnchanged({ was: baseText(path), now: textOf(path), title, isWhole })) results.push({ title, path, state: 'unchanged' })
-    else if (!runnerFor(path)) results.push({ title, path, state: 'not-node' })
+    if (!runnerFor(path)) results.push({ title, path, state: 'not-node' })
     else toRun.push({ title, path })
   }
+  // Every named test runs here first, so a title that is no test shows as missing wherever it is written.
   for (const item of toRun) if (!here.has(item.title)) here.set(item.title, runOne(cwd, item))
-  const needBase = toRun.filter(item => here.get(item.title) === 'pass')
+  const needBase = toRun.filter(item => here.get(item.title) === 'pass' && changed.has(item.path))
   const onBase = new Map()
   if (needBase.length) {
     const temp = mkdtempSync(join(tmpdir(), 'fail-first-base-'))
@@ -169,15 +140,18 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
     const was = onBase.get(item.title)
     const state = head === 'fail' ? 'fails-on-head'
       : head === 'skipped' ? 'skipped'
-        : head === 'missing' ? 'missing'
-          : head === 'stopped' ? 'stopped'
-            : was === 'fail' ? 'counted'
-              : was === 'pass' ? 'passes-on-base'
-                : 'base-unknown'
+        : head === 'todo' ? 'todo'
+          : head === 'missing' ? 'missing'
+            : head === 'stopped' ? 'stopped'
+              : !changed.has(item.path) ? 'unchanged'
+                : was === 'fail' ? 'counted'
+                  : was === 'pass' ? 'passes-on-base'
+                    : 'base-unknown'
     results.push({ ...item, state })
   }
-  // Every title found in tests/ makes the total except a test skipped on this system, one unchanged since the base and a
-  // file this runner cannot run; one that no run finds by its name, or that more than one file has, counts against it.
+  // Every title found in tests/ makes the total except a test skipped on this system, a todo test, one that passes here
+  // in a file unchanged since the base, and a file this runner cannot run; one that no run finds by its name, or that
+  // more than one file has, counts against it.
   // A span that is no title anywhere in tests/ (code beside the title in the same cell) is pr-check's to report.
   const total = results.filter(item => ['counted', 'passes-on-base', 'fails-on-head', 'stopped', 'base-unknown', 'missing', 'ambiguous'].includes(item.state)).length
   const counted = results.filter(item => item.state === 'counted').length
@@ -194,8 +168,9 @@ export const stateWords = {
   'base-unknown': 'gave no verdict on the base',
   stopped: 'did not finish',
   skipped: 'is skipped on this system; not counted',
+  todo: 'is a todo test, which no run can fail; not counted',
   missing: 'matched no test by its exact name',
-  unchanged: 'is unchanged since the base; not run',
+  unchanged: 'passes here, in a test file unchanged since the base; not counted',
   'not-node': 'is not a Node test file here (a plugin test runs with `claude plugin test`); not counted',
   template: 'is a template title; not run',
   unknown: 'is not a test title in tests/; not counted',

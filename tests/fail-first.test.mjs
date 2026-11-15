@@ -4,9 +4,9 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { failFirstLine, isUnchanged, namePattern, outcomeOf, runFailFirst, testBlocks, titlesOf } from '../scripts/fail-first.mjs'
+import { failFirstLine, namePattern, outcomeOf, runFailFirst, titlesOf } from '../scripts/fail-first.mjs'
 
-test('fail-first reads test titles and top-level test blocks, and leaves template titles out of the blocks (#1520)', () => {
+test('fail-first reads test titles and marks template titles (#1520)', () => {
   const text = [
     "import test from 'node:test'",
     "test('the value is two', () => {",
@@ -23,10 +23,6 @@ test('fail-first reads test titles and top-level test blocks, and leaves templat
     { title: 'a ${name} receiver', isTemplate: true },
     { title: 'a nested one', isTemplate: false },
   ])
-  const blocks = testBlocks(text)
-  assert.deepEqual([...blocks.keys()], ['the value is two', "a page's link stays"])
-  assert.match(blocks.get('the value is two'), /assert\.equal\(value, 2\)/)
-  assert.doesNotMatch(blocks.get('the value is two'), /link stays/)
 })
 
 test('fail-first reads every literal test call with no state, so no code before a test hides its title (#1520)', () => {
@@ -43,29 +39,9 @@ test('fail-first reads every literal test call with no state, so no code before 
   ].join('\n')
   // A title in a string or a method call is read too; running it by name finds no test (the run test below).
   assert.deepEqual(titlesOf(text).map(item => item.title), ['a title in a string', 'after a pattern with a backtick', 'after a division by a counter', 'a method input', 'the last one'])
-  assert.deepEqual([...testBlocks(text).keys()], ['after a pattern with a backtick', 'after a division by a counter', 'the last one'])
 })
 
-test('fail-first skips a test on the base only when its block is the same, its title is in the file once and the block is whole JavaScript (#1520)', () => {
-  const isWhole = block => spawnSync(process.execPath, ['--input-type=module', '--check'], { input: block, encoding: 'utf8', timeout: 20000 }).status === 0
-  const top = "import test from 'node:test'\n"
-  const same = `${top}test('kept as it was', () => {\n  assert.equal(1, 1)\n})\n`
-  assert.equal(isUnchanged({ was: same, now: same, title: 'kept as it was', isWhole }), true)
-  // A fixture line that starts with a test call cuts the block short, so what is left is not whole and the test runs.
-  const cut = `${top}test('cut by a fixture', () => {\n  const fixture = \`\ntest('a fixture line', () => {})\n\`\n  assert.ok(fixture)\n})\n`
-  assert.equal(isUnchanged({ was: cut, now: cut, title: 'cut by a fixture', isWhole }), false)
-  // So does a method call split across two lines.
-  const split = `${top}test('split by a method call', () => {\n  const pattern = /x/\n  assert.ok(pattern.\ntest('x'))\n})\n`
-  assert.equal(isUnchanged({ was: split, now: split, title: 'split by a method call', isWhole }), false)
-  // A title the file has twice, here once in a fixture string, is not taken as unchanged.
-  const twice = `${top}const sample = "test('written twice')"\ntest('written twice', () => {})\n`
-  assert.equal(isUnchanged({ was: twice, now: twice, title: 'written twice', isWhole }), false)
-  // A changed block, and a file the branch adds, run.
-  assert.equal(isUnchanged({ was: same, now: same.replace('1, 1', '1, 2'), title: 'kept as it was', isWhole }), false)
-  assert.equal(isUnchanged({ was: null, now: same, title: 'kept as it was', isWhole }), false)
-})
-
-test('fail-first reads a run as pass, fail, skipped or missing from its TAP counts and exit (#1520)', () => {
+test('fail-first reads a run as pass, fail, skipped, todo or missing from its TAP lines and exit (#1520)', () => {
   const tap = (tests, pass, fail, skipped) => `# tests ${tests}\n# pass ${pass}\n# fail ${fail}\n# skipped ${skipped}\n`
   assert.equal(outcomeOf({ status: 0, stdout: tap(1, 1, 0, 0) }), 'pass')
   assert.equal(outcomeOf({ status: 1, stdout: tap(1, 0, 1, 0) }), 'fail')
@@ -79,7 +55,14 @@ test('fail-first reads a run as pass, fail, skipped or missing from its TAP coun
   assert.equal(outcomeOf({ status: 0, stdout: `ok 1 - tests/a.test.mjs\n${tap(1, 1, 0, 0)}` }, 'a title in a fixture'), 'missing')
   assert.equal(outcomeOf({ status: 0, stdout: `ok 1 - the value \\# two\r\n${tap(1, 1, 0, 0)}` }, 'the value # two'), 'pass')
   assert.equal(outcomeOf({ status: 0, stdout: `ok 1 - a skipped one # SKIP synthetic\n${tap(1, 0, 0, 1)}` }, 'a skipped one'), 'skipped')
-  assert.equal(outcomeOf({ status: 0, stdout: `not ok 1 - a todo one # TODO\n${tap(1, 0, 0, 0)}` }, 'a todo one'), 'fail')
+  // A todo result never fails a run, so it is neither pass nor fail, whichever way it went.
+  assert.equal(outcomeOf({ status: 0, stdout: `not ok 1 - a todo one # TODO\n${tap(1, 0, 0, 0)}` }, 'a todo one'), 'todo')
+  assert.equal(outcomeOf({ status: 0, stdout: `ok 1 - a todo one # TODO later\n${tap(1, 0, 0, 0)}` }, 'a todo one'), 'todo')
+  assert.equal(outcomeOf({ status: 0, stdout: `ok 1 - a todo one # TODO\nok 2 - a todo one\n${tap(2, 1, 0, 0)}` }, 'a todo one'), 'pass')
+  assert.equal(outcomeOf({ status: 0, stdout: `ok 1 - a todo one # SKIP\nok 2 - a todo one # TODO\n${tap(2, 0, 0, 1)}` }, 'a todo one'), 'todo')
+  assert.equal(outcomeOf({ status: 1, stdout: `not ok 1 - a todo one # TODO\n${tap(1, 0, 1, 0)}` }, 'a todo one'), 'fail')
+  // TAP drops the spaces at the end of a name.
+  assert.equal(outcomeOf({ status: 0, stdout: `ok 1 - saves the value\n${tap(1, 1, 0, 0)}` }, 'saves the value '), 'pass')
   // A run its time limit stopped is not a failure of the test: it is unknown.
   assert.equal(outcomeOf({ status: null, signal: 'SIGTERM', stdout: '' }), 'stopped')
   assert.equal(outcomeOf({ error: new Error('spawn ENOENT'), stdout: '' }), 'stopped')
@@ -119,6 +102,7 @@ test('fail-first runs each named new or changed test on the merge base with the 
   r.write('tests/old.test.mjs', `${header}test('an old test passes', () => assert.ok(true))\ntest('an old test changes', () => assert.ok(true))\n`)
   r.write('tests/old-helper.mjs', 'export const old = true\n')
   r.write('tests/renamed-from.mjs', 'export const helperBeforeItsRename = { name: "synthetic", count: 3 }\n')
+  r.write('tests/kept.test.mjs', `${header}test('a kept test', () => assert.ok(true))\n`)
   r.commit()
   const base = r.git('rev-parse', 'HEAD')
   rmSync(join(r.cwd, 'tests/old-helper.mjs'))
@@ -127,7 +111,7 @@ test('fail-first runs each named new or changed test on the merge base with the 
   r.write('tests/gone.test.mjs', `${header}import { existsSync } from 'node:fs'\nconst note = "test('the added module is there')"\ntest('the old helper is gone', () => assert.equal(existsSync(new URL('./old-helper.mjs', import.meta.url)), false))\ntest('the renamed helper is gone from its old name', () => assert.equal(existsSync(new URL('./renamed-from.mjs', import.meta.url)), false))\n`)
   r.write('scripts/value.mjs', 'export const value = 2\n')
   r.write('scripts/added.mjs', 'export const added = true\n')
-  r.write('tests/value.test.mjs', `${header}import { value } from '../scripts/value.mjs'\ntest('the value is two', () => assert.equal(value, 2))\ntest('the value is a number', () => assert.equal(typeof value, 'number'))\ntest('the value is three', () => assert.equal(value, 3))\ntest('a test skipped everywhere', { skip: 'synthetic' }, () => {})\nconst sample = "test('a title only in a fixture', () => {})"\n`)
+  r.write('tests/value.test.mjs', `${header}import { value } from '../scripts/value.mjs'\ntest('the value is two', () => assert.equal(value, 2))\ntest('the value is a number', () => assert.equal(typeof value, 'number'))\ntest('the value is three', () => assert.equal(value, 3))\ntest('a test skipped everywhere', { skip: 'synthetic' }, () => {})\ntest.todo('a todo test')\ntest('a todo that fails', { todo: true }, () => assert.fail('synthetic'))\nconst sample = "test('a title only in a fixture', () => {})"\n`)
   r.write('tests/added.test.mjs', `${header}import { added } from '../scripts/added.mjs'\ntest('the added module is there', () => assert.equal(added, true))\n`)
   r.write('tests/old.test.mjs', `${header}import { value } from '../scripts/value.mjs'\ntest('an old test passes', () => assert.ok(true))\ntest('an old test changes', () => assert.equal(value, 2))\n`)
   r.write('tests/pane.test.tsx', "test('a plugin test', () => {})\n")
@@ -136,7 +120,7 @@ test('fail-first runs each named new or changed test on the merge base with the 
   r.commit()
   const head = r.git('rev-parse', 'HEAD')
   const command = (program, args, options = {}) => spawnSync(program, args, { cwd: r.cwd, env: r.env, encoding: 'utf8', timeout: 60000, ...options })
-  const names = ['the value is two', 'the value is a number', 'the value is three', 'a test skipped everywhere', 'the added module is there', 'an old test passes', 'an old test changes', 'a plugin test', 'a test nobody wrote', 'the old helper is gone', 'the renamed helper is gone from its old name', 'a title only in a fixture', 'a title in two files']
+  const names = ['the value is two', 'the value is a number', 'the value is three', 'a test skipped everywhere', 'the added module is there', 'an old test passes', 'an old test changes', 'a plugin test', 'a test nobody wrote', 'the old helper is gone', 'the renamed helper is gone from its old name', 'a title only in a fixture', 'a title in two files', 'a kept test', 'a todo test', 'a todo that fails']
   const checkouts = []
   const runs = []
   const result = await runFailFirst({ cwd: r.cwd, base, names, command, env: r.env, onCheckout: path => checkouts.push(path), onRun: run => runs.push(run) })
@@ -150,7 +134,8 @@ test('fail-first runs each named new or changed test on the merge base with the 
     // The file cannot load on the base, where scripts/added.mjs is missing: it fails there. Another file has the title
     // only in a string, and a run there finds no test by it, so this file has the test.
     'the added module is there': 'counted',
-    'an old test passes': 'unchanged',
+    // Its own lines did not change, but its file did, so it runs on the base, passes there and counts against the line.
+    'an old test passes': 'passes-on-base',
     'an old test changes': 'counted',
     'a plugin test': 'not-node',
     'a test nobody wrote': 'unknown',
@@ -162,16 +147,23 @@ test('fail-first runs each named new or changed test on the merge base with the 
     'a title only in a fixture': 'missing',
     // Two files have the test, so it cannot be run by its name alone; it counts against the line too.
     'a title in two files': 'ambiguous',
+    // Its file is the same as on the base, and it passes here: not run on the base, not counted.
+    'a kept test': 'unchanged',
+    // A todo test never fails a run, whether it passes or fails: not counted.
+    'a todo test': 'todo',
+    'a todo that fails': 'todo',
   })
   assert.match(r.git('diff', '--name-status', base, head, '--', 'tests/renamed-from.mjs', 'tests/renamed-to.mjs'), /^R/)
   assert.equal(result.counted, 3)
-  assert.equal(result.total, 9)
-  assert.equal(result.line, `Fail-first: 3 of 9 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`)
-  // Each test runs here first; only those that pass here run on the base, after every run here.
+  assert.equal(result.total, 10)
+  assert.equal(result.line, `Fail-first: 3 of 10 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`)
+  // Each test runs here first, the unchanged one too; only those that pass here in a changed file run on the base, after
+  // every run here.
+  assert.ok(runs.some(run => run.where === r.cwd && run.title === 'a kept test'))
   const firstBase = runs.findIndex(run => run.where !== r.cwd)
   assert.ok(firstBase > 0)
   assert.ok(runs.slice(firstBase).every(run => run.where === checkouts[0]))
-  assert.deepEqual(runs.slice(firstBase).map(run => run.title).sort(), ['an old test changes', 'the added module is there', 'the old helper is gone', 'the renamed helper is gone from its old name', 'the value is a number', 'the value is two'])
+  assert.deepEqual(runs.slice(firstBase).map(run => run.title).sort(), ['an old test changes', 'an old test passes', 'the added module is there', 'the old helper is gone', 'the renamed helper is gone from its old name', 'the value is a number', 'the value is two'])
   // The base checkout was a separate folder, and it is gone with its worktree record.
   assert.equal(checkouts.length, 1)
   assert.notEqual(checkouts[0], r.cwd)
@@ -194,4 +186,38 @@ test('fail-first counts a working-tree change and says so, and reports no tests 
   const none = await runFailFirst({ cwd: r.cwd, base, names: [], command, env: r.env })
   assert.equal(none.total, 0)
   assert.equal(none.line, null)
+})
+
+test('fail-first calls a test unchanged only when it passes here in a file the same as the base (#1520)', { timeout: 120_000 }, async t => {
+  const r = repository(t)
+  r.write('scripts/value.mjs', 'export const value = 1\n')
+  // A file the branch leaves as it is: a real test, one that the change breaks, and fixture lines that start with a test call.
+  r.write('tests/kept.test.mjs', `${header}import { value } from '../scripts/value.mjs'\ntest('kept as it was', () => assert.ok(true))\ntest('the value is one', () => assert.equal(value, 1))\nconst fixture = \`\ntest('a phantom', () => {})\ntest('another', () => {})\n\`\n`)
+  // Tests inside a comment on the base, which the branch takes out of the comment.
+  r.write('tests/commented.test.mjs', `${header}/*\ntest('an uncommented test', () => assert.ok(true))\ntest('a second uncommented test', () => assert.ok(true))\n*/\n`)
+  r.write('tests/mixed.test.mjs', `${header}test('an old test in a changed file', () => assert.ok(true))\n`)
+  r.commit()
+  const base = r.git('rev-parse', 'HEAD')
+  r.write('scripts/value.mjs', 'export const value = 2\n')
+  r.write('tests/commented.test.mjs', `${header}test('an uncommented test', () => assert.ok(true))\ntest('a second uncommented test', () => assert.ok(true))\n`)
+  r.write('tests/mixed.test.mjs', `${header}test('an old test in a changed file', () => assert.ok(true))\ntest('a new test in it', () => assert.ok(true))\n`)
+  r.commit()
+  const command = (program, args, options = {}) => spawnSync(program, args, { cwd: r.cwd, env: r.env, encoding: 'utf8', timeout: 60000, ...options })
+  const names = ['kept as it was', 'the value is one', 'a phantom', 'an uncommented test', 'an old test in a changed file']
+  const runs = []
+  const result = await runFailFirst({ cwd: r.cwd, base, names, command, env: r.env, onRun: run => runs.push(run) })
+  assert.deepEqual(Object.fromEntries(result.results.map(item => [item.title, item.state])), {
+    'kept as it was': 'unchanged',
+    // An unchanged file does not make a test that fails here, or a fixture line, unchanged.
+    'the value is one': 'fails-on-head',
+    'a phantom': 'missing',
+    // A test whose own lines are the same on both sides runs on the base when its file changed.
+    'an uncommented test': 'passes-on-base',
+    'an old test in a changed file': 'passes-on-base',
+  })
+  assert.equal(result.counted, 0)
+  assert.equal(result.total, 4)
+  // Every named test ran here; only the two in changed files ran on the base.
+  assert.deepEqual(runs.filter(run => run.where === r.cwd).map(run => run.title).sort(), [...names].sort())
+  assert.deepEqual(runs.filter(run => run.where !== r.cwd).map(run => run.title).sort(), ['an old test in a changed file', 'an uncommented test'])
 })
