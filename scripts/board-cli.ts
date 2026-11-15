@@ -2214,6 +2214,12 @@ const codexReceiverExecutable = (): string | null => {
   if (given !== undefined) return explicitCodexExecutable(given)
   return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
 }
+// How long the receiver watches a thread before it reads it as a person's: the daemon's own unload delay and a margin, which
+// the receiver knows. Only a test process, whose stand-in daemon unloads sooner, may shorten it.
+const codexUnloadMs = (): number | undefined => {
+  const given = Number(process.env.AGENT_BOARD_CODEX_UNLOAD_MS)
+  return process.env.AGENT_BOARD_TEST_PID && Number.isInteger(given) && given >= 100 && given <= 65_000 ? given : undefined
+}
 
 // The detached Windows child reports startup failures through a private file too; redirecting
 // its standard handles would make Start-Process inherit the caller's extra pipes again.
@@ -2270,6 +2276,7 @@ const serveChild = (): void => {
         // A file that is missing or cannot be read throws, so the tick keeps every thread: only a row read as ended or gone ends one.
         threads: () => parseProgress(readFileSync(path, 'utf8')).flatMap(project => project.tasks.flatMap(task => task.auto?.agent === 'codex' && task.auto.state !== 'ended' ? [task.auto.resume ?? task.auto.session] : [])),
         executable: codexReceiverExecutable(),
+        unloadMs: codexUnloadMs(),
       },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests

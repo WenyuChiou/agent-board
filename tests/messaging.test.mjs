@@ -4218,8 +4218,14 @@ const codexConnection = async (board, thread = codexCurrent) => waitFor(async ()
 const codexMessage = async (board, id) => (await board.call('/api/board')).body.messaging.messages.find(one => one.id === codexId(id))
 const codexSend = async (board, connection, id = 'AB-CX-001') => (await board.call('/api/messages/send', { id: codexId(id), target: connection.id, turn: 'session', text: 'Check the build and tell me what failed.' })).status
 // The stand-in keeps a thread listed 150 ms after its last subscriber left or its last turn ended (the real daemon's 60 s), so the
-// receiver in these tests waits 400 ms after its own leave (65 s for real) before a listing tells it about a person.
+// receiver in these tests watches a thread for 400 ms (65 s for real) before a listing tells it about a person: the first message
+// to a thread waits that long, and so does each one after a delivery.
 const codexUnloadMs = 400
+// The page's own receiver waits 65 seconds before it reads a thread as a person's. A page started by a test may be given the
+// stand-in daemon's shorter delay; the page takes it only from a test process, so both names are set and both are cleared.
+const codexShortWait = (isOn = true) => {
+  if (isOn) { process.env.AGENT_BOARD_TEST_PID = String(process.pid); process.env.AGENT_BOARD_CODEX_UNLOAD_MS = String(codexUnloadMs) } else { delete process.env.AGENT_BOARD_TEST_PID; delete process.env.AGENT_BOARD_CODEX_UNLOAD_MS }
+}
 const codexReceiver = (board, daemon, options = {}) => startCodexReceiver({ boardUrl: board.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, unloadMs: codexUnloadMs, ...options })
 
 test('a Codex message is sent only to a thread the running daemon has loaded, with no shell', async () => fixture(async (board, dir) => {
@@ -4331,8 +4337,8 @@ test('a turn that ends without an explicit completed status is uncertain, never 
 }))
 
 test('a thread that went idle in the same read as its resume answer is not left looking busy', () => codexFixture(async (board, dir) => {
-  // The answer says active; the turn ends and the thread goes idle right behind it. The later notice wins.
-  const { daemon, id } = codexCase(dir, 0, { status: 'active', resumeRace: true })
+  // A turn begins as the receiver joins: the answer says active; the turn ends and the thread goes idle right behind it. The later notice wins.
+  const { daemon, id } = codexCase(dir, 0, { resumeRace: true })
   const receiver = codexReceiver(board, daemon)
   try {
     const connection = await codexConnection(board)
@@ -4354,10 +4360,11 @@ test('a Codex thread that stays loaded only because the receiver joined it is ne
   try {
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
-    // The person quits. The daemon lists the thread only while someone is subscribed: a receiver that had joined would be that one.
+    // The person quits and the turn ends. The daemon lists the thread only while someone is subscribed or a turn runs: a receiver
+    // that had joined would be that one.
     unlinkSync(person)
-    await waitFor(async () => !(await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
     writeFileSync(endFlag, '')
+    await waitFor(async () => !(await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
     await pause(1500)
     const methods = codexMethods(daemon)
     assert.equal(methods.filter(method => method === 'turn/start' || method === 'thread/resume').length, 0)
@@ -4476,6 +4483,234 @@ test('a second message to a thread the Codex receiver has just left waits out th
     // The daemon unloads the thread once its delay has passed, and the receiver lets the connection go.
     await waitFor(async () => !(await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
     assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-002')).status], [1, 'queued'])
+  } finally { await receiver.close() }
+}))
+
+// Until the daemon has unloaded the thread and the receiver has let its connection go, or more turns were started than should be.
+const codexSettled = (board, daemon, connection, starts) => waitFor(async () => codexStarts(daemon) > starts || !(await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
+
+test('a message held while a turn runs is not started when that turn ends long after the person quit, in the unload delay its end began (#318)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
+  writeFileSync(person, '')
+  // The stand-in keeps the thread listed 3 s after the turn's end, longer than a board poll (2 s): a receiver that read that listing
+  // as a person would take the message and start it with nobody there.
+  const daemon = codexDaemon(dir, { status: 'active', endFlag, person, unloadDelay: 3000 })
+  const receiver = codexReceiver(board, daemon, { unloadMs: 4000 })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    // The person quits while the turn runs, and it runs on for two unload delays: only the turn keeps the thread loaded. Its end
+    // starts the daemon's delay again, which the receiver, out of the thread, does not hear.
+    unlinkSync(person)
+    await pause(6000)
+    writeFileSync(endFlag, '')
+    await codexSettled(board, daemon, connection, 0)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
+  } finally { await receiver.close() }
+}))
+
+test('a Codex thread that stays listed and idle for a whole unload delay while the receiver watches it from outside gets one turn, and the receiver leaves after it (#318)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person })
+  const receiver = codexReceiver(board, daemon, { tickMs: 250, unloadMs: 4000 })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    const methods = codexMethods(daemon)
+    // The wait is 4 s of reads no more than two ticks (500 ms) apart, so several came before the join. A receiver that takes the
+    // first listing as a person joins after three: one as it attaches and one for each of two board polls.
+    assert.ok(methods.slice(0, methods.indexOf('thread/resume')).filter(method => method === 'thread/read').length >= 6)
+    // The person is still there: nothing more is started, and the receiver does not join again.
+    await pause(1000)
+    assert.deepEqual([codexStarts(daemon), codexMethods(daemon).filter(method => method === 'thread/resume').length], [1, 1])
+  } finally { await receiver.close() }
+}))
+
+test('a claim that met a busy Codex thread is not started when that turn ends after the person quit: joining and leaving started the wait again (#318)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
+  writeFileSync(person, '')
+  // The person's turn begins as the claim joins, so the receiver leaves again and holds the claim.
+  const daemon = codexDaemon(dir, { readActive: true, endFlag, person, unloadDelay: 1000 })
+  const receiver = codexReceiver(board, daemon, { unloadMs: 1500 })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    // The person quits, and the turn ends 1.1 s after the receiver's leave: the daemon keeps the thread 1 s more. A receiver that
+    // counted 1.5 s from its own leave alone would read the thread as a person's then, and start the held claim.
+    unlinkSync(person)
+    await pause(1100)
+    writeFileSync(endFlag, '')
+    await codexSettled(board, daemon, connection, 0)
+    assert.equal(codexStarts(daemon), 0)
+    // The claim was held, so the card shows it in doubt once the connection is gone: it was never started.
+    await codexUncertain(board, 'AB-CX-001', 'DISCONNECTED')
+  } finally { await receiver.close() }
+}))
+
+test('a Codex receiver that starts while a thread is still loaded from a receiver killed in it sees that thread for the first time, and starts nothing (#318)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  // The first receiver's leave gets no answer, so it is still in the thread when it is killed. The stand-in keeps the thread listed
+  // 5 s after that: time for the board to let the dead connection go, for the next receiver to register, and for a board poll.
+  const daemon = codexDaemon(dir, { person, unloadDelay: 5000, unsubscribeFaults: ['mute'] })
+  // Its short wait only brings the first delivery sooner.
+  const first = codexReceiver(board, daemon)
+  let second
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    // The person quits, and the receiver is killed while it is still subscribed: the daemon drops its connection.
+    unlinkSync(person)
+    first.kill()
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    await waitFor(async () => !(await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
+    second = codexReceiver(board, daemon, { unloadMs: 6500 })
+    const again = await codexConnection(board)
+    assert.equal(await codexSend(board, again, 'AB-CX-002'), 200)
+    await codexSettled(board, daemon, again, 1)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-002')).status], [1, 'queued'])
+  } finally { first.kill(); await second?.close() }
+}))
+
+test('a Codex thread the receiver was dropped from while it could not leave it is not read as a person\'s after the daemon connection is lost (#318)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), pidFile = join(dir, 'proxy.pid')
+  writeFileSync(person, '')
+  // The first leave is refused and the ones after it get no answer, so the receiver stays subscribed.
+  const daemon = codexDaemon(dir, { person, pidFile, unloadDelay: 3500, unsubscribeFaults: ['error', 'mute', 'mute'] })
+  const receiver = codexReceiver(board, daemon, { unloadMs: 4500 })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    const acknowledged = Date.now()
+    // The person quits, and another connection registers for the session: the receiver's board connection ends while it is
+    // still subscribed to the thread.
+    unlinkSync(person)
+    const holder = (await board.call('/api/messages/register', { agent: 'codex', session: codexCurrent, surface: SURFACE_IDS.cli, turn: 'session', scope: 'session' })).body
+    await waitFor(async () => !(await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
+    // The leave that was on its way when the board connection ended has had its 5 seconds: no answer to it can come any more.
+    await pause(Math.max(0, 5600 - (Date.now() - acknowledged)))
+    // The daemon connection is lost. The daemon drops the subscription then and keeps the thread 3.5 s more.
+    process.kill(Number(readFileSync(pidFile, 'utf8')))
+    await waitFor(async () => daemon.calls().filter(one => one.argv).length === 2)
+    await board.call('/api/messages/disconnect', { connection: holder.id, secret: holder.secret, turn: 'session' })
+    const again = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === codexCurrent && one.surface === SURFACE_IDS.codexDaemon && one.id !== connection.id))
+    assert.equal(await codexSend(board, again, 'AB-CX-002'), 200)
+    await codexSettled(board, daemon, again, 1)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-002')).status], [1, 'queued'])
+  } finally { await receiver.close() }
+}))
+
+test('a jump of the Codex receiver\'s clock is time it did not watch the thread, and the wait starts again (#318)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadDelay: 3000 })
+  let offset = 0
+  const receiver = codexReceiver(board, daemon, { unloadMs: 4000, now: () => performance.now() + offset })
+  try {
+    const connection = await codexConnection(board)
+    await pause(500)
+    // The person quits and the receiver's clock jumps 10 s (the computer slept). By that clock alone the thread has been idle and
+    // listed for longer than the wait; what it did in those 10 s nobody saw.
+    unlinkSync(person)
+    offset = 10_000
+    assert.equal(await codexSend(board, connection), 200)
+    await codexSettled(board, daemon, connection, 0)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
+  } finally { await receiver.close() }
+}))
+
+test('a thread/read that fails ends what the Codex receiver had seen of the thread: a turn that ran behind it restarts the wait (#318)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), beginFlag = join(dir, 'begin-turn'), endFlag = join(dir, 'end-turn'), readFaults = join(dir, 'read-faults')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, beginFlag, endFlag, readFaults, unloadDelay: 3000 })
+  const receiver = codexReceiver(board, daemon, { unloadMs: 4000 })
+  try {
+    const connection = await codexConnection(board)
+    await pause(1000)
+    // The person starts a turn and quits. Every read is refused while it runs, so the receiver never reads the thread as busy.
+    writeFileSync(readFaults, '')
+    writeFileSync(beginFlag, '')
+    await waitFor(async () => !existsSync(beginFlag))
+    unlinkSync(person)
+    await pause(2000)
+    // The turn ends, which keeps the thread loaded 3 s more, and the reads work again: idle, as before the turn.
+    writeFileSync(endFlag, '')
+    await waitFor(async () => !existsSync(endFlag))
+    unlinkSync(readFaults)
+    assert.equal(await codexSend(board, connection), 200)
+    await codexSettled(board, daemon, connection, 0)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
+  } finally { await receiver.close() }
+}))
+
+test('a turn too short for the Codex receiver to read as running still restarts the wait, by the thread\'s changed updatedAt (#318)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), beginFlag = join(dir, 'begin-turn'), endFlag = join(dir, 'end-turn')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, beginFlag, endFlag, unloadDelay: 3000 })
+  const receiver = codexReceiver(board, daemon, { unloadMs: 4000 })
+  try {
+    const connection = await codexConnection(board)
+    // The thread is watched, idle and listed, for a whole wait: a message sent now would be started.
+    await pause(4500)
+    // The person quits, and a turn starts and ends in one pass of the stand-in, between two reads of the receiver.
+    unlinkSync(person)
+    writeFileSync(endFlag, '')
+    writeFileSync(beginFlag, '')
+    await waitFor(async () => !existsSync(endFlag))
+    assert.equal(await codexSend(board, connection), 200)
+    await codexSettled(board, daemon, connection, 0)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
+  } finally { await receiver.close() }
+}))
+
+test('a leave the daemon never answers, three times over, ends the Codex receiver\'s connection to the daemon, and nothing is started for the thread (#318)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unsubscribeFaults: ['mute', 'mute', 'mute'] })
+  const errors = []
+  const receiver = codexReceiver(board, daemon, { leaveMs: 500, onError: error => errors.push(error.message) })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    // The person quits and a second message comes. The thread stays listed because the receiver itself cannot leave it.
+    unlinkSync(person)
+    assert.equal(await codexSend(board, connection, 'AB-CX-002'), 200)
+    await pause(4000)
+    // The receiver ended its connection, which leaves the thread for certain, and connected again: the Codex program ran twice.
+    assert.deepEqual([errors.filter(code => code === 'LEAVE_FAILED').length, daemon.calls().filter(one => one.argv).length, codexStarts(daemon), (await codexMessage(board, 'AB-CX-002')).status], [1, 2, 1, 'queued'])
+  } finally { await receiver.close() }
+}))
+
+test('a Codex receiver dropped while its interrupt is still on its way does not attach to the thread again until it has left it, and leaves once the interrupt is done (#318)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), interruptFlag = join(dir, 'interrupt')
+  writeFileSync(person, '')
+  // The interrupt is answered only when the test says so: after another connection has ended the receiver's own.
+  const daemon = codexDaemon(dir, { approval: 'hold', interruptFlag, person })
+  const receiver = codexReceiver(board, daemon, { approvalMs: 400 })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await codexUncertain(board, 'AB-CX-001', 'APPROVAL_TIMEOUT')
+    // The person has quit, and another connection registers for the session: the receiver's own connection ends, then the other leaves.
+    unlinkSync(person)
+    const holder = (await board.call('/api/messages/register', { agent: 'codex', session: codexCurrent, surface: SURFACE_IDS.cli, turn: 'session', scope: 'session' })).body
+    await waitFor(async () => !(await board.call('/api/board')).body.messaging.connections.some(one => one.id === connection.id))
+    await board.call('/api/messages/disconnect', { connection: holder.id, secret: holder.secret, turn: 'session' })
+    // Several ticks pass. Still in the thread while the interrupt waits, the receiver would read its own subscription as a person.
+    await pause(600)
+    assert.deepEqual([receiver.attached(), codexMethods(daemon).includes('thread/unsubscribe')], [[], false])
+    writeFileSync(interruptFlag, '')
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    // Out of the thread, nothing keeps it loaded: the daemon unloads it and the receiver does not come back.
+    await pause(1000)
+    assert.deepEqual([receiver.attached(), codexStarts(daemon)], [[], 1])
   } finally { await receiver.close() }
 }))
 
@@ -5000,7 +5235,8 @@ const codexTable = [
     const receiver = codexReceiver(board, daemon, { ackMs: 1000 })
     try {
       assert.equal(await codexSend(board, await codexConnection(board), 'AB-CX-003'), 200)
-      await waitFor(async () => daemon.calls().some(call => call.method === 'thread/read'))
+      // The receiver has watched the thread for its wait, and the board has handed the message out.
+      await waitFor(async () => (await codexMessage(board, 'AB-CX-003'))?.status === 'uncertain')
       // The read began inside the deadline and answers idle after it.
       await pause(2500)
       assert.equal(codexStarts(daemon), 0)
@@ -5016,7 +5252,7 @@ const codexTable = [
     // The poll that hands the message out is answered and every later poll is refused for good, so the client closes about 2 seconds
     // after the claim, 1.5 seconds before the read answers. The next tick is far off, so only the client's own close can stop the start.
     const proxy = await pollingProxy(board, 'forbidden-after-claim')
-    const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 30_000 })
+    const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 30_000, unloadMs: codexUnloadMs })
     try {
       assert.equal(await codexSend(board, await codexConnection(board)), 200)
       await codexUncertain(board, 'AB-CX-001', 'DISCONNECTED')
@@ -5250,6 +5486,7 @@ test('the board runs the Codex receiver for a Codex session it knows and ends it
   const daemon = codexDaemon(dir, { pidFile: join(dir, 'proxy.pid') })
   process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
   process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
+  codexShortWait()
   let board
   try {
     // Off unless asked for: without --codex-send the page starts no Codex program and joins no thread.
@@ -5278,7 +5515,7 @@ test('the board runs the Codex receiver for a Codex session it knows and ends it
     await waitFor(async () => { try { process.kill(second, 0); return false } catch { return true } })
     // The page took the Codex program it started away with it.
   } finally {
-    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG; codexShortWait(false)
     await board?.close().catch(() => undefined)
     await removeKilledPageFolder(dir)
   }
@@ -5293,6 +5530,7 @@ test('a board file that is missing for two ticks keeps the Codex receiver and it
   const daemon = codexDaemon(dir, { status: 'active', endFlag, pidFile: join(dir, 'proxy.pid') })
   process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
   process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
+  codexShortWait()
   let board
   try {
     board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send'], codexRoutes)
@@ -5311,7 +5549,7 @@ test('a board file that is missing for two ticks keeps the Codex receiver and it
     writeFileSync(progress, readFileSync(progress, 'utf8').replace('state=waiting', 'state=ended'))
     await waitFor(async () => { try { process.kill(proxy, 0); return false } catch { return true } })
   } finally {
-    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG; codexShortWait(false)
     if (existsSync(away) && !existsSync(progress)) fs.renameSync(away, progress)
     await board?.close().catch(() => undefined)
     await removeKilledPageFolder(dir)
@@ -5327,6 +5565,7 @@ test('a moved server lets codexReceiver disconnect before closing messaging so q
   const daemon = codexDaemon(dir, { status: 'active', endFlag, pidFile: join(dir, 'proxy.pid') })
   process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
   process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
+  codexShortWait()
   let board, replacement
   try {
     board = await start(dir, '', ['--messages-dir', messagesDir, '--codex-send'], codexRoutes)
@@ -5358,7 +5597,7 @@ test('a moved server lets codexReceiver disconnect before closing messaging so q
     writeFileSync(progress, readFileSync(progress, 'utf8').replace('state=waiting', 'state=ended'))
     await waitFor(async () => { try { process.kill(proxy, 0); return false } catch { return true } })
   } finally {
-    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG; codexShortWait(false)
     await board?.close().catch(() => undefined)
     await replacement?.close().catch(() => undefined)
     await removeKilledPageFolder(dir)
