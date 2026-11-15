@@ -94,7 +94,8 @@ of its own for it. The plugin keeps no copy of what a session owes the board: at
 it out for each session it knows, so an answer to an open or a take never says "done". A session owes a mailbox when the
 file holds none for it, or less than the lifetime (12 hours) minus ten minutes of its time is left, and it owes a take when
 a message is queued, or claimed and not marked as a wake, for it. A session that owes nothing, and no step to the board,
-costs no board call and no question to the host. One that owes something, or whose file could not be read (no folder known
+costs no question to the host, and no board call once the board has accepted the text of the file the plugin read: until
+then one `--mailbox verify` call, which claims and writes nothing, asks the board about that text. One that owes something, or whose file could not be read (no folder known
 yet, a link or anything but a real folder at the board's path, a file it cannot read), asks the host and the board again. Only an idle session takes, and a take also opens or renews
 the session's mailbox. A busy session opens or renews it with `--mailbox open` instead, which claims nothing, so the board
 can queue a message for it during that turn (its first event is often `chat.message`), and so a turn longer than 12 hours

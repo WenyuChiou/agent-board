@@ -131,12 +131,13 @@ const boardReceiver = (client, directory, replay) => {
   }
   // The host's own view of a session. OpenCode lists only sessions that are not idle (F9: \`{}\` for an idle
   // one), so a lookup that answers with no entry means idle; a failed lookup, an error answer or an entry of
-  // no known shape leaves it unknown. A host without the lookup is left to the last event.
+  // no known shape leaves it unknown. So does a list: it has no entry for any session, so reading it as idle would
+  // start a board message inside a running turn (#1366 review). A host without the lookup is left to the last event.
   const hostState = async session => {
     if (typeof client?.session?.status !== 'function') return 'idle'
     let live
     try { live = await hostCall(() => client.session.status({})) } catch { return 'unknown' }
-    if (live?.error || live?.data == null || typeof live.data !== 'object') return 'unknown'
+    if (live?.error || live?.data == null || typeof live.data !== 'object' || Array.isArray(live.data)) return 'unknown'
     const entry = live.data[session]
     if (entry === undefined) return 'idle'
     if (!entry || typeof entry.type !== 'string') return 'unknown'

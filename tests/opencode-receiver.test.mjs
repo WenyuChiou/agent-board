@@ -209,6 +209,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
           if (forced === 'fail' || calls.statusFails) throw new Error('status lookup failed')
           if (calls.statusError) return { error: { name: 'Failed' } }
           if (calls.noEntry) return { data: {} }
+          if (calls.statusList) return { data: [] }
           if (forced === 'busy') return { data: new Proxy({}, { get: () => ({ type: 'busy' }) }) }
           return { data: new Proxy({}, { get: (_target, key) => calls.busy?.[key] ?? { type: 'idle' } }) }
         },
@@ -422,12 +423,28 @@ test('opencodePlugin holds a message while the session is busy and wakes it at s
 
 test('opencodePlugin never registers a subagent session and never wakes a session it does not own', () => fixture(async f => {
   f.sessions.set('ses_child', { parentID: 'ses_parent' })
-  f.queue('ses_child', 'child-message-1', 'Synthetic text for a subagent')
+  // The child starts with no mailbox, so one on the board afterwards is one the receiver opened for it.
   f.queue('ses_other', 'other-message-1', 'Synthetic text for a session of another process')
   await f.hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_child', parentID: 'ses_parent' } } } })
+  f.calls.busy = { ses_child: { type: 'busy' } }
+  await f.reported({ session: 'ses_child', type: 'busy' })
+  await new Promise(done => setTimeout(done, 300))
+  await f.until(f.settled, 'no call is left running after the busy event')
+  f.tick(); await f.quiet()
+  delete f.calls.busy
   await f.idle('ses_child')
   await new Promise(done => setTimeout(done, 500))
   await f.until(f.settled, 'no call is left running')
+  f.tick(); await f.quiet()
+  assert.equal(f.count('open'), 0, 'no mailbox was opened for the busy subagent')
+  assert.equal(f.count('take'), 0, 'nothing was taken for the idle subagent')
+  assert.equal(f.mailbox('ses_child'), undefined, 'the board holds no mailbox for the subagent')
+  // A message the board holds for the child (its mailbox opened by another route) is not woken by this process either.
+  f.queue('ses_child', 'child-message-1', 'Synthetic text for a subagent')
+  await f.idle('ses_child')
+  await new Promise(done => setTimeout(done, 500))
+  await f.until(f.settled, 'no call is left running')
+  assert.equal(f.count('take'), 0)
   assert.equal(f.calls.promptAsync.length, 0)
   assert.equal(f.message('child-message-1').status, 'queued')
   assert.equal(f.message('other-message-1').status, 'queued')
@@ -533,6 +550,22 @@ test('opencodePlugin holds the message when the host status lookup fails', () =>
   f.calls.noEntry = true
   await f.idle('ses_unknown')
   await f.until(() => f.calls.promptAsync.length === 1 && f.message('unknown-message-1').status === 'accepted' && f.settled(), 'the message was given when the host listed no entry')
+}))
+
+test('opencodePlugin holds the message when the host status answer is a list, which names no session (#1366 review)', () => fixture(async f => {
+  f.queue('ses_list', 'list-message-1', 'Synthetic text while the status answer is a list')
+  // A list has no entry for the session, as an idle session's answer has none, but it says nothing about any session.
+  f.calls.statusList = true
+  await f.idle('ses_list')
+  await f.until(() => f.calls.status.length >= 1, 'the host status was asked')
+  await new Promise(done => setTimeout(done, 300))
+  await f.until(f.settled, 'no call is left running')
+  assert.equal(f.calls.promptAsync.length, 0, 'a list did not read as idle')
+  assert.equal(f.message('list-message-1').status, 'queued')
+  // The same session is woken once the host answers in its own shape again, so the list was the only thing holding it.
+  f.calls.statusList = false
+  await f.idle('ses_list')
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('list-message-1').status === 'accepted' && f.settled(), 'the message was given once the answer was an object')
 }))
 
 test('the OpenCode tool words and replies come from the string tables', async () => {
@@ -2072,7 +2105,13 @@ const askedSince = (f, from) => f.calls.board.slice(from).some(action => action 
 test('A29 I1 every top-level, mailbox and message field, damaged or removed one at a time: a store the board refuses is asked of the board at the next tick, and nothing wakes a turn (#1366 Fable diagnosis)', () => fixture(async f => {
   const session = 'ses_a29'
   await settleIdle(f, session)
-  const base = withFinished(session)
+  // The fields the board writes only for some messages and mailboxes, each with a value it accepts: a base without them
+  // would leave their checks untried, since a case damages only a field the base holds.
+  const fresh = withFinished(session)
+  const hex = length => 'a1b2c3d4e5f6'.repeat(6).slice(0, length)
+  const MESSAGE_EXTRAS = { attempted: Date.now(), ref: hex(12), surface: 'CLI', redelivered: 1, awaitsAck: true, framingNonce: hex(32), answers: 'question-1', hasAccepted: false, leftAt: Date.now(), line: 'nextTurn' }
+  const MAILBOX_EXTRAS = { folderDigest: hex(64), mcpOwner: '1:synthetic-owner', mcpLeaseUntil: Date.now() + 60_000, contested: false }
+  const base = { ...fresh, mailboxes: [{ ...fresh.mailboxes[0], ...MAILBOX_EXTRAS }], messages: [{ ...fresh.messages[0], ...MESSAGE_EXTRAS }] }
   assert.ok(!isRefused(JSON.stringify(base)), 'the board accepts the store each case damages')
   write(f, base)
   let from = f.calls.board.length
@@ -2086,6 +2125,11 @@ test('A29 I1 every top-level, mailbox and message field, damaged or removed one 
   for (const key of Object.keys(base.messages[0])) for (const value of VALUES) damaged.push([`message ${key} ${JSON.stringify(value)}`, { ...base, messages: [change(base.messages[0], key, value)] }])
   damaged.push(['two messages with one id', { ...base, messages: [base.messages[0], base.messages[0]] }])
   damaged.push(['two mailboxes with one id', { ...base, mailboxes: [base.mailboxes[0], base.mailboxes[0]] }])
+  // The board's own answer picks the cases the receiver must ask about, so a field the board stopped checking would drop
+  // out of them unseen. Each optional field's damage is therefore named here and must be refused.
+  const stores = new Map(damaged)
+  const named = [...Object.keys(MESSAGE_EXTRAS).map(key => `message ${key}`), ...Object.keys(MAILBOX_EXTRAS).map(key => `mailbox ${key}`)]
+  for (const label of named.flatMap(name => [`${name} null`, `${name} {}`])) assert.ok(isRefused(JSON.stringify(stores.get(label))), `${label}: the board refuses it`)
   const wrong = []
   let refused = 0
   for (const [label, store] of damaged) {
