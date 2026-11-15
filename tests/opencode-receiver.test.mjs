@@ -2125,10 +2125,20 @@ test('A29 I1 every top-level, mailbox and message field, damaged or removed one 
   for (const key of Object.keys(fresh)) for (const value of VALUES) damaged.push([`${key} ${JSON.stringify(value)}`, change(base, key, value)])
   for (const key of Object.keys(fresh.mailboxes[0])) for (const value of VALUES) damaged.push([`mailbox ${key} ${JSON.stringify(value)}`, inMailbox(key, value)])
   for (const key of Object.keys(fresh.messages[0])) for (const value of VALUES) damaged.push([`message ${key} ${JSON.stringify(value)}`, inMessage(key, value)])
+  // The board's own answer picks the cases the receiver must ask about below, so a required field the board stopped checking
+  // would drop out of them unseen (#1366 round 22). Every case so far must therefore be refused, by name, but these: a value the
+  // board takes as valid for that field ('x' as an id, an address, a reply or an error; a time that has passed), a field it fills in
+  // itself when missing (a message's origin and hash), one it does not read (a mailbox's origin), and a part it does without.
+  const TAKEN = ['mailboxes undefined', 'pausePeerMessages undefined', 'mailbox surface "x"', 'mailbox expires -1', ...VALUES.map(value => `mailbox origin ${JSON.stringify(value)}`),
+    'message id "x"', 'message target "x"', 'message turn "x"', 'message from "x"', 'message to "x"', 'message reply "x"', 'message error "x"', 'message updated -1',
+    'message hash null', 'message hash undefined', 'message origin null', 'message origin undefined']
+  for (const label of TAKEN) assert.ok(damaged.some(([one]) => one === label), `${label} is one of the cases`)
+  for (const [label, store] of damaged) if (!TAKEN.includes(label)) assert.ok(isRefused(JSON.stringify(store)), `${label}: the board refuses it`)
   damaged.push(['two messages with one id', { ...base, messages: [base.messages[0], base.messages[0]] }])
   damaged.push(['two mailboxes with one id', { ...base, mailboxes: [base.mailboxes[0], base.mailboxes[0]] }])
-  // The board's own answer picks the cases the receiver must ask about, so a field the board stopped checking would drop
-  // out of them unseen. Each optional field's damage is therefore named here and must be refused. The receiver learns of a
+  for (const [label, store] of damaged.slice(-2)) assert.ok(isRefused(JSON.stringify(store)), `${label}: the board refuses it`)
+  // The same holds for the optional fields: the board's own answer picks the cases the receiver must ask about, so each one's damage
+  // is named here too and must be refused. The receiver learns of a
   // refusal only from the board's one answer, whatever the field, so the board's refusal is checked for every optional
   // field and a tick for a few of them: the two the receiver reads itself, one more of the message and one of the mailbox.
   const TICKED = ['message attempted', 'message ref', 'message surface', 'mailbox folderDigest']
