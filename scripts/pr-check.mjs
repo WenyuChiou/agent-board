@@ -308,21 +308,56 @@ export const naming = (title, branch) => {
   return output
 }
 
+// Whether the lines from `from` (inclusive) to `to` (exclusive) hold an answer: text outside a
+// fence or a comment, or a non-empty line inside a fence. A fence delimiter itself is not an
+// answer. A null line is a fence line or a line inside a fence (#1492); a null line that does not
+// start with fence markers and is not blank is a line of fenced content, so a section whose whole
+// answer is a fenced block (pasted preflight output, #1459) is not empty.
+const sectionHasAnswer = (shown, raw, from, to) => {
+  for (let i = from; i < to; i++) {
+    if (shown[i] !== null) {
+      if (shown[i].trim() !== '') return true
+    } else if (raw[i] !== undefined && raw[i].trim() !== '' && !/^ {0,3}(`{3,}|~{3,})/.test(raw[i])) {
+      return true
+    }
+  }
+  return false
+}
+
 export const sections = (body, template) => {
   const output = result()
-  const clean = visibleBody(body)
-  const headings = [...clean.matchAll(/^## (.+)\r?$/gm)]
-  for (const heading of visibleBody(template).matchAll(/^## (.+)\r?$/gm)) {
-    const name = heading[1].trim()
-    const index = headings.findIndex(item => item[1].trim().toLowerCase() === name.toLowerCase())
-    const found = headings[index]
-    if (!found || !clean.slice(found.index + found[0].length, headings[index + 1]?.index ?? clean.length).trim()) {
+  // Headings and checklist items are read through visible lines, so a `##` or `- [ ]` inside a
+  // fence is not one (#1492). The answer is read off the isPlaceKept lines, so fenced content
+  // counts: the lines keep their positions, and a null line that is a non-empty line inside a
+  // fence is an answer.
+  const shown = visibleLines(body ?? '', { isPlaceKept: true })
+  const raw = (body ?? '').split(/\r?\n/)
+  const headings = []
+  for (let i = 0; i < shown.length; i++) {
+    const match = shown[i]?.match(/^## (.+)$/)
+    if (match) headings.push({ name: match[1].trim(), line: i })
+  }
+  const templateHeadings = []
+  for (const line of visibleLines(template ?? '', { isPlaceKept: true })) {
+    const match = line?.match(/^## (.+)$/)
+    if (match) templateHeadings.push(match[1].trim())
+  }
+  for (const name of templateHeadings) {
+    const at = headings.findIndex(item => item.name.toLowerCase() === name.toLowerCase())
+    const found = headings[at]
+    const next = at === -1 ? shown.length : (headings[at + 1]?.line ?? shown.length)
+    if (!found || !sectionHasAnswer(shown, raw, found.line + 1, next)) {
       output.problems.push(problem('sections', `the "${name}" section is missing or empty.`, `add "## ${name}" and explain its result, or why it is not applicable.`))
     }
   }
-  const items = new Set([...visibleBody(template).matchAll(/^- \[ \] (.+)\r?$/gm)].map(match => match[1].trim()))
-  for (const match of clean.matchAll(/^- \[([ xX])\] (.+)\r?$/gm)) {
-    if (items.has(match[2].trim())) {
+  const items = new Set()
+  for (const line of visibleLines(template ?? '', { isPlaceKept: true })) {
+    const match = line?.match(/^- \[ \] (.+)$/)
+    if (match) items.add(match[1].trim())
+  }
+  for (const line of shown) {
+    const match = line?.match(/^- \[([ xX])\] (.+)$/)
+    if (match && items.has(match[2].trim())) {
       output.problems.push(problem('sections', 'a template checkbox has no result or reason.', match[1] === ' ' ? 'tick it and add the result, or add "not run:" and why, or "n/a:" and why.' : 'add the result after a dash on the checked item.'))
     }
   }

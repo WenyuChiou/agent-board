@@ -2028,6 +2028,17 @@ test('pr-check reads the template sections and checklist when a comment marker s
   assert.match(flagged(done + 'Note: `<!--` opens a comment.\n' + exact), /template checkbox has no result/)
 })
 
+test('pr-check counts a fenced block as a section answer (#1492)', () => {
+  // A section whose whole answer is a fenced block (pasted preflight output) is not empty:
+  // merged PR #1459's Checks section is exactly this. The first head of this fix dropped fenced
+  // content from the answer, so this test fails there; it passes on the base, which kept it.
+  const done = '## What and why\nDone\n'
+  const checks = '## Checks\n```\nPASS the branch contains the base.\n```\n'
+  assert.deepEqual(sections(done + checks, template).problems, [])
+  // An empty fence is still no answer.
+  assert.match(sections(done + '## Checks\n```\n```\n', template).problems.map(item => item.message).join('\n'), /"Checks" section is missing or empty/)
+})
+
 test('pr-check finds the source pull request link when a comment marker sits inside a code fence or a code span (#1492)', () => {
   const finding = body => findingLink({ title: 'Finding: button flickers on resize', body })
   assert.deepEqual(finding('Found while reviewing.\n\n```\n<!-- example\n```\nFound in PR #1299.\n').problems, [])
