@@ -1005,7 +1005,7 @@ const findClosingParen = (text, openAt) => {
       if (end !== -1) return end
     }
   }
-  if (hadSpace && (text[i] === '"' || text[i] === "'")) return readLinkTitle(text, i)
+  if (hadSpace && (text[i] === '"' || text[i] === "'" || text[i] === '(')) return readLinkTitle(text, i)
   return -1
 }
 

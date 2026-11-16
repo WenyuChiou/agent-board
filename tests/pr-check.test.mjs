@@ -1952,6 +1952,7 @@ test('pr-check limits the changed lines of a pull request by its tier, unless th
     "[](https://example.com/a'b(c'd)e)",
     '[]( "hidden words")',
     '[]( (foo)bar)',
+    '[]( (hidden words))',
     '[][ref]',
     '![][ref]',
     nestedPlaceholder,
@@ -2055,6 +2056,7 @@ test('pr-check accepts two surfaces with cannot split and says it waits for an a
     "Surface: delivery + data, cannot split: [](https://example.com/a'b(c'd)e)",
     'Surface: delivery + data, cannot split: []( "hidden words")',
     'Surface: delivery + data, cannot split: []( (foo)bar)',
+    'Surface: delivery + data, cannot split: []( (hidden words))',
     'Surface: delivery + data, cannot split: [][ref]',
     'Surface: delivery + data, cannot split: ![][ref]',
   ]) {
