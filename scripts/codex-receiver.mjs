@@ -750,13 +750,21 @@ export const startCodexReceiver = ({
           // A claim that waits (the thread was busy, or a join was refused or got no answer, and each starts the wait again) goes back
           // to the board's queue, text and all, once too little of its time is left for a whole wait and two ticks: nothing was asked
           // of Codex for it, since turn/start comes only after this loop. The board then hands it out again when the thread reads as a
-          // person's, with its own 30 minutes. Without this the claim ran out and the board dropped its text (#1578). A board that
-          // refuses it (an older one) leaves the claim held here, as before.
+          // person's, with its own 30 minutes. Without this the claim ran out and the board dropped its text (#1578). Only the board's
+          // own refusal (an older board, an answer it gave) leaves the claim held here, as before. A give-back whose answer is not known
+          // (none came, or the board failed while saving) may have put the message back in the queue, so this delivery ends with no
+          // turn/start: the board hands the message out again if it took the give-back, and expires the claim if it did not.
           let canGiveBack = typeof unsent === 'function'
           const isShort = () => ackMs - (Date.now() - waitsSince) < Math.max(unloadMs, (quiet.get(thread)?.delay ?? 0) + unloadMarginMs) + 2 * tickMs
+          // 'back': the board took it; 'held': the board refused it, so the claim is still this delivery's; 'unknown': either may be so.
           const giveBack = async () => {
-            if (!canGiveBack) return false
-            try { await unsent(); return true } catch (error) { canGiveBack = false; onError(error); return false }
+            if (!canGiveBack) return 'held'
+            try { await unsent(); return 'back' } catch (error) {
+              onError(error)
+              if (error?.isRefused !== true) return 'unknown'
+              canGiveBack = false
+              return 'held'
+            }
           }
           one.deliveries += 1
           // isMine: this delivery is the one in the thread, so only it gives the thread back.
@@ -786,7 +794,7 @@ export const startCodexReceiver = ({
                 // thread for all it knows, and stays out of it until it can tell a person from its own subscription.
                 if (sub.mayBeSubscribed) await leave(thread)
                 else if (!sub.isInUse && await isReady(thread) && !isDone()) break
-                if (!isDone() && isShort() && await giveBack()) return undefined
+                if (!isDone() && isShort() && await giveBack() !== 'held') return undefined
                 await nextEvent()
               }
               // Joining a loaded thread subscribes this connection to its events without starting a turn. The join itself, and the

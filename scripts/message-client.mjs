@@ -46,7 +46,8 @@ export const boardClient = address => {
         body: JSON.stringify(body), signal: AbortSignal.timeout(5000),
       })
       const result = await response.json()
-      if (!response.ok) throw Object.assign(new Error(result.error || 'BOARD_UNAVAILABLE'), { isRetryable: response.status >= 500 && response.status < 600 })
+      // isRefused: the board answered that it would not do it (4xx), so nothing was changed. A 5xx may come after a save.
+      if (!response.ok) throw Object.assign(new Error(result.error || 'BOARD_UNAVAILABLE'), { isRetryable: response.status >= 500 && response.status < 600, isRefused: response.status >= 400 && response.status < 500 })
       return result
     } catch (error) {
       // Only the poller uses this hint. Sending, receipts and registration
