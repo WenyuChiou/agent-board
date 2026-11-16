@@ -1314,7 +1314,7 @@ test('the board page shows the whole file: counts, questions, folded work, steps
   // The shipped DOM's title safety is checked in page-titles.test.mjs, outside the SDK sandbox.
   expect(html).toContain('textContent')
   expect(html).not.toContain('<script>alert(1)')
-  expect(html).toContain("call('/api/board', undefined, boardAbort ? boardAbort.signal : undefined)")
+  expect(html).toContain("call('/api/board', undefined, boardAbort ? boardAbort.signal : undefined, isNow === true)")
   expect(html).toContain('timer = setTimeout(refresh, boardEtag ? 0 : 2000)')
   expect(servePage(STRINGS.en, 'synthetic')).toContain('<html lang="en">')
 })

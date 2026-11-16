@@ -42,6 +42,16 @@ const test = partTest(nodeTest)
 
 const SWEEP_ARMED_KEY = createHash('sha256').update('hand-kept-sweep-armed').digest('hex')
 
+// A pid no process can have on the systems CI runs, for a stand-in page record of a dead process
+// (#1518): above Linux's pid_max (4194304) and not a multiple of 4, so Windows cannot have it
+// either. The old 999999 can be a real Linux pid.
+const deadPid = 9999999
+
+test('the stand-in dead pid is a number no process has', () => {
+  // If it ever ran, a stand-in record would read as a live page. Signal 0 checks without sending.
+  assert.throws(() => process.kill(deadPid, 0), error => error.code === 'ESRCH')
+})
+
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
   ['codex', 'cursor', 'gemini', 'grok', 'opencode', 'hermes', 'claude'].map((agent, i) =>
@@ -6925,6 +6935,7 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off 
     return page
   }
   const addressOf = (page, pid) => JSON.stringify({ pid, port: page.port, url: page.url, path: board.path, built: 'synthetic-earlier-build' })
+  let blocker = null
   try {
     // A page started with --no-codex-send reports noCodexSend: a plain command that replaces it (here for a newer build) gives
     // the new page the same switch.
@@ -6940,8 +6951,34 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off 
     assert.equal(replacedPing.codexSend, false)
     assert.equal(replacedPing.noCodexSend, true)
     await closeAt(replaced, board.served)
-    // A page of a build before #318 and a command that opens the page twice: #1519 (taken out at #1517's round cap).
+    // `--keys "o o"` opens the page twice in one command, as `--watch` can. The first launch lets go of a page with it off;
+    // its own page cannot take the port `blocker` holds, and the page it let go of leaves the address file to a page of a
+    // build before #318, which reports no noCodexSend (deadPid: a number no process has, as for the other stand-ins of this file). The second launch replaces that one, whose closing frees the port.
+    blocker = createNetServer()
+    await new Promise(done => blocker.listen(0, '127.0.0.1', done))
+    const { port } = blocker.address()
+    const earlier = await fakePage({ codexSend: false }, () => blocker.close())
+    const offAgain = await fakePage({ codexSend: false, noCodexSend: true }, () => writeFileSync(board.served, addressOf(earlier, deadPid)))
+    addressFixture(board.served, addressOf(offAgain, process.pid))
+    const keys = await new Promise(done => execFile(process.execPath, [board.script, '--keys', 'o o', '--no-open', '--port', String(port)], { env: board.env, encoding: 'utf8', timeout: 60_000 }, (error, out, err) => done({ error, out, err })))
+    const record = JSON.parse(readFileSync(board.served, 'utf8'))
+    urls.push(record.url)
+    // The command ran both opens and ended on its own: the first open's failure on the held port makes it exit 1, and its
+    // time limit did not stop it. Its board ends with the link of the page the second open started.
+    assert.equal(keys.error?.killed ?? false, false, keys.err)
+    assert.equal(keys.error?.signal ?? null, null, keys.err)
+    assert.equal(keys.error?.code, 1, `${keys.out}${keys.err}`)
+    assert.equal(record.port, port, keys.out)
+    assert.ok(keys.out.trimEnd().endsWith(record.url), keys.out)
+    assert.equal(offAgain.closes, 1)
+    assert.equal(earlier.closes, 1)
+    // The page of the second launch has Send to Codex on: the page it replaced was of a build before #318, and the first
+    // launch's off page is not that launch's to know.
+    const secondPing = await pingOf(record.url)
+    assert.equal(secondPing.codexSend, true)
+    assert.equal(secondPing.noCodexSend, false)
   } finally {
+    blocker?.close()
     for (const fake of fakes) { fake.close(); fake.closeAllConnections() }
     await board.end(urls)
   }
@@ -8118,7 +8155,7 @@ publicationSync340()
 test("the page's address stays out of progress.md's folder, and a file left by a page that is gone does not keep the next one from starting", { timeout: 60_000 }, async () => {
   const board = serveIn()
   const port = await freePort()
-  const gone = { pid: 999999, port, url: `http://127.0.0.1:${port}/?t=gone`, path: board.path, built: '' }
+  const gone = { pid: deadPid, port, url: `http://127.0.0.1:${port}/?t=gone`, path: board.path, built: '' }
   // Where 0.19.0 kept the address, token and all, and where this copy keeps it.
   const old = join(board.dir, 'progress-serve.json')
   addressFixture(old, JSON.stringify(gone))
@@ -8435,9 +8472,9 @@ test('a newer --serve does not start a second page while the page it would repla
 })
 
 test('an address file naming a dead process, or a running one with nothing at its port, does not keep the next --serve from starting a page', { timeout: 60_000 }, async () => {
-  // 999999 is a number no process has. The test's own is one that runs, as a number a restarted
+  // deadPid is a number no process has. The test's own is one that runs, as a number a restarted
   // computer gave to another program does.
-  for (const pid of [999999, process.pid]) {
+  for (const pid of [deadPid, process.pid]) {
     const board = serveIn()
     const port = await freePort()
     const stale = `http://127.0.0.1:${port}/?t=gone`
@@ -12208,6 +12245,32 @@ test('no away line when the tab was hidden for less than 5 minutes', async () =>
   const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
   const dom = await awayAfter(base, later, 4)
   assert.equal(awayLine(dom), '')
+})
+
+// #715 reopen: the time away ends when the tab is visible again, not when the next refresh arrives.
+const awayReturnThenPoll = async (base, later, hiddenMs, pollMs) => {
+  const dom = await pageDom(await sourcePage('en'), base, { now: ONE_LINE_NOW })
+  dom.hideTab()
+  dom.setNow(ONE_LINE_NOW + hiddenMs)
+  dom.showTab()
+  dom.setNow(ONE_LINE_NOW + pollMs)
+  await dom.redraw(later)
+  await dom.settle()
+  return dom
+}
+
+test('hidden for 4:59, back, and the refresh at 5:01 shows no away line', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
+  const dom = await awayReturnThenPoll(base, later, (4 * 60 + 59) * 1000, (5 * 60 + 1) * 1000)
+  assert.equal(awayLine(dom), '')
+})
+
+test('hidden for 5:01, back, and a later refresh says away for 5 min', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
+  const dom = await awayReturnThenPoll(base, later, (5 * 60 + 1) * 1000, 7 * 60 * 1000)
+  assert.equal(awayLine(dom), 'Away for 5 min · Codex asked a question')
 })
 
 test('a refresh while the tab is still hidden keeps the away snapshot for the return', async () => {

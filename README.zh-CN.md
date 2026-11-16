@@ -49,7 +49,7 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 卡片有“排入”时可排给它；[什么时候交给它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 卡片有“排入”时可排给它；[什么时候交给它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 快速开始的第二个命令 | 你自己粘贴 |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己粘贴 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 它空下来就发出 |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己粘贴 |
 | <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | 让它执行 Agent Board skill | 你自己粘贴 |
 
@@ -61,7 +61,7 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板网页 | 暂不支持 |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页 | 卡片有“排入”时可排给它。桌面 app：实际跑过；IDE：没有单独跑过，它的 hook 把它报告成 app 的界面时，跟 app 一样处理；[什么时候交给它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板网页 | 尚未测试 |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板网页 | 尚未测试 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板网页 | 它空下来就发出。没有单独跑过；它的插件把它报告成终端，所以跟终端一样处理 |
 
 - 看板网页：在终端运行 `npx @wenyuchiou/agent-board@next --html`，app 自带的终端也行。
 - 暂不支持或尚未测试：从看板复制回复，粘贴到 app 里。
@@ -69,7 +69,7 @@ npx @wenyuchiou/agent-board@next
 
 ## 在看板上回复
 
-<img alt="看板上的回复送到 agent 的三条路：发送给 Claude Code、排到 Antigravity 或 Codex 的下一轮、或复制给 Cursor、OpenCode、Grok Build 和 Hermes。合成数据。" src="docs/images/answer-zh-CN.svg" width="100%">
+<img alt="看板上的回复送到 agent 的三条路：发送给 Claude Code 或 OpenCode、排到 Antigravity 或 Codex 的下一轮、或复制给 Cursor、Grok Build 和 Hermes。合成数据。" src="docs/images/answer-zh-CN.svg" width="100%">
 
 回复 agent 的提问，和主动给它发消息，走的是同一条路，看你点哪个按钮：
 

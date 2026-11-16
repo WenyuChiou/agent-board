@@ -67,9 +67,10 @@ Keys are English camelCase; values use the board's selected language. Every stri
 | `total` | Total step count from the page model. |
 | `updatedAt` | Source timestamp as an ISO 8601 UTC string, or `null` when unknown. |
 | `age` | The page's relative age wording, including its future-clock warning when present. |
-| `isUnsure` | True when the page has no age, uses its unknown-time label or the source view marks a future clock. |
+| `state` | The row's one derived state, one of `working`, `waiting`, `approval`, `answer`, `stopped`, `toCheck`, `ended`, `cannotTell`, `unsure`, `youStopped` (reserved, not produced yet), `waitingElsewhere` or `manual`; omitted when the view did not derive one. See below for `unsure`. |
+| `isUnsure` | True when the page has no age, uses its unknown-time label, the source view marks a future clock, or `state` is `unsure`. |
 
-The current page has no separate old-time uncertainty marker: known old timestamps keep their relative age and `isUnsure: false`. Missing age uses the same `pgUnknownAge` fallback as the page. Future-clock uncertainty uses `hasFutureTime` from `view.ts`; no additional age cutoff is introduced.
+`state` is `unsure` when every step of the row is the hook's lifecycle placeholder (or it has no step), its last event is more than 30 minutes old (`WORKING_MS`, `hooks/grouping.ts`) and the session has no recorded live process (no process claim at all). An open ask or approval is read first, so such a row reads `answer` or `approval`. A live process keeps the row `working` or `waiting`, and a session end, a dead process or a row quiet past the stale timeout (`--stale-ms`, 12 h by default) reads `ended` instead. A row quiet past 30 minutes that has any real step is not `unsure`, and a known old timestamp otherwise keeps its relative age and `isUnsure: false`. `cannotTell` is the same placeholder row with no usable age; its `isUnsure` follows the unknown-age rule above. Missing age uses the same `pgUnknownAge` fallback as the page. Future-clock uncertainty uses `hasFutureTime` from `view.ts`.
 
 ## Done recently rows
 

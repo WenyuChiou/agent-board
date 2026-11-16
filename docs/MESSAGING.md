@@ -536,9 +536,9 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | OpenClaw | Desktop Control UI | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | OpenClaw | Gateway | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | OpenClaw | WebChat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| OpenCode | CLI TUI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · no live note | stepEnd · no live note | none · no live note |
-| OpenCode | Desktop App | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · no live note | stepEnd · no live note | none · no live note |
-| OpenCode | Web UI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · no live note | stepEnd · no live note | none · no live note |
+| OpenCode | CLI TUI | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-16-opencode-send-live.md](../docs/validation/2026-11-16-opencode-send-live.md) | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · [docs/validation/2026-11-16-opencode-send-live.md](../docs/validation/2026-11-16-opencode-send-live.md) | stepEnd · [docs/validation/2026-11-16-opencode-send-live.md](../docs/validation/2026-11-16-opencode-send-live.md) | none · no live note |
+| OpenCode | Desktop App | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · [docs/validation/2026-11-16-opencode-send-live.md](../docs/validation/2026-11-16-opencode-send-live.md) | stepEnd · [docs/validation/2026-11-16-opencode-send-live.md](../docs/validation/2026-11-16-opencode-send-live.md) | none · no live note |
+| OpenCode | Web UI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receivers/opencode.ts](../hooks/receivers/opencode.ts) | now · [docs/validation/2026-11-16-opencode-send-live.md](../docs/validation/2026-11-16-opencode-send-live.md) | stepEnd · [docs/validation/2026-11-16-opencode-send-live.md](../docs/validation/2026-11-16-opencode-send-live.md) | none · no live note |
 
 <!-- messaging-matrix:end -->
 
@@ -554,7 +554,7 @@ This table is written by hand and covers progress reporting too. Its runs have n
 | Antigravity CLI | Independent named hooks; all four native Windows events observed after the command-quoting fix | Same cross-host owner acceptance; native stream ACK, idle continuation, deduplication, conflict and offline rejection verified |
 | Antigravity App / IDE | Same global hook path; each host must load and execute it, with no arbitrary session discovery | No existing-editor receiver established in these runs. The desktop app's later next-turn mailbox runs have their own record, in the matrix above |
 | Gemini CLI (retired) | No longer offered by setup; Google's CLI is Antigravity CLI. An install from an earlier release still reports | The board no longer routes messages to it; its card offers Copy |
-| OpenCode | Independent setup, session-context progress tool and plugin events | Generic client API only; no native receiving adapter or real bidirectional acceptance yet |
+| OpenCode | Independent setup, session-context progress tool and plugin events | Its plugin receives in the session (#724). The later terminal run of a board send has its own record, in the matrix above |
 | OpenClaw | Independent metadata lifecycle plugin and native skill; separate optional Claude reporter | Its native session tools are not yet integrated into this hub; no real bidirectional acceptance |
 | Grok Build | Existing reporter hooks; optional legacy resume requires `--allow-resume` | No live receiving adapter acceptance |
 | DeepSeek Harness | Independent Cordis lifecycle plugin and native skill | Generic client contract checked; no DeepSeek-native receiver or model ACK acceptance |

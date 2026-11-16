@@ -153,7 +153,8 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/legacy-connect.test.mjs': 275_000, // slowest 148.0 s
   'tests/page-regressions.test.mjs': 90_000,
   'tests/codex-fallback.test.mjs': 115_000, // slowest 60.0 s
-  'tests/prompt-hooks.test.mjs': 90_000, // slowest 46.2 s
+  // Re-derived by the same rule (#1603): 49.3-67.9 s on Windows Node 24 on code that does not touch it; 67.9 s in run 43899299170.
+  'tests/prompt-hooks.test.mjs': 130_000, // slowest 67.9 s
   // Grew past the floor with #1162's terminal setup tests (#1159); slowest 52.6 s after #1361.
   'tests/setup-guidance.test.mjs': 100_000,
   'tests/host-upgrade.test.mjs': 80_000, // slowest 42.6 s

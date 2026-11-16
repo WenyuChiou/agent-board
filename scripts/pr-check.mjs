@@ -1023,15 +1023,16 @@ export const evidenceFirst = ({ body = '', title = '', number = null, firstCommi
 
 // Every pull request names its tier on a `Tier:` line, and one that changes a path docs/dev/risk-paths.md lists is risk
 // tier (RULES R2; #1531). Both apply to pull requests numbered above TIER_FROM, the issue they came in with, other than a
-// release, which is risk tier whatever it says. A local --body-file run, which often checks a draft body, and a small
-// docs fix from outside the team get a note for a missing line instead of a failure.
+// release, which is risk tier whatever it says. A local --body-file run, which often checks a draft body, gets a note for
+// a missing line instead of a failure. A small docs fix from outside the team is spared the issue and claim lines only,
+// not the tier, which decides who may approve (#1577).
 export const TIER_FROM = 1531
 // The paths risk-paths.md lists: one per bullet, in backticks; a path ending in `/` is a folder. The large shared files
 // the page names in its prose are not on the list, and stay the reviewer's call (R2).
 export const riskPathsOf = text => linesOf(text ?? '').flatMap(line => line.trimEnd().match(/^[ \t]*[-*][ \t]+`([^`\s]+)`$/)?.[1] ?? [])
 const isRiskPath = (path, riskPaths) => riskPaths.some(listed => listed.endsWith('/') ? path.startsWith(listed) : path === listed)
 // riskPaths: the list read at the base, null when it could not be read there, undefined when not given.
-export const tier = ({ body = '', title = '', number = null, paths = [], riskPaths, isOptional = false } = {}) => {
+export const tier = ({ body = '', title = '', number = null, paths = [], riskPaths } = {}) => {
   const output = result()
   if (isReleaseTitle(title) || (number !== null && number <= TIER_FROM)) return output
   const fail = (message, fix) => output.problems.push(problem('tier', message, fix))
@@ -1045,7 +1046,7 @@ export const tier = ({ body = '', title = '', number = null, paths = [], riskPat
   const value = found[0] ?? ''
   if (value.trim() === '' || value.startsWith('<')) {
     const message = !found.length ? 'the body has no `Tier:` line.' : value.trim() === '' ? 'the `Tier:` line names no tier.' : 'the `Tier:` line is still the template\'s placeholder.'
-    if (number === null || isOptional) output.info.push(`tier: ${message} The PR check fails a pull request without one (docs/dev/RULES.md, R2).`)
+    if (number === null) output.info.push(`tier: ${message} The PR check fails a pull request without one (docs/dev/RULES.md, R2).`)
     else fail(message, how)
     return output
   }
@@ -1355,7 +1356,7 @@ export const checkPr = data => {
   add(privateData({ added: data.added, body: data.body }))
   add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
-  add(tier({ body: data.body, title: data.title, number: data.number, paths: data.paths, riskPaths: data.riskPaths, isOptional: isSmallDocs }))
+  add(tier({ body: data.body, title: data.title, number: data.number, paths: data.paths, riskPaths: data.riskPaths }))
   add(surface({ body: data.body, title: data.title, number: data.number, paths: data.paths, numstat: data.numstat }))
   add(evidenceFirst({ body: data.body, title: data.title, number: data.number, firstCommitPaths: data.firstCommitPaths }))
   add(size({ body: data.body, title: data.title, number: data.number, numstat: data.numstat }))

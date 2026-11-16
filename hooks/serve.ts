@@ -1658,13 +1658,13 @@ const PAGE_SCRIPT = String.raw`
   // Names this page to the board, so it can tell one open page from another (#265).
   function newPageId() { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } }
   var pageId = newPageId();
-  function call(path, body, signal) {
+  function call(path, body, signal, isNow) {
     if (isUnreachable && body !== undefined) return Promise.reject();
     var requestPage = pageId;
     var headers = { 'x-board-token': token, 'x-board-page': requestPage, 'x-board-visible': document.hidden ? '0' : '1' };
     if (approveSecret) headers['x-board-approve'] = approveSecret;
     // A page that holds the board asks the server to answer when it changes, instead of at once (#359).
-    if (path === '/api/board' && body === undefined && boardEtag) { headers['if-none-match'] = boardEtag; headers['x-board-wait'] = '1'; }
+    if (path === '/api/board' && body === undefined && boardEtag) { headers['if-none-match'] = boardEtag; if (!isNow) headers['x-board-wait'] = '1'; }
     if (body !== undefined) headers['content-type'] = 'application/json';
     var init = { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' };
     if (signal) init.signal = signal;
@@ -2815,8 +2815,10 @@ const PAGE_SCRIPT = String.raw`
     if (document.hidden) return;
     var snap = awaySnap;
     awaySnap = null;
-    if (Date.now() - snap.at < AWAY_MS) { clearAwayLine(); return; }
-    var minutes = Math.floor((Date.now() - snap.at) / 60000);
+    // The time away ends when the tab became visible again; the refresh only triggers the line (#715).
+    var awayMs = (snap.back || Date.now()) - snap.at;
+    if (awayMs < AWAY_MS) { clearAwayLine(); return; }
+    var minutes = Math.floor(awayMs / 60000);
     var diff = awayDiff(snap);
     var hasChange = !!diff && (Object.keys(diff.questions).length > 0 || diff.finished > 0 || (Object.keys(diff.bad).length > 0 && diff.badChanged));
     if (!hasChange) { clearAwayLine(); return; }
@@ -3583,7 +3585,8 @@ const PAGE_SCRIPT = String.raw`
       lostResults.push(card);
     });
   }
-  function refresh() {
+  // isNow: the answer is wanted at once (a tab coming back), not when the board next changes.
+  function refresh(isNow) {
     if (isClosed) return;
     clearTimeout(timer);
     var pollPage = pageId;
@@ -3592,7 +3595,7 @@ const PAGE_SCRIPT = String.raw`
     var ask = ++boardAsk;
     if (boardAbort) boardAbort.abort();
     boardAbort = typeof AbortController === 'function' ? new AbortController() : null;
-    call('/api/board', undefined, boardAbort ? boardAbort.signal : undefined).then(function (data) {
+    call('/api/board', undefined, boardAbort ? boardAbort.signal : undefined, isNow === true).then(function (data) {
       if (isClosed || pollPage !== pageId || ask !== boardAsk) return;
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) { showMoved(); return; }
@@ -3743,7 +3746,12 @@ const PAGE_SCRIPT = String.raw`
   if (typeof document.addEventListener === 'function') document.addEventListener('visibilitychange', function () {
     // The open request told the board whether this tab was in sight; a new one tells it now, and a tab coming back
     // gets its away line at once instead of when the board next changes (#359).
-    if (!document.hidden) { refresh(); return; }
+    if (!document.hidden) {
+      if (awaySnap && !awaySnap.back) awaySnap.back = Date.now();
+      // Answered at once, not held, so the away line comes with it as before.
+      refresh(true);
+      return;
+    }
     clearAwayLine();
     var snap = awaySnapshot();
     if (snap) awaySnap = snap;
@@ -3855,6 +3863,6 @@ const PAGE_SCRIPT = String.raw`
       approveSecret = data.secret;
     }, function () {});
   }
-  pairApprovals().then(refresh);
+  pairApprovals().then(function () { refresh(); });
 })();
 `

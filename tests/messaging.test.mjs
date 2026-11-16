@@ -7457,6 +7457,23 @@ test('shape 27: a Codex live connection takes the mailbox\'s place only on its r
   assert.equal((await w.call('/api/messages/disconnect', { connection: daemon.id, secret: daemon.secret, turn: 'session' })).status, 200)
   assert.deepEqual(busy, await w.card())
 })
+test('shape 28: an OpenCode mailbox card sends from the board on its idle and working routes, with the shipped table (#1591)', async () => {
+  const w = await shapeCase({ agent: 'opencode', kind: 'mailbox', surface: SURFACE_IDS.cli })
+  shapeRoutes.splice(0, shapeRoutes.length, ...RECEIVER_ROUTES)
+  // Idle: the plugin wakes the session at once, so the card sends now, from the card and through the API.
+  const idle = await w.card()
+  assert.deepEqual([idle.delivery?.id, idle.line, idle.canSend], [w.target.id, 'now', true])
+  await shapeSend(w, 'now')
+  // The card's own message is still open, and the board holds one open message per sender and session (PAIR_BUSY).
+  assert.equal((await w.remove(`shape-card-${shapeSerial}`)).status, 200)
+  // Working: the plugin holds the message until the session's step ends; the card still sends.
+  shapeFile = stateFile('opencode', 'working', w.session)
+  const busy = await w.card()
+  assert.deepEqual([busy.delivery?.id, busy.line, busy.canSend], [w.target.id, 'stepEnd', true])
+  const queued = await w.direct('shape-opencode-working')
+  assert.deepEqual([queued.status, queued.body.line], [200, 'stepEnd'])
+  assert.equal((await w.remove('shape-opencode-working')).status, 200)
+})
 test('a live route whose only note for its surface is in surfaceRecords takes the place of the mailbox, on the card and in the API (#318)', async () => {
   const w = await shapeCase({ agent: 'codex', kind: 'mailbox', surface: SURFACE_IDS.cli })
   const note = line => ({ line, record: shapeNote, surfaces: [SURFACE_IDS.cli] }), none = { line: 'none', record: null, surfaces: [] }
