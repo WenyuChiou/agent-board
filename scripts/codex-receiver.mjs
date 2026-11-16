@@ -222,7 +222,7 @@ export const startCodexReceiver = ({
   if (typeof threads !== 'function' || !isAbsolute(executable ?? '')) throw new Error('EXPLICIT_EXECUTABLE_REQUIRED')
   const client = boardClient(boardUrl)
   const attached = new Map()
-  let daemon = null, isTicking = false, isClosed = false, failures = 0, retryAt = 0
+  let daemon = null, isTicking = false, isClosed = false, closing = null, failures = 0, retryAt = 0
   // The newest list of loaded threads, with the time its request was sent: a thread it shows was still loaded after that time.
   let listing = { set: new Set(), sentAt: 0 }, canTell = false
   // What this receiver's connection to the daemon has in each thread, kept apart from the board connection for it (`attached`),
@@ -376,6 +376,7 @@ export const startCodexReceiver = ({
     })()
     return sub.leaving
   }
+  const isWaitingOnApproval = sub => sub !== undefined && sub.watch !== null && (sub.watch.timer !== null || sub.watch.isOverdue)
   // An approval that is no longer waited on takes its passed limit with it: the next wait is timed anew.
   const stopWaiting = sub => {
     if (sub.watch === null) return
@@ -389,20 +390,24 @@ export const startCodexReceiver = ({
   // and the next connection asks again.
   const retryInterrupt = thread => {
     const sub = subs.get(thread), asked = sub?.interrupt ?? null
-    if (asked === null || asked.isAsking) return
+    if (asked === null) return Promise.resolve()
+    if (asked.isAsking) return asked.inFlight ?? Promise.resolve()
     asked.tries += 1
     asked.isAsking = true
-    void ask('turn/interrupt', { threadId: thread, turnId: asked.turn }).then(() => {
+    asked.inFlight = ask('turn/interrupt', { threadId: thread, turnId: asked.turn }).then(async () => {
       if (sub.interrupt === asked) sub.interrupt = null
       if (sub.watch !== null && sub.watch === asked.watch) endWatch(sub)
-    }, error => {
+      await leave(thread)
+    }, async error => {
       asked.isAsking = false
       if (error?.message === 'OWNER_DISCONNECTED') { asked.tries -= 1; return }
       if (sub.interrupt !== asked || asked.tries < INTERRUPT_TRIES) return
       sub.interrupt = null
       if (sub.watch !== null && sub.watch === asked.watch) endWatch(sub)
       onError(new Error('INTERRUPT_FAILED'))
-    })
+      await leave(thread)
+    }).finally(() => { asked.inFlight = null })
+    return asked.inFlight
   }
   // The board is told once what became of a message whose turn this receiver stopped: `uncertain`, with the reason. The delivery
   // sends no receipt of its own for it (it ends without one when the wait runs out, and it ended without one if its board or
@@ -413,14 +418,16 @@ export const startCodexReceiver = ({
   // message ends here, and so does one the board's own limit on an unanswered message has overtaken.
   const report = thread => {
     const sub = subs.get(thread), owed = sub?.owed ?? null, receiver = attached.get(thread)?.receiver
-    if (owed === null || owed.isAsking) return
-    if (Date.now() - owed.at >= ackMs) { sub.owed = null; return }
-    if (!receiver || receiver.isClosed() || receiver.isContested()) return
+    if (owed === null) return Promise.resolve()
+    if (owed.isAsking) return owed.inFlight ?? Promise.resolve()
+    if (Date.now() - owed.at >= ackMs) { sub.owed = null; return Promise.resolve() }
+    if (!receiver || receiver.isClosed() || receiver.isContested()) return Promise.resolve()
     owed.isAsking = true
-    receiver.receipt(owed.message, 'uncertain', undefined, owed.error).then(() => { if (sub.owed === owed) sub.owed = null }, error => {
+    owed.inFlight = receiver.receipt(owed.message, 'uncertain', undefined, owed.error).then(() => { if (sub.owed === owed) sub.owed = null }, error => {
       owed.isAsking = false
       if (sub.owed === owed && SETTLED.has(error?.message)) sub.owed = null
-    })
+    }).finally(() => { owed.inFlight = null })
+    return owed.inFlight
   }
   // Which turn a watch is for, when no answer to turn/start said: the thread's newest turn, asked for with its first user message
   // (`thread/turns/list` gives the newest turn first, and its summary of a turn carries that message). A turn that began with this
@@ -446,6 +453,36 @@ export const startCodexReceiver = ({
   // settles as uncertain: it was delivered, and what became of it is not known. The timer belongs to the turn, not to the
   // delivery or its board connection. A limit that passed while no turn was named and no connection was there to ask on is not
   // timed again: the turn is stopped as soon as a later connection has named it, also when a new wait was begun before it did.
+  const stopApprovalWatch = async (thread, sub, watch, waitForReport = false) => {
+    stopWaiting(sub)
+    // The message settles first: the interrupt makes the turn end as interrupted, which would otherwise be what the card reads.
+    // A delivery that already told the board how it ended (an unanswered start, say) has left no message here.
+    if (watch.message !== null) {
+      sub.owed = { message: watch.message, error: 'APPROVAL_TIMEOUT', at: Date.now(), isAsking: false, inFlight: null }
+      watch.message = null
+      onError(new Error('APPROVAL_TIMEOUT'))
+    }
+    watch.finish?.()
+    const reporting = report(thread)
+    if (waitForReport) await reporting
+    // The receiver stays in the thread until the interrupt is done, so it hears whether the turn is still running.
+    if (watch.turn === null && daemon !== null && daemon.isOpen()) await nameTurn(thread, watch)
+    if (sub.watch !== watch) return
+    if (sub.interrupt === null) {
+      // Only a turn shown to be the delivery's is asked to stop: the start's answer named it, or its first user message was the
+      // delivery's, heard or read (`nameTurn`). One whose start was heard and no more may be a person's.
+      const turn = watch.turn
+      // No turn can be named: there is nothing to ask the daemon to stop. With no connection to ask on, the watch waits for
+      // the next one, overdue: a turn that one names as the delivery's is stopped then, and one it cannot name is timed again.
+      if (turn === null) {
+        if (daemon === null || !daemon.isOpen()) { watch.isOverdue = true; return }
+        endWatch(sub); onError(new Error('INTERRUPT_FAILED'))
+        return
+      }
+      sub.interrupt = { turn, tries: 0, isAsking: false, inFlight: null, watch }
+    }
+    await retryInterrupt(thread)
+  }
   const waitOnApproval = thread => {
     const sub = subs.get(thread), watch = sub?.watch ?? null
     if (watch === null) return
@@ -457,34 +494,7 @@ export const startCodexReceiver = ({
     watch.timer = setTimeout(() => {
       watch.timer = null
       if (sub.watch !== watch) return
-      watch.isOverdue = false
-      // The message settles first: the interrupt makes the turn end as interrupted, which would otherwise be what the card reads.
-      // A delivery that already told the board how it ended (an unanswered start, say) has left no message here.
-      if (watch.message !== null) {
-        sub.owed = { message: watch.message, error: 'APPROVAL_TIMEOUT', at: Date.now(), isAsking: false }
-        watch.message = null
-        onError(new Error('APPROVAL_TIMEOUT'))
-      }
-      watch.finish?.()
-      report(thread)
-      // The receiver stays in the thread until the interrupt is done, so it hears whether the turn is still running.
-      const interrupt = () => {
-        if (sub.watch !== watch || sub.interrupt !== null) return
-        // Only a turn shown to be the delivery's is asked to stop: the start's answer named it, or its first user message was the
-        // delivery's, heard or read (`nameTurn`). One whose start was heard and no more may be a person's.
-        const turn = watch.turn
-        // No turn can be named: there is nothing to ask the daemon to stop. With no connection to ask on, the watch waits for
-        // the next one, overdue: a turn that one names as the delivery's is stopped then, and one it cannot name is timed again.
-        if (turn === null) {
-          if (daemon === null || !daemon.isOpen()) { watch.isOverdue = true; return }
-          endWatch(sub); onError(new Error('INTERRUPT_FAILED'))
-          return
-        }
-        sub.interrupt = { turn, tries: 0, isAsking: false, watch }
-        retryInterrupt(thread)
-      }
-      if (watch.turn !== null) interrupt()
-      else void nameTurn(thread, watch).then(interrupt)
+      void stopApprovalWatch(thread, sub, watch, false)
     }, isDue ? 0 : approvalMs)
     watch.timer.unref?.()
   }
@@ -876,13 +886,30 @@ export const startCodexReceiver = ({
   return {
     // The Codex session ids this receiver is attached to now.
     attached: () => [...attached.keys()],
+    // Active Codex deliveries (held claims, turn/start, or running turns) that are not waiting on an approval.
+    sending: () => [...attached].filter(([thread, one]) =>
+      (one.deliveries > 0 || one.receiver?.isSending?.() === true || subs.get(thread)?.isInUse === true)
+      && !isWaitingOnApproval(subs.get(thread))).length,
     // Sync, for a process that is exiting: the Codex program is ended, so the daemon drops this connection.
     kill: () => { isClosed = true; clearInterval(timer); daemon?.kill() },
-    close: async () => {
+    close: () => closing ??= (async () => {
       isClosed = true
       clearInterval(timer)
+      for (const one of attached.values()) one.wake()
+      await Promise.all([...subs.entries()].map(async ([thread, sub]) => {
+        if (sub.watch !== null && !isWaitingOnApproval(sub) && !sub.mayBeSubscribed && daemon !== null && daemon.isOpen()) {
+          await checkTurn(thread, true)
+        }
+        if (isWaitingOnApproval(sub)) await stopApprovalWatch(thread, sub, sub.watch, true)
+        else {
+          if (sub.owed !== null) await report(thread)
+          if (sub.interrupt !== null) await retryInterrupt(thread)
+        }
+        if (sub.leaving !== null) await sub.leaving
+        else if (sub.mayBeSubscribed) await leave(thread)
+      }))
       for (const thread of [...attached.keys()]) await drop(thread)
       if (daemon !== null) { const old = daemon; daemon = null; await old.close() }
-    },
+    })(),
   }
 }

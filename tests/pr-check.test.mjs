@@ -9,7 +9,8 @@ import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, CASES_FROM, cases, changelog, checkIssue, checkPr,
   duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
   main, naming, needsBundle, outsideClaim, privateData, report, reportMarkdown, reviewOf, rulesPage, sections,
-  ROUND_CAP, rounds, stripComments, SURFACE_FROM, surface, testTitles, tierOf, titleKnown, verdict,
+  riskPathsOf, ROUND_CAP, rounds, stripComments, SURFACE_FROM, surface, testTitles, tier, TIER_FROM, tierOf, titleKnown,
+  verdict, FAIL_FIRST_FROM, caseRows,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -1765,6 +1766,81 @@ test('a reused branch name does not hide the earlier pull request, a CRLF or ind
 })
 
 const riskBody = line => `Fixes #1\nAuthor: codex, fix/x\nTier: risk\n${line === undefined ? '' : `${line}\n`}`
+
+test('pr-check wants one Tier line, and the risk tier for a change to a path risk-paths.md lists (#1531)', () => {
+  const listed = riskPathsOf('# Risk-tier paths\r\n\r\nThe large shared file `hooks/serve.ts` is not listed.\r\n\r\n- `hooks/connect.ts`\r\n* `.claude-plugin/`\r\n- `SECURITY.md` and more\r\n')
+  assert.deepEqual(listed, ['hooks/connect.ts', '.claude-plugin/'])
+  const run = (lines, extra = {}) => tier({ body: `Fixes #1\nAuthor: codex, fix/x\n${lines}\n`, title: 'fix(x): y', number: TIER_FROM + 1, paths: ['hooks/a.ts'], riskPaths: listed, ...extra })
+  const only = (checked, pattern) => {
+    assert.deepEqual(checked.problems.map(item => item.check), ['tier'])
+    assert.match(checked.problems[0].message, pattern)
+  }
+  only(run(''), /no `Tier:` line/)
+  only(run('<!--\nTier: normal\n-->'), /no `Tier:` line/)
+  only(run('Tier: <risk, normal or light: the highest any change reaches>'), /template's placeholder/)
+  only(run('Tier: normal\nTier: risk'), /2 `Tier:` lines/)
+  // An empty line or the placeholder counts as a line too, so a second one cannot hide behind it.
+  only(run('Tier:\nTier: normal'), /2 `Tier:` lines/)
+  only(run('Tier: <risk, normal or light: the highest any change reaches>\nTier: light'), /2 `Tier:` lines/)
+  only(run('Tier:'), /`Tier:` line names no tier/)
+  // A line with a lone \r or a Unicode line separator in it still counts, and still reads as its tier.
+  only(run('Tier: risk note\nTier: normal'), /2 `Tier:` lines/)
+  only(run('Tier: risk\rnote\nTier: normal'), /2 `Tier:` lines/)
+  assert.deepEqual(run('Tier: risk note', { paths: ['hooks/connect.ts'] }).problems, [])
+  assert.deepEqual(surface({ body: 'Fixes #1\nTier: risk note\n', number: TIER_FROM + 1 }).problems.map(item => item.check), ['surface'])
+  only(run('Tier: medium'), /"medium", which is not a tier/)
+  // The value is read as the surface, cases and round checks read it: two backticks are not a tier they see.
+  only(run('Tier: ``risk``'), /"``risk``", which is not a tier/)
+  const doubled = checkPr({ ...syntheticPr(), number: TIER_FROM + 1, body: `${body}Tier: \`\`risk\`\`\n` })
+  assert.ok(doubled.problems.some(item => item.check === 'tier' && /which is not a tier/.test(item.message)))
+  assert.deepEqual(run('Tier: `normal`').problems, [])
+  assert.deepEqual(run('Tier: light').problems, [])
+  // A listed file, a file under a listed folder; the risk tier on either passes.
+  only(run('Tier: normal', { paths: ['hooks/a.ts', 'hooks/connect.ts'] }), /`Tier: normal`, but the pull request changes `hooks\/connect\.ts`, which docs\/dev\/risk-paths\.md lists/)
+  only(run('Tier: light', { paths: ['.claude-plugin/plugin.json'] }), /`Tier: light`, but the pull request changes `\.claude-plugin\/plugin\.json`/)
+  assert.match(run('Tier: normal', { paths: ['hooks/connect.ts', '.claude-plugin/a', '.claude-plugin/b', '.claude-plugin/c'] }).problems[0].message, /and 1 more/)
+  assert.deepEqual(run('Tier: risk', { paths: ['hooks/connect.ts'] }).problems, [])
+  // Unread at the base: a note, never a pass in silence; not given (a caller with no list): nothing.
+  assert.deepEqual(run('Tier: normal', { paths: ['hooks/connect.ts'], riskPaths: null }).problems, [])
+  assert.match(run('Tier: normal', { paths: ['hooks/connect.ts'], riskPaths: null }).info.join('\n'), /could not be read at the base/)
+  assert.match(run('Tier: risk', { paths: ['hooks/connect.ts'], riskPaths: null }).info.join('\n'), /could not be read at the base/)
+  assert.deepEqual(run('Tier: normal', { paths: ['hooks/connect.ts'], riskPaths: undefined }), { problems: [], info: [] })
+  // A release, and a pull request from before the rule, are not checked.
+  assert.deepEqual(run('', { title: 'chore(release): 1.2.3' }).problems, [])
+  assert.deepEqual(run('Tier: light', { number: TIER_FROM, paths: ['hooks/connect.ts'] }).problems, [])
+  // A local run and an outside small docs fix get a note for a missing line; a wrong tier still fails locally.
+  for (const extra of [{ number: null }, { isOptional: true }]) {
+    const noted = run('', extra)
+    assert.deepEqual(noted.problems, [])
+    assert.match(noted.info.join('\n'), /tier: the body has no `Tier:` line\. The PR check fails a pull request without one/)
+  }
+  only(run('Tier: normal', { number: null, paths: ['hooks/connect.ts'] }), /`Tier: normal`, but/)
+})
+
+test('pr-check reads risk-paths.md as the base lists it and counts a moved file by its old path too (#1531)', async t => {
+  const setup = fixture(t)
+  const commit = message => {
+    setup.git('add', '-A')
+    setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', message)
+    return setup.git('rev-parse', 'HEAD')
+  }
+  setup.git('switch', '-q', 'main')
+  setup.put('docs/dev/risk-paths.md', '# Risk-tier paths\n\n- `hooks/listed.ts`\n')
+  setup.put('hooks/listed.ts', 'export const listed = true\n')
+  const base = commit('test: synthetic risk list')
+  setup.git('switch', '-q', '-c', 'fix/synthetic-tier')
+  // The branch moves the listed file and takes it off its own copy of the list.
+  setup.git('mv', 'hooks/listed.ts', 'hooks/moved.ts')
+  setup.put('docs/dev/risk-paths.md', '# Risk-tier paths\n\n- `hooks/other.ts`\n')
+  commit('fix: synthetic move')
+  const runWith = async line => {
+    setup.put('body.txt', `Fixes #42\nAuthor: Codex (local), branch \`fix/synthetic-tier\`\n${line}\n\n## What and why\nChecks a synthetic change.\n\n## Checks\n- [x] Run the tests - passed\n`)
+    return runMain(['--body-file', join(setup.directory, 'body.txt'), '--title', 'fix: synthetic check', '--base', base, '--repo-dir', setup.directory, '--offline', '--no-bundle'])
+  }
+  const normal = await runWith('Tier: normal')
+  assert.match(normal.stdout, /FAIL tier: `Tier: normal`, but the pull request changes `hooks\/listed\.ts`, which docs\/dev\/risk-paths\.md lists/, normal.stdout)
+  assert.doesNotMatch((await runWith('Tier: risk\nSurface: data')).stdout, /FAIL tier/)
+})
 const surfaceRun = (line, extra = {}) => surface({ body: riskBody(line), title: 'fix(x): y', number: SURFACE_FROM + 1, ...extra })
 
 test('pr-check fails a risk pull request with no Surface line, an unknown value, or two values without cannot split', () => {
@@ -2152,4 +2228,94 @@ test('pr-check lets a risk-tier pull request at five rounds take one more round 
   assert.equal(roundsRun(roundHeads(5), 'Round cap: <one more round, words only>').problems.length, 1)
   assert.equal(roundsRun(roundHeads(5), `<!--\n${words}\n-->`).problems.length, 1)
   assert.match(roundsRun(roundHeads(5)).problems[0].fix, /one more round, words only/)
+})
+
+const firstHead = 'abcdef1234567890abcdef1234567890abcdef12'
+const firstTitles = testTitles([{ path: 'tests/x.test.mjs', text: "test('receiver keeps the turn', () => {})\ntest(`a ${name} receiver keeps it`, () => {})\n" }])
+const firstRun = (text = '', extra = {}) => {
+  const rows = extra.rows ?? [caseRow('`receiver keeps the turn`')]
+  const body = `Fixes #1\nAuthor: codex, fix/x\nTier: risk\nSurface: delivery\nCases: ${rows.length} rows\n\n${caseTableText(...rows)}\n## Checks\n\n${text}\n`
+  return cases({ body, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false, ...extra })
+}
+const firstLine = 'Fail-first: 1 of 1 new or changed tests fail on 1111111a and pass on abcdef12.'
+
+test('pr-check wants each case row to name, in backticks, a test that is in tests/ at the head (#1520)', () => {
+  assert.deepEqual(firstRun(firstLine).problems, [])
+  // Code in backticks beside a title is fine; a template title is named with <name>.
+  assert.deepEqual(firstRun(firstLine, { rows: [caseRow('`--no-codex-send`, then `receiver keeps the turn`'), caseRow('`a <name> receiver keeps it`')] }).problems, [])
+  for (const cell of ['receiver keeps the turn', '`a receiver that is not written`', '`--no-codex-send`']) {
+    const checked = firstRun(firstLine, { rows: [caseRow('`receiver keeps the turn`'), caseRow(cell)] })
+    assert.equal(checked.problems.length, 1, cell)
+    assert.equal(checked.problems[0].check, 'cases')
+    assert.match(checked.problems[0].message, /row 2 of the case table names no test of tests\/ in backticks/, cell)
+    assert.match(checked.problems[0].fix, /exact title in backticks/)
+  }
+  // On a draft the table comes before the code, so a test not written yet is a note.
+  const draft = firstRun('', { rows: [caseRow('`a receiver that is not written`')], isDraft: true })
+  assert.deepEqual(draft.problems, [])
+  assert.ok(draft.info.some(line => /row 1 .*no test of tests\/ yet/.test(line)), draft.info.join('\n'))
+  // Pull requests up to FAIL_FIRST_FROM keep the rules they opened with.
+  assert.deepEqual(firstRun('', { rows: [caseRow('not a title')], number: FAIL_FIRST_FROM }).problems, [])
+  assert.deepEqual(caseRows(caseTableText(caseRow('`receiver keeps the turn`'))).map(cells => cells[3]), ['`receiver keeps the turn`'])
+  assert.deepEqual(caseRows('no table here'), [])
+})
+
+test('pr-check wants a Fail-first line for the current head on a Ready risk-tier pull request with a case table (#1520)', () => {
+  const only = (text, extra) => firstRun(text, extra).problems.map(item => item.message).join('\n')
+  assert.deepEqual(firstRun(firstLine).problems, [])
+  // Preflight's own output line, pasted as it is or as a list item, is read too.
+  assert.deepEqual(firstRun(`PASS ${firstLine}`).problems, [])
+  assert.deepEqual(firstRun(`- ${firstLine}`).problems, [])
+  assert.deepEqual(firstRun('Fail-first: none, the change is a sentence only a person can judge').problems, [])
+  assert.match(only(''), /has no `Fail-first:` line/)
+  assert.match(firstRun('').problems[0].fix, /node scripts\/preflight\.mjs --body-file/)
+  assert.match(only(firstLine.replace('abcdef12', '22222222')), /`Fail-first:` line is for 22222222, not the head abcdef12/)
+  assert.match(only(firstLine.replace('1 of 1', '1 of 2')), /says 1 of 2/)
+  assert.match(only(firstLine.replace('1 of 1', '0 of 0')), /counts no new or changed test/)
+  assert.match(only('Fail-first: none'), /says `none` with no reason/)
+  assert.match(only('Fail-first: <the line preflight prints, or none, <reason>>'), /placeholder is still there/)
+  assert.match(only('Fail-first: the tests fail first'), /neither/)
+  assert.match(only(`${firstLine}\n${firstLine}`), /2 `Fail-first:` lines/)
+  // An example in a fence or a comment is not the line.
+  assert.match(only(`\`\`\`\n${firstLine}\n\`\`\``), /has no `Fail-first:` line/)
+  assert.match(only(`<!--\n${firstLine}\n-->`), /has no `Fail-first:` line/)
+  // A draft, a pull request up to FAIL_FIRST_FROM, and a table-less risk pull request need no line.
+  assert.deepEqual(firstRun('', { isDraft: true }).problems, [])
+  assert.deepEqual(firstRun('', { number: FAIL_FIRST_FROM }).problems, [])
+  assert.deepEqual(cases({ body: 'Fixes #1\nTier: risk\nSurface: delivery\nCases: none, one event in one state\n', title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems, [])
+  // On another surface a case table is not required, but one the body has is held to the same tests.
+  const wording = `Fixes #1\nTier: risk\nSurface: wording\n\n${caseTableText(caseRow('`receiver keeps the turn`'))}\n`
+  const voluntary = (text, extra = {}) => cases({ body: `${wording}${text}`, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false, ...extra }).problems.map(item => item.message)
+  assert.deepEqual(voluntary(''), ['a Ready risk-tier pull request with a case table has no `Fail-first:` line.'])
+  assert.deepEqual(voluntary(`\n${firstLine}\n`), [])
+  assert.deepEqual(voluntary('', { isDraft: true }), [])
+  assert.deepEqual(voluntary('', { number: FAIL_FIRST_FROM }), [])
+  assert.deepEqual(cases({ body: 'Fixes #1\nTier: risk\nSurface: wording\n', title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems, [])
+  // A voluntary table's row with no test fails, on a draft too, as a required table's does.
+  const emptyCell = `Fixes #1\nTier: risk\nSurface: wording\n\n${caseTableText(caseRow('`receiver keeps the turn`'), caseRow(''))}\n${firstLine}\n`
+  for (const isDraft of [false, true]) {
+    assert.deepEqual(cases({ body: emptyCell, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft }).problems.map(item => item.message), ['1 rows of the case table name no test.'])
+  }
+  // A table under `Cases: none` is held to the same tests.
+  const underNone = `Fixes #1\nTier: risk\nSurface: delivery\nCases: none, one event in one state\n\n${caseTableText(caseRow('`a receiver that is not written`'))}\n`
+  const keptMessages = cases({ body: underNone, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems.map(item => item.message)
+  assert.deepEqual(keptMessages, ['row 1 of the case table names no test of tests/ in backticks.', 'a Ready risk-tier pull request with a case table has no `Fail-first:` line.'])
+  // A table pr-check cannot read fails under `Cases: none` and on another surface too, with or without the line.
+  const split = `${caseTableText(caseRow('`receiver keeps the turn`'))}\n${caseRow('`receiver keeps the turn`')}\n`
+  const formError = 'the "## Cases" table is not in the form pr-check reads: a blank line, a code fence, a comment or prose splits its rows, or a second table follows it.'
+  for (const surface of ['Surface: delivery\nCases: none, one event in one state', 'Surface: wording']) {
+    for (const line of ['', `\n${firstLine}\n`]) {
+      const messages = cases({ body: `Fixes #1\nTier: risk\n${surface}\n\n${split}${line}`, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems.map(item => item.message)
+      assert.deepEqual(messages, [formError], `${surface} ${line}`)
+    }
+  }
+  // Prose with a pipe in it is no table: the section has nothing to hold, on any surface.
+  for (const surface of ['Surface: delivery\nCases: none, one event in one state', 'Surface: wording']) {
+    const prose = `Fixes #1\nTier: risk\n${surface}\n\n## Cases\n\nThe receiver reads a | b as one word, so no case is new.\n`
+    assert.deepEqual(cases({ body: prose, title: 'fix(x): y', number: FAIL_FIRST_FROM + 1, titles: firstTitles, head: firstHead, isDraft: false }).problems, [], surface)
+  }
+  // checkPr reads the head's tests and the head itself.
+  const risky = { ...syntheticPr(), number: FAIL_FIRST_FROM + 1, testFiles: [{ path: 'tests/x.test.mjs', text: "test('receiver keeps the turn', () => {})" }], body: `${body}Tier: risk\nSurface: data\nCases: 1 rows\n\n${caseTableText(caseRow('`receiver keeps the turn`'))}\n` }
+  assert.deepEqual(checkPr(risky).problems.filter(item => item.check === 'cases').map(item => item.message), ['a Ready risk-tier pull request with a case table has no `Fail-first:` line.'])
+  assert.deepEqual(checkPr({ ...risky, body: `${risky.body}\n${firstLine}\n` }).problems.filter(item => item.check === 'cases'), [])
 })
