@@ -952,27 +952,45 @@ const decodeSplitEntity = (_, dec, hex, named) => {
 }
 
 const findClosingParen = (text, openAt) => {
-  let depth = 1
-  for (let i = openAt + 1; i < text.length; i++) {
-    const ch = text[i]
-    if (ch === '\n' || ch === '\r') return -1
-    if (ch === '\\' && i + 1 < text.length) { i++; continue }
-    if (ch === '<') {
-      for (let j = i + 1; j < text.length && text[j] !== '\n' && text[j] !== '\r'; j++) {
-        if (text[j] === '\\' && j + 1 < text.length) { j++; continue }
-        if (text[j] === '>') { i = j; break }
-      }
-      continue
+  let i = openAt + 1
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++
+  if (text[i] === ')') return i
+  if (text[i] === '<') {
+    i++
+    while (i < text.length && text[i] !== '>' && text[i] !== '\n' && text[i] !== '\r') {
+      if (text[i] === '\\' && i + 1 < text.length) i++
+      i++
     }
-    if (ch === '"' || ch === "'") {
-      for (let j = i + 1; j < text.length; j++) {
-        if (text[j] === '\\' && j + 1 < text.length) { j++; continue }
-        if (text[j] === ch) { i = j; break }
+    if (text[i] !== '>') return -1
+    i++
+  } else {
+    let depth = 0
+    while (i < text.length) {
+      const ch = text[i]
+      if (ch === '\n' || ch === '\r' || ch === ' ' || ch === '\t') break
+      if (ch === '\\' && i + 1 < text.length) { i += 2; continue }
+      if (ch === '(') depth++
+      else if (ch === ')') {
+        if (depth === 0) return i
+        depth--
       }
-      continue
+      i++
     }
-    if (ch === '(') depth++
-    else if (ch === ')' && --depth === 0) return i
+  }
+  let hadSpace = false
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) { hadSpace = true; i++ }
+  if (text[i] === ')') return i
+  if (hadSpace && (text[i] === '"' || text[i] === "'" || text[i] === '(')) {
+    const close = text[i] === '(' ? ')' : text[i]
+    i++
+    while (i < text.length && text[i] !== close && text[i] !== '\n' && text[i] !== '\r') {
+      if (text[i] === '\\' && i + 1 < text.length) i++
+      i++
+    }
+    if (text[i] !== close) return -1
+    i++
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++
+    if (text[i] === ')') return i
   }
   return -1
 }
