@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  addedLines, apiReader, authorKey, authorLine, binaryImages, cap, CASES_FROM, cases, changelog, checkIssue, checkPr,
+  addedLines, apiReader, authorKey, evidenceFirst, EVIDENCE_FROM, isAncestor, authorLine, binaryImages, cap, CASES_FROM, cases, changelog, checkIssue, checkPr,
   duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
   main, naming, needsBundle, outsideClaim, privateData, report, reportMarkdown, reviewOf, rulesPage, sections,
   riskPathsOf, ROUND_CAP, rounds, size, SIZE_FROM, SIZE_NORMAL, SIZE_RISK, stripComments, SURFACE_FROM, surface, testTitles,
@@ -2282,6 +2282,65 @@ test('pr-check lets a risk-tier pull request at five rounds take one more round 
   assert.match(roundsRun(roundHeads(5)).problems[0].fix, /one more round, words only/)
 })
 
+const evidenceBody = line => `Fixes #1\nAuthor: codex, fix/x\nTier: risk\n${line}\n`
+const evidenceRun = (line, firstCommitPaths, extra = {}) => evidenceFirst({ body: evidenceBody(line), title: 'fix(x): y', number: EVIDENCE_FROM + 1, firstCommitPaths, ...extra })
+
+test('pr-check fails a case-surface pull request whose first commit changes code, and exempts tests, the state table and the other cases (#1544)', () => {
+  for (const surfaceName of ['delivery', 'setup-writes', 'data', 'launch']) {
+    const failed = evidenceRun(`Surface: ${surfaceName}`, ['tests/x.test.mjs', 'hooks/messaging.ts'])
+    assert.deepEqual(failed.problems.map(item => item.check), ['evidence'], surfaceName)
+    assert.match(failed.problems[0].message, /changes `hooks\/messaging\.ts`/)
+  }
+  assert.equal(evidenceRun('Surface: delivery + wording, cannot split: one change', ['hooks/messaging.ts']).problems.length, 1)
+  // Pass: only tests and the state table.
+  assert.deepEqual(evidenceRun('Surface: delivery', ['tests/x.test.mjs', 'hooks/delivery-states.ts']).problems, [])
+  // Exemptions: other surfaces, other tiers, a release, no commit data, a number up to EVIDENCE_FROM, no Surface line.
+  assert.deepEqual(evidenceRun('Surface: wording', ['hooks/messaging.ts']).problems, [])
+  assert.deepEqual(evidenceRun('Surface: rules-text', ['scripts/pr-check.mjs']).problems, [])
+  assert.deepEqual(evidenceRun('Surface: delivery', ['hooks/messaging.ts'], { body: evidenceBody('Surface: delivery').replace('risk', 'normal') }).problems, [])
+  assert.deepEqual(evidenceRun('Surface: delivery', ['hooks/messaging.ts'], { title: 'chore(release): 1.2.0' }).problems, [])
+  assert.deepEqual(evidenceRun('Surface: delivery', undefined).problems, [])
+  assert.deepEqual(evidenceRun('Surface: delivery', []).problems, [])
+  assert.deepEqual(evidenceRun('Surface: delivery', ['hooks/messaging.ts'], { number: EVIDENCE_FROM }).problems, [])
+  assert.deepEqual(evidenceFirst({ body: evidenceBody(''), number: EVIDENCE_FROM + 1, firstCommitPaths: ['hooks/messaging.ts'] }).problems, [])
+})
+
+test('pr-check reads the first commit of the branch, not a merge of main or the commits it brought (#1544)', async t => {
+  const setup = fixture(t)
+  const commit = message => {
+    setup.git('add', '-A', '--', '.', ':!body.txt')
+    setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', message)
+    return setup.git('rev-parse', 'HEAD')
+  }
+  setup.git('switch', '-q', 'main')
+  const base = setup.git('rev-parse', 'HEAD')
+  setup.git('switch', '-q', '-c', 'fix/synthetic-evidence')
+  setup.put('tests/y.test.mjs', 'test("y", () => {})\n')
+  commit('test: first')
+  setup.put('hooks/messaging.ts', 'export const sent = true\n')
+  commit('fix: code after the test')
+  const runWith = (name = 'fix/synthetic-evidence') => {
+    setup.put('body.txt', `Fixes #42\nAuthor: Codex (local), branch \`${name}\`\nTier: risk\nSurface: delivery\n\n## What and why\nChecks a synthetic change.\n\n## Checks\n- [x] Run the tests - passed\n`)
+    return runMain(['--body-file', join(setup.directory, 'body.txt'), '--title', 'fix: synthetic check', '--base', base, '--repo-dir', setup.directory, '--offline', '--no-bundle'])
+  }
+  assert.doesNotMatch((await runWith()).stdout, /FAIL evidence/)
+  // Main moves on and the branch merges it: the merge and main's commit are not the first commit.
+  setup.git('switch', '-q', 'main')
+  setup.put('hooks/other.ts', 'export const other = true\n')
+  commit('chore: main moves')
+  setup.git('switch', '-q', 'fix/synthetic-evidence')
+  setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'merge', '-q', '--no-edit', 'main')
+  assert.doesNotMatch((await runWith()).stdout, /FAIL evidence/)
+  // A branch whose first commit is code fails.
+  setup.git('switch', '-q', '-c', 'fix/synthetic-code-first', base)
+  setup.put('hooks/messaging.ts', 'export const sent = true\n')
+  commit('fix: code first')
+  setup.put('tests/y.test.mjs', 'test("y", () => {})\n')
+  commit('test: after')
+  const failed = await runWith('fix/synthetic-code-first')
+  assert.match(failed.stdout, /FAIL evidence: the first commit of this delivery pull request changes `hooks\/messaging\.ts`/, failed.stdout)
+})
+
 const firstHead = 'abcdef1234567890abcdef1234567890abcdef12'
 const firstTitles = testTitles([{ path: 'tests/x.test.mjs', text: "test('receiver keeps the turn', () => {})\ntest(`a ${name} receiver keeps it`, () => {})\n" }])
 const firstRun = (text = '', extra = {}) => {
@@ -2370,4 +2429,57 @@ test('pr-check wants a Fail-first line for the current head on a Ready risk-tier
   const risky = { ...syntheticPr(), number: FAIL_FIRST_FROM + 1, testFiles: [{ path: 'tests/x.test.mjs', text: "test('receiver keeps the turn', () => {})" }], body: `${body}Tier: risk\nSurface: data\nCases: 1 rows\n\n${caseTableText(caseRow('`receiver keeps the turn`'))}\n` }
   assert.deepEqual(checkPr(risky).problems.filter(item => item.check === 'cases').map(item => item.message), ['a Ready risk-tier pull request with a case table has no `Fail-first:` line.'])
   assert.deepEqual(checkPr({ ...risky, body: `${risky.body}\n${firstLine}\n` }).problems.filter(item => item.check === 'cases'), [])
+})
+
+test('pr-check judges the paths of a branch made only of a merge of a code topic, and a merge of main alone still passes (#1544)', async t => {
+  const setup = fixture(t)
+  const git = (...args) => setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', ...args)
+  setup.git('switch', '-q', 'main')
+  const base = setup.git('rev-parse', 'HEAD')
+  setup.git('switch', '-q', '-c', 'topic/code')
+  setup.put('hooks/messaging.ts', 'export const sent = true\n')
+  setup.git('add', '--', 'hooks/messaging.ts')
+  git('commit', '-q', '-m', 'fix: code topic')
+  setup.git('switch', '-q', '-c', 'fix/synthetic-merge-only', base)
+  git('merge', '-q', '--no-ff', '-m', 'merge the topic', 'topic/code')
+  const runWith = (name, against = base) => {
+    setup.put('body.txt', `Fixes #42
+Author: Codex (local), branch \`${name}\`
+Tier: risk
+Surface: delivery
+
+## What and why
+Checks a synthetic change.
+
+## Checks
+- [x] Run the tests - passed
+`)
+    return runMain(['--body-file', join(setup.directory, 'body.txt'), '--title', 'fix: synthetic check', '--base', against, '--repo-dir', setup.directory, '--offline', '--no-bundle'])
+  }
+  const failed = await runWith('fix/synthetic-merge-only')
+  assert.match(failed.stdout, /FAIL evidence: the first commit of this delivery pull request changes `hooks\/messaging\.ts`/, failed.stdout)
+  // A topic merged first and a test committed after it: the merge is the branch's first commit, so its code still fails.
+  setup.git('switch', '-q', '-c', 'fix/synthetic-merge-then-test', base)
+  git('merge', '-q', '--no-ff', '-m', 'merge the topic', 'topic/code')
+  setup.put('tests/synthetic-later.test.mjs', "import { test } from 'node:test'\ntest('synthetic later', () => {})\n")
+  setup.git('add', '--', 'tests/synthetic-later.test.mjs')
+  git('commit', '-q', '-m', 'test: after the merge')
+  const later = await runWith('fix/synthetic-merge-then-test')
+  assert.match(later.stdout, /FAIL evidence: the first commit of this delivery pull request changes `hooks\/messaging\.ts`/, later.stdout)
+  // A branch that only merges main (which moved on) has no change of its own and passes.
+  setup.git('switch', '-q', 'main')
+  setup.put('hooks/other.ts', 'export const other = true\n')
+  setup.git('add', '--', 'hooks/other.ts')
+  git('commit', '-q', '-m', 'chore: main moves')
+  const main2 = setup.git('rev-parse', 'HEAD')
+  setup.git('switch', '-q', '-c', 'fix/synthetic-main-only', base)
+  git('merge', '-q', '--no-ff', '-m', 'merge main', main2)
+  assert.doesNotMatch((await runWith('fix/synthetic-main-only', main2)).stdout, /FAIL evidence/)
+})
+
+test('pr-check stops when git cannot tell whether a merge parent is in the base, instead of guessing (#1544)', () => {
+  assert.equal(isAncestor({ status: 0 }), true)
+  assert.equal(isAncestor({ status: 1 }), false)
+  assert.throws(() => isAncestor({ status: 128 }, 'abc1234'), /git could not tell whether abc1234 is in the base/)
+  assert.throws(() => isAncestor({ status: null, error: new Error('spawn git ENOENT') }), /git could not tell/)
 })
