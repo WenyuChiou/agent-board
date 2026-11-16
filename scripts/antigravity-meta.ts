@@ -307,3 +307,39 @@ export const resolveAntigravityTitle = (
   const promptTitle = readAntigravityFirstPrompt(transcriptPath, conversationId, home)
   return promptTitle === null ? null : { title: promptTitle, titleSource: 'prompt' }
 }
+
+// The first line of each reply the model gave in the conversation's last turn (after its last USER_INPUT), read from
+// the tail of the conversation's own transcript, because the turn-end hook does not carry the reply text (#1416).
+// Only the first line is returned, and only for a regular file under one of the known transcript names; a line that
+// is not JSON is skipped, and anything unreadable reads as no reply.
+export const antigravityReplyFirstLines = (path: unknown): string[] => {
+  if (typeof path !== 'string' || !isAbsolute(path) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(path))) return []
+  try {
+    if (!lstatSync(path).isFile()) return []
+    const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+    try {
+      const stat = fstatSync(fd)
+      if (!stat.isFile() || stat.size <= 0) return []
+      const size = Math.min(stat.size, MAX_TRANSCRIPT_HEAD_BYTES), start = stat.size - size
+      const bytes = Buffer.alloc(size)
+      if (readSync(fd, bytes, 0, size, start) !== size) return []
+      let text = bytes.toString('utf8')
+      if (start > 0) {
+        const end = text.indexOf('\n')
+        if (end < 0) return []
+        text = text.slice(end + 1)
+      }
+      let replies: string[] = []
+      for (const line of text.split(/\r?\n/)) {
+        if (line.trim() === '') continue
+        let entry: unknown
+        try { entry = JSON.parse(line) } catch { continue }
+        if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
+        const { type, source, content } = entry as Record<string, unknown>
+        if (type === 'USER_INPUT') replies = []
+        else if (source === 'MODEL' && type === 'PLANNER_RESPONSE' && typeof content === 'string' && content.trim() !== '') replies.push(content.trim().split(/\r?\n/)[0]!.trim())
+      }
+      return replies
+    } finally { closeSync(fd) }
+  } catch { return [] }
+}

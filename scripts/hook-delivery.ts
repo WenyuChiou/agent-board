@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, unlinkSync } from 'node:fs'
 import { join, posix } from 'node:path'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging.ts'
 import { isSessionEnd, isTurnStart, turnStartEnvelope } from '../hooks/hook-messages.ts'
@@ -9,10 +9,26 @@ import type { CodexReport } from '../hooks/codex.ts'
 import type { Strings } from '../hooks/i18n.ts'
 import type { CodexMeta } from '../hooks/runs.ts'
 import { hookMailbox } from './board-messaging.ts'
+import { antigravityReplyFirstLines } from './antigravity-meta.ts'
 import { readSessionMeta } from './codex-history.ts'
 import { defaultMessagesDirectory } from './runtime-folder.ts'
 
 type Json = Record<string, unknown>
+
+// What Antigravity's turn-start hook handed over, kept until the turn's Stop hook, which reads the model's reply from the
+// conversation's transcript (the hook does not carry it). A message's nonce is the code of its ACK line (#1416). Only an id
+// and a code are kept, never the message text or the reply; a claim lives until the next Stop hook spends it.
+const ACK_CLAIMS_KEEP = 8
+const ackClaimsFile = (root: string, owner: string): string => join(root, 'antigravity-acks', `${owner}.json`)
+const isAckClaim = (one: unknown): one is { id: string; nonce: string } =>
+  typeof one === 'object' && one !== null && typeof (one as Json).id === 'string' && typeof (one as Json).nonce === 'string' && /^[0-9a-f]{6}$/.test((one as Json).nonce as string)
+const readAckClaims = (file: string, readLocal: (file: string) => string | null): { id: string; nonce: string }[] => {
+  try {
+    const saved = readLocal(file)
+    const parsed = saved === null ? null : JSON.parse(saved) as { claims?: unknown }
+    return Array.isArray(parsed?.claims) ? parsed.claims.filter(isAckClaim).map(({ id, nonce }) => ({ id, nonce })) : []
+  } catch { return [] }
+}
 
 // Only Codex's terminal has a live record of a queued message being taken
 // (docs/validation/2026-11-12-codex-cli-mailbox-live.md; its second run, the one that checked this
@@ -101,6 +117,24 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
     }
     if (isSessionEnd(agent, event)) {
       try { await mailbox?.end(agent, session, Date.now()) } catch {}
+    } else if (agent === 'antigravity' && event === 'Stop') {
+      // The turn is over: a reply whose first line is `ACK <code>` of a message handed over in it acknowledges that message.
+      // The claim is spent here, matched or not; only an acknowledgement the board did not take is kept for the next Stop.
+      const file = ackClaimsFile(root, hash(`${agent}:${session}`))
+      const claims = readAckClaims(file, readLocal)
+      if (claims.length > 0) {
+        const lines = antigravityReplyFirstLines(raw.transcriptPath)
+        const kept: typeof claims = []
+        for (const claim of claims) {
+          if (!lines.some(line => line === `ACK ${claim.nonce}` || line.startsWith(`ACK ${claim.nonce} `))) continue
+          try { await mailbox?.ack(agent, session, claim.id, claim.nonce, `ACK ${claim.nonce}`, Date.now()) } catch { kept.push(claim) }
+        }
+        if (kept.length > 0) {
+          if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
+          else process.stderr.write(`${s.localAgentMailboxFailed(mailbox?.error ?? setupError ?? 'MAILBOX_FAILED')}\n`)
+          try { atomic(file, `${JSON.stringify({ version: 1, claims: kept })}\n`, checkDeadline, true) } catch {}
+        } else try { unlinkSync(file) } catch {}
+      }
     } else if (isTurnStart(agent, event)) {
       let message = null
       const transcript = raw.transcript_path
@@ -139,6 +173,14 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
           await new Promise<void>((done, fail) => process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`, error => error ? fail(error) : done()))
           hasWritten = true
         } catch {}
+        if (hasWritten && message !== null && agent === 'antigravity' && /^[0-9a-f]{6}$/.test(message.nonce)) {
+          // Written before the acceptance, so a hook stopped after the model saw the message still leaves its code for the Stop hook.
+          try {
+            const file = ackClaimsFile(root, owner)
+            const claims = [...readAckClaims(file, readLocal).filter(one => one.id !== message.id), { id: message.id, nonce: message.nonce }].slice(-ACK_CLAIMS_KEEP)
+            atomic(file, `${JSON.stringify({ version: 1, claims })}\n`, checkDeadline, true)
+          } catch {}
+        }
         if (hasWritten && message !== null) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
         if (hasWritten && pushResult.keys.length > 0) {
           try {

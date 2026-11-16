@@ -137,6 +137,8 @@ Supported turn starts: Codex `SessionStart` / `UserPromptSubmit`, Antigravity
 ignores, so a Cursor message waits until that chat opens again and its card says so). End events
 are `SessionEnd` for Codex and Muse, and `sessionEnd` for Cursor.
 
+Antigravity's `Stop` hook (the end of every turn, in the app and in agy TUI) reads the model's ACK (#1416). The turn-start hook keeps the id and the `ACK` code of each message it hands over (in the board's data folder, no text); the `Stop` hook reads the first line of each reply the model gave in the turn from the conversation's own transcript, because the hook does not carry the reply. A line that is `ACK <code>` of a message handed over in that turn acknowledges it, and only that line is kept as the reply. A reply with no such line, or with another message's code, changes nothing, and neither does a turn that handed over no message. The kept code is spent at the first `Stop` after the hand-over; one the board did not take (busy or stopped) is tried again at the next `Stop`.
+
 The separate legacy `--allow-resume` option deliberately allows a local reply to
 start an ended Codex or Grok Build session. It is disabled by default, never enabled by
 setup, and works for closed sessions even with the message hub running. It is not live delivery.
