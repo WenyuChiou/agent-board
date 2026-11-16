@@ -7081,7 +7081,7 @@ test('with the receivers\' own records, a Claude card sends and a Codex card tha
 
 // agentapi here is a stand-in that only logs its arguments: whether Antigravity's app starts a turn for the line is the
 // live run's to show (docs/validation/2026-11-17-antigravity-wake-live.md).
-test('the real Antigravity sidecar runs agentapi send-message once for a board message 10 s after the board has its turn\'s Stop, and the board\'s mailbox hand-over that the turn-start hook calls then gives the message (#1396)', () => fixture(async (board, dir) => {
+test('the real Antigravity sidecar runs a stand-in agentapi\'s send-message once for a board message 10 s after the turn\'s Stop in its turn order file, and the board\'s mailbox hand-over that the turn-start hook calls then gives the message (#1396)', () => fixture(async (board, dir) => {
   const { ANTIGRAVITY_WAKE_LINE, antigravitySidecarSource } = await import('../hooks/antigravity-sidecar.ts')
   const { WAKE_IDLE_MS } = await import('../hooks/hook-messages.ts')
   const conversation = '0b6d6e0e-6f43-4c0b-9a58-3f1a7e3a1c11'
