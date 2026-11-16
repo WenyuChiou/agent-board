@@ -1236,6 +1236,11 @@ test('pr-check lets a small docs pull request from an outside author through wit
     { title: 'fix: explain the first step' },
   ]) assert.ok(checkPr(docsPr(extra)).problems.some(item => item.check === 'issue'), JSON.stringify(extra))
   assert.deepEqual(checkPr(docsPr({ added: addedIn(50), paths: ['README.md', 'README.zh-TW.md', 'docs/guides/synthetic.md'] })).problems, [])
+  // The tier is not part of the exemption: above #1531 a small docs fix names its tier like any other (#1577).
+  const numbered = checkPr(docsPr({ number: TIER_FROM + 1 }))
+  assert.deepEqual(numbered.problems.map(item => item.check), ['tier'])
+  assert.match(numbered.problems[0].message, /no `Tier:` line/)
+  assert.deepEqual(checkPr(docsPr({ number: TIER_FROM + 1, body: `${docsBody}Tier: light\n` })).problems, [])
   assert.equal(isSmallDocsFix({ title: 'docs: x', paths: [], added: [] }), false)
   assert.equal(isSmallDocsFix({ title: 'docsify: x', paths: ['README.md'], added: [] }), false)
   assert.equal(isSmallDocsFix({ title: 'docs: x', paths: ['docs/Dev/CI.md'], added: [] }), false)
@@ -1808,12 +1813,10 @@ test('pr-check wants one Tier line, and the risk tier for a change to a path ris
   // A release, and a pull request from before the rule, are not checked.
   assert.deepEqual(run('', { title: 'chore(release): 1.2.3' }).problems, [])
   assert.deepEqual(run('Tier: light', { number: TIER_FROM, paths: ['hooks/connect.ts'] }).problems, [])
-  // A local run and an outside small docs fix get a note for a missing line; a wrong tier still fails locally.
-  for (const extra of [{ number: null }, { isOptional: true }]) {
-    const noted = run('', extra)
-    assert.deepEqual(noted.problems, [])
-    assert.match(noted.info.join('\n'), /tier: the body has no `Tier:` line\. The PR check fails a pull request without one/)
-  }
+  // A local run gets a note for a missing line; a wrong tier still fails locally.
+  const noted = run('', { number: null })
+  assert.deepEqual(noted.problems, [])
+  assert.match(noted.info.join('\n'), /tier: the body has no `Tier:` line\. The PR check fails a pull request without one/)
   only(run('Tier: normal', { number: null, paths: ['hooks/connect.ts'] }), /`Tier: normal`, but/)
 })
 
