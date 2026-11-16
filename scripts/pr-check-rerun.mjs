@@ -7,7 +7,7 @@
 // then starts that run again, so the check on the head reads the comment. When it cannot, it says why in a comment on
 // the pull request, since the job's own failure shows only in the Actions tab.
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -107,23 +107,29 @@ const holdReason = (gh, repo, pull) => {
 // with its notice.
 export const ghRunner = (command = 'gh', timeout = GH_TIMEOUT_MS) => args => spawnSync(command, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout })
 
-export const rerun = async (event, { gh = ghRunner(), sleep = ms => new Promise(done => setTimeout(done, ms)), now = () => Date.now(), log = console.log } = {}) => {
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'in_progress', 'waiting', 'pending', 'requested'])
+
+// A notice that cannot be posted fails the job: the check would be left as it was with nothing on the pull request.
+// Writes `noticed=true` to GITHUB_OUTPUT once posted so the workflow's fallback step posts no duplicate (#1538).
+const postNotice = (gh, repo, number, head, reason, outputFile = process.env.GITHUB_OUTPUT) => {
+  // No leading slash: Git for Windows' shell would turn "/repos/…" into a folder path before gh sees it.
+  const posted = gh(['api', '--method', 'POST', `repos/${repo}/issues/${number}/comments`, '-f', `body=${noticeText(head, reason)}`])
+  if (posted.error || posted.status !== 0) {
+    const failure = new Error(`could not post the notice on #${number} (${reason.replace(/\.$/, '')}): ${String(posted.error?.message || posted.stderr || '').trim().split(/\r?\n/)[0]}`)
+    failure.isNotice = true
+    throw failure
+  }
+  if (outputFile) appendFileSync(outputFile, 'noticed=true\n', 'utf8')
+}
+
+export const rerun = async (event, { gh = ghRunner(), sleep = ms => new Promise(done => setTimeout(done, ms)), now = () => Date.now(), log = console.log, outputFile = process.env.GITHUB_OUTPUT ?? null } = {}) => {
   const number = event?.issue?.number
   if (!event?.issue?.pull_request || !Number.isSafeInteger(number)) return log('pr-check-rerun: not a pull request comment; nothing to do.'), 'skipped'
   if (!mentionsVerdict(event)) return log(`pr-check-rerun: the comment on #${number} has no Review: line; nothing to do.`), 'skipped'
   if (!isTrustedComment(event.comment)) return log(`pr-check-rerun: the comment on #${number} is not from a team member or an app; the next pull request event reads it.`), 'skipped'
   const repo = event.repository?.full_name
   if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('repository must be owner/repo.')
-  // A notice that cannot be posted fails the job: the check would be left as it was with nothing on the pull request.
-  const notify = (head, reason) => {
-    // No leading slash: Git for Windows' shell would turn "/repos/…" into a folder path before gh sees it.
-    const posted = gh(['api', '--method', 'POST', `repos/${repo}/issues/${number}/comments`, '-f', `body=${noticeText(head, reason)}`])
-    if (posted.error || posted.status !== 0) {
-      const failure = new Error(`could not post the notice on #${number} (${reason.replace(/\.$/, '')}): ${String(posted.error?.message || posted.stderr || '').trim().split(/\r?\n/)[0]}`)
-      failure.isNotice = true
-      throw failure
-    }
-  }
+  const notify = (head, reason) => postNotice(gh, repo, number, head, reason, outputFile)
   let head = ''
   // Every call but the notice's: none starts after CALL_LIMIT_MS, and each stops after GH_TIMEOUT_MS.
   const stopAt = now() + CALL_LIMIT_MS
@@ -155,7 +161,20 @@ export const rerun = async (event, { gh = ghRunner(), sleep = ms => new Promise(
         // run again would cancel that one (pr-check's concurrency group), so the job stops here.
         const latest = ghJson(api, ['api', `repos/${repo}/pulls/${number}`])
         if (latest?.state !== 'open' || latest?.head?.sha !== head) return log(`pr-check-rerun: #${number} moved on from ${short} while this waited; its own run reads the comment.`), 'superseded'
-        ghJson(api, ['api', '--method', 'POST', `repos/${repo}/actions/runs/${run.id}/rerun`])
+        try {
+          ghJson(api, ['api', '--method', 'POST', `repos/${repo}/actions/runs/${run.id}/rerun`])
+        } catch (error) {
+          // A rerun request that started the run before timing out shows the run active on one follow-up read (#1538).
+          let current = null
+          try {
+            current = ghJson(api, ['api', `repos/${repo}/actions/runs/${run.id}`])
+          } catch {}
+          if (ACTIVE_RUN_STATUSES.has(current?.status)) {
+            log(`pr-check-rerun: pr-check run ${run.id} for ${short} on #${number} is ${current.status} after the rerun call failed; stopping without a notice.`)
+            return 'rerun'
+          }
+          throw error
+        }
         log(`pr-check-rerun: started pr-check run ${run.id} again for ${short} on #${number}.`)
         return 'rerun'
       }
@@ -175,10 +194,26 @@ export const rerun = async (event, { gh = ghRunner(), sleep = ms => new Promise(
   }
 }
 
-export const main = async (argv = process.argv.slice(2)) => {
-  const at = argv.indexOf('--event')
-  if (at === -1 || !argv[at + 1]) throw new Error('usage: node scripts/pr-check-rerun.mjs --event <event file>')
-  return rerun(JSON.parse(readFileSync(resolve(argv[at + 1]), 'utf8')))
+export const main = async (argv = process.argv.slice(2), deps = {}) => {
+  const { gh = ghRunner(), log = console.log, env = process.env, readFile = readFileSync, outputFile = env.GITHUB_OUTPUT ?? null } = deps
+  let event
+  try {
+    const at = argv.indexOf('--event')
+    if (at === -1 || !argv[at + 1]) throw new Error('usage: node scripts/pr-check-rerun.mjs --event <event file>')
+    event = JSON.parse(readFile(resolve(argv[at + 1]), 'utf8'))
+  } catch (error) {
+    const repo = env.REPO || env.GITHUB_REPOSITORY || ''
+    const number = Number(env.NUMBER)
+    if (/^[\w.-]+\/[\w.-]+$/.test(repo) && Number.isSafeInteger(number) && number > 0) {
+      try {
+        postNotice(gh, repo, number, '', error.message, outputFile)
+      } catch (failure) {
+        log(`pr-check-rerun: ${failure.message}`)
+      }
+    }
+    throw error
+  }
+  return rerun(event, { ...deps, gh, log, outputFile })
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

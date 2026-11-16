@@ -1777,7 +1777,8 @@ export const main = async (argv = process.argv.slice(2)) => {
     // release numbers are read after it, so a pull request renamed a release since its event is checked as a release.
     if (api && options['--event'] && data.number !== null) {
       const current = await api(`pulls/${data.number}`)
-      if (current?.head?.sha === data.head) {
+      if (typeof current?.head?.sha !== 'string' || !/^[0-9a-f]{40}$/i.test(current.head.sha)) throw new Error('pull request metadata is incomplete or invalid.')
+      if (current.head.sha === data.head) {
         if (typeof current.title !== 'string' || !Array.isArray(current.labels) || typeof current.draft !== 'boolean') throw new Error('pull request metadata is incomplete or invalid.')
         Object.assign(data, { title: current.title, body: current.body ?? '', isDraft: current.draft, labels: current.labels })
       }
