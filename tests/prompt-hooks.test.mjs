@@ -1297,14 +1297,31 @@ const escapedDeliveryCases = async () => {
   const folder = '{"session_id":"synthetic","\\u0063wd":"bo\\u0061rd","prompt":"Continue"}'
   assert.equal(JSON.parse(folder).cwd, 'board')
   cases.push(['a folder key written escaped', folder, { session_id: 'synthetic' }])
+  // The Fable diagnosis after codex_464 (#1570): a folder key and value written inside a prompt, joining "boa" and "rd"
+  // or splitting the header; an escaped quote before a hint word in a folder value; an escaped folder key one level down.
+  const inner = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt: 'boa"cwd":"x"rd' })
+  cases.push(['a folder key and value written inside a prompt between "boa" and "rd"', inner, { session_id: 'synthetic', cwd: '/work/demo' }])
+  const inHeader = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt: `${DELIVERY_REQUEST_HINT.slice(0, -4)}"cwd":"x"${DELIVERY_REQUEST_HINT.slice(-4)}` })
+  cases.push(['a folder key and value written inside the header', inHeader, { session_id: 'synthetic', cwd: '/work/demo', board_request: true }])
+  const quoted = '{"session_id":"synthetic","\\u0063wd":"C:\\\\a\\"board","prompt":"Continue"}'
+  assert.equal(JSON.parse(quoted).cwd, 'C:\\a"board')
+  cases.push(['an escaped folder key whose value holds an escaped quote before "board"', quoted, { session_id: 'synthetic' }])
+  const nested = '{"session_id":"synthetic","extra":{"\\u0063wd":"C:\\\\board"},"prompt":"Continue"}'
+  assert.equal(JSON.parse(nested).extra.cwd, 'C:\\board')
+  cases.push(['an escaped folder key one level down', nested, { session_id: 'synthetic' }])
+  cases.push(['an escaped folder key one level down, with the header escaped', nested.replace('Continue', escaped), { session_id: 'synthetic', delivery_request: true }])
   return cases
 }
-// The flags a timeout receipt sets, with its session; the sh scan cannot read an escaped folder key's value.
+// The flags a timeout receipt sets, with its session.
 const receiptFlags = text => {
   const { session_id, board_request, delivery_request } = JSON.parse(text)
   return { session_id, ...(board_request === undefined ? {} : { board_request }), ...(delivery_request === undefined ? {} : { delivery_request }) }
 }
 const expectedFlags = ({ cwd, ...flags }) => flags
+
+// A known limit of the sh scan, which reads line by line: a folder value on the line after its key is scanned. Pinned so
+// that a change to it is deliberate (Fable diagnosis on #1570, case 4); the PowerShell scan reads the parsed payload.
+const shKnownLimits = [['a folder value on the line after its key', '{"session_id":"synthetic","cwd":\n"/work/board","prompt":"Continue"}', { session_id: 'synthetic', board_request: true }]]
 
 test('the sh timeout receipt reads a delivery header written with \\u escapes (#1334)', () => fixture(async home => {
   const { reporterSh } = await import('../hooks/hook-reporters.ts')
@@ -1312,7 +1329,7 @@ test('the sh timeout receipt reads a delivery header written with \\u escapes (#
   const fallback = source.slice(source.indexOf('write_fallback() {'), source.indexOf('\ntimed_out() {'))
   const file = shellPath(join(home, 'receipt')), script = join(home, 'fallback.sh')
   writeFileSync(script, `file='${file}'\nlog_error() { printf '%s\n' "$1" >&2; }\n${fallback}\nwrite_fallback\nexit 0\n`)
-  for (const [name, raw, expected] of await escapedDeliveryCases()) {
+  for (const [name, raw, expected] of [...await escapedDeliveryCases(), ...shKnownLimits]) {
     rmSync(file + '.json', { force: true })
     writeFileSync(file + '.tmp', raw)
     const out = spawnSync(sh, [shellPath(script)], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', windowsHide: true, timeout: 10000 })

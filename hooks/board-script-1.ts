@@ -7861,7 +7861,7 @@ export const LINES = [
 "        $hasSession = $false",
 "        foreach ($key in @(${SESSION_KEYS.map(psQuote).join(\",\")})) { if ($metadata.Contains($key)) { $hasSession = $true } }",
 "        if ($hasSession) {",
-"          $p = ${psQuote(PS_PATH_STRIP)}; $scan = [regex]::Replace($Payload, $p, ''); try { $scan = [regex]::Replace([regex]::Unescape($scan), $p, '') } catch {}",
+"          $scan = [regex]::Replace((ConvertTo-Json -InputObject $raw -Compress -Depth 99), ${psQuote(PS_PATH_STRIP)}, '')",
 "          if ($scan.IndexOf(${psQuote(DELIVERY_REQUEST_HINT)}, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $metadata['delivery_request'] = $true }",
 "          elseif (${BOARD_REQUEST_HINTS.map((hint) => `$scan.IndexOf(${psQuote(hint)}, [StringComparison]::OrdinalIgnoreCase) -ge 0`).join(\" -or \")}) { $metadata['board_request'] = $true }",
 "          $json = ConvertTo-Json -InputObject $metadata -Compress -Depth 4",

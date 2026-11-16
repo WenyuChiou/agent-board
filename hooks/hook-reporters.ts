@@ -19,8 +19,9 @@ const PS_PATH_STRIP = String.raw`"(?:${PATH_KEYS.join('|')})"\s*:\s*"(?:[^"\\]|\
 // Valid JSON may write any letter as a \u escape (#1334). Before it strips the folder paths and looks for a hint, the sh
 // scan reads back the letters, the space, the hyphen and the underscore of every hint and folder key from their
 // escapes; an escaped backslash becomes `_` first, so neither `\\u0041` nor `boa\\rd` turns into hint letters.
-// The PowerShell scan strips the paths, reads every escape back with [regex]::Unescape, which reads left to right,
-// and strips the paths again for a folder key that was written escaped.
+// The PowerShell scan reads the parsed payload written back as JSON instead of the raw text: that copy escapes no
+// letter of a key or a hint and keeps a quote inside a string escaped, so one strip removes every folder path at any
+// depth and never joins the text on either side of it into a hint.
 const UNESCAPED_CHARS = [...new Set([...[DELIVERY_REQUEST_HINT, ...BOARD_REQUEST_HINTS, ...PATH_KEYS, 'workspace_roots'].join('').toLowerCase()].flatMap(char => [char, char.toUpperCase()]))]
 const SH_UNESCAPE = [String.raw`s/\\\\/_/g`, ...UNESCAPED_CHARS.map(char => String.raw`s/\\u${char.charCodeAt(0).toString(16).padStart(4, '0').replace(/[a-f]/g, hex => `[${hex}${hex.toUpperCase()}]`)}/${char}/g`)].join('; ')
 
@@ -412,7 +413,7 @@ try {
         $hasSession = $false
         foreach ($key in @(${SESSION_KEYS.map(psQuote).join(',')})) { if ($metadata.Contains($key)) { $hasSession = $true } }
         if ($hasSession) {
-          $p = ${psQuote(PS_PATH_STRIP)}; $scan = [regex]::Replace($Payload, $p, ''); try { $scan = [regex]::Replace([regex]::Unescape($scan), $p, '') } catch {}
+          $scan = [regex]::Replace((ConvertTo-Json -InputObject $raw -Compress -Depth 99), ${psQuote(PS_PATH_STRIP)}, '')
           if ($scan.IndexOf(${psQuote(DELIVERY_REQUEST_HINT)}, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $metadata['delivery_request'] = $true }
           elseif (${BOARD_REQUEST_HINTS.map(hint => `$scan.IndexOf(${psQuote(hint)}, [StringComparison]::OrdinalIgnoreCase) -ge 0`).join(' -or ')}) { $metadata['board_request'] = $true }
           $json = ConvertTo-Json -InputObject $metadata -Compress -Depth 4
