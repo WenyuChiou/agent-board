@@ -4449,11 +4449,11 @@ const codexConnection = async (board, thread = codexCurrent) => waitFor(async ()
 const codexMessage = async (board, id) => (await board.call('/api/board')).body.messaging.messages.find(one => one.id === codexId(id))
 const codexSend = async (board, connection, id = 'AB-CX-001') => (await board.call('/api/messages/send', { id: codexId(id), target: connection.id, turn: 'session', text: 'Check the build and tell me what failed.' })).status
 // The stand-in keeps a thread listed 150 ms after its last subscriber left or its last turn ended (the real daemon's 60 s) and
-// reports that delay as 0 seconds, so the receiver in these tests watches a thread for 400 ms (65 s for real: the least wait, and
+// reports that delay as 0 seconds, so the receiver in these tests watches a thread for 400 ms (10 minutes and 5 s for real: the least wait, and
 // the margin on a delay the daemon reports) before a listing tells it about a person: the first message to a thread waits that
 // long, and so does each one after a delivery.
 const codexUnloadMs = 400
-// The page's own receiver waits 65 seconds before it reads a thread as a person's. A page started by a test may be given the
+// The page's own receiver waits 10 minutes and 5 seconds before it reads a thread as a person's. A page started by a test may be given the
 // stand-in daemon's shorter delay; the page takes it only from a test process, so both names are set and both are cleared.
 const codexShortWait = (isOn = true) => {
   if (isOn) { process.env.AGENT_BOARD_TEST_PID = String(process.pid); process.env.AGENT_BOARD_CODEX_UNLOAD_MS = String(codexUnloadMs) } else { delete process.env.AGENT_BOARD_TEST_PID; delete process.env.AGENT_BOARD_CODEX_UNLOAD_MS }
@@ -5001,6 +5001,24 @@ test('a Codex daemon set to keep a thread longer than the default is watched for
     assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
   } finally { await receiver.close() }
 }))
+
+test('a delay set for one Codex thread longer than its folder\'s does not read as a person: the receiver waits at least 10 minutes and 5 s, or the folder\'s longer delay (#1578)', async () => {
+  const { isWaitOver } = await import('../scripts/codex-receiver.mjs')
+  assert.equal(typeof isWaitOver, 'function')
+  // The person opened the thread with `codex -c thread_unload_delay_secs=300` and quit; config/read gives the folder's 60 s. The
+  // daemon keeps the thread listed 300 s with nobody on it, so neither 65 s (the old wait) nor 305 s reads as a person.
+  const folder60 = listedAt => isWaitOver({ since: 0, listedAt, delay: 60_000 })
+  assert.deepEqual([65_000, 305_000, 604_999].map(folder60), [false, false, false])
+  // Listed 10 minutes and 5 s after the stretch began: a per-thread delay up to 10 minutes would have unloaded it by then.
+  assert.deepEqual([605_000, 900_000].map(folder60), [true, true])
+  // A folder's delay longer than 10 minutes still wins, with its margin.
+  const folder900 = listedAt => isWaitOver({ since: 0, listedAt, delay: 900_000 })
+  assert.deepEqual([605_000, 904_999, 905_000].map(folder900), [false, false, true])
+  // The stretch's own start counts: the wait is measured from it, not from zero.
+  assert.deepEqual([664_999, 665_000].map(listedAt => isWaitOver({ since: 60_000, listedAt, delay: 0 })), [false, true])
+  // A test's shorter wait (`unloadMs`, `unloadMarginMs`) replaces the least wait and the margin, as the receiver passes them.
+  assert.deepEqual([399, 400].map(listedAt => isWaitOver({ since: 0, listedAt, delay: 0, unloadMs: 400, unloadMarginMs: 400 })), [false, true])
+})
 
 test('a Codex daemon whose unload delay cannot be read gets no message, and gets it once the delay is read for the thread\'s folder (#318)', () => codexFixture(async (board, dir) => {
   const configFaults = join(dir, 'config-faults')
