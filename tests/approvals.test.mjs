@@ -59,7 +59,7 @@ const homeFor = (url, pid = process.pid) => {
 
 // A board started from source, with the tests' shorter waits. No grace window unless a test asks.
 // `open` stands in for the browser opener; the default opens the page and says so.
-const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, open } = {}) => {
+const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, open, holdMs } = {}) => {
   let self
   const place = homeFor()
   const messages = join(place.root, 'messages')
@@ -75,6 +75,7 @@ const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, 
       pending: () => [], act: () => '', tidy: () => '', clean: () => '', sweep: () => {}, sweepMs: 60_000,
       paste: () => ({ isAdded: false, note: '' }), failure: () => null, idleMs: 0,
       approvalTimes: { drawMs, pressMs, secretMs, graceMs },
+      ...(holdMs === undefined ? {} : { boardTimes: { holdMs } }),
       // The browser stand-in: the address the board would open, with its one-time key.
       open: async url => { opened.push(url); return open === undefined ? true : open(url, self) },
       journal: entry => { journal.push(entry) },
@@ -170,7 +171,9 @@ const runHook = (place, input) => {
 }
 
 test('a page in sight whose board request is waiting still counts as watching past APPROVAL_PAGE_MS (#359)', { timeout: 60_000 }, async () => {
-  const board = await startBoard({ drawMs: 5_000, pressMs: 30_000 })
+  // The board request waits up to 30 s here, so it is still waiting when the hook asks at 9 s: nothing in the test
+  // races the hold running out. The shipped page asks again at once after a hold runs out, which a test page would not.
+  const board = await startBoard({ drawMs: 5_000, pressMs: 30_000, holdMs: 30_000 })
   const page = await openPage(board)
   // The shipped page holds the board and waits on it (its etag and x-board-wait), asking nothing else while nothing changes.
   const ask = (headers = {}) => fetch(new URL('/api/board', board.origin), { headers: { 'x-board-token': board.token, ...page.headers, ...headers } })
@@ -180,12 +183,12 @@ test('a page in sight whose board request is waiting still counts as watching pa
   // Longer than the window a page's last request counts as watching: on main the page asked every 2 s.
   await pause(APPROVAL_PAGE_MS + 1000)
   const hook = runHook(board, request('rm -rf synthetic-waiting-folder'))
-  // The waiting request brings the new card (or, on a slow runner, ran out just before it, which counts as asking then);
-  // either way the request stays on the board for the page, not sent back to the host.
+  // The waiting request is answered with a changed board: the card, or an earlier change such as the minute rolling over
+  // (the board's clock counts minutes), so its content is not what this test checks. What it checks is the spec: the
+  // request stays on the board for the page, not sent back to the host.
   const answered = await waiting
-  const answer = await answered.text()
-  if (answered.status === 200) assert.match(answer, /synthetic-waiting-folder/)
-  else assert.equal(answered.status, 304)
+  assert.equal(answered.status, 200)
+  await answered.arrayBuffer()
   const shown = await page.show('rm -rf synthetic-waiting-folder')
   assert.equal(hook.isRunning(), true, 'the host was told to ask in its own window while the page was in sight')
   assert.equal((await page.press(shown, 'deny', { confirmed: true })).status, 200)

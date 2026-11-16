@@ -91,11 +91,20 @@ const startBoard = async ({ fs, holdMs, idleMs = 0, name = 'progress.md' } = {})
   return board
 }
 
+// The board's clock counts minutes (its etag floors `now` to the minute, hooks and the page compare at that precision),
+// so a wake just after a minute turns answers with a changed board. A part of a test that checks a request stays open,
+// or which board answers it, starts clear of the next minute by at least its own length: the server shares this clock.
+const clearOfMinute = async ms => {
+  const left = 60_000 - (Date.now() % 60_000)
+  if (left < ms) await pause(left + 100)
+}
+
 // Whether a request is still open after the server had time to answer it: the answer, or undefined.
 const settledWithin = (promise, ms) => Promise.race([promise, pause(ms).then(() => undefined)])
 
 test('serve: the page redraws from one open request, not a 3 s poll', async () => {
   const board = await startBoard({ holdMs: 60_000 })
+  await clearOfMinute(15000)
   const first = await board.ask()
   assert.equal(first.status, 200)
   assert.match(first.text, /First synthetic task/)
@@ -154,6 +163,7 @@ test('serve: the page redraws from one open request, not a 3 s poll', async () =
 
 test('serve: an open board request with no change is answered "no change" after its wait, and a request without an etag at once', async () => {
   const board = await startBoard({ holdMs: 300 })
+  await clearOfMinute(3000)
   const first = await board.ask()
   const plain = await board.ask()
   assert.equal(plain.status, 200, 'a request that holds no board is answered at once')
@@ -165,6 +175,7 @@ test('serve: an open board request with no change is answered "no change" after 
 
 test('serve: a press wakes the open board request, and a connector poll that hands out nothing does not', async () => {
   const board = await startBoard({ holdMs: 60_000 })
+  await clearOfMinute(4000)
   const first = await board.ask()
   const waiting = board.ask(first.etag)
   await pause(200)
@@ -272,6 +283,7 @@ test('serve: when the file watch fails, the page still updates within 3 s from a
   // The watch cannot be set up at all.
   {
     const board = await startBoard({ holdMs: 60_000, fs: () => { throw Object.assign(new Error('synthetic: no watches left'), { code: 'ENOSPC' }) } })
+    await clearOfMinute(5000)
     const first = await board.ask()
     const waiting = board.ask(first.etag)
     await pause(200)
@@ -288,6 +300,7 @@ test('serve: when the file watch fails, the page still updates within 3 s from a
     const watch = deafWatch()
     const board = await startBoard({ holdMs: 60_000, fs: watch.fs })
     assert.ok(watch.made.length >= 1, 'the server set up a watch')
+    await clearOfMinute(5000)
     const first = await board.ask()
     const waiting = board.ask(first.etag)
     await pause(200)
@@ -304,6 +317,7 @@ test('serve: when the file watch fails, the page still updates within 3 s from a
   {
     const watch = deafWatch()
     const board = await startBoard({ holdMs: 60_000, fs: watch.fs })
+    await clearOfMinute(8000)
     const first = await board.ask()
     const waiting = board.ask(first.etag)
     await pause(200)
