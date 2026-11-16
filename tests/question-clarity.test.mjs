@@ -120,5 +120,7 @@ test('a choice drawn from options that have since changed is not the same ask (#
   assert.equal(isSameAskDrawn({ ...drawn, options: ['B', 'A'] }, drawn), false)
   assert.equal(isSameAskDrawn({ ...drawn, options: ['A'] }, drawn), false)
   assert.equal(isSameAskDrawn({ ...drawn, kind: 'reply', options: [] }, drawn), false)
+  // Only the kind changes, so a guard that skipped the kind would pass this one.
+  assert.equal(isSameAskDrawn({ ...drawn, kind: 'reply' }, drawn), false)
   assert.equal(isSameAskDrawn({ ...drawn, text: 'Other choice' }, drawn), false)
 })
