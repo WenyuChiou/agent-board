@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { addedLines, testTitles, titleKnown } from './pr-check.mjs'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 import { isBundleFile } from './bundle-text.mjs'
+import { checkAdded } from './code-rules.mjs'
 import { testLockNamespaceProblem } from './preflight-lock-policy.mjs'
 
 const tables = [['hooks/i18n.ts', 'ZH_TW'], ['hooks/strings-en.ts', 'EN'], ['hooks/strings-zh-cn.ts', 'ZH_CN']]
@@ -918,6 +919,12 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   })
   if (!unsafe.length) add('PASS', 'added test process launches have cleanup markers or none were added.')
   for (const [path] of unsafe) add('WARN', `${path}: a test that starts a process must stop it in \`finally\` and wait for it to exit, on Windows too`)
+
+  await check('code rules', () => {
+    const failures = checkAdded(added)
+    if (!failures.length) add('PASS', 'no added line breaks a code rule (scripts/code-rules.mjs).')
+    for (const failure of failures) add('FAIL', failure.message)
+  })
 
   if (bodyFile && title) {
     await check('PR body check', () => {
