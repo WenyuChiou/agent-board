@@ -739,7 +739,7 @@ export const startCodexReceiver = ({
         agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: SURFACE, unclaimed: true, pollMs, verify, onError,
         // Nobody attached, or busy, is not a refusal: the lease stays alive and the message waits in the board, unclaimed.
         canReceive: async () => !state.pending && one.deliveries === 0 && !sub.isInUse && await isReady(thread),
-        deliver: async (message, accepted, begin) => {
+        deliver: async (message, accepted, begin, unsent) => {
           // The claim is held until a person has the thread open and it reads idle: a turn that began after the board's poll, or
           // one this connection has not heard of yet (the thread is read fresh right before the start), keeps the message waiting
           // here. Nothing is given back. A connection that is lost meanwhile, or a wait past the board's limit, ends this with no
@@ -747,6 +747,17 @@ export const startCodexReceiver = ({
           // Measured from the board's own claim time, which is what it expires from, so nothing starts for a claim the card already shows as expired.
           const waitsSince = Number.isFinite(message.claimed) && message.claimed > 0 ? message.claimed : Date.now()
           const isDone = () => !isHeld() || Date.now() - waitsSince >= ackMs
+          // A claim that waits (the thread was busy, or a join was refused or got no answer, and each starts the wait again) goes back
+          // to the board's queue, text and all, once too little of its time is left for a whole wait and two ticks: nothing was asked
+          // of Codex for it, since turn/start comes only after this loop. The board then hands it out again when the thread reads as a
+          // person's, with its own 30 minutes. Without this the claim ran out and the board dropped its text (#1578). A board that
+          // refuses it (an older one) leaves the claim held here, as before.
+          let canGiveBack = typeof unsent === 'function'
+          const isShort = () => ackMs - (Date.now() - waitsSince) < Math.max(unloadMs, (quiet.get(thread)?.delay ?? 0) + unloadMarginMs) + 2 * tickMs
+          const giveBack = async () => {
+            if (!canGiveBack) return false
+            try { await unsent(); return true } catch (error) { canGiveBack = false; onError(error); return false }
+          }
           one.deliveries += 1
           // isMine: this delivery is the one in the thread, so only it gives the thread back.
           // hasNoTurn: no turn of this delivery runs, for certain (the daemon refused the start, the request never left, or the
@@ -775,6 +786,7 @@ export const startCodexReceiver = ({
                 // thread for all it knows, and stays out of it until it can tell a person from its own subscription.
                 if (sub.mayBeSubscribed) await leave(thread)
                 else if (!sub.isInUse && await isReady(thread) && !isDone()) break
+                if (!isDone() && isShort() && await giveBack()) return undefined
                 await nextEvent()
               }
               // Joining a loaded thread subscribes this connection to its events without starting a turn. The join itself, and the
