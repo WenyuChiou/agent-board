@@ -14,6 +14,8 @@ import { hookOrDeferred, turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { deliveryText } from '../hooks/messaging.ts'
+import { EN } from '../hooks/strings-en.ts'
+import { ZH_TW } from '../hooks/i18n.ts'
 import { HOOK_INPUT_TIMEOUT, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
@@ -3758,6 +3760,37 @@ test('a prompt that is a board delivery leaves the question open, like a board r
   assert.deepEqual(states, ['working', 'waiting'])
 }))
 
+test('raw replay of a board delivery leaves the question open and keeps no delivery words, like the live event', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  holdAutomaticRecovery(f)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const sent = { id: 'AB-1', to: 'gemini:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' }
+  const prompts = [['a person', 'Continue the task'], ['English board header', deliveryText({ ...sent, from: 'board' }, EN)], ['zh-TW board header', deliveryText({ ...sent, from: 'board' }, ZH_TW)], ['English agent header', deliveryText({ ...sent, from: 'claude:abcdef12' }, EN)], ['zh-TW agent header', deliveryText({ ...sent, from: 'claude:abcdef12' }, ZH_TW)]]
+  for (const [index, [name, prompt]] of prompts.entries()) {
+    const at = Date.now() - 4050
+    const session = `raw-delivery-session-${index}`
+    const report = f.command(['--codex-report', '--agent', 'gemini', '--session', session, '--hook-started', String(at - 1000)], { title: 'Question', state: 'waiting', steps: ['- [?] Choose a path'] })
+    assert.equal(report.status, 0, report.stderr)
+    const args = ['--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
+    const queued = spawnSync(process.execPath, [worker, ...args, '--hook-version', '1', '--hook-event', 'BeforeAgent', '--hook-started', String(at)], { env: f.env, input: JSON.stringify({ session_id: session, hook_event_name: 'BeforeAgent', prompt }), encoding: 'utf8', windowsHide: true, timeout: 2000 })
+    assert.equal(queued.status, 0, queued.stderr)
+    const files = pendingFiles(f)
+    assert.equal(files.length, 1, name)
+    const body = readFileSync(join(f.root, 'pending', files[0]), 'utf8')
+    const raw = JSON.parse(body)
+    assert.equal(raw.payload.board_request, false, name)
+    assert.equal(raw.payload.delivery_request, index === 0 ? undefined : true, name)
+    assert.ok(!body.includes('second plan') && !body.includes('Agent Board message'), name)
+    // Replay the queued event the way a later hook run does.
+    const next = f.command(['--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress], { session_id: `${session}-other`, hook_event_name: 'BeforeAgent', prompt: 'Continue the task' })
+    assert.equal(next.status, 0, next.stderr)
+    assert.deepEqual(pendingFiles(f), [], name)
+    const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`gemini:${session}`).digest('hex')}.json`)))
+    // The person's own words start work again; a delivered board message is not the person's and does not.
+    assert.equal(record.state, index === 0 ? 'working' : 'waiting', name)
+  }
+}))
+
 test('raw replay accepts clock skew and removes only old pending temporary files', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   const pending = join(f.root, 'pending'), at = Date.now() + 50000
@@ -6249,6 +6282,20 @@ test('OpenCode status retains its owned question beyond forty user steps and kee
   assert.equal(untouched.steps.length, 40)
   assert.equal(untouched.asked, undefined)
   assert.equal(untouched.askedRevision, undefined)
+}))
+
+test('an OpenCode status that carries delivery_request leaves its owned question open, a person\'s prompt answers it (#1334)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const send = (id, state, extra = {}) => f.command(['--agent-status', '--agent', 'opencode', '--state', state], { session_id: id, ...extra })
+  const read = id => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`opencode:${id}`).digest('hex') + '.json'), 'utf8'))
+  for (const [name, extra, isAnswered] of [['a person', {}, true], ['a delivery', { delivery_request: true }, false], ['a board command', { board_request: true }, false]]) {
+    const id = `synthetic-opencode-delivery-${name.replaceAll(' ', '-')}`
+    assert.equal(send(id, 'waiting', { last_assistant_message: 'Which branch?' }).status, 0)
+    assert.equal(read(id).steps[read(id).asked], '- [?] Which branch?', name)
+    assert.equal(send(id, 'working', { prompt_submitted: true, ...extra }).status, 0)
+    assert.equal(read(id).steps[read(id).asked], isAnswered ? '- [x] Which branch?' : '- [?] Which branch?', name)
+    assert.equal(read(id).state, isAnswered ? 'working' : 'waiting', name)
+  }
 }))
 
 test('local status preserves cached session and step validation after owned-slot retention', () => fixture(f => {
