@@ -95,8 +95,8 @@ export type ServeOptions = {
   open?: (url: string, asApp: boolean) => Promise<boolean | null>
   // A journal line for an approval answered on the board: its hash and first words only.
   journal?: (entry: { project: string; task: string; step: string }) => void
-  // The tests' shorter waits; the board uses APPROVAL_DRAW_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS
-  // and APPROVAL_GRACE_MS.
+  // The tests' shorter waits; the board uses APPROVAL_DRAW_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS,
+  // APPROVAL_GRACE_MS and APPROVAL_PAGE_MS.
   approvalTimes?: { drawMs: number; pressMs: number; secretMs?: number; graceMs?: number; pageMs?: number }
   // How long a replaced server keeps HTTP open after dropping locks/receivers so an open tab can read `{ moved: true }` (#1335).
   movedGraceMs?: number

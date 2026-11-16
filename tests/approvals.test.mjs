@@ -196,9 +196,9 @@ const waitOn = async (board, page) => {
 const PAGE_MS = 1500
 
 test('a page in sight whose board request is waiting still counts as watching past its watching window (#359)', { timeout: 60_000 }, async () => {
-  await clearOfMinute(5_000)
   const board = await startBoard({ drawMs: 5_000, pressMs: 30_000, pageMs: PAGE_MS, holdMs: 30_000, isWatched: true })
   const page = await openPage(board)
+  await clearOfMinute(5_000)
   const { waiting, isOpen } = await waitOn(board, page)
   // Longer than the window a page's last request counts as watching: on main the page asked every 2 s, inside it.
   await pause(PAGE_MS + 1000)
@@ -216,11 +216,11 @@ test('a page in sight whose board request is waiting still counts as watching pa
 })
 
 test('a page whose board request has just run out still counts as watching until it asks again (#359)', { timeout: 60_000 }, async () => {
-  await clearOfMinute(5_000)
   // The hold runs out past the watching window; the approval then arrives before the page asks again. It is the hook's
   // own request, sent here directly: starting a hook process can take longer than the window on a slow runner.
   const board = await startBoard({ drawMs: 5_000, pressMs: 30_000, pageMs: PAGE_MS, holdMs: PAGE_MS + 1000, isWatched: true })
   const page = await openPage(board)
+  await clearOfMinute(5_000)
   const { waiting } = await waitOn(board, page)
   const ended = await waiting
   assert.equal(ended.status, 304, 'the hold ran out with nothing changed')
