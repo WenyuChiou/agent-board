@@ -191,7 +191,7 @@ export const startServer = (o: ServeOptions): void => {
     if (id === '') return
     retired.add(id)
     // A bound on the memory: the oldest ids are forgotten first.
-    while (retired.size > 256) retired.delete(retired.values().next().value as string)
+    while (retired.size > 4096) retired.delete(retired.values().next().value as string)
   }
   // A page that has not asked for this long no longer stands for a newer page (a backgrounded tab asks about once a minute).
   const PAGE_STALE_MS = 150_000
@@ -476,7 +476,10 @@ export const startServer = (o: ServeOptions): void => {
     if (!isLan && req.method === 'GET' && url.pathname === '/api/board' && pageIdOf(req.headers) !== '') {
       const now = Date.now()
       const id = pageIdOf(req.headers)
-      if (retired.has(id)) {
+      const rawSecret = text(req.headers['x-board-approve'])
+      // Even if retired's FIFO bound forgot an old id, an unseen page presenting an unrecognised approval secret
+      // cannot allocate a new pageSeq or displace a live keyed page (#1474).
+      if (retired.has(id) || (!pages.has(id) && rawSecret !== '' && secretOf(req.headers, now) === '')) {
         // A retired page already dropped its secrets when it left or was replaced; keep its late poll
         // from allocating a fresh pageSeq or disturbing any other page's secret (#1378).
         isReplaced = true
