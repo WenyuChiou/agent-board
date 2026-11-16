@@ -475,10 +475,13 @@ fs.writeFileSync = (target, data, ...rest) => {
 
 // A removal may find a path already gone, or the same link with its target gone, only where the path's planned real
 // path is a file this batch itself removed (codex_476 on #1594). The preload plays another program that removes one
-// file right after remove's first unlink, which is the board's own agent-board.mjs.
+// file right after remove takes out the board's own agent-board.mjs, its first removal. It waits for that exact path:
+// Node 22's recursive rmSync calls fs.unlinkSync too, and the setup helper clears its temporary folder that way after
+// the plan, before the apply has planned.
 const removeOnFirstUnlink = (home, victim) => seam(home, `const unlink = fs.unlinkSync
+const first = ${JSON.stringify(join(home, '.agent-board', 'agent-board.mjs'))}
 let done = false
-fs.unlinkSync = file => { unlink(file); if (!done) { done = true; unlink(${JSON.stringify(victim)}) } }`)
+fs.unlinkSync = file => { unlink(file); if (!done && String(file) === first) { done = true; unlink(${JSON.stringify(victim)}) } }`)
 
 test('a remove keeps a Hermes SKILL.md file link whose target another program deleted after setup planned: remove fails instead of deleting it', t => withHome(({ home, run }) => {
   assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
