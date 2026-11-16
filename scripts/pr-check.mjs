@@ -101,7 +101,7 @@ export const issueLine = (body, title, { isOptional = false } = {}) => {
     output.info.push('issue: release pull requests need no issue line.')
     return output
   }
-  const clean = stripComments(body)
+  const clean = visibleBody(body)
   // The list is the run of issue lines that opens the body; the first other line ends it.
   const listed = []
   for (const line of linesOf(clean).map(text => text.trim()).filter(Boolean)) {
@@ -134,7 +134,7 @@ export const issueLine = (body, title, { isOptional = false } = {}) => {
 
 const linkedIssues = body => {
   const items = []
-  for (const line of linesOf(stripComments(body ?? '')).map(text => text.trim()).filter(Boolean)) {
+  for (const line of linesOf(visibleBody(body)).map(text => text.trim()).filter(Boolean)) {
     const match = line.match(/^(Fixes|Closes|Resolves|Part of)\s+#(\d+)\b/i)
     if (!match) break
     items.push({ number: Number(match[2]), kind: match[1].toLowerCase() === 'part of' ? 'part of' : 'fixes' })
@@ -239,7 +239,7 @@ export const findingLink = ({ title = '', body = '', number = null, repo = null,
   const output = result()
   const hasFindingTitle = /^\s*(?:[a-z]+(?:\([^)]*\))?!?:\s*)?(?:\[\s*finding\s*\]|finding\s*:)/i.test(String(title ?? ''))
   if (!isFinding && !hasFindingTitle) return output
-  const clean = stripComments(body ?? '')
+  const clean = visibleBody(body)
   // The answer may itself start with #, as the form's placeholder `#1299` does; only the next heading, indented or not, ends
   // the section. Blank lines may be CRLF, as a body edited on the web is.
   const fromPrSection = clean.match(/^#{2,3}[ \t]*Pull request it came from(?:[ \t]*\r?\n)+(?![ \t]*#{1,6}[ \t])([^\r\n]+)/im)?.[1]?.trim() ?? ''
@@ -282,7 +282,7 @@ const namesBranch = (text, branch, boundary = '[\\s`,();.]') => {
 
 export const authorLine = (body, branch) => {
   const output = { agent: null, ...result() }
-  const author = stripComments(body).match(/^Author:[ \t]*(.*)$/m)?.[1]?.trim() ?? ''
+  const author = visibleBody(body).match(/^Author:[ \t]*(.*)$/m)?.[1]?.trim() ?? ''
   const comma = author.indexOf(',')
   const name = comma === -1 ? '' : author.slice(0, comma).replace(/`/g, '').trim()
   // The weekly table and the review queue name the agent by the words before the comma, so a line without one would count as a new author each time.
@@ -310,9 +310,9 @@ export const naming = (title, branch) => {
 
 export const sections = (body, template) => {
   const output = result()
-  const clean = stripComments(body)
+  const clean = visibleBody(body)
   const headings = [...clean.matchAll(/^## (.+)\r?$/gm)]
-  for (const heading of stripComments(template).matchAll(/^## (.+)\r?$/gm)) {
+  for (const heading of visibleBody(template).matchAll(/^## (.+)\r?$/gm)) {
     const name = heading[1].trim()
     const index = headings.findIndex(item => item[1].trim().toLowerCase() === name.toLowerCase())
     const found = headings[index]
@@ -320,7 +320,7 @@ export const sections = (body, template) => {
       output.problems.push(problem('sections', `the "${name}" section is missing or empty.`, `add "## ${name}" and explain its result, or why it is not applicable.`))
     }
   }
-  const items = new Set([...stripComments(template).matchAll(/^- \[ \] (.+)\r?$/gm)].map(match => match[1].trim()))
+  const items = new Set([...visibleBody(template).matchAll(/^- \[ \] (.+)\r?$/gm)].map(match => match[1].trim()))
   for (const match of clean.matchAll(/^- \[([ xX])\] (.+)\r?$/gm)) {
     if (items.has(match[2].trim())) {
       output.problems.push(problem('sections', 'a template checkbox has no result or reason.', match[1] === ' ' ? 'tick it and add the result, or add "not run:" and why, or "n/a:" and why.' : 'add the result after a dash on the checked item.'))
@@ -499,7 +499,7 @@ export const needsBundle = paths => paths.some(path => /^(scripts|hooks)\//.test
 // Every agent posts from one GitHub account, so the weekly table and the review queue tell agents apart by the
 // Author line: the words before its first comma, with a dispatching lane in brackets as part of the name.
 export const authorKey = body => {
-  const author = stripComments(body).match(/^Author:[ \t]*(.*)$/m)?.[1] ?? ''
+  const author = visibleBody(body).match(/^Author:[ \t]*(.*)$/m)?.[1] ?? ''
   return author.split(',')[0].replace(/`/g, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
 }
 
@@ -779,7 +779,7 @@ export const reviewOf = item => {
 }
 
 // The tier the body names on its `Tier:` line (RULES R2), or null when it names none.
-export const tierOf = body => stripComments(body ?? '').match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
+export const tierOf = body => visibleBody(body).match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
 
 // A risk-tier pull request changes one failure surface and names it on a `Surface:` line (CONTRIBUTING rule 2, #1490).
 // It applies to pull requests numbered above SURFACE_FROM, the issue (#1490) the rule and this check came in with; a local
@@ -854,6 +854,9 @@ const visibleLines = (text, { isPlaceKept = false } = {}) => {
   }
   return shown
 }
+// The body as a reader sees it: no fenced code, no HTML comment, and a comment marker inside a fence or a code span
+// is plain text, so it hides nothing after it (#1492).
+const visibleBody = body => visibleLines(body ?? '').join('\n')
 // The tier a `Tier:` line's value names, or null. Every check reads the value with this one reader (#1531), so a
 // spelling the tier check accepts is one the surface, cases and round checks read too.
 const tierWord = value => value.match(/^`?(risk|normal|light)\b/i)?.[1].toLowerCase() ?? null
