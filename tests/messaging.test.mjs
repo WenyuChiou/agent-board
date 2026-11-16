@@ -4411,10 +4411,33 @@ const codexFixture = async fn => {
   try { await fn(sharedCodex.board, sub) } finally { codexCurrent = codexThread; codexSuffix = '' }
 }
 const codexMock = new URL('./helpers/codex-daemon-mock.mjs', import.meta.url)
+// Skip an incomplete trailing line while the mock proxy appends to its log so waitFor keeps polling; earlier lines still throw.
+const parseCodexLogCalls = text => {
+  if (!text) return []
+  const lines = text.split('\n')
+  if (!text.endsWith('\n')) lines.pop()
+  const entries = lines.map(line => line.trim()).filter(Boolean)
+  const parsed = []
+  for (let i = 0; i < entries.length; i += 1) {
+    try { parsed.push(JSON.parse(entries[i])) } catch (error) {
+      if (i === entries.length - 1) break
+      throw error
+    }
+  }
+  return parsed
+}
+const hasFreshReadBeforeStart = (calls, start) => {
+  const at = calls.indexOf(start)
+  if (at < 0) return false
+  const beforeStart = calls.slice(0, at)
+  const lastRead = beforeStart.findLastIndex(one => one.method === 'thread/read')
+  if (lastRead < 0) return false
+  return beforeStart.slice(lastRead + 1).every(one => one.method === 'thread/loaded/list')
+}
 const codexDaemon = (dir, config) => {
   const file = join(dir, 'mock.json'), log = join(dir, 'rpc.log')
   writeFileSync(file, JSON.stringify({ log, loaded: [codexCurrent], status: 'idle', start: 'ack', turn: 'turn-busy', ...config }))
-  return { executable: fileURLToPath(codexMock), env: { ...process.env, CODEX_MOCK_CONFIG: file }, log, calls: () => (readFileSyncSafe(log) ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line)) }
+  return { executable: fileURLToPath(codexMock), env: { ...process.env, CODEX_MOCK_CONFIG: file }, log, calls: () => parseCodexLogCalls(readFileSyncSafe(log)) }
 }
 const codexCase = (dir, i, config) => {
   // One board serves several cases of a test: each has its own mock folder and message id, so the board starts once.
@@ -4500,8 +4523,8 @@ test('an idle Codex thread gets the message through turn/start, not the queue', 
     const calls = daemon.calls().filter(one => one.method)
     const starts = calls.filter(one => one.method === 'turn/start')
     assert.equal(starts.length, 1)
-    // The thread is read fresh right before the start (#1370).
-    assert.equal(calls[calls.indexOf(starts[0]) - 1].method, 'thread/read')
+    // The thread is read fresh right before the start (#1370), ignoring interleaved list polls (#1564).
+    assert.ok(hasFreshReadBeforeStart(calls, starts[0]), 'thread/read precedes turn/start with no intervening non-list RPC')
     assert.ok(!calls.some(one => /^thread\/queue|^turn\/steer/.test(one.method)))
     const text = starts[0].params.input[0].text
     // The claim nonce is the message id Codex records, and the header tells a thread that answered already what to do.
@@ -4516,6 +4539,29 @@ test('an idle Codex thread gets the message through turn/start, not the queue', 
     assert.equal(daemon.calls().filter(one => one.method === 'turn/start').length, 2)
   } finally { await receiver.close() }
 }))
+
+test('Codex mock log polling skips a half-written trailing line and fresh-read checks ignore list polls (#1564)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-log-1564-'))
+  try {
+    const daemon = codexDaemon(dir, {})
+    const first = { argv: ['app-server', 'proxy'] }
+    const second = { method: 'thread/read' }
+    writeFileSync(daemon.log, `${JSON.stringify(first)}\n${JSON.stringify(second)}\n{"method":"turn/st`)
+    assert.deepEqual(daemon.calls(), [first, second])
+    // A truncated final line that already got its trailing newline is also skipped; earlier corruption still throws.
+    writeFileSync(daemon.log, `${JSON.stringify(first)}\n{"method":"broken\n`)
+    assert.deepEqual(daemon.calls(), [first])
+    writeFileSync(daemon.log, `{"method":"broken\n${JSON.stringify(first)}\n`)
+    assert.throws(() => daemon.calls(), SyntaxError)
+
+    const start = { method: 'turn/start' }
+    assert.equal(hasFreshReadBeforeStart([{ method: 'thread/resume' }, { method: 'thread/read' }, { method: 'thread/loaded/list' }, start], start), true)
+    assert.equal(hasFreshReadBeforeStart([{ method: 'thread/read' }, { method: 'turn/steer' }, start], start), false)
+    assert.equal(hasFreshReadBeforeStart([{ method: 'thread/resume' }, { method: 'thread/loaded/list' }, start], start), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('a busy Codex thread gets the message only after its running turn ends', async () => codexFixture(async (board, dir) => {
   const endFlag = join(dir, 'end-turn')
