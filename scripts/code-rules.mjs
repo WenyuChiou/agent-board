@@ -24,8 +24,10 @@ export const loadConfig = (repoDir = process.cwd(), refs) => {
     const { base = 'origin/main', head = 'HEAD', run = spawnSync } = refs
     const mergeBase = run('git', ['merge-base', base, head], { cwd: repoDir, encoding: 'utf8' })
     if (mergeBase.error || mergeBase.status !== 0) throw new Error(`code-rules: ${CONFIG_PATH} is missing and git could not find the merge base of ${base} and ${head}; fetch the base and run again.`)
-    const had = run('git', ['cat-file', '-e', `${mergeBase.stdout.trim()}:${CONFIG_PATH}`], { cwd: repoDir, encoding: 'utf8' })
-    if (!had.error && had.status === 0) throw new Error(`code-rules: this pull request removes ${CONFIG_PATH}; restore it from main (the check reads its list from the pull request).`)
+    // ls-tree prints the path when the merge base has it and nothing when not; any failure stops the check (codex_448).
+    const had = run('git', ['ls-tree', '--name-only', mergeBase.stdout.trim(), '--', CONFIG_PATH], { cwd: repoDir, encoding: 'utf8' })
+    if (had.error || had.status !== 0) throw new Error(`code-rules: ${CONFIG_PATH} is missing and git could not read the merge base; fetch the base and run again.`)
+    if (had.stdout.trim()) throw new Error(`code-rules: this pull request removes ${CONFIG_PATH}; restore it from main (the check reads its list from the pull request).`)
   }
   const path = existsSync(own) ? own : join(here, 'code-rules.json')
   let config
@@ -39,6 +41,34 @@ export const loadConfig = (repoDir = process.cwd(), refs) => {
 // hooks/board-script-N.ts are built from other sources; the rule reads the sources.
 const isGenerated = path => /^hooks\/board-script-\d+\.ts$/.test(path)
 const isBlockCommentLine = text => /^\s*\*/.test(text)
+
+// The index of the `}` that closes a `${` expression whose body starts at `from`, past strings, comments and nested
+// templates, so a quoted brace neither ends the expression early nor keeps it open (codex_448); the line's length when
+// it does not close on this line.
+const closeOf = (text, from) => {
+  let depth = 1
+  for (let k = from; k < text.length; k++) {
+    const c = text[k]
+    if (c === '\\') k++
+    else if (c === '"' || c === "'") { k++; while (k < text.length && text[k] !== c) k += text[k] === '\\' ? 2 : 1 }
+    else if (c === '`') k = templateEnd(text, k)
+    else if (c === '/' && text[k + 1] === '/') return text.length
+    else if (c === '/' && text[k + 1] === '*') { const end = text.indexOf('*/', k + 2); if (end === -1) return text.length; k = end + 1 }
+    else if (c === '{') depth++
+    else if (c === '}' && --depth === 0) return k
+  }
+  return text.length
+}
+// The index of the backtick that closes the template starting at `start`, or the line's length.
+const templateEnd = (text, start) => {
+  let j = start + 1
+  while (j < text.length && text[j] !== '`') {
+    if (text[j] === '\\') j += 2
+    else if (text[j] === '$' && text[j + 1] === '{') j = closeOf(text, j + 2) + 1
+    else j++
+  }
+  return j
+}
 
 // The line without its strings and comments, so a call inside a string, a `// ...` tail or a `/* ... */` never matches.
 // A template literal's `${...}` expressions run, so they stay as code (round 2 of #1551).
@@ -58,12 +88,7 @@ export const codeOnly = text => {
       while (j < text.length && text[j] !== '`') {
         if (text[j] === '\\') { j += 2; continue }
         if (text[j] === '$' && text[j + 1] === '{') {
-          let depth = 1
-          let k = j + 2
-          for (; k < text.length; k++) {
-            if (text[k] === '{') depth++
-            else if (text[k] === '}' && --depth === 0) break
-          }
+          const k = closeOf(text, j + 2)
           out += ` ${codeOnly(text.slice(j + 2, k))} `
           j = k + 1
           continue

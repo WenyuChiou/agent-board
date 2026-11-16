@@ -80,6 +80,13 @@ test('a timer inside a template literal expression fails, and the same words in 
   assert.deepEqual(check(added('tests/x.test.mjs', 'const t = `${name} it.only( as words`')), [])
 })
 
+test('a quoted or commented brace inside a template expression neither hides a timer nor exposes template text', () => {
+  assert.equal(check(added('hooks/new-thing.ts', "const text = `${'}' + setTimeout(done, 10)}`")).length, 1)
+  assert.equal(check(added('hooks/new-thing.ts', 'const text = `${a /* } */ + setTimeout(done, 10)}`')).length, 1)
+  assert.equal(check(added('hooks/new-thing.ts', 'const text = `${`${x}` + setTimeout(done, 10)}`')).length, 1)
+  assert.deepEqual(check(added('hooks/new-thing.ts', "const text = `${'{'} setTimeout( as words`")), [])
+})
+
 test('it.only after a statement prefix fails, and this test file, which writes the call only inside strings, passes', () => {
   assert.equal(check(added('tests/x.test.mjs', 'if (enabled) it.only("one", () => {})')).length, 1)
   assert.equal(check(added('tests/x.test.mjs', 'for (const x of y) { test.only("one", () => {}) }')).length, 1)
