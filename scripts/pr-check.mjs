@@ -874,10 +874,10 @@ const surfaceLine = body => {
 export const SIZE_FROM = 1545
 export const SIZE_RISK = 400
 export const SIZE_NORMAL = 800
-// A reason is the text after `cannot split:` with something left once each `<...>` placeholder and repeated `cannot split:`
-// is taken out (surface reads it the same way); the template's own `Surface:` line,
+// A reason is the text after `cannot split:` with a letter or a digit, in any language, left once each `<...>` placeholder
+// and repeated `cannot split:` are taken out, so formatting alone is none (surface reads it the same way); the template's own `Surface:` line,
 // which starts with `<`, never counts (as in surface), and neither does a line in a code fence or an HTML comment.
-const isSplitReason = text => /[^ \t,;.:]/.test(text.replace(/<[^<>]*>/g, '').replace(/cannot split:/gi, ''))
+const isSplitReason = text => /[\p{L}\p{N}]/u.test(text.replace(/<[^<>]*>/g, '').replace(/cannot split:/gi, ''))
 const hasSplitReason = body => surfaceLine(body).filled.some(value => isSplitReason(value.split(/,[ \t]*cannot split:/i).slice(1).join(','))) ||
   visibleLines(body).some(line => isSplitReason(line.match(/^Size:[ \t]*cannot split:(.*)$/i)?.[1] ?? ''))
 export const size = ({ body = '', title = '', number = null, numstat, tier = visibleTier(body) } = {}) => {
