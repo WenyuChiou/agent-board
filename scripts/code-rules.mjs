@@ -15,9 +15,18 @@ import { addedLines } from './pr-check.mjs'
 const here = dirname(fileURLToPath(import.meta.url))
 export const CONFIG_PATH = 'scripts/code-rules.json'
 
-// The pull request's list, or this checker's own when the checkout has none (a branch cut before the file existed).
-export const loadConfig = (repoDir = process.cwd()) => {
+// The pull request's list, or this checker's own when the checkout has none because its branch was cut before the file
+// existed. When `refs` names the base and head and the merge base already had the list, the pull request removed it:
+// that stops the check instead of falling back, so a deleted list never passes (round 2 of #1551).
+export const loadConfig = (repoDir = process.cwd(), refs) => {
   const own = join(resolve(repoDir), CONFIG_PATH)
+  if (!existsSync(own) && refs) {
+    const { base = 'origin/main', head = 'HEAD', run = spawnSync } = refs
+    const mergeBase = run('git', ['merge-base', base, head], { cwd: repoDir, encoding: 'utf8' })
+    if (mergeBase.error || mergeBase.status !== 0) throw new Error(`code-rules: ${CONFIG_PATH} is missing and git could not find the merge base of ${base} and ${head}; fetch the base and run again.`)
+    const had = run('git', ['cat-file', '-e', `${mergeBase.stdout.trim()}:${CONFIG_PATH}`], { cwd: repoDir, encoding: 'utf8' })
+    if (!had.error && had.status === 0) throw new Error(`code-rules: this pull request removes ${CONFIG_PATH}; restore it from main (the check reads its list from the pull request).`)
+  }
   const path = existsSync(own) ? own : join(here, 'code-rules.json')
   let config
   try { config = JSON.parse(readFileSync(path, 'utf8')) } catch { throw new Error(`code-rules: ${CONFIG_PATH} is not readable JSON; fix it or restore it from main.`) }
@@ -32,6 +41,7 @@ const isGenerated = path => /^hooks\/board-script-\d+\.ts$/.test(path)
 const isBlockCommentLine = text => /^\s*\*/.test(text)
 
 // The line without its strings and comments, so a call inside a string, a `// ...` tail or a `/* ... */` never matches.
+// A template literal's `${...}` expressions run, so they stay as code (round 2 of #1551).
 export const codeOnly = text => {
   let out = ''
   for (let i = 0; i < text.length; i++) {
@@ -42,7 +52,27 @@ export const codeOnly = text => {
       if (end === -1) break
       i = end + 1
       out += ' '
-    } else if (char === '"' || char === "'" || char === '`') {
+    } else if (char === '`') {
+      let j = i + 1
+      out += '`'
+      while (j < text.length && text[j] !== '`') {
+        if (text[j] === '\\') { j += 2; continue }
+        if (text[j] === '$' && text[j + 1] === '{') {
+          let depth = 1
+          let k = j + 2
+          for (; k < text.length; k++) {
+            if (text[k] === '{') depth++
+            else if (text[k] === '}' && --depth === 0) break
+          }
+          out += ` ${codeOnly(text.slice(j + 2, k))} `
+          j = k + 1
+          continue
+        }
+        j++
+      }
+      out += '`'
+      i = j
+    } else if (char === '"' || char === "'") {
       let j = i + 1
       while (j < text.length && text[j] !== char) j += text[j] === '\\' ? 2 : 1
       out += char + char
@@ -84,7 +114,8 @@ export const main = (argv = process.argv.slice(2), { log = console.log, error = 
   const value = name => { const i = argv.indexOf(name); return i === -1 ? undefined : argv[i + 1] }
   try {
     const cwd = resolve(value('--repo-dir') ?? '.')
-    const failures = checkAdded(diffAdded({ cwd, base: value('--base'), head: value('--head') }), loadConfig(cwd))
+    const refs = { base: value('--base') ?? 'origin/main', head: value('--head') ?? 'HEAD' }
+    const failures = checkAdded(diffAdded({ cwd, ...refs }), loadConfig(cwd, refs))
     if (!failures.length) { log('code-rules: PASS, no added line breaks a code rule.'); return 0 }
     for (const failure of failures) error(`FAIL ${failure.message}`)
     error(`code-rules: ${failures.length} FAIL`)

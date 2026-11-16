@@ -73,6 +73,13 @@ test('a trailing comment or a string holding the call never blocks, and a call a
   assert.equal(codeOnly('a("it.only(") // x'), 'a("") ')
 })
 
+test('a timer inside a template literal expression fails, and the same words in template text pass', () => {
+  assert.equal(check(added('hooks/new-thing.ts', 'const text = `${setTimeout(done, 10)}`')).length, 1)
+  assert.equal(check(added('hooks/new-thing.ts', 'log(`wait ${ok ? setTimeout(go, 1) : 0} then`)')).length, 1)
+  assert.deepEqual(check(added('hooks/new-thing.ts', 'const text = `setTimeout( is only words here`')), [])
+  assert.deepEqual(check(added('tests/x.test.mjs', 'const t = `${name} it.only( as words`')), [])
+})
+
 test('it.only after a statement prefix fails, and this test file, which writes the call only inside strings, passes', () => {
   assert.equal(check(added('tests/x.test.mjs', 'if (enabled) it.only("one", () => {})')).length, 1)
   assert.equal(check(added('tests/x.test.mjs', 'for (const x of y) { test.only("one", () => {}) }')).length, 1)
@@ -119,6 +126,36 @@ test('the list is data read from the pull request checkout: its own entry passes
     const broken = run('broken')
     assert.equal(broken.status, 1)
     assert.match(broken.stderr, /not readable JSON/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a pull request that deletes the list fails closed, and a branch cut before the list existed uses the checker list', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'code-rules-gone-'))
+  try {
+    const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, encoding: 'utf8' })
+    const run = head => spawnSync(process.execPath, [script, '--repo-dir', dir, '--base', 'main', '--head', head], { encoding: 'utf8' })
+    git('init', '-q', '-b', 'main')
+    mkdirSync(join(dir, 'hooks')); mkdirSync(join(dir, 'scripts'))
+    writeFileSync(join(dir, 'hooks', 'plain.ts'), 'export const a = 1\n')
+    git('add', '.'); git('commit', '-q', '-m', 'before the list')
+    git('branch', 'early')
+    writeFileSync(join(dir, 'scripts', 'code-rules.json'), JSON.stringify({ setTimeoutFiles: [] }))
+    git('add', '.'); git('commit', '-q', '-m', 'the list')
+    // Removing the list, with nothing else changed, stops the check instead of falling back to the checker's list.
+    git('checkout', '-q', '-b', 'deleted', 'main')
+    git('rm', '-q', 'scripts/code-rules.json'); git('commit', '-q', '-m', 'deleted')
+    const deleted = run('deleted')
+    assert.equal(deleted.status, 1, deleted.stdout)
+    assert.match(deleted.stderr, /removes scripts\/code-rules\.json/)
+    // A branch cut before the list existed is judged by the checker's own list: a clean change passes, a new timer fails.
+    git('checkout', '-q', 'early')
+    writeFileSync(join(dir, 'hooks', 'plain.ts'), 'export const a = 2\n')
+    git('add', '.'); git('commit', '-q', '-m', 'early change')
+    const early = run('early')
+    assert.equal(early.status, 0, early.stderr)
+    writeFileSync(join(dir, 'hooks', 'fresh.ts'), 'setTimeout(a, 1)\n')
+    git('add', '.'); git('commit', '-q', '-m', 'early timer')
+    assert.equal(run('early').status, 1)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
