@@ -1705,13 +1705,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // Each file is read again just before its change and checked after it (#1488, as runSidecarOnly does), so an
     // edit made before that last re-read is never overwritten or removed, and a change that did not land is not
     // reported as applied. A mismatch stops the batch at once: files written before it stay (no rollback, as in the connect
-    // transaction). The install record is written after every planned file, so a mismatch among them leaves it unwritten;
-    // a mismatch on another agent's record comes after this one's. The next setup plans again from the files as they are.
-    // A file that already holds what this change leaves passes the re-read too: it is the same file reached by a second
-    // name earlier in this batch (a skills folder linked to the shared one, or another letter case on Windows), and
-    // writing the same text over it, or removing a file already gone, loses nothing a person wrote.
-    const unchanged = (file: string, next: string | null): void => { const now = readLocal(file); if (now !== (before.get(file) ?? null) && now !== next) throw new Error('INSTALL_CHANGED') }
-    const written = (file: string, text: string | null): void => { if (readLocal(file) !== text) throw new Error('INSTALL_CHANGED') }
+    // transaction). This agent's install record changes after every planned file (on install, other agents' records are
+    // updated after it; on remove, the handover to another agent's record comes first), so a mismatch among the planned
+    // files leaves the record as it was. The next setup plans again from the files as they are.
+    // A file that already holds, byte for byte, what this change leaves passes the re-read too: it is the same file reached
+    // by a second name earlier in this batch (a skills folder linked to the shared one, or another letter case on
+    // Windows), and writing the same text over it, or removing a file already gone, loses nothing a person wrote.
+    const holds = (file: string, text: string | null): boolean => { const bytes = readBytes(file); return text === null ? bytes === null : bytes !== null && bytes.equals(Buffer.from(text, 'utf8')) }
+    const unchanged = (file: string, next: string | null): void => { if (readLocal(file) !== (before.get(file) ?? null) && !holds(file, next)) throw new Error('INSTALL_CHANGED') }
+    const written = (file: string, text: string | null): void => { if (!holds(file, text)) throw new Error('INSTALL_CHANGED') }
     const put = (file: string, text: string, target = file): void => { atomic(target, text, () => unchanged(file, text)); written(file, text) }
     const drop = (file: string): void => { unchanged(file, null); if (existsSync(file)) unlinkSync(file); written(file, null) }
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
