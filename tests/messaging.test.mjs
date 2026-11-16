@@ -5046,6 +5046,52 @@ test('a Codex receiver with its own default wait starts nothing on a listed idle
   } finally { await receiver.close() }
 }))
 
+test('an unsent receipt from the connection that holds a claim puts the message back in the queue with its text; any other claim refuses it (#1578)', () => {
+  const now = Date.now()
+  const target = { id: 'synthetic-codex-binding', agent: 'codex', session: 'unsent-session', turn: 'session', surface: SURFACE_IDS.codexDaemon, expires: now + OPEN_LIMIT_MS }
+  const other = { ...target, id: 'synthetic-other-binding' }
+  const queued = queueMessage({ messages: [] }, { id: 'unsent-one', target: target.id, turn: target.turn, text: 'Check the build.' }, 'board', target, now).state
+  const claimed = claimMessages(queued, target, now + 1, 'abcdef').state
+  const back = messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2)
+  const one = back.messages[0]
+  assert.deepEqual([one.status, one.text, one.claimed, one.error, one.target], ['queued', 'Check the build.', 0, '', target.id])
+  // Taken again, it is a fresh claim with the same ACK code, not a repeat: nothing of it was sent.
+  const again = claimMessages(back, target, now + 3, '123456').messages[0]
+  assert.deepEqual([again.status, again.claimed, again.nonce, again.redelivered], ['uncertain', now + 3, 'abcdef', undefined])
+  // Refused: another connection of the session, an accepted claim, a claim already reported with an error, an unsent receipt
+  // that carries a reply or an error, and a message that is not claimed.
+  assert.throws(() => messageReceipt(claimed, other, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2), /INVALID_RECEIPT/)
+  const accepted = messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'accepted' }, now + 2)
+  assert.throws(() => messageReceipt(accepted, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 3), /INVALID_RECEIPT/)
+  const reported = messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'uncertain', error: 'ACK_TIMEOUT' }, now + 2)
+  assert.throws(() => messageReceipt(reported, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 3), /INVALID_RECEIPT/)
+  assert.throws(() => messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent', error: 'BUSY' }, now + 2), /INVALID_RECEIPT/)
+  assert.throws(() => messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent', reply: 'ACK abcdef' }, now + 2), /INVALID_RECEIPT/)
+  assert.throws(() => messageReceipt(queued, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2), /CLAIM_REQUIRED/)
+})
+
+test('a Codex claim that meets a busy thread goes back to the queue with its text before too little of its time is left for a whole wait, and is delivered once after (#1578)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
+  writeFileSync(person, '')
+  // The person's turn begins as the claim joins, so the receiver leaves again. The claim's own time is 3 s here (30 minutes for
+  // real) and a whole wait is 400 ms: with less than that and two ticks left, nothing was sent for the claim, so it goes back.
+  const daemon = codexDaemon(dir, { readActive: true, endFlag, person })
+  const receiver = codexReceiver(board, daemon, { ackMs: 3000 })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'queued')
+    assert.equal(codexStarts(daemon), 0)
+    // The turn ends: the message is taken again and started once, with the text it was sent with.
+    writeFileSync(endFlag, '')
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    const starts = daemon.calls().filter(one => one.method === 'turn/start')
+    assert.equal(starts.length, 1)
+    assert.ok(JSON.stringify(starts[0].params).includes('Check the build and tell me what failed.'))
+  } finally { await receiver.close() }
+}))
+
 test('a Codex daemon whose unload delay cannot be read gets no message, and gets it once the delay is read for the thread\'s folder (#318)', () => codexFixture(async (board, dir) => {
   const configFaults = join(dir, 'config-faults')
   writeFileSync(configFaults, '')
