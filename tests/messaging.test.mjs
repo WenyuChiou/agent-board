@@ -6772,7 +6772,7 @@ test('every receiver record against idle, working and ended shows its line, with
     assert.equal(card.send === 'connected' || card.send === 'mailbox', canSend, label)
     if (!canSend && state !== 'ended') assert.ok(labels.includes(s.pgCopyAnswer), label + ' ' + labels.join(' | '))
     if (!isGone) {
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, none: s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
       assert.ok(page.text().includes(words), label + ' ' + words)
       assert.equal(page.text().includes(s.serveLineUnrecorded), !canSend && route.line !== 'none', label)
     }
@@ -7253,7 +7253,7 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     assert.equal(card.delivery !== undefined, canSend, `${record.source}/${surface.id}/${state}`)
     if (!(record.kind === 'mailbox' && state === 'ended')) {
       const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface.id === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface.id === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
       assert.equal(card.line, route.line, `${record.source}/${surface.id}/${state}`)
       assert.ok(card.lineText.includes(words), `${record.source}/${surface.id}/${state}: ${card.lineText}`)
     }

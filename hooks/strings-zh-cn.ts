@@ -906,6 +906,7 @@ export const ZH_CN: Strings = {
   serveReopenRunning: (agent: string): string => `正在后台执行这一轮；打开 ${agent} 窗口就能看到。`,
   serveReopenDone: (agent: string): string => `已在后台执行这一轮；打开 ${agent} 窗口就能看到。`,
   serveLineNone: (agent: string): string => `${agent} 还不能从看板收消息：请复制后贴到它的会话里。`,
+  serveCodexResumePrompt: '在电脑上恢复这个 Codex 对话，再在 Codex 中发送一次提示以重新连接。连接后再从那台电脑的看板发送；仅重新打开对话还不会连接。',
   serveLineUnrecorded: '这条路还没有现场运行记录，所以只提供复制。',
   serveLineStateUnknown: '无法确定会话状态，所以只提供复制。',
   serveLineShadowed: '另一个接收器已连接到此会话，这条路无法发送。',
