@@ -9,8 +9,8 @@ import {
   addedLines, apiReader, authorKey, evidenceFirst, EVIDENCE_FROM, isAncestor, authorLine, binaryImages, cap, CASES_FROM, cases, changelog, checkIssue, checkPr,
   duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
   main, naming, needsBundle, outsideClaim, privateData, report, reportMarkdown, reviewOf, rulesPage, sections,
-  riskPathsOf, ROUND_CAP, rounds, stripComments, SURFACE_FROM, surface, testTitles, tier, TIER_FROM, tierOf, titleKnown,
-  verdict, FAIL_FIRST_FROM, caseRows,
+  riskPathsOf, ROUND_CAP, rounds, size, SIZE_FROM, SIZE_NORMAL, SIZE_RISK, stripComments, SURFACE_FROM, surface, testTitles,
+  tier, TIER_FROM, tierOf, titleKnown, verdict, FAIL_FIRST_FROM, caseRows,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -926,8 +926,9 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   const args = ['--event', event, '--repo-dir', setup.directory]
   const passed = await runMain(args, env)
   assert.equal(passed.status, 0, passed.stdout + passed.stderr)
-  // The reviews are read even with an approving comment, for the round count (#1503).
-  assert.equal(calls.length, 6)
+  // The reviews are read even with an approving comment, for the round count (#1503); the pull request itself is read
+  // as it is now (#1258).
+  assert.equal(calls.length, 7)
   assert.ok(calls.every(call => call.host === 'api.example.invalid' && call.authorization === 'Bearer synthetic-token-value'))
   globalThis.fetch = async url => (url.pathname.endsWith('/issues/42') ? { ok: false, status: 404, headers: new Headers() } : { ok: true, status: 200, json: async () => [], headers: new Headers() })
   const missing = await runMain(args, env)
@@ -947,6 +948,57 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   }
   assert.equal((await runMain(args, env)).status, 2)
   assert.equal(calls.some(call => call.host === 'untrusted.invalid'), false)
+})
+
+test('pr-check reads the pull request as it is now, so a re-run of a draft event cannot pass a ready one with changes requested (#1258)', async t => {
+  const setup = fixture(t)
+  const head = setup.git('rev-parse', 'HEAD')
+  // The event of a run started while the pull request was a draft: a re-run of that run reuses it.
+  setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body, draft: true, author_association: 'OWNER', created_at: '2030-01-01T00:00:00Z', labels: [], head: { ref: branch, sha: head }, base: { sha: setup.base } } }))
+  const args = ['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory]
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const env = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' }
+  const answer = liveHead => async url => {
+    const payload = url.pathname.endsWith('/pulls/17') ? { number: 17, title: 'fix: synthetic check', body, draft: false, labels: [], head: { ref: branch, sha: liveHead } }
+      : url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: REQUEST CHANGES ${head} by independent reviewer` }]
+        : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  // Marked ready since, on the same head: checked as ready, so the request for changes holds it.
+  globalThis.fetch = answer(head)
+  const ready = await runMain(args, env)
+  assert.equal(ready.status, 1, ready.stdout + ready.stderr)
+  assert.match(ready.stdout, /the latest review requested changes/)
+  // A newer head since: this run is for the old head, which is checked as the event has it.
+  globalThis.fetch = answer('f'.repeat(40))
+  const older = await runMain(args, env)
+  assert.equal(older.status, 0, older.stdout + older.stderr)
+})
+
+test('pr-check reads the release numbers after reading the pull request as it is now, so an event from before a rename to a release still checks its changelog (#1258)', async t => {
+  const setup = fixture(t)
+  const head = setup.git('rev-parse', 'HEAD')
+  // main: the last release tag on the fixture base, then a fix merged after it. The event is from before the pull request
+  // was renamed a release; the release section it now needs is missing, so the changelog check must fail it.
+  setup.git('switch', 'main')
+  setup.git('tag', 'agent-board--v1.0.0')
+  setup.put('late.txt', 'late\n')
+  setup.git('add', '--', 'late.txt')
+  setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'fix: a late synthetic fix (#101)')
+  const base = setup.git('rev-parse', 'HEAD')
+  setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body, draft: false, author_association: 'OWNER', created_at: '2030-01-01T00:00:00Z', labels: [], head: { ref: branch, sha: head }, base: { sha: base } } }))
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async url => {
+    const payload = url.pathname.endsWith('/pulls/17') ? { number: 17, title: 'chore(release): 1.1.0', body, draft: false, labels: [], head: { ref: branch, sha: head } }
+      : url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${head} by independent reviewer` }]
+        : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  const renamed = await runMain(['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory], { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' })
+  assert.equal(renamed.status, 1, renamed.stdout + renamed.stderr)
+  assert.match(renamed.stdout, /CHANGELOG\.md has no section for version 1\.1\.0/)
 })
 
 test('pr-check looks up each further issue with the token and reads a repeated issue once', async t => {
@@ -1791,6 +1843,58 @@ test('pr-check reads risk-paths.md as the base lists it and counts a moved file 
 })
 const surfaceRun = (line, extra = {}) => surface({ body: riskBody(line), title: 'fix(x): y', number: SURFACE_FROM + 1, ...extra })
 
+test('pr-check limits the changed lines of a pull request by its tier, unless the body says why it cannot be split (#1545)', () => {
+  const lines = (count, path = 'scripts/x.mjs') => [{ path, added: count, deleted: 0 }]
+  const risk = 'Tier: risk\nSurface: delivery'
+  const run = (body, numstat, extra = {}) => size({ body, numstat, number: SIZE_FROM + 1, ...extra })
+  assert.equal(run(risk, lines(SIZE_RISK)).problems.length, 0)
+  assert.match(run(risk, lines(SIZE_RISK + 1)).problems[0]?.message ?? '', /401 changed lines .* more than 400, the limit on the risk tier/)
+  // A reason on the Surface line, or a Size line, lets it through; the template's placeholder does not.
+  assert.equal(run('Tier: risk\nSurface: delivery, cannot split: one migration', lines(SIZE_RISK + 1)).problems.length, 0)
+  assert.equal(run(`${risk}\nSize: cannot split: the schema and its reader change together`, lines(SIZE_RISK + 1)).problems.length, 0)
+  assert.equal(run(`${risk}\nSize: cannot split: <reason>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  // The placeholder twice, or the clause twice, is still no reason.
+  assert.equal(run(`${risk}\nSurface: delivery, cannot split: <reason>, cannot split: <reason>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: <reason> <reason>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  // Formatting around the placeholder is still no reason; a reason has a letter or a digit, in any language.
+  assert.equal(run(`${risk}\nSurface: delivery, cannot split: \`<reason>\``, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: **<reason>**`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: 同一個遷移`, lines(SIZE_RISK + 1)).problems.length, 0)
+  // A reason with an HTML entity or a tag in it is no reason, since Markdown can hide what it holds, and neither is an
+  // invisible character (a zero-width space, the Hangul filler); a reason starting with an unclosed `<` still counts.
+  assert.equal(run(`${risk}\nSurface: delivery + data, cannot split: &#8203;`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: &lt;reason&gt;`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: &amp;lt;reason&amp;gt;`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: &#60;reason&#x3E;`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: &ZeroWidthSpace;`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: \u3164`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: <placeholder<reason>>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: one migration &amp; its reader`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: &constructor;`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSurface: delivery + data, cannot split: <span title="&gt;hidden"></span>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: <span title=">hidden"></span>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: <- the schema and its reader change together`, lines(SIZE_RISK + 1)).problems.length, 0)
+  // The template's own lines are not a reason, and neither is one inside a code fence or an HTML comment.
+  const template = readFileSync(new URL('../.github/pull_request_template.md', import.meta.url), 'utf8')
+  assert.equal(run(template, lines(SIZE_NORMAL + 1)).problems.length, 1)
+  assert.equal(run(template.replace(/^Tier:.*$/m, 'Tier: risk'), lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run([risk, '```', 'Size: cannot split: shown as an example', '```'].join('\n'), lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\n<!-- Size: cannot split: a hidden reason -->`, lines(SIZE_RISK + 1)).problems.length, 1)
+  // Tests, generated files and string tables do not count.
+  assert.equal(run(risk, [...lines(SIZE_RISK), ...lines(500, 'tests/x.test.mjs'), ...lines(500, 'hooks/released.ts'), ...lines(500, 'hooks/strings-en.ts')]).problems.length, 0)
+  // The normal tier: a note above 400, a failure above 800; a body with no tier is read as normal.
+  const normal = run('Tier: normal', lines(SIZE_RISK + 1))
+  assert.equal(normal.problems.length, 0)
+  assert.match(normal.info.join('\n'), /size note: 401 changed lines/)
+  assert.match(run('Tier: normal', lines(SIZE_NORMAL + 1)).problems[0]?.message ?? '', /more than 800, the limit on the normal tier/)
+  assert.equal(run('', lines(SIZE_NORMAL + 1)).problems.length, 1)
+  // The light tier, a release, a pull request from before the rule, and a run with no line counts have no limit.
+  assert.equal(run('Tier: light', lines(5000)).problems.length, 0)
+  assert.equal(run(risk, lines(5000), { title: 'chore(release): agent-board 0.25.0' }).problems.length, 0)
+  assert.equal(run(risk, lines(5000), { number: SIZE_FROM }).problems.length, 0)
+  assert.equal(run(risk, undefined).problems.length, 0)
+})
+
 test('pr-check fails a risk pull request with no Surface line, an unknown value, or two values without cannot split', () => {
   const missing = surfaceRun()
   assert.equal(missing.problems.length, 1)
@@ -1835,7 +1939,7 @@ test('pr-check accepts two surfaces with cannot split and says it waits for an a
   const checked = surfaceRun('Surface: delivery + setup-writes, cannot split: main breaks between steps', { paths: ['hooks/connect.ts', 'hooks/messaging.ts'] })
   assert.deepEqual(checked.problems, [])
   assert.match(checked.info.join('\n'), /cannot split: main breaks between steps" waits for the maintainer's or the owner's answer before the first review/)
-  for (const empty of ['Surface: delivery + data, cannot split:', 'Surface: delivery + data, cannot split:   ', 'Surface: delivery + data, cannot split: <reason>']) {
+  for (const empty of ['Surface: delivery + data, cannot split:', 'Surface: delivery + data, cannot split:   ', 'Surface: delivery + data, cannot split: <reason>', 'Surface: delivery + data, cannot split: <reason>, cannot split: <reason>', 'Surface: delivery + data, cannot split: \`<reason>\`', 'Surface: delivery + data, cannot split: &lt;reason&gt;', 'Surface: delivery + data, cannot split: \u3164']) {
     assert.match(surfaceRun(empty).problems[0]?.message ?? '', /`cannot split:` with no reason/, empty)
   }
   // A filled reason may start with `<`; only the template's own `<reason>` is a placeholder.
