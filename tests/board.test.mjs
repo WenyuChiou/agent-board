@@ -12220,6 +12220,32 @@ test('no away line when the tab was hidden for less than 5 minutes', async () =>
   assert.equal(awayLine(dom), '')
 })
 
+// #715 reopen: the time away ends when the tab is visible again, not when the next refresh arrives.
+const awayReturnThenPoll = async (base, later, hiddenMs, pollMs) => {
+  const dom = await pageDom(await sourcePage('en'), base, { now: ONE_LINE_NOW })
+  dom.hideTab()
+  dom.setNow(ONE_LINE_NOW + hiddenMs)
+  dom.showTab()
+  dom.setNow(ONE_LINE_NOW + pollMs)
+  await dom.redraw(later)
+  await dom.settle()
+  return dom
+}
+
+test('hidden for 4:59, back, and the refresh at 5:01 shows no away line', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
+  const dom = await awayReturnThenPoll(base, later, (4 * 60 + 59) * 1000, (5 * 60 + 1) * 1000)
+  assert.equal(awayLine(dom), '')
+})
+
+test('hidden for 5:01, back, and a later refresh says away for 5 min', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
+  const dom = await awayReturnThenPoll(base, later, (5 * 60 + 1) * 1000, 7 * 60 * 1000)
+  assert.equal(awayLine(dom), 'Away for 5 min · Codex asked a question')
+})
+
 test('a refresh while the tab is still hidden keeps the away snapshot for the return', async () => {
   const base = cardsModel('codex')
   const later = {
