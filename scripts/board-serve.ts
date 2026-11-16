@@ -234,22 +234,23 @@ export const startServer = (o: ServeOptions): void => {
   // A page whose request waits here is still open, as it was while it asked every 2 s: the windows sized for that poll
   // (an approval's watching page, APPROVAL_PAGE_MS; the board command's open-window check; the idle exit) see it as
   // having asked just now. Only a page in sight counts as watching or as activity; a hidden one only stays open (#359).
-  const touchWaiting = (now: number): void => {
-    for (const one of waiters) {
-      if (!one.isLan && one.id !== '') {
-        const page = pages.get(one.id)
-        if (page !== undefined) page.at = now
-      }
-      const held = one.secret === '' ? undefined : pageSecrets.get(one.secret)
-      if (held !== undefined) {
-        held.seen = now
-        if (one.isVisible) held.watched = now
-      }
-      if (one.isVisible) {
-        if (one.isLan) { if (lan !== null) lan.lastSeen = now }
-        else lastSeen = now
-      }
+  const touchPage = (one: WaitingPage, now: number): void => {
+    if (!one.isLan && one.id !== '') {
+      const page = pages.get(one.id)
+      if (page !== undefined) page.at = now
     }
+    const held = one.secret === '' ? undefined : pageSecrets.get(one.secret)
+    if (held !== undefined) {
+      held.seen = now
+      if (one.isVisible) held.watched = now
+    }
+    if (one.isVisible) {
+      if (one.isLan) { if (lan !== null) lan.lastSeen = now }
+      else lastSeen = now
+    }
+  }
+  const touchWaiting = (now: number): void => {
+    for (const one of waiters) touchPage(one, now)
   }
   const holdBoard = (res: ServerResponse, page: WaitingPage, recheck: () => boolean, last: () => boolean): void => {
     const { id } = page
@@ -260,6 +261,9 @@ export const startServer = (o: ServeOptions): void => {
       isDone = true
       clearTimeout(timer)
       waiters.delete(waiter)
+      // The page asked until this moment, so it counts as having asked now: an approval that arrives before its next
+      // request (a round trip away) still finds it watching. A page already dropped (replaced, gone) is not brought back.
+      touchPage(page, Date.now())
       syncFallback()
     }
     const settle = (answer: () => boolean): void => {

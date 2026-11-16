@@ -235,6 +235,7 @@ test('serve: a tab left open does not keep an idle server alive', async () => {
 
 test('serve: with a progress file of another name, the inbox folder made later is still watched', async () => {
   const board = await startBoard({ holdMs: 60_000, name: 'tasks.md' })
+  await clearOfMinute(5000)
   const first = await board.ask()
   const waiting = board.ask(first.etag)
   await pause(200)
@@ -253,6 +254,7 @@ test('serve: with a progress file of another name, the inbox folder made later i
 
 test('serve: a page waiting on the board counts as open just now, and one replaced while it waits is told at once', async () => {
   const board = await startBoard({ holdMs: 60_000 })
+  await clearOfMinute(5000)
   const first = await board.ask()
   const waiting = board.ask(first.etag)
   // Longer than a page's last request alone would keep it "just now": the board command's open-window check reads this.
