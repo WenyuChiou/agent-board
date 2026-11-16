@@ -555,18 +555,23 @@ test('the PowerShell reporter writes a prompt receipt with no prompt words', { s
 
 // #836: with module autoload on, the reporter's first cmdlet walked every module folder (over 20 s on a busy runner).
 // A module placed first on PSModulePath that exports its own ConvertFrom-Json shows whether that search happens.
-test('the PowerShell reporter loads its two modules by path and searches no module folder for a command (#836)', { skip: process.platform !== 'win32' }, () => fixture(async home => {
-  const { reporterPs1 } = await import('../hooks/connect-pure.ts')
-  const file = join(home, 'progress-report.ps1')
+test('the PowerShell reporter, and the copy the sh reporter runs, load their two modules by path and search no module folder for a command (#836)', { skip: process.platform !== 'win32' }, () => fixture(async home => {
+  const { reporterPs1, reporterSh } = await import('../hooks/connect-pure.ts')
+  const file = join(home, 'progress-report.ps1'), shell = join(home, 'progress-report.sh')
   writeFileSync(file, reporterPs1())
+  // On Windows the sh reporter hands a stripped copy of the same reporter to powershell.exe -Command.
+  writeFileSync(shell, reporterSh(shellPath(join(home, 'progress-inbox'))))
   const modules = join(home, 'planted-modules')
   const marker = join(home, 'planted-module-ran.txt')
   mkdirSync(join(modules, 'PlantedJson'), { recursive: true })
   writeFileSync(join(modules, 'PlantedJson', 'PlantedJson.psm1'), `function ConvertFrom-Json { [IO.File]::WriteAllText('${marker.replaceAll("'", "''")}', 'ran'); throw 'planted' }\nExport-ModuleMember -Function ConvertFrom-Json\n`)
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], { input: JSON.stringify({ session_id: 'synthetic-owner', turnId: 'synthetic-module-turn', prompt: 'PRIVATE_REAL_ANSWER' }), encoding: 'utf8', windowsHide: true, env: { ...process.env, PSModulePath: `${modules};${process.env.PSModulePath ?? ''}` } })
-  assert.equal(result.status, 0, result.stderr)
-  assert.equal(existsSync(marker), false, 'the reporter ran a ConvertFrom-Json it found by searching the module folders')
-  assert.equal(receipts(home).length, 1)
+  const env = { ...process.env, HOME: home, USERPROFILE: home, PSModulePath: `${modules};${process.env.PSModulePath ?? ''}` }
+  for (const [copy, program, args] of [['reporter', 'powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt']], ['sh copy', sh, [shellPath(shell), 'gemini', 'prompt']]]) {
+    const result = spawnSync(program, args, { input: JSON.stringify({ session_id: `synthetic-owner-${copy}`, turnId: 'synthetic-module-turn', prompt: 'PRIVATE_REAL_ANSWER' }), encoding: 'utf8', windowsHide: true, env })
+    assert.equal(result.status, 0, `${copy}: ${result.stderr}`)
+    assert.equal(existsSync(marker), false, `${copy}: the reporter ran a ConvertFrom-Json it found by searching the module folders`)
+  }
+  assert.equal(receipts(home).length, 2)
 }))
 
 test('the legacy Cursor reporter pairs beforeSubmitPrompt with its own afterAgentResponse', () => fixture(async home => {
@@ -1266,5 +1271,61 @@ test('the sh timeout receipt marks a board delivery as a delivery, not a board r
     const out = spawnSync(sh, [shellPath(script)], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', windowsHide: true, timeout: 10000 })
     assert.equal(out.status, 0, out.stderr)
     assert.equal(readFileSync(file + '.json', 'utf8'), JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', delivery_request: true }), name)
+  }
+}))
+
+// Valid JSON may write the header's letters as \u escapes; both timeout receipts read them back (#1334). A literal
+// backslash before "u0041" in the prompt is an escaped backslash in JSON, so it stays text and marks no delivery.
+const escapedDeliveryCases = async () => {
+  const { DELIVERY_REQUEST_HINT } = await import('../hooks/board-commands.ts')
+  const escaped = [...DELIVERY_REQUEST_HINT].map((char, index) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')[index % 2 ? 'toUpperCase' : 'toLowerCase']()}`).join('')
+  const cases = []
+  for (const [name, prompt] of await deliveryPrompts()) {
+    const raw = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt })
+    const written = raw.replace(DELIVERY_REQUEST_HINT, escaped)
+    assert.notEqual(written, raw, name)
+    assert.equal(JSON.parse(written).prompt, prompt, name)
+    cases.push([`${name}, header letters escaped`, written, { session_id: 'synthetic', cwd: '/work/demo', delivery_request: true }])
+  }
+  const decoy = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt: '\\u0041gent Board message' })
+  assert.equal(JSON.parse(decoy).prompt.startsWith('\\u0041'), true)
+  cases.push(['a literal backslash before u0041', decoy, { session_id: 'synthetic', cwd: '/work/demo', board_request: true }])
+  return cases
+}
+
+test('the sh timeout receipt reads a delivery header written with \\u escapes (#1334)', () => fixture(async home => {
+  const { reporterSh } = await import('../hooks/hook-reporters.ts')
+  const source = reporterSh('/x')
+  const fallback = source.slice(source.indexOf('write_fallback() {'), source.indexOf('\ntimed_out() {'))
+  const file = shellPath(join(home, 'receipt')), script = join(home, 'fallback.sh')
+  writeFileSync(script, `file='${file}'\nlog_error() { printf '%s\n' "$1" >&2; }\n${fallback}\nwrite_fallback\nexit 0\n`)
+  for (const [name, raw, expected] of await escapedDeliveryCases()) {
+    rmSync(file + '.json', { force: true })
+    writeFileSync(file + '.tmp', raw)
+    const out = spawnSync(sh, [shellPath(script)], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    assert.equal(out.status, 0, out.stderr)
+    assert.equal(readFileSync(file + '.json', 'utf8'), JSON.stringify(expected), name)
+  }
+}))
+
+// The PowerShell timeout receipt is the block Read-PromptReceipt runs; it is run here on its own, in the reporter and
+// in the copy the sh reporter hands to powershell.exe.
+test('the PowerShell timeout receipt reads a delivery header written with \\u escapes (#1334)', { skip: process.platform !== 'win32' }, () => fixture(async home => {
+  const { powershellReporter } = await import('../hooks/hook-reporters.ts')
+  const cases = await escapedDeliveryCases()
+  for (const [copy, source] of [['reporter', powershellReporter(false)], ['sh copy', powershellReporter(true)]]) {
+    const start = source.indexOf('Read-PromptReceipt $tmp $clock {')
+    const end = source.indexOf('if ($clock.ElapsedMilliseconds -ge', start)
+    assert.ok(start >= 0 && end > start, copy)
+    const block = source.slice(source.indexOf('{', start) + 1, source.lastIndexOf('}', end))
+    for (const [index, [name, raw, expected]] of cases.entries()) {
+      const input = join(home, `payload-${index}.json`), output = join(home, `fallback-${index}.txt`), script = join(home, `fallback-${index}.ps1`)
+      writeFileSync(input, raw)
+      const quote = path => `'${path.replaceAll("'", "''")}'`
+      writeFileSync(script, `$ErrorActionPreference = 'Stop'\n$Payload = [IO.File]::ReadAllText(${quote(input)})\n$script:fallback = $null\n& {${block}}\n[IO.File]::WriteAllText(${quote(output)}, [string]$script:fallback)\n`)
+      const out = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], { encoding: 'utf8', windowsHide: true, timeout: 30000 })
+      assert.equal(out.status, 0, `${copy} ${name}: ${out.stderr}`)
+      assert.equal(readFileSync(output, 'utf8'), JSON.stringify(expected), `${copy} ${name}`)
+    }
   }
 }))
