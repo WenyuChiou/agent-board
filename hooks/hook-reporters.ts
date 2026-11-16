@@ -11,6 +11,8 @@ const psQuote = (text: string): string => `'${text.replace(/'/g, "''")}'`
 const windowsQuote = (text: string): string => `"${text.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
 const PROMPT_FILE_SCRIPT = `process.argv[1] = require('node:fs').readFileSync(process.env.AGENT_BOARD_PROMPT_INPUT, 'utf8')\n${PROMPT_RECEIPT_SCRIPT}`
 const SESSION_KEYS = RECEIPT_SESSION_KEYS
+// Ends the quoted here-document that holds the sh reporter's PowerShell copy; no line of that copy may equal it.
+export const PS_HEREDOC_END = 'AGENT_BOARD_POWERSHELL_REPORTER_END'
 // A timed-out prompt is scanned for board words without its folder paths: a project
 // folder named agent-board or dashboard is not a board request.
 const PATH_KEYS = [...RECEIPT_FOLDER_KEYS, 'transcript_path', 'transcriptPath']
@@ -56,7 +58,7 @@ case "$agent" in codex|cursor|gemini|grok|muse|hermes|openclaw|opencode|antigrav
 case "$event" in prompt|turn|end) ;; *) event=unknown ;; esac
 dir=${shellQuote(inbox)}
 file="$dir/$agent-$event-$(date +%s)-$$"
-reader=''; watcher=''; owned=''; timeout_owned=''; completion_owned=''; receipt_owned=''; fallback_owned=''; phase=INPUT_TIMEOUT
+reader=''; watcher=''; owned=''; timeout_owned=''; completion_owned=''; receipt_owned=''; fallback_owned=''; script_owned=''; phase=INPUT_TIMEOUT
 log_error() {
   logdir="$HOME/.agent-board"; log="$logdir/hook-errors.log"; temp="$log.$$.tmp"
   if mkdir -p "$logdir" && [ ! -L "$log" ] && { [ ! -e "$log" ] || [ -f "$log" ]; }; then
@@ -76,6 +78,7 @@ cleanup() {
   [ -z "$completion_owned" ] || rm -f "$file.complete"
   [ -z "$receipt_owned" ] || rm -f "$file.receipt"
   [ -z "$fallback_owned" ] || rm -f "$file.fallback"
+  [ -z "$script_owned" ] || rm -f "$file.ps1"
 }
 finish() { [ "$agent" != cursor ] || printf '{}\\n'; exit 0; }
 write_fallback() {
@@ -130,7 +133,16 @@ trap 'log_error REPORTER_INTERRUPTED; finish' 1 2 15
 trap timed_out ALRM
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
-    AGENT_BOARD_SH_AGENT="$agent" AGENT_BOARD_SH_EVENT="$event" AGENT_BOARD_SH_PAYLOAD="\${1-}" AGENT_BOARD_SH_INBOX="$dir" powershell.exe -NoLogo -NoProfile -NonInteractive -Command ${shellQuote(powershellReporter(true))}
+    # The PowerShell reporter goes into a file of this run's own, run with -File: as one -Command argument it
+    # would bring the command line near the 32,767 characters Windows allows, and past that PowerShell never
+    # starts (#1444). The trap removes the file; the PowerShell sweep takes one a killed run left behind.
+    if ! mkdir -p "$dir" || ! (set -C; : > "$file.ps1"); then log_error REPORTER_FAILED; finish; fi
+    script_owned=yes
+    if ! cat > "$file.ps1" <<'${PS_HEREDOC_END}'
+${powershellReporter(true)}
+${PS_HEREDOC_END}
+    then log_error REPORTER_FAILED; finish; fi
+    AGENT_BOARD_SH_AGENT="$agent" AGENT_BOARD_SH_EVENT="$event" AGENT_BOARD_SH_PAYLOAD="\${1-}" AGENT_BOARD_SH_INBOX="$dir" powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$file.ps1"
     [ "$?" = 0 ] && exit 0
     log_error REPORTER_FAILED; finish ;;
 esac
@@ -438,7 +450,7 @@ try {
     # A backlog of locked files must not spend the hook's whole timeout on retries.
     $sweepSleepMs = 0
     foreach ($scratch in @(Get-ChildItem -LiteralPath $dir -File | Where-Object {
-      $_.Extension -in @('.tmp', '.receipt', '.fallback', '.timeout', '.complete') -and $_.LastWriteTime -lt $scratchCutoff
+      $_.Extension -in @('.tmp', '.receipt', '.fallback', '.timeout', '.complete', '.ps1') -and $_.LastWriteTime -lt $scratchCutoff
     })) {
       $removed = $false
       for ($try = 0; $try -lt 5; $try++) {
@@ -541,10 +553,6 @@ if ($Agent -eq 'cursor') { '{}' }
 exit 0
 `
 
-// The sh reporter passes the whole script as one -Command argument, and a Windows command line holds at
-// most 32,767 characters, so that copy leaves out its whole-line comments (#1444).
-export const powershellReporter = (fromShell: boolean): string => fromShell
-  ? reporterSource(true).split('\n').filter(line => !line.trimStart().startsWith('#')).join('\n')
-  : reporterSource(false)
+export const powershellReporter = (fromShell: boolean): string => reporterSource(fromShell)
 
 export const reporterPs1 = (): string => powershellReporter(false)

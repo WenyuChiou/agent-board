@@ -504,9 +504,9 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
   // The reporter logs here, so each run can tell whether it timed out.
   const env = { ...process.env, HOME: home, USERPROFILE: home }, log = join(home, '.agent-board', 'hook-errors.log'), timedOut = new Set()
   // On Windows the sh reporter hands over to an embedded PowerShell reporter; observe its classifier as for ps1.
-  const source = reporterSh(shellPath(join(home, 'progress-inbox'))), embedded = shellQuote(powershellReporter(true))
+  const source = reporterSh(shellPath(join(home, 'progress-inbox'))), embedded = powershellReporter(true)
   assert.equal(source.split(embedded).length, 2)
-  writeFileSync(file, source.replace(embedded, () => shellQuote(observeClassifier(powershellReporter(true), diagnostic))))
+  writeFileSync(file, source.replace(embedded, () => observeClassifier(powershellReporter(true), diagnostic)))
   for (const mode of ['stdin', 'argument']) for (const prompt of ['/board', 'PRIVATE_REAL_ANSWER']) {
     const raw = JSON.stringify({ session_id: `synthetic-${mode}-${prompt === '/board'}`, cwd: '/synthetic/中文', turn_id: turn, prompt, transcript_path: 'PRIVATE_TRANSCRIPT' })
     rmSync(diagnostic, { force: true })
@@ -532,14 +532,56 @@ test('the sh reporter writes a prompt receipt with no prompt words from stdin or
   assert.ok(saved.some(({ file, body }) => readTurn(file, body).turnKey !== undefined), diagnostics.join('; '))
 }))
 
-// The sh reporter hands the whole script to powershell.exe as one -Command argument, and a Windows command line holds
-// 32,767 characters: past that Windows starts nothing and the receipt is silently missing. 2,048 of them stay free
-// for the probes these tests insert (the classifier probe adds about 1,900) (#1444).
-test('the sh reporter PowerShell command leaves 2,048 characters free in a Windows command line', async () => {
-  const { powershellReporter } = await import('../hooks/hook-reporters.ts')
-  const line = `powershell.exe -NoLogo -NoProfile -NonInteractive -Command "${powershellReporter(true).replaceAll('"', '\\"')}"`
-  assert.ok(line.length <= 32_767 - 2_048, `${line.length} characters`)
+// A Windows command line holds 32,767 characters: past that Windows starts nothing and the receipt is silently
+// missing. The sh reporter used to hand its whole PowerShell copy to powershell.exe as one -Command argument, which
+// had reached 30,672 characters (#1444); it now names a file, so the command line no longer grows with the reporter.
+test('the sh reporter starts PowerShell with a command line that does not grow with the reporter (#1444)', async () => {
+  const { reporterSh } = await import('../hooks/connect-pure.ts')
+  const { powershellReporter, PS_HEREDOC_END } = await import('../hooks/hook-reporters.ts')
+  const launches = reporterSh('/synthetic/progress-inbox').split('\n').filter(line => line.includes('powershell.exe'))
+  assert.equal(launches.length, 1)
+  // At run time the line is this text with a file path in place of $file.ps1; the environment values are not on it.
+  assert.ok(launches[0].length < 512, `${launches[0].length} characters`)
+  // -Command ran under any execution policy; a -File script needs the process-scope Bypass, as the Windows hooks pass.
+  assert.match(launches[0], / -ExecutionPolicy Bypass -File "\$file\.ps1"$/)
+  // The copy sits in a quoted here-document, which a line equal to its end marker would cut short.
+  assert.ok(!powershellReporter(true).split('\n').includes(PS_HEREDOC_END))
 })
+
+test('the sh reporter writes a prompt receipt when its PowerShell copy is longer than a Windows command line (#1444)', { skip: process.platform !== 'win32' }, () => fixture(async home => {
+  const { reporterSh, shellQuote } = await import('../hooks/connect-pure.ts')
+  const { powershellReporter } = await import('../hooks/hook-reporters.ts')
+  const file = join(home, 'progress-report.sh'), inbox = join(home, 'progress-inbox')
+  const source = reporterSh(shellPath(inbox)), embedded = powershellReporter(true)
+  // A statement that only makes the copy longer than a whole command line, as more reporter code would.
+  const padded = embedded.replace('\n', `\n$null = "${'x'.repeat(32_767)}"\n`)
+  // An earlier reporter carried the copy shell-quoted on its command line; that form is padded the same way.
+  const written = source.includes(embedded) ? source.replace(embedded, () => padded) : source.replace(shellQuote(embedded), () => shellQuote(padded))
+  assert.notEqual(written, source)
+  writeFileSync(file, written)
+  const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt'], { env: { ...process.env, HOME: home, USERPROFILE: home }, input: JSON.stringify({ session_id: 'synthetic-long-copy', prompt: '/board' }), encoding: 'utf8', windowsHide: true })
+  assert.equal(result.status, 0, result.stderr)
+  const saved = receipts(home)
+  assert.deepEqual(saved.map(one => JSON.parse(one.body)), [{ session_id: 'synthetic-long-copy', board_request: true }])
+  // The run's own copy of the script is gone with it.
+  assert.deepEqual(readdirSync(inbox).filter(name => name.endsWith('.ps1')), [])
+}))
+
+// A script PowerShell will not run (a group policy that overrides Bypass, a file it cannot parse) ends the same way: a
+// failed exit, which the sh reporter logs instead of passing over in silence (#1444).
+test('the sh reporter logs REPORTER_FAILED when PowerShell will not run its copy (#1444)', { skip: process.platform !== 'win32' }, () => fixture(async home => {
+  const { reporterSh } = await import('../hooks/connect-pure.ts')
+  const { powershellReporter } = await import('../hooks/hook-reporters.ts')
+  const file = join(home, 'progress-report.sh'), inbox = join(home, 'progress-inbox'), log = join(home, '.agent-board', 'hook-errors.log')
+  const source = reporterSh(shellPath(inbox)), embedded = powershellReporter(true)
+  assert.equal(source.split(embedded).length, 2)
+  writeFileSync(file, source.replace(embedded, () => `${embedded}\nif (`))
+  const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt'], { env: { ...process.env, HOME: home, USERPROFILE: home }, input: JSON.stringify({ session_id: 'synthetic-refused-copy', prompt: '/board' }), encoding: 'utf8', windowsHide: true })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(readFileSync(log, 'utf8'), / gemini prompt REPORTER_FAILED\n$/)
+  assert.deepEqual(receipts(home).filter(one => one.file.endsWith('.json')), [])
+  assert.deepEqual(existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.ps1')) : [], [])
+}))
 
 test('the PowerShell reporter writes a prompt receipt with no prompt words', { skip: process.platform !== 'win32' }, () => fixture(async home => {
   const { reporterPs1 } = await import('../hooks/connect-pure.ts')
@@ -574,7 +616,7 @@ test('the PowerShell reporter, and the copy the sh reporter runs, load their two
   const { reporterPs1, reporterSh } = await import('../hooks/connect-pure.ts')
   const file = join(home, 'progress-report.ps1'), shell = join(home, 'progress-report.sh')
   writeFileSync(file, reporterPs1())
-  // On Windows the sh reporter hands a stripped copy of the same reporter to powershell.exe -Command.
+  // On Windows the sh reporter writes a copy of the same reporter to a file and runs it with powershell.exe -File.
   writeFileSync(shell, reporterSh(shellPath(join(home, 'progress-inbox'))))
   const modules = join(home, 'planted-modules')
   const marker = join(home, 'planted-module-ran.txt')
