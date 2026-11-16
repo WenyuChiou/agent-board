@@ -9,8 +9,8 @@ import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, CASES_FROM, cases, changelog, checkIssue, checkPr,
   duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
   main, naming, needsBundle, outsideClaim, privateData, report, reportMarkdown, reviewOf, rulesPage, sections,
-  riskPathsOf, ROUND_CAP, rounds, stripComments, SURFACE_FROM, surface, testTitles, tier, TIER_FROM, tierOf, titleKnown,
-  verdict,
+  riskPathsOf, ROUND_CAP, rounds, size, SIZE_FROM, SIZE_NORMAL, SIZE_RISK, stripComments, SURFACE_FROM, surface, testTitles,
+  tier, TIER_FROM, tierOf, titleKnown, verdict,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -1790,6 +1790,31 @@ test('pr-check reads risk-paths.md as the base lists it and counts a moved file 
   assert.doesNotMatch((await runWith('Tier: risk\nSurface: data')).stdout, /FAIL tier/)
 })
 const surfaceRun = (line, extra = {}) => surface({ body: riskBody(line), title: 'fix(x): y', number: SURFACE_FROM + 1, ...extra })
+
+test('pr-check limits the changed lines of a pull request by its tier, unless the body says why it cannot be split (#1545)', () => {
+  const lines = (count, path = 'scripts/x.mjs') => [{ path, added: count, deleted: 0 }]
+  const risk = 'Tier: risk\nSurface: delivery'
+  const run = (body, numstat, extra = {}) => size({ body, numstat, number: SIZE_FROM + 1, ...extra })
+  assert.equal(run(risk, lines(SIZE_RISK)).problems.length, 0)
+  assert.match(run(risk, lines(SIZE_RISK + 1)).problems[0]?.message ?? '', /401 changed lines .* more than 400, the limit on the risk tier/)
+  // A reason on the Surface line, or a Size line, lets it through; the template's placeholder does not.
+  assert.equal(run('Tier: risk\nSurface: delivery, cannot split: one migration', lines(SIZE_RISK + 1)).problems.length, 0)
+  assert.equal(run(`${risk}\nSize: cannot split: the schema and its reader change together`, lines(SIZE_RISK + 1)).problems.length, 0)
+  assert.equal(run(`${risk}\nSize: cannot split: <reason>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  // Tests, generated files and string tables do not count.
+  assert.equal(run(risk, [...lines(SIZE_RISK), ...lines(500, 'tests/x.test.mjs'), ...lines(500, 'hooks/strings-en.ts')]).problems.length, 0)
+  // The normal tier: a note above 400, a failure above 800; a body with no tier is read as normal.
+  const normal = run('Tier: normal', lines(SIZE_RISK + 1))
+  assert.equal(normal.problems.length, 0)
+  assert.match(normal.info.join('\n'), /size note: 401 changed lines/)
+  assert.match(run('Tier: normal', lines(SIZE_NORMAL + 1)).problems[0]?.message ?? '', /more than 800, the limit on the normal tier/)
+  assert.equal(run('', lines(SIZE_NORMAL + 1)).problems.length, 1)
+  // The light tier, a release, a pull request from before the rule, and a run with no line counts have no limit.
+  assert.equal(run('Tier: light', lines(5000)).problems.length, 0)
+  assert.equal(run(risk, lines(5000), { title: 'chore(release): agent-board 0.25.0' }).problems.length, 0)
+  assert.equal(run(risk, lines(5000), { number: SIZE_FROM }).problems.length, 0)
+  assert.equal(run(risk, undefined).problems.length, 0)
+})
 
 test('pr-check fails a risk pull request with no Surface line, an unknown value, or two values without cannot split', () => {
   const missing = surfaceRun()

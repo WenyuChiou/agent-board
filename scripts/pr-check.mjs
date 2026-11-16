@@ -867,6 +867,25 @@ const surfaceLine = body => {
   const found = visibleLines(body).flatMap(line => line.match(/^Surface:[ \t]*(.*)$/i)?.[1].trim() ?? [])
   return { found, filled: found.filter(value => value !== '' && !value.startsWith('<')) }
 }
+// The size limit (RULES R6, #1545): changed lines, counted as for the surface note, on the risk tier fail above SIZE_RISK and
+// on the normal tier fail above SIZE_NORMAL with a note above SIZE_RISK, unless the body says why the change cannot be split
+// (`cannot split: <reason>` on the `Surface:` line, or a line `Size: cannot split: <reason>`). The light tier and releases
+// have none. It applies to pull requests numbered above SIZE_FROM; a local --body-file run is checked as new.
+export const SIZE_FROM = 1545
+export const SIZE_RISK = 400
+export const SIZE_NORMAL = 800
+const hasSplitReason = body => visibleLines(body).some(line => /^(?:Surface|Size):.*\bcannot split:[ \t]*\S/i.test(line) && !/\bcannot split:[ \t]*<[^<>]*>[ \t]*$/i.test(line))
+export const size = ({ body = '', title = '', number = null, numstat, tier = visibleTier(body) } = {}) => {
+  const output = result()
+  if (!Array.isArray(numstat) || tier === 'light' || isReleaseTitle(title) || (number !== null && number <= SIZE_FROM)) return output
+  const lines = numstat.filter(item => !isUncountedForSurface(item.path)).reduce((sum, item) => sum + item.added + item.deleted, 0)
+  const limit = tier === 'risk' ? SIZE_RISK : SIZE_NORMAL
+  const counted = `${lines} changed lines (tests, generated files and string tables not counted)`
+  if (lines > limit && !hasSplitReason(body)) {
+    output.problems.push(problem('size', `${counted} is more than ${limit}, the limit on the ${tier === 'risk' ? 'risk' : 'normal'} tier (RULES.md, R6).`, 'split it into smaller pull requests, or say why it cannot be split: end the `Surface:` line with `, cannot split: <reason>`, or add a line `Size: cannot split: <reason>`.'))
+  } else if (lines > SIZE_RISK && tier !== 'risk') output.info.push(`size note: ${counted} is more than ${SIZE_RISK}; above ${SIZE_NORMAL} it fails without a reason it cannot be split.`)
+  return output
+}
 export const surface = ({ body = '', title = '', number = null, paths = [], numstat, tier = visibleTier(body) } = {}) => {
   const output = result()
   if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= SURFACE_FROM)) return output
@@ -1189,6 +1208,7 @@ export const checkPr = data => {
   add(binaryImages(data.changedPaths))
   add(tier({ body: data.body, title: data.title, number: data.number, paths: data.paths, riskPaths: data.riskPaths, isOptional: isSmallDocs }))
   add(surface({ body: data.body, title: data.title, number: data.number, paths: data.paths, numstat: data.numstat }))
+  add(size({ body: data.body, title: data.title, number: data.number, numstat: data.numstat }))
   add(cases({ body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
   if (issue.issue !== null) {
     // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
