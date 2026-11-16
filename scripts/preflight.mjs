@@ -820,10 +820,11 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   }
 
   // An info line, never a failure: the journeys and tests that cover the paths this change touches (#1544).
-  await check('journey map', () => {
+  // No await, so the touched-tests check below starts in the same turn (the lock race tests depend on it).
+  try {
     const line = journeyLine([...changed])
     if (line) add('PASS', line)
-  })
+  } catch { add('WARN', 'journey map could not be read; check scripts/path-journeys.json.') }
 
   await check('touched Node tests', () => {
     const paths = [...changed].filter(path => isTest(path) && path.endsWith('.mjs') && existsSync(join(cwd, path)))
