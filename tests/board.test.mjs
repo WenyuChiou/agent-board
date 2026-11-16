@@ -6309,17 +6309,23 @@ test('the Cursor shell helper keeps the open-pipe error naming fd3 when page cle
 test('the Cursor shell helper stops at once on test abort when bash exited with fd3 still open instead of waiting 5 seconds (#1451)', { skip: process.platform !== 'win32', timeout: 15_000 }, async () => {
   const board = serveIn()
   const controller = new AbortController()
+  let abortTimer
   await withFd3Holder(board, 'holder-1451-abort', async target => {
     try {
       const began = performance.now()
+      const marks = []
       await assert.rejects(
         () => cursorShell(target, [], {}, async () => {}, line => {
-          if (line.startsWith('bash exit code=0')) controller.abort()
+          marks.push(line)
+          // Fire asynchronously after `exited` resolves so cursorShell is in the 5 s pipe-wait Promise.race.
+          if (line.startsWith('bash exit code=0')) abortTimer = setTimeout(() => controller.abort(), 50)
         }, controller.signal),
         /stopped by the test's abort/,
       )
+      assert.ok(marks.some(line => line.includes('stopping pipe wait after bash exit')), marks.join('\n'))
       assert.ok(performance.now() - began < 3_500, 'test abort after bash exit must not wait out the 5 s pipe deadline')
     } finally {
+      clearTimeout(abortTimer)
       controller.abort()
     }
   })
