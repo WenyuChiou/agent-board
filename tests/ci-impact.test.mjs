@@ -996,7 +996,7 @@ test('the brief template retains the same local and CI execution policy as AGENT
 // The browser job's tool install tries up to three times when the runner's Ubuntu package mirror is unreachable
 // (#1460). Its loop runs here as written in the workflow, under the bash options Actions uses, with a stand-in
 // installer that fails a set number of times and a sleep that returns at once.
-const gitBash = process.platform === 'win32' ? join(process.env.ProgramFiles ?? 'C:\Program Files', 'Git', 'bin', 'bash.exe') : '/bin/bash'
+const gitBash = process.platform === 'win32' ? join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe') : '/bin/bash'
 test('the browser tool install stops at its first success, tries three times and then fails', async () => {
   const text = await workflow()
   const step = text.slice(text.indexOf('- name: Install isolated browser test tools'))
