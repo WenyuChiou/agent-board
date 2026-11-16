@@ -867,7 +867,8 @@ test('pr-check still rejects closed or missing issues unless the event is both c
       globalThis.fetch = async url => {
         calls.push(url.pathname)
         const isIssue = url.pathname.endsWith('/issues/42')
-        return { ok: !(isIssue && isMissing), status: isIssue && isMissing ? 404 : 200, json: async () => isIssue ? { state: 'closed' } : [], headers: new Headers() }
+        const payload = isIssue ? { state: 'closed' } : url.pathname.endsWith('/pulls/17') ? { head: { sha: '0'.repeat(40) } } : []
+        return { ok: !(isIssue && isMissing), status: isIssue && isMissing ? 404 : 200, json: async () => payload, headers: new Headers() }
       }
       const checked = await runMain(args, apiEnv)
       assert.equal(checked.status, 1, JSON.stringify(lifecycle) + checked.stdout + checked.stderr)
@@ -973,7 +974,7 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
     assert.equal(url.searchParams.get('per_page'), '100')
     const isClaim = url.pathname.endsWith('/issues/42/comments')
     const isSecond = url.searchParams.has('page')
-    const payload = url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${setup.head} by independent reviewer` }] : isClaim ? (isSecond ? [{ body: `Claim: codex, ${branch}` }] : []) : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
+    const payload = url.pathname.endsWith('/pulls/17') ? { number: 17, title: 'fix: synthetic check', body, draft: false, labels: [], head: { ref: branch, sha: setup.head } } : url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${setup.head} by independent reviewer` }] : isClaim ? (isSecond ? [{ body: `Claim: codex, ${branch}` }] : []) : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
     return { ok: true, status: 200, json: async () => payload, headers: new Headers(isClaim && !isSecond ? { link: '<https://api.example.invalid/repos/synthetic/example/issues/42/comments?per_page=100&page=2>; rel="next"' } : {}) }
   }
   const args = ['--event', event, '--repo-dir', setup.directory]
@@ -983,7 +984,7 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   // as it is now (#1258).
   assert.equal(calls.length, 7)
   assert.ok(calls.every(call => call.host === 'api.example.invalid' && call.authorization === 'Bearer synthetic-token-value'))
-  globalThis.fetch = async url => (url.pathname.endsWith('/issues/42') ? { ok: false, status: 404, headers: new Headers() } : { ok: true, status: 200, json: async () => [], headers: new Headers() })
+  globalThis.fetch = async url => (url.pathname.endsWith('/issues/42') ? { ok: false, status: 404, headers: new Headers() } : { ok: true, status: 200, json: async () => (url.pathname.endsWith('/pulls/17') ? { head: { sha: '0'.repeat(40) } } : []), headers: new Headers() })
   const missing = await runMain(args, env)
   assert.equal(missing.status, 1)
   assert.match(missing.stdout, /issue #42 does not exist/)
@@ -997,7 +998,7 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   calls.length = 0
   globalThis.fetch = async (url, options) => {
     calls.push({ host: url.host, authorization: options.headers.Authorization })
-    return { ok: true, status: 200, json: async () => (url.pathname.endsWith('/issues/42') ? { state: 'open' } : []), headers: new Headers({ link: '<https://untrusted.invalid/?token=synthetic01234567890123456789>; rel="next"' }) }
+    return { ok: true, status: 200, json: async () => (url.pathname.endsWith('/pulls/17') ? { head: { sha: '0'.repeat(40) } } : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []), headers: new Headers({ link: '<https://untrusted.invalid/?token=synthetic01234567890123456789>; rel="next"' }) }
   }
   assert.equal((await runMain(args, env)).status, 2)
   assert.equal(calls.some(call => call.host === 'untrusted.invalid'), false)
@@ -1027,6 +1028,11 @@ test('pr-check reads the pull request as it is now, so a re-run of a draft event
   globalThis.fetch = answer('f'.repeat(40))
   const older = await runMain(args, env)
   assert.equal(older.status, 0, older.stdout + older.stderr)
+  // An API answer to pulls/17 without a valid head fails closed rather than keeping the draft event (#1538).
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => [], headers: new Headers() })
+  const malformed = await runMain(args, env)
+  assert.equal(malformed.status, 2)
+  assert.match(malformed.stderr, /pull request metadata is incomplete or invalid/)
 })
 
 test('pr-check reads the release numbers after reading the pull request as it is now, so an event from before a rename to a release still checks its changelog (#1258)', async t => {
@@ -1069,7 +1075,7 @@ test('pr-check looks up each further issue with the token and reads a repeated i
   const answer = async (url, options) => {
     calls.push({ path: url.pathname, authorization: options.headers.Authorization })
     const issue = url.pathname.match(/\/issues\/(\d+)(\/comments)?$/)
-    const payload = url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${head} by independent reviewer` }] : !issue ? [] : !issue[2] ? { state: 'open' } : []
+    const payload = url.pathname.endsWith('/pulls/17') ? { head: { sha: '0'.repeat(40) } } : url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${head} by independent reviewer` }] : !issue ? [] : !issue[2] ? { state: 'open' } : []
     return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
   }
   const listed = body.replace('Fixes #42', 'Fixes #42\nFixes #43')
@@ -1113,7 +1119,8 @@ const githubAnswers = (calls, { labels = [], comments = [], pulls = [], reviews 
   calls.push(url.pathname)
   const isPrComments = url.pathname.endsWith('/issues/17/comments')
   const defaultReview = currentFixtureHead ? [{ body: `Review: APPROVE ${currentFixtureHead} by independent reviewer` }] : []
-  const payload = isPrComments ? (reviews.length ? reviews : defaultReview) :
+  const payload = url.pathname.endsWith('/pulls/17') ? { head: { sha: '0'.repeat(40) } } :
+    isPrComments ? (reviews.length ? reviews : defaultReview) :
     url.pathname.endsWith('/issues/42') ? { state: 'open', labels } :
     url.pathname.endsWith('/issues/42/comments') ? comments :
     url.pathname.endsWith('/pulls') ? pulls : []
@@ -2319,7 +2326,7 @@ test('pr-check fails the round count of a risk-tier pull request whose reviews c
   const args = ['--event', event, '--repo-dir', setup.directory]
   const answers = isReviewsDown => async url => {
     if (isReviewsDown && url.pathname.endsWith('/reviews')) return { ok: false, status: 502, headers: new Headers() }
-    const payload = /\/issues\/\d+\/comments$/.test(url.pathname) && !url.pathname.endsWith('/issues/42/comments') ? [{ body: `Review: APPROVE ${setup.head} by independent reviewer` }] : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
+    const payload = /\/pulls\/\d+$/.test(url.pathname) ? { head: { sha: '0'.repeat(40) } } : /\/issues\/\d+\/comments$/.test(url.pathname) && !url.pathname.endsWith('/issues/42/comments') ? [{ body: `Review: APPROVE ${setup.head} by independent reviewer` }] : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
     return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
   }
   const risk = `${body}Tier: risk\nSurface: none\n`
