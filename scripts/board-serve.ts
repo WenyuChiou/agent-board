@@ -193,19 +193,21 @@ export const startServer = (o: ServeOptions): void => {
   let retiredOverflow: Uint32Array | null = null
   const bloomDigest = (id: string): Buffer => createHash('sha256').update(id).digest()
   const markOverflow = (id: string): void => {
-    retiredOverflow ??= new Uint32Array(RETIRED_BLOOM_BITS >>> 5)
+    const filter = retiredOverflow ??= new Uint32Array(RETIRED_BLOOM_BITS >>> 5)
     const digest = bloomDigest(id)
     for (let offset = 0; offset < 24; offset += 4) {
       const bit = digest.readUInt32BE(offset) & (RETIRED_BLOOM_BITS - 1)
-      retiredOverflow[bit >>> 5] |= 1 << (bit & 31)
+      const word = bit >>> 5
+      filter[word] = (filter[word] ?? 0) | (1 << (bit & 31))
     }
   }
   const hasOverflow = (id: string): boolean => {
-    if (retiredOverflow === null) return false
+    const filter = retiredOverflow
+    if (filter === null) return false
     const digest = bloomDigest(id)
     for (let offset = 0; offset < 24; offset += 4) {
       const bit = digest.readUInt32BE(offset) & (RETIRED_BLOOM_BITS - 1)
-      if ((retiredOverflow[bit >>> 5] & (1 << (bit & 31))) === 0) return false
+      if (((filter[bit >>> 5] ?? 0) & (1 << (bit & 31))) === 0) return false
     }
     return true
   }
