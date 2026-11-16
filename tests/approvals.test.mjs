@@ -217,25 +217,25 @@ test('a page in sight whose board request is waiting still counts as watching pa
 
 test('a page whose board request has just run out still counts as watching until it asks again (#359)', { timeout: 60_000 }, async () => {
   await clearOfMinute(5_000)
-  // The hold runs out past the watching window; the hook then asks before the page asks again.
+  // The hold runs out past the watching window; the approval then arrives before the page asks again. It is the hook's
+  // own request, sent here directly: starting a hook process can take longer than the window on a slow runner.
   const board = await startBoard({ drawMs: 5_000, pressMs: 30_000, pageMs: PAGE_MS, holdMs: PAGE_MS + 1000, isWatched: true })
   const page = await openPage(board)
   const { waiting } = await waitOn(board, page)
   const ended = await waiting
   assert.equal(ended.status, 304, 'the hold ran out with nothing changed')
-  const hook = runHook(board, request('rm -rf synthetic-gap-folder'))
-  // Look without the page's headers, which would count as the page asking again: the board decides when the hook asks.
+  const asked = fetch(new URL('/api/approvals/ask', board.origin), { method: 'POST', headers: { 'content-type': 'application/json', 'x-board-token': board.token }, body: JSON.stringify(hook.askBody(request('rm -rf synthetic-gap-folder'))) })
+  // Look without the page's headers, which would count as the page asking again: the board decided when the ask came.
   let card
   for (let tries = 0; tries < 100 && card === undefined; tries += 1) {
     card = (await board.call('/api/board')).body.approvals?.cards?.find(one => one.command === 'rm -rf synthetic-gap-folder')
     if (card === undefined) await pause(50)
   }
-  assert.ok(card, 'the hook never asked')
+  assert.ok(card, 'the approval never reached the board')
   assert.equal(card.state, 'asking', 'an approval between a hold running out and the next request went back to the host')
-  assert.equal(hook.isRunning(), true)
   const shown = await page.show('rm -rf synthetic-gap-folder')
   assert.equal((await page.press(shown, 'deny', { confirmed: true })).status, 200)
-  await hook.done
+  assert.equal((await (await asked).json()).decision?.behavior, 'deny')
 })
 
 test('the hook finds the address file where hooks/receiver.ts names it and reads it the same way', () => {

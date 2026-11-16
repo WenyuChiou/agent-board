@@ -210,7 +210,7 @@ test('serve: a board request without the token is refused at once, never held', 
 })
 
 test('serve: a tab left open does not keep an idle server alive', async () => {
-  // The idle exit after 0.8 s; the page asks again at once each time its waiting request runs out.
+  // The idle exit after 1.5 s; the page asks again at once each time its waiting request runs out.
   const keepAsking = async (board, visible, ms) => {
     let etag = (await board.ask()).etag
     const began = performance.now()
@@ -224,12 +224,12 @@ test('serve: a tab left open does not keep an idle server alive', async () => {
   }
   // A tab in sight keeps it up while it waits, so the server does not go while someone reads the board, even when
   // one wait lasts longer than the idle time.
-  const watched = await startBoard({ holdMs: 2000, idleMs: 800 })
-  await keepAsking(watched, '1', 3000)
+  const watched = await startBoard({ holdMs: 2500, idleMs: 1500 })
+  await keepAsking(watched, '1', 4000)
   assert.equal(await settledWithin(watched.isStopped.then(() => true), 0), undefined, 'the server went while a tab in sight was waiting')
   await watched.close()
   // A hidden tab does not: the server goes after its idle time.
-  const hidden = await startBoard({ holdMs: 300, idleMs: 800 })
+  const hidden = await startBoard({ holdMs: 300, idleMs: 1500 })
   await keepAsking(hidden, '0', 15_000)
   assert.ok(await settledWithin(hidden.isStopped.then(() => true), 1000), 'the server stayed up while only a hidden tab was waiting')
 })
