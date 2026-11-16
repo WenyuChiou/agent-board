@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
@@ -310,3 +310,17 @@ fs.renameSync = (from, to) => {
     stoppedOnChange(install)
   }))
 }
+
+// Hermes's skills folder linked to the shared one gives one file two names in one batch. The second write finds the
+// text the first wrote, which loses nothing, so setup and remove go through (codex_468 on #1594).
+test('a Hermes skills folder linked to the shared skills folder installs and removes without a false changed-file stop', () => withHome(({ home, run }) => {
+  mkdirSync(join(home, '.agents', 'skills'), { recursive: true })
+  mkdirSync(join(home, '.hermes'), { recursive: true })
+  symlinkSync(join(home, '.agents', 'skills'), join(home, '.hermes', 'skills'), 'junction')
+  const install = run(['--agent', 'hermes', '--apply'])
+  assert.equal(install.status, 0, `${install.stdout}${install.stderr}`)
+  const skill = readFileSync(join(home, '.agents', 'skills', 'agent-board', 'SKILL.md'), 'utf8')
+  assert.equal(readFileSync(join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md'), 'utf8'), skill)
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'])
+  assert.equal(removed.status, 0, `${removed.stdout}${removed.stderr}`)
+}))
