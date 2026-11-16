@@ -626,7 +626,11 @@ export const startServer = (o: ServeOptions): void => {
       // Pages that stopped asking long ago (a crashed window) are forgotten.
       if (pages.size > 32) for (const [other, one] of pages) if (now - one.at > 300_000) pages.delete(other)
     }
-    if (!url.pathname.startsWith('/api/messages/')) {
+    // A hidden tab waiting on the board (#359) is not someone using it: a tab left open behind others does not keep an idle
+    // server, or the address a phone was given, alive. A tab in sight still counts while it waits, so the server does not
+    // go while someone reads the board; so do loading the page, a request for the whole board and every press.
+    const isWaitingAsk = req.method === 'GET' && url.pathname === '/api/board' && req.headers['x-board-wait'] === '1' && req.headers['x-board-visible'] === '0'
+    if (!url.pathname.startsWith('/api/messages/') && !isWaitingAsk) {
       lastSeen = Date.now()
       if (side !== null) side.lastSeen = lastSeen
     }
@@ -1055,8 +1059,9 @@ export const startServer = (o: ServeOptions): void => {
     // The idle timer starts only once the server is listening: a listen failure
     // throws before this point, and a timer made earlier would keep the failed
     // child alive instead of letting it exit.
-    // An open page keeps a board request open and asks again when it is answered (#359), so it asks at least every
-    // BOARD_HOLD_MS; the server goes once nobody has asked for `idleMs` and no reply is on its way.
+    // An open page keeps a board request open and asks again when it is answered (#359); a hidden tab's waiting requests
+    // are not counted, so the server goes once no tab in sight has asked and nobody has loaded the page or pressed
+    // anything for `idleMs`, and no reply is on its way.
     const idle = setInterval(() => {
       if (isStopping) return
       if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()

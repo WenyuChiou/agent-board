@@ -35,7 +35,7 @@ const blockOf = title => `## Synthetic watch\n<!-- auto session=abcd1234 agent=c
 
 // A board started from source. `fs` stands in for fs.watch; `holdMs` for how long an open request waits.
 // `reads` counts how often the server built the board, which is where its file work is.
-const startBoard = async ({ fs, holdMs } = {}) => {
+const startBoard = async ({ fs, holdMs, idleMs = 0 } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'serve-watch-'))
   roots.push(root)
   const claude = join(root, '.claude')
@@ -53,7 +53,7 @@ const startBoard = async ({ fs, holdMs } = {}) => {
       port: 0, messagesDirectory: messages, routes: [], s: EN, ping: {},
       view: () => { reads += 1; return buildView(parseProgress(readFileSync(progress, 'utf8')), [], null, Date.now(), 0, {}, EN) },
       pending: () => [], act: () => '', tidy: () => '', clean: () => '', sweep: () => {}, sweepMs: 60_000,
-      paste: () => ({ isAdded: false, note: '' }), failure: () => null, idleMs: 0,
+      paste: () => ({ isAdded: false, note: '' }), failure: () => null, idleMs,
       watch: { progress, inbox, ...(fs === undefined ? {} : { fs }) },
       ...(holdMs === undefined ? {} : { boardTimes: { holdMs } }),
       onReady: url => { resolve(url); return true },
@@ -64,15 +64,15 @@ const startBoard = async ({ fs, holdMs } = {}) => {
   const origin = `http://127.0.0.1:${url.port}`
   const token = url.searchParams.get('t')
   // The page's board request: with the etag of the board it holds, it waits for a change.
-  const ask = async etag => {
-    const response = await fetch(new URL('/api/board', origin), { headers: { 'x-board-token': token, 'x-board-page': 'p-watch', 'x-board-visible': '1', ...(etag === undefined ? {} : { 'if-none-match': etag, 'x-board-wait': '1' }) } })
+  const ask = async (etag, { headers = {} } = {}) => {
+    const response = await fetch(new URL('/api/board', origin), { headers: { 'x-board-token': token, 'x-board-page': 'p-watch', 'x-board-visible': '1', ...(etag === undefined ? {} : { 'if-none-match': etag, 'x-board-wait': '1' }), ...headers } })
     const text = await response.text()
     return { status: response.status, etag: response.headers.get('etag'), text, at: performance.now() }
   }
   const post = (path, body) => fetch(new URL(path, origin), { method: 'POST', headers: { 'x-board-token': token, 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(async response => ({ status: response.status, text: await response.text() }))
   let isClosed = false
   const board = {
-    root, claude, progress, inbox, ask, post, get reads() { return reads },
+    root, claude, progress, inbox, ask, post, isStopped, get reads() { return reads },
     // A board written the way the board itself and the hooks write it: a new file renamed over the old one.
     replace: title => {
       const temporary = `${progress}.${process.pid}.tmp`
@@ -175,6 +175,43 @@ test('serve: a press wakes the open board request, and a connector poll that han
   assert.equal(await settledWithin(waiting, 200), undefined, 'an unchanged board was answered after a press')
   await board.close()
   await waiting.catch(() => undefined)
+})
+
+test('serve: a board request without the token is refused at once, never held', async () => {
+  const board = await startBoard({ holdMs: 60_000 })
+  const first = await board.ask()
+  // The page's waiting request with a wrong token, and with none: the same check as every request answers it.
+  for (const token of ['synthetic-wrong-token', '']) {
+    const answer = await settledWithin(board.ask(first.etag, { headers: { 'x-board-token': token } }), 2000)
+    assert.ok(answer !== undefined, `a request with ${token ? 'a wrong' : 'no'} token was held`)
+    assert.ok(answer.status === 401 || answer.status === 403, `a request with ${token ? 'a wrong' : 'no'} token got ${answer.status}`)
+    assert.doesNotMatch(answer.text, /First synthetic task/)
+  }
+  await board.close()
+})
+
+test('serve: a tab left open does not keep an idle server alive', async () => {
+  // The idle exit after 1.5 s; the page's waiting requests run out every 300 ms and it asks again at once.
+  const keepAsking = async (board, visible, ms) => {
+    let etag = (await board.ask()).etag
+    const began = performance.now()
+    while (performance.now() - began < ms) {
+      try {
+        const answer = await board.ask(etag, { headers: { 'x-board-visible': visible } })
+        if (answer.status === 200) etag = answer.etag
+      } catch { return }
+      if (await settledWithin(board.isStopped.then(() => true), 0)) return
+    }
+  }
+  // A tab in sight keeps it up while it waits, so the server does not go while someone reads the board.
+  const watched = await startBoard({ holdMs: 300, idleMs: 1500 })
+  await keepAsking(watched, '1', 5000)
+  assert.equal(await settledWithin(watched.isStopped.then(() => true), 0), undefined, 'the server went while a tab in sight was waiting')
+  await watched.close()
+  // A hidden tab does not: the server goes after its idle time.
+  const hidden = await startBoard({ holdMs: 300, idleMs: 1500 })
+  await keepAsking(hidden, '0', 15_000)
+  assert.ok(await settledWithin(hidden.isStopped.then(() => true), 1000), 'the server stayed up while only a hidden tab was waiting')
 })
 
 // A watch that never reports a change, as one that stopped would, and can be made to fail.
