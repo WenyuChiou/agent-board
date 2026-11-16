@@ -867,6 +867,37 @@ const surfaceLine = body => {
   const found = visibleLines(body).flatMap(line => line.match(/^Surface:[ \t]*(.*)$/i)?.[1].trim() ?? [])
   return { found, filled: found.filter(value => value !== '' && !value.startsWith('<')) }
 }
+// The size limit (RULES R6, #1545): changed lines, counted as for the surface note, on the risk tier fail above SIZE_RISK and
+// on the normal tier fail above SIZE_NORMAL with a note above SIZE_RISK, unless the body says why the change cannot be split
+// (`cannot split: <reason>` on the `Surface:` line, or a line `Size: cannot split: <reason>`). The light tier and releases
+// have none. It applies to pull requests numbered above SIZE_FROM; a local --body-file run is checked as new.
+export const SIZE_FROM = 1545
+export const SIZE_RISK = 400
+export const SIZE_NORMAL = 800
+// A reason is the text after `cannot split:` with a letter or a digit, in any language, and no placeholder, tag or
+// HTML entity, so formatting alone is none (surface reads it the same way); the template's own `Surface:` line,
+// which starts with `<`, never counts (as in surface), and neither does a line in a code fence or an HTML comment.
+// A reason a reader sees is plain words: one with an HTML entity (`&#8203;`, `&lt;reason&gt;`) or a tag (`<reason>`,
+// `<span title="...">`) in it is none, since Markdown can hide what such text holds (round cap of #1548). Of the rest,
+// a character Unicode marks default-ignorable (a zero-width space, the Hangul filler) is not a letter.
+const isSplitReason = text => {
+  const reason = text.replace(/cannot split:/gi, '')
+  if (/&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]*);|<[a-z/!?]/i.test(reason)) return false
+  return /[\p{L}\p{N}]/u.test(reason.replace(/\p{Default_Ignorable_Code_Point}/gu, ''))
+}
+const hasSplitReason = body => surfaceLine(body).filled.some(value => isSplitReason(value.split(/,[ \t]*cannot split:/i).slice(1).join(','))) ||
+  visibleLines(body).some(line => isSplitReason(line.match(/^Size:[ \t]*cannot split:(.*)$/i)?.[1] ?? ''))
+export const size = ({ body = '', title = '', number = null, numstat, tier = visibleTier(body) } = {}) => {
+  const output = result()
+  if (!Array.isArray(numstat) || tier === 'light' || isReleaseTitle(title) || (number !== null && number <= SIZE_FROM)) return output
+  const lines = numstat.filter(item => !isUncountedForSurface(item.path)).reduce((sum, item) => sum + item.added + item.deleted, 0)
+  const limit = tier === 'risk' ? SIZE_RISK : SIZE_NORMAL
+  const counted = `${lines} changed lines (tests, generated files and string tables not counted)`
+  if (lines > limit && !hasSplitReason(body)) {
+    output.problems.push(problem('size', `${counted} is more than ${limit}, the limit on the ${tier === 'risk' ? 'risk' : 'normal'} tier (RULES.md, R6).`, 'split it into smaller pull requests, or say why it cannot be split: end the `Surface:` line with `, cannot split: <reason>`, or add a line `Size: cannot split: <reason>`, in plain words (no HTML tag or entity).'))
+  } else if (lines > SIZE_RISK && tier !== 'risk') output.info.push(`size note: ${counted} is more than ${SIZE_RISK}; above ${SIZE_NORMAL} it fails without a reason it cannot be split.`)
+  return output
+}
 export const surface = ({ body = '', title = '', number = null, paths = [], numstat, tier = visibleTier(body) } = {}) => {
   const output = result()
   if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= SURFACE_FROM)) return output
@@ -884,8 +915,8 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   }
   const [named, ...reasonParts] = line.split(/,[ \t]*cannot split:/i)
   const reason = reasonParts.join(',').trim()
-  if (reasonParts.length && (!reason || /^<[^<>]*>$/.test(reason))) {
-    fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.','write the reason after `cannot split:`, for the maintainer or the owner to accept or refuse before the first review.')
+  if (reasonParts.length && !isSplitReason(reason)) {
+    fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.','write the reason after `cannot split:` in plain words (no HTML tag or entity), for the maintainer or the owner to accept or refuse before the first review.')
     return output
   }
   const values = named.split('+').map(value => value.replace(/`/g, '').trim().toLowerCase())
@@ -1260,6 +1291,7 @@ export const checkPr = data => {
   add(binaryImages(data.changedPaths))
   add(tier({ body: data.body, title: data.title, number: data.number, paths: data.paths, riskPaths: data.riskPaths, isOptional: isSmallDocs }))
   add(surface({ body: data.body, title: data.title, number: data.number, paths: data.paths, numstat: data.numstat }))
+  add(size({ body: data.body, title: data.title, number: data.number, numstat: data.numstat }))
   add(cases({ body: data.body, title: data.title, number: data.number, isDraft: data.isDraft, titles: testTitles(data.testFiles ?? []), head: data.head }))
   if (issue.issue !== null) {
     // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
