@@ -7977,7 +7977,9 @@ test('a deferred take asks again for its own session only, and a session closed 
 test('hook delivery and DeepSeek take report corrupt messages.json as an error instead of deferred, while a held claim stays deferred (#1448)', () => mailboxFixture(async f => {
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   f.save(join(f.directory, 'messages.json'), '{not json')
-  const failedHook = f.call('codex', 'UserPromptSubmit')
+  // A slow runner may defer the first try past the store's 120 ms; one deferred turn is allowed (#1581).
+  const isStoreFailure = result => /board: mailbox failed \(INVALID_MESSAGE_STORE\)/.test(result.stderr)
+  const failedHook = await hookOrDeferred(() => f.call('codex', 'UserPromptSubmit'), isStoreFailure)
   assert.equal(failedHook.status, 0, failedHook.stderr)
   assert.equal(failedHook.stdout, '')
   assert.match(failedHook.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
@@ -7991,7 +7993,7 @@ test('hook delivery and DeepSeek take report corrupt messages.json as an error i
     '<!-- /auto session=a1b2c3f9 -->',
     '',
   ].join('\n'))
-  const withQuestion = f.call('codex', 'UserPromptSubmit')
+  const withQuestion = await hookOrDeferred(() => f.call('codex', 'UserPromptSubmit'), isStoreFailure)
   assert.equal(withQuestion.status, 0, withQuestion.stderr)
   const questionEnvelope = JSON.parse(withQuestion.stdout)
   assert.match(questionEnvelope.hookSpecificOutput.additionalContext, /Auth check/)
