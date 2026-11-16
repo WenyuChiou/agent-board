@@ -8,7 +8,7 @@ import { addedLines, caseRows, failFirstValues, testTitles, titleKnown } from '.
 import { runFailFirst, stateWords } from './fail-first.mjs'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 import { isBundleFile } from './bundle-text.mjs'
-import { checkAdded } from './code-rules.mjs'
+import { checkAdded, loadConfig } from './code-rules.mjs'
 import { testLockNamespaceProblem } from './preflight-lock-policy.mjs'
 
 const tables = [['hooks/i18n.ts', 'ZH_TW'], ['hooks/strings-en.ts', 'EN'], ['hooks/strings-zh-cn.ts', 'ZH_CN']]
@@ -934,7 +934,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   for (const [path] of unsafe) add('WARN', `${path}: a test that starts a process must stop it in \`finally\` and wait for it to exit, on Windows too`)
 
   await check('code rules', () => {
-    const failures = checkAdded(added)
+    const failures = checkAdded(added, loadConfig(cwd))
     if (!failures.length) add('PASS', 'no added line breaks a code rule (scripts/code-rules.mjs).')
     for (const failure of failures) add('FAIL', failure.message)
   })

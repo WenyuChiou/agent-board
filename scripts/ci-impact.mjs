@@ -85,7 +85,7 @@ export const makePlan = (files, options = {}) => {
       known = true
     }
     if (path === 'bin/agent-board.mjs') { select('npm', path); known = true }
-    if (/^scripts\/(?:pr-check|preflight|fail-first|changelog-fold|team-stats|review-queue|review-queue-post|code-rules)\.mjs$/.test(path)) { select('tooling', path); known = true }
+    if (/^scripts\/(?:pr-check|preflight|fail-first|changelog-fold|team-stats|review-queue|review-queue-post|code-rules)\.(?:mjs|json)$/.test(path)) { select('tooling', path); known = true }
     if (/^(?:scripts\/setup|tests\/setup\.check)\.(?:sh|ps1)$/.test(path)) {
       select('installers', path)
       installers.add(path.endsWith('.ps1') ? 'windows-latest' : 'ubuntu-latest')

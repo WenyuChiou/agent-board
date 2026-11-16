@@ -86,7 +86,7 @@ const has = (checks, state, text) => checks.some(item => item.state === state &&
 const mainFixture = (t, { isSame = false, hasImportFailure = false, mainSource } = {}) => {
   const f = fixture(t)
   const local = readFileSync(script, 'utf8')
-  for (const name of ['pr-check.mjs', 'fail-first.mjs', 'changelog-fold.mjs', 'bundle-text.mjs', 'preflight-lock-policy.mjs', 'code-rules.mjs']) {
+  for (const name of ['pr-check.mjs', 'fail-first.mjs', 'changelog-fold.mjs', 'bundle-text.mjs', 'preflight-lock-policy.mjs', 'code-rules.mjs', 'code-rules.json']) {
     f.write(`scripts/${name}`, readFileSync(new URL(`../scripts/${name}`, import.meta.url), 'utf8'))
   }
   const main = mainSource ?? (isSame ? local : `import { message } from './main-only-message.mjs'\n${local.replace("'the branch contains the base.'", 'message')}`)
@@ -124,6 +124,21 @@ test('preflight warns once and uses the local copy when fetching is disabled', a
   assert.deepEqual(checks.filter(item => item.state === 'WARN').map(item => item.message), [
     'using the local preflight because --no-fetch was supplied; origin/main freshness is unknown.',
   ])
+})
+
+test('preflight runs the code rules on the added lines: a new timer in a hook fails, and the list in the same change lets it pass', async t => {
+  const f = fixture(t)
+  assert.ok(has(await f.check(), 'PASS', 'no added line breaks a code rule'))
+  f.write('hooks/fresh-timer.ts', 'export const wait = () => setTimeout(() => {}, 10)\n')
+  f.commit()
+  const failed = await f.check()
+  assert.ok(has(failed, 'FAIL', '[set-timeout-in-hooks]'))
+  assert.equal(has(failed, 'PASS', 'no added line breaks a code rule'), false)
+  f.write('scripts/code-rules.json', JSON.stringify({ setTimeoutFiles: ['hooks/fresh-timer.ts'] }))
+  f.commit()
+  const listed = await f.check()
+  assert.ok(has(listed, 'PASS', 'no added line breaks a code rule'))
+  assert.equal(listed.some(item => item.state === 'FAIL' && item.message.includes('[set-timeout-in-hooks]')), false)
 })
 
 test('preflight warns that a release branch behind main needs current main, with the PR title given', async t => {
