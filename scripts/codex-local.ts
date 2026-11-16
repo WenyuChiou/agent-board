@@ -508,12 +508,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // case on Windows), so writing the same bytes over it loses nothing. Before a removal it must be as planned, already
   // gone (a second name of a file this batch removed), or the same link it was with its target gone (a file link to a
   // file this batch removed). Anything else stops the batch, a link or other bytes put where the file was included.
+  // A second name may also find a regular file where it planned a file link, when this batch's own write replaced that
+  // link (a skills folder linked to the shared one whose SKILL.md is a file link): only when the path's real path is
+  // one this batch wrote and it holds exactly the new bytes (Greptile on #1594).
   // After a write the rename target must be a regular file holding exactly the bytes; after a removal the path is gone.
   // A plain rename or unlink cannot close the instant between the last re-read and the change.
   const isHolding = (now: Snap, text: string): boolean => sameBytes(now.bytes, Buffer.from(text, 'utf8'))
+  const ours = new Set<string>()
+  const realOf = (file: string): string | null => { try { return realpathSync.native(file) } catch { return null } }
+  const isOurs = (file: string, now: Snap, next: string): boolean => now.kind === 'file' && isHolding(now, next) && ours.has(realOf(file) ?? '')
   const unchanged = (file: string, next: string | null): void => {
     const was = before.get(file) ?? NO_PATH, now = take(file)
-    const isSecondName = next !== null && isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file')
+    const isSecondName = next !== null && isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' || isOurs(file, now, next))
     const isGone = next === null && (now.kind === 'none' || was.kind === 'link' && now.kind === 'link' && now.link === was.link && now.bytes === null)
     if (!same(was, now) && !isSecondName && !isGone) throw new Error('INSTALL_CHANGED')
   }
@@ -521,7 +527,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const now = take(file)
     if (text === null ? now.kind !== 'none' : now.kind !== 'file' || !isHolding(now, text)) throw new Error('INSTALL_CHANGED')
   }
-  const put = (file: string, text: string, target = file): void => { atomic(target, text, () => unchanged(file, text)); written(target, text) }
+  const put = (file: string, text: string, target = file): void => {
+    atomic(target, text, () => unchanged(file, text))
+    written(target, text)
+    const real = realOf(target)
+    if (real !== null) ours.add(real)
+  }
   // unlinkSync, not an existsSync check first: a file link whose target this batch already removed reads as gone but
   // is still there, and must go too.
   const drop = (file: string): void => {

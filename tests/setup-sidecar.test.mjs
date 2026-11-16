@@ -341,6 +341,33 @@ test('a Hermes SKILL.md linked to the shared SKILL.md leaves no dangling link af
   assert.throws(() => lstatSync(own), { code: 'ENOENT' })
 }))
 
+// Hermes's skills folder linked to the shared one, and the shared SKILL.md a file link: setup plans both names as that
+// link, and its first write replaces the link with a regular file. The second name then finds this batch's own bytes in
+// a regular file, which loses nothing, so a language change updates both (Greptile on #1594). File links need a
+// privilege on Windows.
+test('a Hermes skills folder linked to the shared one whose SKILL.md is a file link updates both names on a language change', t => withHome(({ home, run }) => {
+  mkdirSync(join(home, '.agents', 'skills'), { recursive: true })
+  mkdirSync(join(home, '.hermes'), { recursive: true })
+  symlinkSync(join(home, '.agents', 'skills'), join(home, '.hermes', 'skills'), 'junction')
+  const install = run(['--agent', 'hermes', '--apply'])
+  assert.equal(install.status, 0, `${install.stdout}${install.stderr}`)
+  const shared = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  const english = readFileSync(shared)
+  const kept = join(home, 'kept-skill.md')
+  writeFileSync(kept, english)
+  rmSync(shared)
+  try { symlinkSync(kept, shared, 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const update = run(['--agent', 'hermes', '--apply'], { lang: 'zh-TW' })
+  assert.equal(update.status, 0, `${update.stdout}${update.stderr}`)
+  const now = readFileSync(shared)
+  assert.notDeepEqual(now, english)
+  assert.deepEqual(readFileSync(own), now)
+}))
+
 // U+FFFD written as UTF-8 (EF BF BD) and a lone FF byte decode to the same text, so only the bytes tell them apart.
 // Every re-read compares a path's kind, link and bytes with what setup saw when it planned (#1488).
 const FFFD = Buffer.from([0xef, 0xbf, 0xbd])
