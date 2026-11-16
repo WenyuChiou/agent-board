@@ -951,22 +951,84 @@ const decodeSplitEntity = (_, dec, hex, named) => {
   return Object.hasOwn(splitEntities, key) ? splitEntities[key] : ''
 }
 
+const findClosingParen = (text, openAt) => {
+  let depth = 1
+  for (let i = openAt + 1; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '\n' || ch === '\r') return -1
+    if (ch === '\\' && i + 1 < text.length) { i++; continue }
+    if (ch === '<') {
+      for (let j = i + 1; j < text.length && text[j] !== '\n' && text[j] !== '\r'; j++) {
+        if (text[j] === '\\' && j + 1 < text.length) { j++; continue }
+        if (text[j] === '>') { i = j; break }
+      }
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      for (let j = i + 1; j < text.length; j++) {
+        if (text[j] === '\\' && j + 1 < text.length) { j++; continue }
+        if (text[j] === ch) { i = j; break }
+      }
+      continue
+    }
+    if (ch === '(') depth++
+    else if (ch === ')' && --depth === 0) return i
+  }
+  return -1
+}
+
+const stripMarkdownLinks = text => {
+  let out = ''
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\' && i + 1 < text.length) { out += text[i] + text[i + 1]; i++; continue }
+    const start = text[i] === '!' && text[i + 1] === '[' ? i + 1 : text[i] === '[' ? i : -1
+    if (start !== -1) {
+      const closeBracket = text.indexOf(']', start + 1)
+      if (closeBracket !== -1) {
+        const after = closeBracket + 1
+        if (text[after] === '(') {
+          const closeParen = findClosingParen(text, after)
+          if (closeParen !== -1) {
+            out += text.slice(start + 1, closeBracket)
+            i = closeParen
+            continue
+          }
+        } else if (text[after] === '[') {
+          const closeRef = text.indexOf(']', after + 1)
+          if (closeRef !== -1 && !text.slice(after + 1, closeRef).includes('\n')) {
+            out += text.slice(start + 1, closeBracket)
+            i = closeRef
+            continue
+          }
+        }
+      }
+    }
+    out += text[i]
+  }
+  return out
+}
+
 // A reason is the visible text after `cannot split:` with a letter or a digit, in any language, and no placeholder,
 // HTML tag or empty link/image hiding non-visible words (#1556). Tags and link destinations are stripped before decoding
 // entities on each pass so `<span title="&gt;hidden"></span>` never decodes into visible text while real entities
 // like `&amp;` still count. Characters Unicode marks default-ignorable (zero-width space, Hangul filler) are ignored.
 const isSplitReason = text => {
   let reason = text.replace(/cannot split:/gi, '')
-  for (let pass = 0; pass < 6; pass++) {
-    const next = reason
-      .replace(/!?\[([^\]]*)\]\((?:[^()\n]|\([^()\n]*\))*\)/g, '$1')
-      .replace(/<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>/gi, '')
+  let converged = false
+  for (let pass = 0; pass < 8; pass++) {
+    const next = stripMarkdownLinks(reason)
+      .replace(/<\/?[a-z](?:=\s*(?:"[^"]*"|'[^']*')|[^>=]|=(?!\s*["']))*>/gi, '')
+      .replace(/<\/?[a-z][^>]*>/gi, '')
       .replace(/<!(?:--[\s\S]*?--|[^>]*?)>/g, '')
       .replace(/<\?[\s\S]*?\?>/g, '')
       .replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z][a-z0-9]*));/gi, decodeSplitEntity)
-    if (next === reason) break
+    if (next === reason) {
+      converged = true
+      break
+    }
     reason = next
   }
+  if (!converged) return false
   return /[\p{L}\p{N}]/u.test(reason.replace(/\p{Default_Ignorable_Code_Point}/gu, ''))
 }
 const hasSplitReason = body => surfaceLine(body).filled.some(value => isSplitReason(value.split(/,[ \t]*cannot split:/i).slice(1).join(','))) ||

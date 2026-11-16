@@ -1926,7 +1926,9 @@ test('pr-check limits the changed lines of a pull request by its tier, unless th
   // Real entities in visible prose count, while entity-encoded placeholders, unknown/invisible entities, HTML tags and
   // empty Markdown links/images remain hidden/empty in both size and surface; a leading unclosed `<` still counts (#1556).
   assert.equal(run(`${risk}\nSize: cannot split: one migration &amp; its reader`, lines(SIZE_RISK + 1)).problems.length, 0)
-  for (const hidden of [
+  let nestedPlaceholder = '<reason>'
+  for (let i = 0; i < 8; i++) nestedPlaceholder = nestedPlaceholder.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const hiddenSplitTexts = [
     '&#8203;',
     '&lt;reason&gt;',
     '&amp;lt;reason&amp;gt;',
@@ -1937,9 +1939,21 @@ test('pr-check limits the changed lines of a pull request by its tier, unless th
     '<placeholder<reason>>',
     '<span title="&gt;hidden"></span>',
     '<span title=">hidden"></span>',
+    '<span title=a"b></span>',
+    '<span title=a\'b></span>',
+    '<span title="a"b"></span>',
     '[](<3>)',
     '![](<3>)',
-  ]) {
+    '[](<&#51;(((x)))>)',
+    '[](<a)b>)',
+    '[](https://example.com "a)b")',
+    "[](https://example.com 'a)b')",
+    '[](https://example.com/a\\)b)',
+    '[][ref]',
+    '![][ref]',
+    nestedPlaceholder,
+  ]
+  for (const hidden of hiddenSplitTexts) {
     assert.equal(run(`${risk}\nSize: cannot split: ${hidden}`, lines(SIZE_RISK + 1)).problems.length, 1, hidden)
     assert.equal(run(`Tier: risk\nSurface: delivery + data, cannot split: ${hidden}`, lines(SIZE_RISK + 1)).problems.length, 1, hidden)
   }
@@ -2025,8 +2039,18 @@ test('pr-check accepts two surfaces with cannot split and says it waits for an a
     'Surface: delivery + data, cannot split: <placeholder<reason>>',
     'Surface: delivery + data, cannot split: <span title="&gt;hidden"></span>',
     'Surface: delivery + data, cannot split: <span title=">hidden"></span>',
+    'Surface: delivery + data, cannot split: <span title=a"b></span>',
+    "Surface: delivery + data, cannot split: <span title=a'b></span>",
+    'Surface: delivery + data, cannot split: <span title="a"b"></span>',
     'Surface: delivery + data, cannot split: [](<3>)',
     'Surface: delivery + data, cannot split: ![](<3>)',
+    'Surface: delivery + data, cannot split: [](<&#51;(((x)))>)',
+    'Surface: delivery + data, cannot split: [](<a)b>)',
+    'Surface: delivery + data, cannot split: [](https://example.com "a)b")',
+    "Surface: delivery + data, cannot split: [](https://example.com 'a)b')",
+    'Surface: delivery + data, cannot split: [](https://example.com/a\\)b)',
+    'Surface: delivery + data, cannot split: [][ref]',
+    'Surface: delivery + data, cannot split: ![][ref]',
   ]) {
     assert.match(surfaceRun(empty).problems[0]?.message ?? '', /`cannot split:` with no reason/, empty)
   }
