@@ -310,7 +310,8 @@ export const resolveAntigravityTitle = (
 
 // The first line of each reply the model gave in the conversation's last turn (after its last USER_INPUT), read from
 // the tail of the conversation's own transcript, because the turn-end hook does not carry the reply text (#1416).
-// Only the first line is returned, and only for a regular file under one of the known transcript names; a line that
+// Only the reply's own first line is returned (a blank first line stays blank, so an ACK on the line after it does not
+// count), and only for a regular file under one of the known transcript names; a line that
 // is not JSON is skipped, and anything unreadable reads as no reply.
 export const antigravityReplyFirstLines = (path: unknown): string[] => {
   if (typeof path !== 'string' || !isAbsolute(path) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(path))) return []
@@ -337,7 +338,7 @@ export const antigravityReplyFirstLines = (path: unknown): string[] => {
         if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
         const { type, source, content } = entry as Record<string, unknown>
         if (type === 'USER_INPUT') replies = []
-        else if (source === 'MODEL' && type === 'PLANNER_RESPONSE' && typeof content === 'string' && content.trim() !== '') replies.push(content.trim().split(/\r?\n/)[0]!.trim())
+        else if (source === 'MODEL' && type === 'PLANNER_RESPONSE' && typeof content === 'string' && content.trim() !== '') replies.push(content.split(/\r?\n/)[0]!.trim())
       }
       return replies
     } finally { closeSync(fd) }

@@ -17,16 +17,19 @@ type Json = Record<string, unknown>
 
 // What Antigravity's turn-start hook handed over, kept until the turn's Stop hook, which reads the model's reply from the
 // conversation's transcript (the hook does not carry it). A message's nonce is the code of its ACK line (#1416). Only an id
-// and a code are kept, never the message text or the reply; a claim lives until the next Stop hook spends it.
+// and a code are kept, never the message text or the reply; a claim lives until the next Stop hook spends it. A claim whose
+// ACK line was read but that the board did not take (busy, or no mailbox) is kept as matched and offered again at each Stop,
+// since a later turn's transcript no longer holds that line.
+type AckClaim = { id: string; nonce: string; matched?: true }
 const ACK_CLAIMS_KEEP = 8
 const ackClaimsFile = (root: string, owner: string): string => join(root, 'antigravity-acks', `${owner}.json`)
-const isAckClaim = (one: unknown): one is { id: string; nonce: string } =>
+const isAckClaim = (one: unknown): one is AckClaim =>
   typeof one === 'object' && one !== null && typeof (one as Json).id === 'string' && typeof (one as Json).nonce === 'string' && /^[0-9a-f]{6}$/.test((one as Json).nonce as string)
-const readAckClaims = (file: string, readLocal: (file: string) => string | null): { id: string; nonce: string }[] => {
+const readAckClaims = (file: string, readLocal: (file: string) => string | null): AckClaim[] => {
   try {
     const saved = readLocal(file)
     const parsed = saved === null ? null : JSON.parse(saved) as { claims?: unknown }
-    return Array.isArray(parsed?.claims) ? parsed.claims.filter(isAckClaim).map(({ id, nonce }) => ({ id, nonce })) : []
+    return Array.isArray(parsed?.claims) ? parsed.claims.filter(isAckClaim).map(({ id, nonce, matched }) => matched === true ? { id, nonce, matched } : { id, nonce }) : []
   } catch { return [] }
 }
 
@@ -119,15 +122,18 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
       try { await mailbox?.end(agent, session, Date.now()) } catch {}
     } else if (agent === 'antigravity' && event === 'Stop') {
       // The turn is over: a reply whose first line is `ACK <code>` of a message handed over in it acknowledges that message.
-      // The claim is spent here, matched or not; only an acknowledgement the board did not take is kept for the next Stop.
+      // The claim is spent here, matched or not; only an acknowledgement the board did not take is kept, as matched, for the next Stop.
       const file = ackClaimsFile(root, hash(`${agent}:${session}`))
       const claims = readAckClaims(file, readLocal)
       if (claims.length > 0) {
         const lines = antigravityReplyFirstLines(raw.transcriptPath)
         const kept: typeof claims = []
         for (const claim of claims) {
-          if (!lines.some(line => line === `ACK ${claim.nonce}` || line.startsWith(`ACK ${claim.nonce} `))) continue
-          try { await mailbox?.ack(agent, session, claim.id, claim.nonce, `ACK ${claim.nonce}`, Date.now()) } catch { kept.push(claim) }
+          if (claim.matched !== true && !lines.some(line => line === `ACK ${claim.nonce}` || line.startsWith(`ACK ${claim.nonce} `))) continue
+          try {
+            if (mailbox === undefined) throw new Error(setupError ?? 'MAILBOX_FAILED')
+            await mailbox.ack(agent, session, claim.id, claim.nonce, `ACK ${claim.nonce}`, Date.now())
+          } catch { kept.push({ id: claim.id, nonce: claim.nonce, matched: true }) }
         }
         if (kept.length > 0) {
           if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)

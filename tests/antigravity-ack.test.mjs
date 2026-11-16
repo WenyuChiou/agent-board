@@ -83,7 +83,7 @@ const fixture = async (folder, fn) => {
         assert.equal(again.status, 0, again.stderr)
       }
     }
-    await fn({ state, seed, one, handOver, say, stop })
+    await fn({ state, seed, one, handOver, say, stop, call, directory })
   } finally { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 
@@ -110,6 +110,7 @@ for (const [surface, folder] of SURFACES) {
       ['no-line', () => 'Got it, done.'],
       ['another-code', () => 'ACK 0a0a0a\nGot it.'],
       ['line-not-first', nonce => `Got it.\nACK ${nonce}`],
+      ['blank-first-line', nonce => `\nACK ${nonce}`],
     ]) {
       f.seed(id)
       const nonce = await f.handOver(id)
@@ -118,6 +119,25 @@ for (const [surface, folder] of SURFACES) {
       assert.equal(f.one(id).status, 'accepted', id)
       assert.equal(f.one(id).reply, '', id)
     }
+  }))
+
+  test(`${surface}: an ACK the board could not take at the turn end is taken at the next turn end, even when that turn's reply says something else`, () => fixture(folder, async f => {
+    f.seed('busy-message')
+    const nonce = await f.handOver('busy-message')
+    f.say(`ACK ${nonce}`)
+    // The board's store is in use at this turn end: a server lock that names no process defers the acknowledgement.
+    const lock = join(f.directory, 'server.lock')
+    writeFileSync(lock, 'starting')
+    const busy = f.call('Stop')
+    assert.equal(busy.status, 0, busy.stderr)
+    assert.match(busy.stderr, /^board: mailbox deferred$/m)
+    assert.equal(f.one('busy-message').status, 'accepted')
+    rmSync(lock)
+    // The next turn hands nothing over and its reply is about something else; the kept acknowledgement goes through.
+    f.say('Something else entirely.')
+    await hookOrDeferred(() => f.call('Stop'), () => f.one('busy-message').status === 'acknowledged')
+    assert.equal(f.one('busy-message').status, 'acknowledged')
+    assert.equal(f.one('busy-message').reply, `ACK ${nonce}`)
   }))
 
   test(`${surface}: a turn that handed over no message changes nothing, even when its reply carries the code of an earlier one`, () => fixture(folder, async f => {
