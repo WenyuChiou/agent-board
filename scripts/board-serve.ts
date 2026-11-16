@@ -185,13 +185,41 @@ export const startServer = (o: ServeOptions): void => {
   let loadedAt = 0
   let pageSeq = 0
   // Pages told they were replaced. They stay replaced: a poll already on its way when the page stopped must not make it the newest again.
+  // Up to RETIRED_EXACT_LIMIT recent ids sit in an exact Set; evicted older ids spill into a fixed 64 KB Bloom filter
+  // so forgotten unkeyed ids still stay retired with bounded memory (#1474).
   const retired = new Set<string>()
+  const RETIRED_EXACT_LIMIT = 4096
+  const RETIRED_BLOOM_BITS = 1 << 19
+  let retiredOverflow: Uint32Array | null = null
+  const bloomDigest = (id: string): Buffer => createHash('sha256').update(id).digest()
+  const markOverflow = (id: string): void => {
+    retiredOverflow ??= new Uint32Array(RETIRED_BLOOM_BITS >>> 5)
+    const digest = bloomDigest(id)
+    for (let offset = 0; offset < 24; offset += 4) {
+      const bit = digest.readUInt32BE(offset) & (RETIRED_BLOOM_BITS - 1)
+      retiredOverflow[bit >>> 5] |= 1 << (bit & 31)
+    }
+  }
+  const hasOverflow = (id: string): boolean => {
+    if (retiredOverflow === null) return false
+    const digest = bloomDigest(id)
+    for (let offset = 0; offset < 24; offset += 4) {
+      const bit = digest.readUInt32BE(offset) & (RETIRED_BLOOM_BITS - 1)
+      if ((retiredOverflow[bit >>> 5] & (1 << (bit & 31))) === 0) return false
+    }
+    return true
+  }
+  const isRetiredPage = (id: string): boolean => retired.has(id) || hasOverflow(id)
   let activeMaxSeq = 0
   const retirePage = (id: string): void => {
     if (id === '') return
     retired.add(id)
-    // A bound on the memory: the oldest ids are forgotten first.
-    while (retired.size > 4096) retired.delete(retired.values().next().value as string)
+    // A bound on the memory: oldest exact ids move to the fixed Bloom filter once retired passes RETIRED_EXACT_LIMIT.
+    while (retired.size > RETIRED_EXACT_LIMIT) {
+      const evicted = retired.values().next().value as string
+      retired.delete(evicted)
+      markOverflow(evicted)
+    }
   }
   // A page that has not asked for this long no longer stands for a newer page (a backgrounded tab asks about once a minute).
   const PAGE_STALE_MS = 150_000
@@ -248,7 +276,7 @@ export const startServer = (o: ServeOptions): void => {
     const held = secret === '' || isApprovalOff ? undefined : pageSecrets.get(secret)
     if (held === undefined) return ''
     // A page that stopped asking, left, or was replaced takes its secret with it (#1378).
-    if (now - held.seen > secretMs || (held.page !== '' && retired.has(held.page))) {
+    if (now - held.seen > secretMs || (held.page !== '' && isRetiredPage(held.page))) {
       pageSecrets.delete(secret)
       return ''
     }
@@ -479,7 +507,7 @@ export const startServer = (o: ServeOptions): void => {
       const rawSecret = text(req.headers['x-board-approve'])
       // Even if retired's FIFO bound forgot an old id, an unseen page presenting an unrecognised approval secret
       // cannot allocate a new pageSeq or displace a live keyed page (#1474).
-      if (retired.has(id) || (!pages.has(id) && rawSecret !== '' && secretOf(req.headers, now) === '')) {
+      if (isRetiredPage(id) || (!pages.has(id) && rawSecret !== '' && secretOf(req.headers, now) === '')) {
         // A retired page already dropped its secrets when it left or was replaced; keep its late poll
         // from allocating a fresh pageSeq or disturbing any other page's secret (#1378).
         isReplaced = true
@@ -688,7 +716,7 @@ export const startServer = (o: ServeOptions): void => {
           turnApprovalsOff()
           return json(res, 403, { note: o.s.approvalOff })
         }
-        if (page === '' || retired.has(page)) return json(res, 403, { note: o.s.approvalNoSecret })
+        if (page === '' || isRetiredPage(page)) return json(res, 403, { note: o.s.approvalNoSecret })
         const secret = randomBytes(24).toString('base64url')
         known.secret = secret
         const seq = page !== '' ? (pages.get(page)?.seq ?? ++pageSeq) : 0
@@ -837,7 +865,7 @@ export const startServer = (o: ServeOptions): void => {
         const id = pageIdOf(req.headers)
         const mine = pages.get(id)?.seq
         const now = Date.now()
-        if (retired.has(id) || mine !== undefined && [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)) return json(res, 409, {})
+        if (isRetiredPage(id) || mine !== undefined && [...pages.entries()].some(([other, one]) => other !== id && one.seq > mine && now - one.at < PAGE_STALE_MS)) return json(res, 409, {})
         return o.setWindow(place) ? json(res, 200, {}) : json(res, 409, {})
       }
       if (url.pathname === '/api/clean') {

@@ -708,12 +708,13 @@ test('a page secret is dropped on page-gone (persisted or not), ignores restore,
 test('a late poll from a retired page that the server has forgotten never displaces a newer keyed page (#1474)', async () => {
   const board = await startBoard({ secretMs: APPROVAL_SECRET_MS })
 
-  // Unkeyed P retires, 256 more ids retire, keyed Q opens, then P's late poll lands: P answers moved and Q keeps its secret and order.
+  // Unkeyed P retires, >4096 more ids retire (evicting P from retired), keyed Q opens, then P's late poll lands: P answers moved and Q keeps its secret and order.
   const pPlain = { origin: board.origin, 'x-board-page': 'p-plain-retired', 'x-board-visible': '1' }
   assert.equal((await board.call('/api/board', undefined, pPlain)).status, 200)
   assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-plain-retired' })).status, 200)
-  for (let start = 0; start < 256; start += 32) {
-    await Promise.all(Array.from({ length: 32 }, (_, offset) =>
+  for (let start = 0; start < 4100; start += 64) {
+    const batch = Math.min(64, 4100 - start)
+    await Promise.all(Array.from({ length: batch }, (_, offset) =>
       board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': `r-plain-${start + offset}` })))
   }
   const qFirst = await openPage(board, { pageId: 'q-after-256', pairWithPage: true })
