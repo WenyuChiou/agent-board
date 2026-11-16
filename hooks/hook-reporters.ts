@@ -1,10 +1,10 @@
-import { BOARD_REQUEST_HINTS, boardRequestWords, promptReceiptScript, RECEIPT_FOLDER_KEYS, RECEIPT_KEYS, RECEIPT_SESSION_KEYS } from './board-commands.ts'
+import { BOARD_REQUEST_HINTS, boardRequestWords, DELIVERY_REQUEST_HINT, deliveryRequestWords, promptReceiptScript, RECEIPT_FOLDER_KEYS, RECEIPT_KEYS, RECEIPT_SESSION_KEYS } from './board-commands.ts'
 import { HOOK_INPUT_TIMEOUT } from './hook-safety.ts'
 import { ZH_TW } from './i18n.ts'
 import { EN } from './strings-en.ts'
 import { ZH_CN } from './strings-zh-cn.ts'
 
-const PROMPT_RECEIPT_SCRIPT = promptReceiptScript(boardRequestWords([EN, ZH_TW, ZH_CN]))
+const PROMPT_RECEIPT_SCRIPT = promptReceiptScript(boardRequestWords([EN, ZH_TW, ZH_CN]), deliveryRequestWords([EN, ZH_TW, ZH_CN]))
 
 const shellQuote = (text: string): string => `'${text.replace(/'/g, `'\\''`)}'`
 const psQuote = (text: string): string => `'${text.replace(/'/g, "''")}'`
@@ -16,9 +16,18 @@ const SESSION_KEYS = RECEIPT_SESSION_KEYS
 const PATH_KEYS = [...RECEIPT_FOLDER_KEYS, 'transcript_path', 'transcriptPath']
 const SH_PATH_STRIP = String.raw`s/"(${PATH_KEYS.join('|')})"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"//g; s/"workspace_roots"[[:space:]]*:[[:space:]]*\[[^]]*]//g`
 const PS_PATH_STRIP = String.raw`"(?:${PATH_KEYS.join('|')})"\s*:\s*"(?:[^"\\]|\\.)*"|"workspace_roots"\s*:\s*\[[^\]]*\]`
+// Valid JSON may write any letter as a \u escape (#1334). Before it strips the folder paths and looks for a hint, the sh
+// scan reads back the letters, the space, the hyphen and the underscore of every hint and folder key from their
+// escapes; an escaped backslash becomes `_` first, so neither `\\u0041` nor `boa\\rd` turns into hint letters.
+// The PowerShell scan reads the parsed payload written back as JSON instead of the raw text: that copy escapes no
+// letter of a key or a hint and keeps a quote inside a string escaped, so one strip removes every folder path at any
+// depth and never joins the text on either side of it into a hint.
+const UNESCAPED_CHARS = [...new Set([...[DELIVERY_REQUEST_HINT, ...BOARD_REQUEST_HINTS, ...PATH_KEYS, 'workspace_roots'].join('').toLowerCase()].flatMap(char => [char, char.toUpperCase()]))]
+const SH_UNESCAPE = [String.raw`s/\\\\/_/g`, ...UNESCAPED_CHARS.map(char => String.raw`s/\\u${char.charCodeAt(0).toString(16).padStart(4, '0').replace(/[a-f]/g, hex => `[${hex}${hex.toUpperCase()}]`)}/${char}/g`)].join('; ')
 
 // Each board word as a case pattern in any letter case, e.g. *[Bb][Oo][Aa][Rr][Dd]*.
-const SH_HINT_PATTERNS = BOARD_REQUEST_HINTS.map(hint => `*${[...hint].map(char => /[a-z]/i.test(char) ? `[${char.toUpperCase()}${char.toLowerCase()}]` : char).join('')}*`).join('|')
+const shPattern = (hint: string): string => `*${[...hint].map(char => /[a-z]/i.test(char) ? `[${char.toUpperCase()}${char.toLowerCase()}]` : char === ' ' ? '\\ ' : char).join('')}*`
+const SH_HINT_PATTERNS = BOARD_REQUEST_HINTS.map(shPattern).join('|')
 
 // The inbox holds at most this many turn files and bytes (#373). A reporter that finds it past
 // either removes the oldest turn files, and adds one line to INBOX_DROPPED_FILE for each
@@ -100,9 +109,11 @@ write_fallback() {
   IFS=$saved_ifs
   [ -n "$had_globbing_off" ] || set +f
   [ -n "$has_session" ] || return
-  scan=$(LC_ALL=C sed -E ${shellQuote(SH_PATH_STRIP)} "$file.tmp") || scan=$(cat "$file.tmp")
+  scan=$(LC_ALL=C sed -E ${shellQuote(`${SH_UNESCAPE}; ${SH_PATH_STRIP}`)} "$file.tmp") || scan=$(cat "$file.tmp")
   # An empty scan (sed and cat both failed) counts as a board request: a wrong mark only leaves a question waiting.
-  case "$scan" in ''|${SH_HINT_PATTERNS}) receipt="$receipt$separator\\"board_request\\":true" ;; esac
+  # A delivery header is no board command: it keeps the turn's closing question, so it is checked first (#1334). Its own
+  # words hold "board", so this scan cannot see a board command inside a delivery; the classifier can, and it wins there.
+  case "$scan" in ${shPattern(DELIVERY_REQUEST_HINT)}) receipt="$receipt$separator\\"delivery_request\\":true" ;; ''|${SH_HINT_PATTERNS}) receipt="$receipt$separator\\"board_request\\":true" ;; esac
   if (set -C; : > "$file.fallback"); then
     fallback_owned=yes
     printf '%s}' "$receipt" > "$file.fallback" && mv "$file.fallback" "$file.json" || log_error REPORTER_FAILED
@@ -239,6 +250,11 @@ finish
 const reporterSource = (fromShell: boolean): string => `# Written by the Agent Board plugin (/progress connect).
 ${fromShell ? "$Agent = [string]$env:AGENT_BOARD_SH_AGENT; $Event = [string]$env:AGENT_BOARD_SH_EVENT; $Payload = [string]$env:AGENT_BOARD_SH_PAYLOAD" : "param([string]$Agent = 'agent', [string]$Event = 'turn', [string]$Payload = '')"}
 $ErrorActionPreference = 'Stop'
+# No module folder is searched for a command: the two modules the script needs load by path (#836). A first
+# cmdlet with autoload on walked every module folder and took over 20 s on a busy Windows runner.
+$PSModuleAutoLoadingPreference = 'None'
+Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1')
+Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1')
 if ($Agent -notin @('codex','cursor','gemini','grok','muse','hermes','openclaw','opencode','antigravity','deepseek')) { $Agent = 'unknown' }
 if ($Event -notin @('prompt','turn','end')) { $Event = 'unknown' }
 $homeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath('UserProfile') }
@@ -397,8 +413,9 @@ try {
         $hasSession = $false
         foreach ($key in @(${SESSION_KEYS.map(psQuote).join(',')})) { if ($metadata.Contains($key)) { $hasSession = $true } }
         if ($hasSession) {
-          $scan = [regex]::Replace($Payload, ${psQuote(PS_PATH_STRIP)}, '')
-          if (${BOARD_REQUEST_HINTS.map(hint => `$scan.IndexOf(${psQuote(hint)}, [StringComparison]::OrdinalIgnoreCase) -ge 0`).join(' -or ')}) { $metadata['board_request'] = $true }
+          $scan = [regex]::Replace((ConvertTo-Json -InputObject $raw -Compress -Depth 99), ${psQuote(PS_PATH_STRIP)}, '')
+          if ($scan.IndexOf(${psQuote(DELIVERY_REQUEST_HINT)}, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $metadata['delivery_request'] = $true }
+          elseif (${BOARD_REQUEST_HINTS.map(hint => `$scan.IndexOf(${psQuote(hint)}, [StringComparison]::OrdinalIgnoreCase) -ge 0`).join(' -or ')}) { $metadata['board_request'] = $true }
           $json = ConvertTo-Json -InputObject $metadata -Compress -Depth 4
           $script:fallback = [regex]::Replace($json, '[^\\x20-\\x7e]', { param($match) '\\u' + ([int][char]$match.Value).ToString('x4') })
         }

@@ -836,7 +836,7 @@ export const LINES = [
 "  const knownBoards = (text) => Object.values(STRINGS).some((words) => text === boardScript(path, words.lang)) || isReleasedBoard(text, path);",
 "  const hasBoard = remove || sharedFile(board, boardCode, knownBoards);",
 "  const worker = folder + sep + HOOK_WORKER;",
-"  const workerCode = hookWorker(home, board, boardPromptHelper(boardRequestWords(Object.values(STRINGS))), [home, \".agent-board\"].join(sep));",
+"  const workerCode = hookWorker(home, board, boardPromptHelper(boardRequestWords(Object.values(STRINGS)), deliveryRequestWords(Object.values(STRINGS))), [home, \".agent-board\"].join(sep));",
 "  let workerState;",
 "  const hasWorker = () => workerState ??= hasBoard && sharedFile(worker, workerCode);",
 "  const savedBy = remove ? null : openclawSavedBy(readMaybe([openclawHome, \"openclaw.json\"].join(sep)) ?? \"\");",

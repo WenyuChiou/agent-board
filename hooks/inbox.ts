@@ -146,7 +146,7 @@ export const readTurn = (fileName: string, body: string): AgentTurn | null => {
     transcript: event === 'prompt' ? '' : first(record, ['transcript_path', 'transcriptPath']),
     at: inboxTime(fileName),
     ...(turnKey === undefined ? {} : { turnKey }),
-    ...(event === 'prompt' && (record.board_request === true || isBoardRequest(record, [...BOARD_WORDS, ...DELIVERY_WORDS])) ? { isBoardRequest: true } : {}),
+    ...(event === 'prompt' && (record.board_request === true || record.delivery_request === true || isBoardRequest(record, [...BOARD_WORDS, ...DELIVERY_WORDS])) ? { isBoardRequest: true } : {}),
   }
 }
 
