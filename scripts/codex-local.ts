@@ -1715,7 +1715,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const unchanged = (file: string, next: string | null): void => { if (readLocal(file) !== (before.get(file) ?? null) && !holds(file, next)) throw new Error('INSTALL_CHANGED') }
     const written = (file: string, text: string | null): void => { if (!holds(file, text)) throw new Error('INSTALL_CHANGED') }
     const put = (file: string, text: string, target = file): void => { atomic(target, text, () => unchanged(file, text)); written(file, text) }
-    const drop = (file: string): void => { unchanged(file, null); if (existsSync(file)) unlinkSync(file); written(file, null) }
+    // unlinkSync, not an existsSync check first: a file link whose target this batch already removed reads as gone but
+    // is still there, and must go too.
+    const drop = (file: string): void => {
+      unchanged(file, null)
+      try { unlinkSync(file) } catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error }
+      written(file, null)
+    }
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
@@ -323,4 +323,20 @@ test('a Hermes skills folder linked to the shared skills folder installs and rem
   assert.equal(readFileSync(join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md'), 'utf8'), skill)
   const removed = run(['--remove', '--agent', 'hermes', '--apply'])
   assert.equal(removed.status, 0, `${removed.stdout}${removed.stderr}`)
+}))
+
+// A Hermes SKILL.md that is a file link to the shared one: removing the shared file first leaves the link dangling, and
+// remove still takes the link away instead of skipping it (Greptile on #1594). File links need a privilege on Windows.
+test('a Hermes SKILL.md linked to the shared SKILL.md leaves no dangling link after remove', t => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const shared = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  rmSync(own)
+  try { symlinkSync(shared, own, 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'])
+  assert.equal(removed.status, 0, `${removed.stdout}${removed.stderr}`)
+  assert.throws(() => lstatSync(own), { code: 'ENOENT' })
 }))
