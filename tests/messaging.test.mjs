@@ -5272,6 +5272,62 @@ test('a Codex turn that waits on an approval when the daemon connection is lost 
   } finally { await receiver.close() }
 }))
 
+test('a Codex receiver outside a thread does not interrupt a turn whose approval was answered within one look of the limit, and still times the limit from when the wait began (#1502)', async () => {
+  await codexFixture(async (board, dir) => {
+    const pidFile = join(dir, 'proxy.pid'), answerFlag = join(dir, 'answer'), approvalMs = 3000, errors = []
+    const daemon = codexDaemon(dir, { approval: 'hold', pidFile, answerFlag })
+    const receiver = codexReceiver(board, daemon, { approvalMs, tickMs: 2000, pollMs: 150, onError: error => errors.push(error.message) })
+    try {
+      assert.equal(await codexSend(board, await codexConnection(board)), 200)
+      await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'accepted')
+      const began = Date.now()
+      process.kill(Number(readFileSync(pidFile, 'utf8')))
+      await waitFor(async () => daemon.calls().filter(one => one.argv).length === 2 && codexLastProxy(daemon).some(one => one.method === 'thread/read'))
+      assert.ok(Date.now() - began < approvalMs - 400, 'reconnected and looked once before the approval limit')
+      // Answer the approval within one look (2000 ms) of the 3000 ms limit, before the next periodic tick runs.
+      writeFileSync(answerFlag, '')
+      await pause(Math.max(0, approvalMs - (Date.now() - began)) + 400)
+      const secondProxyReads = codexLastProxy(daemon).filter(one => one.method === 'thread/read')
+      assert.ok(secondProxyReads.length >= 2, 'the approval timer took a fresh thread/read after the limit')
+      assert.deepEqual([codexInterrupts(daemon), errors.filter(one => one === 'APPROVAL_TIMEOUT'), codexStarts(daemon)], [[], [], 1])
+    } finally { await receiver.close() }
+  })
+  // When the approval is still waiting after the limit, the original wait start time still holds across reconnect.
+  await codexFixture(async (board, dir) => {
+    const pidFile = join(dir, 'proxy.pid'), approvalMs = 1800, errors = []
+    const daemon = codexDaemon(dir, { approval: 'hold', pidFile })
+    const receiver = codexReceiver(board, daemon, { approvalMs, tickMs: 400, onError: error => errors.push(error.message) })
+    try {
+      assert.equal(await codexSend(board, await codexConnection(board)), 200)
+      await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'accepted')
+      const began = Date.now()
+      process.kill(Number(readFileSync(pidFile, 'utf8')))
+      await waitFor(async () => daemon.calls().filter(one => one.argv).length === 2)
+      await waitFor(async () => codexLastProxy(daemon).some(one => one.method === 'turn/interrupt'))
+      const took = Date.now() - began
+      assert.ok(took < approvalMs + 900, `interrupted at ${took} ms, timed from when wait began (${approvalMs} ms)`)
+      await codexUncertain(board, 'AB-CX-001', 'APPROVAL_TIMEOUT')
+      assert.deepEqual([codexInterrupts(daemon), errors.filter(one => one === 'APPROVAL_TIMEOUT').length], [['turn-delivery'], 1])
+    } finally { await receiver.close() }
+  })
+})
+
+test('a Codex receiver outside a thread that names its turn while an approval wait runs reads the status again after the limit and after naming before stopping it (#1502)', () => codexFixture(async (board, dir) => {
+  const approvalMs = 2100, errors = []
+  const daemon = codexDaemon(dir, { approval: 'hold', start: 'heardWaiting', answerOnLookup: true })
+  const receiver = codexReceiver(board, daemon, { approvalMs, tickMs: 1400, pollMs: 150, onError: error => errors.push(error.message) })
+  try {
+    assert.equal(await codexSend(board, await codexConnection(board)), 200)
+    await waitFor(async () => daemon.calls().some(one => one.method === 'turn/start'))
+    const began = Date.now()
+    await waitFor(async () => daemon.calls().filter(one => one.argv).length === 2 && codexLastProxy(daemon).some(one => one.method === 'thread/turns/list'))
+    assert.ok(Date.now() - began < approvalMs - 400, 'reconnecting look named the turn before the approval limit')
+    // Wait past approvalMs while still before the next periodic look (tickMs 1400 from reconnect).
+    await pause(Math.max(0, approvalMs - (Date.now() - began)) + 300)
+    assert.deepEqual([codexInterrupts(daemon), errors.filter(one => one === 'APPROVAL_TIMEOUT'), codexStarts(daemon)], [[], [], 1])
+  } finally { await receiver.close() }
+}))
+
 test('a refused or odd answer to thread/unsubscribe keeps the Codex receiver in the thread, is reported once, and is asked again until it is out (#318)', () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { unsubscribeFaults: ['error', 'odd'] })
   const errors = []
