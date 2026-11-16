@@ -49,7 +49,7 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | Held for the session when its card offers it; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | Held for the session when its card offers it; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | The second Quick start command | You paste it |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | You paste it |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | Sent when it is free |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | You paste it |
 | <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | Ask it for the Agent Board skill | You paste it |
 
@@ -61,7 +61,7 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page | Not yet |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | Held for the session when its card offers it. Desktop app: checked in a live run; IDE: no run of its own, and it is treated like the app when its hook reports it as the app's surface; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page | Not tested yet |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page | Not tested yet |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page | Sent when it is free. No run of its own; its plugin reports it as the terminal, so it is treated the same |
 
 - Board page: run `npx @wenyuchiou/agent-board@next --html` in a terminal, the app's own included.
 - Not yet or Not tested yet: copy your answer from the board and paste it into the app.
@@ -69,7 +69,7 @@ npx @wenyuchiou/agent-board@next
 
 ## Answer from the board
 
-<img alt="Three ways an answer from the board reaches its agent: Send to Claude Code, queue for the next turn of Antigravity or Codex, or copy for Cursor, OpenCode, Grok Build and Hermes. Synthetic data." src="docs/images/answer-en.svg" width="100%">
+<img alt="Three ways an answer from the board reaches its agent: Send to Claude Code, queue for the next turn of Antigravity or Codex, or copy for Cursor, Grok Build and Hermes. Synthetic data." src="docs/images/answer-en.svg" width="100%">
 
 An answer to an agent's question and a message you send it travel the same way, by the button you press:
 

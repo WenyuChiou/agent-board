@@ -7464,6 +7464,8 @@ test('shape 28: an OpenCode mailbox card sends from the board on its idle and wo
   const idle = await w.card()
   assert.deepEqual([idle.delivery?.id, idle.line, idle.canSend], [w.target.id, 'now', true])
   await shapeSend(w, 'now')
+  // The card's own message is still open, and the board holds one open message per sender and session (PAIR_BUSY).
+  assert.equal((await w.remove(`shape-card-${shapeSerial}`)).status, 200)
   // Working: the plugin holds the message until the session's step ends; the card still sends.
   shapeFile = stateFile('opencode', 'working', w.session)
   const busy = await w.card()
