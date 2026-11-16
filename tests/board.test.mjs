@@ -5355,6 +5355,57 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   assert.equal(dom.node('side').hidden, true)
 })
 
+test('a late failure of a poll sent under an earlier page id does not mark a persisted pageshow page offline (#1475)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  const emptyModel = { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }
+  const polls = []
+  let holdNextPoll = null
+  let failRestored = false
+  const dom = await pageDom(html, null, {
+    width: 1000,
+    getBoard: async options => {
+      polls.push(options.headers)
+      if (holdNextPoll !== null) {
+        const next = holdNextPoll
+        holdNextPoll = null
+        return await next
+      }
+      if (failRestored) return Promise.reject(new Error('synthetic offline failure'))
+      return { ok: true, json: async () => ({ model: emptyModel, now: 1 }) }
+    },
+  })
+  await dom.settle()
+  const firstPage = polls[0]['x-board-page']
+
+  let rejectStale
+  holdNextPoll = new Promise((_, reject) => { rejectStale = reject })
+  await dom.redraw(emptyModel)
+
+  dom.leave({ persisted: true })
+  await dom.flush()
+  const before = polls.length
+  dom.restore(true)
+  await dom.flush()
+  rejectStale(new Error('synthetic late poll failure from bfcache'))
+  await dom.settle()
+
+  // The restored page switched pageId before the old poll rejected, so it stays online with active buttons.
+  assert.ok(polls.length > before)
+  assert.notEqual(polls.at(-1)['x-board-page'], firstPage)
+  assert.equal(dom.node('offline').textContent, '')
+  assert.notEqual(lightsOf(dom)[0], 'is-offline')
+  assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).some(button => !button.disabled))
+
+  // A failure on the restored page's own id still marks it offline.
+  failRestored = true
+  await dom.redraw(emptyModel)
+  assert.equal(dom.node('offline').textContent, JSON.parse(dom.node('words').textContent).serveOffline)
+  assert.deepEqual(lightsOf(dom), ['is-offline', 'is-offline', 'is-offline'])
+})
+
 test('a page the board says was replaced stops asking and shows one line (#265)', async () => {
   const source = `${BOARD_SCRIPT}
 process.stdout.write(servePage(STRINGS.en, 'synthetic'))

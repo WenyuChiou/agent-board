@@ -1657,7 +1657,8 @@ const PAGE_SCRIPT = String.raw`
   var pageId = newPageId();
   function call(path, body) {
     if (isUnreachable && body !== undefined) return Promise.reject();
-    var headers = { 'x-board-token': token, 'x-board-page': pageId, 'x-board-visible': document.hidden ? '0' : '1' };
+    var requestPage = pageId;
+    var headers = { 'x-board-token': token, 'x-board-page': requestPage, 'x-board-visible': document.hidden ? '0' : '1' };
     if (approveSecret) headers['x-board-approve'] = approveSecret;
     if (path === '/api/board' && body === undefined && boardEtag) headers['if-none-match'] = boardEtag;
     if (body !== undefined) headers['content-type'] = 'application/json';
@@ -1665,10 +1666,14 @@ const PAGE_SCRIPT = String.raw`
       if (path === '/api/board' && res.status === 304) return { ok: true, unchanged: true };
       return res.json().catch(function () { return {}; }).then(function (data) {
         data.ok = res.ok && data.ok !== false;
-        if (path === '/api/board') boardEtag = data.ok && data.model && res.headers ? res.headers.get('etag') || '' : '';
+        if (requestPage === pageId && path === '/api/board') boardEtag = data.ok && data.model && res.headers ? res.headers.get('etag') || '' : '';
         return data;
       });
-    }).catch(function (error) { unreachable(); throw error; });
+    }).catch(function (error) {
+      // A request started under an earlier pageId (before persisted pageshow switched ids) must not mark the restored page offline (#1475).
+      if (requestPage === pageId) unreachable();
+      throw error;
+    });
   }
   ${settingsScript}
   ${dockScript}
