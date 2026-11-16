@@ -69,7 +69,7 @@ npx @wenyuchiou/agent-board@next
 
 ## 在看板上回复
 
-<img alt="看板上的回复送到 agent 的三条路：发送给 Claude Code、排到 Antigravity 或 Codex 的下一轮、或复制给 Cursor、Grok Build 和 Hermes。合成数据。" src="docs/images/answer-zh-CN.svg" width="100%">
+<img alt="看板上的回复送到 agent 的三条路：发送给 Claude Code 或 OpenCode、排到 Antigravity 或 Codex 的下一轮、或复制给 Cursor、Grok Build 和 Hermes。合成数据。" src="docs/images/answer-zh-CN.svg" width="100%">
 
 回复 agent 的提问，和主动给它发消息，走的是同一条路，看你点哪个按钮：
 

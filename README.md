@@ -69,7 +69,7 @@ npx @wenyuchiou/agent-board@next
 
 ## Answer from the board
 
-<img alt="Three ways an answer from the board reaches its agent: Send to Claude Code, queue for the next turn of Antigravity or Codex, or copy for Cursor, Grok Build and Hermes. Synthetic data." src="docs/images/answer-en.svg" width="100%">
+<img alt="Three ways an answer from the board reaches its agent: Send to Claude Code or OpenCode, queue for the next turn of Antigravity or Codex, or copy for Cursor, Grok Build and Hermes. Synthetic data." src="docs/images/answer-en.svg" width="100%">
 
 An answer to an agent's question and a message you send it travel the same way, by the button you press:
 
