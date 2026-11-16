@@ -874,9 +874,10 @@ const surfaceLine = body => {
 export const SIZE_FROM = 1545
 export const SIZE_RISK = 400
 export const SIZE_NORMAL = 800
-// A reason is the text after `cannot split:`, not empty and not the template's `<reason>`; the template's own `Surface:` line,
+// A reason is the text after `cannot split:` with something left once each `<...>` placeholder and repeated `cannot split:`
+// is taken out (surface reads it the same way); the template's own `Surface:` line,
 // which starts with `<`, never counts (as in surface), and neither does a line in a code fence or an HTML comment.
-const isSplitReason = text => { const reason = text.trim(); return reason !== '' && !/^<[^<>]*>$/.test(reason) }
+const isSplitReason = text => /[^ \t,;.:]/.test(text.replace(/<[^<>]*>/g, '').replace(/cannot split:/gi, ''))
 const hasSplitReason = body => surfaceLine(body).filled.some(value => isSplitReason(value.split(/,[ \t]*cannot split:/i).slice(1).join(','))) ||
   visibleLines(body).some(line => isSplitReason(line.match(/^Size:[ \t]*cannot split:(.*)$/i)?.[1] ?? ''))
 export const size = ({ body = '', title = '', number = null, numstat, tier = visibleTier(body) } = {}) => {
@@ -907,7 +908,7 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   }
   const [named, ...reasonParts] = line.split(/,[ \t]*cannot split:/i)
   const reason = reasonParts.join(',').trim()
-  if (reasonParts.length && (!reason || /^<[^<>]*>$/.test(reason))) {
+  if (reasonParts.length && !isSplitReason(reason)) {
     fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.','write the reason after `cannot split:`, for the maintainer or the owner to accept or refuse before the first review.')
     return output
   }

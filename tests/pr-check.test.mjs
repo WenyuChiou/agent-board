@@ -1801,6 +1801,9 @@ test('pr-check limits the changed lines of a pull request by its tier, unless th
   assert.equal(run('Tier: risk\nSurface: delivery, cannot split: one migration', lines(SIZE_RISK + 1)).problems.length, 0)
   assert.equal(run(`${risk}\nSize: cannot split: the schema and its reader change together`, lines(SIZE_RISK + 1)).problems.length, 0)
   assert.equal(run(`${risk}\nSize: cannot split: <reason>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  // The placeholder twice, or the clause twice, is still no reason.
+  assert.equal(run(`${risk}\nSurface: delivery, cannot split: <reason>, cannot split: <reason>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: <reason> <reason>`, lines(SIZE_RISK + 1)).problems.length, 1)
   // The template's own lines are not a reason, and neither is one inside a code fence or an HTML comment.
   const template = readFileSync(new URL('../.github/pull_request_template.md', import.meta.url), 'utf8')
   assert.equal(run(template, lines(SIZE_NORMAL + 1)).problems.length, 1)
@@ -1866,7 +1869,7 @@ test('pr-check accepts two surfaces with cannot split and says it waits for an a
   const checked = surfaceRun('Surface: delivery + setup-writes, cannot split: main breaks between steps', { paths: ['hooks/connect.ts', 'hooks/messaging.ts'] })
   assert.deepEqual(checked.problems, [])
   assert.match(checked.info.join('\n'), /cannot split: main breaks between steps" waits for the maintainer's or the owner's answer before the first review/)
-  for (const empty of ['Surface: delivery + data, cannot split:', 'Surface: delivery + data, cannot split:   ', 'Surface: delivery + data, cannot split: <reason>']) {
+  for (const empty of ['Surface: delivery + data, cannot split:', 'Surface: delivery + data, cannot split:   ', 'Surface: delivery + data, cannot split: <reason>', 'Surface: delivery + data, cannot split: <reason>, cannot split: <reason>']) {
     assert.match(surfaceRun(empty).problems[0]?.message ?? '', /`cannot split:` with no reason/, empty)
   }
   // A filled reason may start with `<`; only the template's own `<reason>` is a placeholder.
