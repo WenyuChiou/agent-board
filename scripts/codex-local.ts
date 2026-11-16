@@ -689,8 +689,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (args.includes('--apply') && !sidecarConflicts.length) {
       withInstallLock(home, () => {
         for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
-        // Each file is read again just before its change and checked after it, so an edit made while setup runs
-        // is never overwritten or removed, and a change that did not land is not reported as applied.
+        // Each file is read again just before its change and checked after it, so an edit made before that last
+        // re-read is never overwritten or removed, and a change that did not land is not reported as applied. A plain
+        // rename cannot close the instant between the re-read and the rename (#1488).
         for (const change of sidecarChanges) {
           const unchanged = (): void => { if (readLocal(change.file) !== before.get(change.file)) throw new Error('INSTALL_CHANGED') }
           const text = change.action === 'remove' ? null : change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!
@@ -1702,8 +1703,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
     local?.beforeApply?.(plan)
     // Each file is read again just before its change and checked after it (#1488, as runSidecarOnly does), so an
-    // edit made while setup runs is never overwritten or removed, and a change that did not land is not reported as
-    // applied. A mismatch stops the batch at once: files written before it stay (no rollback, as in the connect
+    // edit made before that last re-read is never overwritten or removed, and a change that did not land is not
+    // reported as applied. A mismatch stops the batch at once: files written before it stay (no rollback, as in the connect
     // transaction), the install record is not written, and the next setup plans again from the files as they are.
     const unchanged = (file: string): void => { if (readLocal(file) !== (before.get(file) ?? null)) throw new Error('INSTALL_CHANGED') }
     const written = (file: string, text: string | null): void => { if (readLocal(file) !== text) throw new Error('INSTALL_CHANGED') }
