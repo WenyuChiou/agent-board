@@ -537,11 +537,16 @@ export const startServer = (o: ServeOptions): void => {
     )
     if (problem !== null) return json(res, problem, {})
     // A press, a send, a message or a tidy can change the board: an open board request looks again once it is answered.
-    if (req.method !== 'GET') res.once('finish', wakeAll)
+    // A connector's poll comes every 2 s per connector; only one that hands out a message wakes it (replyMessage).
+    if (req.method !== 'GET' && url.pathname !== '/api/messages/poll') res.once('finish', wakeAll)
     const replyMessage = (action: string, payload: Record<string, unknown>): void => {
       // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
       if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
-      try { return json(res, 200, messaging.act(action, payload, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
+      try {
+        const result = messaging.act(action, payload, Date.now(), action === 'expect' ? o.reports?.() : undefined)
+        if (action === 'poll' && ((result as { messages?: unknown[] }).messages?.length ?? 0) > 0) res.once('finish', wakeAll)
+        return json(res, 200, result)
+      }
       catch (error) {
         // A temporary file lock is storage unavailability, not a stale binding.
         // Only the owner's lease-bounded poller retries; sends and receipts do not.

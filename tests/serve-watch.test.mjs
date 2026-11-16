@@ -69,9 +69,10 @@ const startBoard = async ({ fs, holdMs } = {}) => {
     const text = await response.text()
     return { status: response.status, etag: response.headers.get('etag'), text, at: performance.now() }
   }
+  const post = (path, body) => fetch(new URL(path, origin), { method: 'POST', headers: { 'x-board-token': token, 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(async response => ({ status: response.status, text: await response.text() }))
   let isClosed = false
   const board = {
-    root, claude, progress, inbox, ask, get reads() { return reads },
+    root, claude, progress, inbox, ask, post, get reads() { return reads },
     // A board written the way the board itself and the hooks write it: a new file renamed over the old one.
     replace: title => {
       const temporary = `${progress}.${process.pid}.tmp`
@@ -153,6 +154,27 @@ test('serve: an open board request with no change is answered "no change" after 
   assert.equal(held.status, 304)
   assert.equal(held.etag, first.etag)
   await board.close()
+})
+
+test('serve: a press wakes the open board request, and a connector poll that hands out nothing does not', async () => {
+  const board = await startBoard({ holdMs: 60_000 })
+  const first = await board.ask()
+  const waiting = board.ask(first.etag)
+  await pause(200)
+  // A connector polls every 2 s; one that gets no message leaves the board as it was, so it builds nothing.
+  const atPoll = board.reads
+  const polled = await board.post('/api/messages/poll', { connection: 'synthetic-connection', secret: 'synthetic-secret', turn: 'synthetic-turn' })
+  assert.notEqual(polled.status, 200, 'the synthetic connection is unknown')
+  await pause(300)
+  assert.equal(board.reads, atPoll, 'a connector poll with no message woke the open request')
+  // A press may change the board: the open request looks again (and, the board being the same, keeps waiting).
+  const atPress = board.reads
+  await board.post('/api/tidy', {})
+  for (let tries = 0; tries < 40 && board.reads === atPress; tries += 1) await pause(50)
+  assert.ok(board.reads > atPress, 'a press did not wake the open request')
+  assert.equal(await settledWithin(waiting, 200), undefined, 'an unchanged board was answered after a press')
+  await board.close()
+  await waiting.catch(() => undefined)
 })
 
 // A watch that never reports a change, as one that stopped would, and can be made to fail.
