@@ -104,7 +104,7 @@ const settledWithin = (promise, ms) => Promise.race([promise, pause(ms).then(() 
 
 test('serve: the page redraws from one open request, not a 3 s poll', async () => {
   const board = await startBoard({ holdMs: 60_000 })
-  await clearOfMinute(15000)
+  await clearOfMinute(10000)
   const first = await board.ask()
   assert.equal(first.status, 200)
   assert.match(first.text, /First synthetic task/)
@@ -115,7 +115,8 @@ test('serve: the page redraws from one open request, not a 3 s poll', async () =
   const waiting = board.ask(first.etag)
   await pause(200)
   const readsBefore = board.reads
-  assert.equal(await settledWithin(waiting, 3500), undefined, 'an unchanged board must not be answered on a timer')
+  // Longer than main's 2 s poll and the timer's 2 s.
+  assert.equal(await settledWithin(waiting, 2500), undefined, 'an unchanged board must not be answered on a timer')
   assert.equal(board.reads, readsBefore, 'the server built the board while nothing changed')
 
   // A write in place answers it with the new board.
@@ -152,10 +153,10 @@ test('serve: the page redraws from one open request, not a 3 s poll', async () =
   for (let tries = 0; tries < 40 && board.reads === readsAtSecondFile; tries += 1) await pause(50)
   assert.ok(board.reads > readsAtSecondFile, 'the inbox folder made after the start is not watched')
   // After all those real changes the watch is still trusted: nothing is built while nothing changes, longer than the
-  // probe's interval and the timer's (a watch judged deaf would build every 2 s).
+  // probe's interval (1.5 s) and the timer's (a watch judged deaf would build every 2 s).
   await pause(300)
   const readsQuiet = board.reads
-  await pause(3000)
+  await pause(2500)
   assert.equal(board.reads, readsQuiet, 'the watch was judged deaf after real changes, and the timer took over')
   await board.close()
   await quiet.catch(() => undefined)
@@ -209,7 +210,7 @@ test('serve: a board request without the token is refused at once, never held', 
 })
 
 test('serve: a tab left open does not keep an idle server alive', async () => {
-  // The idle exit after 1.5 s; the page's waiting requests run out every 300 ms and it asks again at once.
+  // The idle exit after 0.8 s; the page asks again at once each time its waiting request runs out.
   const keepAsking = async (board, visible, ms) => {
     let etag = (await board.ask()).etag
     const began = performance.now()
@@ -223,12 +224,12 @@ test('serve: a tab left open does not keep an idle server alive', async () => {
   }
   // A tab in sight keeps it up while it waits, so the server does not go while someone reads the board, even when
   // one wait lasts longer than the idle time.
-  const watched = await startBoard({ holdMs: 4000, idleMs: 1500 })
-  await keepAsking(watched, '1', 5000)
+  const watched = await startBoard({ holdMs: 2000, idleMs: 800 })
+  await keepAsking(watched, '1', 3000)
   assert.equal(await settledWithin(watched.isStopped.then(() => true), 0), undefined, 'the server went while a tab in sight was waiting')
   await watched.close()
   // A hidden tab does not: the server goes after its idle time.
-  const hidden = await startBoard({ holdMs: 300, idleMs: 1500 })
+  const hidden = await startBoard({ holdMs: 300, idleMs: 800 })
   await keepAsking(hidden, '0', 15_000)
   assert.ok(await settledWithin(hidden.isStopped.then(() => true), 1000), 'the server stayed up while only a hidden tab was waiting')
 })

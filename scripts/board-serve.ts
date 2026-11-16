@@ -97,7 +97,7 @@ export type ServeOptions = {
   journal?: (entry: { project: string; task: string; step: string }) => void
   // The tests' shorter waits; the board uses APPROVAL_DRAW_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS
   // and APPROVAL_GRACE_MS.
-  approvalTimes?: { drawMs: number; pressMs: number; secretMs?: number; graceMs?: number }
+  approvalTimes?: { drawMs: number; pressMs: number; secretMs?: number; graceMs?: number; pageMs?: number }
   // How long a replaced server keeps HTTP open after dropping locks/receivers so an open tab can read `{ moved: true }` (#1335).
   movedGraceMs?: number
   // progress.md and its inbox folder, watched so an open board request is answered as soon as either changes (#359).
@@ -403,7 +403,7 @@ export const startServer = (o: ServeOptions): void => {
     if (held.page !== '' && pageIdOf(headers) !== held.page) return ''
     return secret
   }
-  const isWatched = (now: number): boolean => { touchWaiting(now); return !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs && now - held.watched < APPROVAL_PAGE_MS) }
+  const isWatched = (now: number): boolean => { touchWaiting(now); return !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs && now - held.watched < (o.approvalTimes?.pageMs ?? APPROVAL_PAGE_MS)) }
   // A page that can answer approvals is still open, if only behind another window.
   const hasLiveSecret = (now: number): boolean => { touchWaiting(now); return !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs) }
   // The hook's answer: a decision, or none, and the host's own prompt asks. The request then stays

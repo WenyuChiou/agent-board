@@ -22,7 +22,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { startServer } = await import('../scripts/board-serve.ts')
 const { privateRuntimeFolder, writePrivateRuntimeFile } = await import('../scripts/runtime-folder.ts')
-const { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_PAGE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, approvalCards, approvalOf, approvalsPayload, decisionOf, readAsk } = await import('../hooks/approvals.ts')
+const { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, approvalCards, approvalOf, approvalsPayload, decisionOf, readAsk } = await import('../hooks/approvals.ts')
 const { addressFileName: receiverFileName, addressKey: receiverKey, parseAddress: receiverParse } = await import('../hooks/receiver.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
@@ -60,7 +60,7 @@ const homeFor = (url, pid = process.pid) => {
 
 // A board started from source, with the tests' shorter waits. No grace window unless a test asks.
 // `open` stands in for the browser opener; the default opens the page and says so.
-const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, open, holdMs, isWatched = false } = {}) => {
+const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, pageMs, open, holdMs, isWatched = false } = {}) => {
   let self
   const place = homeFor()
   const messages = join(place.root, 'messages')
@@ -75,7 +75,7 @@ const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, 
       view: () => buildView(parseProgress(readFileSync(place.progress, 'utf8')), [], null, Date.now(), 0, {}, EN),
       pending: () => [], act: () => '', tidy: () => '', clean: () => '', sweep: () => {}, sweepMs: 60_000,
       paste: () => ({ isAdded: false, note: '' }), failure: () => null, idleMs: 0,
-      approvalTimes: { drawMs, pressMs, secretMs, graceMs },
+      approvalTimes: { drawMs, pressMs, secretMs, graceMs, ...(pageMs === undefined ? {} : { pageMs }) },
       ...(holdMs === undefined ? {} : { boardTimes: { holdMs } }),
       // A file watch as the shipped board has (#359), so no timer looks at the board while a request waits; its stand-in
       // never reports, and nothing in these tests writes the files, so only the board's own changes answer a request.
@@ -191,13 +191,17 @@ const waitOn = async (board, page) => {
   return { waiting, isOpen: () => answer === undefined }
 }
 
-test('a page in sight whose board request is waiting still counts as watching past APPROVAL_PAGE_MS (#359)', { timeout: 60_000 }, async () => {
-  await clearOfMinute(15_000)
-  const board = await startBoard({ drawMs: 5_000, pressMs: 30_000, holdMs: 30_000, isWatched: true })
+// These two run with a shorter watching window (the tests' `pageMs`, like `drawMs`) than the board's APPROVAL_PAGE_MS of
+// 8 s, and a hold longer than it, so the same order of events takes seconds instead of a test of 10 s or more.
+const PAGE_MS = 1500
+
+test('a page in sight whose board request is waiting still counts as watching past its watching window (#359)', { timeout: 60_000 }, async () => {
+  await clearOfMinute(5_000)
+  const board = await startBoard({ drawMs: 5_000, pressMs: 30_000, pageMs: PAGE_MS, holdMs: 30_000, isWatched: true })
   const page = await openPage(board)
   const { waiting, isOpen } = await waitOn(board, page)
-  // Longer than the window a page's last request counts as watching: on main the page asked every 2 s.
-  await pause(APPROVAL_PAGE_MS + 1000)
+  // Longer than the window a page's last request counts as watching: on main the page asked every 2 s, inside it.
+  await pause(PAGE_MS + 1000)
   // The premise: the request is still waiting, so only the server counting a waiting page as watching can keep the
   // approval on the page.
   assert.equal(isOpen(), true, 'the board request was answered before the hook asked')
@@ -212,9 +216,9 @@ test('a page in sight whose board request is waiting still counts as watching pa
 })
 
 test('a page whose board request has just run out still counts as watching until it asks again (#359)', { timeout: 60_000 }, async () => {
-  await clearOfMinute(15_000)
-  // The hold runs out after 9 s, past APPROVAL_PAGE_MS; the hook then asks before the page asks again.
-  const board = await startBoard({ drawMs: 5_000, pressMs: 30_000, holdMs: APPROVAL_PAGE_MS + 1000, isWatched: true })
+  await clearOfMinute(5_000)
+  // The hold runs out past the watching window; the hook then asks before the page asks again.
+  const board = await startBoard({ drawMs: 5_000, pressMs: 30_000, pageMs: PAGE_MS, holdMs: PAGE_MS + 1000, isWatched: true })
   const page = await openPage(board)
   const { waiting } = await waitOn(board, page)
   const ended = await waiting

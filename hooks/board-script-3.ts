@@ -11429,7 +11429,7 @@ export const LINES = [
 "  };",
 "  const isWatched = (now) => {",
 "    touchWaiting(now);",
-"    return !isApprovalOff && [...pageSecrets.values()].some((held) => now - held.seen <= secretMs && now - held.watched < APPROVAL_PAGE_MS);",
+"    return !isApprovalOff && [...pageSecrets.values()].some((held) => now - held.seen <= secretMs && now - held.watched < (o.approvalTimes?.pageMs ?? APPROVAL_PAGE_MS));",
 "  };",
 "  const hasLiveSecret = (now) => {",
 "    touchWaiting(now);",
