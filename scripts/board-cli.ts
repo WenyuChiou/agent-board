@@ -83,6 +83,7 @@ const flag = (name: string): string | undefined => {
 const BOOL_FLAGS = new Set([
   '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--awaits-ack', '--chat', '--codex-doctor',
   '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
+  '--no-codex-send',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
@@ -2203,12 +2204,15 @@ const openPageState = async (server: RunningServer): Promise<PageState> => {
   return answer.wantsKeyedPage === true && !(process.env.SSH_CONNECTION || process.env.SSH_TTY) ? 'unkeyed' : 'open'
 }
 
-// The Codex program the receiver runs (#318). The receiver is off unless the page was started with `--codex-send`: whether a
-// command that needs approval still reaches the person while the board is joined is not proven on a real Codex yet (#318).
-// Then AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else, it turns the receiver off), else the one
-// on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names its own, so it never reaches the real ~/.codex.
+// Send to Codex is on unless the page was started with `--no-codex-send`: the live run of 2026-11-15 showed an approval in a
+// delivered turn reaching the person's own Codex window (docs/validation/2026-11-15-codex-send-default-live.md, #318).
+// `--codex-send`, the switch from before, is still accepted and changes nothing; with both, the receiver is off.
+const isCodexSendOn = (): boolean => !args.includes('--no-codex-send')
+// The Codex program the receiver runs (#318): AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else, it
+// turns the receiver off), else the one on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names its own,
+// so it never reaches the real ~/.codex.
 const codexReceiverExecutable = (): string | null => {
-  if (!args.includes('--codex-send')) return null
+  if (!isCodexSendOn()) return null
   const given = process.env.AGENT_BOARD_CODEX_BIN
   if (given !== undefined) return explicitCodexExecutable(given)
   return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
@@ -2288,7 +2292,7 @@ const serveChild = (): void => {
       },
       get s() { return s },
       port: requestedPort,
-      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: args.includes('--codex-send'), messagesDirectory: messagesDirectory() },
+      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: isCodexSendOn(), noCodexSend: args.includes('--no-codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       pending: (isFresh = true) => pending(undefined, isFresh),
@@ -2433,7 +2437,11 @@ const keptPage = async (file: string): Promise<Running | null> => {
 // The running page of this copy for this file, or null. Any other page found in the file (one
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
-const runningPage = async (isStarting = false, isReplacing = false): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
+// `replaced`: what one launch (`ensureServer`) learns of the pages it lets go of, in its first lookup or a retry (#318).
+// `isStopping`: `stop` takes this copy's page for this file whatever it was started with; the launch settings decide only
+// whether a new start may reuse a page, so `stop --no-codex-send` must not close a page with Send to Codex on and then
+// say none was running (#318).
+const runningPage = async (isStarting = false, isReplacing = false, replaced?: { isCodexSendOff: boolean }, isStopping = false): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
   const running = readRunning()
   if (running === null) {
     // A file that has not read for ten seconds (either way, should the clock have been set
@@ -2449,8 +2457,12 @@ const runningPage = async (isStarting = false, isReplacing = false): Promise<{ p
   const answer = first !== null && first !== 'silent' ? first : isRunning(running.pid) ? await ping(running, 5000) : first
   // An idle preference must not close a page that may hold an unsent reply.
   const requestedStale = staleTimeoutMs()
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (!args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
-  return (await stays(running, serveFile(), isReplacing && replacementMove(running))) ? { page: running, isKept: true } : null
+  // Send to Codex (#318): a plain command keeps a page whether its receiver is on or off, so `/agent-board` never ends a page the
+  // person turned it off for; `--codex-send` asks for a page with it on, `--no-codex-send` for one with it off.
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && (isStopping || (answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (await stays(running, serveFile(), isReplacing && replacementMove(running))) return { page: running, isKept: true }
+  if (replaced !== undefined && answer !== null && answer !== 'silent' && answer.noCodexSend === true) replaced.isCodexSendOff = true
+  return null
 }
 
 // `--lan`: the running page opens to the local network too, and its address there is printed
@@ -2519,7 +2531,13 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   }
   const old = readRunning(oldServeFile)
   if (old !== null && (await stays(old, oldServeFile, replacementMove(old)))) return { url: old.url, port: old.port, isKept: true, isNew: false }
-  const found = await runningPage(false, true)
+  // A page this launch lets go of that was started with `--no-codex-send` and is replaced for another reason (a new build,
+  // another setting): a command with no switch gives the new page the same switch, so the replacement does not turn the
+  // receiver back on (#318). It is this launch's own, so a long-running command (`--watch`) never carries it to a later
+  // launch. A page of a build before #318 does not report `noCodexSend`, so its replacement has the receiver on.
+  const replaced = { isCodexSendOff: false }
+  const codexSwitch = (): string[] => (args.includes('--no-codex-send') || (replaced.isCodexSendOff && !args.includes('--codex-send')) ? ['--no-codex-send'] : [])
+  const found = await runningPage(false, true, replaced)
   if (found !== null) return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
   if (args.includes('--port')) {
     const requestedPort = parseServePort(flag('--port'))
@@ -2582,7 +2600,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
       let url: string | null = null
       try {
         for (const name of [ready, err]) writeFileSync(name, '', { flag: 'wx', mode: 0o600 })
-        child = windowsStart(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest, '--ready-file', ready], { isHidden: true, env: childEnv, isPiped: true })
+        child = windowsStart(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest, ...codexSwitch(), '--ready-file', ready], { isHidden: true, env: childEnv, isPiped: true })
         child.stdout?.on('data', (chunk: Buffer) => {
           launcherOutput += chunk.toString('utf8')
           const found = /(?:^|\r?\n)([1-9][0-9]*)\r?\n/.exec(launcherOutput)
@@ -2613,7 +2631,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
         for (const name of [ready, err]) { try { unlinkSync(name) } catch {} }
       }
     }
-    const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: childEnv })
+    const child = spawn(process.execPath, [...serverMemoryArgs(process.execArgv, process.env.NODE_OPTIONS), script, '--serve-child', ...rest, ...codexSwitch()], { cwd: dirname(path), detached: true, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: childEnv })
     let stderr = ''
     child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-16_384) })
     // The child prints its address once it listens; it exits at once when it cannot.
@@ -2665,7 +2683,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     }
     const until = storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
     for (;;) {
-      const other = await runningPage(true)
+      const other = await runningPage(true, false, replaced)
       if (other !== null) return { url: other.page.url, port: other.page.port, isKept: other.isKept, isNew: false, idleMs: other.idleMs }
       if (performance.now() >= until) break
       // A protected Windows address may still be publishing within this launch deadline.
@@ -2703,7 +2721,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     } else if (storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
       // Collision in claims or another start is in flight: back off with randomized jitter, then retry or wait for its page
       await new Promise(done => setTimeout(done, Math.floor(Math.random() * 150) + 50))
-      const afterWait = await runningPage(true)
+      const afterWait = await runningPage(true, false, replaced)
       if (afterWait !== null) return { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs }
       if (performance.now() < deadline) continue
     }
@@ -2795,7 +2813,7 @@ const openPageSurface = async (): Promise<void> => {
 }
 
 const stopBoard = async (): Promise<void> => {
-  const found = await runningPage()
+  const found = await runningPage(false, false, undefined, true)
   if (found === null) {
     process.stdout.write(`${s.serveNoneRunning}\n`)
     return

@@ -6544,6 +6544,25 @@ test('agent-board stop stops this file\'s page and says so, and says when none i
   }
 })
 
+test('agent-board stop with a Send to Codex switch stops this file\'s page whatever it was started with, and says so (#318)', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const stopCmd = (...extra) => new Promise((done, fail) => {
+    execFile(process.execPath, [board.script, 'stop', ...extra], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
+  })
+  try {
+    // A page with Send to Codex on (the default): `stop --no-codex-send` stops it and says it stopped, not that none was running.
+    assert.ok(board.urlOf(await board.serve(['--quiet-board'])))
+    assert.equal((await stopCmd('--no-codex-send')).trim(), EN.serveStopped)
+    assert.equal((await stopCmd()).trim(), EN.serveNoneRunning)
+    // A page with it off: `stop --codex-send` stops it the same way.
+    assert.ok(board.urlOf(await board.serve(['--quiet-board', '--no-codex-send'])))
+    assert.equal((await stopCmd('--codex-send')).trim(), EN.serveStopped)
+    assert.equal((await stopCmd()).trim(), EN.serveNoneRunning)
+  } finally {
+    await board.end([])
+  }
+})
+
 test('stop says the board page did not stop and exits 1 when the page refuses to close', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const requests = []
@@ -6769,6 +6788,112 @@ test('a plain board command keeps a page started with --codex-send, and a plain 
     const stopped = await new Promise((done, fail) => execFile(process.execPath, [board.script, 'stop'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
     assert.equal(stopped.trim(), EN.serveStopped)
   } finally { await board.end([url]) }
+})
+
+test('Send to Codex is on by default; --no-codex-send turns it off, a plain command keeps either page, a replacement for another reason keeps it off, and each switch replaces a page with the other setting (#318)', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  const pingOf = async url => {
+    const address = new URL(url)
+    return (await fetchAt('127.0.0.1', Number(address.port), 'GET', '/api/ping', { 'x-board-token': address.searchParams.get('t') })).json()
+  }
+  try {
+    // A page started with no switch has the receiver on.
+    const on = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(on)
+    urls.push(on)
+    assert.equal((await pingOf(on)).codexSend, true)
+    // --codex-send, the switch from before, keeps that page: it already has the receiver on.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board', '--codex-send'])), on)
+    // --no-codex-send asks for a page with it off: the running one is replaced.
+    const off = board.urlOf(await board.serve(['--quiet-board', '--no-codex-send']))
+    assert.ok(off)
+    assert.notEqual(off, on)
+    urls.push(off)
+    assert.equal((await pingOf(off)).codexSend, false)
+    const offPid = JSON.parse(readFileSync(board.served, 'utf8')).pid
+    // The plain command (the README's, and /agent-board's) keeps that page, so it does not turn the receiver back on.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board'])), off)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).pid, offPid, 'the page was not replaced')
+    // With both switches the receiver is off, so that page is kept too.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board', '--codex-send', '--no-codex-send'])), off)
+    // A command with no switch that replaces the page for another reason (here --allow-resume) gives the new page the
+    // switch the old one was started with, so the replacement does not turn the receiver back on.
+    const resumed = board.urlOf(await board.serve(['--quiet-board', '--allow-resume']))
+    assert.ok(resumed)
+    assert.notEqual(resumed, off)
+    urls.push(resumed)
+    const resumedPing = await pingOf(resumed)
+    assert.equal(resumedPing.allowResume, true)
+    assert.equal(resumedPing.codexSend, false)
+    // --codex-send, the switch from before, asks for it on: the page is replaced again.
+    const again = board.urlOf(await board.serve(['--quiet-board', '--codex-send']))
+    assert.ok(again)
+    assert.notEqual(again, resumed)
+    urls.push(again)
+    assert.equal((await pingOf(again)).codexSend, true)
+    // Both switches ask for a page with it off, so the page with it on is replaced by one that has it off.
+    const both = board.urlOf(await board.serve(['--quiet-board', '--codex-send', '--no-codex-send']))
+    assert.ok(both)
+    assert.notEqual(both, again)
+    urls.push(both)
+    assert.equal((await pingOf(both)).codexSend, false)
+  } finally { await board.end(urls) }
+})
+
+test('a page that reports noCodexSend is replaced by one with Send to Codex off (#318)', { timeout: 90_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  const fakes = []
+  const pingOf = async url => {
+    const address = new URL(url)
+    return (await fetchAt('127.0.0.1', Number(address.port), 'GET', '/api/ping', { 'x-board-token': address.searchParams.get('t') })).json()
+  }
+  // A stand-in page of another build: it answers its ping with `fields`, and agrees to close after running `onClose`; `closes`
+  // counts the requests to close it.
+  const fakePage = async (fields, onClose = () => {}) => {
+    const page = { port: 0, url: '', closes: 0 }
+    const fake = createServer((req, res) => {
+      if (req.url === '/api/ping') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ path: board.path, built: 'synthetic-earlier-build', allowResume: false, ...fields }))
+      } else if (req.url === '/api/close') {
+        page.closes++
+        onClose()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{}')
+      } else {
+        res.writeHead(404)
+        res.end()
+      }
+    })
+    await new Promise(done => fake.listen(0, '127.0.0.1', done))
+    fakes.push(fake)
+    page.port = fake.address().port
+    page.url = `http://127.0.0.1:${page.port}/?t=synthetic-${page.port}`
+    return page
+  }
+  const addressOf = (page, pid) => JSON.stringify({ pid, port: page.port, url: page.url, path: board.path, built: 'synthetic-earlier-build' })
+  try {
+    // A page started with --no-codex-send reports noCodexSend: a plain command that replaces it (here for a newer build) gives
+    // the new page the same switch.
+    const off = await fakePage({ codexSend: false, noCodexSend: true })
+    addressFixture(board.served, addressOf(off, process.pid))
+    const replaced = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(replaced)
+    urls.push(replaced)
+    // A new page, not the stand-in: it was asked to close, and the address names another page.
+    assert.equal(off.closes, 1)
+    assert.notEqual(new URL(replaced).port, String(off.port))
+    const replacedPing = await pingOf(replaced)
+    assert.equal(replacedPing.codexSend, false)
+    assert.equal(replacedPing.noCodexSend, true)
+    await closeAt(replaced, board.served)
+    // A page of a build before #318 and a command that opens the page twice: #1519 (taken out at #1517's round cap).
+  } finally {
+    for (const fake of fakes) { fake.close(); fake.closeAllConnections() }
+    await board.end(urls)
+  }
 })
 
 test('the board command in a read-only sandbox reuses a running page\'s link', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
@@ -8248,6 +8373,9 @@ test('a newer --serve does not start a second page while the page it would repla
     assert.notEqual(url, board.url.href)
     assert.ok(!next.includes('already open is kept'), next)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+    // The page it replaced was started with no switch, as every page before #318 was: the new page has Send to Codex on.
+    const address = new URL(url)
+    assert.equal((await fetchAt('127.0.0.1', Number(address.port), 'GET', '/api/ping', { 'x-board-token': address.searchParams.get('t') })).json().codexSend, true)
     await held.exited()
   } finally {
     for (const url of urls) await closeAt(url, board.served)
@@ -10635,7 +10763,8 @@ test('a replaced server tells an open tab the board moved instead of dropping of
   const board = serveIn()
   const urls = []
   try {
-    const first = board.urlOf(await board.serve([]))
+    // Started with Send to Codex off, so --codex-send below asks for a page with another setting (#318).
+    const first = board.urlOf(await board.serve(['--no-codex-send']))
     assert.ok(first)
     urls.push(first)
     const firstAddress = new URL(first)
