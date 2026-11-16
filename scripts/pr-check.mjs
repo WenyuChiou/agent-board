@@ -1549,6 +1549,16 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.prComments = null
     if (!options['--offline']) {
       const api = apiReader(options, repo, cwd)
+      // A re-run of a pull request event reuses that event as it was (pr-check-rerun, #1258): a draft since marked ready,
+      // or a body, title or label changed since, would be checked as it was then, and a REQUEST CHANGES on a draft holds
+      // nothing. So the pull request is read as it is now and, while its head is still the event's, checked as it is.
+      if (options['--event'] && data.number !== null) {
+        const current = await api(`pulls/${data.number}`)
+        if (current?.head?.sha === data.head) {
+          if (typeof current.title !== 'string' || !Array.isArray(current.labels) || typeof current.draft !== 'boolean') throw new Error('pull request metadata is incomplete or invalid.')
+          Object.assign(data, { title: current.title, body: current.body ?? '', isDraft: current.draft, labels: current.labels })
+        }
+      }
       // Open pull requests are read both for an outside author's cap (#607) and to flag a second pull request fixing the
       // same issue (#1325). Team authors still skip issue-comment claim lookups.
       const isTeam = () => isKnownAssociation(data.association) && !isOutsideAssociation(data.association)
