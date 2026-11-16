@@ -1701,6 +1701,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // planning: another installer or host may have changed them in that interval.
     for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
     local?.beforeApply?.(plan)
+    // Each file is read again just before its change and checked after it (#1488, as runSidecarOnly does), so an
+    // edit made while setup runs is never overwritten or removed, and a change that did not land is not reported as
+    // applied. A mismatch stops the batch at once: files written before it stay (no rollback, as in the connect
+    // transaction), the install record is not written, and the next setup plans again from the files as they are.
+    const unchanged = (file: string): void => { if (readLocal(file) !== (before.get(file) ?? null)) throw new Error('INSTALL_CHANGED') }
+    const written = (file: string, text: string | null): void => { if (readLocal(file) !== text) throw new Error('INSTALL_CHANGED') }
+    const put = (file: string, text: string, target = file): void => { atomic(target, text, () => unchanged(file)); written(file, text) }
+    const drop = (file: string): void => { unchanged(file); unlinkSync(file); written(file, null) }
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue
@@ -1708,25 +1716,26 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         // A linked config.toml stays a link, and the person's permissions stay.
         const target = realpathSync(trustConfig)
         const mode = statSync(target).mode & 0o777
-        atomic(target, nextTrust)
+        put(trustConfig, nextTrust, target)
         if (process.platform !== 'win32') chmodSync(target, mode)
       }
-      else if (change.file === allowlistFile && nextAllowlist !== undefined) atomic(allowlistFile, nextAllowlist)
+      else if (change.file === allowlistFile && nextAllowlist !== undefined) put(allowlistFile, nextAllowlist)
       else if (change.file === nativeConfig) {
-        if (change.action === 'remove') unlinkSync(nativeConfig)
-        else atomic(nativeConfig, nextConfigText!)
+        if (change.action === 'remove') drop(nativeConfig)
+        else put(nativeConfig, nextConfigText!)
       }
       else if (change.file === progress) {
         mkdirSync(dirname(progress), { recursive: true })
         writeFileSync(progress, '', { flag: 'wx', mode: 0o600 })
-      } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
-      else atomic(change.file, files[change.file] ?? '')
+      } else if (remove || retired.includes(change.file)) drop(change.file)
+      else put(change.file, files[change.file] ?? '')
     }
     if (remove) {
-      if (handover) atomic(handover.file, handover.text)
-      if (readLocal(manifestFile) !== null) unlinkSync(manifestFile)
+      if (handover) put(handover.file, handover.text)
+      unchanged(manifestFile)
+      if (before.get(manifestFile) !== null) drop(manifestFile)
     } else {
-      atomic(manifestFile, nextManifest)
+      put(manifestFile, nextManifest)
       for (const other of localAgents.filter(one => one !== agent)) {
         const siblingFile = join(root, `install-${other}.json`)
         const siblingText = initial(siblingFile)
@@ -1742,7 +1751,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             updatedSibling = true
           }
         }
-        if (updatedSibling) atomic(siblingFile, `${JSON.stringify({ ...sibling, files: siblingFiles }, null, 2)}\n`)
+        if (updatedSibling) put(siblingFile, `${JSON.stringify({ ...sibling, files: siblingFiles }, null, 2)}\n`)
       }
     }
   })
