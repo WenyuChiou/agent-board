@@ -10,19 +10,59 @@ const testFile = /^tests\/(?:.*\/)?[^/]+\.test\.(mjs|cjs|js|ts|tsx)$/
 // no state from one call to the next, so no code earlier in a file can hide a later title. It also reads a call inside a
 // string, a comment or a method call (`pattern.test('x')`); running the title settles those, since it runs no test.
 const titleCall = /\b(?:test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|[^'\\\r\n])*'|"(?:\\[^\r\n]|[^"\\\r\n])*"|`(?:\\[^\r\n]|[^`\\\r\n])*`)/g
-const unescape = text => text.replace(/\\(.)/g, (_, char) => ({ n: '\n', t: '\t' })[char] ?? char)
-const titleOf = raw => {
-  const title = unescape(raw.slice(1, -1))
-  return { title, isTemplate: raw[0] === '`' && /\$\{/.test(title) }
+// Exact source-spelling parity with scripts/pr-check.mjs (`unescapeTitle`): quotes and backslashes unescape, while
+// `\t`, `\n`, ... stay in source form so case-table spans match; runtime unescaping happens only when running (#1541).
+const unescapeSource = text => text.replace(/\\(['"\\`])/g, '$1')
+const unescapeRuntime = text => text.replace(/\\(.)/g, (_, char) => ({ n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', '0': '\0' })[char] ?? char)
+const templateVariable = /\$\{[^}]*\}/g
+const fitsTemplate = (span, parts) => {
+  if (!span.startsWith(parts[0])) return false
+  let at = parts[0].length
+  for (const part of parts.slice(1, -1)) {
+    const found = span.indexOf(part, at + 1)
+    if (found === -1 || found < at + 1) return false
+    at = found + part.length
+  }
+  const last = parts.at(-1)
+  return span.length - last.length >= at + 1 && span.endsWith(last)
 }
+const runtimeForTemplate = (span, sourceParts, runtimeParts) => {
+  let at = sourceParts[0].length
+  let out = runtimeParts[0]
+  for (let i = 1; i < sourceParts.length - 1; i += 1) {
+    const found = span.indexOf(sourceParts[i], at + 1)
+    out += span.slice(at, found) + runtimeParts[i]
+    at = found + sourceParts[i].length
+  }
+  const last = sourceParts.at(-1)
+  return out + span.slice(at, span.length - last.length) + runtimeParts.at(-1)
+}
+const parsedTitleOf = raw => {
+  const inner = raw.slice(1, -1)
+  const title = unescapeSource(inner)
+  const isTemplate = raw[0] === '`' && templateVariable.test(title)
+  templateVariable.lastIndex = 0
+  if (!isTemplate) return { title, runtime: unescapeRuntime(inner), isTemplate: false, template: null }
+  const rawParts = inner.split(templateVariable)
+  const sourceParts = rawParts.map(unescapeSource)
+  const runtimeParts = rawParts.map(unescapeRuntime)
+  const hasLetters = /\p{L}/u.test(title.replace(templateVariable, ''))
+  return { title, runtime: unescapeRuntime(inner), isTemplate: true, template: hasLetters ? { sourceParts, runtimeParts } : null }
+}
+const parsedTitlesOf = text => [...text.matchAll(titleCall)].map(match => parsedTitleOf(match[1]))
 
 // Every test title in a file, in order; a template title (`${…}`) cannot be run by its name.
-export const titlesOf = text => [...text.matchAll(titleCall)].map(match => titleOf(match[1]))
+export const titlesOf = text => parsedTitlesOf(text).map(({ title, isTemplate }) => ({ title, isTemplate }))
 
 const count = (output, name) => Number(output.match(new RegExp(`^# ${name} (\\d+)\\s*$`, 'm'))?.[1] ?? 0)
 // Each result line of a TAP report, at any depth: `not `, the name (Node escapes `\` and `#` in it) and a SKIP or TODO.
 const tapLine = /^[ \t]*(not )?ok \d+ - ((?:\\.|[^\\#\r\n])*?)[ \t]*(?:#[ \t]*(SKIP|TODO)\b[^\r\n]*)?\r?$/gim
 const tapName = text => text.replace(/\\(.)/g, (_, char) => ({ n: '\n', t: '\t', r: '\r' })[char] ?? char)
+// Node's TAP reporter escapes control characters before escaping `\`, turning `\t` into `\\t` in TAP lines (#1541).
+const matchesTapName = (raw, title) => {
+  const once = tapName(raw)
+  return once.trimEnd() === title.trimEnd() || tapName(once).trimEnd() === title.trimEnd()
+}
 // A run reads as pass, fail, skipped, todo, missing (the name matched no test) or stopped (no verdict: a time limit, a
 // signal, a program that did not start). With the title, a pass needs the test's own result line: a name that matches no
 // test still exits 0, and Node then reports the file itself as one passing test. A todo result never fails a run, so it
@@ -35,7 +75,7 @@ export const outcomeOf = (ran, title) => {
   if (ran.status !== 0 || fail > 0) return 'fail'
   if (title !== undefined) {
     // TAP drops the spaces at the end of a name.
-    const named = [...output.matchAll(tapLine)].filter(match => tapName(match[2]).trimEnd() === title.trimEnd())
+    const named = [...output.matchAll(tapLine)].filter(match => matchesTapName(match[2], title))
     if (!named.length) return 'missing'
     if (named.some(match => match[1] && !match[3])) return 'fail'
     if (named.some(match => !match[3])) return 'pass'
@@ -78,11 +118,15 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
   const isDirty = git('status', '--porcelain', '-z').length > 0
   const textOf = path => readFileSync(join(cwd, path), 'utf8')
   const owners = new Map()
-  for (const path of files) for (const { title, isTemplate } of titlesOf(textOf(path))) if (!isTemplate) owners.set(title, [...(owners.get(title) ?? []), path])
-  const runOne = (where, { title, path }) => {
-    const [program, args] = runnerFor(path)(title)
+  const templates = []
+  for (const path of files) for (const { title, runtime, isTemplate, template } of parsedTitlesOf(textOf(path))) {
+    if (!isTemplate) owners.set(title, [...(owners.get(title) ?? []), { path, runtime }])
+    else if (template) templates.push({ path, ...template })
+  }
+  const runOne = (where, { title, runtime = title, path }) => {
+    const [program, args] = runnerFor(path)(runtime)
     onRun?.({ where, title, path })
-    return outcomeOf(command(program, args, { cwd: where, env: typeof env === 'function' ? env() : env, timeout, maxBuffer: big }), title)
+    return outcomeOf(command(program, args, { cwd: where, env: typeof env === 'function' ? env() : env, timeout, maxBuffer: big }), runtime)
   }
   // Every named test that passes here runs on the base, whatever its file: neither a file the branch left as it was nor
   // any source text makes a test old, since a helper or fixture it reads may have changed (#1532).
@@ -90,25 +134,34 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
   const toRun = []
   const here = new Map()
   for (const title of [...new Set(names)]) {
-    const paths = [...new Set(owners.get(title) ?? [])]
-    if (/<[^<>]+>/.test(title)) { results.push({ title, state: 'template' }); continue }
-    if (!paths.length) { results.push({ title, state: 'unknown' }); continue }
-    let [path] = paths
-    if (paths.length > 1) {
+    let rawEntries = owners.get(title) ?? []
+    // Look up an exact fixed title before checking `<...>` so literal angle brackets in fixed titles still run (#1542).
+    if (!rawEntries.length) {
+      if (/<[^<>]+>/.test(title)) { results.push({ title, state: 'template' }); continue }
+      // Resolve concrete citations of template literals (`a one receiver` from `test(\`a \${name} receiver\`)`) as pr-check does (#1541 review).
+      rawEntries = templates
+        .filter(item => fitsTemplate(title, item.sourceParts))
+        .map(item => ({ path: item.path, runtime: runtimeForTemplate(title, item.sourceParts, item.runtimeParts) }))
+    }
+    const entries = [...new Map(rawEntries.map(entry => [`${entry.path}\0${entry.runtime}`, entry])).values()]
+    const paths = [...new Set(entries.map(entry => entry.path))]
+    if (!entries.length) { results.push({ title, state: 'missing' }); continue }
+    let [entry] = entries
+    if (entries.length > 1) {
       // The reader also finds a title in a string, a comment or a method call, so the file that has the test is the one
       // whose run finds it by name; a file this runner cannot run cannot be ruled out.
       const found = []
-      for (const candidate of paths) {
-        if (!runnerFor(candidate)) { found.push({ candidate }); continue }
-        const outcome = runOne(cwd, { title, path: candidate })
+      for (const candidate of entries) {
+        if (!runnerFor(candidate.path)) { found.push({ candidate }); continue }
+        const outcome = runOne(cwd, { title, runtime: candidate.runtime, path: candidate.path })
         if (outcome !== 'missing') found.push({ candidate, outcome })
       }
       if (found.length !== 1) { results.push({ title, state: found.length ? 'ambiguous' : 'missing', path: paths.join(', ') }); continue }
-      path = found[0].candidate
+      entry = found[0].candidate
       if (found[0].outcome) here.set(title, found[0].outcome)
     }
-    if (!runnerFor(path)) results.push({ title, path, state: 'not-node' })
-    else toRun.push({ title, path })
+    if (!runnerFor(entry.path)) results.push({ title, path: entry.path, state: 'not-node' })
+    else toRun.push({ title, runtime: entry.runtime, path: entry.path })
   }
   // Every named test runs here first, so a title that is no test shows as missing wherever it is written.
   for (const item of toRun) if (!here.has(item.title)) here.set(item.title, runOne(cwd, item))
@@ -144,12 +197,12 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
                 : was === 'fail' ? 'counted'
                   : was === 'pass' ? 'passes-on-base'
                     : 'base-unknown'
-    results.push({ ...item, state })
+    results.push({ title: item.title, path: item.path, state })
   }
   // Every title found in tests/ makes the total except a test skipped on this system, a todo test and a file this runner
-  // cannot run; one that no run finds by its name, or that more than one file has, counts against it.
-  // A span that is no title anywhere in tests/ (code beside the title in the same cell) is pr-check's to report.
-  const total = results.filter(item => ['counted', 'passes-on-base', 'fails-on-head', 'stopped', 'base-unknown', 'missing', 'ambiguous'].includes(item.state)).length
+  // cannot run; one that no run finds by its name, that tests/ lacks altogether (#1541), or that more than one file
+  // has, counts against it.
+  const total = results.filter(item => ['counted', 'passes-on-base', 'fails-on-head', 'stopped', 'base-unknown', 'missing', 'unknown', 'ambiguous'].includes(item.state)).length
   const counted = results.filter(item => item.state === 'counted').length
   const order = new Map([...new Set(names)].map((title, i) => [title, i]))
   results.sort((a, b) => order.get(a.title) - order.get(b.title))

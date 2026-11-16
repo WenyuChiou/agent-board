@@ -975,7 +975,16 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       try { text = read(resolve(cwd, bodyFile)) } catch { return }
       const rows = caseRows(text)
       if (!rows.length) { add('PASS', 'fail-first: the body has no case table, so no test runs on the base.'); return }
-      const names = [...new Set(rows.flatMap(cells => [...(cells[3] ?? '').matchAll(/`([^`\n]+)`/g)].map(match => match[1])))]
+      const trackedTests = splitPaths(command('git', ['ls-files', '-z', '--', 'tests'], { cwd, maxBuffer }).stdout ?? '')
+      const untrackedTests = splitPaths(command('git', ['ls-files', '--others', '--exclude-standard', '-z', '--', 'tests'], { cwd, maxBuffer }).stdout ?? '')
+      const titles = testTitles([...new Set([...trackedTests, ...untrackedTests])].filter(path => isTest(path) && existsSync(resolve(cwd, path))).map(path => ({ path, text: read(resolve(cwd, path)) })))
+      // When a cell has a known test title with code spans beside it, run only the known spans; otherwise keep all spans
+      // so a named title that fail-first cannot find still fails the Fail-first line (#1541).
+      const names = [...new Set(rows.flatMap(cells => {
+        const spans = [...(cells[3] ?? '').matchAll(/`([^`\n]+)`/g)].map(match => match[1])
+        const known = spans.filter(span => titleKnown(span, titles))
+        return known.length ? known : spans
+      }))]
       const owner = names.length ? takeTestLock() : null
       if (names.length && !owner?.path) return
       const temps = []
@@ -989,9 +998,8 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
         }
         const found = await runFailFirst({ cwd, base: mergeBase, names, command, env, timeout: 600000 })
         for (const item of found.results) {
-          // A span that names no test is pr-check's to report, row by row.
-          if (item.state === 'unknown' || item.state === 'counted') continue
-          add(['passes-on-base', 'fails-on-head', 'missing', 'ambiguous'].includes(item.state) ? 'FAIL' : 'WARN', `${item.title}: ${stateWords[item.state]}.`)
+          if (item.state === 'counted') continue
+          add(['passes-on-base', 'fails-on-head', 'missing', 'unknown', 'ambiguous'].includes(item.state) ? 'FAIL' : 'WARN', `${item.title}: ${stateWords[item.state]}.`)
         }
         if (found.isDirty) add('WARN', 'fail-first ran on uncommitted changes; commit them and run preflight again, so the line is for the head you push.')
         if (!found.total) add('WARN', 'fail-first: no new or changed test that the case table names ran here; if none can fail without the change, write "Fail-first: none, <reason>" under Checks.')
