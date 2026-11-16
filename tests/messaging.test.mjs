@@ -7097,8 +7097,10 @@ test('the real Antigravity sidecar wakes an idle app conversation once for a boa
   const sidecar = () => new Promise(done => {
     const child = spawn(process.execPath, [join(dir, 'sidecar.mjs'), '--messages-dir', folder, '--once'], { cwd: dir, windowsHide: true, env: { ...process.env, NODE_OPTIONS: `--require=${join(dir, 'agentapi.cjs')}`, ANTIGRAVITY_AGENTAPI_EXE: process.execPath } })
     let output = ''
+    // A sidecar that does not end its one poll is stopped, so the test never leaves it running.
+    const timer = setTimeout(() => child.kill(), 15_000)
     child.stdout.on('data', chunk => { output += chunk })
-    child.on('exit', () => done(output))
+    child.on('exit', () => { clearTimeout(timer); done(output) })
   })
   const calls = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []
   // Its first poll marks it alive, so the card sends at once.
