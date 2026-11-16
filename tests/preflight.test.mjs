@@ -7,7 +7,7 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { syncBuiltinESMExports } from 'node:module'
 import os from 'node:os'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, leftToCi, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
 
@@ -86,7 +86,7 @@ const has = (checks, state, text) => checks.some(item => item.state === state &&
 const mainFixture = (t, { isSame = false, hasImportFailure = false, mainSource } = {}) => {
   const f = fixture(t)
   const local = readFileSync(script, 'utf8')
-  for (const name of ['pr-check.mjs', 'changelog-fold.mjs', 'bundle-text.mjs', 'preflight-lock-policy.mjs']) {
+  for (const name of ['pr-check.mjs', 'fail-first.mjs', 'changelog-fold.mjs', 'bundle-text.mjs', 'preflight-lock-policy.mjs']) {
     f.write(`scripts/${name}`, readFileSync(new URL(`../scripts/${name}`, import.meta.url), 'utf8'))
   }
   const main = mainSource ?? (isSame ? local : `import { message } from './main-only-message.mjs'\n${local.replace("'the branch contains the base.'", 'message')}`)
@@ -2520,4 +2520,78 @@ test('preflight prints safe status lines counts and a failing CLI exit code', t 
   assert.equal(run(['--unknown']).status, 1)
   assert.equal(run(['--lock-platform', 'win32']).status, 1)
   assert.equal(safeLine('C:\\Users\\private-person\\file /home/private-person/file tests/nested/file.mjs\n'), '<path> <path> tests/nested/file.mjs ')
+})
+
+test('preflight runs the tests the case table names on the merge base and here, prints the Fail-first line and checks the body with it (#1520)', { timeout: 180_000 }, async t => {
+  const f = fixture(t)
+  f.write('scripts/value.mjs', 'export const value = 1\n')
+  f.commit()
+  f.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+  const base = f.git('rev-parse', 'HEAD')
+  f.write('scripts/value.mjs', 'export const value = 2\n')
+  f.write('tests/value.test.mjs', "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { value } from '../scripts/value.mjs'\ntest('the value is two', () => assert.equal(value, 2))\ntest('the value is a number', () => assert.equal(typeof value, 'number'))\nconst sample = \"test('a title only in a fixture')\"\ntest.todo('a todo test')\n")
+  f.commit()
+  const head = f.git('rev-parse', 'HEAD')
+  const bodyOf = test => `Fixes #1\nTier: risk\nSurface: delivery\nCases: 1 rows\n\n## Cases\n\n| State | Event | Expected result | Test |\n|---|---|---|---|\n| one | two | three | \`${test}\` |\n\n## Checks\n`
+  const bodies = []
+  const run = (program, args, options) => {
+    if (args[0] === 'scripts/pr-check.mjs') {
+      bodies.push(readFileSync(args[args.indexOf('--body-file') + 1], 'utf8'))
+      return { status: 0, stdout: 'pr-check: all checks passed\n', stderr: '' }
+    }
+    return f.run(program, args, options)
+  }
+  const line = `Fail-first: 1 of 1 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`
+  writeFileSync(join(f.root, 'body.md'), bodyOf('the value is two'))
+  const checks = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+  assert.ok(has(checks, 'PASS', line), JSON.stringify(checks))
+  // The body is checked as it will read with the line pasted, and the file itself is left as it was.
+  assert.equal(bodies.length, 1)
+  assert.ok(bodies[0].includes(line))
+  assert.equal(readFileSync(join(f.root, 'body.md'), 'utf8'), bodyOf('the value is two'))
+  // Lines are read as pr-check reads them: a body with the template's placeholder, or only an example in a fence, gets
+  // the line at its end; a body with the line already pasted is checked as it is, so it keeps one line.
+  const template = 'Fail-first: <the line preflight prints, or none, <reason>>\n'
+  for (const [body, isPasted] of [
+    [`${template}${bodyOf('the value is two')}`, false],
+    [`${template}${bodyOf('the value is two')}\`\`\`\n${line}\n\`\`\`\n`, false],
+    [`${template}${bodyOf('the value is two')}${line}\n`, true],
+  ]) {
+    writeFileSync(join(f.root, 'body.md'), body)
+    await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+    assert.equal(bodies.at(-1), isPasted ? body : `${body.trimEnd()}\n\n${line}\n`)
+  }
+  writeFileSync(join(f.root, 'body.md'), bodyOf('the value is a number'))
+  const passing = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+  assert.ok(has(passing, 'FAIL', 'the value is a number: passes on the base'), JSON.stringify(passing))
+  assert.ok(has(passing, 'FAIL', `Fail-first: 0 of 1 new or changed tests fail on ${base.slice(0, 8)}`))
+  // A title read from a fixture string matches no test when it runs, and it counts against the line.
+  writeFileSync(join(f.root, 'body.md'), bodyOf('a title only in a fixture'))
+  const fixtureOnly = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+  assert.ok(has(fixtureOnly, 'FAIL', 'a title only in a fixture: matched no test by its exact name'), JSON.stringify(fixtureOnly))
+  assert.ok(has(fixtureOnly, 'FAIL', `Fail-first: 0 of 1 new or changed tests fail on ${base.slice(0, 8)}`))
+  // A todo test never fails a run: it is named as a warning and left out of the line.
+  writeFileSync(join(f.root, 'body.md'), bodyOf('a todo test'))
+  const todo = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+  assert.ok(has(todo, 'WARN', 'a todo test: is a todo test, which no run can fail; not counted'), JSON.stringify(todo))
+  assert.ok(has(todo, 'WARN', 'fail-first: no new or changed test that the case table names ran here'), JSON.stringify(todo))
+  // With no case table there is nothing to run.
+  writeFileSync(join(f.root, 'body.md'), 'Fixes #1\n')
+  assert.ok(has(await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' }), 'PASS', 'fail-first: the body has no case table'))
+  // A temp home that cannot be removed fails the check, and the test lock is still let go.
+  const remove = fs.rmSync
+  const removeMock = t.mock.method(fs, 'rmSync', (path, ...args) => {
+    if (/^agent-board-preflight-(?!body-|main-)/.test(basename(String(path)))) throw Object.assign(new Error('synthetic busy folder'), { code: 'EBUSY' })
+    return remove(path, ...args)
+  })
+  syncBuiltinESMExports()
+  try {
+    writeFileSync(join(f.root, 'body.md'), bodyOf('the value is two'))
+    const busy = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+    assert.ok(has(busy, 'FAIL', 'fail-first could not finish'), JSON.stringify(busy))
+    assert.deepEqual(existsSync(f.lockPath) ? readdirSync(f.lockPath).filter(name => name.endsWith('.lock')) : [], [])
+  } finally {
+    removeMock.mock.restore()
+    syncBuiltinESMExports()
+  }
 })
