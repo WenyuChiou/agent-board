@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { checkAdded, codeOnly, loadConfig } from '../scripts/code-rules.mjs'
+import { checkAdded, loadConfig } from '../scripts/code-rules.mjs'
 
 const script = fileURLToPath(new URL('../scripts/code-rules.mjs', import.meta.url))
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -13,6 +13,8 @@ const config = loadConfig(root)
 const SET_TIMEOUT_FILES = config.setTimeoutFiles
 const check = rows => checkAdded(rows, config)
 const added = (path, text) => [{ path, line: 7, text }]
+// Lines are read whole, so this file builds the word from parts and passes its own rule.
+const ONLY = '.only'
 
 test('a new setTimeout in a hooks file outside the allow-list fails with its cause and fix', () => {
   const [failure, ...rest] = check(added('hooks/new-thing.ts', '  const t = setTimeout(() => done(), 500)'))
@@ -21,22 +23,20 @@ test('a new setTimeout in a hooks file outside the allow-list fails with its cau
   assert.match(failure.message, /^hooks\/new-thing\.ts:7: \[set-timeout-in-hooks\] .*setTimeoutFiles/)
 })
 
-test('setTimeout passes in an allow-listed hooks file, in a comment, in generated bundles and outside hooks', () => {
+test('setTimeout passes in an allow-listed hooks file, in generated bundles and outside hooks', () => {
   assert.ok(SET_TIMEOUT_FILES.includes('hooks/serve.ts'))
   assert.deepEqual(check(added('hooks/serve.ts', 'setTimeout(stop, 10)')), [])
-  assert.deepEqual(check(added('hooks/new-thing.ts', '  // setTimeout( is not allowed here')), [])
   assert.deepEqual(check(added('hooks/board-script-3.ts', '"  setTimeout(stop, 10)",')), [])
   assert.deepEqual(check(added('scripts/new-tool.mjs', 'setTimeout(stop, 10)')), [])
   assert.deepEqual(check(added('hooks/new-thing.ts', 'const clearTimeout2 = mysetTimeoutValue')), [])
 })
 
 test('a committed .only in a test file fails and a normal test passes', () => {
-  const [failure] = check(added('tests/x.test.mjs', "test.only('one', () => {})"))
+  const [failure] = check(added('tests/x.test.mjs', `test${ONLY}('one', () => {})`))
   assert.equal(failure.rule, 'only-in-tests')
-  assert.equal(check(added('tests/x.test.mjs', "  describe.only('group', () => {})")).length, 1)
+  assert.equal(check(added('tests/x.test.mjs', `  describe${ONLY}('group', () => {})`)).length, 1)
   assert.deepEqual(check(added('tests/x.test.mjs', "test('one', () => {})")), [])
-  assert.deepEqual(check(added('tests/x.test.mjs', "'it.only(\"a title\")', // in a string")), [])
-  assert.deepEqual(check(added('scripts/x.mjs', "test.only('one', () => {})")), [])
+  assert.deepEqual(check(added('scripts/x.mjs', `test${ONLY}('one', () => {})`)), [])
 })
 
 test('the command exits 1 on a hit and 0 on a clean diff, over base...head only', () => {
@@ -64,42 +64,32 @@ test('the command exits 1 on a hit and 0 on a clean diff, over base...head only'
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('a trailing comment or a string holding the call never blocks, and a call after a statement prefix does', () => {
-  assert.deepEqual(check(added('hooks/new-thing.ts', 'const a = 1 // then setTimeout( later')), [])
-  assert.deepEqual(check(added('hooks/new-thing.ts', 'const a = 1 /* setTimeout( */ + 2')), [])
-  assert.deepEqual(check(added('hooks/new-thing.ts', "const text = 'setTimeout('")), [])
-  assert.equal(check(added('hooks/new-thing.ts', 'if (ok) setTimeout(go, 5) // later')).length, 1)
-  assert.deepEqual(check(added('tests/x.test.mjs', "test('x', () => {}) // it.only( was here")), [])
-  assert.equal(codeOnly('a("it.only(") // x'), 'a("") ')
+test('every added line is read whole: the word in a comment or a string fails, and so does a call after a comment or template opened on a line above', () => {
+  const lines = [
+    'if (ok) setTimeout(go, 5) // later',
+    'const a = 1 // then setTimeout( later',
+    'const a = 1 /* setTimeout( */ + 2',
+    "const text = 'setTimeout('",
+    'const text = `setTimeout( is only words here`',
+    'log(`wait ${ok ? setTimeout(go, 1) : 0} then`)',
+    "const later = s.replace(/'/g, '') && setTimeout(done, 1)",
+    'const wait = setTimeout',
+    // The template or the block comment was opened on a line above; the call after its end runs (codex_453).
+    '`; setTimeout(done, 1)',
+    '*/ setTimeout(done, 1)',
+    ' * setTimeout(done, 1) on a doc comment line',
+  ]
+  for (const text of lines) assert.equal(check(added('hooks/new-thing.ts', text)).length, 1, text)
+  assert.equal(check(added('tests/x.test.mjs', `test('x', () => {}) // it${ONLY}( was here`)).length, 1)
+  assert.equal(check(added('tests/x.test.mjs', `'it${ONLY}("a title")', // in a string`)).length, 1)
+  const [failure] = check(added('hooks/new-thing.ts', '// a setTimeout here'))
+  assert.match(failure.message, /only text in a comment or a string, reword it or split it/)
 })
 
-test('a timer inside a template literal expression fails, and the same words in template text pass', () => {
-  assert.equal(check(added('hooks/new-thing.ts', 'const text = `${setTimeout(done, 10)}`')).length, 1)
-  assert.equal(check(added('hooks/new-thing.ts', 'log(`wait ${ok ? setTimeout(go, 1) : 0} then`)')).length, 1)
-  assert.deepEqual(check(added('hooks/new-thing.ts', 'const text = `setTimeout( is only words here`')), [])
-  assert.deepEqual(check(added('tests/x.test.mjs', 'const t = `${name} it.only( as words`')), [])
-})
-
-test('a quoted or commented brace inside a template expression neither hides a timer nor exposes template text', () => {
-  assert.equal(check(added('hooks/new-thing.ts', "const text = `${'}' + setTimeout(done, 10)}`")).length, 1)
-  assert.equal(check(added('hooks/new-thing.ts', 'const text = `${a /* } */ + setTimeout(done, 10)}`')).length, 1)
-  assert.equal(check(added('hooks/new-thing.ts', 'const text = `${`${x}` + setTimeout(done, 10)}`')).length, 1)
-  assert.deepEqual(check(added('hooks/new-thing.ts', "const text = `${'{'} setTimeout( as words`")), [])
-})
-
-test('a line the reader cannot take apart is read whole, and passing the timer function on fails too', () => {
-  assert.equal(check(added('hooks/new-thing.ts', 'const result = [`${/"/.test(s)}`, setTimeout(done, 1)]')).length, 1)
-  assert.equal(check(added('hooks/new-thing.ts', "const later = s.replace(/'/g, '') && setTimeout(done, 1)")).length, 1)
-  const deep = '`${'.repeat(6000) + 'setTimeout(done, 1)' + '}`'.repeat(6000)
-  assert.equal(check(added('hooks/new-thing.ts', deep)).length, 1)
-  assert.equal(check(added('hooks/new-thing.ts', 'const wait = setTimeout')).length, 1)
-  assert.deepEqual(check(added('hooks/new-thing.ts', "const label = 'setTimeout( as words, in hooks/a.ts'")), [])
-})
-
-test('it.only after a statement prefix fails, and this test file, which writes the call only inside strings, passes', () => {
-  assert.equal(check(added('tests/x.test.mjs', 'if (enabled) it.only("one", () => {})')).length, 1)
-  assert.equal(check(added('tests/x.test.mjs', 'for (const x of y) { test.only("one", () => {}) }')).length, 1)
-  assert.equal(check(added('tests/x.test.mjs', 'ok && describe.only("group", () => {})')).length, 1)
+test('a .only after a statement prefix fails, and this test file, which builds the word from parts, passes', () => {
+  assert.equal(check(added('tests/x.test.mjs', `if (enabled) it${ONLY}("one", () => {})`)).length, 1)
+  assert.equal(check(added('tests/x.test.mjs', `for (const x of y) { test${ONLY}("one", () => {}) }`)).length, 1)
+  assert.equal(check(added('tests/x.test.mjs', `ok && describe${ONLY}("group", () => {})`)).length, 1)
   const own = readFileSync(new URL('./code-rules.test.mjs', import.meta.url), 'utf8').split(/\r?\n/)
   assert.deepEqual(check(own.map((text, i) => ({ path: 'tests/code-rules.test.mjs', line: i + 1, text }))), [])
 })

@@ -40,97 +40,27 @@ export const loadConfig = (repoDir = process.cwd(), refs) => {
 
 // hooks/board-script-N.ts are built from other sources; the rule reads the sources.
 const isGenerated = path => /^hooks\/board-script-\d+\.ts$/.test(path)
-const isBlockCommentLine = text => /^\s*\*/.test(text)
 
-// The index of the `}` that closes a `${` expression whose body starts at `from`, past strings, comments and nested
-// templates, so a quoted brace neither ends the expression early nor keeps it open (codex_448); the line's length when
-// it does not close on this line.
-const closeOf = (text, from) => {
-  let depth = 1
-  for (let k = from; k < text.length; k++) {
-    const c = text[k]
-    if (c === '\\') k++
-    else if (c === '"' || c === "'") { k++; while (k < text.length && text[k] !== c) k += text[k] === '\\' ? 2 : 1 }
-    else if (c === '`') k = templateEnd(text, k)
-    else if (c === '/' && text[k + 1] === '/') return text.length
-    else if (c === '/' && text[k + 1] === '*') { const end = text.indexOf('*/', k + 2); if (end === -1) return text.length; k = end + 1 }
-    else if (c === '/') throw AMBIGUOUS
-    else if (c === '{') depth++
-    else if (c === '}' && --depth === 0) return k
-  }
-  return text.length
-}
-// The index of the backtick that closes the template starting at `start`, or the line's length.
-const templateEnd = (text, start) => {
-  let j = start + 1
-  while (j < text.length && text[j] !== '`') {
-    if (text[j] === '\\') j += 2
-    else if (text[j] === '$' && text[j + 1] === '{') j = closeOf(text, j + 2) + 1
-    else j++
-  }
-  return j
-}
-
-// A `/` in code that starts no comment is a regular expression or a division. This reader does not parse regular
-// expressions, whose quotes and braces would mislead it, so such a line is read whole: the strict side (codex_450).
-const AMBIGUOUS = Symbol('ambiguous')
-
-// The line without its strings and comments, so a call inside a string, a `// ...` tail or a `/* ... */` never matches.
-// A template literal's `${...}` expressions run, so they stay as code (round 2 of #1551). A line this reader cannot
-// take apart (a regular expression, or nesting too deep for it) is returned whole, so a timer in it still fails.
-export const codeOnly = text => {
-  try { return strip(text) } catch { return text }
-}
-const strip = text => {
-  let out = ''
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i]
-    if (char === '/' && text[i + 1] === '/') break
-    if (char === '/' && text[i + 1] === '*') {
-      const end = text.indexOf('*/', i + 2)
-      if (end === -1) break
-      i = end + 1
-      out += ' '
-    } else if (char === '`') {
-      let j = i + 1
-      out += '`'
-      while (j < text.length && text[j] !== '`') {
-        if (text[j] === '\\') { j += 2; continue }
-        if (text[j] === '$' && text[j + 1] === '{') {
-          const k = closeOf(text, j + 2)
-          out += ` ${strip(text.slice(j + 2, k))} `
-          j = k + 1
-          continue
-        }
-        j++
-      }
-      out += '`'
-      i = j
-    } else if (char === '"' || char === "'") {
-      let j = i + 1
-      while (j < text.length && text[j] !== char) j += text[j] === '\\' ? 2 : 1
-      out += char + char
-      i = j
-    } else if (char === '/') throw AMBIGUOUS
-    else out += char
-  }
-  return out
-}
+// Every added line is read whole, its comments and strings included. A line alone does not say whether it starts
+// inside a comment, a string or a template literal opened on a line above, so a reader that drops comments and strings
+// can drop a real call (rounds 2 to 5 of #1551). Reading the whole line never misses one; the cost is that the word in
+// a comment or a string fails too, and the fix says how to word it instead.
+const TEXT_ONLY = 'If the word is only text in a comment or a string, reword it or split it'
 
 export const rules = [
   {
     id: 'set-timeout-in-hooks',
     applies: (path, config) => /^hooks\/.+\.tsx?$/.test(path) && !isGenerated(path) && !config.setTimeoutFiles.includes(path),
-    test: text => !isBlockCommentLine(text) && /\bsetTimeout\b/.test(codeOnly(text)),
+    test: text => /\bsetTimeout\b/.test(text),
     cause: 'a new `setTimeout` (a call, or the function passed on) in a hooks/ file that is not on the list of files that already use one: a timer in a hook keeps the hook process alive after its work is done or fires after the agent moved on.',
-    fix: `start the timer from a file already on the list, or add this file to "setTimeoutFiles" in ${CONFIG_PATH} in the same pull request and say why in its body (the check reads the list from the pull request). For a renamed or moved file, move its path in that list.`,
+    fix: `start the timer from a file already on the list, or add this file to "setTimeoutFiles" in ${CONFIG_PATH} in the same pull request and say why in its body (the check reads the list from the pull request). For a renamed or moved file, move its path in that list. ${TEXT_ONLY} ('set' + 'Timeout', or "a timer").`,
   },
   {
     id: 'only-in-tests',
     applies: path => /^tests\/.+\.test\.(?:mjs|tsx?)$/.test(path),
-    test: text => !isBlockCommentLine(text) && /\b(?:test|describe|it)\.only\b/.test(codeOnly(text)),
+    test: text => /\b(?:test|describe|it)\.only\b/.test(text),
     cause: 'a committed `.only(`: node and the test runners then skip every other test in the file, and the run still passes.',
-    fix: 'remove `.only` before committing; run one test with `--test-name-pattern` instead.',
+    fix: `remove \`.only\` before committing; run one test with \`--test-name-pattern\` instead. ${TEXT_ONLY} (build it as 'it' + ONLY, with const ONLY = '.only').`,
   },
 ]
 
