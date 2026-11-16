@@ -7993,10 +7993,17 @@ test('hook delivery and DeepSeek take report corrupt messages.json as an error i
     '<!-- /auto session=a1b2c3f9 -->',
     '',
   ].join('\n'))
-  const withQuestion = await hookOrDeferred(() => f.call('codex', 'UserPromptSubmit'), isStoreFailure)
+  let withQuestion = f.call('codex', 'UserPromptSubmit')
   assert.equal(withQuestion.status, 0, withQuestion.stderr)
+  // The question goes out on the first call even when its mailbox look defers; a second call
+  // would not send it again, so the envelope is checked here and only the store error is retried.
   const questionEnvelope = JSON.parse(withQuestion.stdout)
   assert.match(questionEnvelope.hookSpecificOutput.additionalContext, /Auth check/)
+  if (!isStoreFailure(withQuestion)) {
+    assert.match(withQuestion.stderr, /^board: mailbox deferred$/m)
+    withQuestion = f.call('codex', 'UserPromptSubmit')
+    assert.equal(withQuestion.status, 0, withQuestion.stderr)
+  }
   assert.match(withQuestion.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
   f.save(f.progress, '')
 
