@@ -685,6 +685,59 @@ test('approval gate: a ready pull request requires a qualifying review approval 
     ],
   })
   assert.equal(humanApprovedAfterBot.problems.filter(p => p.check === 'review').length, 0)
+  assert.equal(humanApprovedAfterBot.info.filter(line => line.startsWith('review: ignored approval')).length, 1)
+})
+
+test('pr-check ignores approvals from outside associations with a note while keeping team approvals and outside change requests (#1535)', () => {
+  const head = syntheticPr().head
+  const basePr = { ...syntheticPr(), prComments: [] }
+
+  for (const association of ['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'MANNEQUIN']) {
+    for (const outsider of [
+      { body: `Review: APPROVE ${head} by visitor`, user: { login: 'visitor', type: 'User' }, author_association: association },
+      { state: 'APPROVED', commit_id: head, body: '', user: { login: 'visitor', type: 'User' }, author_association: association },
+    ]) {
+      assert.equal(reviewOf(outsider), null, association)
+      const checked = checkPr({ ...basePr, prComments: [outsider] })
+      assert.ok(checked.problems.some(p => p.check === 'review' && p.message.includes('needs a qualifying review approval')), association)
+      const ignoredNotes = checked.info.filter(line => line.startsWith('review: ignored approval'))
+      assert.equal(ignoredNotes.length, 1, association)
+      assert.match(ignoredNotes[0], /visitor/, association)
+      assert.match(ignoredNotes[0], new RegExp(`outside association \\(${association}\\)`), association)
+    }
+  }
+
+  for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR', 'member']) {
+    const teamApproval = { body: `Review: APPROVE ${head} by team reviewer`, user: { login: 'teammate', type: 'User' }, author_association: association }
+    assert.deepEqual(reviewOf(teamApproval), { kind: 'APPROVE', sha: head.toLowerCase(), reviewer: 'team reviewer' }, association)
+    const checked = checkPr({ ...basePr, prComments: [teamApproval] })
+    assert.equal(checked.problems.filter(p => p.check === 'review').length, 0, association)
+    assert.equal(checked.info.filter(line => line.startsWith('review: ignored approval')).length, 0, association)
+  }
+
+  const teamPlusOutsideApproval = checkPr({
+    ...basePr,
+    prComments: [
+      { body: `Review: APPROVE ${head} by team reviewer`, user: { login: 'teammate', type: 'User' }, author_association: 'COLLABORATOR' },
+      { body: `Review: APPROVE ${head} by visitor`, user: { login: 'visitor', type: 'User' }, author_association: 'NONE' },
+    ],
+  })
+  assert.equal(teamPlusOutsideApproval.problems.filter(p => p.check === 'review').length, 0)
+  assert.equal(teamPlusOutsideApproval.info.filter(line => line.startsWith('review: ignored approval')).length, 1)
+
+  for (const outsideHold of [
+    { body: `Review: REQUEST CHANGES ${head} by visitor`, user: { login: 'visitor', type: 'User' }, author_association: 'NONE' },
+    { state: 'CHANGES_REQUESTED', commit_id: head, body: '', user: { login: 'contributor', type: 'User' }, author_association: 'CONTRIBUTOR' },
+  ]) {
+    const held = checkPr({
+      ...basePr,
+      prComments: [
+        { body: `Review: APPROVE ${head} by team reviewer`, user: { login: 'teammate', type: 'User' }, author_association: 'MEMBER' },
+        outsideHold,
+      ],
+    })
+    assert.ok(held.problems.some(p => p.check === 'review' && p.message.includes('latest review requested changes')))
+  }
 })
 
 test('pr-check combines issue state and draft information without mutating inputs', () => {
