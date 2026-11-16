@@ -2188,9 +2188,9 @@ const ping = async (running: Running, waitMs = 1500): Promise<Record<string, unk
   }
 }
 
-// A board page counts as an open window only if it reported itself visible within this long. A visible page asks every
-// 3 seconds; a hidden or minimized one does not count, so opening the board then shows a window (#265). Only a test
-// process may shorten it.
+// A board page counts as an open window only if it reported itself visible within this long. A visible page keeps a
+// board request open, and the server counts a waiting page as having asked just now (#359); a hidden or minimized one
+// does not count, so opening the board then shows a window (#265). Only a test process may shorten it.
 const PAGE_OPEN_MS = (): number => (process.env.AGENT_BOARD_TEST_PID && Number(process.env.AGENT_BOARD_PAGE_OPEN_MS) > 0 ? Math.min(Number(process.env.AGENT_BOARD_PAGE_OPEN_MS), 10_000) : 10_000)
 // 'open': a page reported itself in front lately. 'unkeyed': one did, but a host is asking for
 // approvals and that page cannot answer them (opened from the printed address, or reloaded, which

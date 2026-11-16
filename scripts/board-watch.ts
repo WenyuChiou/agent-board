@@ -56,7 +56,8 @@ export const watchBoard = ({ progress, inbox, onChange, onFail, watch = fsWatch 
   }
   try {
     open(folder, name => {
-      if (name !== null && !name.startsWith(stem)) return
+      // The inbox folder keeps its own name whatever progress.md is called (a custom --progress-file).
+      if (name !== null && !name.startsWith(stem) && name !== inboxName) return
       if (name === null || name === inboxName) armInbox()
       onChange()
     })

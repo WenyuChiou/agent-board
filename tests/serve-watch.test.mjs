@@ -35,12 +35,12 @@ const blockOf = title => `## Synthetic watch\n<!-- auto session=abcd1234 agent=c
 
 // A board started from source. `fs` stands in for fs.watch; `holdMs` for how long an open request waits.
 // `reads` counts how often the server built the board, which is where its file work is.
-const startBoard = async ({ fs, holdMs, idleMs = 0 } = {}) => {
+const startBoard = async ({ fs, holdMs, idleMs = 0, name = 'progress.md' } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'serve-watch-'))
   roots.push(root)
   const claude = join(root, '.claude')
   mkdirSync(claude)
-  const progress = join(claude, 'progress.md')
+  const progress = join(claude, name)
   const inbox = join(claude, 'progress-inbox')
   writeFileSync(progress, blockOf('First synthetic task'))
   const messages = join(root, 'messages')
@@ -64,15 +64,16 @@ const startBoard = async ({ fs, holdMs, idleMs = 0 } = {}) => {
   const origin = `http://127.0.0.1:${url.port}`
   const token = url.searchParams.get('t')
   // The page's board request: with the etag of the board it holds, it waits for a change.
-  const ask = async (etag, { headers = {} } = {}) => {
-    const response = await fetch(new URL('/api/board', origin), { headers: { 'x-board-token': token, 'x-board-page': 'p-watch', 'x-board-visible': '1', ...(etag === undefined ? {} : { 'if-none-match': etag, 'x-board-wait': '1' }), ...headers } })
+  const ask = async (etag, { headers = {}, page = 'p-watch' } = {}) => {
+    const response = await fetch(new URL('/api/board', origin), { headers: { 'x-board-token': token, 'x-board-page': page, 'x-board-visible': '1', ...(etag === undefined ? {} : { 'if-none-match': etag, 'x-board-wait': '1' }), ...headers } })
     const text = await response.text()
     return { status: response.status, etag: response.headers.get('etag'), text, at: performance.now() }
   }
+  const ping = () => fetch(new URL('/api/ping', origin), { headers: { 'x-board-token': token } }).then(response => response.json())
   const post = (path, body) => fetch(new URL(path, origin), { method: 'POST', headers: { 'x-board-token': token, 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(async response => ({ status: response.status, text: await response.text() }))
   let isClosed = false
   const board = {
-    root, claude, progress, inbox, ask, post, isStopped, get reads() { return reads },
+    root, claude, progress, inbox, ask, post, ping, isStopped, get reads() { return reads },
     // A board written the way the board itself and the hooks write it: a new file renamed over the old one.
     replace: title => {
       const temporary = `${progress}.${process.pid}.tmp`
@@ -203,8 +204,9 @@ test('serve: a tab left open does not keep an idle server alive', async () => {
       if (await settledWithin(board.isStopped.then(() => true), 0)) return
     }
   }
-  // A tab in sight keeps it up while it waits, so the server does not go while someone reads the board.
-  const watched = await startBoard({ holdMs: 300, idleMs: 1500 })
+  // A tab in sight keeps it up while it waits, so the server does not go while someone reads the board, even when
+  // one wait lasts longer than the idle time.
+  const watched = await startBoard({ holdMs: 4000, idleMs: 1500 })
   await keepAsking(watched, '1', 5000)
   assert.equal(await settledWithin(watched.isStopped.then(() => true), 0), undefined, 'the server went while a tab in sight was waiting')
   await watched.close()
@@ -212,6 +214,40 @@ test('serve: a tab left open does not keep an idle server alive', async () => {
   const hidden = await startBoard({ holdMs: 300, idleMs: 1500 })
   await keepAsking(hidden, '0', 15_000)
   assert.ok(await settledWithin(hidden.isStopped.then(() => true), 1000), 'the server stayed up while only a hidden tab was waiting')
+})
+
+test('serve: with a progress file of another name, the inbox folder made later is still watched', async () => {
+  const board = await startBoard({ holdMs: 60_000, name: 'tasks.md' })
+  const first = await board.ask()
+  const waiting = board.ask(first.etag)
+  await pause(200)
+  const before = board.reads
+  mkdirSync(board.inbox)
+  writeFileSync(join(board.inbox, 'codex-turn-1.json'), '{}')
+  for (let tries = 0; tries < 40 && board.reads === before; tries += 1) await pause(50)
+  const afterFolder = board.reads
+  assert.ok(afterFolder > before, 'the new inbox folder did not wake the open request')
+  writeFileSync(join(board.inbox, 'codex-turn-2.json'), '{}')
+  for (let tries = 0; tries < 40 && board.reads === afterFolder; tries += 1) await pause(50)
+  assert.ok(board.reads > afterFolder, 'a file in the inbox folder made after the start did not wake the open request')
+  await board.close()
+  await waiting.catch(() => undefined)
+})
+
+test('serve: a page waiting on the board counts as open just now, and one replaced while it waits is told at once', async () => {
+  const board = await startBoard({ holdMs: 60_000 })
+  const first = await board.ask()
+  const waiting = board.ask(first.etag)
+  // Longer than a page's last request alone would keep it "just now": the board command's open-window check reads this.
+  await pause(1500)
+  const { pageAgo } = await board.ping()
+  assert.ok(pageAgo !== null && pageAgo < 500, `a page in sight waiting on the board was last seen ${pageAgo} ms ago`)
+  // A newer page asks: the older one's waiting request is answered that the board moved (#265), not after its wait.
+  await board.ask(undefined, { page: 'p-newer' })
+  const moved = await settledWithin(waiting, 2000)
+  assert.ok(moved !== undefined, 'the replaced page was still waiting')
+  assert.deepEqual(JSON.parse(moved.text), { moved: true })
+  await board.close()
 })
 
 // A watch that never reports a change, as one that stopped would, and can be made to fail.

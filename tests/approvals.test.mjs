@@ -21,7 +21,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { startServer } = await import('../scripts/board-serve.ts')
 const { privateRuntimeFolder, writePrivateRuntimeFile } = await import('../scripts/runtime-folder.ts')
-const { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, approvalCards, approvalOf, approvalsPayload, decisionOf, readAsk } = await import('../hooks/approvals.ts')
+const { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_PAGE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, approvalCards, approvalOf, approvalsPayload, decisionOf, readAsk } = await import('../hooks/approvals.ts')
 const { addressFileName: receiverFileName, addressKey: receiverKey, parseAddress: receiverParse } = await import('../hooks/receiver.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
@@ -168,6 +168,27 @@ const runHook = (place, input) => {
   done.then(() => { isExited = true })
   return { done, isRunning: () => !isExited }
 }
+
+test('a page in sight whose board request is waiting still counts as watching past APPROVAL_PAGE_MS (#359)', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 5_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  // The shipped page holds the board and waits on it (its etag and x-board-wait), asking nothing else while nothing changes.
+  const ask = (headers = {}) => fetch(new URL('/api/board', board.origin), { headers: { 'x-board-token': board.token, ...page.headers, ...headers } })
+  const first = await ask()
+  await first.arrayBuffer()
+  const waiting = ask({ 'if-none-match': first.headers.get('etag'), 'x-board-wait': '1' })
+  // Longer than the window a page's last request counts as watching: on main the page asked every 2 s.
+  await pause(APPROVAL_PAGE_MS + 1000)
+  const hook = runHook(board, request('rm -rf synthetic-waiting-folder'))
+  // The waiting request brings the new card, and the request stays on the board for the page, not sent back to the host.
+  const answered = await waiting
+  assert.equal(answered.status, 200)
+  assert.match(await answered.text(), /synthetic-waiting-folder/)
+  const shown = await page.show('rm -rf synthetic-waiting-folder')
+  assert.equal(hook.isRunning(), true, 'the host was told to ask in its own window while the page was in sight')
+  assert.equal((await page.press(shown, 'deny', { confirmed: true })).status, 200)
+  assert.equal((await hook.done).decision?.hookSpecificOutput?.decision?.behavior, 'deny')
+})
 
 test('the hook finds the address file where hooks/receiver.ts names it and reads it the same way', () => {
   const env = { CLAUDE_PROGRESS_FILE: isWindows ? 'C:\\synthetic\\board\\progress.md' : '/synthetic/board/progress.md', HOME: isWindows ? 'C:\\synthetic\\home' : '/synthetic/home', USERPROFILE: isWindows ? 'C:\\synthetic\\home' : '/synthetic/home' }

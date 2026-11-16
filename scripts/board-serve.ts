@@ -195,7 +195,9 @@ export const startServer = (o: ServeOptions): void => {
   // nothing changed the answer waits here until the file watch, a press, an approval or a reply wakes it, or
   // until BOARD_HOLD_MS passes (then 304). Nothing reads a file while a request waits and the watch works.
   // Without a working watch, waiting requests are checked every BOARD_FALLBACK_MS instead.
-  type Waiter = { wake: () => void; drop: () => void }
+  // Who waits: the page's id ('' on the network), its approval secret, whether it said it was in sight, and on which side.
+  type WaitingPage = { id: string; secret: string; isVisible: boolean; isLan: boolean }
+  type Waiter = WaitingPage & { wake: () => void; drop: () => void }
   const waiters = new Set<Waiter>()
   let boardWatch: BoardWatch | null = null
   let wakeTimer: ReturnType<typeof setTimeout> | null = null
@@ -217,7 +219,29 @@ export const startServer = (o: ServeOptions): void => {
     }
   }
   // recheck answers when the board changed and says whether it did; last always answers.
-  const holdBoard = (res: ServerResponse, id: string, recheck: () => boolean, last: () => boolean): void => {
+  // A page whose request waits here is still open, as it was while it asked every 2 s: the windows sized for that poll
+  // (an approval's watching page, APPROVAL_PAGE_MS; the board command's open-window check; the idle exit) see it as
+  // having asked just now. Only a page in sight counts as watching or as activity; a hidden one only stays open (#359).
+  const touchWaiting = (now: number): void => {
+    for (const one of waiters) {
+      if (!one.isLan && one.id !== '') {
+        const page = pages.get(one.id)
+        if (page !== undefined) page.at = now
+      }
+      const held = one.secret === '' ? undefined : pageSecrets.get(one.secret)
+      if (held !== undefined) {
+        held.seen = now
+        if (one.isVisible) held.watched = now
+      }
+      if (one.isVisible) {
+        if (one.isLan) { if (lan !== null) lan.lastSeen = now }
+        else lastSeen = now
+      }
+    }
+  }
+  const holdBoard = (res: ServerResponse, page: WaitingPage, recheck: () => boolean, last: () => boolean): void => {
+    const { id } = page
+    const seq = id === '' ? 0 : pages.get(id)?.seq ?? 0
     let isDone = false
     const done = (): void => {
       if (isDone) return
@@ -231,7 +255,13 @@ export const startServer = (o: ServeOptions): void => {
       let isAnswered = true
       try {
         // A page replaced while it waited is told so, as its next request would be (#265).
-        if (isMoved || (id !== '' && isRetiredPage(id))) {
+        const isSuperseded = id !== '' && !isMoved && (isRetiredPage(id) || (seq > 0 && activeMaxSeq > seq))
+        if (isSuperseded) {
+          pages.delete(id)
+          retirePage(id)
+          dropPageSecrets(id)
+        }
+        if (isMoved || isSuperseded) {
           if (isMoved && id !== '') movedWaiting.delete(id)
           if (isMoved) res.once('finish', () => { if (movedWaiting.size === 0 && movedReleased) setImmediate(finish) })
           json(res, 200, { moved: true })
@@ -241,7 +271,7 @@ export const startServer = (o: ServeOptions): void => {
       }
       if (isAnswered) done()
     }
-    const waiter: Waiter = { wake: () => settle(recheck), drop: done }
+    const waiter: Waiter = { ...page, wake: () => settle(recheck), drop: done }
     const timer = setTimeout(() => settle(last), o.boardTimes?.holdMs ?? BOARD_HOLD_MS)
     res.once('close', done)
     waiters.add(waiter)
@@ -302,6 +332,7 @@ export const startServer = (o: ServeOptions): void => {
   }
   // How long ago a visible page last loaded or asked; null when none did.
   const pageAgo = (now: number): number | null => {
+    touchWaiting(now)
     let latest = loadedAt
     for (const one of pages.values()) if (one.visible && one.at > latest) latest = one.at
     return latest === 0 ? null : now - latest
@@ -356,9 +387,9 @@ export const startServer = (o: ServeOptions): void => {
     if (held.page !== '' && pageIdOf(headers) !== held.page) return ''
     return secret
   }
-  const isWatched = (now: number): boolean => !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs && now - held.watched < APPROVAL_PAGE_MS)
+  const isWatched = (now: number): boolean => { touchWaiting(now); return !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs && now - held.watched < APPROVAL_PAGE_MS) }
   // A page that can answer approvals is still open, if only behind another window.
-  const hasLiveSecret = (now: number): boolean => !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs)
+  const hasLiveSecret = (now: number): boolean => { touchWaiting(now); return !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs) }
   // The hook's answer: a decision, or none, and the host's own prompt asks. The request then stays
   // on its row a minute as asked in its window, with no button.
   const settleApproval = (id: string, decision: ApprovalDecision | null): void => {
@@ -608,7 +639,8 @@ export const startServer = (o: ServeOptions): void => {
           dropPageSecrets(id)
         } else {
           pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
-          if (mine > activeMaxSeq) activeMaxSeq = mine
+          // A newer page: an older one waiting on the board hears now that it was replaced.
+          if (mine > activeMaxSeq) { activeMaxSeq = mine; wakeAll() }
           // Any secret bound to an older page is retired once a newer page asks for the board (#1378).
           dropOlderSecrets(id, mine, now)
         }
@@ -699,7 +731,8 @@ export const startServer = (o: ServeOptions): void => {
         // Only a page that holds the board it would be answered with waits; the terminal board and scripts never do.
         const wantsWait = req.headers['x-board-wait'] === '1' && ifNoneMatch !== undefined && !isStopping
         if (answer(!wantsWait)) return
-        holdBoard(res, isLan ? '' : pageIdOf(req.headers), () => answer(false), () => answer(true))
+        const waitingNow = Date.now()
+        holdBoard(res, { id: isLan ? '' : pageIdOf(req.headers), secret: isLan ? '' : secretOf(req.headers, waitingNow), isVisible: req.headers['x-board-visible'] !== '0', isLan }, () => answer(false), () => answer(true))
         return
       }
       // Only the board script on the computer asks; the answer names progress.md's path.
@@ -777,6 +810,8 @@ export const startServer = (o: ServeOptions): void => {
             if (left !== undefined) {
               left.timers.forEach(clearTimeout)
               approvals.delete(item.id)
+              // Its buttons leave the page now.
+              wakeAll()
             }
             done()
           })
@@ -1064,6 +1099,7 @@ export const startServer = (o: ServeOptions): void => {
     // anything for `idleMs`, and no reply is on its way.
     const idle = setInterval(() => {
       if (isStopping) return
+      touchWaiting(Date.now())
       if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
       if (o.idleMs > 0 && !isBusySending() && Date.now() - lastSeen > o.idleMs) stop()
     }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)

@@ -154,6 +154,9 @@ describe('L1 first run', () => {
   // before the hook process finished exiting counts as 0 ms.
   test(`L1 latency: a hook event from each host is on the page within 2 s (95th percentile over ${PAGE_EVENT_SAMPLES} events)`, async t => {
     const world = makeWorld()
+    // The page stand-in below stops on every way out, a failed assertion included, so a failure cannot leave it asking.
+    let isObserving = true
+    const observerEnd = new AbortController()
     try {
       const server = await serve.start(world)
       const address = new URL(server.url)
@@ -176,13 +179,12 @@ describe('L1 first run', () => {
       }
       // The page: one open board request at a time, asked again as soon as it is answered.
       let etag
-      let isObserving = true
       let answers = 0
       const expected = new Set()
       const observing = (async () => {
         while (isObserving) {
           try {
-            const response = await fetch(new URL('/api/board', address), { headers: { 'x-board-token': token, 'x-board-page': 'p-l1-latency', 'x-board-visible': '1', ...(etag === undefined ? {} : { 'if-none-match': etag, 'x-board-wait': '1' }) }, signal: AbortSignal.timeout(30_000) })
+            const response = await fetch(new URL('/api/board', address), { headers: { 'x-board-token': token, 'x-board-page': 'p-l1-latency', 'x-board-visible': '1', ...(etag === undefined ? {} : { 'if-none-match': etag, 'x-board-wait': '1' }) }, signal: AbortSignal.any([AbortSignal.timeout(30_000), observerEnd.signal]) })
             answers += 1
             if (response.status !== 200) { await response.arrayBuffer(); continue }
             etag = response.headers.get('etag') ?? undefined
@@ -229,6 +231,8 @@ describe('L1 first run', () => {
       await server.stop()
       await observing
     } finally {
+      isObserving = false
+      observerEnd.abort()
       await world.close()
     }
   })
