@@ -1,10 +1,10 @@
-import { boardPromptHelper, boardRequestWords } from './board-commands'
+import { boardPromptHelper, boardRequestWords, deliveryRequestWords } from './board-commands'
 import { STRINGS } from './strings'
 import type { Strings } from './i18n'
 import { opencodeReceiverSource } from './receivers/opencode'
 import { HOOK_VERSION, HOOK_WORKER_GRACE, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookTimeout, hostHookTimeout } from './hook-safety'
 
-const BOARD_PROMPT_HELPER = boardPromptHelper(boardRequestWords(Object.values(STRINGS)))
+const BOARD_PROMPT_HELPER = boardPromptHelper(boardRequestWords(Object.values(STRINGS)), deliveryRequestWords(Object.values(STRINGS)))
 
 // Base64 without Buffer or btoa: /progress connect also builds these commands where neither
 // exists (#285).
@@ -287,7 +287,7 @@ ${board === undefined ? '' : `  // The receiver's tick makes a session it still 
       if (open.has(sessionID)) open.get(sessionID).isReplying = true
       // The reply may have ended while the lookup ran: a known session keeps what was noted since.
       await reach({ session: sessionID, state: 'working', current, isNewest, isLatest: () => true, isReplying: true, report: async where => {
-        run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...where, ...(isBoardRequest(output) ? { board_request: true } : {}) }, undefined, deadline)
+        run('--agent-status', { session_id: sessionID, state: 'working', prompt_submitted: true, ...where, ...(isBoardRequest(output) ? { board_request: true } : isDeliveryRequest(output) ? { delivery_request: true } : {}) }, undefined, deadline)
       } })
   }),
   event: async ({ event }) => withStatusEvent(event, async (current, deadline, isIdle, isLatest) => {

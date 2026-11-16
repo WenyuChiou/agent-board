@@ -811,7 +811,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const isPromptLike = isPromptEvent(raw) || raw.prompt_submitted === true
       const isBoardCommand = isPromptLike && (raw.board_request === true || isBoardRequest(raw, boardRequestWords(Object.values(STRINGS))))
       // A delivered board message is not the person's reply, yet the turn it starts is real work: its closing question still counts.
-      const isDelivery = isPromptLike && !isBoardCommand && isBoardRequest(raw, deliveryRequestWords(Object.values(STRINGS)))
+      const isDelivery = isPromptLike && !isBoardCommand && (raw.delivery_request === true || isBoardRequest(raw, deliveryRequestWords(Object.values(STRINGS))))
       const isBoardPrompt = isBoardCommand || isDelivery
       // No longer changes any step (#243); kept so events queued by an older version still validate.
       const isPrompt = !isBoardPrompt && mode === '--agent-status' && status === 'working' && (payload.prompt_submitted === true || /^(?:UserPromptSubmit|user_prompt_submit|BeforeAgent)$/.test(String(payload.hook_event_name ?? payload.hookEventName)))
@@ -1476,7 +1476,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const original = readFileSync(process.argv[1] ?? '', 'utf8').replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, '')
   const files: Record<string, string> = {
     [script]: `globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang: Object.entries(STRINGS).find(([, words]) => words === fileWords)?.[0] ?? 'en' })}\n${original}`,
-    [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)))),
+    [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)), deliveryRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
   if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script, fileWords)

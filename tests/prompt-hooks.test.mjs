@@ -188,10 +188,11 @@ test('pre-safety board-request plugins upgrade by exact bytes and preserve perso
     const hook = hooks.find(one => one.agent === agent && one.generated)
     assert.equal(hook.edit(old, false), current(ctx))
     assert.equal(hook.edit(old + '// personal edit\n', false), COLLISION)
-    const released = current(ctx).replace(/^const BOARD_WORDS = \[.*\]$/m, () => frozenWords)
+    // 0.24.3 had no delivery flag: its bytes are the current ones without it.
+    const released = current(ctx, true, true, true, false).replace(/^const BOARD_WORDS = \[.*\]$/m, () => frozenWords)
     assert.equal(hook.edit(released, false), current(ctx))
     assert.equal(hook.edit(released + '// personal edit\n', false), COLLISION)
-    const withoutTurnKey = current(ctx, true, true, false)
+    const withoutTurnKey = current(ctx, true, true, false, false)
     assert.equal(createHash('sha256').update(withoutTurnKey).digest('hex'), beforeTurnKeyHash)
     assert.equal(hook.edit(withoutTurnKey, false), current(ctx))
     assert.equal(hook.edit(withoutTurnKey + '// personal edit\n', false), COLLISION)
@@ -240,6 +241,125 @@ test('legacy prompt callbacks flag board commands without retaining their text',
   for (const prompt of prompts) await callbacks.get('before_prompt_build')({ prompt }, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
   assert.equal(saved.length, 8)
   for (const one of saved) assert.deepEqual(JSON.parse(one.body), { session_id: 'synthetic-owner', ...(one.name.includes('opencode-') ? { cwd: '/synthetic' } : { cwd: '' }), board_request: true })
+})
+
+// The delivery headers a reporter can receive, in English and zh-TW, from the board and from an agent (#1334). It is
+// defined before the first test that reads it, so a test run alone by name finds it initialized.
+const deliveryPrompts = async () => {
+  const { deliveryText } = await import('../hooks/messaging.ts')
+  const { ZH_TW } = await import('../hooks/i18n.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  const sent = { id: 'AB-1', to: 'gemini:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' }
+  return [
+    ['English board header', deliveryText({ ...sent, from: 'board' }, EN)],
+    ['zh-TW board header', deliveryText({ ...sent, from: 'board' }, ZH_TW)],
+    ['English agent header', deliveryText({ ...sent, from: 'claude:abcdef12' }, EN)],
+    ['zh-TW agent header', deliveryText({ ...sent, from: 'claude:abcdef12' }, ZH_TW)],
+  ]
+}
+
+// A message the board delivered into an OpenCode or OpenClaw session (#1334): the plugin must flag it as a delivery
+// (never as the person's prompt, never as a board command, #1306), keep its words out of the receipt, and a board
+// command inside it still wins.
+const deliveryPlugins = async () => {
+  const { deliveryText } = await import('../hooks/messaging.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  const sent = { id: 'AB-1', to: 'opencode:abcdef12', from: 'board', nonce: 'a1b2c3', status: 'claimed' }
+  return [
+    ['a person', 'Continue the task'],
+    ...await deliveryPrompts(),
+    ['a board command inside a delivery', deliveryText({ ...sent, text: EN.boardCommandPrompt }, EN)],
+  ]
+}
+const instantiatePlugin = (saved, script, suffix) => {
+  const descriptors = new Map()
+  const open = name => { const fd = descriptors.size + 1; descriptors.set(fd, name); return fd }
+  return new Function('createRequire', 'closeSync', 'mkdirSync', 'openSync', 'renameSync', 'unlinkSync', 'writeFileSync', 'join', `${script.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoard', 'const AgentBoard').replace('export default', 'const plugin =')}\n${suffix}`)(createRequire, fd => descriptors.delete(fd), () => {}, open, () => {}, () => {}, (fd, body) => saved.push({ name: descriptors.get(fd), body }), (...parts) => parts.join('/'))
+}
+const assertDeliveryFlags = async (agent, bodies) => {
+  const cases = await deliveryPlugins()
+  assert.equal(bodies.length, cases.length, agent)
+  for (const [index, [name]] of cases.entries()) {
+    const body = bodies[index]
+    const sent = JSON.parse(body)
+    const isCommand = index === cases.length - 1
+    const isDelivery = index > 0 && !isCommand
+    assert.equal(sent.board_request, isCommand ? true : undefined, `${agent} ${name}`)
+    assert.equal(sent.delivery_request, isDelivery ? true : undefined, `${agent} ${name}`)
+    assert.ok(!body.includes('Agent Board message') && !body.includes('second plan'), `${agent} ${name}`)
+    // Only the person's own prompt answers an open question; a delivery does not (a board command never did).
+    assert.equal(await answersQuestion(`${agent}-prompt-1700000000000-1.json`, body), index === 0, `${agent} ${name}`)
+  }
+}
+
+test('the installed OpenCode inbox plugin flags a board delivery, so it leaves the open question unanswered', async () => {
+  const saved = []
+  const hooks = await instantiatePlugin(saved, template('opencodePlugin', ''), 'return AgentBoard')({ directory: '/synthetic', client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+  for (const [, text] of await deliveryPlugins()) await hooks['chat.message']({ sessionID: 'synthetic-owner' }, { parts: [{ type: 'text', text }] })
+  await assertDeliveryFlags('opencode', saved.map(one => one.body))
+})
+
+test('the installed OpenClaw inbox plugin flags a board delivery, so it leaves the open question unanswered', async () => {
+  const saved = []
+  const callbacks = new Map()
+  instantiatePlugin(saved, template('openclawPlugin', ''), 'return plugin').register({ on: (name, callback) => callbacks.set(name, callback) })
+  for (const [, prompt] of await deliveryPlugins()) await callbacks.get('before_prompt_build')({ prompt }, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
+  await assertDeliveryFlags('openclaw', saved.map(one => one.body))
+})
+
+test('the OpenCode and OpenClaw plugins released before the delivery flag are still recognised as ours and upgrade', async () => {
+  const { agentHooks, COLLISION } = await import('../hooks/connect-pure.ts')
+  const hooks = agentHooks({ ...ctx, sep: '/', isWindows: false, script: '/synthetic/progress-report.sh', codexHome: '/synthetic/.codex', grokHome: '/synthetic/.grok', hermesHome: '/synthetic/.hermes', openclawHome: '/synthetic/.openclaw' })
+  for (const [agent, plugin] of [['opencode', opencodePlugin], ['openclaw', openclawPlugin]]) {
+    const hook = hooks.find(one => one.agent === agent && one.generated)
+    // The 0.24.3 bytes: the board-request flag and the turn key, no delivery flag.
+    for (const withTurnKey of [true, false]) {
+      const released = plugin(ctx, true, true, withTurnKey, false)
+      assert.notEqual(released, plugin(ctx), agent)
+      assert.equal(hook.edit(released, false), plugin(ctx), agent)
+      assert.equal(hook.edit(released + '// personal edit\n', false), COLLISION, agent)
+    }
+  }
+})
+
+test('the native OpenCode plugin flags a board delivery as a delivery, not as the person\'s prompt or a board command', async t => {
+  const exitListeners = process.listeners('exit')
+  t.after(() => {
+    for (const listener of process.listeners('exit')) if (!exitListeners.includes(listener)) process.removeListener('exit', listener)
+    delete globalThis[Symbol.for('agent-board.opencode-open-sessions')]
+  })
+  const { opencodePlugin: local } = await import('../hooks/local-agents.ts')
+  const saved = []
+  const source = local('node', '/synthetic/board.mjs', '/synthetic/progress.md', 'Progress', process.env.HOME)
+  const factory = new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoardLocal', 'const AgentBoardLocal')}\nreturn AgentBoardLocal`)(createRequire, (_node, _args, options) => { saved.push(options.input); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } }))
+  const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+  const cases = await deliveryPlugins()
+  for (const [, text] of cases) await hooks['chat.message']({ sessionID: 'synthetic-owner' }, { parts: [{ type: 'text', text }] })
+  assert.equal(saved.length, cases.length)
+  for (const [index, [name]] of cases.entries()) {
+    const sent = JSON.parse(saved[index])
+    assert.equal(sent.prompt_submitted, true, name)
+    assert.equal(sent.board_request, index === cases.length - 1 ? true : undefined, name)
+    assert.equal(sent.delivery_request, index > 0 && index < cases.length - 1 ? true : undefined, name)
+    assert.ok(!saved[index].includes('Agent Board message') && !saved[index].includes('second plan'), name)
+  }
+})
+
+test('a board delivery is no answer in Claude Code: the receiver submits it as a plugin prompt, which is not the person\'s', async () => {
+  const { isPersonsAnswer } = await import('../hooks/digest.ts')
+  const { deliveryText } = await import('../hooks/messaging.ts')
+  const { ZH_TW } = await import('../hooks/i18n.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  // hooks/register.tsx hands the delivery to prompt.submit as { text } alone: no origin, no asUser.
+  const source = readFileSync(new URL('../hooks/register.tsx', import.meta.url), 'utf8')
+  assert.match(source, /submit: text => \$\.prompt\.submit\(\{ text \}\),/)
+  const sent = { id: 'AB-1', from: 'board', to: 'claude:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' }
+  for (const s of [EN, ZH_TW]) {
+    const text = deliveryText(sent, s)
+    assert.equal(isPersonsAnswer({ text, origin: { kind: 'plugin' } }), false)
+    assert.equal(isPersonsAnswer({ text, origin: { kind: 'composer' } }), true)
+  }
+  assert.equal(isPersonsAnswer({ text: 'Continue the task', origin: { kind: 'composer' } }), true)
 })
 
 const sh = process.platform === 'win32' ? existsSync('C:/Program Files/Git/bin/bash.exe') ? 'C:/Program Files/Git/bin/bash.exe' : 'sh' : '/bin/sh'
@@ -446,6 +566,27 @@ test('the PowerShell reporter writes a prompt receipt with no prompt words', { s
   assert.ok(turnResult.turnKey)
   assert.ok(saved.every(one => readTurn(one.file, one.body).turnKey === turnResult.turnKey), diagnostics.join('; '))
   assert.ok(saved.every(one => !one.body.includes('PRIVATE_') && !one.body.includes('/board') && !one.body.includes('$agent-board') && !one.body.includes(turn)))
+}))
+
+// #836: with module autoload on, the reporter's first cmdlet walked every module folder (over 20 s on a busy runner).
+// A module placed first on PSModulePath that exports its own ConvertFrom-Json shows whether that search happens.
+test('the PowerShell reporter, and the copy the sh reporter runs, load their two modules by path and search no module folder for a command (#836)', { skip: process.platform !== 'win32' }, () => fixture(async home => {
+  const { reporterPs1, reporterSh } = await import('../hooks/connect-pure.ts')
+  const file = join(home, 'progress-report.ps1'), shell = join(home, 'progress-report.sh')
+  writeFileSync(file, reporterPs1())
+  // On Windows the sh reporter hands a stripped copy of the same reporter to powershell.exe -Command.
+  writeFileSync(shell, reporterSh(shellPath(join(home, 'progress-inbox'))))
+  const modules = join(home, 'planted-modules')
+  const marker = join(home, 'planted-module-ran.txt')
+  mkdirSync(join(modules, 'PlantedJson'), { recursive: true })
+  writeFileSync(join(modules, 'PlantedJson', 'PlantedJson.psm1'), `function ConvertFrom-Json { [IO.File]::WriteAllText('${marker.replaceAll("'", "''")}', 'ran'); throw 'planted' }\nExport-ModuleMember -Function ConvertFrom-Json\n`)
+  const env = { ...process.env, HOME: home, USERPROFILE: home, PSModulePath: `${modules};${process.env.PSModulePath ?? ''}` }
+  for (const [copy, program, args] of [['reporter', 'powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt']], ['sh copy', sh, [shellPath(shell), 'gemini', 'prompt']]]) {
+    const result = spawnSync(program, args, { input: JSON.stringify({ session_id: `synthetic-owner-${copy}`, turnId: 'synthetic-module-turn', prompt: 'PRIVATE_REAL_ANSWER' }), encoding: 'utf8', windowsHide: true, env })
+    assert.equal(result.status, 0, `${copy}: ${result.stderr}`)
+    assert.equal(existsSync(marker), false, `${copy}: the reporter ran a ConvertFrom-Json it found by searching the module folders`)
+  }
+  assert.equal(receipts(home).length, 2)
 }))
 
 test('the legacy Cursor reporter pairs beforeSubmitPrompt with its own afterAgentResponse', () => fixture(async home => {
@@ -1063,4 +1204,161 @@ test('the sh timeout receipt preserves ordered plain metadata and the session ga
   assert.match(out.stderr, /(^|\n)REPORTER_FAILED\n$/)
   assert.equal(existsSync(file + '.json'), false)
   assert.equal(readFileSync(file + '.fallback', 'utf8'), 'other')
+}))
+
+// A message the board delivered into a session (#1334): through a generated reporter it must keep the prompt from
+// answering the open question, as it does on the live Codex path, and must not become a board turn.
+// Whether the saved receipt, read as the inbox reads it, answers an open question.
+const answersQuestion = async (file, body) => {
+  const { answerAgentPrompt, blockId, readTurn } = await import('../hooks/inbox.ts')
+  const { emptyMirror } = await import('../hooks/mirror.ts')
+  const { applyDigest } = await import('../hooks/digest.ts')
+  const turn = readTurn(file, body)
+  const before = turn.at - 5000
+  const mirror = { ...applyDigest(emptyMirror(blockId(turn.agent, turn.session), 'demo', before, '/demo', turn.agent), { title: 'Limit', context: '', done: '', next: 'Continue', ask: 'Per-key limit', why: '100 or 300 a minute?' }, before), resume: turn.session, turnOrder: before * 2 }
+  return answerAgentPrompt(mirror, turn, turn.at + 1) !== null
+}
+const assertDeliveryReceipts = async (home, run) => {
+  const cases = [['a person\'s prompt', 'Continue the task'], ...await deliveryPrompts()]
+  for (const [index, [name, prompt]] of cases.entries()) {
+    const before = receipts(home).map(one => one.file)
+    run(JSON.stringify({ session_id: `synthetic-delivery-${index}`, cwd: '/synthetic/demo', prompt }))
+    const saved = receipts(home).filter(one => !before.includes(one.file))
+    assert.equal(saved.length, 1, name)
+    const receipt = JSON.parse(saved[0].body)
+    assert.ok(!saved[0].body.includes('second plan') && !saved[0].body.includes('Agent Board message'), name)
+    assert.equal(receipt.board_request, undefined, name)
+    assert.equal(receipt.delivery_request, index === 0 ? undefined : true, name)
+    assert.equal(await answersQuestion(saved[0].file, saved[0].body), index === 0, name)
+  }
+}
+
+test('every delivery header starts with the words the reporters\' timeout fallback looks for', async () => {
+  const { DELIVERY_REQUEST_HINT, deliveryRequestWords } = await import('../hooks/board-commands.ts')
+  assert.match(DELIVERY_REQUEST_HINT, /^[A-Za-z]+(?: [A-Za-z]+)*$/)
+  for (const words of deliveryRequestWords(Object.values(STRINGS))) assert.ok(words.startsWith(DELIVERY_REQUEST_HINT), words)
+  for (const [name, prompt] of await deliveryPrompts()) assert.ok(prompt.includes(DELIVERY_REQUEST_HINT), name)
+})
+
+test('a board delivery through the sh reporter leaves the open question unanswered, a person\'s prompt answers it', () => fixture(async home => {
+  const { reporterSh } = await import('../hooks/connect-pure.ts')
+  const file = join(home, 'progress-report.sh')
+  writeFileSync(file, reporterSh(shellPath(join(home, 'progress-inbox'))))
+  const env = { ...process.env, HOME: home, USERPROFILE: home }
+  await assertDeliveryReceipts(home, input => {
+    const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt'], { env, input, encoding: 'utf8', windowsHide: true })
+    assert.equal(result.status, 0, result.stderr)
+  })
+}))
+
+test('a board delivery through the PowerShell reporter leaves the open question unanswered, a person\'s prompt answers it', { skip: process.platform !== 'win32' }, () => fixture(async home => {
+  const { reporterPs1 } = await import('../hooks/connect-pure.ts')
+  const file = join(home, 'progress-report.ps1')
+  writeFileSync(file, reporterPs1())
+  const env = { ...process.env, HOME: home, USERPROFILE: home }
+  await assertDeliveryReceipts(home, input => {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], { env, input, encoding: 'utf8', windowsHide: true })
+    assert.equal(result.status, 0, result.stderr)
+  })
+}))
+
+test('the sh timeout receipt marks a board delivery as a delivery, not a board request', () => fixture(async home => {
+  const { reporterSh } = await import('../hooks/hook-reporters.ts')
+  const source = reporterSh('/x')
+  const fallback = source.slice(source.indexOf('write_fallback() {'), source.indexOf('\ntimed_out() {'))
+  const file = shellPath(join(home, 'receipt')), script = join(home, 'fallback.sh')
+  writeFileSync(script, `file='${file}'\nlog_error() { printf '%s\n' "$1" >&2; }\n${fallback}\nwrite_fallback\nexit 0\n`)
+  for (const [name, prompt] of await deliveryPrompts()) {
+    rmSync(file + '.json', { force: true })
+    writeFileSync(file + '.tmp', JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt }))
+    const out = spawnSync(sh, [shellPath(script)], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    assert.equal(out.status, 0, out.stderr)
+    assert.equal(readFileSync(file + '.json', 'utf8'), JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', delivery_request: true }), name)
+  }
+}))
+
+// Valid JSON may write the header's letters as \u escapes; both timeout receipts read them back (#1334). A literal
+// backslash before "u0041" in the prompt is an escaped backslash in JSON, so it stays text and marks no delivery.
+const escapedDeliveryCases = async () => {
+  const { DELIVERY_REQUEST_HINT } = await import('../hooks/board-commands.ts')
+  const escaped = [...DELIVERY_REQUEST_HINT].map((char, index) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')[index % 2 ? 'toUpperCase' : 'toLowerCase']()}`).join('')
+  const cases = []
+  for (const [name, prompt] of await deliveryPrompts()) {
+    const raw = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt })
+    const written = raw.replace(DELIVERY_REQUEST_HINT, escaped)
+    assert.notEqual(written, raw, name)
+    assert.equal(JSON.parse(written).prompt, prompt, name)
+    cases.push([`${name}, header letters escaped`, written, { session_id: 'synthetic', cwd: '/work/demo', delivery_request: true }])
+  }
+  const decoy = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt: '\\u0041gent Board message' })
+  assert.equal(JSON.parse(decoy).prompt.startsWith('\\u0041'), true)
+  cases.push(['a literal backslash before u0041', decoy, { session_id: 'synthetic', cwd: '/work/demo', board_request: true }])
+  // codex_464: an escaped backslash inside a hint word, and a folder key written escaped whose value holds a hint word.
+  const split = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt: 'boa\\rd' })
+  assert.equal(JSON.parse(split).prompt, 'boa\\rd')
+  cases.push(['an escaped backslash inside "board"', split, { session_id: 'synthetic', cwd: '/work/demo' }])
+  const folder = '{"session_id":"synthetic","\\u0063wd":"bo\\u0061rd","prompt":"Continue"}'
+  assert.equal(JSON.parse(folder).cwd, 'board')
+  cases.push(['a folder key written escaped', folder, { session_id: 'synthetic' }])
+  // The Fable diagnosis after codex_464 (#1570): a folder key and value written inside a prompt, joining "boa" and "rd"
+  // or splitting the header; an escaped quote before a hint word in a folder value; an escaped folder key one level down.
+  const inner = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt: 'boa"cwd":"x"rd' })
+  cases.push(['a folder key and value written inside a prompt between "boa" and "rd"', inner, { session_id: 'synthetic', cwd: '/work/demo' }])
+  const inHeader = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt: `${DELIVERY_REQUEST_HINT.slice(0, -4)}"cwd":"x"${DELIVERY_REQUEST_HINT.slice(-4)}` })
+  cases.push(['a folder key and value written inside the header', inHeader, { session_id: 'synthetic', cwd: '/work/demo', board_request: true }])
+  const quoted = '{"session_id":"synthetic","\\u0063wd":"C:\\\\a\\"board","prompt":"Continue"}'
+  assert.equal(JSON.parse(quoted).cwd, 'C:\\a"board')
+  cases.push(['an escaped folder key whose value holds an escaped quote before "board"', quoted, { session_id: 'synthetic' }])
+  const nested = '{"session_id":"synthetic","extra":{"\\u0063wd":"C:\\\\board"},"prompt":"Continue"}'
+  assert.equal(JSON.parse(nested).extra.cwd, 'C:\\board')
+  cases.push(['an escaped folder key one level down', nested, { session_id: 'synthetic' }])
+  cases.push(['an escaped folder key one level down, with the header escaped', nested.replace('Continue', escaped), { session_id: 'synthetic', delivery_request: true }])
+  return cases
+}
+// The flags a timeout receipt sets, with its session.
+const receiptFlags = text => {
+  const { session_id, board_request, delivery_request } = JSON.parse(text)
+  return { session_id, ...(board_request === undefined ? {} : { board_request }), ...(delivery_request === undefined ? {} : { delivery_request }) }
+}
+const expectedFlags = ({ cwd, ...flags }) => flags
+
+// A known limit of the sh scan, which reads line by line: a folder value on the line after its key is scanned. Pinned so
+// that a change to it is deliberate (Fable diagnosis on #1570, case 4); the PowerShell scan reads the parsed payload.
+const shKnownLimits = [['a folder value on the line after its key', '{"session_id":"synthetic","cwd":\n"/work/board","prompt":"Continue"}', { session_id: 'synthetic', board_request: true }]]
+
+test('the sh timeout receipt reads a delivery header written with \\u escapes (#1334)', () => fixture(async home => {
+  const { reporterSh } = await import('../hooks/hook-reporters.ts')
+  const source = reporterSh('/x')
+  const fallback = source.slice(source.indexOf('write_fallback() {'), source.indexOf('\ntimed_out() {'))
+  const file = shellPath(join(home, 'receipt')), script = join(home, 'fallback.sh')
+  writeFileSync(script, `file='${file}'\nlog_error() { printf '%s\n' "$1" >&2; }\n${fallback}\nwrite_fallback\nexit 0\n`)
+  for (const [name, raw, expected] of [...await escapedDeliveryCases(), ...shKnownLimits]) {
+    rmSync(file + '.json', { force: true })
+    writeFileSync(file + '.tmp', raw)
+    const out = spawnSync(sh, [shellPath(script)], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    assert.equal(out.status, 0, out.stderr)
+    assert.deepEqual(receiptFlags(readFileSync(file + '.json', 'utf8')), expectedFlags(expected), name)
+  }
+}))
+
+// The PowerShell timeout receipt is the block Read-PromptReceipt runs; it is run here on its own, in the reporter and
+// in the copy the sh reporter hands to powershell.exe.
+test('the PowerShell timeout receipt reads a delivery header written with \\u escapes (#1334)', { skip: process.platform !== 'win32' }, () => fixture(async home => {
+  const { powershellReporter } = await import('../hooks/hook-reporters.ts')
+  const cases = await escapedDeliveryCases()
+  for (const [copy, source] of [['reporter', powershellReporter(false)], ['sh copy', powershellReporter(true)]]) {
+    const start = source.indexOf('Read-PromptReceipt $tmp $clock {')
+    const end = source.indexOf('if ($clock.ElapsedMilliseconds -ge', start)
+    assert.ok(start >= 0 && end > start, copy)
+    const block = source.slice(source.indexOf('{', start) + 1, source.lastIndexOf('}', end))
+    for (const [index, [name, raw, expected]] of cases.entries()) {
+      const input = join(home, `payload-${index}.json`), output = join(home, `fallback-${index}.txt`), script = join(home, `fallback-${index}.ps1`)
+      writeFileSync(input, raw)
+      const quote = path => `'${path.replaceAll("'", "''")}'`
+      writeFileSync(script, `$ErrorActionPreference = 'Stop'\n$Payload = [IO.File]::ReadAllText(${quote(input)})\n$script:fallback = $null\n& {${block}}\n[IO.File]::WriteAllText(${quote(output)}, [string]$script:fallback)\n`)
+      const out = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], { encoding: 'utf8', windowsHide: true, timeout: 30000 })
+      assert.equal(out.status, 0, `${copy} ${name}: ${out.stderr}`)
+      assert.deepEqual(receiptFlags(readFileSync(output, 'utf8')), expectedFlags(expected), `${copy} ${name}`)
+    }
+  }
 }))
