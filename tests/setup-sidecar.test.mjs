@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
@@ -339,4 +339,109 @@ test('a Hermes SKILL.md linked to the shared SKILL.md leaves no dangling link af
   const removed = run(['--remove', '--agent', 'hermes', '--apply'])
   assert.equal(removed.status, 0, `${removed.stdout}${removed.stderr}`)
   assert.throws(() => lstatSync(own), { code: 'ENOENT' })
+}))
+
+// U+FFFD written as UTF-8 (EF BF BD) and a lone FF byte decode to the same text, so only the bytes tell them apart.
+// Every re-read compares a path's kind, link and bytes with what setup saw when it planned (#1488).
+const FFFD = Buffer.from([0xef, 0xbf, 0xbd])
+const withFF = bytes => { const at = bytes.indexOf(FFFD); return Buffer.concat([bytes.subarray(0, at), Buffer.from([0xff]), bytes.subarray(at + 3)]) }
+// The preload swaps EF BF BD for FF in one file the first time setup opens that file's temporary copy.
+const byteEditOnOpen = (home, name) => seam(home, `const open = fs.openSync
+let done = false
+fs.openSync = (file, ...rest) => {
+  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.lastIndexOf(${JSON.stringify(`${name}.`)}) : -1
+  if (!done && at >= 0) {
+    done = true
+    const real = file.slice(0, at) + ${JSON.stringify(name)}
+    const bytes = fs.readFileSync(real), i = bytes.indexOf(Buffer.from([0xef, 0xbf, 0xbd]))
+    fs.writeFileSync(real, Buffer.concat([bytes.subarray(0, i), Buffer.from([0xff]), bytes.subarray(i + 3)]))
+  }
+  return open(file, ...rest)
+}`)
+
+test('a standalone install keeps a one-byte edit to hooks.json that decodes the same: setup fails instead of writing over it', () => withHome(({ home, run }) => {
+  const hooks = join(home, '.gemini', 'config', 'hooks.json')
+  mkdirSync(join(home, '.gemini', 'config'), { recursive: true })
+  // The person's own entry, which setup keeps beside its own, holds U+FFFD.
+  const own = Buffer.concat([Buffer.from('{\n  "my-hooks": { "note": "a'), FFFD, Buffer.from('b" }\n}\n')])
+  writeFileSync(hooks, own)
+  const install = run(['--agent', 'antigravity', '--apply'], { env: byteEditOnOpen(home, 'hooks.json') })
+  stoppedOnChange(install)
+  assert.deepEqual(readFileSync(hooks), withFF(own))
+}))
+
+test('the sidecar-only writer keeps a one-byte edit to sidecar.mjs that decodes the same: setup fails instead of writing over it', () => withHome(({ home, run, dir }) => {
+  const { root } = connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  // An older sidecar.mjs holding U+FFFD, under the hash the sidecar's record keeps, so this setup plans to update it.
+  const file = join(dir, 'sidecar.mjs')
+  const old = Buffer.concat([Buffer.from('// an older sidecar '), FFFD, Buffer.from('\n')])
+  writeFileSync(file, old)
+  const recordFile = join(root, 'install-antigravity-sidecar.json')
+  const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+  record.files[Object.keys(record.files).find(key => key.endsWith('sidecar.mjs'))] = createHash('sha256').update(old).digest('hex')
+  writeFileSync(recordFile, `${JSON.stringify(record, null, 2)}\n`)
+  const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env: byteEditOnOpen(home, 'sidecar.mjs') })
+  stoppedOnChange(install)
+  assert.deepEqual(readFileSync(file), withFF(old))
+}))
+
+// A link to a path that is not there: on Windows a junction to a missing folder, which needs no privilege.
+const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'file'
+
+test('a standalone remove keeps a dangling link that replaced sidecar.mjs: remove fails instead of deleting it', t => withHome(({ home, run, dir }) => {
+  const probe = join(home, 'probe-link')
+  try { symlinkSync(join(home, 'nowhere'), probe, LINK_TYPE) } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make links'); return }
+    throw error
+  }
+  rmSync(probe, { force: true })
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  const file = join(dir, 'sidecar.mjs'), missing = join(home, 'missing-folder')
+  // Right after remove took out sidecar.json, another process puts a link to nowhere where sidecar.mjs was.
+  const env = seam(home, `const unlink = fs.unlinkSync
+fs.unlinkSync = file => {
+  unlink(file)
+  if (typeof file === 'string' && file.split(/[\\\\/]/).pop() === 'sidecar.json') {
+    const mjs = file.slice(0, -'sidecar.json'.length) + 'sidecar.mjs'
+    unlink(mjs)
+    fs.symlinkSync(${JSON.stringify(missing)}, mjs, ${JSON.stringify(LINK_TYPE)})
+  }
+}`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
+  stoppedOnChange(removed)
+  assert.ok(lstatSync(file).isSymbolicLink(), 'the link is still there')
+  assert.ok(readlinkSync(file).endsWith('missing-folder'), readlinkSync(file))
+}))
+
+test('a standalone install stops when hooks.json became a link to a file holding the planned text', t => withHome(({ home, run }) => {
+  const probe = join(home, 'probe.txt')
+  writeFileSync(probe, '')
+  try { symlinkSync(probe, join(home, 'probe-link.txt'), 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const hooks = join(home, '.gemini', 'config', 'hooks.json'), planned = join(home, 'planned.json')
+  // Once setup wrote hooks.json's temporary copy, another process puts a link where hooks.json goes, to a file holding
+  // exactly that text: writing over it would turn the link into a plain file.
+  const env = seam(home, `const open = fs.openSync, write = fs.writeFileSync
+let fd = -1, done = false
+fs.openSync = (file, ...rest) => {
+  const got = open(file, ...rest)
+  if (!done && typeof file === 'string' && file.endsWith('.tmp') && file.includes('hooks.json.')) fd = got
+  return got
+}
+fs.writeFileSync = (target, data, ...rest) => {
+  write(target, data, ...rest)
+  if (!done && target === fd) {
+    done = true
+    write(${JSON.stringify(planned)}, data)
+    if (fs.existsSync(${JSON.stringify(hooks)})) fs.unlinkSync(${JSON.stringify(hooks)})
+    fs.symlinkSync(${JSON.stringify(planned)}, ${JSON.stringify(hooks)}, 'file')
+  }
+}`)
+  const install = run(['--agent', 'antigravity', '--apply'], { env })
+  stoppedOnChange(install)
+  assert.ok(lstatSync(hooks).isSymbolicLink(), 'the link is still there')
+  assert.equal(readlinkSync(hooks), planned)
 }))
