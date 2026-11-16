@@ -76,7 +76,23 @@ Unaffected groups are shown as not run, never as passed tests. Missing metadata,
 failed planning and cancelled or failed groups block validation.
 
 Branch protection must require affected checks, CI validation and pr-check from
-GitHub Actions. Requiring old expanded matrix row names would leave unaffected
+GitHub Actions. pr-check reads the `Review:` verdict comments when it runs, and a
+comment starts no pull request run, so `pr-check-rerun.yml` starts the pull
+request's newest pr-check run of the head again, once it has finished, when a
+team member or an app posts, edits or deletes a comment that mentions `Review:`
+in any letter case (#1258). When it cannot, it leaves the check as it is and
+says why in a comment on the pull request: the pull request changes
+`pr-check.yml` itself; another open pull request has the same head branch; the
+run waits for a maintainer's approval (approving it runs the check); no run is
+listed for the head, or the run does not finish, within 9 minutes; GitHub
+refuses the re-run (a run older than 30 days, or re-run 50 times) or does not
+answer in time; or a step before its script fails or passes its time limit.
+When the run it waited for has finished but the pull request has closed, or
+has a new head, it stops with nothing said: a closed pull request needs no
+check, and after a push the new head's own run reads the comment, while starting
+the old run again would cancel that one. An outside account's comment
+(#1535), and a comment a workflow posts with its own token, start nothing; the
+next pull request event reads them. Requiring old expanded matrix row names would leave unaffected
 PRs waiting for contexts that a skipped matrix never creates. The approved
 migration runs the rollout in full first and preserves all other protections.
 That migration is done; a pull request now merges main only when GitHub reports
