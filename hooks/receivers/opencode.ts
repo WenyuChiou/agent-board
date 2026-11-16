@@ -20,17 +20,18 @@ export const messagingReceiver = {
   agent: 'opencode',
   kind: 'mailbox',
   // The plugin cannot tell the terminal, the desktop app and the web page apart, so all three share the
-  // generic CLI surface id. No plugin run on any of them is recorded yet.
-  surfaces: [{ name: 'CLI TUI', id: SURFACE_IDS.cli, evidence: null }, { name: 'Desktop App', id: SURFACE_IDS.cli, evidence: null }, { name: 'Web UI', id: SURFACE_IDS.cli, evidence: null }],
+  // generic CLI surface id. The recorded run is in the terminal (#1591); the desktop app and the web page run the
+  // same plugin but have no run of their own, so their rows stay untested even though their cards send too.
+  surfaces: [{ name: 'CLI TUI', id: SURFACE_IDS.cli, evidence: 'docs/validation/2026-11-16-opencode-send-live.md' }, { name: 'Desktop App', id: SURFACE_IDS.cli, evidence: null }, { name: 'Web UI', id: SURFACE_IDS.cli, evidence: null }],
   tier: 1,
   primitive: '[P1]',
   isImplemented: true,
-  // Idle: promptAsync woke an idle headless session (F9), but no run of this plugin is recorded, so no
-  // record is named and the card keeps Copy. Working: the plugin holds the message until session.idle
-  // (tests only). Ended: no mailbox.
+  // Idle: the plugin, as setup writes it, woke an idle session in the terminal at once. Working: it held the
+  // message until session.idle and then woke the session. Both runs are in the record below (#1591), so the card
+  // sends on both routes. Ended: no mailbox.
   routes: {
-    idle: { line: 'now', record: null, surfaces: [SURFACE_IDS.cli] },
-    working: { line: 'stepEnd', record: null, surfaces: [SURFACE_IDS.cli] },
+    idle: { line: 'now', record: 'docs/validation/2026-11-16-opencode-send-live.md', surfaces: [SURFACE_IDS.cli] },
+    working: { line: 'stepEnd', record: 'docs/validation/2026-11-16-opencode-send-live.md', surfaces: [SURFACE_IDS.cli] },
     ended: { line: 'none', record: null, surfaces: [SURFACE_IDS.cli] },
   },
 }
