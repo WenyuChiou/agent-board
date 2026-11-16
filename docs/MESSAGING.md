@@ -236,19 +236,20 @@ What each side may rely on:
   lost answer does not take Send away and a sidecar that stopped is no longer offered within about half a minute.
 - **Which message.** `wake-poll` returns only a message the board sent on that route, still queued and never woken,
   for a mailbox on `IDE`, and only when it is the message the next turn's hook would take: a peer message or a claim in
-  doubt ahead of it means no wake. The turn's state comes from Antigravity's own hooks, never from progress rows (a model
-  may report waiting before its turn ends): the turn-start hook's take marks the mailbox busy, and the `Stop` hook calls
-  `mailbox-idle` with its own time, which marks it idle at that time (a call the board answers late, after the next
-  turn's take, still reads as before that take). A wake is due 10 s after a `Stop` later than the last turn start, and
-  only while no wake of that conversation started since that `Stop`. A `Stop` call the board did not take (no board
-  running, a busy one) records nothing, so nothing is woken and the next turn delivers. Progress rows can only hold a
-  wake back: nothing is woken while the conversation's row reads working, or was written after the `Stop` (every hook
-  event and every report restamps it), or carries no time. So a turn whose take never reached the board gets no wake
-  started into it, even once the model reports waiting. Rows keep whole seconds, so a row written later in the
-  `Stop`'s own second is not seen.
-- **Not covered.** Between the board's yes and the sidecar's `send-message` call the person may start a turn, and a
-  turn whose turn-start hook never ran leaves no mark; what the app does with `send-message` into a running turn is
-  the live run's to record.
+  doubt ahead of it means no wake. The turn's state comes from Antigravity's own hooks, which number its turns, never
+  from progress rows or from any clock (a model may report waiting before its turn ends, and a hook's time is the time
+  its handler ran, not the time of the event). Each conversation has a turn order file in the messages folder, named by
+  its mailbox id: the turn-start hook adds one to `started` and sends that number with its take, and the `Stop` hook sets
+  `stopped` to the number of the turn it ends. Each writes the file under the file's own lock, before any board call;
+  the board only reads it, and keeps the highest number a take sent. A wake is due only when the turn that started last,
+  by the file and by every take the board saw, has had its `Stop`, 10 s after that `Stop`, and once per `Stop`. So a
+  failed take, a failed file write, a waiting report, a repeated event or a clock set back starts no wake into a running
+  turn. No file, or one that does not read, holds every wake; no file is written until a board has made the folder.
+- **Not covered.** Between the board's yes and the sidecar's `send-message` call the person may start a turn; a `Stop`
+  hook that starts after the next turn's start reads that turn's number and ends it while it runs (only a turn number
+  in the `Stop` input, or the app waiting for its `Stop` hook, closes that); a turn whose turn-start hook never ran
+  leaves no mark. What the app does with `send-message` into a running turn, and whether it waits for its `Stop` hook,
+  are the live run's to record. Turn order files are kept, one small file per conversation.
 - **Attempt.** The board saves the start (`woke`, a field of its own; OpenCode's `attempted` rules never read it) before
   it answers `{"ok":true}`. The `nonce` is worked out from the message, so the board keeps none. The hook mailbox hands the
   message over in the turn the wake starts; a hook that hands its claim back puts the message back in the queue at once,

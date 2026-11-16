@@ -5,8 +5,8 @@ import { sha256 } from './sha256.ts'
 // a later bridge can add its own value without a new store version.
 export type Origin = 'local'
 // A connected session is a live lease from a host adapter, never a name in progress.md.
-// busyAt, idleAt: an Antigravity mailbox's last turn start and last Stop, as its own hooks told the board (#1396).
-export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin; folderDigest?: string; mcpOwner?: string; mcpLeaseUntil?: number; busyAt?: number; idleAt?: number }
+// busySeq: the highest turn number an Antigravity mailbox's turn-start hook sent with its take (#1396).
+export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin; folderDigest?: string; mcpOwner?: string; mcpLeaseUntil?: number; busySeq?: number }
 export type Message = {
   id: string
   target: string
@@ -48,7 +48,9 @@ export type Message = {
   leftAt?: number
   // When the Antigravity sidecar started a wake for this message, and what it reported of it (#1396); the first report
   // stays. A field of its own, so OpenCode's `attempted` rules (release, lapse, settle) never read an Antigravity wake.
+  // wakeAfter: the number of the turn whose Stop the wake followed, so one Stop starts one wake.
   woke?: number
+  wakeAfter?: number
   wake?: 'sent' | 'failed'
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
@@ -298,12 +300,6 @@ export const deliveryText = (message: Message, s: Strings = ZH_TW): string => [
 // Observation is not an authorization token. Only an exact, newer progress report
 // satisfies a handoff; a transport acceptance or even an ACK cannot do so.
 export type ProgressBinding = { agent: string; session: string; updated: number }
-// When a session's progress rows were last written, by the writer's clock: undefined with no row, or when any of its rows
-// has no time, so a caller that waits on it holds instead of guessing (#1396).
-export const sessionWritten = (reports: readonly ProgressBinding[], agent: string, session: string): number | undefined => {
-  const times = reports.filter(one => one.agent === agent && one.session === session).map(one => one.updated)
-  return times.length > 0 && times.every(time => Number.isFinite(time) && time > 0) ? Math.max(...times) : undefined
-}
 export type SessionExpectation = {
   id: string; agent: string; session: string; surface: string
   created: number; deadline: number; baseline: number; observed: number | null

@@ -32,7 +32,8 @@ import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { deliverTurnEvent } from './hook-delivery'
-import { checkStoreFile, hookMailbox } from './board-messaging'
+import { checkStoreFile, hookMailbox, markTurnOrder, readTurnOrder } from './board-messaging'
+import { isTurnStart } from '../hooks/hook-messages'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
@@ -1138,6 +1139,21 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
       queuedFile = file
     }
+    // Antigravity's turn order (#1396): written before the lock below and before any board call, so a lock that stays busy,
+    // a row write that fails or a take that fails each loses one mark at most. A turn start's number also goes with its
+    // take, so a file write that fails still reaches the board. A replayed event writes nothing: no turn counts twice.
+    const turnMark = current?.agent === 'antigravity' && current.mode === '--agent-status' && current.event !== undefined
+      ? isTurnStart('antigravity', current.event) ? 'start' : current.event === 'Stop' ? 'stop' : undefined : undefined
+    let turnSeq: number | undefined
+    if (current !== undefined && turnMark !== undefined) {
+      const messages = defaultMessagesDirectory(progress, home, process.env, process.platform)
+      try {
+        const count = markTurnOrder(messages, 'antigravity', current.session, turnMark, Date.now(), Math.max(0, Math.min(500, hookDeadline - Date.now() - 500)))
+        if (turnMark === 'start') turnSeq = count
+      } catch {
+        if (turnMark === 'start') turnSeq = (readTurnOrder(messages, 'antigravity', current.session)?.started ?? 0) + 1
+      }
+    }
     let delay = 50
     let processed = 0
     let report: CodexReport | undefined
@@ -1252,7 +1268,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       '--progress-file', progress, '--home', home, '--data-dir', root,
     ])) : null
     if (await deliverTurnEvent({
-      mode, agent, event, session, report, raw, folder: current.folder, base, progress, home, root, hookDeadline, s,
+      mode, agent, event, session, report, raw, folder: current.folder, base, progress, home, root, hookDeadline, s, seq: turnSeq,
       hash, readLocal, atomic, checkDeadline, hereNames,
     })) return true
     if (mode === '--codex-report' && planInput !== undefined) return true

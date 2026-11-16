@@ -1,6 +1,6 @@
 import { ANTIGRAVITY_POLL_MS } from './antigravity-sidecar'
 import { address, claimMessages, disconnectMessages, MAILBOX_LEASE_MS, messageFields, messageId, messageReceipt, SURFACE_IDS } from './messaging'
-import type { Connection, Message, MessageState, RowState } from './messaging'
+import type { Connection, Message, MessageState } from './messaging'
 import { sha256 } from './sha256'
 
 export const MAILBOX_CAP = 200
@@ -94,12 +94,17 @@ export const turnStartEnvelope = (agent: string, event: string, text: string, ba
 export const SIDECAR_ALIVE_MS = ANTIGRAVITY_POLL_MS.slow + 2 * ANTIGRAVITY_POLL_MS.fast
 // The owner's plan: a conversation is woken only once it has been idle this long after its turn's end.
 export const WAKE_IDLE_MS = 10_000
-// Antigravity's own hooks say when a turn runs: its turn-start hook's take marks the mailbox busy, its Stop hook marks it idle.
-// A progress report says nothing of this, since a model may report waiting before its turn ends. Only a mailbox is marked.
-export const markMailbox = (state: MessageState, agent: string, session: string, field: 'busyAt' | 'idleAt', now: number): MessageState => {
+// Antigravity's own hooks number its turns (#1396): its turn-start hook adds one to `started` in the conversation's turn
+// order file and sends that number with its take, and its Stop hook sets `stopped` to the number of the turn it ends. Both
+// write the file before any board call, so the order comes from the hooks' own sequence, not from any clock. A progress
+// report says nothing of this, since a model may report waiting before its turn ends.
+export type TurnOrder = { started: number; stopped: number; stoppedAt: number }
+// The order file as the running board reads it now; undefined when there is none or it cannot be read, which holds a wake.
+export type TurnsOfSession = (agent: string, session: string) => TurnOrder | undefined
+// The board keeps the highest number a take sent, so a turn whose file write failed still reads as started.
+export const markBusy = (state: MessageState, agent: string, session: string, seq: number): MessageState => {
   const id = mailboxId(agent, session), mailboxes = state.mailboxes ?? []
-  const mark: Pick<Connection, 'busyAt' | 'idleAt'> = field === 'busyAt' ? { busyAt: now } : { idleAt: now }
-  return mailboxes.some(one => one.id === id) ? { ...state, mailboxes: mailboxes.map(one => one.id === id ? { ...one, ...mark } : one) } : state
+  return mailboxes.some(one => one.id === id) ? { ...state, mailboxes: mailboxes.map(one => one.id === id ? { ...one, busySeq: Math.max(one.busySeq ?? 0, seq) } : one) } : state
 }
 // A message the board sent on the app's route that goes in at once; agy TUI runs no sidecar.
 const isWakeMessage = (one: Message): boolean => one.to.startsWith('antigravity:') && one.line === 'now' && one.surface === SURFACE_IDS.antigravityIde
@@ -107,39 +112,32 @@ const isWakeMessage = (one: Message): boolean => one.to.startsWith('antigravity:
 const wakeNonce = (one: Message): string => sha256(`wake:${one.id}:${one.hash}`).slice(0, 16)
 // The nonce of the claim the wake looks ahead to; that claim is never saved.
 const PROBE_NONCE = '000000'
-// The board's own view of the conversation (its progress rows) must read idle too: the turn-start hook writes its row as
-// working, so a turn whose take never reached the board (a busy store, a lost answer) still starts no wake.
-export type StateOfSession = (agent: string, session: string) => RowState | undefined
-// When the conversation's progress rows were last written, by the writer's clock (undefined: no row, or a row with no
-// time). Every hook event and every model report restamps its row, so a row written after the Stop means the
-// conversation moved on, whatever its state reads: a waiting report from a turn whose take never reached the board.
-export type WrittenOfSession = (agent: string, session: string) => number | undefined
-const isWakeDue = (state: MessageState, one: Message, now: number, stateOfSession: StateOfSession, writtenOfSession: WrittenOfSession): boolean => {
-  if (one.status !== 'queued' || one.woke !== undefined || !isWakeMessage(one)) return false
+// The number of the turn whose Stop a wake for this message would follow, or undefined when none is due.
+const wakeStop = (state: MessageState, one: Message, now: number, turnsOfSession: TurnsOfSession): number | undefined => {
+  if (one.status !== 'queued' || one.woke !== undefined || !isWakeMessage(one)) return undefined
   const box = state.mailboxes?.find(mailbox => mailbox.id === one.target && mailbox.surface === one.surface && mailbox.expires > now)
-  const idleAt = box?.idleAt
-  // Idle only from a Stop later than the last turn start, and for 10 s; a wake started since then has its turn to run.
-  if (box === undefined || idleAt === undefined || idleAt <= (box.busyAt ?? 0) || now - idleAt < WAKE_IDLE_MS) return false
-  if (stateOfSession(box.agent, box.session) !== 'idle') return false
-  // Rows keep whole seconds and the Stop's own row write comes before its call, so that write never holds the wake; a
-  // row written later in the Stop's second is not seen.
-  const written = writtenOfSession(box.agent, box.session)
-  if (written === undefined || written > idleAt) return false
-  if (state.messages.some(other => other.to === one.to && other.woke !== undefined && other.woke >= idleAt)) return false
+  if (box === undefined) return undefined
+  // Idle only when the last turn that started has had its Stop, by the file and by every take the board saw, and for 10 s
+  // since. Not covered (an Edge): a Stop hook that starts after the next turn's start reads that turn's number, so it ends
+  // the turn still running; only a turn number in the Stop's own input, or the app waiting for its Stop hook, closes that.
+  const turns = turnsOfSession(box.agent, box.session)
+  if (turns === undefined || turns.stopped <= 0 || turns.stopped !== Math.max(turns.started, box.busySeq ?? 0) || now - turns.stoppedAt < WAKE_IDLE_MS) return undefined
+  // One wake per Stop: a wake started since then has its turn to run.
+  if (state.messages.some(other => other.to === one.to && other.wakeAfter !== undefined && other.wakeAfter >= turns.stopped)) return undefined
   // Only the message the next turn's hook takes: a wake for any other would start a turn that hands that one over instead.
-  return claimMessages(state, box, now, PROBE_NONCE).messages[0]?.id === one.id
+  return claimMessages(state, box, now, PROBE_NONCE).messages[0]?.id === one.id ? turns.stopped : undefined
 }
 // What a card says of a queued message's wake: the sidecar's report, a start with no report yet, or, while no sidecar
 // polls, that the message waits for the next turn.
 export const shownWake = (one: Message, isOn?: boolean): 'sent' | 'failed' | 'started' | 'off' | undefined =>
   one.status !== 'queued' || !isWakeMessage(one) ? undefined : one.wake ?? (one.woke !== undefined ? 'started' : isOn === false ? 'off' : undefined)
 // The sidecar's three calls. A refusal is an ok answer with a code, since the sidecar reads any other answer as a board error.
-export const wakeAction = (state: MessageState, action: string, body: Record<string, unknown>, now: number, stateOfSession: StateOfSession, writtenOfSession: WrittenOfSession): { state: MessageState; result: object } => {
+export const wakeAction = (state: MessageState, action: string, body: Record<string, unknown>, now: number, turnsOfSession: TurnsOfSession): { state: MessageState; result: object } => {
   if (action === 'wake-poll') {
     messageFields(body, ['agent'])
     if (body.agent !== 'antigravity') throw new Error('INVALID_MAILBOX_CALL')
     // One wake per poll; one handed out whose start never came is handed out again.
-    const one = state.messages.find(message => isWakeDue(state, message, now, stateOfSession, writtenOfSession))
+    const one = state.messages.find(message => wakeStop(state, message, now, turnsOfSession) !== undefined)
     const session = one && state.mailboxes?.find(box => box.id === one.target)?.session
     return { state, result: { wakes: one === undefined ? [] : [{ id: one.id, conversation: session, nonce: wakeNonce(one) }] } }
   }
@@ -152,7 +150,8 @@ export const wakeAction = (state: MessageState, action: string, body: Record<str
   if (action === 'wake-attempt') {
     // The board, not the sidecar, keeps a message to one wake: the start is saved before the one answer ok.
     if (one?.woke !== undefined) return { state, result: { ok: false, code: 'WAKE_STARTED' } }
-    return one !== undefined && isWakeDue(state, one, now, stateOfSession, writtenOfSession) ? marked(one, { woke: now, updated: now }) : { state, result: { ok: false, code: 'NOT_HELD' } }
+    const stop = one === undefined ? undefined : wakeStop(state, one, now, turnsOfSession)
+    return one !== undefined && stop !== undefined ? marked(one, { woke: now, wakeAfter: stop, updated: now }) : { state, result: { ok: false, code: 'NOT_HELD' } }
   }
   if (one?.woke === undefined) return { state, result: { ok: false, code: 'NOT_STARTED' } }
   // A repeated report is the same report, and a later one never changes the first. Its time stays: the hook may have claimed it since.

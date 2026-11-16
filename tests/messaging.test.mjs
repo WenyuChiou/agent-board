@@ -7087,17 +7087,24 @@ test('the real Antigravity sidecar runs agentapi send-message once for a board m
   const conversation = '0b6d6e0e-6f43-4c0b-9a58-3f1a7e3a1c11'
   // The conversation's progress row reads waiting, so the card offers the idle route.
   writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n<!-- auto session=abcdef01 agent=antigravity resume=${conversation} state=waiting updated=${new Date(Date.now() - 20_000).toISOString()} -->\n### App card\n- [?] Pick one?\n<!-- /auto session=abcdef01 -->\n`)
-  // The calls Antigravity's turn-start and Stop hooks make, sent here to the board's mailbox API directly.
-  const hook = async () => (await board.call('/api/messages/mailbox-turn', { agent: 'antigravity', session: conversation, surface: 'IDE' })).body.message
-  assert.equal(await hook(), null)
-  const stopped = Date.now()
-  assert.deepEqual((await board.call('/api/messages/mailbox-idle', { agent: 'antigravity', session: conversation, at: stopped })).body, { ok: true })
+  // The sidecar finds the board by the owner record a board keeps only in its default folder, so this board runs there;
+  // Antigravity's hooks keep the conversation's turn order file in it too.
+  const folder = (await board.call('/api/ping')).body.messagesDirectory
+  const turns = value => writeFileSync(join(folder, `${mailboxId('antigravity', conversation)}.turns.json`), JSON.stringify(value))
+  // What Antigravity's turn-start hook does: it numbers the turn in that file, then takes with that number from the board's
+  // mailbox API, called here directly. Its Stop hook ends the turn in the file and calls no board.
+  let stopped = 0
+  const hook = async seq => {
+    turns({ started: seq, stopped: seq - 1, stoppedAt: stopped })
+    return (await board.call('/api/messages/mailbox-turn', { agent: 'antigravity', session: conversation, surface: 'IDE', seq })).body.message
+  }
+  assert.equal(await hook(1), null)
+  stopped = Date.now()
+  turns({ started: 1, stopped: 1, stoppedAt: stopped })
   const card = async () => (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'antigravity')
   assert.equal((await card()).line, 'nextTurn')
   // The sidecar setup writes, with a stand-in for Antigravity's agentapi that only logs its arguments.
   const log = join(dir, 'agentapi.log')
-  // The sidecar finds the board by the owner record a board keeps only in its default folder, so this board runs there.
-  const folder = (await board.call('/api/ping')).body.messagesDirectory
   writeFileSync(join(dir, 'sidecar.mjs'), antigravitySidecarSource())
   writeFileSync(join(dir, 'agentapi.cjs'), `if (require('node:path').basename(process.argv[1] ?? '') === 'agentapi') { require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n'); process.exit(0) }\n`)
   const sidecar = () => new Promise(done => {
@@ -7124,7 +7131,7 @@ test('the real Antigravity sidecar runs agentapi send-message once for a board m
   // One wake per message: another poll runs nothing.
   await sidecar()
   assert.equal(calls().length, 1)
-  assert.equal((await hook()).text, 'Synthetic wake text')
+  assert.equal((await hook(2)).text, 'Synthetic wake text')
 }, '', [], RECEIVER_ROUTES))
 
 test('the routes the tests hand the board are checked whole: a missing record key, an unknown line or a non-list is refused, and only a non-empty string is a record (#1351)', async () => {
