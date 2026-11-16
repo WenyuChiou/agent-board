@@ -199,11 +199,16 @@ test('pr-check-rerun does nothing without a team comment or an open pull request
     assert.equal(await rerun(event(approval), { gh: timedOutRerun, log: quiet }), 'rerun', status)
     assert.deepEqual(notices(startedAnyway.calls), [], status)
   }
+  // If the new attempt already finished before the follow-up read, a higher run_attempt still counts as started (#1538).
+  const finishedAttempt = fake({ ...base, [runsPath()]: { workflow_runs: [run(83, 'completed', undefined, { run_attempt: 1 })] }, [runDetailPath(83)]: { id: 83, status: 'completed', run_attempt: 2 } })
+  const timedOutAttempt = args => args.includes(rerunPath(83)) ? (finishedAttempt.calls.push(args), { error: hung.error, status: null, stdout: '', stderr: '' }) : finishedAttempt.gh(args)
+  assert.equal(await rerun(event(approval), { gh: timedOutAttempt, log: quiet }), 'rerun')
+  assert.deepEqual(notices(finishedAttempt.calls), [])
   // When POST .../rerun is refused and the follow-up read shows the run is still completed, still post the notice once (#1538).
   const reallyRefused = fake({ ...base, [runsPath()]: { workflow_runs: [run(82, 'completed')] }, [runDetailPath(82)]: { id: 82, status: 'completed' } })
   await assert.rejects(rerun(event(approval), { gh: reallyRefused.gh, log: quiet }), /gh api --method POST failed: gh: Not Found \(HTTP 404\)/)
   assert.equal(notices(reallyRefused.calls).length, 1)
-  // When main cannot read the event file, it posts the notice once via env repo/number and marks GITHUB_OUTPUT (#1538).
+  // When main cannot read the event file, it posts the notice once via env repo/number without leaking the path and marks GITHUB_OUTPUT (#1538).
   const temp = mkdtempSync(join(tmpdir(), 'pr-check-rerun-'))
   try {
     const outputFile = join(temp, 'github-output.txt')
@@ -211,7 +216,13 @@ test('pr-check-rerun does nothing without a team comment or an open pull request
     const earlyFail = fake({ [noticePath]: {} })
     await assert.rejects(main(['--event', missingEvent], { gh: earlyFail.gh, env: { REPO: 'synthetic/board', NUMBER: '7', GITHUB_OUTPUT: outputFile }, log: quiet }), /ENOENT/)
     assert.equal(notices(earlyFail.calls).length, 1)
+    assert.equal(notices(earlyFail.calls)[0].includes('missing-event.json'), false)
     assert.match(readFileSync(outputFile, 'utf8'), /^noticed=true$/m)
+    // An unwritable GITHUB_OUTPUT after posting a notice does not trigger a second notice (#1538).
+    const unwritableOutput = join(temp, 'missing-dir', 'github-output.txt')
+    const heldBadOutput = fake({ ...base, [filesPath()]: [{ filename: '.github/workflows/pr-check.yml' }] })
+    assert.equal(await rerun(event(approval), { gh: heldBadOutput.gh, log: quiet, outputFile: unwritableOutput }), 'held')
+    assert.equal(notices(heldBadOutput.calls).length, 1)
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }
