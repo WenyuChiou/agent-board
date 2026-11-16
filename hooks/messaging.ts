@@ -45,6 +45,8 @@ export type Message = {
   // When an automatic receiver left with this message still queued. The board refuses the message a fixed time after
   // this, working from the store alone; the next receiver of the session takes it over and clears the stamp (#318).
   leftAt?: number
+  // What the Antigravity sidecar reported of the wake it started for this message (#1396); the first report stays.
+  wake?: 'sent' | 'failed'
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
@@ -71,19 +73,25 @@ export const isNote = (value: unknown): value is string => typeof value === 'str
 // property every object inherits reads the route's note.
 export const routeRecord = (route: Route, surface: string): string | null =>
   route.surfaceRecords !== undefined && Object.hasOwn(route.surfaceRecords, surface) ? route.surfaceRecords[surface] ?? null : route.record
-export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route> }
+// `sidecar`: an entry that holds only while the Antigravity sidecar polls the board (#1396); `sidecarRoutes` drops it otherwise.
+export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route>; sidecar?: true }
+export const sidecarRoutes = (routes: readonly ReceiverRoutes[], isOn: boolean): readonly ReceiverRoutes[] => isOn ? routes : routes.filter(one => one.sidecar !== true)
 type SendRefusal = 'NO_TARGET' | 'SHADOWED' | 'CONTESTED' | 'OFFLINE' | 'STATE_UNKNOWN' | 'SURFACE_UNKNOWN' | 'NO_RECORD' | 'TURN_RUNNING'
 export type SendDecision =
   | { canSend: true; line: RouteLine; target: Connection; state: RowState }
   | { canSend: false; line: RouteLine; reason: SendRefusal }
 
-const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteKind, state: RowState): Route | undefined =>
-  records.find(one => one.agent === (agent === '' ? 'claude' : agent) && one.kind === kind)?.routes[state]
+// Two entries of one agent and kind can cover different surfaces (the Antigravity sidecar's covers the app, #1396): the last
+// one whose route covers the surface wins, and the first is the default.
+const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteKind, state: RowState, surface?: string): Route | undefined => {
+  const all = records.filter(one => one.agent === (agent === '' ? 'claude' : agent) && one.kind === kind)
+  return (all.filter(one => surface !== undefined && Array.isArray(one.routes[state]?.surfaces) && one.routes[state].surfaces.includes(surface)).at(-1) ?? all[0])?.routes[state]
+}
 // Whether a connection's own route, for its session's state now, has a live note that covers its surface. Only such a
 // live connection takes the place of the session's mailbox: an unrecorded route never stands in for a recorded one (#318).
 export const isRecordedRoute = (one: Connection, stateOfSession: (agent: string, session: string) => RowState | undefined, routes: readonly ReceiverRoutes[]): boolean => {
   const state = stateOfSession(one.agent, one.session)
-  const route = state === undefined ? undefined : routeOf(routes, one.agent, routeKind(one.scope), state)
+  const route = state === undefined ? undefined : routeOf(routes, one.agent, routeKind(one.scope), state, one.surface)
   return route !== undefined && route.line !== 'none' && isNote(routeRecord(route, one.surface)) && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface)
 }
 
@@ -101,7 +109,7 @@ export const sendDecision = (
   if (target.expires <= now) return { canSend: false, line: 'none', reason: 'OFFLINE' }
   const state = stateOfSession(target.agent, target.session)
   if (state === undefined) return { canSend: false, line: 'none', reason: 'STATE_UNKNOWN' }
-  const route = routeOf(routes, target.agent, routeKind(target.scope), state)
+  const route = routeOf(routes, target.agent, routeKind(target.scope), state, target.surface)
   if (route === undefined) return { canSend: false, line: 'none', reason: 'NO_RECORD' }
   // Background resume cannot run while a turn is already active in that conversation.
   if (route.line === 'reopen' && state === 'working') return { canSend: false, line: 'none', reason: 'TURN_RUNNING' }
@@ -130,8 +138,8 @@ export const isRoute = (value: unknown): value is Route => {
 // whole, so a missing key cannot read as a record.
 export const isReceiverRoutes = (value: unknown): value is ReceiverRoutes[] => Array.isArray(value) && value.every(one => {
   if (one === null || typeof one !== 'object') return false
-  const { agent, kind, routes } = one as Record<string, unknown>
-  if (!isNote(agent) || kind !== 'live' && kind !== 'mailbox' && kind !== 'turn' || routes === null || typeof routes !== 'object') return false
+  const { agent, kind, routes, sidecar } = one as Record<string, unknown>
+  if (!isNote(agent) || kind !== 'live' && kind !== 'mailbox' && kind !== 'turn' || routes === null || typeof routes !== 'object' || sidecar !== undefined && sidecar !== true) return false
   return (['idle', 'working', 'ended'] as const).every(state => isRoute((routes as Record<string, unknown>)[state]))
 })
 // A connection's scope names its kind of receiver: a session the host owns, a hook mailbox, or one turn.

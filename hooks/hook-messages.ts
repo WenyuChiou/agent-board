@@ -1,4 +1,5 @@
-import { address, claimMessages, disconnectMessages, MAILBOX_LEASE_MS, messageReceipt } from './messaging'
+import { ANTIGRAVITY_POLL_MS } from './antigravity-sidecar'
+import { address, claimMessages, disconnectMessages, MAILBOX_LEASE_MS, messageFields, messageId, messageReceipt, SURFACE_IDS } from './messaging'
 import type { Connection, Message, MessageState } from './messaging'
 import { sha256 } from './sha256'
 
@@ -85,4 +86,53 @@ export const turnStartEnvelope = (agent: string, event: string, text: string, ba
   if (agent === 'cursor') return { env: { AGENT_BOARD_SESSION_ID: session, AGENT_BOARD_AGENT: 'cursor' }, additional_context: context }
   if (agent === 'antigravity') return { injectSteps: [event === 'SessionStart' ? { systemMessage: { systemMessage: context } } : { ephemeralMessage: context }] }
   return { ...(agent === 'gemini' ? { decision: 'allow' } : {}), hookSpecificOutput: { hookEventName: event, additionalContext: context } }
+}
+
+// The Antigravity sidecar's wake (#1396; the contract is in hooks/antigravity-sidecar.ts). Each poll is the sidecar's sign that
+// it is alive. After a poll that gets no answer it waits its slow interval, so it counts as on for one slow wait and two fast
+// polls: one lost answer does not take Send away, and a sidecar that stopped is no longer offered within about half a minute.
+export const SIDECAR_ALIVE_MS = ANTIGRAVITY_POLL_MS.slow + 2 * ANTIGRAVITY_POLL_MS.fast
+// The owner's plan: a conversation is woken only once it has been idle this long after its turn's end.
+export const WAKE_IDLE_MS = 10_000
+// When the board's own record last read a session idle (its turn's end), or undefined while it does not.
+export type IdleSince = (agent: string, session: string) => number | undefined
+// A message the board sent on the app's route that goes in at once; agy TUI runs no sidecar.
+const isWakeMessage = (one: Message): boolean => one.to.startsWith('antigravity:') && one.line === 'now' && one.surface === SURFACE_IDS.antigravityIde
+// Worked out from the message, so the board keeps no nonce of its own; the hash never leaves the board.
+const wakeNonce = (one: Message): string => sha256(`wake:${one.id}:${one.hash}`).slice(0, 16)
+const isWakeDue = (state: MessageState, one: Message, now: number, idleSince: IdleSince): boolean => {
+  if (one.status !== 'queued' || one.attempted !== undefined || !isWakeMessage(one)) return false
+  const box = state.mailboxes?.find(mailbox => mailbox.id === one.target && mailbox.surface === one.surface && mailbox.expires > now)
+  const since = box === undefined ? undefined : idleSince(box.agent, box.session)
+  // The app has no running field, so a wake's turn counts as running until the record shows a turn end after the wake began.
+  return since !== undefined && now - since >= WAKE_IDLE_MS && !state.messages.some(other => other.to === one.to && other.attempted !== undefined && other.wake !== 'failed' && other.attempted >= since)
+}
+// What a card says of a queued message's wake: the sidecar's report, a start with no report yet, or, while no sidecar
+// polls, that the message waits for the next turn.
+export const shownWake = (one: Message, isOn?: boolean): 'sent' | 'failed' | 'started' | 'off' | undefined =>
+  one.status !== 'queued' || !isWakeMessage(one) ? undefined : one.wake ?? (one.attempted !== undefined ? 'started' : isOn === false ? 'off' : undefined)
+// The sidecar's three calls. A refusal is an ok answer with a code, since the sidecar reads any other answer as a board error.
+export const wakeAction = (state: MessageState, action: string, body: Record<string, unknown>, now: number, idleSince: IdleSince): { state: MessageState; result: object } => {
+  if (action === 'wake-poll') {
+    messageFields(body, ['agent'])
+    if (body.agent !== 'antigravity') throw new Error('INVALID_MAILBOX_CALL')
+    // One wake per poll; one handed out and never attempted is handed out again.
+    const one = state.messages.find(message => isWakeDue(state, message, now, idleSince))
+    const session = one && state.mailboxes?.find(box => box.id === one.target)?.session
+    return { state, result: { wakes: one === undefined ? [] : [{ id: one.id, conversation: session, nonce: wakeNonce(one) }] } }
+  }
+  messageFields(body, action === 'wake-attempt' ? ['id', 'nonce'] : ['id', 'nonce', 'status', 'error'])
+  const id = messageId(body.id), nonce = messageId(body.nonce)
+  if (action === 'wake-report' && body.status !== 'sent' && body.status !== 'failed') throw new Error('INVALID_REPORT')
+  if (body.error !== undefined) messageId(body.error)
+  const one = state.messages.find(message => message.id === id && isWakeMessage(message) && wakeNonce(message) === nonce)
+  const marked = (target: Message, change: Partial<Message>) => ({ state: { ...state, messages: state.messages.map(message => message === target ? { ...target, ...change } : message) }, result: { ok: true } })
+  if (action === 'wake-attempt') {
+    // The board, not the sidecar, keeps a message to one wake: the start is saved before the one answer ok.
+    if (one?.attempted !== undefined) return { state, result: { ok: false, code: 'WAKE_STARTED' } }
+    return one !== undefined && isWakeDue(state, one, now, idleSince) ? marked(one, { attempted: now, updated: now }) : { state, result: { ok: false, code: 'NOT_HELD' } }
+  }
+  if (one?.attempted === undefined) return { state, result: { ok: false, code: 'NOT_STARTED' } }
+  // A repeated report is the same report, and a later one never changes the first. Its time stays: the hook may have claimed it since.
+  return one.wake !== undefined ? { state, result: { ok: true } } : marked(one, { wake: body.status as 'sent' | 'failed' })
 }

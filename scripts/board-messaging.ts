@@ -2,8 +2,9 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
-import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
-import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, rebindMessages, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
+import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, shownWake, SIDECAR_ALIVE_MS, takeMailboxMessage, wakeAction } from '../hooks/hook-messages'
+import type { IdleSince } from '../hooks/hook-messages'
+import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, rebindMessages, ROUTE_LINES, sendDecision, shownMessage, sidecarRoutes, textHash } from '../hooks/messaging'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
@@ -31,7 +32,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
     if (one.leftAt !== undefined && !Number.isFinite(one.leftAt)) throw new Error('INVALID_MESSAGE_STORE')
-    if (one.line !== undefined && !ROUTE_LINES.includes(one.line)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.line !== undefined && !ROUTE_LINES.includes(one.line) || one.wake !== undefined && one.wake !== 'sent' && one.wake !== 'failed') throw new Error('INVALID_MESSAGE_STORE')
     if (one.surface !== undefined && (typeof one.surface !== 'string' || one.surface === '' || /[\r\n]/.test(one.surface))) throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
     messageId(one.turn)
@@ -165,7 +166,7 @@ export const moveLockAside = (lock: string, recorded: string, claim: MessageStor
 
 // Only a host adapter can register a receiving session. Registrations and secrets die with
 // this server; message ids and receipts survive restart so uncertainty is never auto-retried.
-export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined }
+export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined; idleSince?: IdleSince }
 
 const openMessaging = (directory: string, isDefault = false, gate?: MessageGate) => {
   const root = resolve(directory)
@@ -201,8 +202,13 @@ const openMessaging = (directory: string, isDefault = false, gate?: MessageGate)
 // for the terminal board, --status and --json to count what the page counts (#1296). The file is replaced whole,
 // never edited in place, so a read sees one complete save. Nothing (undefined) when the folder holds no store or
 // the file cannot be read as one: those surfaces then count every question as waiting, as they did before.
-const shownMessages = (state: Pick<MessageState, 'messages' | 'mailboxes'>) =>
-  state.messages.map(one => ({ ...shownMessage(one), ...(isMailboxSurfaceLost(one, state.mailboxes) ? { isSurfaceLost: true as const } : {}) }))
+// isSidecarOn: whether the Antigravity sidecar polls now, which only the server knows.
+const shownMessages = (state: Pick<MessageState, 'messages' | 'mailboxes'>, isSidecarOn?: boolean) =>
+  state.messages.map(one => {
+    const { wake: _wake, ...shown } = shownMessage(one)
+    const wake = shownWake(one, isSidecarOn)
+    return { ...shown, ...(wake === undefined ? {} : { wake }), ...(isMailboxSurfaceLost(one, state.mailboxes) ? { isSurfaceLost: true as const } : {}) }
+  })
 
 export const readQueuedMessaging = (directory: string, now: number) => {
   try {
@@ -286,6 +292,9 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
   // Whether what this connection leaves queued stays queued: only an automatic receiver's, unless its session ended.
   const keepsLeft = (one: Live, isEnded = false): boolean => one.keepsQueued === true && !isEnded
   const expectations = new Map<string, SessionExpectation>()
+  // The last time the Antigravity sidecar polled (#1396): kept in memory only, since a poll is a sign of life, not a change.
+  let sidecarSeen = Number.NEGATIVE_INFINITY
+  const isSidecarOn = (now: number): boolean => now - sidecarSeen <= SIDECAR_ALIVE_MS
   // Every write is pruned first, so the file never holds more than the two caps allow.
   const save = (changed: MessageState, now: number): void => {
     requireOpen()
@@ -375,7 +384,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       expire(now)
       for (const [id, one] of expectations) expectations.set(id, observeSession(one, reports, now))
       return {
-        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, keepsQueued: _keepsQueued, ...one }) => one), messages: shownMessages(state),
+        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, keepsQueued: _keepsQueued, ...one }) => one), messages: shownMessages(state, isSidecarOn(now)), sidecar: isSidecarOn(now),
         sessions: [
           ...[...expectations.values()].map(one => ({
             id: one.id, agent: one.agent, session: one.session, surface: one.surface,
@@ -466,7 +475,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         let target = connections.get(String(input.target)) ?? state.mailboxes?.find(one => one.id === input.target)
         let line: RouteLine | undefined, surface: string | undefined
         if (from === 'board' && !state.messages.some(one => one.id === input.id)) {
-          const decision = sendDecision(String(input.target), [...connections.values()], state.mailboxes ?? [], gate?.stateOfSession ?? (() => undefined), gate?.routes ?? [], now)
+          const decision = sendDecision(String(input.target), [...connections.values()], state.mailboxes ?? [], gate?.stateOfSession ?? (() => undefined), sidecarRoutes(gate?.routes ?? [], isSidecarOn(now)), now)
           if (!decision.canSend) {
             const code = decision.reason === 'CONTESTED' ? 'CONTESTED' : decision.reason === 'OFFLINE' || decision.reason === 'NO_TARGET' ? 'OFFLINE' : 'NO_RECORDED_ROUTE'
             throw Object.assign(new Error(code), { decision })
@@ -484,6 +493,12 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         messageFields(body, ['id'])
         save(dismissMessage(state, messageId(body.id), now), now)
         return { ok: true }
+      }
+      if (action === 'wake-poll' || action === 'wake-attempt' || action === 'wake-report') {
+        const next = wakeAction(state, action, body, now, gate?.idleSince ?? (() => undefined))
+        if (action === 'wake-poll') sidecarSeen = now
+        if (next.state !== state) save(next.state, now)
+        return next.result
       }
       if (['mailbox-turn', 'mailbox-release', 'mailbox-attempt', 'mailbox-open', 'mailbox-accept', 'mailbox-end', 'mailbox-ack', 'mcp-enroll'].includes(action)) {
         const next = mailboxAction(state, action, body, now)

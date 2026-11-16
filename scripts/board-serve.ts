@@ -20,7 +20,7 @@ import type { ReceiverRoutes } from '../hooks/messaging'
 import { isRecordedRoute } from '../hooks/messaging'
 import type { SendDecision } from '../hooks/messaging'
 import { RECEIVER_ROUTES } from '../hooks/receiver-routes'
-import { cardSendKey, handledOnly, lanAddress, localHosts, pagePolicy, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
+import { cardSendKey, handledOnly, idleSince, lanAddress, localHosts, pagePolicy, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { isFolder, runSendPlan } from './background-resume'
@@ -164,7 +164,7 @@ const lineOf = (value: unknown): number | undefined => (typeof value === 'number
 
 export const startServer = (o: ServeOptions): void => {
   const messaging = (() => {
-    try { return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory, { routes: o.routes ?? RECEIVER_ROUTES, stateOfSession: (agent, session) => sessionState(o.view(), agent, session) }) }
+    try { return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory, { routes: o.routes ?? RECEIVER_ROUTES, stateOfSession: (agent, session) => sessionState(o.view(), agent, session), idleSince: (agent, session) => idleSince(o.view(), agent, session) }) }
     // The code (EACCES, EPERM) goes along, so the person gets advice that fits the cause.
     catch (error) { throw Object.assign(new Error(error instanceof Error ? error.message : '', { cause: 'MESSAGE_STORE_FAILED' }), { code: error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined }) }
   })()
