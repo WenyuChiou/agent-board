@@ -874,27 +874,17 @@ const surfaceLine = body => {
 export const SIZE_FROM = 1545
 export const SIZE_RISK = 400
 export const SIZE_NORMAL = 800
-// A reason is the text after `cannot split:` with a letter or a digit, in any language, left once each `<...>` placeholder
-// and repeated `cannot split:` are taken out, so formatting alone is none (surface reads it the same way); the template's own `Surface:` line,
+// A reason is the text after `cannot split:` with a letter or a digit, in any language, and no placeholder, tag or
+// HTML entity, so formatting alone is none (surface reads it the same way); the template's own `Surface:` line,
 // which starts with `<`, never counts (as in surface), and neither does a line in a code fence or an HTML comment.
-// Markdown shows an HTML entity as its character, so `&lt;reason&gt;` is the placeholder and `&#8203;` an invisible
-// space: entities are read as what they show (named ones other than these five as nothing), and a placeholder inside
-// another goes with it, until nothing changes. Then a character Unicode marks default-ignorable (a zero-width space,
-// the Hangul filler) is not a letter.
-const ENTITIES = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" }
-const fromEntity = (_, dec, hex, name) => {
-  if (name !== undefined) return ENTITIES[name.toLowerCase()] ?? ''
-  const code = dec !== undefined ? Number(dec) : parseInt(hex, 16)
-  return code <= 0x10ffff ? String.fromCodePoint(code) : ''
+// A reason a reader sees is plain words: one with an HTML entity (`&#8203;`, `&lt;reason&gt;`) or a tag (`<reason>`,
+// `<span title="...">`) in it is none, since Markdown can hide what such text holds (round cap of #1548). Of the rest,
+// a character Unicode marks default-ignorable (a zero-width space, the Hangul filler) is not a letter.
+const isSplitReason = text => {
+  const reason = text.replace(/cannot split:/gi, '')
+  if (/&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]*);|<[a-z/!?]/i.test(reason)) return false
+  return /[\p{L}\p{N}]/u.test(reason.replace(/\p{Default_Ignorable_Code_Point}/gu, ''))
 }
-const shownText = text => {
-  for (let before = ''; before !== text;) {
-    before = text
-    text = text.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|([a-z][a-z0-9]*));/gi, fromEntity).replace(/<[^<>]*>/g, '')
-  }
-  return text
-}
-const isSplitReason = text => /[\p{L}\p{N}]/u.test(shownText(text).replace(/cannot split:/gi, '').replace(/\p{Default_Ignorable_Code_Point}/gu, ''))
 const hasSplitReason = body => surfaceLine(body).filled.some(value => isSplitReason(value.split(/,[ \t]*cannot split:/i).slice(1).join(','))) ||
   visibleLines(body).some(line => isSplitReason(line.match(/^Size:[ \t]*cannot split:(.*)$/i)?.[1] ?? ''))
 export const size = ({ body = '', title = '', number = null, numstat, tier = visibleTier(body) } = {}) => {
@@ -904,7 +894,7 @@ export const size = ({ body = '', title = '', number = null, numstat, tier = vis
   const limit = tier === 'risk' ? SIZE_RISK : SIZE_NORMAL
   const counted = `${lines} changed lines (tests, generated files and string tables not counted)`
   if (lines > limit && !hasSplitReason(body)) {
-    output.problems.push(problem('size', `${counted} is more than ${limit}, the limit on the ${tier === 'risk' ? 'risk' : 'normal'} tier (RULES.md, R6).`, 'split it into smaller pull requests, or say why it cannot be split: end the `Surface:` line with `, cannot split: <reason>`, or add a line `Size: cannot split: <reason>`.'))
+    output.problems.push(problem('size', `${counted} is more than ${limit}, the limit on the ${tier === 'risk' ? 'risk' : 'normal'} tier (RULES.md, R6).`, 'split it into smaller pull requests, or say why it cannot be split: end the `Surface:` line with `, cannot split: <reason>`, or add a line `Size: cannot split: <reason>`, in plain words (no HTML tag or entity).'))
   } else if (lines > SIZE_RISK && tier !== 'risk') output.info.push(`size note: ${counted} is more than ${SIZE_RISK}; above ${SIZE_NORMAL} it fails without a reason it cannot be split.`)
   return output
 }
@@ -926,7 +916,7 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   const [named, ...reasonParts] = line.split(/,[ \t]*cannot split:/i)
   const reason = reasonParts.join(',').trim()
   if (reasonParts.length && !isSplitReason(reason)) {
-    fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.','write the reason after `cannot split:`, for the maintainer or the owner to accept or refuse before the first review.')
+    fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.','write the reason after `cannot split:` in plain words (no HTML tag or entity), for the maintainer or the owner to accept or refuse before the first review.')
     return output
   }
   const values = named.split('+').map(value => value.replace(/`/g, '').trim().toLowerCase())

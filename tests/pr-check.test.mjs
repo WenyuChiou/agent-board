@@ -1808,8 +1808,8 @@ test('pr-check limits the changed lines of a pull request by its tier, unless th
   assert.equal(run(`${risk}\nSurface: delivery, cannot split: \`<reason>\``, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: **<reason>**`, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: 同一個遷移`, lines(SIZE_RISK + 1)).problems.length, 0)
-  // An HTML entity is read as what it shows, a placeholder inside another goes with it, and an invisible character
-  // (a zero-width space, the Hangul filler) is no reason; a real reason with an entity in it still counts.
+  // A reason with an HTML entity or a tag in it is no reason, since Markdown can hide what it holds, and neither is an
+  // invisible character (a zero-width space, the Hangul filler); a reason starting with an unclosed `<` still counts.
   assert.equal(run(`${risk}\nSurface: delivery + data, cannot split: &#8203;`, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: &lt;reason&gt;`, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: &amp;lt;reason&amp;gt;`, lines(SIZE_RISK + 1)).problems.length, 1)
@@ -1817,7 +1817,10 @@ test('pr-check limits the changed lines of a pull request by its tier, unless th
   assert.equal(run(`${risk}\nSize: cannot split: &ZeroWidthSpace;`, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: \u3164`, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: <placeholder<reason>>`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: one migration &amp; its reader`, lines(SIZE_RISK + 1)).problems.length, 0)
+  assert.equal(run(`${risk}\nSize: cannot split: one migration &amp; its reader`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: &constructor;`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSurface: delivery + data, cannot split: <span title="&gt;hidden"></span>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\nSize: cannot split: <span title=">hidden"></span>`, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: <- the schema and its reader change together`, lines(SIZE_RISK + 1)).problems.length, 0)
   // The template's own lines are not a reason, and neither is one inside a code fence or an HTML comment.
   const template = readFileSync(new URL('../.github/pull_request_template.md', import.meta.url), 'utf8')
