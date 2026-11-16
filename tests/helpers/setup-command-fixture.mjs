@@ -7,7 +7,7 @@ export const runPrinted = (command, f, removed = ['CODEX_HOME']) => {
   const env = { ...f.env }
   for (const name of removed) delete env[name]
   return process.platform === 'win32'
-    ? spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { env, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
+    ? spawnSync(join(env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', command], { env, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
     : spawnSync(command, { shell: true, env, encoding: 'utf8', timeout: 30_000 })
 }
 

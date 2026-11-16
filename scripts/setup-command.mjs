@@ -2,7 +2,6 @@
 // not to a command a person might paste into another shell.
 const contextFlags = ['--home', '--data-dir', '--progress-file', '--lang', '--codex-dir', '--grok-dir', '--hermes-dir', '--opencode-dir', '--openclaw-dir', '--deepseek-dir']
 
-/** @param {readonly string[]} args */
 export const installContext = args => ({
   flags: contextFlags.flatMap(flag => {
     const at = args.indexOf(flag)
@@ -12,12 +11,6 @@ export const installContext = args => ({
 
 // argv contains the arguments after the program. Rendering never selects the executable used by
 // setup's subprocess: that remains Node plus the owned installed script, even with an npm display prefix.
-/**
- * @param {import('./setup-command.mjs').InstallContext} context
- * @param {import('./setup-command.mjs').InstallStep} step
- * @param {(word: string) => string} quote
- * @param {((program: string, argv: string[], isRunnable: boolean) => string) | undefined} [render]
- */
 export const installCommand = (context, step, quote, render) => {
   const argv = [...context.flags]
   if (step.target === 'board' && context.dataDir && !argv.includes('--data-dir')) {
