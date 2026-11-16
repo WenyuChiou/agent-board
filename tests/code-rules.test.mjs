@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { checkAdded, codeLinesOf, loadConfig } from '../scripts/code-rules.mjs'
+import { checkAdded, codeLinesOf, headReader, loadConfig } from '../scripts/code-rules.mjs'
 
 const script = fileURLToPath(new URL('../scripts/code-rules.mjs', import.meta.url))
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -112,9 +112,34 @@ test('comments, strings and regexes pass when they only name the word, while cod
     assert.equal(hits[0].rule, 'set-timeout-in-hooks', label)
   }
 
-  // Condition regex on line still permits later code on the same line.
+  // Condition regex (`if (...)` and `for await (...)`) still permits later code on following lines.
   const condRegex = "if (enabled) /`/.test(text); setTimeout(done, 1)\n"
   assert.equal(codeLinesOf(condRegex)[0].includes('setTimeout'), true)
+  const forAwaitSource = 'for await (const item of items) /`/.test(item)\nsetTimeout(done, 1)\n'
+  const forAwaitHits = checkAdded(
+    [{ path: 'hooks/new-thing.ts', line: 2, text: 'setTimeout(done, 1)' }],
+    config,
+    undefined,
+    { files: { 'hooks/new-thing.ts': forAwaitSource } },
+  )
+  assert.equal(forAwaitHits.length, 1)
+
+  // JSX text apostrophes inside .tsx and .jsx files do not hide executable `{...}` expressions (#1561 review).
+  const tsxHook = "const view = <Text>Don't {setTimeout(done, 1)}</Text>\n"
+  assert.equal(checkAdded([{ path: 'hooks/view.tsx', line: 1, text: tsxHook }], config, undefined, { files: { 'hooks/view.tsx': tsxHook } }).length, 1)
+  const jsxTest = `const view = <>Don't {test${ONLY}('a', () => {})}</>\n`
+  assert.equal(checkAdded([{ path: 'tests/view.test.jsx', line: 1, text: jsxTest }], config, undefined, { files: { 'tests/view.test.jsx': jsxTest } }).length, 1)
+  const tsxGeneric = 'const fn = <T extends Foo>(x: T) => setTimeout(done, 1)\n'
+  assert.equal(checkAdded([{ path: 'hooks/view.tsx', line: 1, text: tsxGeneric }], config, undefined, { files: { 'hooks/view.tsx': tsxGeneric } }).length, 1)
+
+  // A failed git show read for a changed file stops the CLI reader instead of silently falling back (#1561 review).
+  const badRead = headReader({
+    cwd: root,
+    head: 'HEAD',
+    requiredPaths: new Set(['hooks/new-thing.ts']),
+    run: () => ({ status: 128, stdout: '', stderr: 'fatal: read failure' }),
+  })
+  assert.throws(() => badRead('hooks/new-thing.ts'), /could not read hooks\/new-thing\.ts/)
 })
 
 test('test extensions (.js, .cjs, .jsx), aliases before .only, and hand-written board-script files fail (#1563)', () => {
@@ -152,7 +177,7 @@ test('CLI execution reads full files from --head even when another branch is che
     // Branch that safely adds comment/string/template mentions passes.
     git('checkout', '-q', '-b', 'safe', 'main')
     writeFileSync(join(dir, 'hooks', 'ctx.ts'), 'const s = `open\n  // setTimeout(done, 1)\n`\n/* block\n * setTimeout(done, 1)\n*/\nconst q = "a \\\n  setTimeout(done, 1)"\n')
-    writeFileSync(join(dir, 'tests', 'example.test.js'), '// it.only("note")\n')
+    writeFileSync(join(dir, 'tests', 'example.test.js'), `// it${ONLY}("note")\n`)
     git('add', '.'); git('commit', '-q', '-m', 'safe')
 
     // Another branch checked out at HEAD while we still test `safe`, plus a failing branch `unsafe`.

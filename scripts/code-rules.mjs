@@ -66,23 +66,75 @@ const REGEX_KEYWORDS = new Set(['return', 'throw', 'case', 'default', 'delete', 
 const COND_KEYWORDS = new Set(['if', 'while', 'for', 'with'])
 const REGEX_PREFIX_CHARS = new Set(['(', '[', '{', '}', ',', ';', ':', '?', '!', '~', '=', '+', '-', '*', '/', '%', '&', '|', '^', '<', '>', '${'])
 
-// Scans JS/TS source from its top so each line knows whether it begins inside a comment, string, regex or template
-// literal, leaving non-code text out (replaced with spaces) while keeping code inside `${...}` expressions (#1561).
-export const codeLinesOf = source => {
+// Scans JS/TS/JSX source from its top so each line knows whether it begins inside a comment, string, regex, JSX text
+// or template literal, leaving non-code text out (replaced with spaces) while keeping executable code, `${...}` and JSX `{...}` (#1561).
+export const codeLinesOf = (source, { jsx = false } = {}) => {
   const stack = [{ kind: 'code', braceDepth: 0 }]
   const parenKinds = []
   const lines = []
   let buf = ''
   let lastToken = null
   let prevToken = null
+  let lastWasMember = false
+  let prevWasMember = false
   let lastParenKind = 'other'
-  const pushToken = token => { prevToken = lastToken; lastToken = token }
-  const canStartRegex = () => {
+  const pushToken = token => {
+    prevToken = lastToken
+    prevWasMember = lastWasMember
+    lastWasMember = token === '.' || token === '?.' ? false : lastToken === '.' || lastToken === '?.'
+    lastToken = token
+  }
+  const canStartExpr = () => {
     if (lastToken === null || lastToken === '${') return true
     if (lastToken === ')') return lastParenKind === 'cond'
     if (lastToken === '++' || lastToken === '--') return false
-    if (REGEX_KEYWORDS.has(lastToken) && prevToken !== '.' && prevToken !== '?.') return true
+    if (REGEX_KEYWORDS.has(lastToken) && !lastWasMember) return true
     return REGEX_PREFIX_CHARS.has(lastToken) || REGEX_PREFIX_CHARS.has(lastToken.slice(-1))
+  }
+  const hasJsxClose = (startIndex, tagName) => {
+    const prefix = `</${tagName}`
+    let at = source.indexOf(prefix, startIndex)
+    while (at !== -1) {
+      const next = source[at + prefix.length] ?? ''
+      if (next === '>' || /\s/.test(next)) return true
+      at = source.indexOf(prefix, at + 1)
+    }
+    return false
+  }
+  // Distinguish `<Tag>` JSX elements from TypeScript `<T extends Foo>` / `<T,>` generics in .tsx/.jsx (#1561 review).
+  const jsxTagStart = index => {
+    if (!jsx || source[index] !== '<' || !canStartExpr()) return null
+    if (source[index + 1] === '>') return hasJsxClose(index + 2, '') ? '' : null
+    if (!/[A-Za-z_$]/.test(source[index + 1] ?? '')) return null
+    let k = index + 1
+    while (k < source.length && /[A-Za-z0-9_$.]/.test(source[k])) k += 1
+    const tagName = source.slice(index + 1, k)
+    if (!/[\s/>]/.test(source[k] ?? '')) return null
+    let j = k
+    let quote = null
+    let depth = 0
+    while (j < source.length) {
+      const c = source[j]
+      if (quote) {
+        if (c === '\\') { j += 2; continue }
+        if (c === quote) quote = null
+        j += 1
+        continue
+      }
+      if (c === "'" || c === '"' || c === '`') { quote = c; j += 1; continue }
+      if (c === '{') { depth += 1; j += 1; continue }
+      if (c === '}') { if (depth > 0) depth -= 1; j += 1; continue }
+      if (depth === 0) {
+        if (c === '/' && source[j + 1] === '>') return tagName
+        if (c === '>') return hasJsxClose(j + 1, tagName) ? tagName : null
+      }
+      j += 1
+    }
+    return null
+  }
+  const openJsx = (index, tag) => {
+    if (tag === '') { stack.push({ kind: 'jsx-text' }); buf += '  '; return index + 2 }
+    stack.push({ kind: 'jsx-tag' }); buf += ' '; return index + 1
   }
   const handleEscape = index => {
     if (source[index + 1] === '\r' && source[index + 2] === '\n') { lines.push(buf); buf = ''; return index + 3 }
@@ -119,6 +171,22 @@ export const codeLinesOf = source => {
       i += 1
       continue
     }
+    if (top.kind === 'jsx-text') {
+      if (ch === '\n') { lines.push(buf); buf = ''; i += 1; continue }
+      if (ch === '{') { stack.push({ kind: 'jsx-expr', braceDepth: 0 }); buf += '{'; pushToken('{'); i += 1; continue }
+      if (ch === '<' && source[i + 1] === '/') {
+        let j = i + 2
+        while (j < n && source[j] !== '>' && source[j] !== '\n' && source[j] !== '\r') j += 1
+        if (source[j] === '>') { stack.pop(); buf += ' '.repeat(j + 1 - i); i = j + 1; pushToken('<jsx>'); continue }
+      }
+      if (ch === '<') {
+        const tag = jsxTagStart(i)
+        if (tag !== null) { i = openJsx(i, tag); continue }
+      }
+      if (ch !== '\r') buf += ' '
+      i += 1
+      continue
+    }
     if (ch === '\n') { lines.push(buf); buf = ''; i += 1; continue }
     if (ch === ' ' || ch === '\t' || ch === '\r') { if (ch !== '\r') buf += ch; i += 1; continue }
     if (ch === '/' && source[i + 1] === '/') {
@@ -126,7 +194,11 @@ export const codeLinesOf = source => {
       continue
     }
     if (ch === '/' && source[i + 1] === '*') { stack.push({ kind: 'block-comment' }); buf += '  '; i += 2; continue }
-    if (ch === '/' && canStartRegex()) {
+    if (top.kind === 'jsx-tag') {
+      if (ch === '/' && source[i + 1] === '>') { stack.pop(); buf += '  '; i += 2; pushToken('<jsx>'); continue }
+      if (ch === '>') { top.kind = 'jsx-text'; buf += ' '; i += 1; continue }
+    }
+    if (ch === '/' && canStartExpr() && top.kind !== 'jsx-tag') {
       let j = i + 1
       let inClass = false
       let closed = false
@@ -146,18 +218,27 @@ export const codeLinesOf = source => {
         continue
       }
     }
+    if (ch === '<' && (top.kind === 'code' || top.kind === 'expr' || top.kind === 'jsx-expr')) {
+      const tag = jsxTagStart(i)
+      if (tag !== null) { i = openJsx(i, tag); continue }
+    }
     if (ch === "'" || ch === '"') { stack.push({ kind: 'string', quote: ch }); buf += ' '; i += 1; continue }
     if (ch === '`') { stack.push({ kind: 'template' }); buf += ' '; i += 1; continue }
-    if (ch === '{') { if (top.kind === 'expr') top.braceDepth += 1; buf += '{'; pushToken('{'); i += 1; continue }
+    if (ch === '{') {
+      if (top.kind === 'jsx-tag') { stack.push({ kind: 'jsx-expr', braceDepth: 0 }); buf += '{'; pushToken('{'); i += 1; continue }
+      if (top.kind === 'expr' || top.kind === 'jsx-expr') top.braceDepth += 1
+      buf += '{'; pushToken('{'); i += 1; continue
+    }
     if (ch === '}') {
-      if (top.kind === 'expr') {
+      if (top.kind === 'expr' || top.kind === 'jsx-expr') {
         if (top.braceDepth > 0) { top.braceDepth -= 1; buf += '}'; pushToken('}'); i += 1; continue }
-        stack.pop(); buf += ' '; pushToken('}'); i += 1; continue
+        stack.pop(); buf += top.kind === 'jsx-expr' ? '}' : ' '; pushToken('}'); i += 1; continue
       }
       buf += '}'; pushToken('}'); i += 1; continue
     }
     if (ch === '(') {
-      parenKinds.push(COND_KEYWORDS.has(lastToken) && prevToken !== '.' && prevToken !== '?.' ? 'cond' : 'other')
+      const isCond = (COND_KEYWORDS.has(lastToken) && !lastWasMember) || (lastToken === 'await' && prevToken === 'for' && !prevWasMember)
+      parenKinds.push(isCond ? 'cond' : 'other')
       buf += '('; pushToken('('); i += 1; continue
     }
     if (ch === ')') { lastParenKind = parenKinds.pop() ?? 'other'; buf += ')'; pushToken(')'); i += 1; continue }
@@ -221,13 +302,14 @@ export const checkAdded = (added, config = loadConfig(), list = rules, options =
   const readFile = fileReaderOf(config, options)
   const scanned = new Map()
   const codeTextOf = item => {
+    const jsx = /\.[jt]sx$/i.test(item.path)
     if (!scanned.has(item.path)) {
       const full = readFile(item.path)
-      scanned.set(item.path, typeof full === 'string' ? codeLinesOf(full) : null)
+      scanned.set(item.path, typeof full === 'string' ? codeLinesOf(full, { jsx }) : null)
     }
     const lines = scanned.get(item.path)
     if (lines && item.line >= 1 && item.line <= lines.length) return lines[item.line - 1]
-    return codeLinesOf(item.text)[0] ?? ''
+    return codeLinesOf(item.text, { jsx })[0] ?? ''
   }
   return added.flatMap(item => {
     const active = list.filter(rule => rule.applies(item.path, config, readFile))
@@ -245,9 +327,15 @@ export const diffAdded = ({ cwd = process.cwd(), base = 'origin/main', head = 'H
   return addedLines(diff.stdout)
 }
 
-const headReader = ({ cwd = process.cwd(), head = 'HEAD', run = spawnSync }) => path => {
+export const headReader = ({ cwd = process.cwd(), head = 'HEAD', run = spawnSync, requiredPaths = new Set() }) => path => {
   const shown = run('git', ['show', `${head}:${path}`], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
-  return !shown.error && shown.status === 0 ? shown.stdout : undefined
+  if (!shown.error && shown.status === 0) return shown.stdout
+  if (requiredPaths.has(path)) {
+    throw new Error(`code-rules: could not read ${path} at ${head}: ${shown.stderr?.trim() || shown.error?.message || 'git show failed'}`)
+  }
+  const exists = run('git', ['cat-file', '-e', `${head}:${path}`], { cwd, encoding: 'utf8' })
+  if (!exists.error && exists.status !== 0 && /does not exist in|exists on disk, but not in/.test(exists.stderr ?? '')) return undefined
+  throw new Error(`code-rules: could not read ${path} at ${head}: ${exists.stderr?.trim() || shown.stderr?.trim() || shown.error?.message || 'git failed'}`)
 }
 
 export const main = (argv = process.argv.slice(2), { log = console.log, error = console.error } = {}) => {
@@ -255,7 +343,8 @@ export const main = (argv = process.argv.slice(2), { log = console.log, error = 
   try {
     const cwd = resolve(value('--repo-dir') ?? '.')
     const refs = { base: value('--base') ?? 'origin/main', head: value('--head') ?? 'HEAD' }
-    const failures = checkAdded(diffAdded({ cwd, ...refs }), loadConfig(cwd, refs), rules, { readFile: headReader({ cwd, head: refs.head }) })
+    const added = diffAdded({ cwd, ...refs })
+    const failures = checkAdded(added, loadConfig(cwd, refs), rules, { readFile: headReader({ cwd, head: refs.head, requiredPaths: new Set(added.map(item => item.path)) }) })
     if (!failures.length) { log('code-rules: PASS, no added line breaks a code rule.'); return 0 }
     for (const failure of failures) error(`FAIL ${failure.message}`)
     error(`code-rules: ${failures.length} FAIL`)
