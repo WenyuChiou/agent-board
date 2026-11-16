@@ -5020,6 +5020,32 @@ test('a delay set for one Codex thread longer than its folder\'s does not read a
   assert.deepEqual([399, 400].map(listedAt => isWaitOver({ since: 0, listedAt, delay: 0, unloadMs: 400, unloadMarginMs: 400 })), [false, true])
 })
 
+test('a Codex receiver with its own default wait starts nothing on a listed idle thread before 10 minutes and 5 s of watching, and starts the message after (#1578)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  // The stand-in keeps the thread listed while `person` exists and reports no unload delay, as a thread kept by a per-thread delay
+  // the folder's config does not show would look. The receiver keeps its own default wait (no unloadMs, no margin) and reads the
+  // time on a clock 50 times faster than the wall clock, so a 10-minute watch takes about 12 s; its ticks still come every 100 ms,
+  // 5 s apart on that clock, under the gap rule's 20 s (watchTickMs).
+  const speed = 50, started = performance.now()
+  const fast = () => (performance.now() - started) * speed
+  const daemon = codexDaemon(dir, { person })
+  const receiver = codexReceiver(board, daemon, { unloadMs: undefined, unloadMarginMs: undefined, now: fast, watchTickMs: 10_000 })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    // Well past the old 65 s and past a 300 s per-thread delay, by the receiver's clock: nothing is started.
+    while (fast() < 330_000) await pause(100)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
+    // After 10 minutes and 5 s of unbroken watching the thread reads as a person's, and the message is started.
+    const until = Date.now() + 40_000
+    while (codexStarts(daemon) === 0 && Date.now() < until) await pause(100)
+    const at = fast()
+    assert.equal(codexStarts(daemon), 1)
+    assert.ok(at >= 605_000, `started at ${Math.round(at / 1000)} s by the receiver's clock`)
+  } finally { await receiver.close() }
+}))
+
 test('a Codex daemon whose unload delay cannot be read gets no message, and gets it once the delay is read for the thread\'s folder (#318)', () => codexFixture(async (board, dir) => {
   const configFaults = join(dir, 'config-faults')
   writeFileSync(configFaults, '')

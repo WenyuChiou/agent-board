@@ -226,6 +226,9 @@ export const startCodexReceiver = ({
   pollMs = 2000,
   // A clock that never goes back and is not the wall clock, which a person or a time sync can move.
   now = () => performance.now(), onError = () => undefined,
+  // The tick that the watch's gap rule counts in on `now`'s clock (two looks more than two of these apart end the stretch). It
+  // is tickMs, the timer's own period, except in a test that runs `now` faster than the wall clock to watch a whole wait (#1578).
+  watchTickMs = tickMs,
 }) => {
   if (typeof threads !== 'function' || !isAbsolute(executable ?? '')) throw new Error('EXPLICIT_EXECUTABLE_REQUIRED')
   const client = boardClient(boardUrl)
@@ -316,7 +319,7 @@ export const startCodexReceiver = ({
     if (q.sampling !== null) return q.sampling
     q.sampling = (async () => {
       const on = daemon, sentAt = now()
-      if (q.last === null || sentAt - q.last > 2 * tickMs) restart(thread)
+      if (q.last === null || sentAt - q.last > 2 * watchTickMs) restart(thread)
       // In the thread, or maybe in it, the receiver's own subscription keeps it loaded: nothing read now is about a person.
       if (subs.get(thread)?.mayBeSubscribed === true) { q.since = null; return }
       const epoch = q.epoch
@@ -327,7 +330,7 @@ export const startCodexReceiver = ({
       if (daemon !== on || quiet.get(thread) !== q) return
       const at = now()
       // Asked in time and answered late: what the thread did meanwhile nobody saw, as when it is asked late.
-      if (q.last !== null && at - q.last > 2 * tickMs) q.since = null
+      if (q.last !== null && at - q.last > 2 * watchTickMs) q.since = null
       q.last = at
       if (delay !== null) q.delay = Math.max(q.delay ?? 0, delay)
       const hasMarker = typeof seen?.marker === 'number' || typeof seen?.marker === 'string'
@@ -343,14 +346,14 @@ export const startCodexReceiver = ({
   const isPersonAttached = thread => {
     const q = quiet.get(thread), at = now()
     if (!canTell || q === undefined || q.since === null || q.last === null || q.delay === null || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) return false
-    if (at - q.last > 2 * tickMs || at - listing.sentAt > 2 * tickMs) return false
+    if (at - q.last > 2 * watchTickMs || at - listing.sentAt > 2 * watchTickMs) return false
     return isWaitOver({ since: q.since, listedAt: listing.sentAt, delay: q.delay, unloadMs, unloadMarginMs })
   }
   // Whether a message can go to the thread now, from a fresh look and a listing no older than two ticks.
   const isReady = async thread => {
     if (!canTell || subs.get(thread)?.mayBeSubscribed === true) return false
     await sample(thread)
-    if (now() - listing.sentAt > 2 * tickMs) try { await list() } catch { return false }
+    if (now() - listing.sentAt > 2 * watchTickMs) try { await list() } catch { return false }
     return isPersonAttached(thread)
   }
   // Leaves the thread so the daemon can unload it once nobody else is on it. One leave at a time: a second caller gets the one in
