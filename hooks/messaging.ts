@@ -298,6 +298,12 @@ export const deliveryText = (message: Message, s: Strings = ZH_TW): string => [
 // Observation is not an authorization token. Only an exact, newer progress report
 // satisfies a handoff; a transport acceptance or even an ACK cannot do so.
 export type ProgressBinding = { agent: string; session: string; updated: number }
+// When a session's progress rows were last written, by the writer's clock: undefined with no row, or when any of its rows
+// has no time, so a caller that waits on it holds instead of guessing (#1396).
+export const sessionWritten = (reports: readonly ProgressBinding[], agent: string, session: string): number | undefined => {
+  const times = reports.filter(one => one.agent === agent && one.session === session).map(one => one.updated)
+  return times.length > 0 && times.every(time => Number.isFinite(time) && time > 0) ? Math.max(...times) : undefined
+}
 export type SessionExpectation = {
   id: string; agent: string; session: string; surface: string
   created: number; deadline: number; baseline: number; observed: number | null

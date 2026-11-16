@@ -110,13 +110,21 @@ const PROBE_NONCE = '000000'
 // The board's own view of the conversation (its progress rows) must read idle too: the turn-start hook writes its row as
 // working, so a turn whose take never reached the board (a busy store, a lost answer) still starts no wake.
 export type StateOfSession = (agent: string, session: string) => RowState | undefined
-const isWakeDue = (state: MessageState, one: Message, now: number, stateOfSession: StateOfSession): boolean => {
+// When the conversation's progress rows were last written, by the writer's clock (undefined: no row, or a row with no
+// time). Every hook event and every model report restamps its row, so a row written after the Stop means the
+// conversation moved on, whatever its state reads: a waiting report from a turn whose take never reached the board.
+export type WrittenOfSession = (agent: string, session: string) => number | undefined
+const isWakeDue = (state: MessageState, one: Message, now: number, stateOfSession: StateOfSession, writtenOfSession: WrittenOfSession): boolean => {
   if (one.status !== 'queued' || one.woke !== undefined || !isWakeMessage(one)) return false
   const box = state.mailboxes?.find(mailbox => mailbox.id === one.target && mailbox.surface === one.surface && mailbox.expires > now)
   const idleAt = box?.idleAt
   // Idle only from a Stop later than the last turn start, and for 10 s; a wake started since then has its turn to run.
   if (box === undefined || idleAt === undefined || idleAt <= (box.busyAt ?? 0) || now - idleAt < WAKE_IDLE_MS) return false
   if (stateOfSession(box.agent, box.session) !== 'idle') return false
+  // Rows keep whole seconds and the Stop's own row write comes before its call, so that write never holds the wake; a
+  // row written later in the Stop's second is not seen.
+  const written = writtenOfSession(box.agent, box.session)
+  if (written === undefined || written > idleAt) return false
   if (state.messages.some(other => other.to === one.to && other.woke !== undefined && other.woke >= idleAt)) return false
   // Only the message the next turn's hook takes: a wake for any other would start a turn that hands that one over instead.
   return claimMessages(state, box, now, PROBE_NONCE).messages[0]?.id === one.id
@@ -126,12 +134,12 @@ const isWakeDue = (state: MessageState, one: Message, now: number, stateOfSessio
 export const shownWake = (one: Message, isOn?: boolean): 'sent' | 'failed' | 'started' | 'off' | undefined =>
   one.status !== 'queued' || !isWakeMessage(one) ? undefined : one.wake ?? (one.woke !== undefined ? 'started' : isOn === false ? 'off' : undefined)
 // The sidecar's three calls. A refusal is an ok answer with a code, since the sidecar reads any other answer as a board error.
-export const wakeAction = (state: MessageState, action: string, body: Record<string, unknown>, now: number, stateOfSession: StateOfSession): { state: MessageState; result: object } => {
+export const wakeAction = (state: MessageState, action: string, body: Record<string, unknown>, now: number, stateOfSession: StateOfSession, writtenOfSession: WrittenOfSession): { state: MessageState; result: object } => {
   if (action === 'wake-poll') {
     messageFields(body, ['agent'])
     if (body.agent !== 'antigravity') throw new Error('INVALID_MAILBOX_CALL')
     // One wake per poll; one handed out whose start never came is handed out again.
-    const one = state.messages.find(message => isWakeDue(state, message, now, stateOfSession))
+    const one = state.messages.find(message => isWakeDue(state, message, now, stateOfSession, writtenOfSession))
     const session = one && state.mailboxes?.find(box => box.id === one.target)?.session
     return { state, result: { wakes: one === undefined ? [] : [{ id: one.id, conversation: session, nonce: wakeNonce(one) }] } }
   }
@@ -144,7 +152,7 @@ export const wakeAction = (state: MessageState, action: string, body: Record<str
   if (action === 'wake-attempt') {
     // The board, not the sidecar, keeps a message to one wake: the start is saved before the one answer ok.
     if (one?.woke !== undefined) return { state, result: { ok: false, code: 'WAKE_STARTED' } }
-    return one !== undefined && isWakeDue(state, one, now, stateOfSession) ? marked(one, { woke: now, updated: now }) : { state, result: { ok: false, code: 'NOT_HELD' } }
+    return one !== undefined && isWakeDue(state, one, now, stateOfSession, writtenOfSession) ? marked(one, { woke: now, updated: now }) : { state, result: { ok: false, code: 'NOT_HELD' } }
   }
   if (one?.woke === undefined) return { state, result: { ok: false, code: 'NOT_STARTED' } }
   // A repeated report is the same report, and a later one never changes the first. Its time stays: the hook may have claimed it since.

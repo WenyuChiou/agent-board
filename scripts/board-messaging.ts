@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
-import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, markMailbox, releaseMailboxMessage, shownWake, SIDECAR_ALIVE_MS, takeMailboxMessage, wakeAction } from '../hooks/hook-messages'
+import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, markMailbox, releaseMailboxMessage, shownWake, SIDECAR_ALIVE_MS, takeMailboxMessage, wakeAction, type WrittenOfSession } from '../hooks/hook-messages'
 import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, rebindMessages, ROUTE_LINES, sendDecision, shownMessage, sidecarRoutes, textHash } from '../hooks/messaging'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
@@ -88,11 +88,14 @@ export const mailboxAction = (state: MessageState, action: string, body: Record<
     const next = takeMailboxMessage(state, agent, session, messageText(body.surface, 100), now, STALE_MS, randomBytes(3).toString('hex'), body.ref)
     return { state: busy(next.state), result: { message: next.message } }
   }
-  // Antigravity's Stop hook: its turn has ended, which the sidecar's wake waits for (#1396). It marks a mailbox already there.
+  // Antigravity's Stop hook: its turn has ended, which the sidecar's wake waits for (#1396). It marks a mailbox already there,
+  // at the hook's own time: a call the board answers late (after the next turn's take) must not read as idle. A time
+  // later than the board's is the board's, and the mark never goes back.
   if (action === 'mailbox-idle') {
-    messageFields(body, ['agent', 'session'])
-    if (agent !== 'antigravity') throw new Error('INVALID_MAILBOX_CALL')
-    return { state: markMailbox(state, agent, session, 'idleAt', now), result: { ok: true } }
+    messageFields(body, ['agent', 'session', 'at'])
+    if (agent !== 'antigravity' || typeof body.at !== 'number' || !Number.isSafeInteger(body.at) || body.at <= 0) throw new Error('INVALID_MAILBOX_CALL')
+    const was = state.mailboxes?.find(one => one.id === mailboxId(agent, session))?.idleAt ?? 0
+    return { state: markMailbox(state, agent, session, 'idleAt', Math.max(was, Math.min(body.at, now))), result: { ok: true } }
   }
   if (action === 'mailbox-release') {
     messageFields(body, ['agent', 'session', 'ref', 'unsent'])
@@ -174,7 +177,7 @@ export const moveLockAside = (lock: string, recorded: string, claim: MessageStor
 
 // Only a host adapter can register a receiving session. Registrations and secrets die with
 // this server; message ids and receipts survive restart so uncertainty is never auto-retried.
-export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined }
+export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined; writtenOfSession?: WrittenOfSession }
 
 const openMessaging = (directory: string, isDefault = false, gate?: MessageGate) => {
   const root = resolve(directory)
@@ -503,7 +506,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         return { ok: true }
       }
       if (action === 'wake-poll' || action === 'wake-attempt' || action === 'wake-report') {
-        const next = wakeAction(state, action, body, now, gate?.stateOfSession ?? (() => undefined))
+        const next = wakeAction(state, action, body, now, gate?.stateOfSession ?? (() => undefined), gate?.writtenOfSession ?? (() => undefined))
         if (action === 'wake-poll') sidecarSeen = now
         if (next.state !== state) save(next.state, now)
         return next.result
@@ -794,7 +797,7 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
     },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
     // Antigravity's Stop (#1396): a call the board did not take records nothing, so nothing is woken and the next turn delivers.
-    idle: (agent: string, session: string, now: number) => call('mailbox-idle', { agent, session }, now),
+    idle: (agent: string, session: string, now: number) => call('mailbox-idle', { agent, session, at: now }, now),
     // The same end for a caller that must tell a write that failed from one that worked.
     endOrThrow: async (agent: string, session: string, now: number): Promise<void> => { await access.call('mailbox-end', { agent, session }, now) },
   }

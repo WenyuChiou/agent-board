@@ -32,23 +32,31 @@ const T = Date.UTC(2026, 10, 16, 12)
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 
 // A board's message store with its gate. `reports` holds when each conversation's progress rows last read waiting; a
-// conversation missing from it is working. The gate also offers that time as `idleSince`, which only the board before
-// #1602's first review read (as its turn's end): this board ignores it, so these tests also run against that board.
-const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T - 20_000 }) => {
+// conversation missing from it is working. `written` holds when its rows were last written (missing: no time). The gate
+// also offers the first as `idleSince`, which only the board before #1602's first review read (as its turn's end): this
+// board ignores it, so these tests also run against that board.
+const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T - 20_000 }, written = { ...reports }) => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-wake-'))
   const hub = createMessaging(join(dir, 'messages'), false, {
     routes: RECEIVER_ROUTES,
     stateOfSession: (_agent, session) => reports[session] === undefined ? 'working' : 'idle',
     idleSince: (_agent, session) => reports[session],
+    writtenOfSession: (_agent, session) => written[session],
   })
+  // A row is written again at each hook event and report, never back in time.
+  const write = (session, now) => { written[session] = Math.max(written[session] ?? 0, now) }
   // The turn-start hook's take, with the claim name a hook gives it when one is passed.
-  const enroll = (session, surface, now, ref) => hub.act('mailbox-turn', { agent: 'antigravity', session, surface, ...(ref === undefined ? {} : { ref }) }, now).message
-  // A turn's Stop: its progress row reads waiting and its hook tells the board. A board before #1602's first review
-  // has no mailbox-idle (it answers UNKNOWN_FIELD) and reads the Stop from the progress row alone. This board never
-  // answers mailbox-idle so, and every wake below needs the call to work here.
-  const stop = (session, now) => {
-    reports[session] = now
-    try { hub.act('mailbox-idle', { agent: 'antigravity', session }, now) } catch (error) { if (error.message !== 'UNKNOWN_FIELD') throw error }
+  const enroll = (session, surface, now, ref) => { write(session, now); return hub.act('mailbox-turn', { agent: 'antigravity', session, surface, ...(ref === undefined ? {} : { ref }) }, now).message }
+  // A turn's Stop at `at`: its progress row reads waiting and its hook tells the board, whose answer may come later
+  // (`now`). A board before #1602's first review has no mailbox-idle (it answers UNKNOWN_FIELD) and reads the Stop from
+  // the progress row alone; one before its third has no Stop time (UNKNOWN_FIELD for `at`) and keeps its own clock. This
+  // board answers neither so, and every wake below needs the call to work here.
+  const stop = (session, now, at = now) => {
+    reports[session] = at
+    write(session, at)
+    for (const body of [{ agent: 'antigravity', session, at }, { agent: 'antigravity', session }]) {
+      try { hub.act('mailbox-idle', body, now); return } catch (error) { if (error.message !== 'UNKNOWN_FIELD') throw error }
+    }
   }
   // A conversation whose last turn started 30 s ago and stopped 20 s ago.
   const ready = (session, surface = IDE) => { enroll(session, surface, T - 30_000); stop(session, T - 20_000) }
@@ -56,7 +64,7 @@ const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T
   const poll = now => hub.act('wake-poll', { agent: 'antigravity' }, now)
   const shown = (id, now) => hub.snapshot(now).messages.find(one => one.id === id)
   const saved = id => JSON.parse(readFileSync(join(dir, 'messages', 'messages.json'), 'utf8')).messages.find(one => one.id === id)
-  return { hub, reports, enroll, stop, ready, send, poll, shown, saved, close: () => { hub.close(); rmSync(dir, { recursive: true, force: true }) } }
+  return { hub, reports, written, enroll, stop, ready, send, poll, shown, saved, close: () => { hub.close(); rmSync(dir, { recursive: true, force: true }) } }
 }
 const using = async fn => {
   const w = world()
@@ -212,6 +220,58 @@ test('a turn start whose board call failed starts no wake while its progress row
   assert.deepEqual(w.poll(T + 60_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-mid'])
 }))
 
+// codex_478 on #1602: the row's state alone is not enough, since the model may report waiting in a turn whose take never
+// reached the board. The rows' write time is: every hook event and report restamps it.
+test('a turn start whose board call failed starts no wake after the model reports waiting, until that turn\'s Stop', () => using(w => {
+  w.enroll(APP, IDE, T - 30_000)
+  w.stop(APP, T)
+  w.poll(T)
+  assert.equal(w.send(APP, 'm-mid', T + 2000).line, 'now')
+  // A new turn starts: its hook writes the row as working, but its take never reaches the board.
+  delete w.reports[APP]
+  w.written[APP] = T + 3000
+  // The model reports waiting while that turn still runs: the row reads idle again, written after the Stop.
+  w.reports[APP] = T + 5000
+  w.written[APP] = T + 5000
+  assert.deepEqual(w.poll(T + 15_000), { wakes: [] })
+  assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
+  assert.equal(w.shown('m-mid', T + 60_000).wake, undefined)
+  w.stop(APP, T + 60_000)
+  assert.deepEqual(w.poll(T + 60_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-mid'])
+}))
+
+test('a Stop call the board answers after the next turn\'s take keeps the Stop\'s own time and starts no wake into that turn', () => using(w => {
+  w.enroll(APP, IDE, T - 30_000)
+  // That turn's Stop hook runs at T, but the board answers its call only at T + 2000, after the next turn's take.
+  assert.equal(w.enroll(APP, IDE, T + 1000), null)
+  w.poll(T + 1200)
+  assert.equal(w.send(APP, 'm-late', T + 1500).line, 'now')
+  w.stop(APP, T + 2000, T)
+  assert.equal(w.hub.snapshot(T + 2000).mailboxes[0].idleAt, T)
+  assert.deepEqual(w.poll(T + 20_000), { wakes: [] })
+  // The running turn's own Stop; 10 s later the message is woken.
+  w.stop(APP, T + 30_000)
+  assert.deepEqual(w.poll(T + 30_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-late'])
+}))
+
+test('no wake while the conversation\'s progress rows carry no write time, and a board reads no time from a row without one', async () => {
+  await using(w => {
+    w.ready(APP)
+    w.poll(T)
+    delete w.written[APP]
+    assert.equal(w.send(APP, 'm-untimed', T).line, 'now')
+    assert.deepEqual(w.poll(T + 1000), { wakes: [] })
+    w.written[APP] = T - 20_000
+    assert.equal(w.poll(T + 2000).wakes[0]?.id, 'm-untimed')
+  })
+  const { sessionWritten } = await import('../hooks/messaging.ts')
+  const row = (session, updated) => ({ agent: 'antigravity', session, updated })
+  assert.equal(sessionWritten([], 'antigravity', APP), undefined)
+  assert.equal(sessionWritten([row(APP, T - 5000), row(APP, T - 1000), row(APP_2, T)], 'antigravity', APP), T - 1000)
+  assert.equal(sessionWritten([row(APP, T - 5000), row(APP, Number.NaN)], 'antigravity', APP), undefined)
+  assert.equal(sessionWritten([{ ...row(APP, T), agent: 'codex' }], 'antigravity', APP), undefined)
+})
+
 test('a peer message queued before the board message starts no wake while the next turn would take the peer message', () => using(w => {
   w.ready(APP)
   w.poll(T)
@@ -280,22 +340,33 @@ test('Antigravity\'s Stop hook tells a running board its turn ended, its other e
     writeFileSync(join(folder, 'server.lock'), String(process.pid))
     writeFileSync(join(folder, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token` }))
     assert.equal(await hook('PostInvocation'), false)
+    const hookStarted = Date.now()
     assert.equal(await hook('Stop'), false)
-    assert.deepEqual(calls, [['/api/messages/mailbox-idle', { agent: 'antigravity', session: APP }]])
+    assert.equal(calls.length, 1)
+    const [url, { at, ...rest }] = calls[0]
+    assert.deepEqual([url, rest], ['/api/messages/mailbox-idle', { agent: 'antigravity', session: APP }])
+    // The call carries the hook's own time, not the time the board answers it.
+    assert.ok(Number.isSafeInteger(at) && at >= hookStarted && at <= Date.now(), String(at))
   } finally {
     if (runtime !== undefined) process.env.XDG_RUNTIME_DIR = runtime
     await new Promise(done => server.close(done))
     rmSync(home, { recursive: true, force: true })
   }
-  // The board takes the Stop only from Antigravity, and only for a mailbox it has.
+  // The board takes the Stop only from Antigravity, with its time, and only for a mailbox it has. A time later than the
+  // board's is the board's, and the mark never goes back.
   await using(w => {
-    assert.throws(() => w.hub.act('mailbox-idle', { agent: 'codex', session: APP }, T), /INVALID_MAILBOX_CALL/)
-    assert.deepEqual(w.hub.act('mailbox-idle', { agent: 'antigravity', session: APP }, T), { ok: true })
+    assert.throws(() => w.hub.act('mailbox-idle', { agent: 'codex', session: APP, at: T }, T), /INVALID_MAILBOX_CALL/)
+    for (const at of [undefined, 0, -1, 1.5, '1']) assert.throws(() => w.hub.act('mailbox-idle', { agent: 'antigravity', session: APP, ...(at === undefined ? {} : { at }) }, T), /INVALID_MAILBOX_CALL/)
+    assert.deepEqual(w.hub.act('mailbox-idle', { agent: 'antigravity', session: APP, at: T }, T), { ok: true })
     assert.deepEqual(w.hub.snapshot(T).mailboxes, [])
     w.enroll(APP, IDE, T)
     w.stop(APP, T + 1000)
-    const [box] = w.hub.snapshot(T + 1000).mailboxes
-    assert.deepEqual([box.busyAt, box.idleAt], [T, T + 1000])
+    const idleAt = () => w.hub.snapshot(T + 3000).mailboxes[0].idleAt
+    assert.deepEqual([w.hub.snapshot(T + 1000).mailboxes[0].busyAt, idleAt()], [T, T + 1000])
+    w.hub.act('mailbox-idle', { agent: 'antigravity', session: APP, at: T + 60_000 }, T + 2000)
+    assert.equal(idleAt(), T + 2000)
+    w.hub.act('mailbox-idle', { agent: 'antigravity', session: APP, at: T + 500 }, T + 3000)
+    assert.equal(idleAt(), T + 2000)
   })
 })
 

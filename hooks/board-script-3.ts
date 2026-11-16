@@ -11117,7 +11117,7 @@ export const LINES = [
 "var startServer = (o) => {",
 "  const messaging = (() => {",
 "    try {",
-"      return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory, { routes: o.routes ?? RECEIVER_ROUTES, stateOfSession: (agent, session) => sessionState(o.view(), agent, session) });",
+"      return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory, { routes: o.routes ?? RECEIVER_ROUTES, stateOfSession: (agent, session) => sessionState(o.view(), agent, session), writtenOfSession: (agent, session) => sessionWritten(o.reports?.() ?? [], agent, session) });",
 "    } catch (error) {",
 "      throw Object.assign(new Error(error instanceof Error ? error.message : \"\", { cause: \"MESSAGE_STORE_FAILED\" }), { code: error instanceof Error ? error.code : undefined });",
 "    }",
