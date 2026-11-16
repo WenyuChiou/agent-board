@@ -2611,6 +2611,39 @@ test('preflight runs the tests the case table names on the merge base and here, 
   }
 })
 
+test('preflight runs \\t and fixed <...> titles, ignores code beside a known title, lists templates, and fails unfound titles (#1541, #1542)', { timeout: 180_000 }, async t => {
+  const f = fixture(t)
+  f.write('scripts/value.mjs', 'export const value = 1\n')
+  f.commit()
+  f.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+  const base = f.git('rev-parse', 'HEAD')
+  f.write('scripts/value.mjs', 'export const value = 2\n')
+  f.write('tests/escapes.test.mjs', [
+    "import test from 'node:test'",
+    "import assert from 'node:assert/strict'",
+    "import { value } from '../scripts/value.mjs'",
+    String.raw`test('reads\tcolumns', () => assert.equal(value, 2))`,
+    String.raw`test('uses <XDG_RUNTIME_DIR>\\dir', () => assert.equal(value, 2))`,
+    'for (const name of ["one"]) test(`a ${name} receiver`, () => assert.equal(value, 2))',
+  ].join('\n') + '\n')
+  f.commit()
+  const head = f.git('rev-parse', 'HEAD')
+  const run = (program, args, options) => args[0] === 'scripts/pr-check.mjs'
+    ? { status: 0, stdout: 'pr-check: all checks passed\n', stderr: '' }
+    : f.run(program, args, options)
+  const makeBody = rows => `Fixes #1\nTier: risk\nSurface: delivery\nCases: ${rows.length} rows\n\n## Cases\n\n| State | Event | Expected result | Test |\n|---|---|---|---|\n${rows.map(testCell => `| one | two | three | ${testCell} |`).join('\n')}\n\n## Checks\n`
+
+  writeFileSync(join(f.root, 'body.md'), makeBody(['`reads\\tcolumns` (`value`)', '`uses <XDG_RUNTIME_DIR>\\dir`', '`a <name> receiver`']))
+  const okChecks = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+  assert.ok(has(okChecks, 'PASS', `Fail-first: 2 of 2 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`), JSON.stringify(okChecks))
+  assert.ok(has(okChecks, 'WARN', 'a <name> receiver: is a template title; not run.'), JSON.stringify(okChecks))
+
+  writeFileSync(join(f.root, 'body.md'), makeBody(['`reads\\tcolumns`', '`not written anywhere`']))
+  const missingChecks = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
+  assert.ok(has(missingChecks, 'FAIL', 'not written anywhere: is not a test title in tests/.'), JSON.stringify(missingChecks))
+  assert.ok(has(missingChecks, 'FAIL', `Fail-first: 1 of 2 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`), JSON.stringify(missingChecks))
+})
+
 test('preflight prints the journeys and tests for a mapped path, and only warns when the map cannot be read (#1544)', async t => {
   const f = fixture(t)
   f.write('hooks/messaging.ts', 'export const sent = true\n')

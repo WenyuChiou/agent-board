@@ -155,8 +155,8 @@ test('fail-first runs each named new or changed test on the merge base with the 
   })
   assert.match(r.git('diff', '--name-status', base, head, '--', 'tests/renamed-from.mjs', 'tests/renamed-to.mjs'), /^R/)
   assert.equal(result.counted, 3)
-  assert.equal(result.total, 11)
-  assert.equal(result.line, `Fail-first: 3 of 11 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`)
+  assert.equal(result.total, 12)
+  assert.equal(result.line, `Fail-first: 3 of 12 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`)
   // Each test runs here first; every one that passes here then runs on the base, after every run here.
   assert.ok(runs.some(run => run.where === r.cwd && run.title === 'a kept test'))
   const firstBase = runs.findIndex(run => run.where !== r.cwd)
@@ -220,4 +220,44 @@ test('fail-first runs every named test that passes here on the base, whatever it
   // Every named test ran here, and each that passed here ran on the base.
   assert.deepEqual(runs.filter(run => run.where === r.cwd).map(run => run.title).sort(), [...names].sort())
   assert.deepEqual(runs.filter(run => run.where !== r.cwd).map(run => run.title).sort(), ['a new test in it', 'an old test in a changed file', 'an uncommented test', 'kept as it was'])
+})
+
+test('fail-first keeps source spelling for escaped titles, counts unfound names, and runs fixed <...> titles before treating them as templates (#1541, #1542)', { timeout: 120_000 }, async t => {
+  assert.deepEqual(
+    titlesOf(String.raw`test('a\tb tab', () => {})` + '\n' + String.raw`test('a\\b slash', () => {})` + '\n' + String.raw`test("say \"hi\"", () => {})`).map(item => item.title),
+    ['a\\tb tab', 'a\\b slash', 'say "hi"']
+  )
+  // Both single-escaped TAP (\t) and Node's double-escaped TAP (\\t) match the runtime tab title.
+  assert.equal(outcomeOf({ status: 0, stdout: 'ok 1 - a\\tb tab\n# tests 1\n# pass 1\n# fail 0\n# skipped 0\n' }, 'a\tb tab'), 'pass')
+  assert.equal(outcomeOf({ status: 0, stdout: 'ok 1 - a\\\\tb tab\n# tests 1\n# pass 1\n# fail 0\n# skipped 0\n' }, 'a\tb tab'), 'pass')
+
+  const r = repository(t)
+  r.write('scripts/value.mjs', 'export const value = 1\n')
+  r.commit()
+  const base = r.git('rev-parse', 'HEAD')
+  r.write('scripts/value.mjs', 'export const value = 2\n')
+  r.write('tests/escapes.test.mjs', [
+    header.trimEnd(),
+    "import { value } from '../scripts/value.mjs'",
+    String.raw`test('reads\tcolumns', () => assert.equal(value, 2))`,
+    String.raw`test('uses <XDG_RUNTIME_DIR>\\agent-board', () => assert.equal(value, 2))`,
+    'for (const name of ["one"]) test(`a ${name} receiver`, () => assert.equal(value, 2))',
+  ].join('\n') + '\n')
+  r.commit()
+  const command = (program, args, options = {}) => spawnSync(program, args, { cwd: r.cwd, env: r.env, encoding: 'utf8', timeout: 60000, ...options })
+  const result = await runFailFirst({
+    cwd: r.cwd,
+    base,
+    names: ['reads\\tcolumns', 'uses <XDG_RUNTIME_DIR>\\agent-board', 'a <name> receiver', 'not written anywhere'],
+    command,
+    env: r.env,
+  })
+  assert.deepEqual(Object.fromEntries(result.results.map(item => [item.title, item.state])), {
+    'reads\\tcolumns': 'counted',
+    'uses <XDG_RUNTIME_DIR>\\agent-board': 'counted',
+    'a <name> receiver': 'template',
+    'not written anywhere': 'unknown',
+  })
+  assert.equal(result.counted, 2)
+  assert.equal(result.total, 3)
 })
