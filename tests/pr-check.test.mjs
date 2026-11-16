@@ -1923,19 +1923,44 @@ test('pr-check limits the changed lines of a pull request by its tier, unless th
   assert.equal(run(`${risk}\nSurface: delivery, cannot split: \`<reason>\``, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: **<reason>**`, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: 同一個遷移`, lines(SIZE_RISK + 1)).problems.length, 0)
-  // A reason with an HTML entity or a tag in it is no reason, since Markdown can hide what it holds, and neither is an
-  // invisible character (a zero-width space, the Hangul filler); a reason starting with an unclosed `<` still counts.
-  assert.equal(run(`${risk}\nSurface: delivery + data, cannot split: &#8203;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: &lt;reason&gt;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: &amp;lt;reason&amp;gt;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: &#60;reason&#x3E;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: &ZeroWidthSpace;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: \u3164`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: <placeholder<reason>>`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: one migration &amp; its reader`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: &constructor;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSurface: delivery + data, cannot split: <span title="&gt;hidden"></span>`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: <span title=">hidden"></span>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  // Real entities in visible prose count, while entity-encoded placeholders, unknown/invisible entities, HTML tags and
+  // empty Markdown links/images remain hidden/empty in both size and surface; a leading unclosed `<` still counts (#1556).
+  assert.equal(run(`${risk}\nSize: cannot split: one migration &amp; its reader`, lines(SIZE_RISK + 1)).problems.length, 0)
+  let nestedPlaceholder = '<reason>'
+  for (let i = 0; i < 8; i++) nestedPlaceholder = nestedPlaceholder.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const hiddenSplitTexts = [
+    '&#8203;',
+    '&lt;reason&gt;',
+    '&amp;lt;reason&amp;gt;',
+    '&#60;reason&#x3E;',
+    '&ZeroWidthSpace;',
+    '&constructor;',
+    '\u3164',
+    '<placeholder<reason>>',
+    '<span title="&gt;hidden"></span>',
+    '<span title=">hidden"></span>',
+    '<span title=a"b></span>',
+    '<span title=a\'b></span>',
+    '<span title="a"b"></span>',
+    '[](<3>)',
+    '![](<3>)',
+    '[](<&#51;(((x)))>)',
+    '[](<a)b>)',
+    '[](https://example.com "a)b")',
+    "[](https://example.com 'a)b')",
+    '[](https://example.com/a\\)b)',
+    "[](https://example.com/a'b(c'd)e)",
+    '[]( "hidden words")',
+    '[]( (foo)bar)',
+    '[]( (hidden words))',
+    '[][ref]',
+    '![][ref]',
+    nestedPlaceholder,
+  ]
+  for (const hidden of hiddenSplitTexts) {
+    assert.equal(run(`${risk}\nSize: cannot split: ${hidden}`, lines(SIZE_RISK + 1)).problems.length, 1, hidden)
+    assert.equal(run(`Tier: risk\nSurface: delivery + data, cannot split: ${hidden}`, lines(SIZE_RISK + 1)).problems.length, 1, hidden)
+  }
   assert.equal(run(`${risk}\nSize: cannot split: <- the schema and its reader change together`, lines(SIZE_RISK + 1)).problems.length, 0)
   // The template's own lines are not a reason, and neither is one inside a code fence or an HTML comment.
   const template = readFileSync(new URL('../.github/pull_request_template.md', import.meta.url), 'utf8')
@@ -2002,9 +2027,42 @@ test('pr-check accepts two surfaces with cannot split and says it waits for an a
   const checked = surfaceRun('Surface: delivery + setup-writes, cannot split: main breaks between steps', { paths: ['hooks/connect.ts', 'hooks/messaging.ts'] })
   assert.deepEqual(checked.problems, [])
   assert.match(checked.info.join('\n'), /cannot split: main breaks between steps" waits for the maintainer's or the owner's answer before the first review/)
-  for (const empty of ['Surface: delivery + data, cannot split:', 'Surface: delivery + data, cannot split:   ', 'Surface: delivery + data, cannot split: <reason>', 'Surface: delivery + data, cannot split: <reason>, cannot split: <reason>', 'Surface: delivery + data, cannot split: \`<reason>\`', 'Surface: delivery + data, cannot split: &lt;reason&gt;', 'Surface: delivery + data, cannot split: \u3164']) {
+  for (const empty of [
+    'Surface: delivery + data, cannot split:',
+    'Surface: delivery + data, cannot split:   ',
+    'Surface: delivery + data, cannot split: <reason>',
+    'Surface: delivery + data, cannot split: <reason>, cannot split: <reason>',
+    'Surface: delivery + data, cannot split: `<reason>`',
+    'Surface: delivery + data, cannot split: &#8203;',
+    'Surface: delivery + data, cannot split: &lt;reason&gt;',
+    'Surface: delivery + data, cannot split: &amp;lt;reason&amp;gt;',
+    'Surface: delivery + data, cannot split: &#60;reason&#x3E;',
+    'Surface: delivery + data, cannot split: &ZeroWidthSpace;',
+    'Surface: delivery + data, cannot split: &constructor;',
+    'Surface: delivery + data, cannot split: \u3164',
+    'Surface: delivery + data, cannot split: <placeholder<reason>>',
+    'Surface: delivery + data, cannot split: <span title="&gt;hidden"></span>',
+    'Surface: delivery + data, cannot split: <span title=">hidden"></span>',
+    'Surface: delivery + data, cannot split: <span title=a"b></span>',
+    "Surface: delivery + data, cannot split: <span title=a'b></span>",
+    'Surface: delivery + data, cannot split: <span title="a"b"></span>',
+    'Surface: delivery + data, cannot split: [](<3>)',
+    'Surface: delivery + data, cannot split: ![](<3>)',
+    'Surface: delivery + data, cannot split: [](<&#51;(((x)))>)',
+    'Surface: delivery + data, cannot split: [](<a)b>)',
+    'Surface: delivery + data, cannot split: [](https://example.com "a)b")',
+    "Surface: delivery + data, cannot split: [](https://example.com 'a)b')",
+    'Surface: delivery + data, cannot split: [](https://example.com/a\\)b)',
+    "Surface: delivery + data, cannot split: [](https://example.com/a'b(c'd)e)",
+    'Surface: delivery + data, cannot split: []( "hidden words")',
+    'Surface: delivery + data, cannot split: []( (foo)bar)',
+    'Surface: delivery + data, cannot split: []( (hidden words))',
+    'Surface: delivery + data, cannot split: [][ref]',
+    'Surface: delivery + data, cannot split: ![][ref]',
+  ]) {
     assert.match(surfaceRun(empty).problems[0]?.message ?? '', /`cannot split:` with no reason/, empty)
   }
+  assert.deepEqual(surfaceRun('Surface: delivery + data, cannot split: one migration &amp; its reader').problems, [])
   // A filled reason may start with `<`; only the template's own `<reason>` is a placeholder.
   assert.deepEqual(surfaceRun('Surface: delivery + data, cannot split: <30 seconds of a broken main still blocks a release').problems, [])
   // The exception covers two surfaces, not three.
