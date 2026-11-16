@@ -22,14 +22,14 @@ const fixture = run => {
   env.AGENT_BOARD_SETUP_COMMAND = ''
   for (const name of ['CODEX_THREAD_ID', 'CODEX_SESSION_ID', 'AGENT_BOARD_AGENT', 'AGENT_BOARD_SESSION_ID', 'AGENT_BOARD_SETUP_TTY']) delete env[name]
   const launch = args => spawnSync(process.execPath, [launcher, ...args], { cwd: root, env, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
-  try { run({ root, home, launch }) } finally { rmSync(root, { recursive: true, force: true }) }
+  try { run({ root, home, launch, env }) } finally { rmSync(root, { recursive: true, force: true }) }
 }
 
 for (const [name, options] of [
   ['the default installation', () => []],
   ['a custom data directory with spaces and a quote', root => ['--data-dir', join(root, "board's data")]],
   ['a nondefault progress file', root => ['--progress-file', join(root, 'separate progress', 'work.md')]],
-]) test(`setup's printed board command opens ${name} through the package launcher`, () => fixture(({ root, home, launch }) => {
+]) test(`setup's printed board command opens ${name} through the package launcher`, () => fixture(({ root, home, launch, env }) => {
   const args = options(root)
   const setup = launch(['setup', '--agent', 'grok', '--lang', 'en', ...args, '--apply'])
   assert.ifError(setup.error)
@@ -37,10 +37,13 @@ for (const [name, options] of [
   const command = setup.stdout.match(/Open the board: (.+)/)?.[1]
   assert.ok(command, 'setup must give its next board command')
   const data = args[0] === '--data-dir' ? args[1] : join(home, '.agent-board')
-  const expected = data === join(home, '.agent-board') ? [] : ['--data-dir', data]
-  const passed = command === prefix ? [] : ['--data-dir', data]
-  // Run exactly the advertised package arguments, with a read-only view instead of opening a browser.
-  const board = launch([...passed, '--print'])
+  const expected = [...(data === join(home, '.agent-board') ? [] : ['--data-dir', data]), ...(args[0] === '--progress-file' ? args : []), '--lang', 'en']
+  // Execute the advertised arguments, substituting only this checkout for npx so the test stays offline.
+  const direct = `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(launcher)}`
+  const printed = command.replace(prefix, direct) + ' --print'
+  const board = process.platform === 'win32'
+    ? spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', printed], { env, cwd: root, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
+    : spawnSync(printed, { shell: true, env, cwd: root, encoding: 'utf8', timeout: 30_000 })
   assert.ifError(board.error)
   assert.equal(board.status, 0, 'the printed board command must find the installed board')
   assert.doesNotMatch(board.stderr, /not set up|No board script/)

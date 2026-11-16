@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { rmSync } from 'node:fs'
+import { copyFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { bootstrap, locales, fixture, terminal } from './helpers/setup-fixture.mjs'
@@ -11,6 +11,8 @@ const boardCheck = (f, args) => spawnSync(process.execPath, [join(f.root, 'data'
 test('an unreachable detected Codex retains locate advice instead of a failing doctor command in every language', () => {
   for (const lang of locales) fixture((setup, f) => {
     const commands = setupPrograms(f.root, f.env, ['codex'])
+    // Windows discovery accepts a native executable, not the .cmd stand-in used by explicit trust tests.
+    if (process.platform === 'win32') copyFileSync(process.execPath, join(f.root, 'synthetic bin', 'codex.exe'))
     setup('--agent', 'codex', '--lang', lang, '--apply')
     f.env.AGENT_BOARD_TEST_CODEX_FAIL = '1'
     const result = boardCheck(f, ['--agent', 'codex', '--codex-doctor', '--lang', lang])

@@ -96,7 +96,7 @@ test('a failed Codex trust part keeps Hermes trust and the Claude plugin install
   f.env.AGENT_BOARD_TEST_CODEX_FAIL = '1'
   const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'])
   succeeded(result)
-  assert.match(result.stdout, /Approve the board's hooks in Codex: failed\. Run: .*--codex-trust.*--codex-bin.*--apply/)
+  assert.match(result.stdout, /Approve the board's hooks in Codex: failed\. Run: .*--codex-trust --apply --codex-bin /)
   assert.match(result.stdout, /Approve the board's hooks in Hermes Agent: done\./)
   assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), true)
   assert.deepEqual(claudeCalls(f), pluginCommands)
