@@ -99,6 +99,8 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
     try { mailbox = hookMailbox(defaultMessagesDirectory(progress, home, process.env, process.platform), hookDeadline - Date.now()) } catch (error) {
       setupError = error instanceof Error && error.message ? error.message : 'MAILBOX_FAILED'
     }
+    // Antigravity's turn has ended: the sidecar's wake waits for this, not for a progress report (#1396).
+    if (agent === 'antigravity' && event === 'Stop') await mailbox?.idle(agent, session, Date.now())
     if (isSessionEnd(agent, event)) {
       try { await mailbox?.end(agent, session, Date.now()) } catch {}
     } else if (isTurnStart(agent, event)) {

@@ -7079,13 +7079,17 @@ test('with the receivers\' own records, a Claude card sends and a Codex card tha
   assert.notEqual((await board.call('/api/messages/send', { id: 'AB-DIRECT-claude', target: claudeConnection.id, turn: 'session', text: 'Again' })).body.error, 'NO_RECORDED_ROUTE')
 }, '', undefined, RECEIVER_ROUTES))
 
-test('the real Antigravity sidecar wakes an idle app conversation once for a board message, and its turn-start hook then hands the message over (#1396)', () => fixture(async (board, dir) => {
+test('the real Antigravity sidecar wakes an idle app conversation once for a board message 10 s after the board has its turn\'s Stop, and the board\'s mailbox hand-over that the turn-start hook calls then gives the message (#1396)', () => fixture(async (board, dir) => {
   const { ANTIGRAVITY_WAKE_LINE, antigravitySidecarSource } = await import('../hooks/antigravity-sidecar.ts')
+  const { WAKE_IDLE_MS } = await import('../hooks/hook-messages.ts')
   const conversation = '0b6d6e0e-6f43-4c0b-9a58-3f1a7e3a1c11'
-  // The board's own record says the conversation's turn ended 20 s ago, past the 10 s the board waits.
+  // The conversation's progress row reads waiting, so the card offers the idle route.
   writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n<!-- auto session=abcdef01 agent=antigravity resume=${conversation} state=waiting updated=${new Date(Date.now() - 20_000).toISOString()} -->\n### App card\n- [?] Pick one?\n<!-- /auto session=abcdef01 -->\n`)
+  // The calls Antigravity's turn-start and Stop hooks make, sent here to the board's mailbox API directly.
   const hook = async () => (await board.call('/api/messages/mailbox-turn', { agent: 'antigravity', session: conversation, surface: 'IDE' })).body.message
   assert.equal(await hook(), null)
+  assert.deepEqual((await board.call('/api/messages/mailbox-idle', { agent: 'antigravity', session: conversation })).body, { ok: true })
+  const stopped = Date.now()
   const card = async () => (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'antigravity')
   assert.equal((await card()).line, 'nextTurn')
   // The sidecar setup writes, with a stand-in for Antigravity's agentapi that only logs its arguments.
@@ -7108,7 +7112,9 @@ test('the real Antigravity sidecar wakes an idle app conversation once for a boa
   assert.equal((await card()).line, 'now')
   const sent = await board.call('/api/messages/send', { id: 'AB-WAKE-1', target: mailboxId('antigravity', conversation), turn: 'session', text: 'Synthetic wake text' })
   assert.equal(sent.body.line, 'now')
-  // The next poll wakes the conversation with the fixed line alone, and the board keeps the sidecar's report.
+  // The board wakes a conversation only 10 s after its Stop, so the test waits that out; then the next poll wakes the
+  // conversation with the fixed line alone, and the board keeps the sidecar's report.
+  await pause(Math.max(0, stopped + WAKE_IDLE_MS + 500 - Date.now()))
   assert.match(await sidecar(), /wake sent/)
   assert.deepEqual(calls(), [['send-message', '--title=Agent Board', conversation, ANTIGRAVITY_WAKE_LINE]])
   const message = (await board.call('/api/board')).body.messaging.messages.find(one => one.id === 'AB-WAKE-1')

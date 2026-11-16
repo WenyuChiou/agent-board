@@ -97,12 +97,6 @@ export const sessionState = (view: View, agent: string, session: string): RowSta
     .map(one => 'steps' in one ? rowState(one as Parameters<typeof rowState>[0]) : stateOf(one.auto as Parameters<typeof stateOf>[0], (one.target as AgentTarget | null | undefined)?.isClosed === true))
   return states.length > 0 && states.every(state => state === states[0]) ? states[0] : undefined
 }
-// The board's own record of a session's turn end (#1396): the last time its rows reported while it reads idle.
-export const idleSince = (view: View, agent: string, session: string): number | undefined => {
-  if (sessionState(view, agent, session) !== 'idle') return undefined
-  const last = Math.max(...sessionRows(view).filter(one => ((one.agent as string | undefined) || 'claude') === (agent || 'claude') && one.nativeSession === session).map(one => typeof one.at === 'number' ? one.at : 0))
-  return last > 0 ? last : undefined
-}
 const codexResumeHint = (agent: string, state: RowState | undefined, s: Strings): string => agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : ''
 
 // One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route

@@ -5,7 +5,8 @@ import { sha256 } from './sha256.ts'
 // a later bridge can add its own value without a new store version.
 export type Origin = 'local'
 // A connected session is a live lease from a host adapter, never a name in progress.md.
-export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin; folderDigest?: string; mcpOwner?: string; mcpLeaseUntil?: number }
+// busyAt, idleAt: an Antigravity mailbox's last turn start and last Stop, as its own hooks told the board (#1396).
+export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin; folderDigest?: string; mcpOwner?: string; mcpLeaseUntil?: number; busyAt?: number; idleAt?: number }
 export type Message = {
   id: string
   target: string
@@ -45,7 +46,9 @@ export type Message = {
   // When an automatic receiver left with this message still queued. The board refuses the message a fixed time after
   // this, working from the store alone; the next receiver of the session takes it over and clears the stamp (#318).
   leftAt?: number
-  // What the Antigravity sidecar reported of the wake it started for this message (#1396); the first report stays.
+  // When the Antigravity sidecar started a wake for this message, and what it reported of it (#1396); the first report
+  // stays. A field of its own, so OpenCode's `attempted` rules (release, lapse, settle) never read an Antigravity wake.
+  woke?: number
   wake?: 'sent' | 'failed'
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }

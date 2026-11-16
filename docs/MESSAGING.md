@@ -234,15 +234,17 @@ What each side may rely on:
   otherwise the hook mailbox's `nextTurn` route stands, as it always does for agy TUI. The sidecar counts as on for 34 s
   after its last poll: one 30 s wait after a poll that got no answer, plus two 2 s polls (`SIDECAR_ALIVE_MS`), so one
   lost answer does not take Send away and a sidecar that stopped is no longer offered within about half a minute.
-- **Which message.** `wake-poll` returns only a message the board sent on that route, still queued and never attempted,
-  for a mailbox on `IDE`, and only once the conversation has read idle for 10 s in the board's own record (its rows'
-  last report while idle). The app has no running field, so a conversation whose last wake began after that record is
-  read as still in the wake's turn, and nothing more is woken until a later turn end is recorded. A wake reported
-  `failed` holds nothing.
-- **Attempt.** The board saves the start (`attempted`, the mark OpenCode's attempt uses) before it answers
-  `{"ok":true}`. The `nonce` is worked out from the message, so the board keeps none. The hook mailbox hands the message
-  over in the turn the wake starts; a hook's release does not hand back a started wake, so it goes out again only after
-  its lease, and never to a second wake.
+- **Which message.** `wake-poll` returns only a message the board sent on that route, still queued and never woken,
+  for a mailbox on `IDE`, and only when it is the message the next turn's hook would take: a peer message or a claim in
+  doubt ahead of it means no wake. The turn's state comes from Antigravity's own hooks, never from progress rows (a model
+  may report waiting before its turn ends): the turn-start hook's take marks the mailbox busy, and the `Stop` hook calls
+  `mailbox-idle`, which marks it idle. A wake is due 10 s after a `Stop` later than the last turn start, and only while no
+  wake of that conversation started since that `Stop`. A `Stop` call the board did not take (no board running, a busy
+  one) records nothing, so nothing is woken and the next turn delivers.
+- **Attempt.** The board saves the start (`woke`, a field of its own; OpenCode's `attempted` rules never read it) before
+  it answers `{"ok":true}`. The `nonce` is worked out from the message, so the board keeps none. The hook mailbox hands the
+  message over in the turn the wake starts; a hook that hands its claim back puts the message back in the queue at once,
+  for the next turn, and never to a second wake.
 - **Report.** The first report stays. Until the hook hands the message over, the card reads that Antigravity was woken,
   could not be woken, is being woken with nothing confirmed yet (a start with no report), or that the sidecar is not on
   (a message sent for a wake whose sidecar has stopped).

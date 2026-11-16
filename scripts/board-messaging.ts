@@ -2,8 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
-import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, shownWake, SIDECAR_ALIVE_MS, takeMailboxMessage, wakeAction } from '../hooks/hook-messages'
-import type { IdleSince } from '../hooks/hook-messages'
+import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, markMailbox, releaseMailboxMessage, shownWake, SIDECAR_ALIVE_MS, takeMailboxMessage, wakeAction } from '../hooks/hook-messages'
 import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, rebindMessages, ROUTE_LINES, sendDecision, shownMessage, sidecarRoutes, textHash } from '../hooks/messaging'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
@@ -27,7 +26,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
   for (const one of messages) {
     messageId(one.id)
     if (one.framingNonce !== undefined && (typeof one.framingNonce !== 'string' || !/^[0-9a-f]{32}$/.test(one.framingNonce)) || one.awaitsAck !== undefined && typeof one.awaitsAck !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
-    if (one.attempted !== undefined && !(Number.isFinite(one.attempted) && one.attempted > 0)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.attempted !== undefined && !(Number.isFinite(one.attempted) && one.attempted > 0) || one.woke !== undefined && !(Number.isFinite(one.woke) && one.woke > 0)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
@@ -52,6 +51,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
       if (!one || !isMailboxTarget(one.id) || one.id !== mailboxId(messageId(one.agent), messageId(one.session)) || one.scope !== 'mailbox' || one.turn !== 'session' || !Number.isFinite(one.expires)) throw new Error('INVALID_MESSAGE_STORE')
       messageText(one.surface, 100)
       if (one.folderDigest !== undefined && (typeof one.folderDigest !== 'string' || !/^[0-9a-f]{64}$/.test(one.folderDigest)) || one.mcpOwner !== undefined && (typeof one.mcpOwner !== 'string' || !/^[1-9][0-9]*:[^\r\n\0]{1,100}$/.test(one.mcpOwner)) || one.mcpLeaseUntil !== undefined && !Number.isFinite(one.mcpLeaseUntil) || one.contested !== undefined && typeof one.contested !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
+      if (one.busyAt !== undefined && !Number.isFinite(one.busyAt) || one.idleAt !== undefined && !Number.isFinite(one.idleAt)) throw new Error('INVALID_MESSAGE_STORE')
     }
     if (new Set(saved.mailboxes.map(one => one.id)).size !== saved.mailboxes.length) throw new Error('INVALID_MESSAGE_STORE')
   }
@@ -82,9 +82,17 @@ export const mailboxAction = (state: MessageState, action: string, body: Record<
     messageFields(body, ['agent', 'session', 'surface', 'before', 'isRestricted', 'ref'])
     if (body.ref !== undefined && !isClaimRef(body.ref)) throw new Error('INVALID_REF')
     if (body.isRestricted === true && (state.mailboxes?.find(one => one.id === mailboxId(agent, session))?.mcpLeaseUntil ?? 0) > now) throw new Error('NO_LEASE')
-    if (body.before !== undefined && (typeof body.before !== 'number' || now > body.before)) return { state, result: { message: null } }
+    // Antigravity's turn has started, whether or not this take still reaches its hook in time (#1396).
+    const busy = (changed: MessageState): MessageState => agent === 'antigravity' ? markMailbox(changed, agent, session, 'busyAt', now) : changed
+    if (body.before !== undefined && (typeof body.before !== 'number' || now > body.before)) return { state: busy(state), result: { message: null } }
     const next = takeMailboxMessage(state, agent, session, messageText(body.surface, 100), now, STALE_MS, randomBytes(3).toString('hex'), body.ref)
-    return { state: next.state, result: { message: next.message } }
+    return { state: busy(next.state), result: { message: next.message } }
+  }
+  // Antigravity's Stop hook: its turn has ended, which the sidecar's wake waits for (#1396). It marks a mailbox already there.
+  if (action === 'mailbox-idle') {
+    messageFields(body, ['agent', 'session'])
+    if (agent !== 'antigravity') throw new Error('INVALID_MAILBOX_CALL')
+    return { state: markMailbox(state, agent, session, 'idleAt', now), result: { ok: true } }
   }
   if (action === 'mailbox-release') {
     messageFields(body, ['agent', 'session', 'ref', 'unsent'])
@@ -166,7 +174,7 @@ export const moveLockAside = (lock: string, recorded: string, claim: MessageStor
 
 // Only a host adapter can register a receiving session. Registrations and secrets die with
 // this server; message ids and receipts survive restart so uncertainty is never auto-retried.
-export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined; idleSince?: IdleSince }
+export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined }
 
 const openMessaging = (directory: string, isDefault = false, gate?: MessageGate) => {
   const root = resolve(directory)
@@ -495,12 +503,12 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         return { ok: true }
       }
       if (action === 'wake-poll' || action === 'wake-attempt' || action === 'wake-report') {
-        const next = wakeAction(state, action, body, now, gate?.idleSince ?? (() => undefined))
+        const next = wakeAction(state, action, body, now)
         if (action === 'wake-poll') sidecarSeen = now
         if (next.state !== state) save(next.state, now)
         return next.result
       }
-      if (['mailbox-turn', 'mailbox-release', 'mailbox-attempt', 'mailbox-open', 'mailbox-accept', 'mailbox-end', 'mailbox-ack', 'mcp-enroll'].includes(action)) {
+      if (['mailbox-turn', 'mailbox-release', 'mailbox-attempt', 'mailbox-open', 'mailbox-accept', 'mailbox-end', 'mailbox-ack', 'mailbox-idle', 'mcp-enroll'].includes(action)) {
         const next = mailboxAction(state, action, body, now)
         save(next.state, now)
         return next.result
@@ -652,7 +660,8 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
       }
       // Only a running board claims after the hook stopped waiting; the store is written by the hook itself.
       // An in-process plugin hands a claim back through the store itself (writesRelease); a hook that stopped waiting leaves that to a running board.
-      if (action === 'peer-send' || (action === 'mailbox-release' || action === 'mailbox-attempt') && !writesRelease) throw new Error('BOARD_NOT_RUNNING')
+      // A Stop with no board running records nothing: no sidecar polls a board that is not running, and the next turn delivers.
+      if (action === 'peer-send' || action === 'mailbox-idle' || (action === 'mailbox-release' || action === 'mailbox-attempt') && !writesRelease) throw new Error('BOARD_NOT_RUNNING')
       // A kept claim that is no longer on disk is gone, and a fresh one is taken.
       const kept = held
       held = null
@@ -784,6 +793,8 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
       try { await access.call('mailbox-accept', { agent, session, id, nonce }, now); return true } catch { return false }
     },
     end: (agent: string, session: string, now: number) => call('mailbox-end', { agent, session }, now),
+    // Antigravity's Stop (#1396): a call the board did not take records nothing, so nothing is woken and the next turn delivers.
+    idle: (agent: string, session: string, now: number) => call('mailbox-idle', { agent, session }, now),
     // The same end for a caller that must tell a write that failed from one that worked.
     endOrThrow: async (agent: string, session: string, now: number): Promise<void> => { await access.call('mailbox-end', { agent, session }, now) },
   }
