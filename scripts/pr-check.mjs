@@ -877,7 +877,24 @@ export const SIZE_NORMAL = 800
 // A reason is the text after `cannot split:` with a letter or a digit, in any language, left once each `<...>` placeholder
 // and repeated `cannot split:` are taken out, so formatting alone is none (surface reads it the same way); the template's own `Surface:` line,
 // which starts with `<`, never counts (as in surface), and neither does a line in a code fence or an HTML comment.
-const isSplitReason = text => /[\p{L}\p{N}]/u.test(text.replace(/<[^<>]*>/g, '').replace(/cannot split:/gi, ''))
+// Markdown shows an HTML entity as its character, so `&lt;reason&gt;` is the placeholder and `&#8203;` an invisible
+// space: entities are read as what they show (named ones other than these five as nothing), and a placeholder inside
+// another goes with it, until nothing changes. Then a character Unicode marks default-ignorable (a zero-width space,
+// the Hangul filler) is not a letter.
+const ENTITIES = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" }
+const fromEntity = (_, dec, hex, name) => {
+  if (name !== undefined) return ENTITIES[name.toLowerCase()] ?? ''
+  const code = dec !== undefined ? Number(dec) : parseInt(hex, 16)
+  return code <= 0x10ffff ? String.fromCodePoint(code) : ''
+}
+const shownText = text => {
+  for (let before = ''; before !== text;) {
+    before = text
+    text = text.replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|([a-z][a-z0-9]*));/gi, fromEntity).replace(/<[^<>]*>/g, '')
+  }
+  return text
+}
+const isSplitReason = text => /[\p{L}\p{N}]/u.test(shownText(text).replace(/cannot split:/gi, '').replace(/\p{Default_Ignorable_Code_Point}/gu, ''))
 const hasSplitReason = body => surfaceLine(body).filled.some(value => isSplitReason(value.split(/,[ \t]*cannot split:/i).slice(1).join(','))) ||
   visibleLines(body).some(line => isSplitReason(line.match(/^Size:[ \t]*cannot split:(.*)$/i)?.[1] ?? ''))
 export const size = ({ body = '', title = '', number = null, numstat, tier = visibleTier(body) } = {}) => {
