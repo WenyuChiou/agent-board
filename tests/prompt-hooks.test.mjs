@@ -1290,8 +1290,21 @@ const escapedDeliveryCases = async () => {
   const decoy = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt: '\\u0041gent Board message' })
   assert.equal(JSON.parse(decoy).prompt.startsWith('\\u0041'), true)
   cases.push(['a literal backslash before u0041', decoy, { session_id: 'synthetic', cwd: '/work/demo', board_request: true }])
+  // codex_464: an escaped backslash inside a hint word, and a folder key written escaped whose value holds a hint word.
+  const split = JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt: 'boa\\rd' })
+  assert.equal(JSON.parse(split).prompt, 'boa\\rd')
+  cases.push(['an escaped backslash inside "board"', split, { session_id: 'synthetic', cwd: '/work/demo' }])
+  const folder = '{"session_id":"synthetic","\\u0063wd":"bo\\u0061rd","prompt":"Continue"}'
+  assert.equal(JSON.parse(folder).cwd, 'board')
+  cases.push(['a folder key written escaped', folder, { session_id: 'synthetic' }])
   return cases
 }
+// The flags a timeout receipt sets, with its session; the sh scan cannot read an escaped folder key's value.
+const receiptFlags = text => {
+  const { session_id, board_request, delivery_request } = JSON.parse(text)
+  return { session_id, ...(board_request === undefined ? {} : { board_request }), ...(delivery_request === undefined ? {} : { delivery_request }) }
+}
+const expectedFlags = ({ cwd, ...flags }) => flags
 
 test('the sh timeout receipt reads a delivery header written with \\u escapes (#1334)', () => fixture(async home => {
   const { reporterSh } = await import('../hooks/hook-reporters.ts')
@@ -1304,7 +1317,7 @@ test('the sh timeout receipt reads a delivery header written with \\u escapes (#
     writeFileSync(file + '.tmp', raw)
     const out = spawnSync(sh, [shellPath(script)], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', windowsHide: true, timeout: 10000 })
     assert.equal(out.status, 0, out.stderr)
-    assert.equal(readFileSync(file + '.json', 'utf8'), JSON.stringify(expected), name)
+    assert.deepEqual(receiptFlags(readFileSync(file + '.json', 'utf8')), expectedFlags(expected), name)
   }
 }))
 
@@ -1325,7 +1338,7 @@ test('the PowerShell timeout receipt reads a delivery header written with \\u es
       writeFileSync(script, `$ErrorActionPreference = 'Stop'\n$Payload = [IO.File]::ReadAllText(${quote(input)})\n$script:fallback = $null\n& {${block}}\n[IO.File]::WriteAllText(${quote(output)}, [string]$script:fallback)\n`)
       const out = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], { encoding: 'utf8', windowsHide: true, timeout: 30000 })
       assert.equal(out.status, 0, `${copy} ${name}: ${out.stderr}`)
-      assert.equal(readFileSync(output, 'utf8'), JSON.stringify(expected), `${copy} ${name}`)
+      assert.deepEqual(receiptFlags(readFileSync(output, 'utf8')), expectedFlags(expected), `${copy} ${name}`)
     }
   }
 }))

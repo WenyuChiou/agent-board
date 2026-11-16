@@ -16,10 +16,13 @@ const SESSION_KEYS = RECEIPT_SESSION_KEYS
 const PATH_KEYS = [...RECEIPT_FOLDER_KEYS, 'transcript_path', 'transcriptPath']
 const SH_PATH_STRIP = String.raw`s/"(${PATH_KEYS.join('|')})"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"//g; s/"workspace_roots"[[:space:]]*:[[:space:]]*\[[^]]*]//g`
 const PS_PATH_STRIP = String.raw`"(?:${PATH_KEYS.join('|')})"\s*:\s*"(?:[^"\\]|\\.)*"|"workspace_roots"\s*:\s*\[[^\]]*\]`
-// Valid JSON may write any letter as a \u escape, so the scan reads the hint letters, the space and the hyphen back
-// from their escapes before it looks for a hint (#1334). An escaped backslash goes first, so `\\u0041` stays text.
-const HINT_CHARS = [...new Set([...[DELIVERY_REQUEST_HINT, ...BOARD_REQUEST_HINTS].join('').toLowerCase()].flatMap(char => [char, char.toUpperCase()]))]
-const SH_HINT_UNESCAPE = [String.raw`s/\\\\//g`, ...HINT_CHARS.map(char => String.raw`s/\\u${char.charCodeAt(0).toString(16).padStart(4, '0').replace(/[a-f]/g, hex => `[${hex}${hex.toUpperCase()}]`)}/${char}/g`)].join('; ')
+// Valid JSON may write any letter as a \u escape (#1334). Before it strips the folder paths and looks for a hint, the sh
+// scan reads back the letters, the space, the hyphen and the underscore of every hint and folder key from their
+// escapes; an escaped backslash becomes `_` first, so neither `\\u0041` nor `boa\\rd` turns into hint letters.
+// The PowerShell scan strips the paths, reads every escape back with [regex]::Unescape, which reads left to right,
+// and strips the paths again for a folder key that was written escaped.
+const UNESCAPED_CHARS = [...new Set([...[DELIVERY_REQUEST_HINT, ...BOARD_REQUEST_HINTS, ...PATH_KEYS, 'workspace_roots'].join('').toLowerCase()].flatMap(char => [char, char.toUpperCase()]))]
+const SH_UNESCAPE = [String.raw`s/\\\\/_/g`, ...UNESCAPED_CHARS.map(char => String.raw`s/\\u${char.charCodeAt(0).toString(16).padStart(4, '0').replace(/[a-f]/g, hex => `[${hex}${hex.toUpperCase()}]`)}/${char}/g`)].join('; ')
 
 // Each board word as a case pattern in any letter case, e.g. *[Bb][Oo][Aa][Rr][Dd]*.
 const shPattern = (hint: string): string => `*${[...hint].map(char => /[a-z]/i.test(char) ? `[${char.toUpperCase()}${char.toLowerCase()}]` : char === ' ' ? '\\ ' : char).join('')}*`
@@ -105,7 +108,7 @@ write_fallback() {
   IFS=$saved_ifs
   [ -n "$had_globbing_off" ] || set +f
   [ -n "$has_session" ] || return
-  scan=$(LC_ALL=C sed -E ${shellQuote(`${SH_PATH_STRIP}; ${SH_HINT_UNESCAPE}`)} "$file.tmp") || scan=$(cat "$file.tmp")
+  scan=$(LC_ALL=C sed -E ${shellQuote(`${SH_UNESCAPE}; ${SH_PATH_STRIP}`)} "$file.tmp") || scan=$(cat "$file.tmp")
   # An empty scan (sed and cat both failed) counts as a board request: a wrong mark only leaves a question waiting.
   # A delivery header is no board command: it keeps the turn's closing question, so it is checked first (#1334). Its own
   # words hold "board", so this scan cannot see a board command inside a delivery; the classifier can, and it wins there.
@@ -409,7 +412,7 @@ try {
         $hasSession = $false
         foreach ($key in @(${SESSION_KEYS.map(psQuote).join(',')})) { if ($metadata.Contains($key)) { $hasSession = $true } }
         if ($hasSession) {
-          $scan = [regex]::Replace($Payload, ${psQuote(PS_PATH_STRIP)}, ''); try { $scan = [regex]::Unescape($scan) } catch {}
+          $p = ${psQuote(PS_PATH_STRIP)}; $scan = [regex]::Replace($Payload, $p, ''); try { $scan = [regex]::Replace([regex]::Unescape($scan), $p, '') } catch {}
           if ($scan.IndexOf(${psQuote(DELIVERY_REQUEST_HINT)}, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $metadata['delivery_request'] = $true }
           elseif (${BOARD_REQUEST_HINTS.map(hint => `$scan.IndexOf(${psQuote(hint)}, [StringComparison]::OrdinalIgnoreCase) -ge 0`).join(' -or ')}) { $metadata['board_request'] = $true }
           $json = ConvertTo-Json -InputObject $metadata -Compress -Depth 4
