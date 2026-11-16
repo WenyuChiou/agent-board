@@ -121,6 +121,7 @@ export const sampleBinding = (agent: string, via: Via): Connection => via === 'l
   ? { id: 'c1', agent, session: 's1', surface: 'CLI', turn: 't1', scope: 'session', expires: FAR }
   : { id: `mailbox_${sha256(address(agent, 's1')).slice(0, 24)}`, agent, session: 's1', surface: 'CLI', turn: 'session', scope: 'mailbox', expires: FAR }
 type Sample = Partial<Message> & { agent?: 'opencode'; via: Via }
+type Shape = Partial<Message> & { agent?: 'opencode'; via?: Via }
 const REF = '0123456789ab'
 const out = { claimed: SAMPLE_NOW, nonce: 'a1b2c3' } as const
 const wake = { agent: 'opencode', via: 'mailbox', ref: REF, attempted: SAMPLE_NOW, ...out } as const
@@ -152,24 +153,34 @@ const SAMPLES: Record<DeliveryState, Sample> = {
   wakeExpired: { ...wake, status: 'uncertain', error: 'EXPIRED', hasAccepted: true, text: '' },
 }
 // Every state is walked in two more shapes: accepted before (an accept then another receipt, or the open limit, keeps
-// `hasAccepted`), and bound to another surface than its receiver's. A few states have shapes of their own.
-const COMMON_SHAPES: Record<string, Partial<Message>> = { acceptedBefore: { hasAccepted: true }, otherSurface: { surface: 'IDE' } }
-const OWN_SHAPES: Partial<Record<DeliveryState, Record<string, Partial<Message>>>> = {
+// `hasAccepted`), and bound to another surface than its receiver's. A state `stateOf` reads the same on every receiver
+// is also walked on a hook's mailbox, there for a caller that can ACK, after an unnamed pull, and as an OpenCode wake. A few
+// have shapes of their own.
+const COMMON_SHAPES: Record<string, Shape> = { acceptedBefore: { hasAccepted: true }, otherSurface: { surface: 'IDE' } }
+const ON_HOOK = { via: 'mailbox', ref: REF } as const
+const RECEIVER_SHAPES: Record<string, Shape> = { onHook: ON_HOOK, awaitsAck: { ...ON_HOOK, awaitsAck: true }, onPull: { via: 'mailbox' }, onWake: wake }
+const ANY_RECEIVER: readonly DeliveryState[] = ['turnEnded', 'inDoubt', 'disconnected', 'acknowledged', 'rejected', 'dismissed', 'expired']
+const OWN_SHAPES: Partial<Record<DeliveryState, Record<string, Shape>>> = {
+  takenBack: { onHook: { via: 'mailbox' } },
+  pulled: { onWake: { agent: 'opencode' } },
+  handed: { onPull: { ref: undefined }, onWake: wake },
+  handedLost: { onPull: { ref: undefined }, onWake: wake },
+  acceptedAwaitsAck: { onPull: { ref: undefined } },
   leased: { lastRepeat: { redelivered: MAILBOX_REDELIVERIES - 1 } },
   inDoubt: { otherError: { error: 'CONNECTION_LOST' } },
-  acceptedLost: { otherError: { error: 'RECEIVER_ERROR' } },
+  acceptedLost: { awaitsAck: { ...ON_HOOK, awaitsAck: true }, onWake: { ...wake, awaitsAck: true }, otherError: { error: 'RECEIVER_ERROR' } },
   rejected: { stopped: { error: 'STOPPED' } },
   acknowledged: { withReply: { reply: 'ACK a1b2c3 on it' } },
 }
-export const shapesOf = (name: DeliveryState): Record<string, Partial<Message>> => ({ ...COMMON_SHAPES, ...OWN_SHAPES[name] })
+export const shapesOf = (name: DeliveryState): Record<string, Shape> => ({ ...COMMON_SHAPES, ...(ANY_RECEIVER.includes(name) ? RECEIVER_SHAPES : {}), ...OWN_SHAPES[name] })
 const messageOf = (binding: Connection, fields: Partial<Message>): Message => ({
   id: 'm1', target: binding.id, turn: binding.turn, from: 'board', to: address(binding.agent, binding.session), text: 'hello', hash: textHash('hello'),
   origin: 'local', status: 'queued', updated: SAMPLE_NOW, reply: '', error: '', hops: 1, claimed: 0, nonce: '', ...fields,
 })
 export const sampleOf = (name: DeliveryState, shape?: string): { message: Message; binding: Connection; state: MessageState } => {
-  const { agent = 'codex', via, ...fields } = SAMPLES[name]
+  const { agent = 'codex', via, ...fields } = { ...SAMPLES[name], ...(shape === undefined ? {} : shapesOf(name)[shape]) }
   const binding = sampleBinding(agent, via)
-  const message = messageOf(binding, { ...fields, ...(shape === undefined ? {} : shapesOf(name)[shape]) })
+  const message = messageOf(binding, fields)
   return { message, binding, state: { messages: [message], mailboxes: via === 'mailbox' ? [binding] : [] } }
 }
 
@@ -283,6 +294,7 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     attempt: 'INVALID_MAILBOX_CALL', release: 'pulled', releaseUnsent: 'pulled', dismiss: 'dismissed', disconnect: 'disconnected', leave: 'disconnected', rebind: 'pulled', openLimit: 'expired', dayLimit: 'expired' },
     shapes: {
       acceptedBefore: { card: 'messagesAcceptedUnconfirmed' },
+      onWake: { on: { attempt: 'CLAIM_LOST' } },
     } },
   leased: { holdsSend: true, holdsStart: true, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'leased', claimLate: 'sent:leased', pull: 'leased', accept: 'handed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'leased',
@@ -316,10 +328,17 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     attempt: 'INVALID_MAILBOX_CALL', release: 'accepted', releaseUnsent: 'accepted', dismiss: 'dismissed', disconnect: 'acceptedLost', leave: 'acceptedLost', rebind: 'accepted', openLimit: 'accepted', dayLimit: 'accepted' } },
   handed: { holdsSend: false, holdsStart: false, card: 'messagesHandedNow', claudeCard: 'claudeDelivered', on: {
     claim: 'handed', claimLate: 'handed', pull: 'handed', accept: 'handed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'leased',
-    attempt: 'INVALID_MAILBOX_CALL', release: 'handed', releaseUnsent: 'handed', dismiss: 'dismissed', disconnect: 'handedLost', leave: 'handedLost', rebind: 'handed', openLimit: 'expired', dayLimit: 'expired' } },
+    attempt: 'INVALID_MAILBOX_CALL', release: 'handed', releaseUnsent: 'handed', dismiss: 'dismissed', disconnect: 'handedLost', leave: 'handedLost', rebind: 'handed', openLimit: 'expired', dayLimit: 'expired' },
+    shapes: {
+      onPull: { on: { unsure: 'pulled' } },
+      onWake: { on: { unsure: 'wakeStarted', attempt: 'CLAIM_LOST', openLimit: 'wakeExpired', dayLimit: 'wakeExpired' } },
+    } },
   acceptedAwaitsAck: { holdsSend: true, holdsStart: true, card: 'messagesHandedNow', claudeCard: 'claudeDelivered', on: {
     claim: 'acceptedAwaitsAck', claimLate: 'acceptedAwaitsAck', pull: 'acceptedAwaitsAck', accept: 'acceptedAwaitsAck', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'leased',
-    attempt: 'INVALID_MAILBOX_CALL', release: 'acceptedAwaitsAck', releaseUnsent: 'acceptedAwaitsAck', dismiss: 'dismissed', disconnect: 'acceptedLost', leave: 'acceptedLost', rebind: 'acceptedAwaitsAck', openLimit: 'expired', dayLimit: 'expired' } },
+    attempt: 'INVALID_MAILBOX_CALL', release: 'acceptedAwaitsAck', releaseUnsent: 'acceptedAwaitsAck', dismiss: 'dismissed', disconnect: 'acceptedLost', leave: 'acceptedLost', rebind: 'acceptedAwaitsAck', openLimit: 'expired', dayLimit: 'expired' },
+    shapes: {
+      onPull: { on: { unsure: 'pulled' } },
+    } },
   wakeAccepted: { holdsSend: true, holdsStart: true, card: 'messagesHandedNow', claudeCard: 'claudeDelivered', on: {
     claim: 'wakeAccepted', claimLate: 'wakeAccepted', pull: 'wakeAccepted', accept: 'wakeAccepted', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'wakeStarted',
     attempt: 'CLAIM_LOST', release: 'wakeAccepted', releaseUnsent: 'wakeAccepted', dismiss: 'dismissed', disconnect: 'wakeAccepted', leave: 'wakeAccepted', rebind: 'wakeAccepted', openLimit: 'unconfirmed', dayLimit: 'unconfirmed' } },
@@ -327,22 +346,36 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     claim: 'acceptedLost', claimLate: 'acceptedLost', pull: 'acceptedLost', accept: 'acceptedLost', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'claimed',
     attempt: 'INVALID_MAILBOX_CALL', release: 'acceptedLost', releaseUnsent: 'acceptedLost', dismiss: 'dismissed', disconnect: 'acceptedLost', leave: 'acceptedLost', rebind: 'acceptedLost', openLimit: 'expired', dayLimit: 'expired' },
     shapes: {
+      awaitsAck: { card: 'messagesHandedNow', on: { unsure: 'leased' } },
+      onWake: { card: 'messagesHandedNow', on: { unsure: 'wakeStarted', attempt: 'CLAIM_LOST', openLimit: 'unconfirmed', dayLimit: 'unconfirmed' } },
       otherError: { card: 'messagesAccepted', claudeCard: 'claudeDelivered' },
     } },
   handedLost: { holdsSend: false, holdsStart: false, card: 'messagesHandedNow', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'handedLost', claimLate: 'handedLost', pull: 'handedLost', accept: 'handedLost', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'leased',
-    attempt: 'INVALID_MAILBOX_CALL', release: 'handedLost', releaseUnsent: 'handedLost', dismiss: 'dismissed', disconnect: 'handedLost', leave: 'handedLost', rebind: 'handedLost', openLimit: 'expired', dayLimit: 'expired' } },
+    attempt: 'INVALID_MAILBOX_CALL', release: 'handedLost', releaseUnsent: 'handedLost', dismiss: 'dismissed', disconnect: 'handedLost', leave: 'handedLost', rebind: 'handedLost', openLimit: 'expired', dayLimit: 'expired' },
+    shapes: {
+      onPull: { on: { unsure: 'pulled' } },
+      onWake: { on: { unsure: 'wakeStarted', attempt: 'CLAIM_LOST', openLimit: 'wakeExpired', dayLimit: 'wakeExpired' } },
+    } },
   turnEnded: { holdsSend: false, holdsStart: false, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'turnEnded', claimLate: 'turnEnded', pull: 'turnEnded', accept: 'accepted', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'claimed',
     attempt: 'INVALID_MAILBOX_CALL', release: 'turnEnded', releaseUnsent: 'turnEnded', dismiss: 'dismissed', disconnect: 'turnEnded', leave: 'turnEnded', rebind: 'turnEnded', openLimit: 'expired', dayLimit: 'expired' },
     shapes: {
       acceptedBefore: { card: 'messagesAcceptedUnconfirmed' },
+      onHook: { on: { accept: 'handed', unsure: 'leased' } },
+      awaitsAck: { on: { accept: 'acceptedAwaitsAck', unsure: 'leased' } },
+      onPull: { on: { accept: 'handed', unsure: 'pulled' } },
+      onWake: { on: { accept: 'handed', unsure: 'wakeStarted', attempt: 'CLAIM_LOST' } },
     } },
   inDoubt: { holdsSend: true, holdsStart: true, card: 'messagesTimeout', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'inDoubt', claimLate: 'inDoubt', pull: 'inDoubt', accept: 'accepted', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'claimed',
     attempt: 'INVALID_MAILBOX_CALL', release: 'inDoubt', releaseUnsent: 'inDoubt', dismiss: 'dismissed', disconnect: 'inDoubt', leave: 'inDoubt', rebind: 'inDoubt', openLimit: 'expired', dayLimit: 'expired' },
     shapes: {
       acceptedBefore: { card: 'messagesAcceptedUnconfirmed' },
+      onHook: { on: { accept: 'handed', unsure: 'leased' } },
+      awaitsAck: { on: { accept: 'acceptedAwaitsAck', unsure: 'leased' } },
+      onPull: { on: { accept: 'handed', unsure: 'pulled' } },
+      onWake: { on: { accept: 'handed', unsure: 'wakeStarted', attempt: 'CLAIM_LOST' } },
       otherError: { card: 'messagesUncertain' },
     } },
   disconnected: { holdsSend: true, holdsStart: true, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
@@ -350,6 +383,10 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     attempt: 'INVALID_MAILBOX_CALL', release: 'disconnected', releaseUnsent: 'disconnected', dismiss: 'dismissed', disconnect: 'disconnected', leave: 'disconnected', rebind: 'disconnected', openLimit: 'expired', dayLimit: 'expired' },
     shapes: {
       acceptedBefore: { card: 'messagesAcceptedUnconfirmed' },
+      onHook: { on: { accept: 'handed', unsure: 'leased' } },
+      awaitsAck: { on: { accept: 'acceptedAwaitsAck', unsure: 'leased' } },
+      onPull: { on: { accept: 'handed', unsure: 'pulled' } },
+      onWake: { on: { accept: 'handed', unsure: 'wakeStarted', attempt: 'CLAIM_LOST' } },
     } },
   unconfirmed: { holdsSend: false, holdsStart: false, card: 'messagesSentUnconfirmed', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'unconfirmed', claimLate: 'unconfirmed', pull: 'unconfirmed', accept: 'unconfirmed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'wakeStarted',
@@ -361,12 +398,14 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     claim: 'acknowledged', claimLate: 'acknowledged', pull: 'acknowledged', accept: 'RECEIPT_CONFLICT', ack: 'acknowledged', reject: 'RECEIPT_CONFLICT', fail: 'RECEIPT_CONFLICT', timeout: 'RECEIPT_CONFLICT', unsure: 'RECEIPT_CONFLICT',
     attempt: 'INVALID_MAILBOX_CALL', release: 'acknowledged', releaseUnsent: 'acknowledged', dismiss: 'MESSAGE_FINISHED', disconnect: 'acknowledged', leave: 'acknowledged', rebind: 'acknowledged', openLimit: 'acknowledged', dayLimit: 'gone' },
     shapes: {
+      onWake: { on: { attempt: 'CLAIM_LOST' } },
       withReply: { claudeCard: 'claudeReplied', on: { ack: 'RECEIPT_CONFLICT' } },
     } },
   rejected: { holdsSend: false, holdsStart: false, card: 'messagesRejected', claudeCard: 'messagesRejected', on: {
     claim: 'rejected', claimLate: 'rejected', pull: 'rejected', accept: 'RECEIPT_CONFLICT', ack: 'RECEIPT_CONFLICT', reject: 'rejected', fail: 'RECEIPT_CONFLICT', timeout: 'RECEIPT_CONFLICT', unsure: 'RECEIPT_CONFLICT',
     attempt: 'INVALID_MAILBOX_CALL', release: 'rejected', releaseUnsent: 'rejected', dismiss: 'MESSAGE_FINISHED', disconnect: 'rejected', leave: 'rejected', rebind: 'rejected', openLimit: 'rejected', dayLimit: 'gone' },
     shapes: {
+      onWake: { on: { attempt: 'CLAIM_LOST' } },
       stopped: { claudeCard: 'claudeStopped' },
     } },
   takenBack: { holdsSend: false, holdsStart: false, card: 'messagesRejected', claudeCard: null, on: {
@@ -377,12 +416,14 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     attempt: 'INVALID_MAILBOX_CALL', release: 'dismissed', releaseUnsent: 'dismissed', dismiss: 'MESSAGE_FINISHED', disconnect: 'dismissed', leave: 'dismissed', rebind: 'dismissed', openLimit: 'dismissed', dayLimit: 'gone' },
     shapes: {
       acceptedBefore: { card: 'messagesAcceptedUnconfirmed' },
+      onWake: { on: { attempt: 'CLAIM_LOST' } },
     } },
   expired: { holdsSend: false, holdsStart: false, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'expired', claimLate: 'expired', pull: 'expired', accept: 'MESSAGE_EXPIRED', ack: 'MESSAGE_EXPIRED', reject: 'MESSAGE_EXPIRED', fail: 'MESSAGE_EXPIRED', timeout: 'MESSAGE_EXPIRED', unsure: 'MESSAGE_EXPIRED',
     attempt: 'INVALID_MAILBOX_CALL', release: 'expired', releaseUnsent: 'expired', dismiss: 'MESSAGE_FINISHED', disconnect: 'expired', leave: 'expired', rebind: 'expired', openLimit: 'expired', dayLimit: 'gone' },
     shapes: {
       acceptedBefore: { card: 'messagesAcceptedUnconfirmed' },
+      onWake: { on: { attempt: 'CLAIM_LOST' } },
     } },
   wakeExpired: { holdsSend: false, holdsStart: false, card: 'messagesAcceptedUnconfirmed', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'wakeExpired', claimLate: 'wakeExpired', pull: 'wakeExpired', accept: 'MESSAGE_EXPIRED', ack: 'acknowledged', reject: 'MESSAGE_EXPIRED', fail: 'MESSAGE_EXPIRED', timeout: 'MESSAGE_EXPIRED', unsure: 'MESSAGE_EXPIRED',
