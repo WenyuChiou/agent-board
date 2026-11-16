@@ -145,7 +145,7 @@ gh pr create -R WenyuChiou/agent-board --draft --title "fix(cli): <summary>" --b
 node scripts/pr-check.mjs --pr <PR>
 ```
 
-From a fork, `gh pr create` also needs `--head <your GitHub login>:<branch>`, and GitHub holds the PR check and CI until a maintainer approves the run. Each push, body edit, label change or `gh pr ready` starts a run that waits again; the maintainer looks for held runs at least once a day. So push when a piece of work is done, not after every small edit, and keep the pull request a draft until the approved runs pass (rule 7). The PR check prints what is still missing and how to fix it. After you edit the body, update the pull request with `gh pr edit <PR> -R WenyuChiou/agent-board --body-file ../pr-body.md`; the check runs again.
+From a fork, `gh pr create` also needs `--head <your GitHub login>:<branch>`, and GitHub holds the PR check and CI until a maintainer approves the run. Each push, body edit, label change or `gh pr ready` starts a run that waits again; the maintainer looks for held runs at least once a day. So push when a piece of work is done, not after every small edit, and keep the pull request a draft until the approved runs pass, or until CI passes and the PR check fails only for a missing approval (rule 7). The PR check prints what is still missing and how to fix it. After you edit the body, update the pull request with `gh pr edit <PR> -R WenyuChiou/agent-board --body-file ../pr-body.md`; the check runs again.
 
 If the PR check says you are over the open pull request limit for contributors from outside the team, close the newest of yours (`gh pr close <PR> -R WenyuChiou/agent-board`) and, once a slot is free, open a new pull request from the same branch. Do not reopen the closed one: it would keep its first place in the queue.
 
@@ -157,7 +157,7 @@ Before you mark it ready, run the local preflight. It checks the branch against 
 node scripts/preflight.mjs --body-file ../pr-body.md --title "fix(cli): <summary>"
 ```
 
-Paste its summary under Checks and update the body (`gh pr edit`, as above). Preflight does not run `claude plugin test .`; when you changed a `.test.ts` or `.test.tsx` file it warns about that, so say under Checks whether you ran it (step 4). When the preflight shows no `FAIL`, wait until CI is green and the PR check passes, then mark it ready with the head GitHub has:
+Paste its summary under Checks and update the body (`gh pr edit`, as above). Preflight does not run `claude plugin test .`; when you changed a `.test.ts` or `.test.tsx` file it warns about that, so say under Checks whether you ran it (step 4). When the preflight shows no `FAIL`, wait until CI is green and the PR check passes or fails only for a missing approval (CONTRIBUTING rule 13), then mark it ready with the head GitHub has:
 
 ```sh
 gh pr checks <PR> -R WenyuChiou/agent-board

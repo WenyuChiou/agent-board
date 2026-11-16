@@ -926,8 +926,9 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   const args = ['--event', event, '--repo-dir', setup.directory]
   const passed = await runMain(args, env)
   assert.equal(passed.status, 0, passed.stdout + passed.stderr)
-  // The reviews are read even with an approving comment, for the round count (#1503).
-  assert.equal(calls.length, 6)
+  // The reviews are read even with an approving comment, for the round count (#1503); the pull request itself is read
+  // as it is now (#1258).
+  assert.equal(calls.length, 7)
   assert.ok(calls.every(call => call.host === 'api.example.invalid' && call.authorization === 'Bearer synthetic-token-value'))
   globalThis.fetch = async url => (url.pathname.endsWith('/issues/42') ? { ok: false, status: 404, headers: new Headers() } : { ok: true, status: 200, json: async () => [], headers: new Headers() })
   const missing = await runMain(args, env)
@@ -947,6 +948,57 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   }
   assert.equal((await runMain(args, env)).status, 2)
   assert.equal(calls.some(call => call.host === 'untrusted.invalid'), false)
+})
+
+test('pr-check reads the pull request as it is now, so a re-run of a draft event cannot pass a ready one with changes requested (#1258)', async t => {
+  const setup = fixture(t)
+  const head = setup.git('rev-parse', 'HEAD')
+  // The event of a run started while the pull request was a draft: a re-run of that run reuses it.
+  setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body, draft: true, author_association: 'OWNER', created_at: '2030-01-01T00:00:00Z', labels: [], head: { ref: branch, sha: head }, base: { sha: setup.base } } }))
+  const args = ['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory]
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const env = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' }
+  const answer = liveHead => async url => {
+    const payload = url.pathname.endsWith('/pulls/17') ? { number: 17, title: 'fix: synthetic check', body, draft: false, labels: [], head: { ref: branch, sha: liveHead } }
+      : url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: REQUEST CHANGES ${head} by independent reviewer` }]
+        : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  // Marked ready since, on the same head: checked as ready, so the request for changes holds it.
+  globalThis.fetch = answer(head)
+  const ready = await runMain(args, env)
+  assert.equal(ready.status, 1, ready.stdout + ready.stderr)
+  assert.match(ready.stdout, /the latest review requested changes/)
+  // A newer head since: this run is for the old head, which is checked as the event has it.
+  globalThis.fetch = answer('f'.repeat(40))
+  const older = await runMain(args, env)
+  assert.equal(older.status, 0, older.stdout + older.stderr)
+})
+
+test('pr-check reads the release numbers after reading the pull request as it is now, so an event from before a rename to a release still checks its changelog (#1258)', async t => {
+  const setup = fixture(t)
+  const head = setup.git('rev-parse', 'HEAD')
+  // main: the last release tag on the fixture base, then a fix merged after it. The event is from before the pull request
+  // was renamed a release; the release section it now needs is missing, so the changelog check must fail it.
+  setup.git('switch', 'main')
+  setup.git('tag', 'agent-board--v1.0.0')
+  setup.put('late.txt', 'late\n')
+  setup.git('add', '--', 'late.txt')
+  setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'fix: a late synthetic fix (#101)')
+  const base = setup.git('rev-parse', 'HEAD')
+  setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body, draft: false, author_association: 'OWNER', created_at: '2030-01-01T00:00:00Z', labels: [], head: { ref: branch, sha: head }, base: { sha: base } } }))
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async url => {
+    const payload = url.pathname.endsWith('/pulls/17') ? { number: 17, title: 'chore(release): 1.1.0', body, draft: false, labels: [], head: { ref: branch, sha: head } }
+      : url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${head} by independent reviewer` }]
+        : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  const renamed = await runMain(['--event', join(setup.directory, 'event.json'), '--repo-dir', setup.directory], { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value' })
+  assert.equal(renamed.status, 1, renamed.stdout + renamed.stderr)
+  assert.match(renamed.stdout, /CHANGELOG\.md has no section for version 1\.1\.0/)
 })
 
 test('pr-check looks up each further issue with the token and reads a repeated issue once', async t => {

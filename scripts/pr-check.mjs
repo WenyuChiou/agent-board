@@ -1688,6 +1688,22 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.headPaths = headPaths
     data.changelogText = headPaths.has('CHANGELOG.md') ? git(cwd, 'show', `${data.head}:CHANGELOG.md`) : ''
     data.testFiles = linesOf(git(cwd, 'ls-tree', '-r', '--name-only', data.head, '--', 'tests')).filter(path => /\.test\.(mjs|ts|tsx)"?$/.test(path)).map(diffPath).map(path => ({ path, text: git(cwd, 'show', `${data.head}:${path}`) }))
+    data.issueData = null
+    data.issueComments = null
+    data.open = null
+    data.prComments = null
+    const api = options['--offline'] ? null : apiReader(options, repo, cwd)
+    // A re-run of a pull request event reuses that event as it was (pr-check-rerun, #1258): a draft since marked ready,
+    // or a body, title or label changed since, would be checked as it was then, and a REQUEST CHANGES on a draft holds
+    // nothing. So the pull request is read as it is now and, while its head is still the event's, checked as it is. The
+    // release numbers are read after it, so a pull request renamed a release since its event is checked as a release.
+    if (api && options['--event'] && data.number !== null) {
+      const current = await api(`pulls/${data.number}`)
+      if (current?.head?.sha === data.head) {
+        if (typeof current.title !== 'string' || !Array.isArray(current.labels) || typeof current.draft !== 'boolean') throw new Error('pull request metadata is incomplete or invalid.')
+        Object.assign(data, { title: current.title, body: current.body ?? '', isDraft: current.draft, labels: current.labels })
+      }
+    }
     if (isReleaseTitle(data.title)) {
       const tagCheck = spawnSync('git', ['describe', '--tags', '--abbrev=0', '--match', 'agent-board--v*'], { cwd, encoding: 'utf8', maxBuffer })
       const lastTag = tagCheck.status === 0 ? tagCheck.stdout.trim() : null
@@ -1702,12 +1718,7 @@ export const main = async (argv = process.argv.slice(2)) => {
         }
       }
     }
-    data.issueData = null
-    data.issueComments = null
-    data.open = null
-    data.prComments = null
-    if (!options['--offline']) {
-      const api = apiReader(options, repo, cwd)
+    if (api) {
       // Open pull requests are read both for an outside author's cap (#607) and to flag a second pull request fixing the
       // same issue (#1325). Team authors still skip issue-comment claim lookups.
       const isTeam = () => isKnownAssociation(data.association) && !isOutsideAssociation(data.association)
