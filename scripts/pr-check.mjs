@@ -953,32 +953,35 @@ const decodeSplitEntity = (_, dec, hex, named) => {
 
 const findClosingParen = (text, openAt) => {
   let i = openAt + 1
-  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++
-  if (text[i] === ')') return i
-  if (text[i] === '<') {
-    i++
-    while (i < text.length && text[i] !== '>' && text[i] !== '\n' && text[i] !== '\r') {
-      if (text[i] === '\\' && i + 1 < text.length) i++
-      i++
-    }
-    if (text[i] !== '>') return -1
-    i++
-  } else {
-    let depth = 0
-    while (i < text.length) {
-      const ch = text[i]
-      if (ch === '\n' || ch === '\r' || ch === ' ' || ch === '\t') break
-      if (ch === '\\' && i + 1 < text.length) { i += 2; continue }
-      if (ch === '(') depth++
-      else if (ch === ')') {
-        if (depth === 0) return i
-        depth--
-      }
-      i++
-    }
-  }
   let hadSpace = false
   while (i < text.length && (text[i] === ' ' || text[i] === '\t')) { hadSpace = true; i++ }
+  if (text[i] === ')') return i
+  const startsTitleOnly = hadSpace && (text[i] === '"' || text[i] === "'" || text[i] === '(')
+  if (!startsTitleOnly) {
+    if (text[i] === '<') {
+      i++
+      while (i < text.length && text[i] !== '>' && text[i] !== '\n' && text[i] !== '\r') {
+        if (text[i] === '\\' && i + 1 < text.length) i++
+        i++
+      }
+      if (text[i] !== '>') return -1
+      i++
+    } else {
+      let depth = 0
+      while (i < text.length) {
+        const ch = text[i]
+        if (ch === '\n' || ch === '\r' || ch === ' ' || ch === '\t') break
+        if (ch === '\\' && i + 1 < text.length) { i += 2; continue }
+        if (ch === '(') depth++
+        else if (ch === ')') {
+          if (depth === 0) return i
+          depth--
+        }
+        i++
+      }
+    }
+    while (i < text.length && (text[i] === ' ' || text[i] === '\t')) { hadSpace = true; i++ }
+  }
   if (text[i] === ')') return i
   if (hadSpace && (text[i] === '"' || text[i] === "'" || text[i] === '(')) {
     const close = text[i] === '(' ? ')' : text[i]
