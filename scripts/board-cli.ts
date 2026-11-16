@@ -2438,7 +2438,10 @@ const keptPage = async (file: string): Promise<Running | null> => {
 // that no longer answers, or an older copy's) is let go, so a new one can write the file; but an
 // older copy's page that will not close (a reply is on its way) is kept, and `isKept` says so.
 // `replaced`: what one launch (`ensureServer`) learns of the pages it lets go of, in its first lookup or a retry (#318).
-const runningPage = async (isStarting = false, isReplacing = false, replaced?: { isCodexSendOff: boolean }): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
+// `isStopping`: `stop` takes this copy's page for this file whatever it was started with; the launch settings decide only
+// whether a new start may reuse a page, so `stop --no-codex-send` must not close a page with Send to Codex on and then
+// say none was running (#318).
+const runningPage = async (isStarting = false, isReplacing = false, replaced?: { isCodexSendOff: boolean }, isStopping = false): Promise<{ page: Running; isKept: boolean; idleMs?: number | undefined } | null> => {
   const running = readRunning()
   if (running === null) {
     // A file that has not read for ten seconds (either way, should the clock have been set
@@ -2456,7 +2459,7 @@ const runningPage = async (isStarting = false, isReplacing = false, replaced?: {
   const requestedStale = staleTimeoutMs()
   // Send to Codex (#318): a plain command keeps a page whether its receiver is on or off, so `/agent-board` never ends a page the
   // person turned it off for; `--codex-send` asks for a page with it on, `--no-codex-send` for one with it off.
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && (isStopping || (answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   if (await stays(running, serveFile(), isReplacing && replacementMove(running))) return { page: running, isKept: true }
   if (replaced !== undefined && answer !== null && answer !== 'silent' && answer.noCodexSend === true) replaced.isCodexSendOff = true
   return null
@@ -2810,7 +2813,7 @@ const openPageSurface = async (): Promise<void> => {
 }
 
 const stopBoard = async (): Promise<void> => {
-  const found = await runningPage()
+  const found = await runningPage(false, false, undefined, true)
   if (found === null) {
     process.stdout.write(`${s.serveNoneRunning}\n`)
     return

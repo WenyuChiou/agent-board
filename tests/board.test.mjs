@@ -6544,6 +6544,25 @@ test('agent-board stop stops this file\'s page and says so, and says when none i
   }
 })
 
+test('agent-board stop with a Send to Codex switch stops this file\'s page whatever it was started with, and says so (#318)', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const stopCmd = (...extra) => new Promise((done, fail) => {
+    execFile(process.execPath, [board.script, 'stop', ...extra], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
+  })
+  try {
+    // A page with Send to Codex on (the default): `stop --no-codex-send` stops it and says it stopped, not that none was running.
+    assert.ok(board.urlOf(await board.serve(['--quiet-board'])))
+    assert.equal((await stopCmd('--no-codex-send')).trim(), EN.serveStopped)
+    assert.equal((await stopCmd()).trim(), EN.serveNoneRunning)
+    // A page with it off: `stop --codex-send` stops it the same way.
+    assert.ok(board.urlOf(await board.serve(['--quiet-board', '--no-codex-send'])))
+    assert.equal((await stopCmd('--codex-send')).trim(), EN.serveStopped)
+    assert.equal((await stopCmd()).trim(), EN.serveNoneRunning)
+  } finally {
+    await board.end([])
+  }
+})
+
 test('stop says the board page did not stop and exits 1 when the page refuses to close', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const requests = []
