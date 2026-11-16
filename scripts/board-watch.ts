@@ -8,13 +8,15 @@
 //
 // A watch that cannot be set up, or that stops with an error (its folder removed, the system out of
 // watches), is closed for good and isWatching() turns false; the server then checks on a timer instead.
-import { watch as fsWatch } from 'node:fs'
+// A watch can also set up fine and never report (WSL's /mnt/c, some network mounts): probe() stats the two paths,
+// and a change it sees with no event for it, still none 250 ms later, counts as the watch stopping.
+import { statSync, watch as fsWatch } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
 import { basename, dirname, extname } from 'node:path'
 
 export type WatchFn = (path: string, listener: (event: string, name: string | Buffer | null) => void) => FSWatcher
 
-export type BoardWatch = { isWatching: () => boolean; close: () => void }
+export type BoardWatch = { isWatching: () => boolean; probe: () => void; close: () => void }
 
 export const watchBoard = ({ progress, inbox, onChange, onFail, watch = fsWatch }: {
   progress: string
@@ -31,6 +33,17 @@ export const watchBoard = ({ progress, inbox, onChange, onFail, watch = fsWatch 
   let inboxWatcher: FSWatcher | null = null
   let isFailed = false
   let isClosed = false
+  // Events seen, and the stamp of the two paths with the event count when it was taken.
+  let events = 0
+  const stampOf = (path: string): string => {
+    try {
+      const entry = statSync(path)
+      return `${entry.mtimeMs}:${entry.size}:${entry.ino}`
+    } catch (error) { return (error as NodeJS.ErrnoException).code ?? 'error' }
+  }
+  const stamp = (): string => `${stampOf(progress)}|${stampOf(inbox)}`
+  let lastStamp = stamp()
+  let eventsAtStamp = 0
   const closeAll = (): void => {
     for (const one of watchers.splice(0)) { try { one.close() } catch {} }
     inboxWatcher = null
@@ -42,7 +55,7 @@ export const watchBoard = ({ progress, inbox, onChange, onFail, watch = fsWatch 
     onFail()
   }
   const open = (path: string, listener: (name: string | null) => void): FSWatcher | null => {
-    const one = watch(path, (_event, name) => listener(name === null || name === undefined ? null : String(name)))
+    const one = watch(path, (_event, name) => { events += 1; listener(name === null || name === undefined ? null : String(name)) })
     one.on('error', fail)
     watchers.push(one)
     return one
@@ -68,6 +81,17 @@ export const watchBoard = ({ progress, inbox, onChange, onFail, watch = fsWatch 
   armInbox()
   return {
     isWatching: () => !isFailed && !isClosed,
+    probe: () => {
+      if (isFailed || isClosed) return
+      const now = stamp()
+      const before = eventsAtStamp
+      eventsAtStamp = events
+      if (now === lastStamp) return
+      lastStamp = now
+      if (events !== before) return
+      // An event can trail the write a little: only one still missing 250 ms on means the watch is deaf.
+      setTimeout(() => { if (events === before) fail() }, 250).unref()
+    },
     close: () => {
       isClosed = true
       closeAll()

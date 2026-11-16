@@ -123,6 +123,9 @@ const BOARD_HOLD_MS = 10_000
 const BOARD_FALLBACK_MS = 1000
 // Changes within this long of each other wake the waiting requests once.
 const BOARD_WAKE_MS = 25
+// While a request waits on a working watch, the two watched paths are stat-ed this often (no file is read), so a watch
+// that set up but never reports is found and the timer takes over: the change still shows within 3 s.
+const BOARD_PROBE_MS = 1500
 
 const HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' }
 
@@ -202,6 +205,7 @@ export const startServer = (o: ServeOptions): void => {
   let boardWatch: BoardWatch | null = null
   let wakeTimer: ReturnType<typeof setTimeout> | null = null
   let fallbackTimer: ReturnType<typeof setInterval> | null = null
+  let probeTimer: ReturnType<typeof setInterval> | null = null
   // Several changes in a burst (a hook writes the inbox and progress.md) wake the waiting requests once.
   const wakeAll = (): void => {
     if (wakeTimer !== null || waiters.size === 0) return
@@ -216,6 +220,12 @@ export const startServer = (o: ServeOptions): void => {
     else if (!isNeeded && fallbackTimer !== null) {
       clearInterval(fallbackTimer)
       fallbackTimer = null
+    }
+    const isProbed = waiters.size > 0 && (boardWatch?.isWatching() ?? false)
+    if (isProbed && probeTimer === null) probeTimer = setInterval(() => boardWatch?.probe(), BOARD_PROBE_MS)
+    else if (!isProbed && probeTimer !== null) {
+      clearInterval(probeTimer)
+      probeTimer = null
     }
   }
   // recheck answers when the board changed and says whether it did; last always answers.
@@ -442,6 +452,8 @@ export const startServer = (o: ServeOptions): void => {
     boardWatch?.close()
     if (wakeTimer !== null) clearTimeout(wakeTimer)
     for (const one of [...waiters]) one.drop()
+    if (probeTimer !== null) clearInterval(probeTimer)
+    if (fallbackTimer !== null) clearInterval(fallbackTimer)
     server.close()
     server.closeAllConnections()
     o.onStop()

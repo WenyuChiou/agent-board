@@ -283,25 +283,38 @@ test('serve: when the file watch fails, the page still updates within 3 s from a
     const board = await startBoard({ holdMs: 60_000, fs: watch.fs })
     assert.ok(watch.made.length >= 1, 'the server set up a watch')
     const first = await board.ask()
-    // While the deaf watch stands, nothing answers: the change waits for the watch, not for a timer.
     const waiting = board.ask(first.etag)
     await pause(200)
-    writeFileSync(board.progress, blockOf('Missed by the deaf watch'))
-    assert.equal(await settledWithin(waiting, 2500), undefined, 'a working watch must not also poll')
     watch.made[0].emit('error', Object.assign(new Error('synthetic: watch stopped'), { code: 'EPERM' }))
     const failedAt = performance.now()
+    writeFileSync(board.progress, blockOf('Missed by the stopped watch'))
+    const answer = await waiting
+    assert.equal(answer.status, 200)
+    assert.match(answer.text, /Missed by the stopped watch/)
+    assert.ok(answer.at - failedAt <= PAGE_FALLBACK_MS, `after the watch stopped the change took ${Math.round(answer.at - failedAt)} ms`)
+    await board.close()
+  }
+  // The watch set up fine and never reports anything, and never fails (WSL's /mnt/c, some network mounts).
+  {
+    const watch = deafWatch()
+    const board = await startBoard({ holdMs: 60_000, fs: watch.fs })
+    const first = await board.ask()
+    const waiting = board.ask(first.etag)
+    await pause(200)
+    const writtenAt = performance.now()
+    writeFileSync(board.progress, blockOf('Missed by the deaf watch'))
     const answer = await waiting
     assert.equal(answer.status, 200)
     assert.match(answer.text, /Missed by the deaf watch/)
-    assert.ok(answer.at - failedAt <= PAGE_FALLBACK_MS, `after the watch stopped the change took ${Math.round(answer.at - failedAt)} ms`)
+    assert.ok(answer.at - writtenAt <= PAGE_FALLBACK_MS, `with a deaf watch the change took ${Math.round(answer.at - writtenAt)} ms`)
     // Later changes come from the timer check.
     const next = board.ask(answer.etag)
     await pause(200)
-    const writtenAt = performance.now()
+    const laterAt = performance.now()
     writeFileSync(board.progress, blockOf('Seen from the timer'))
     const later = await next
     assert.match(later.text, /Seen from the timer/)
-    assert.ok(later.at - writtenAt <= PAGE_FALLBACK_MS, `from the timer the change took ${Math.round(later.at - writtenAt)} ms`)
+    assert.ok(later.at - laterAt <= PAGE_FALLBACK_MS, `from the timer the change took ${Math.round(later.at - laterAt)} ms`)
     await board.close()
   }
 })
