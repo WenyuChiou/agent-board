@@ -1,0 +1,13 @@
+{
+  "setTimeoutFiles": [
+    "hooks/antigravity-sidecar.ts",
+    "hooks/board-dock.ts",
+    "hooks/hook-safety.ts",
+    "hooks/local-agents.ts",
+    "hooks/page-look.ts",
+    "hooks/portable-agents.ts",
+    "hooks/receivers/deepseek.ts",
+    "hooks/receivers/opencode.ts",
+    "hooks/serve.ts"
+  ]
+}

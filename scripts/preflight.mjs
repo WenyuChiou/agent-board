@@ -8,6 +8,7 @@ import { addedLines, caseRows, failFirstValues, testTitles, titleKnown } from '.
 import { runFailFirst, stateWords } from './fail-first.mjs'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 import { isBundleFile } from './bundle-text.mjs'
+import { checkAdded, loadConfig } from './code-rules.mjs'
 import { testLockNamespaceProblem } from './preflight-lock-policy.mjs'
 import { journeyLine, loadPathJourneys } from './path-journeys.mjs'
 
@@ -939,6 +940,12 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   })
   if (!unsafe.length) add('PASS', 'added test process launches have cleanup markers or none were added.')
   for (const [path] of unsafe) add('WARN', `${path}: a test that starts a process must stop it in \`finally\` and wait for it to exit, on Windows too`)
+
+  await check('code rules', () => {
+    const failures = checkAdded(added, loadConfig(cwd))
+    if (!failures.length) add('PASS', 'no added line breaks a code rule (scripts/code-rules.mjs).')
+    for (const failure of failures) add('FAIL', failure.message)
+  })
 
   // pr-check on a body file; `pasted` says what preflight added to a copy of it.
   const checkBody = (bodyPath, pasted) => {
