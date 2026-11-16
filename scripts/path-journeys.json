@@ -1,0 +1,29 @@
+{
+  "_about": "Source paths mapped to the journeys and tests that cover them (#1544). A path ending in / is a folder. Preflight prints the matches for the paths a change touches, as an info line; it never fails on them. A test checks that every listed file exists.",
+  "areas": [
+    {
+      "name": "delivery",
+      "paths": ["hooks/receivers/", "hooks/receiver.ts", "hooks/receiver-record.ts", "hooks/receiver-routes.ts", "hooks/messaging.ts", "hooks/hook-messages.ts", "scripts/board-messaging.ts", "scripts/message-client.mjs", "scripts/codex-receiver.mjs", "scripts/hook-delivery.ts", "scripts/codex-message-connector.mjs"],
+      "journeys": ["tests/journeys.test.tsx: L3b messages between sessions and agents", "tests/journeys.test.tsx: L3 across agents and sessions"],
+      "tests": ["tests/messaging.test.mjs", "tests/messaging-matrix.test.mjs", "tests/receiver.test.ts", "tests/receiver-wiring.test.tsx", "tests/opencode-receiver.test.mjs", "tests/deepseek-receiver.test.mjs", "tests/accepted-disconnect.test.mjs"]
+    },
+    {
+      "name": "setup-writes",
+      "paths": ["scripts/setup-agent.mjs", "scripts/setup-codex.mjs", "scripts/setup-discovery.mjs", "scripts/setup.sh", "scripts/setup.ps1", "scripts/install-control.ts", "scripts/connect-transaction.ts", "scripts/legacy-connect.ts", "scripts/settings-agents.ts", "hooks/settings-agents.ts", "hooks/connect.ts", "hooks/connect-pure.ts", "hooks/connect-worker.ts"],
+      "journeys": ["tests/journeys.test.tsx: L1 first run"],
+      "tests": ["tests/setup-board-command.test.mjs", "tests/setup-guidance.test.mjs", "tests/setup-readme.test.mjs", "tests/setup-remove.test.mjs", "tests/setup-sidecar.test.mjs", "tests/setup-terminal.test.mjs", "tests/setup.check.sh", "tests/settings-agents.test.mjs", "tests/settings-symlink.test.mjs", "tests/connect-trust.test.ts", "tests/connect-worker.test.mjs", "tests/legacy-connect.test.mjs", "tests/pane-connect.test.tsx"]
+    },
+    {
+      "name": "launch",
+      "paths": ["bin/agent-board.mjs", "scripts/board-cli.ts", "scripts/board-serve.ts", "scripts/server-runtime.ts", "scripts/runtime-folder.ts", "hooks/hooks.json", "hooks/board-commands.ts"],
+      "journeys": ["tests/journeys.test.tsx: L1 first run", "tests/journeys.test.tsx: L2 a busy board"],
+      "tests": ["tests/board-entry.test.mjs", "tests/serve-opener.test.mjs", "tests/runtime-folder.test.mjs", "tests/prompt-hooks.test.mjs", "tests/setup-board-command.test.mjs"]
+    },
+    {
+      "name": "data",
+      "paths": ["hooks/retention.ts", "hooks/old-months.ts", "hooks/old-months-run.ts", "hooks/ledger-move.ts", "hooks/tidy.ts", "hooks/journal.ts", "hooks/history.ts", "hooks/inbox.ts"],
+      "journeys": ["tests/journeys.test.tsx: L2 a working day"],
+      "tests": ["tests/retention.test.ts", "tests/old-months.test.tsx", "tests/tidy.test.mjs", "tests/ledger-reads.test.tsx", "tests/ledger-size.test.tsx", "tests/journal-overflow.test.tsx", "tests/inbox-recovery.test.ts", "tests/inbox-backlog.test.tsx", "tests/storage.test.tsx", "tests/board-storage.test.mjs"]
+    }
+  ]
+}

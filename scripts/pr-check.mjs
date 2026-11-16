@@ -924,6 +924,28 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   return output
 }
 
+// On a case surface the first commit of a risk-tier pull request changes only tests or the state table, so the evidence
+// exists before the code does (#1544, Fable proposal 3). It applies to pull requests numbered above EVIDENCE_FROM, set
+// above every open pull request so none is held; a local --body-file run has no number and is checked as new.
+// firstCommitPaths: the paths of the oldest commit of the branch (merges of main left out), undefined when not read.
+export const EVIDENCE_FROM = 1550
+const isEvidencePath = path => path.startsWith('tests/') || path === 'hooks/delivery-states.ts'
+export const evidenceFirst = ({ body = '', title = '', number = null, firstCommitPaths, tier = visibleTier(body) } = {}) => {
+  const output = result()
+  if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= EVIDENCE_FROM)) return output
+  if (!Array.isArray(firstCommitPaths) || !firstCommitPaths.length) return output
+  const line = surfaceLine(body).filled[0]
+  if (!line) return output
+  const named = line.split(/,[ \t]*cannot split:/i)[0].split('+').map(value => value.replace(/`/g, '').trim().toLowerCase()).filter(value => caseSurfaces.includes(value))
+  if (!named.length) return output
+  const code = firstCommitPaths.filter(path => !isEvidencePath(path))
+  if (code.length) {
+    const names = code.slice(0, 3).map(path => `\`${path}\``).join(', ') + (code.length > 3 ? ` and ${code.length - 3} more` : '')
+    output.problems.push(problem('evidence', `the first commit of this ${named.join(' + ')} pull request changes ${names}, which is neither a test nor the state table.`, 'make the first commit only tests (tests/) or hooks/delivery-states.ts, so the evidence exists before the code; put the code in a later commit (CONTRIBUTING.md rule 2).'))
+  }
+  return output
+}
+
 // Every pull request names its tier on a `Tier:` line, and one that changes a path docs/dev/risk-paths.md lists is risk
 // tier (RULES R2; #1531). Both apply to pull requests numbered above TIER_FROM, the issue they came in with, other than a
 // release, which is risk tier whatever it says. A local --body-file run, which often checks a draft body, and a small
@@ -1189,6 +1211,7 @@ export const checkPr = data => {
   add(binaryImages(data.changedPaths))
   add(tier({ body: data.body, title: data.title, number: data.number, paths: data.paths, riskPaths: data.riskPaths, isOptional: isSmallDocs }))
   add(surface({ body: data.body, title: data.title, number: data.number, paths: data.paths, numstat: data.numstat }))
+  add(evidenceFirst({ body: data.body, title: data.title, number: data.number, firstCommitPaths: data.firstCommitPaths }))
   add(cases({ body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
   if (issue.issue !== null) {
     // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
@@ -1577,6 +1600,9 @@ export const main = async (argv = process.argv.slice(2)) => {
       const [added, deleted, ...name] = line.split('\t')
       return { path: diffPath(name.join('\t')), added: Number(added) || 0, deleted: Number(deleted) || 0 }
     }).filter(item => item.path)
+    // The oldest commit of the branch itself (a merge of main and the commits it brought are left out), for the evidence-first check.
+    const firstCommit = linesOf(git(cwd, 'rev-list', '--first-parent', '--no-merges', '--reverse', `${base}..${data.head}`)).find(Boolean)
+    if (firstCommit) data.firstCommitPaths = linesOf(git(cwd, 'show', '--format=', '--name-only', '--no-renames', '--no-ext-diff', firstCommit)).filter(Boolean).map(diffPath)
     data.template = git(cwd, 'show', `${base}:.github/pull_request_template.md`)
     // The risk-tier paths as the base lists them, so a pull request cannot take its own path off the list (#1531).
     const riskList = spawnSync('git', ['show', `${base}:docs/dev/risk-paths.md`], { cwd, encoding: 'utf8', maxBuffer })

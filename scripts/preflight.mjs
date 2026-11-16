@@ -8,6 +8,7 @@ import { addedLines, testTitles, titleKnown } from './pr-check.mjs'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 import { isBundleFile } from './bundle-text.mjs'
 import { testLockNamespaceProblem } from './preflight-lock-policy.mjs'
+import { journeyLine } from './path-journeys.mjs'
 
 const tables = [['hooks/i18n.ts', 'ZH_TW'], ['hooks/strings-en.ts', 'EN'], ['hooks/strings-zh-cn.ts', 'ZH_CN']]
 const homeNames = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_PROGRESS_FILE']
@@ -789,6 +790,12 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     add('FAIL', 'changed files could not be read; check the base and Git working tree.')
     return checks
   }
+
+  // An info line, never a failure: the journeys and tests that cover the paths this change touches (#1544).
+  await check('journey map', () => {
+    const line = journeyLine([...changed])
+    if (line) add('PASS', line)
+  })
 
   await check('touched Node tests', () => {
     const paths = [...changed].filter(path => isTest(path) && path.endsWith('.mjs') && existsSync(join(cwd, path)))
