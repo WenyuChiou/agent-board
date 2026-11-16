@@ -874,7 +874,11 @@ const surfaceLine = body => {
 export const SIZE_FROM = 1545
 export const SIZE_RISK = 400
 export const SIZE_NORMAL = 800
-const hasSplitReason = body => visibleLines(body).some(line => /^(?:Surface|Size):.*\bcannot split:[ \t]*\S/i.test(line) && !/\bcannot split:[ \t]*<[^<>]*>[ \t]*$/i.test(line))
+// A reason is the text after `cannot split:`, not empty and not the template's `<reason>`; the template's own `Surface:` line,
+// which starts with `<`, never counts (as in surface), and neither does a line in a code fence or an HTML comment.
+const isSplitReason = text => { const reason = text.trim(); return reason !== '' && !/^<[^<>]*>$/.test(reason) }
+const hasSplitReason = body => surfaceLine(body).filled.some(value => isSplitReason(value.split(/,[ \t]*cannot split:/i).slice(1).join(','))) ||
+  visibleLines(body).some(line => isSplitReason(line.match(/^Size:[ \t]*cannot split:(.*)$/i)?.[1] ?? ''))
 export const size = ({ body = '', title = '', number = null, numstat, tier = visibleTier(body) } = {}) => {
   const output = result()
   if (!Array.isArray(numstat) || tier === 'light' || isReleaseTitle(title) || (number !== null && number <= SIZE_FROM)) return output

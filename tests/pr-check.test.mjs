@@ -1801,8 +1801,14 @@ test('pr-check limits the changed lines of a pull request by its tier, unless th
   assert.equal(run('Tier: risk\nSurface: delivery, cannot split: one migration', lines(SIZE_RISK + 1)).problems.length, 0)
   assert.equal(run(`${risk}\nSize: cannot split: the schema and its reader change together`, lines(SIZE_RISK + 1)).problems.length, 0)
   assert.equal(run(`${risk}\nSize: cannot split: <reason>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  // The template's own lines are not a reason, and neither is one inside a code fence or an HTML comment.
+  const template = readFileSync(new URL('../.github/pull_request_template.md', import.meta.url), 'utf8')
+  assert.equal(run(template, lines(SIZE_NORMAL + 1)).problems.length, 1)
+  assert.equal(run(template.replace(/^Tier:.*$/m, 'Tier: risk'), lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run([risk, '```', 'Size: cannot split: shown as an example', '```'].join('\n'), lines(SIZE_RISK + 1)).problems.length, 1)
+  assert.equal(run(`${risk}\n<!-- Size: cannot split: a hidden reason -->`, lines(SIZE_RISK + 1)).problems.length, 1)
   // Tests, generated files and string tables do not count.
-  assert.equal(run(risk, [...lines(SIZE_RISK), ...lines(500, 'tests/x.test.mjs'), ...lines(500, 'hooks/strings-en.ts')]).problems.length, 0)
+  assert.equal(run(risk, [...lines(SIZE_RISK), ...lines(500, 'tests/x.test.mjs'), ...lines(500, 'hooks/released.ts'), ...lines(500, 'hooks/strings-en.ts')]).problems.length, 0)
   // The normal tier: a note above 400, a failure above 800; a body with no tier is read as normal.
   const normal = run('Tier: normal', lines(SIZE_RISK + 1))
   assert.equal(normal.problems.length, 0)
