@@ -929,7 +929,13 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
 // above every open pull request so none is held; a local --body-file run has no number and is checked as new.
 // firstCommitPaths: the paths of the oldest commit of the branch (merges of main left out), undefined when not read.
 export const EVIDENCE_FROM = 1550
-const isEvidencePath = path => path.startsWith('tests/') || path === 'hooks/delivery-states.ts'
+// The result of `git merge-base --is-ancestor`: exit 0 is in the base, 1 is not, and anything else (a git error) stops the
+// check, so a merge whose ancestry git could not read is never taken for a merge of main or for a topic (codex_446).
+export const isAncestor = (result, commit = 'a commit') => {
+  if (result?.error || (result?.status !== 0 && result?.status !== 1)) throw new Error(`git could not tell whether ${commit} is in the base; fetch both commits and run again.`)
+  return result.status === 0
+}
+const isEvidencePath =path => path.startsWith('tests/') || path === 'hooks/delivery-states.ts'
 export const evidenceFirst = ({ body = '', title = '', number = null, firstCommitPaths, tier = visibleTier(body) } = {}) => {
   const output = result()
   if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= EVIDENCE_FROM)) return output
@@ -1675,7 +1681,7 @@ export const main = async (argv = process.argv.slice(2)) => {
     // not a merge of main (a merge whose other parents are all in the base). A merge of a topic branch counts, judged by the
     // paths it brings in, so code merged in before the tests still fails. A branch with no such commit (a merge of main alone)
     // is judged by the paths it changes against the base, which are none.
-    const isInBase = commit => spawnSync('git', ['merge-base', '--is-ancestor', commit, base], { cwd, encoding: 'utf8' }).status === 0
+    const isInBase = commit => isAncestor(spawnSync('git', ['merge-base', '--is-ancestor', commit, base], { cwd, encoding: 'utf8' }), commit)
     const firstCommit = linesOf(git(cwd, 'rev-list', '--first-parent', '--reverse', '--parents', `${base}..${data.head}`)).filter(Boolean)
       .map(line => line.split(' ')).find(([, , ...others]) => !others.length || !others.every(isInBase))
     if (!firstCommit) data.firstCommitPaths = data.paths

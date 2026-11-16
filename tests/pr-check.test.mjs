@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  addedLines, apiReader, authorKey, evidenceFirst, EVIDENCE_FROM, authorLine, binaryImages, cap, CASES_FROM, cases, changelog, checkIssue, checkPr,
+  addedLines, apiReader, authorKey, evidenceFirst, EVIDENCE_FROM, isAncestor, authorLine, binaryImages, cap, CASES_FROM, cases, changelog, checkIssue, checkPr,
   duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
   main, naming, needsBundle, outsideClaim, privateData, report, reportMarkdown, reviewOf, rulesPage, sections,
   riskPathsOf, ROUND_CAP, rounds, stripComments, SURFACE_FROM, surface, testTitles, tier, TIER_FROM, tierOf, titleKnown,
@@ -2371,4 +2371,11 @@ Checks a synthetic change.
   setup.git('switch', '-q', '-c', 'fix/synthetic-main-only', base)
   git('merge', '-q', '--no-ff', '-m', 'merge main', main2)
   assert.doesNotMatch((await runWith('fix/synthetic-main-only', main2)).stdout, /FAIL evidence/)
+})
+
+test('pr-check stops when git cannot tell whether a merge parent is in the base, instead of guessing (#1544)', () => {
+  assert.equal(isAncestor({ status: 0 }), true)
+  assert.equal(isAncestor({ status: 1 }), false)
+  assert.throws(() => isAncestor({ status: 128 }, 'abc1234'), /git could not tell whether abc1234 is in the base/)
+  assert.throws(() => isAncestor({ status: null, error: new Error('spawn git ENOENT') }), /git could not tell/)
 })
