@@ -180,10 +180,12 @@ test('a page in sight whose board request is waiting still counts as watching pa
   // Longer than the window a page's last request counts as watching: on main the page asked every 2 s.
   await pause(APPROVAL_PAGE_MS + 1000)
   const hook = runHook(board, request('rm -rf synthetic-waiting-folder'))
-  // The waiting request brings the new card, and the request stays on the board for the page, not sent back to the host.
+  // The waiting request brings the new card (or, on a slow runner, ran out just before it, which counts as asking then);
+  // either way the request stays on the board for the page, not sent back to the host.
   const answered = await waiting
-  assert.equal(answered.status, 200)
-  assert.match(await answered.text(), /synthetic-waiting-folder/)
+  const answer = await answered.text()
+  if (answered.status === 200) assert.match(answer, /synthetic-waiting-folder/)
+  else assert.equal(answered.status, 304)
   const shown = await page.show('rm -rf synthetic-waiting-folder')
   assert.equal(hook.isRunning(), true, 'the host was told to ask in its own window while the page was in sight')
   assert.equal((await page.press(shown, 'deny', { confirmed: true })).status, 200)

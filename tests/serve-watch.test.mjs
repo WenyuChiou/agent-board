@@ -142,6 +142,12 @@ test('serve: the page redraws from one open request, not a 3 s poll', async () =
   writeFileSync(join(board.inbox, 'codex-turn-2.json'), '{}')
   for (let tries = 0; tries < 40 && board.reads === readsAtSecondFile; tries += 1) await pause(50)
   assert.ok(board.reads > readsAtSecondFile, 'the inbox folder made after the start is not watched')
+  // After all those real changes the watch is still trusted: nothing is built while nothing changes, longer than the
+  // probe's interval and the timer's (a watch judged deaf would build every 2 s).
+  await pause(300)
+  const readsQuiet = board.reads
+  await pause(3000)
+  assert.equal(board.reads, readsQuiet, 'the watch was judged deaf after real changes, and the timer took over')
   await board.close()
   await quiet.catch(() => undefined)
 })

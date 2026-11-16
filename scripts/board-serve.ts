@@ -119,8 +119,10 @@ const LAN_IDLE = 10 * 60 * 1000
 // An open board request (#359) is answered "no change" after this long, so the page's clock, ages and the
 // server's view of which page is visible stay as fresh as they were with the old 2 s poll.
 const BOARD_HOLD_MS = 10_000
-// Without a working file watch, waiting requests look at the board this often: a change still shows within 3 s.
-const BOARD_FALLBACK_MS = 1000
+// Without a working file watch, waiting requests look at the board this often: a change still shows within 3 s, and
+// the board is built no more often than main's page asked for it (every 2 s), so idle cost cannot rise even when a
+// watch is judged deaf by mistake.
+const BOARD_FALLBACK_MS = 2000
 // Changes within this long of each other wake the waiting requests once.
 const BOARD_WAKE_MS = 25
 // While a request waits on a working watch, the two watched paths are stat-ed this often (no file is read), so a watch

@@ -9,7 +9,7 @@
 // A watch that cannot be set up, or that stops with an error (its folder removed, the system out of
 // watches), is closed for good and isWatching() turns false; the server then checks on a timer instead.
 // A watch can also set up fine and never report (WSL's /mnt/c, some network mounts): probe() stats the two paths,
-// and a change it sees with no event for it, still none 250 ms later, counts as the watch stopping.
+// and a change it sees with no event for it, still none 500 ms later, counts as the watch stopping.
 import { statSync, watch as fsWatch } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
 import { basename, dirname, extname } from 'node:path'
@@ -76,7 +76,7 @@ export const watchBoard = ({ progress, inbox, onChange, onFail, watch = fsWatch 
     })
   } catch {
     fail()
-    return { isWatching: () => false, close: () => { isClosed = true } }
+    return { isWatching: () => false, probe: () => {}, close: () => { isClosed = true } }
   }
   armInbox()
   return {
@@ -89,8 +89,8 @@ export const watchBoard = ({ progress, inbox, onChange, onFail, watch = fsWatch 
       if (now === lastStamp) return
       lastStamp = now
       if (events !== before) return
-      // An event can trail the write a little: only one still missing 250 ms on means the watch is deaf.
-      setTimeout(() => { if (events === before) fail() }, 250).unref()
+      // An event can trail the write a little: only one still missing 500 ms on means the watch is deaf.
+      setTimeout(() => { if (events === before) fail() }, 500).unref()
     },
     close: () => {
       isClosed = true
