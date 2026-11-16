@@ -542,7 +542,8 @@ test('the sh reporter starts PowerShell with a command line that does not grow w
   assert.equal(launches.length, 1)
   // At run time the line is this text with a file path in place of $file.ps1; the environment values are not on it.
   assert.ok(launches[0].length < 512, `${launches[0].length} characters`)
-  assert.match(launches[0], / -File "\$file\.ps1"$/)
+  // -Command ran under any execution policy; a -File script needs the process-scope Bypass, as the Windows hooks pass.
+  assert.match(launches[0], / -ExecutionPolicy Bypass -File "\$file\.ps1"$/)
   // The copy sits in a quoted here-document, which a line equal to its end marker would cut short.
   assert.ok(!powershellReporter(true).split('\n').includes(PS_HEREDOC_END))
 })
@@ -564,6 +565,22 @@ test('the sh reporter writes a prompt receipt when its PowerShell copy is longer
   assert.deepEqual(saved.map(one => JSON.parse(one.body)), [{ session_id: 'synthetic-long-copy', board_request: true }])
   // The run's own copy of the script is gone with it.
   assert.deepEqual(readdirSync(inbox).filter(name => name.endsWith('.ps1')), [])
+}))
+
+// A script PowerShell will not run (a group policy that overrides Bypass, a file it cannot parse) ends the same way: a
+// failed exit, which the sh reporter logs instead of passing over in silence (#1444).
+test('the sh reporter logs REPORTER_FAILED when PowerShell will not run its copy (#1444)', { skip: process.platform !== 'win32' }, () => fixture(async home => {
+  const { reporterSh } = await import('../hooks/connect-pure.ts')
+  const { powershellReporter } = await import('../hooks/hook-reporters.ts')
+  const file = join(home, 'progress-report.sh'), inbox = join(home, 'progress-inbox'), log = join(home, '.agent-board', 'hook-errors.log')
+  const source = reporterSh(shellPath(inbox)), embedded = powershellReporter(true)
+  assert.equal(source.split(embedded).length, 2)
+  writeFileSync(file, source.replace(embedded, () => `${embedded}\nif (`))
+  const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt'], { env: { ...process.env, HOME: home, USERPROFILE: home }, input: JSON.stringify({ session_id: 'synthetic-refused-copy', prompt: '/board' }), encoding: 'utf8', windowsHide: true })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(readFileSync(log, 'utf8'), / gemini prompt REPORTER_FAILED\n$/)
+  assert.deepEqual(receipts(home).filter(one => one.file.endsWith('.json')), [])
+  assert.deepEqual(existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.ps1')) : [], [])
 }))
 
 test('the PowerShell reporter writes a prompt receipt with no prompt words', { skip: process.platform !== 'win32' }, () => fixture(async home => {
