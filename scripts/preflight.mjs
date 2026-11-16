@@ -4,7 +4,8 @@ import { accessSync, closeSync, constants, existsSync, lstatSync, mkdirSync, mkd
 import { tmpdir, userInfo } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { addedLines, testTitles, titleKnown } from './pr-check.mjs'
+import { addedLines, caseRows, failFirstValues, testTitles, titleKnown } from './pr-check.mjs'
+import { runFailFirst, stateWords } from './fail-first.mjs'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 import { isBundleFile } from './bundle-text.mjs'
 import { testLockNamespaceProblem } from './preflight-lock-policy.mjs'
@@ -695,6 +696,33 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   const check = async (label, action) => {
     try { await action() } catch { add('FAIL', `${label} could not finish; check its inputs and tools.`) }
   }
+  // The environment of one test run: a temp home of its own, no tokens, and its own TAP rather than the parent's.
+  const testEnv = temp => {
+    const env = { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' }
+    // A nested test runner must emit its own TAP, not the parent's IPC protocol.
+    delete env.NODE_TEST_CONTEXT
+    for (const name of Object.keys(env)) if (/^(GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY)$/i.test(name)) delete env[name]
+    for (const name of homeNames) env[name] = name === 'CLAUDE_PROGRESS_FILE' ? join(temp, 'progress.md') : temp
+    return env
+  }
+  // Takes the account's test lock, or reports why it cannot and returns null.
+  const takeTestLock = () => {
+    let owner
+    try { owner = acquireTestLock(lockPath, onLockPublished, fallbackLockPath, readProcessIdentity, lockPlatform) } catch (error) {
+      add('FAIL', error.message?.startsWith('test lock directory ') ? error.message : 'test lock directory could not be used; check account directory access.')
+      return null
+    }
+    if (owner?.blockedBy) {
+      const { pid, name, markerMs, uncertainty } = owner.blockedBy
+      const minutes = Math.floor(Math.max(0, Date.now() - markerMs) / 60_000)
+      const detail = uncertainty === 'legacy' ? ', owner could not be confirmed because no process identity was recorded'
+        : uncertainty === 'unknown' ? ', process start time could not be read, so the owner could not be confirmed'
+          : uncertainty === 'second' ? ', process identity is known only to the second; this may be a reused process ID'
+            : uncertainty === 'namespace' ? ', its time or process ID namespace differs or could not be read, so the owner could not be confirmed' : ''
+      add('FAIL', `another preflight test run is already active on this computer (process ${pid}, started ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago${detail}); finish it, or if no preflight is running, delete its .lock file  and run preflight again.`, `${name} from this account's .agent-board-preflight-tests-* folder`)
+    }
+    return owner
+  }
   let changed
   let added
   let mergeBase
@@ -807,31 +835,16 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
       add('WARN', '\ue001', `${path}: not run here; it is on preflight's list of files too long for its ten-minute limit (leftToCi in scripts/preflight.mjs), and CI runs it whole. Run the tests you changed by name (node --test --test-name-pattern "<title>" ${path}) and list them under Evidence.`)
     }
     const toRun = paths.filter(path => !leftToCi.has(path))
-    let owner = null
-    try { owner = toRun.length ? acquireTestLock(lockPath, onLockPublished, fallbackLockPath, readProcessIdentity, lockPlatform) : null } catch (error) {
-      add('FAIL', error.message?.startsWith('test lock directory ') ? error.message : 'test lock directory could not be used; check account directory access.')
-      return
-    }
-    if (owner?.blockedBy) {
-      const { pid, name, markerMs, uncertainty } = owner.blockedBy
-      const minutes = Math.floor(Math.max(0, Date.now() - markerMs) / 60_000)
-      const detail = uncertainty === 'legacy' ? ', owner could not be confirmed because no process identity was recorded'
-        : uncertainty === 'unknown' ? ', process start time could not be read, so the owner could not be confirmed'
-          : uncertainty === 'second' ? ', process identity is known only to the second; this may be a reused process ID'
-            : uncertainty === 'namespace' ? ', its time or process ID namespace differs or could not be read, so the owner could not be confirmed' : ''
-      add('FAIL', `another preflight test run is already active on this computer (process ${pid}, started ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago${detail}); finish it, or if no preflight is running, delete its .lock file \ue001 and run preflight again.`, `${name} from this account's .agent-board-preflight-tests-* folder`)
-    }
+    const owner = toRun.length ? takeTestLock() : null
+    // The lock could not be taken, and takeTestLock said why.
+    if (toRun.length && owner === null) return
     if (owner?.isFallback) add('PASS', "the home folder cannot hold the test lock, so the test lock was this account's shared fallback folder, and any home lock folder was still read.")
     if (owner?.path) {
       try {
         for (const path of toRun) {
           const temp = mkdtempSync(join(tmpdir(), 'agent-board-preflight-'))
           try {
-            const env = { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' }
-            // A nested test runner must emit its own TAP, not the parent's IPC protocol.
-            delete env.NODE_TEST_CONTEXT
-            for (const name of Object.keys(env)) if (/^(GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY)$/i.test(name)) delete env[name]
-            for (const name of homeNames) env[name] = name === 'CLAUDE_PROGRESS_FILE' ? join(temp, 'progress.md') : temp
+            const env = testEnv(temp)
             onProgress?.(`RUN ${shown(path)}`)
             const tested = command(process.execPath, ['--test', '--test-reporter=tap', path], { env, timeout: 600000 })
             const output = `${tested.stdout ?? ''}\n${tested.stderr ?? ''}`
@@ -926,23 +939,88 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   if (!unsafe.length) add('PASS', 'added test process launches have cleanup markers or none were added.')
   for (const [path] of unsafe) add('WARN', `${path}: a test that starts a process must stop it in \`finally\` and wait for it to exit, on Windows too`)
 
+  // pr-check on a body file; `pasted` says what preflight added to a copy of it.
+  const checkBody = (bodyPath, pasted) => {
+    const prCheck = extra => command(process.execPath, ['scripts/pr-check.mjs', '--body-file', bodyPath, '--title', title, '--no-bundle', '--base', base, ...extra])
+    const firstOf = checked => `${checked.stdout ?? ''}\n${checked.stderr ?? ''}`.split(/\r?\n/).find(line => /^FAIL |^pr-check:/.test(line) && !/^pr-check: new pull request/.test(line))
+    let checked = prCheck([])
+    let note = ''
+    // Without GitHub the body is still checked offline; the GitHub part is reported as not run, never as passed.
+    if (checked.status !== 0 && /network check failed/.test(firstOf(checked) ?? '')) {
+      const installed = command('gh', ['--version'])
+      const signedIn = installed.error || installed.status !== 0 ? null : command('gh', ['auth', 'status'])
+      const why = !signedIn ? 'the GitHub CLI is not installed' : signedIn.error || signedIn.status !== 0 ? 'the GitHub CLI is not signed in or cannot reach GitHub' : 'GitHub could not be reached'
+      add('WARN', `pr-check's GitHub checks (issue, claim, open pull request cap, review) did not run here, because ${why}; CI's pr-check runs them on the pull request.`)
+      checked = prCheck(['--offline'])
+      note = ' without GitHub (--offline)'
+    }
+    const first = firstOf(checked)
+    add(!checked.error && checked.status === 0 ? 'PASS' : 'FAIL', checked.status === 0 ? `PR body passed pr-check${note}${pasted}.` : `PR body: ${first ?? 'pr-check could not finish.'}`)
+  }
+  // The tests the case table names run on the merge base, with this branch's tests copied in, and here: a test that
+  // passes on both does not check the change. The count is the `Fail-first:` line (CONTRIBUTING rule 8, #1520).
+  let failFirstLine = null
   if (bodyFile && title) {
-    await check('PR body check', () => {
-      const prCheck = extra => command(process.execPath, ['scripts/pr-check.mjs', '--body-file', resolve(cwd, bodyFile), '--title', title, '--no-bundle', '--base', base, ...extra])
-      const firstOf = checked => `${checked.stdout ?? ''}\n${checked.stderr ?? ''}`.split(/\r?\n/).find(line => /^FAIL |^pr-check:/.test(line) && !/^pr-check: new pull request/.test(line))
-      let checked = prCheck([])
-      let note = ''
-      // Without GitHub the body is still checked offline; the GitHub part is reported as not run, never as passed.
-      if (checked.status !== 0 && /network check failed/.test(firstOf(checked) ?? '')) {
-        const installed = command('gh', ['--version'])
-        const signedIn = installed.error || installed.status !== 0 ? null : command('gh', ['auth', 'status'])
-        const why = !signedIn ? 'the GitHub CLI is not installed' : signedIn.error || signedIn.status !== 0 ? 'the GitHub CLI is not signed in or cannot reach GitHub' : 'GitHub could not be reached'
-        add('WARN', `pr-check's GitHub checks (issue, claim, open pull request cap, review) did not run here, because ${why}; CI's pr-check runs them on the pull request.`)
-        checked = prCheck(['--offline'])
-        note = ' without GitHub (--offline)'
+    await check('fail-first', async () => {
+      let text
+      // A body file that cannot be read is the PR body check's to report.
+      try { text = read(resolve(cwd, bodyFile)) } catch { return }
+      const rows = caseRows(text)
+      if (!rows.length) { add('PASS', 'fail-first: the body has no case table, so no test runs on the base.'); return }
+      const names = [...new Set(rows.flatMap(cells => [...(cells[3] ?? '').matchAll(/`([^`\n]+)`/g)].map(match => match[1])))]
+      const owner = names.length ? takeTestLock() : null
+      if (names.length && !owner?.path) return
+      const temps = []
+      try {
+        onProgress?.(`RUN fail-first: the tests the case table names, here and on ${mergeBase.slice(0, 8)}`)
+        // Each run gets a home of its own, so a run here leaves nothing behind for the run on the base.
+        const env = () => {
+          const temp = mkdtempSync(join(tmpdir(), 'agent-board-preflight-'))
+          temps.push(temp)
+          return testEnv(temp)
+        }
+        const found = await runFailFirst({ cwd, base: mergeBase, names, command, env, timeout: 600000 })
+        for (const item of found.results) {
+          // A span that names no test is pr-check's to report, row by row.
+          if (item.state === 'unknown' || item.state === 'counted') continue
+          add(['passes-on-base', 'fails-on-head', 'missing', 'ambiguous'].includes(item.state) ? 'FAIL' : 'WARN', `${item.title}: ${stateWords[item.state]}.`)
+        }
+        if (found.isDirty) add('WARN', 'fail-first ran on uncommitted changes; commit them and run preflight again, so the line is for the head you push.')
+        if (!found.total) add('WARN', 'fail-first: no new or changed test that the case table names ran here; if none can fail without the change, write "Fail-first: none, <reason>" under Checks.')
+        else {
+          failFirstLine = found.line
+          add(found.counted === found.total ? 'PASS' : 'FAIL', '', found.line)
+        }
+      } finally {
+        // The lock is let go even when a temp home cannot be removed.
+        try {
+          for (const temp of temps) rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+        } finally {
+          if (owner?.path) releaseTestLock(owner.path)
+        }
       }
-      const first = firstOf(checked)
-      add(!checked.error && checked.status === 0 ? 'PASS' : 'FAIL', checked.status === 0 ? `PR body passed pr-check${note}.` : `PR body: ${first ?? 'pr-check could not finish.'}`)
+    })
+    await check('PR body check', () => {
+      let bodyPath = resolve(cwd, bodyFile)
+      let copy = null
+      // The body is checked as it will read with the line above pasted; the file itself is left as it is.
+      if (failFirstLine) {
+        const text = read(bodyPath)
+        // A filled line (pasted already, or `none, <reason>`) is checked as it is; otherwise the line goes at the end.
+        // Lines are read as pr-check reads them, so an example in a fence is not a line and a placeholder is none.
+        const isFilled = failFirstValues(text).some(value => value !== '' && !value.startsWith('<'))
+        const pasted = isFilled ? null : `${text.trimEnd()}\n\n${failFirstLine}\n`
+        if (pasted !== null) {
+          copy = mkdtempSync(join(tmpdir(), 'agent-board-preflight-body-'))
+          bodyPath = join(copy, 'body.md')
+          writeFileSync(bodyPath, pasted)
+        }
+      }
+      try {
+        checkBody(bodyPath, copy ? ' with the `Fail-first:` line above pasted' : '')
+      } finally {
+        if (copy) rmSync(copy, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+      }
     })
   } else add('PASS', 'PR body check skipped; supply --body-file and --title to include it.')
 
