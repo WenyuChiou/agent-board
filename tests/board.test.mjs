@@ -42,6 +42,16 @@ const test = partTest(nodeTest)
 
 const SWEEP_ARMED_KEY = createHash('sha256').update('hand-kept-sweep-armed').digest('hex')
 
+// A pid no process can have on the systems CI runs, for a stand-in page record of a dead process
+// (#1518): above Linux's pid_max (4194304) and not a multiple of 4, so Windows cannot have it
+// either. The old 999999 can be a real Linux pid.
+const deadPid = 9999999
+
+test('the stand-in dead pid is a number no process has', () => {
+  // If it ever ran, a stand-in record would read as a live page. Signal 0 checks without sending.
+  assert.throws(() => process.kill(deadPid, 0), error => error.code === 'ESRCH')
+})
+
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
   ['codex', 'cursor', 'gemini', 'grok', 'opencode', 'hermes', 'claude'].map((agent, i) =>
@@ -8067,7 +8077,7 @@ publicationSync340()
 test("the page's address stays out of progress.md's folder, and a file left by a page that is gone does not keep the next one from starting", { timeout: 60_000 }, async () => {
   const board = serveIn()
   const port = await freePort()
-  const gone = { pid: 999999, port, url: `http://127.0.0.1:${port}/?t=gone`, path: board.path, built: '' }
+  const gone = { pid: deadPid, port, url: `http://127.0.0.1:${port}/?t=gone`, path: board.path, built: '' }
   // Where 0.19.0 kept the address, token and all, and where this copy keeps it.
   const old = join(board.dir, 'progress-serve.json')
   addressFixture(old, JSON.stringify(gone))
@@ -8384,9 +8394,9 @@ test('a newer --serve does not start a second page while the page it would repla
 })
 
 test('an address file naming a dead process, or a running one with nothing at its port, does not keep the next --serve from starting a page', { timeout: 60_000 }, async () => {
-  // 999999 is a number no process has. The test's own is one that runs, as a number a restarted
+  // deadPid is a number no process has. The test's own is one that runs, as a number a restarted
   // computer gave to another program does.
-  for (const pid of [999999, process.pid]) {
+  for (const pid of [deadPid, process.pid]) {
     const board = serveIn()
     const port = await freePort()
     const stale = `http://127.0.0.1:${port}/?t=gone`
