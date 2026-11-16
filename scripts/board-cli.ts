@@ -2295,6 +2295,8 @@ const serveChild = (): void => {
       ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: isCodexSendOn(), noCodexSend: args.includes('--no-codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
+      // An open board request is answered when progress.md or the hooks' inbox changes (#359).
+      watch: { progress: path, inbox: join(dirname(path), 'progress-inbox') },
       pending: (isFresh = true) => pending(undefined, isFresh),
       act,
       tidy,

@@ -25,6 +25,8 @@ import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { isFolder, runSendPlan } from './background-resume'
 import { createMessaging } from './board-messaging'
+import { watchBoard } from './board-watch'
+import type { BoardWatch, WatchFn } from './board-watch'
 import { startCodexReceiver } from './codex-receiver.mjs'
 import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
@@ -98,6 +100,11 @@ export type ServeOptions = {
   approvalTimes?: { drawMs: number; pressMs: number; secretMs?: number; graceMs?: number }
   // How long a replaced server keeps HTTP open after dropping locks/receivers so an open tab can read `{ moved: true }` (#1335).
   movedGraceMs?: number
+  // progress.md and its inbox folder, watched so an open board request is answered as soon as either changes (#359).
+  // `fs` is the tests' stand-in for fs.watch. Absent: no watch, and waiting requests are checked on the timer.
+  watch?: { progress: string; inbox: string; fs?: WatchFn }
+  // The tests' shorter waits for an open board request; the board uses BOARD_HOLD_MS and BOARD_FALLBACK_MS.
+  boardTimes?: { holdMs?: number; fallbackMs?: number }
 }
 
 type Result = { ok: boolean; note: string }
@@ -108,6 +115,14 @@ const MAX_BODY = 64 * 1024
 // The page on the local network stops after this long without a request from it, so an
 // address a phone was given does not stay open for the page's whole life.
 const LAN_IDLE = 10 * 60 * 1000
+
+// An open board request (#359) is answered "no change" after this long, so the page's clock, ages and the
+// server's view of which page is visible stay as fresh as they were with the old 2 s poll.
+const BOARD_HOLD_MS = 10_000
+// Without a working file watch, waiting requests look at the board this often: a change still shows within 3 s.
+const BOARD_FALLBACK_MS = 1000
+// Changes within this long of each other wake the waiting requests once.
+const BOARD_WAKE_MS = 25
 
 const HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' }
 
@@ -176,6 +191,62 @@ export const startServer = (o: ServeOptions): void => {
   const replies = new Map<string, Result & { at: number; key: string }>()
   let port = 0
   let lastSeen = Date.now()
+  // Open board requests (#359). A page that already has the board sends its etag and x-board-wait: 1; when
+  // nothing changed the answer waits here until the file watch, a press, an approval or a reply wakes it, or
+  // until BOARD_HOLD_MS passes (then 304). Nothing reads a file while a request waits and the watch works.
+  // Without a working watch, waiting requests are checked every BOARD_FALLBACK_MS instead.
+  type Waiter = { wake: () => void; drop: () => void }
+  const waiters = new Set<Waiter>()
+  let boardWatch: BoardWatch | null = null
+  let wakeTimer: ReturnType<typeof setTimeout> | null = null
+  let fallbackTimer: ReturnType<typeof setInterval> | null = null
+  // Several changes in a burst (a hook writes the inbox and progress.md) wake the waiting requests once.
+  const wakeAll = (): void => {
+    if (wakeTimer !== null || waiters.size === 0) return
+    wakeTimer = setTimeout(() => {
+      wakeTimer = null
+      for (const one of [...waiters]) one.wake()
+    }, BOARD_WAKE_MS)
+  }
+  const syncFallback = (): void => {
+    const isNeeded = waiters.size > 0 && !(boardWatch?.isWatching() ?? false)
+    if (isNeeded && fallbackTimer === null) fallbackTimer = setInterval(wakeAll, o.boardTimes?.fallbackMs ?? BOARD_FALLBACK_MS)
+    else if (!isNeeded && fallbackTimer !== null) {
+      clearInterval(fallbackTimer)
+      fallbackTimer = null
+    }
+  }
+  // recheck answers when the board changed and says whether it did; last always answers.
+  const holdBoard = (res: ServerResponse, id: string, recheck: () => boolean, last: () => boolean): void => {
+    let isDone = false
+    const done = (): void => {
+      if (isDone) return
+      isDone = true
+      clearTimeout(timer)
+      waiters.delete(waiter)
+      syncFallback()
+    }
+    const settle = (answer: () => boolean): void => {
+      if (isDone) return
+      let isAnswered = true
+      try {
+        // A page replaced while it waited is told so, as its next request would be (#265).
+        if (isMoved || (id !== '' && isRetiredPage(id))) {
+          if (isMoved && id !== '') movedWaiting.delete(id)
+          if (isMoved) res.once('finish', () => { if (movedWaiting.size === 0 && movedReleased) setImmediate(finish) })
+          json(res, 200, { moved: true })
+        } else isAnswered = answer()
+      } catch {
+        if (!res.headersSent) json(res, 500, {})
+      }
+      if (isAnswered) done()
+    }
+    const waiter: Waiter = { wake: () => settle(recheck), drop: done }
+    const timer = setTimeout(() => settle(last), o.boardTimes?.holdMs ?? BOARD_HOLD_MS)
+    res.once('close', done)
+    waiters.add(waiter)
+    syncFallback()
+  }
   // Which board pages are open (#265). A page names itself in x-board-page on every poll; loading the page counts until its
   // first poll. The terminal board and other scripts read GET /api/board without that header and do not count. A page that
   // says it left is dropped alone, so another page that is still open stays counted. Only a page that reported itself visible
@@ -293,13 +364,14 @@ export const startServer = (o: ServeOptions): void => {
   const settleApproval = (id: string, decision: ApprovalDecision | null): void => {
     const pending = approvals.get(id)
     if (pending === undefined) return
+    wakeAll()
     pending.timers.forEach(clearTimeout)
     pending.timers = []
     const answer = pending.answer
     pending.answer = undefined
     if (decision === null) {
       pending.item = { ...pending.item, state: 'window' }
-      const gone = setTimeout(() => approvals.delete(id), APPROVAL_WINDOW_MS)
+      const gone = setTimeout(() => { approvals.delete(id); wakeAll() }, APPROVAL_WINDOW_MS)
       // Holds no process open: a board that stops forgets it anyway.
       gone.unref()
       pending.timers.push(gone)
@@ -336,6 +408,9 @@ export const startServer = (o: ServeOptions): void => {
       movedTimer = null
     }
     closeNonServer()
+    boardWatch?.close()
+    if (wakeTimer !== null) clearTimeout(wakeTimer)
+    for (const one of [...waiters]) one.drop()
     server.close()
     server.closeAllConnections()
     o.onStop()
@@ -360,6 +435,8 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (moved && movedWaiting.size > 0) {
       isMoved = true
+      // Pages waiting on the board hear at once that it moved.
+      for (const one of [...waiters]) one.wake()
       movedTimer = setTimeout(finish, o.movedGraceMs ?? 5_000)
       const released = (): void => {
         movedReleased = true
@@ -437,7 +514,7 @@ export const startServer = (o: ServeOptions): void => {
     runSendPlan(plan, o.s, label)
       .then(result => replies.set(key, { ...result, at: Date.now(), key: cardKey }))
       .catch((error: unknown) => replies.set(key, { ok: false, note: o.s.serveSendFailed(label, String(error)), at: Date.now(), key: cardKey }))
-      .finally(() => { sending.delete(key); sending.delete(cardSendKey(cardKey)) })
+      .finally(() => { sending.delete(key); sending.delete(cardSendKey(cardKey)); wakeAll() })
     return { status: 202, note: o.s.serveQueued(label) }
   }
 
@@ -459,6 +536,8 @@ export const startServer = (o: ServeOptions): void => {
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
+    // A press, a send, a message or a tidy can change the board: an open board request looks again once it is answered.
+    if (req.method !== 'GET') res.once('finish', wakeAll)
     const replyMessage = (action: string, payload: Record<string, unknown>): void => {
       // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
       if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
@@ -571,35 +650,48 @@ export const startServer = (o: ServeOptions): void => {
         if (isReplaced) return json(res, 200, { moved: true })
         // A file the board cannot read is named on the page, which would otherwise say it is offline. The page
         // is always the grouped one; the old ?group=agent address asks for what every address gets now.
-        try {
-          const now = Date.now()
-          const view = o.view()
-          const state = messaging.snapshot(now, o.reports?.(false))
-          const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          // The page on the network learns only that an approval waits: no command, no button.
-          const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, isApprovalOff)
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, isLan ? handledOnly(state) : state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now, ...(approvalsShown === undefined ? {} : { approvals: approvalsShown }) }
-          // The page already compares its clock at minute precision. Keep that refresh boundary
-          // without treating each millisecond as changed content; replies and receipts stay exact.
-          const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
-          const etag = `W/"${createHash('sha256').update(fingerprint).digest('hex')}"`
-          const matches = req.headers['if-none-match']?.split(',').some(value => value.trim() === '*' || value.trim().replace(/^W\//, '') === etag.slice(2))
-          if (matches) {
-            res.writeHead(304, { ...HEADERS, etag })
-            res.end()
-            return
+        const ifNoneMatch = req.headers['if-none-match']
+        // Answers with the board, or with the note of a file it could not read; an unchanged board is
+        // answered (304) only when isLast, and otherwise left waiting. Says whether it answered.
+        const answer = (isLast: boolean): boolean => {
+          try {
+            const now = Date.now()
+            const view = o.view()
+            const state = messaging.snapshot(now, o.reports?.(false))
+            const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
+            // The page on the network learns only that an approval waits: no command, no button.
+            const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, isApprovalOff)
+            const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, isLan ? handledOnly(state) : state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now, ...(approvalsShown === undefined ? {} : { approvals: approvalsShown }) }
+            // The page already compares its clock at minute precision. Keep that refresh boundary
+            // without treating each millisecond as changed content; replies and receipts stay exact.
+            const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
+            const etag = `W/"${createHash('sha256').update(fingerprint).digest('hex')}"`
+            const matches = ifNoneMatch?.split(',').some(value => value.trim() === '*' || value.trim().replace(/^W\//, '') === etag.slice(2))
+            if (matches) {
+              if (!isLast) return false
+              res.writeHead(304, { ...HEADERS, etag })
+              res.end()
+              return true
+            }
+            res.writeHead(200, { ...HEADERS, etag, 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify(payload))
+            return true
+          } catch (error) {
+            const note = o.failure(error, isLan)
+            if (note === null) {
+              process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
+              json(res, 500, { note: o.s.pressFailed })
+              return true
+            }
+            json(res, 409, { note })
+            return true
           }
-          res.writeHead(200, { ...HEADERS, etag, 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify(payload))
-          return
-        } catch (error) {
-          const note = o.failure(error, isLan)
-          if (note === null) {
-            process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
-            return json(res, 500, { note: o.s.pressFailed })
-          }
-          return json(res, 409, { note })
         }
+        // Only a page that holds the board it would be answered with waits; the terminal board and scripts never do.
+        const wantsWait = req.headers['x-board-wait'] === '1' && ifNoneMatch !== undefined && !isStopping
+        if (answer(!wantsWait)) return
+        holdBoard(res, isLan ? '' : pageIdOf(req.headers), () => answer(false), () => answer(true))
+        return
       }
       // Only the board script on the computer asks; the answer names progress.md's path.
       // wantsKeyedPage: approvals are in use and no open page can answer them, so the board script
@@ -647,6 +739,7 @@ export const startServer = (o: ServeOptions): void => {
         const item = approvalOf(ask, randomBytes(12).toString('base64url'), now, homedir(), isWindows, o.s)
         const pending: Pending = { item, timers: [] }
         approvals.set(item.id, pending)
+        wakeAll()
         // No turn, or no page in front of the person that can answer it: the host asks at once.
         if (item.state === 'window' || !isWatched(now)) {
           settleApproval(item.id, null)
@@ -942,6 +1035,10 @@ export const startServer = (o: ServeOptions): void => {
       return
     }
     messaging.markPublished()
+    if (o.watch !== undefined) {
+      const { progress, inbox, fs } = o.watch
+      boardWatch = watchBoard({ progress, inbox, onChange: wakeAll, onFail: () => { syncFallback(); wakeAll() }, ...(fs === undefined ? {} : { watch: fs }) })
+    }
     // Preparing a private address can block; inactivity starts once that address is ready.
     lastSeen = Date.now()
     if (o.codex?.executable) {
@@ -953,8 +1050,8 @@ export const startServer = (o: ServeOptions): void => {
     // The idle timer starts only once the server is listening: a listen failure
     // throws before this point, and a timer made earlier would keep the failed
     // child alive instead of letting it exit.
-    // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
-    // `idleMs` and no reply is on its way.
+    // An open page keeps a board request open and asks again when it is answered (#359), so it asks at least every
+    // BOARD_HOLD_MS; the server goes once nobody has asked for `idleMs` and no reply is on its way.
     const idle = setInterval(() => {
       if (isStopping) return
       if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()

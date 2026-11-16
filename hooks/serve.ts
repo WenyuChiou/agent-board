@@ -1473,6 +1473,9 @@ const PAGE_SCRIPT = String.raw`
     return box;
   }
   var timer = null;
+  // The open board request (#359): its number, so an answer to one that was replaced is dropped, and what aborts it.
+  var boardAsk = 0;
+  var boardAbort = null;
   var isClosed = false;
   var isUnreachable = false;
   var offlineButtons = [];
@@ -1655,14 +1658,17 @@ const PAGE_SCRIPT = String.raw`
   // Names this page to the board, so it can tell one open page from another (#265).
   function newPageId() { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } }
   var pageId = newPageId();
-  function call(path, body) {
+  function call(path, body, signal) {
     if (isUnreachable && body !== undefined) return Promise.reject();
     var requestPage = pageId;
     var headers = { 'x-board-token': token, 'x-board-page': requestPage, 'x-board-visible': document.hidden ? '0' : '1' };
     if (approveSecret) headers['x-board-approve'] = approveSecret;
-    if (path === '/api/board' && body === undefined && boardEtag) headers['if-none-match'] = boardEtag;
+    // A page that holds the board asks the server to answer when it changes, instead of at once (#359).
+    if (path === '/api/board' && body === undefined && boardEtag) { headers['if-none-match'] = boardEtag; headers['x-board-wait'] = '1'; }
     if (body !== undefined) headers['content-type'] = 'application/json';
-    return fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' }).then(function (res) {
+    var init = { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' };
+    if (signal) init.signal = signal;
+    return fetch(path, init).then(function (res) {
       if (path === '/api/board' && res.status === 304) return { ok: true, unchanged: true };
       return res.json().catch(function () { return {}; }).then(function (data) {
         data.ok = res.ok && data.ok !== false;
@@ -1671,7 +1677,8 @@ const PAGE_SCRIPT = String.raw`
       });
     }).catch(function (error) {
       // A request started under an earlier pageId (before persisted pageshow switched ids) must not mark the restored page offline (#1475).
-      if (requestPage === pageId) unreachable();
+      // Nor does an open board request this page replaced and aborted.
+      if (requestPage === pageId && !(signal && signal.aborted)) unreachable();
       throw error;
     });
   }
@@ -3580,8 +3587,13 @@ const PAGE_SCRIPT = String.raw`
     if (isClosed) return;
     clearTimeout(timer);
     var pollPage = pageId;
-    call('/api/board').then(function (data) {
-      if (isClosed || pollPage !== pageId) return;
+    // One open board request at a time: a refresh after a press replaces the waiting one, so held requests never
+    // use up the browser's few connections to the board.
+    var ask = ++boardAsk;
+    if (boardAbort) boardAbort.abort();
+    boardAbort = typeof AbortController === 'function' ? new AbortController() : null;
+    call('/api/board', undefined, boardAbort ? boardAbort.signal : undefined).then(function (data) {
+      if (isClosed || pollPage !== pageId || ask !== boardAsk) return;
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) { showMoved(); return; }
       if (data.unchanged) { reachable(); maybeShowAway(); return; }
@@ -3628,10 +3640,12 @@ const PAGE_SCRIPT = String.raw`
         if (reply.at > seenAt) { since = Math.max(since, reply.at); say(reply.note, reply.ok ? 'done' : 'alert', reply.key, undefined, !reply.ok); }
       });
     }, function () {
-      if (pollPage === pageId) unreachable();
+      if (pollPage === pageId && ask === boardAsk) unreachable();
     }).then(function () {
-      // Leave room for the response and paint inside the three-second ask deadline.
-      if (!isClosed && pollPage === pageId) timer = setTimeout(refresh, 2000);
+      if (isClosed || pollPage !== pageId || ask !== boardAsk) return;
+      // Holding the board, the page asks again at once and the server answers when it changes (#359). Without it
+      // (offline, a file it could not read, a press under way) it asks again in 2 s, inside the three-second ask deadline.
+      timer = setTimeout(refresh, boardEtag ? 0 : 2000);
     });
   }
   // Wider than the parser's start marker, so a block it would take is never dropped here.
@@ -3727,10 +3741,13 @@ const PAGE_SCRIPT = String.raw`
   // Going away starts a new away period: the line from before is gone, and the world as
   // it stands now is the snapshot the return is compared with.
   if (typeof document.addEventListener === 'function') document.addEventListener('visibilitychange', function () {
-    if (!document.hidden) return;
+    // The open request told the board whether this tab was in sight; a new one tells it now, and a tab coming back
+    // gets its away line at once instead of when the board next changes (#359).
+    if (!document.hidden) { refresh(); return; }
     clearAwayLine();
     var snap = awaySnapshot();
     if (snap) awaySnap = snap;
+    refresh();
   });
   if (typeof ResizeObserver === 'function' && document.documentElement) {
     var head = document.getElementById('head');
