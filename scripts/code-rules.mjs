@@ -101,7 +101,7 @@ export const codeLinesOf = (source, { jsx = false } = {}) => {
     }
     return false
   }
-  // Distinguish `<Tag>` JSX elements from TypeScript `<T extends Foo>` / `<T,>` generics in .tsx/.jsx (#1561 review).
+  // Distinguish `<Tag>` JSX elements from TypeScript generics (`<T,>`, `<T extends ...>`, `<T = ...>`) in .tsx/.jsx (#1561 review).
   const jsxTagStart = index => {
     if (!jsx || source[index] !== '<' || !canStartExpr()) return null
     if (source[index + 1] === '>') return hasJsxClose(index + 2, '') ? '' : null
@@ -111,6 +111,9 @@ export const codeLinesOf = (source, { jsx = false } = {}) => {
     const tagName = source.slice(index + 1, k)
     if (!/[\s/>]/.test(source[k] ?? '')) return null
     let j = k
+    while (j < source.length && /\s/.test(source[j])) j += 1
+    if (source[j] === ',' || source[j] === '=') return null
+    if (source.startsWith('extends', j) && /^\s+(?![=>/])[^\r\n]/.test(source.slice(j + 7, j + 16))) return null
     let quote = null
     let depth = 0
     while (j < source.length) {
@@ -125,6 +128,7 @@ export const codeLinesOf = (source, { jsx = false } = {}) => {
       if (c === '{') { depth += 1; j += 1; continue }
       if (c === '}') { if (depth > 0) depth -= 1; j += 1; continue }
       if (depth === 0) {
+        if (c === ',') return null
         if (c === '/' && source[j + 1] === '>') return tagName
         if (c === '>') return hasJsxClose(j + 1, tagName) ? tagName : null
       }

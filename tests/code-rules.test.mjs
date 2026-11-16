@@ -129,8 +129,10 @@ test('comments, strings and regexes pass when they only name the word, while cod
   assert.equal(checkAdded([{ path: 'hooks/view.tsx', line: 1, text: tsxHook }], config, undefined, { files: { 'hooks/view.tsx': tsxHook } }).length, 1)
   const jsxTest = `const view = <>Don't {test${ONLY}('a', () => {})}</>\n`
   assert.equal(checkAdded([{ path: 'tests/view.test.jsx', line: 1, text: jsxTest }], config, undefined, { files: { 'tests/view.test.jsx': jsxTest } }).length, 1)
-  const tsxGeneric = 'const fn = <T extends Foo>(x: T) => setTimeout(done, 1)\n'
-  assert.equal(checkAdded([{ path: 'hooks/view.tsx', line: 1, text: tsxGeneric }], config, undefined, { files: { 'hooks/view.tsx': tsxGeneric } }).length, 1)
+  const tsxGeneric = 'const fn = <T extends Item>(x: T) => setTimeout(done, 1)\nconst view = <T>text</T>\n'
+  assert.equal(checkAdded([{ path: 'hooks/view.tsx', line: 1, text: 'const fn = <T extends Item>(x: T) => setTimeout(done, 1)' }], config, undefined, { files: { 'hooks/view.tsx': tsxGeneric } }).length, 1)
+  const tsxCommaGeneric = 'const fn = <T,>(x: T) => setTimeout(done, 1)\nconst view = <T>text</T>\n'
+  assert.equal(checkAdded([{ path: 'hooks/view.tsx', line: 1, text: 'const fn = <T,>(x: T) => setTimeout(done, 1)' }], config, undefined, { files: { 'hooks/view.tsx': tsxCommaGeneric } }).length, 1)
 
   // A failed git show read for a changed file stops the CLI reader instead of silently falling back (#1561 review).
   const badRead = headReader({
