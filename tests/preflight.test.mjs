@@ -9,7 +9,7 @@ import os from 'node:os'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, leftToCi, objectKeys, runPreflight, safeLine } from '../scripts/preflight.mjs'
+import { accountFallbackLockPath, accountTestLockPath, bundleSources, engineProblems, leftToCi, objectKeys, pinnedBrowsersPath, runPreflight, safeLine } from '../scripts/preflight.mjs'
 
 const script = fileURLToPath(new URL('../scripts/preflight.mjs', import.meta.url))
 const syntheticIdentity = ticks => `linux:00000000-0000-4000-8000-000000000001:${ticks}:time:[1]:pid:[2]`
@@ -555,6 +555,18 @@ test('preflight runs touched Node tests with an isolated home and removes it aft
   assert.notEqual(homes[0], f.home)
   assert.equal(existsSync(homes[0]), false)
   assert.equal(existsSync(join(f.home, 'marker')), false)
+})
+
+test('preflight keeps the account Playwright browsers visible to the nested run after it swaps the home folders (#1471)', async t => {
+  assert.equal(pinnedBrowsersPath({ LOCALAPPDATA: 'C:\\Users\\pat\\AppData\\Local' }, 'win32'), 'C:\\Users\\pat\\AppData\\Local\\ms-playwright')
+  assert.equal(pinnedBrowsersPath({ LOCALAPPDATA: 'C:\\Local', PLAYWRIGHT_BROWSERS_PATH: 'D:\\browsers' }, 'win32'), 'D:\\browsers')
+  assert.equal(pinnedBrowsersPath({ HOME: '/home/pat' }, 'linux'), undefined)
+  assert.equal(pinnedBrowsersPath({}, 'win32'), undefined)
+  const f = fixture(t)
+  const expected = JSON.stringify(pinnedBrowsersPath(process.env) ?? '')
+  f.write('tests/browsers.test.mjs', `import test from 'node:test'\nimport assert from 'node:assert/strict'\ntest('the nested run names the account browsers', () => {\n  assert.equal(process.env.PLAYWRIGHT_BROWSERS_PATH ?? '', ${expected})\n})\n`)
+  const checks = await f.check({})
+  assert.ok(has(checks, 'PASS', 'tests/browsers.test.mjs: 1 tests, 0 failed'))
 })
 
 test('preflight streams each completed check and names a touched Node file before running it', async t => {

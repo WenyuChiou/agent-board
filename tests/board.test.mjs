@@ -5981,12 +5981,17 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
   for (const pipe of closed) pipe.catch(() => {})
   let timer
   let abort
+  let aborted = false
   const stopped = new Promise((_, fail) => {
     abort = () => {
-      if (child.exitCode !== null || child.signalCode !== null) return
-      mark('test abort: ending the command')
-      if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
-      else child.kill('SIGKILL')
+      if (aborted) return
+      aborted = true
+      const stillRunning = child.exitCode === null && child.signalCode === null
+      mark(stillRunning ? 'test abort: ending the command' : 'test abort: stopping pipe wait after bash exit')
+      if (stillRunning) {
+        if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+        else child.kill('SIGKILL')
+      }
       fail(new Error("the Cursor shell command was stopped by the test's abort"))
     }
     if (signal?.aborted) abort()
@@ -6000,14 +6005,21 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
     const result = await Promise.race([exited, stopped])
     await Promise.race([
       Promise.all(closed),
+      stopped,
       new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds after bash exit; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
     ])
     assert.equal(result.code, 0, stderr)
     return { stdout, stderr }
   } catch (error) {
     mark(`cursor shell failed: ${error.message.split('\n')[0]}`)
-    await stop()
-    mark('stop done')
+    try {
+      await stop()
+      mark('stop done')
+    } catch (cleanupError) {
+      mark(`stop failed: ${cleanupError.message.split('\n')[0]}`)
+      error.message = `${error.message}; page cleanup failed: ${cleanupError.message}`
+      error.cause ??= cleanupError
+    }
     throw error
   } finally {
     clearTimeout(timer)
@@ -6266,6 +6278,57 @@ test('the Cursor shell helper still fails, naming the pipe, when a command retur
     )
     assert.ok(marks.some(line => line.includes('bash exit code=0')), `bash had already exited: ${marks.join('\n')}`)
   } finally { await board.end([]) }
+})
+
+const withFd3Holder = async (board, name, run) => {
+  const holderPidFile = join(board.dir, `${name}.pid`)
+  const holder = `import { writeFileSync } from 'node:fs'\nimport { spawn } from 'node:child_process'\nconst c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })\nwriteFileSync(${JSON.stringify(holderPidFile)}, String(c.pid))\nc.unref()`
+  try {
+    return await run(fakeBoard(board, holder))
+  } finally {
+    if (existsSync(holderPidFile)) {
+      const pid = Number(readFileSync(holderPidFile, 'utf8'))
+      if (pid && processAlive(pid)) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true })
+    }
+    rmSync(board.served, { recursive: true, force: true })
+    await board.end([])
+  }
+}
+
+test('the Cursor shell helper keeps the open-pipe error naming fd3 when page cleanup also fails (#1451)', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
+  const board = serveIn()
+  writeFileSync(board.served, '{bad json')
+  await withFd3Holder(board, 'holder-1451-cleanup', async target => {
+    await assert.rejects(
+      () => cursorShell(target, [], {}, () => closeFixturePage(board), () => {}, t.signal),
+      error => /did not all reach EOF in 5 seconds after bash exit; still open: [^;]*fd3/.test(error.message) && error.message.includes('page cleanup failed:'),
+    )
+  })
+})
+
+test('the Cursor shell helper stops at once on test abort when bash exited with fd3 still open instead of waiting 5 seconds (#1451)', { skip: process.platform !== 'win32', timeout: 15_000 }, async () => {
+  const board = serveIn()
+  const controller = new AbortController()
+  let abortTimer
+  await withFd3Holder(board, 'holder-1451-abort', async target => {
+    try {
+      const began = performance.now()
+      const marks = []
+      await assert.rejects(
+        () => cursorShell(target, [], {}, async () => {}, line => {
+          marks.push(line)
+          // Fire asynchronously after `exited` resolves so cursorShell is in the 5 s pipe-wait Promise.race.
+          if (line.startsWith('bash exit code=0')) abortTimer = setTimeout(() => controller.abort(), 50)
+        }, controller.signal),
+        /stopped by the test's abort/,
+      )
+      assert.ok(marks.some(line => line.includes('stopping pipe wait after bash exit')), marks.join('\n'))
+      assert.ok(performance.now() - began < 3_500, 'test abort after bash exit must not wait out the 5 s pipe deadline')
+    } finally {
+      clearTimeout(abortTimer)
+      controller.abort()
+    }
+  })
 })
 
 test('a browser startup failure keeps the launcher lines the launcher log held before the cleanup removed it', async () => {
@@ -6935,6 +6998,7 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off 
     return page
   }
   const addressOf = (page, pid) => JSON.stringify({ pid, port: page.port, url: page.url, path: board.path, built: 'synthetic-earlier-build' })
+  let blocker = null
   try {
     // A page started with --no-codex-send reports noCodexSend: a plain command that replaces it (here for a newer build) gives
     // the new page the same switch.
@@ -6950,8 +7014,34 @@ test('a page that reports noCodexSend is replaced by one with Send to Codex off 
     assert.equal(replacedPing.codexSend, false)
     assert.equal(replacedPing.noCodexSend, true)
     await closeAt(replaced, board.served)
-    // A page of a build before #318 and a command that opens the page twice: #1519 (taken out at #1517's round cap).
+    // `--keys "o o"` opens the page twice in one command, as `--watch` can. The first launch lets go of a page with it off;
+    // its own page cannot take the port `blocker` holds, and the page it let go of leaves the address file to a page of a
+    // build before #318, which reports no noCodexSend (deadPid: a number no process has, as for the other stand-ins of this file). The second launch replaces that one, whose closing frees the port.
+    blocker = createNetServer()
+    await new Promise(done => blocker.listen(0, '127.0.0.1', done))
+    const { port } = blocker.address()
+    const earlier = await fakePage({ codexSend: false }, () => blocker.close())
+    const offAgain = await fakePage({ codexSend: false, noCodexSend: true }, () => writeFileSync(board.served, addressOf(earlier, deadPid)))
+    addressFixture(board.served, addressOf(offAgain, process.pid))
+    const keys = await new Promise(done => execFile(process.execPath, [board.script, '--keys', 'o o', '--no-open', '--port', String(port)], { env: board.env, encoding: 'utf8', timeout: 60_000 }, (error, out, err) => done({ error, out, err })))
+    const record = JSON.parse(readFileSync(board.served, 'utf8'))
+    urls.push(record.url)
+    // The command ran both opens and ended on its own: the first open's failure on the held port makes it exit 1, and its
+    // time limit did not stop it. Its board ends with the link of the page the second open started.
+    assert.equal(keys.error?.killed ?? false, false, keys.err)
+    assert.equal(keys.error?.signal ?? null, null, keys.err)
+    assert.equal(keys.error?.code, 1, `${keys.out}${keys.err}`)
+    assert.equal(record.port, port, keys.out)
+    assert.ok(keys.out.trimEnd().endsWith(record.url), keys.out)
+    assert.equal(offAgain.closes, 1)
+    assert.equal(earlier.closes, 1)
+    // The page of the second launch has Send to Codex on: the page it replaced was of a build before #318, and the first
+    // launch's off page is not that launch's to know.
+    const secondPing = await pingOf(record.url)
+    assert.equal(secondPing.codexSend, true)
+    assert.equal(secondPing.noCodexSend, false)
   } finally {
+    blocker?.close()
     for (const fake of fakes) { fake.close(); fake.closeAllConnections() }
     await board.end(urls)
   }
@@ -12191,6 +12281,32 @@ test('no away line when the tab was hidden for less than 5 minutes', async () =>
   const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
   const dom = await awayAfter(base, later, 4)
   assert.equal(awayLine(dom), '')
+})
+
+// #715 reopen: the time away ends when the tab is visible again, not when the next refresh arrives.
+const awayReturnThenPoll = async (base, later, hiddenMs, pollMs) => {
+  const dom = await pageDom(await sourcePage('en'), base, { now: ONE_LINE_NOW })
+  dom.hideTab()
+  dom.setNow(ONE_LINE_NOW + hiddenMs)
+  dom.showTab()
+  dom.setNow(ONE_LINE_NOW + pollMs)
+  await dom.redraw(later)
+  await dom.settle()
+  return dom
+}
+
+test('hidden for 4:59, back, and the refresh at 5:01 shows no away line', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
+  const dom = await awayReturnThenPoll(base, later, (4 * 60 + 59) * 1000, (5 * 60 + 1) * 1000)
+  assert.equal(awayLine(dom), '')
+})
+
+test('hidden for 5:01, back, and a later refresh says away for 5 min', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
+  const dom = await awayReturnThenPoll(base, later, (5 * 60 + 1) * 1000, 7 * 60 * 1000)
+  assert.equal(awayLine(dom), 'Away for 5 min · Codex asked a question')
 })
 
 test('a refresh while the tab is still hidden keeps the away snapshot for the return', async () => {
