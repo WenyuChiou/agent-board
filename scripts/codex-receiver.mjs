@@ -34,10 +34,18 @@ const APPROVAL_LIMIT_MS = 120_000
 const MIN_DAEMON = [0, 169, 0]
 // The daemon's unload delay when its config names none (60 s), and the margin added to it for the time a request and its answer
 // take and for two clocks that do not run alike. A person can set the delay (`thread_unload_delay_secs` in Codex's config), so the
-// receiver asks the daemon for it and never waits less than the default with its margin (UNLOAD_MS).
+// receiver asks the daemon for the delay of the thread's folder. A delay set for one thread only (`codex -c
+// thread_unload_delay_secs=…`, or a client's `config` on `thread/start`) is not in that answer, and no answer of the daemon names
+// it (Codex 0.169.0), so the receiver never waits less than 10 minutes with the margin (UNLOAD_LEAST_MS): a per-thread delay
+// up to 10 minutes cannot keep a thread listed past that with nobody on it (#1578).
 const UNLOAD_DEFAULT_SECS = 60
 const UNLOAD_MARGIN_MS = 5000
-const UNLOAD_MS = UNLOAD_DEFAULT_SECS * 1000 + UNLOAD_MARGIN_MS
+const UNLOAD_LEAST_MS = 10 * 60_000
+const UNLOAD_MS = UNLOAD_LEAST_MS + UNLOAD_MARGIN_MS
+// Whether a listing asked at `listedAt` is one wait after a stretch that began at `since`: the longer of `unloadMs` and the
+// folder's unload delay (`delay`) with its margin (#1578).
+export const isWaitOver = ({ since, listedAt, delay, unloadMs = UNLOAD_MS, unloadMarginMs = UNLOAD_MARGIN_MS }) =>
+  listedAt >= since + Math.max(unloadMs, delay + unloadMarginMs)
 // How long the answer to a leave is waited for, and how many leaves in a row may fail before the receiver ends its connection to
 // the daemon: a connection that is gone is in no thread.
 const LEAVE_LIMIT_MS = 5000
@@ -336,7 +344,7 @@ export const startCodexReceiver = ({
     const q = quiet.get(thread), at = now()
     if (!canTell || q === undefined || q.since === null || q.last === null || q.delay === null || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) return false
     if (at - q.last > 2 * tickMs || at - listing.sentAt > 2 * tickMs) return false
-    return listing.sentAt >= q.since + Math.max(unloadMs, q.delay + unloadMarginMs)
+    return isWaitOver({ since: q.since, listedAt: listing.sentAt, delay: q.delay, unloadMs, unloadMarginMs })
   }
   // Whether a message can go to the thread now, from a fresh look and a listing no older than two ticks.
   const isReady = async thread => {

@@ -105,8 +105,8 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   if (reason === 'SHADOWED') return s.serveLineShadowed
   if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
   if (line === 'none' && !canSend && agent === 'codex' && state === 'ended') return codexResumeHint(agent, state, s)
-  // Codex's daemon receiver starts a message only once it has watched the thread for one unload delay, about a minute
-  // unless Codex's config sets a longer one, and so has read a person's own Codex on it (docs/MESSAGING.md, "How long it
+  // Codex's daemon receiver starts a message only once it has watched the thread for at least 10 minutes, or one unload delay
+  // when Codex's config sets a longer one (#1578), and so has read a person's own Codex on it (docs/MESSAGING.md, "How long it
   // watches first"). An idle Codex card on that surface says so, and that the message stays queued until then, instead of
   // promising a start right away: with nobody on the thread, or a delay it cannot read, the receiver holds it, and the board
   // is not told why (#1506). Other Codex surfaces have no such watch.
