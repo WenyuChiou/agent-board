@@ -503,7 +503,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         return { ok: true }
       }
       if (action === 'wake-poll' || action === 'wake-attempt' || action === 'wake-report') {
-        const next = wakeAction(state, action, body, now)
+        const next = wakeAction(state, action, body, now, gate?.stateOfSession ?? (() => undefined))
         if (action === 'wake-poll') sidecarSeen = now
         if (next.state !== state) save(next.state, now)
         return next.result

@@ -240,7 +240,9 @@ What each side may rely on:
   may report waiting before its turn ends): the turn-start hook's take marks the mailbox busy, and the `Stop` hook calls
   `mailbox-idle`, which marks it idle. A wake is due 10 s after a `Stop` later than the last turn start, and only while no
   wake of that conversation started since that `Stop`. A `Stop` call the board did not take (no board running, a busy
-  one) records nothing, so nothing is woken and the next turn delivers.
+  one) records nothing, so nothing is woken and the next turn delivers. Progress rows can only hold a wake back: while
+  the conversation's row reads working, nothing is woken, so a turn whose take never reached the board (the turn-start
+  hook writes its row as working all the same) gets no wake started into it.
 - **Attempt.** The board saves the start (`woke`, a field of its own; OpenCode's `attempted` rules never read it) before
   it answers `{"ok":true}`. The `nonce` is worked out from the message, so the board keeps none. The hook mailbox hands the
   message over in the turn the wake starts; a hook that hands its claim back puts the message back in the queue at once,

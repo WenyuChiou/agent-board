@@ -195,6 +195,23 @@ test('a progress report that reads waiting before the turn\'s Stop starts no wak
   assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
 }))
 
+test('a turn start whose board call failed starts no wake while its progress row reads working', () => using(w => {
+  w.enroll(APP, IDE, T - 30_000)
+  w.stop(APP, T)
+  w.poll(T)
+  // Sent within 10 s of the Stop, on the idle route.
+  assert.equal(w.send(APP, 'm-mid', T + 2000).line, 'now')
+  // A new turn starts: its hook writes the progress row as working, but its take never reaches the board, so the
+  // mailbox still holds the last Stop as its newest event.
+  delete w.reports[APP]
+  assert.deepEqual(w.poll(T + 15_000), { wakes: [] })
+  assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
+  assert.equal(w.shown('m-mid', T + 60_000).wake, undefined)
+  // That turn's Stop reaches the board; 10 s later the message is woken.
+  w.stop(APP, T + 60_000)
+  assert.deepEqual(w.poll(T + 60_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-mid'])
+}))
+
 test('a peer message queued before the board message starts no wake while the next turn would take the peer message', () => using(w => {
   w.ready(APP)
   w.poll(T)
