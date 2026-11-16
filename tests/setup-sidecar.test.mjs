@@ -247,3 +247,61 @@ fs.renameSync = (from, to) => {
   const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env })
   assert.notEqual(install.status, 0, install.stdout)
 }))
+
+// A standalone install (no connector) goes through setup's main writer, not the sidecar-only one (#1488).
+// The preload edits one file the first time setup opens that file's temporary copy, after the plan and the batch check.
+const editOnOpen = (home, name) => seam(home, `const open = fs.openSync
+let done = false
+fs.openSync = (file, ...rest) => {
+  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.lastIndexOf(${JSON.stringify(`${name}.`)}) : -1
+  if (!done && at >= 0) { done = true; fs.writeFileSync(file.slice(0, at) + ${JSON.stringify(name)}, ${JSON.stringify(EDIT)}) }
+  return open(file, ...rest)
+}`)
+
+for (const name of ['sidecar.json', 'sidecar.mjs', 'hooks.json']) {
+  test(`a standalone install keeps an edit to ${name} made after setup planned: setup fails instead of writing over it`, () => withHome(({ home, run, dir }) => {
+    const hooks = join(home, '.gemini', 'config', 'hooks.json')
+    const file = name === 'hooks.json' ? hooks : join(dir, name)
+    const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env: editOnOpen(home, name) })
+    assert.notEqual(install.status, 0, install.stdout)
+    assert.equal(readFileSync(file, 'utf8'), EDIT)
+  }))
+}
+
+test('a standalone remove keeps sidecar.mjs when it is edited after sidecar.json went: remove fails instead of deleting it', () => withHome(({ home, run, dir }) => {
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  const env = seam(home, `const unlink = fs.unlinkSync
+fs.unlinkSync = file => {
+  unlink(file)
+  if (typeof file === 'string' && file.endsWith('sidecar.json')) fs.writeFileSync(file.slice(0, -'sidecar.json'.length) + 'sidecar.mjs', ${JSON.stringify(EDIT)})
+}`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
+  assert.notEqual(removed.status, 0, removed.stdout)
+  assert.equal(readFileSync(join(dir, 'sidecar.mjs'), 'utf8'), EDIT)
+}))
+
+test('a standalone remove keeps hooks.json when it is edited after another file went: remove fails instead of deleting it', () => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'antigravity', '--apply']).status, 0)
+  const hooks = join(home, '.gemini', 'config', 'hooks.json')
+  const env = seam(home, `const unlink = fs.unlinkSync
+let done = false
+fs.unlinkSync = file => {
+  unlink(file)
+  if (!done && typeof file === 'string' && !file.endsWith('hooks.json') && fs.existsSync(${JSON.stringify(hooks)})) { done = true; fs.writeFileSync(${JSON.stringify(hooks)}, ${JSON.stringify(EDIT)}) }
+}`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
+  assert.notEqual(removed.status, 0, removed.stdout)
+  assert.equal(readFileSync(hooks, 'utf8'), EDIT)
+}))
+
+for (const name of ['sidecar.mjs', 'hooks.json']) {
+  test(`a standalone install fails when ${name} does not hold the text it wrote right after the write`, () => withHome(({ home, run }) => {
+    const env = seam(home, `const rename = fs.renameSync
+fs.renameSync = (from, to) => {
+  rename(from, to)
+  if (typeof to === 'string' && to.endsWith(${JSON.stringify(name)})) fs.writeFileSync(to, ${JSON.stringify(EDIT)})
+}`)
+    const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env })
+    assert.notEqual(install.status, 0, install.stdout)
+  }))
+}
