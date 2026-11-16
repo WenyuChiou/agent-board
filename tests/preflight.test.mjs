@@ -86,7 +86,7 @@ const has = (checks, state, text) => checks.some(item => item.state === state &&
 const mainFixture = (t, { isSame = false, hasImportFailure = false, mainSource } = {}) => {
   const f = fixture(t)
   const local = readFileSync(script, 'utf8')
-  for (const name of ['pr-check.mjs', 'fail-first.mjs', 'changelog-fold.mjs', 'bundle-text.mjs', 'preflight-lock-policy.mjs']) {
+  for (const name of ['pr-check.mjs', 'fail-first.mjs', 'changelog-fold.mjs', 'bundle-text.mjs', 'preflight-lock-policy.mjs', 'path-journeys.mjs', 'path-journeys.json']) {
     f.write(`scripts/${name}`, readFileSync(new URL(`../scripts/${name}`, import.meta.url), 'utf8'))
   }
   const main = mainSource ?? (isSame ? local : `import { message } from './main-only-message.mjs'\n${local.replace("'the branch contains the base.'", 'message')}`)
@@ -2594,4 +2594,17 @@ test('preflight runs the tests the case table names on the merge base and here, 
     removeMock.mock.restore()
     syncBuiltinESMExports()
   }
+})
+
+test('preflight prints the journeys and tests for a mapped path, and only warns when the map cannot be read (#1544)', async t => {
+  const f = fixture(t)
+  f.write('hooks/messaging.ts', 'export const sent = true\n')
+  const mapped = await f.check()
+  assert.ok(has(mapped, 'PASS', 'touched paths are covered by (delivery): journeys tests/journeys.test.tsx: L3b messages between sessions and agents'), JSON.stringify(mapped))
+  const broken = await f.check({ loadJourneys: () => { throw new Error('synthetic unreadable map') } })
+  assert.ok(has(broken, 'WARN', 'journey map could not be read'), JSON.stringify(broken))
+  assert.ok(!broken.some(item => item.state === 'FAIL' && item.message.includes('journey')))
+  const other = fixture(t)
+  other.write('docs/unmapped.md', 'text\n')
+  assert.ok(!(await other.check()).some(item => item.message.includes('covered by')))
 })
