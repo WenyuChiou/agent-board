@@ -14,10 +14,40 @@ const titleCall = /\b(?:test|it)(?:\.(?:skip|only|todo))?\s*\(\s*('(?:\\[^\r\n]|
 // `\t`, `\n`, ... stay in source form so case-table spans match; runtime unescaping happens only when running (#1541).
 const unescapeSource = text => text.replace(/\\(['"\\`])/g, '$1')
 const unescapeRuntime = text => text.replace(/\\(.)/g, (_, char) => ({ n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v', '0': '\0' })[char] ?? char)
+const templateVariable = /\$\{[^}]*\}/g
+const fitsTemplate = (span, parts) => {
+  if (!span.startsWith(parts[0])) return false
+  let at = parts[0].length
+  for (const part of parts.slice(1, -1)) {
+    const found = span.indexOf(part, at + 1)
+    if (found === -1 || found < at + 1) return false
+    at = found + part.length
+  }
+  const last = parts.at(-1)
+  return span.length - last.length >= at + 1 && span.endsWith(last)
+}
+const runtimeForTemplate = (span, sourceParts, runtimeParts) => {
+  let at = sourceParts[0].length
+  let out = runtimeParts[0]
+  for (let i = 1; i < sourceParts.length - 1; i += 1) {
+    const found = span.indexOf(sourceParts[i], at + 1)
+    out += span.slice(at, found) + runtimeParts[i]
+    at = found + sourceParts[i].length
+  }
+  const last = sourceParts.at(-1)
+  return out + span.slice(at, span.length - last.length) + runtimeParts.at(-1)
+}
 const parsedTitleOf = raw => {
   const inner = raw.slice(1, -1)
   const title = unescapeSource(inner)
-  return { title, runtime: unescapeRuntime(inner), isTemplate: raw[0] === '`' && /\$\{/.test(title) }
+  const isTemplate = raw[0] === '`' && templateVariable.test(title)
+  templateVariable.lastIndex = 0
+  if (!isTemplate) return { title, runtime: unescapeRuntime(inner), isTemplate: false, template: null }
+  const rawParts = inner.split(templateVariable)
+  const sourceParts = rawParts.map(unescapeSource)
+  const runtimeParts = rawParts.map(unescapeRuntime)
+  const hasLetters = /\p{L}/u.test(title.replace(templateVariable, ''))
+  return { title, runtime: unescapeRuntime(inner), isTemplate: true, template: hasLetters ? { sourceParts, runtimeParts } : null }
 }
 const parsedTitlesOf = text => [...text.matchAll(titleCall)].map(match => parsedTitleOf(match[1]))
 
@@ -88,7 +118,11 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
   const isDirty = git('status', '--porcelain', '-z').length > 0
   const textOf = path => readFileSync(join(cwd, path), 'utf8')
   const owners = new Map()
-  for (const path of files) for (const { title, runtime, isTemplate } of parsedTitlesOf(textOf(path))) if (!isTemplate) owners.set(title, [...(owners.get(title) ?? []), { path, runtime }])
+  const templates = []
+  for (const path of files) for (const { title, runtime, isTemplate, template } of parsedTitlesOf(textOf(path))) {
+    if (!isTemplate) owners.set(title, [...(owners.get(title) ?? []), { path, runtime }])
+    else if (template) templates.push({ path, ...template })
+  }
   const runOne = (where, { title, runtime = title, path }) => {
     const [program, args] = runnerFor(path)(runtime)
     onRun?.({ where, title, path })
@@ -100,10 +134,18 @@ export const runFailFirst = async ({ cwd, base, names, command, env, runnerFor =
   const toRun = []
   const here = new Map()
   for (const title of [...new Set(names)]) {
-    const entries = [...new Map((owners.get(title) ?? []).map(entry => [`${entry.path}\0${entry.runtime}`, entry])).values()]
-    const paths = [...new Set(entries.map(entry => entry.path))]
+    let rawEntries = owners.get(title) ?? []
     // Look up an exact fixed title before checking `<...>` so literal angle brackets in fixed titles still run (#1542).
-    if (!entries.length) { results.push({ title, state: /<[^<>]+>/.test(title) ? 'template' : 'unknown' }); continue }
+    if (!rawEntries.length) {
+      if (/<[^<>]+>/.test(title)) { results.push({ title, state: 'template' }); continue }
+      // Resolve concrete citations of template literals (`a one receiver` from `test(\`a \${name} receiver\`)`) as pr-check does (#1541 review).
+      rawEntries = templates
+        .filter(item => fitsTemplate(title, item.sourceParts))
+        .map(item => ({ path: item.path, runtime: runtimeForTemplate(title, item.sourceParts, item.runtimeParts) }))
+    }
+    const entries = [...new Map(rawEntries.map(entry => [`${entry.path}\0${entry.runtime}`, entry])).values()]
+    const paths = [...new Set(entries.map(entry => entry.path))]
+    if (!entries.length) { results.push({ title, state: 'missing' }); continue }
     let [entry] = entries
     if (entries.length > 1) {
       // The reader also finds a title in a string, a comment or a method call, so the file that has the test is the one
@@ -179,6 +221,6 @@ export const stateWords = {
   missing: 'matched no test by its exact name',
   'not-node': 'is not a Node test file here (a plugin test runs with `claude plugin test`); not counted',
   template: 'is a template title; not run',
-  unknown: 'is not a test title in tests/',
+  unknown: 'is not a test title in tests/; not counted',
   ambiguous: 'is a test in more than one file, so it cannot be run by its name alone',
 }

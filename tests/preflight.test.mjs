@@ -2633,14 +2633,14 @@ test('preflight runs \\t and fixed <...> titles, ignores code beside a known tit
     : f.run(program, args, options)
   const makeBody = rows => `Fixes #1\nTier: risk\nSurface: delivery\nCases: ${rows.length} rows\n\n## Cases\n\n| State | Event | Expected result | Test |\n|---|---|---|---|\n${rows.map(testCell => `| one | two | three | ${testCell} |`).join('\n')}\n\n## Checks\n`
 
-  writeFileSync(join(f.root, 'body.md'), makeBody(['`reads\\tcolumns` (`value`)', '`uses <XDG_RUNTIME_DIR>\\dir`', '`a <name> receiver`']))
+  writeFileSync(join(f.root, 'body.md'), makeBody(['`reads\\tcolumns` (`value`)', '`uses <XDG_RUNTIME_DIR>\\dir`', '`a one receiver`', '`a <name> receiver`']))
   const okChecks = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
-  assert.ok(has(okChecks, 'PASS', `Fail-first: 2 of 2 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`), JSON.stringify(okChecks))
+  assert.ok(has(okChecks, 'PASS', `Fail-first: 3 of 3 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`), JSON.stringify(okChecks))
   assert.ok(has(okChecks, 'WARN', 'a <name> receiver: is a template title; not run.'), JSON.stringify(okChecks))
 
   writeFileSync(join(f.root, 'body.md'), makeBody(['`reads\\tcolumns`', '`not written anywhere`']))
   const missingChecks = await f.check({ run, bodyFile: join(f.root, 'body.md'), title: 'fix: synthetic' })
-  assert.ok(has(missingChecks, 'FAIL', 'not written anywhere: is not a test title in tests/.'), JSON.stringify(missingChecks))
+  assert.ok(has(missingChecks, 'FAIL', 'not written anywhere: matched no test by its exact name.'), JSON.stringify(missingChecks))
   assert.ok(has(missingChecks, 'FAIL', `Fail-first: 1 of 2 new or changed tests fail on ${base.slice(0, 8)} and pass on ${head.slice(0, 8)}.`), JSON.stringify(missingChecks))
 })
 

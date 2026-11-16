@@ -138,7 +138,7 @@ test('fail-first runs each named new or changed test on the merge base with the 
     'an old test passes': 'passes-on-base',
     'an old test changes': 'counted',
     'a plugin test': 'not-node',
-    'a test nobody wrote': 'unknown',
+    'a test nobody wrote': 'missing',
     // The branch deleted tests/old-helper.mjs, so the base checkout lacks it too, and the test passes there.
     'the old helper is gone': 'passes-on-base',
     // A renamed helper is gone from its old path on the base checkout too.
@@ -248,16 +248,17 @@ test('fail-first keeps source spelling for escaped titles, counts unfound names,
   const result = await runFailFirst({
     cwd: r.cwd,
     base,
-    names: ['reads\\tcolumns', 'uses <XDG_RUNTIME_DIR>\\agent-board', 'a <name> receiver', 'not written anywhere'],
+    names: ['reads\\tcolumns', 'uses <XDG_RUNTIME_DIR>\\agent-board', 'a one receiver', 'a <name> receiver', 'not written anywhere'],
     command,
     env: r.env,
   })
   assert.deepEqual(Object.fromEntries(result.results.map(item => [item.title, item.state])), {
     'reads\\tcolumns': 'counted',
     'uses <XDG_RUNTIME_DIR>\\agent-board': 'counted',
+    'a one receiver': 'counted',
     'a <name> receiver': 'template',
-    'not written anywhere': 'unknown',
+    'not written anywhere': 'missing',
   })
-  assert.equal(result.counted, 2)
-  assert.equal(result.total, 3)
+  assert.equal(result.counted, 3)
+  assert.equal(result.total, 4)
 })
