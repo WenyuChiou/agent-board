@@ -448,6 +448,22 @@ test('the PowerShell reporter writes a prompt receipt with no prompt words', { s
   assert.ok(saved.every(one => !one.body.includes('PRIVATE_') && !one.body.includes('/board') && !one.body.includes('$agent-board') && !one.body.includes(turn)))
 }))
 
+// #836: with module autoload on, the reporter's first cmdlet walked every module folder (over 20 s on a busy runner).
+// A module placed first on PSModulePath that exports its own ConvertFrom-Json shows whether that search happens.
+test('the PowerShell reporter loads its two modules by path and searches no module folder for a command (#836)', { skip: process.platform !== 'win32' }, () => fixture(async home => {
+  const { reporterPs1 } = await import('../hooks/connect-pure.ts')
+  const file = join(home, 'progress-report.ps1')
+  writeFileSync(file, reporterPs1())
+  const modules = join(home, 'planted-modules')
+  const marker = join(home, 'planted-module-ran.txt')
+  mkdirSync(join(modules, 'PlantedJson'), { recursive: true })
+  writeFileSync(join(modules, 'PlantedJson', 'PlantedJson.psm1'), `function ConvertFrom-Json { [IO.File]::WriteAllText('${marker.replaceAll("'", "''")}', 'ran'); throw 'planted' }\nExport-ModuleMember -Function ConvertFrom-Json\n`)
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], { input: JSON.stringify({ session_id: 'synthetic-owner', turnId: 'synthetic-module-turn', prompt: 'PRIVATE_REAL_ANSWER' }), encoding: 'utf8', windowsHide: true, env: { ...process.env, PSModulePath: `${modules};${process.env.PSModulePath ?? ''}` } })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(marker), false, 'the reporter ran a ConvertFrom-Json it found by searching the module folders')
+  assert.equal(receipts(home).length, 1)
+}))
+
 test('the legacy Cursor reporter pairs beforeSubmitPrompt with its own afterAgentResponse', () => fixture(async home => {
   const { reporterPs1, reporterSh } = await import('../hooks/connect-pure.ts')
   const { readTurn } = await import('../hooks/inbox.ts')
@@ -1063,4 +1079,87 @@ test('the sh timeout receipt preserves ordered plain metadata and the session ga
   assert.match(out.stderr, /(^|\n)REPORTER_FAILED\n$/)
   assert.equal(existsSync(file + '.json'), false)
   assert.equal(readFileSync(file + '.fallback', 'utf8'), 'other')
+}))
+
+// A message the board delivered into a session (#1334): through a generated reporter it must keep the prompt from
+// answering the open question, as it does on the live Codex path, and must not become a board turn.
+const deliveryPrompts = async () => {
+  const { deliveryText } = await import('../hooks/messaging.ts')
+  const { ZH_TW } = await import('../hooks/i18n.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  const sent = { id: 'AB-1', to: 'gemini:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' }
+  return [
+    ['English board header', deliveryText({ ...sent, from: 'board' }, EN)],
+    ['zh-TW board header', deliveryText({ ...sent, from: 'board' }, ZH_TW)],
+    ['English agent header', deliveryText({ ...sent, from: 'claude:abcdef12' }, EN)],
+    ['zh-TW agent header', deliveryText({ ...sent, from: 'claude:abcdef12' }, ZH_TW)],
+  ]
+}
+// Whether the saved receipt, read as the inbox reads it, answers an open question.
+const answersQuestion = async (file, body) => {
+  const { answerAgentPrompt, blockId, readTurn } = await import('../hooks/inbox.ts')
+  const { emptyMirror } = await import('../hooks/mirror.ts')
+  const { applyDigest } = await import('../hooks/digest.ts')
+  const turn = readTurn(file, body)
+  const before = turn.at - 5000
+  const mirror = { ...applyDigest(emptyMirror(blockId(turn.agent, turn.session), 'demo', before, '/demo', turn.agent), { title: 'Limit', context: '', done: '', next: 'Continue', ask: 'Per-key limit', why: '100 or 300 a minute?' }, before), resume: turn.session, turnOrder: before * 2 }
+  return answerAgentPrompt(mirror, turn, turn.at + 1) !== null
+}
+const assertDeliveryReceipts = async (home, run) => {
+  const cases = [['a person\'s prompt', 'Continue the task'], ...await deliveryPrompts()]
+  for (const [index, [name, prompt]] of cases.entries()) {
+    const before = receipts(home).map(one => one.file)
+    run(JSON.stringify({ session_id: `synthetic-delivery-${index}`, cwd: '/synthetic/demo', prompt }))
+    const saved = receipts(home).filter(one => !before.includes(one.file))
+    assert.equal(saved.length, 1, name)
+    const receipt = JSON.parse(saved[0].body)
+    assert.ok(!saved[0].body.includes('second plan') && !saved[0].body.includes('Agent Board message'), name)
+    assert.equal(receipt.board_request, undefined, name)
+    assert.equal(receipt.delivery_request, index === 0 ? undefined : true, name)
+    assert.equal(await answersQuestion(saved[0].file, saved[0].body), index === 0, name)
+  }
+}
+
+test('every delivery header starts with the words the reporters\' timeout fallback looks for', async () => {
+  const { DELIVERY_REQUEST_HINT, deliveryRequestWords } = await import('../hooks/board-commands.ts')
+  assert.match(DELIVERY_REQUEST_HINT, /^[A-Za-z]+(?: [A-Za-z]+)*$/)
+  for (const words of deliveryRequestWords(Object.values(STRINGS))) assert.ok(words.startsWith(DELIVERY_REQUEST_HINT), words)
+  for (const [name, prompt] of await deliveryPrompts()) assert.ok(prompt.includes(DELIVERY_REQUEST_HINT), name)
+})
+
+test('a board delivery through the sh reporter leaves the open question unanswered, a person\'s prompt answers it', () => fixture(async home => {
+  const { reporterSh } = await import('../hooks/connect-pure.ts')
+  const file = join(home, 'progress-report.sh')
+  writeFileSync(file, reporterSh(shellPath(join(home, 'progress-inbox'))))
+  const env = { ...process.env, HOME: home, USERPROFILE: home }
+  await assertDeliveryReceipts(home, input => {
+    const result = spawnSync(sh, [shellPath(file), 'gemini', 'prompt'], { env, input, encoding: 'utf8', windowsHide: true })
+    assert.equal(result.status, 0, result.stderr)
+  })
+}))
+
+test('a board delivery through the PowerShell reporter leaves the open question unanswered, a person\'s prompt answers it', { skip: process.platform !== 'win32' }, () => fixture(async home => {
+  const { reporterPs1 } = await import('../hooks/connect-pure.ts')
+  const file = join(home, 'progress-report.ps1')
+  writeFileSync(file, reporterPs1())
+  const env = { ...process.env, HOME: home, USERPROFILE: home }
+  await assertDeliveryReceipts(home, input => {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], { env, input, encoding: 'utf8', windowsHide: true })
+    assert.equal(result.status, 0, result.stderr)
+  })
+}))
+
+test('the sh timeout receipt marks a board delivery as a delivery, not a board request', () => fixture(async home => {
+  const { reporterSh } = await import('../hooks/hook-reporters.ts')
+  const source = reporterSh('/x')
+  const fallback = source.slice(source.indexOf('write_fallback() {'), source.indexOf('\ntimed_out() {'))
+  const file = shellPath(join(home, 'receipt')), script = join(home, 'fallback.sh')
+  writeFileSync(script, `file='${file}'\nlog_error() { printf '%s\n' "$1" >&2; }\n${fallback}\nwrite_fallback\nexit 0\n`)
+  for (const [name, prompt] of await deliveryPrompts()) {
+    rmSync(file + '.json', { force: true })
+    writeFileSync(file + '.tmp', JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', prompt }))
+    const out = spawnSync(sh, [shellPath(script)], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    assert.equal(out.status, 0, out.stderr)
+    assert.equal(readFileSync(file + '.json', 'utf8'), JSON.stringify({ session_id: 'synthetic', cwd: '/work/demo', delivery_request: true }), name)
+  }
 }))
