@@ -787,31 +787,53 @@ export const isLaneReviewer = (review, tier) => review?.isFresh === true && (tie
 
 const isBotUser = user => user?.type === 'Bot' || /\[bot\]$/i.test(user?.login ?? '')
 
-export const reviewOf = item => {
-  if (!item) return null
-  const isBot = typeof item === 'object' && isBotUser(item.user)
+// Only team associations (OWNER, MEMBER, COLLABORATOR) and allowed apps may approve; no review bot or app is
+// currently allowed (#1343, #1535). When author_association is unknown (synthetic local calls), it reads as the team.
+const ignoredApprovalReason = item => {
+  if (!item || typeof item !== 'object') return null
+  if (isBotUser(item.user)) return 'bot or unapproved app'
+  if (isOutsideAssociation(item.author_association)) return `outside association (${String(item.author_association).trim().toUpperCase()})`
+  return null
+}
+
+const readReview = item => {
+  if (!item) return { review: null, ignored: null }
+  const blocked = ignoredApprovalReason(item)
   const body = typeof item === 'string' ? item : item.body ?? ''
   const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
-  if (match && !(match[1].toUpperCase() === 'APPROVE' && isBot)) {
+  if (match) {
+    const kind = match[1].toUpperCase()
     const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
+    if (kind === 'APPROVE' && blocked) {
+      if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
+        return { review: { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(item.user?.login ? { reviewer: item.user.login } : {}) }, ignored: null }
+      }
+      return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
+    }
     const isFresh = isFreshLine(body.slice(match.index).split(/\r?\n/, 1)[0])
     return {
-      kind: match[1].toUpperCase(),
-      sha: match[2].toLowerCase(),
-      ...(reviewer ? { reviewer } : {}),
-      ...(isFresh ? { isFresh } : {}),
+      review: {
+        kind,
+        sha: match[2].toLowerCase(),
+        ...(reviewer ? { reviewer } : {}),
+        ...(isFresh ? { isFresh } : {}),
+      },
+      ignored: null,
     }
-  }
-  if (!isBot && typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
-    const reviewer = item.user?.login ?? null
-    return { kind: 'APPROVE', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
   }
   if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
     const reviewer = item.user?.login ?? null
-    return { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
+    return { review: { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }, ignored: null }
   }
-  return null
+  if (typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
+    const reviewer = item.user?.login ?? null
+    if (blocked) return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
+    return { review: { kind: 'APPROVE', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }, ignored: null }
+  }
+  return { review: null, ignored: null }
 }
+
+export const reviewOf = item => readReview(item).review
 
 // The tier the body names on its `Tier:` line (RULES R2), or null when it names none.
 export const tierOf = body => visibleBody(body).match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
@@ -1292,7 +1314,16 @@ export const rounds = (comments, { body = '', title = '', number = null, isDraft
 export const verdict = (comments, head, options = {}) => {
   const output = result()
   const { isDraft = false, authorAgent = null, number = null, tier = null } = options
-  const reviews = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
+  const reviews = []
+  for (const comment of comments ?? []) {
+    const { review, ignored } = readReview(comment)
+    if (review) reviews.push(review)
+    else if (ignored) {
+      const who = safeText(String(ignored.who).replace(/\s+/g, ' ').trim())
+      const reason = safeText(String(ignored.reason).replace(/\s+/g, ' ').trim())
+      output.info.push(`review: ignored approval from ${who} (${reason}); only a team member or an allowed app may approve.`)
+    }
+  }
   const last = reviews.at(-1)
 
   if (!last) {
