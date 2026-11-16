@@ -1673,7 +1673,10 @@ export const main = async (argv = process.argv.slice(2)) => {
     }).filter(item => item.path)
     // The oldest commit of the branch itself (a merge of main and the commits it brought are left out), for the evidence-first check.
     const firstCommit = linesOf(git(cwd, 'rev-list', '--first-parent', '--no-merges', '--reverse', `${base}..${data.head}`)).find(Boolean)
-    if (firstCommit) data.firstCommitPaths = linesOf(git(cwd, 'show', '--format=', '--name-only', '--no-renames', '--no-ext-diff', firstCommit)).filter(Boolean).map(diffPath)
+    // A branch made only of merges (a merge of a topic branch) has no such commit: judge the paths it changes against the base instead.
+    // A merge of main alone changes nothing against the base, so it still passes.
+    if (!firstCommit) data.firstCommitPaths = data.paths
+    else data.firstCommitPaths = linesOf(git(cwd, 'show', '--format=', '--name-only', '--no-renames', '--no-ext-diff', firstCommit)).filter(Boolean).map(diffPath)
     data.template = git(cwd, 'show', `${base}:.github/pull_request_template.md`)
     // The risk-tier paths as the base lists them, so a pull request cannot take its own path off the list (#1531).
     const riskList = spawnSync('git', ['show', `${base}:docs/dev/risk-paths.md`], { cwd, encoding: 'utf8', maxBuffer })

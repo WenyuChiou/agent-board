@@ -2326,3 +2326,41 @@ test('pr-check wants a Fail-first line for the current head on a Ready risk-tier
   assert.deepEqual(checkPr(risky).problems.filter(item => item.check === 'cases').map(item => item.message), ['a Ready risk-tier pull request with a case table has no `Fail-first:` line.'])
   assert.deepEqual(checkPr({ ...risky, body: `${risky.body}\n${firstLine}\n` }).problems.filter(item => item.check === 'cases'), [])
 })
+
+test('pr-check judges the paths of a branch made only of a merge of a code topic, and a merge of main alone still passes (#1544)', async t => {
+  const setup = fixture(t)
+  const git = (...args) => setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', ...args)
+  setup.git('switch', '-q', 'main')
+  const base = setup.git('rev-parse', 'HEAD')
+  setup.git('switch', '-q', '-c', 'topic/code')
+  setup.put('hooks/messaging.ts', 'export const sent = true\n')
+  setup.git('add', '--', 'hooks/messaging.ts')
+  git('commit', '-q', '-m', 'fix: code topic')
+  setup.git('switch', '-q', '-c', 'fix/synthetic-merge-only', base)
+  git('merge', '-q', '--no-ff', '-m', 'merge the topic', 'topic/code')
+  const runWith = (name, against = base) => {
+    setup.put('body.txt', `Fixes #42
+Author: Codex (local), branch \`${name}\`
+Tier: risk
+Surface: delivery
+
+## What and why
+Checks a synthetic change.
+
+## Checks
+- [x] Run the tests - passed
+`)
+    return runMain(['--body-file', join(setup.directory, 'body.txt'), '--title', 'fix: synthetic check', '--base', against, '--repo-dir', setup.directory, '--offline', '--no-bundle'])
+  }
+  const failed = await runWith('fix/synthetic-merge-only')
+  assert.match(failed.stdout, /FAIL evidence: the first commit of this delivery pull request changes `hooks\/messaging\.ts`/, failed.stdout)
+  // A branch that only merges main (which moved on) has no change of its own and passes.
+  setup.git('switch', '-q', 'main')
+  setup.put('hooks/other.ts', 'export const other = true\n')
+  setup.git('add', '--', 'hooks/other.ts')
+  git('commit', '-q', '-m', 'chore: main moves')
+  const main2 = setup.git('rev-parse', 'HEAD')
+  setup.git('switch', '-q', '-c', 'fix/synthetic-main-only', base)
+  git('merge', '-q', '--no-ff', '-m', 'merge main', main2)
+  assert.doesNotMatch((await runWith('fix/synthetic-main-only', main2)).stdout, /FAIL evidence/)
+})

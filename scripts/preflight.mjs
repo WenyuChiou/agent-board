@@ -9,7 +9,7 @@ import { runFailFirst, stateWords } from './fail-first.mjs'
 import { fragmentIssue, isFragmentPath } from './changelog-fold.mjs'
 import { isBundleFile } from './bundle-text.mjs'
 import { testLockNamespaceProblem } from './preflight-lock-policy.mjs'
-import { journeyLine } from './path-journeys.mjs'
+import { journeyLine, loadPathJourneys } from './path-journeys.mjs'
 
 const tables = [['hooks/i18n.ts', 'ZH_TW'], ['hooks/strings-en.ts', 'EN'], ['hooks/strings-zh-cn.ts', 'ZH_CN']]
 const homeNames = ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_PROGRESS_FILE']
@@ -614,7 +614,7 @@ const parseArgs = argv => {
 }
 
 // lockPlatform accompanies the injected identity reader in module fixtures; the CLI has no override.
-export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, isFromMain = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessIdentity = processStartIdentity, lockPlatform = process.platform, onCheck, onProgress, onLockPublished } = {}) => {
+export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', isNoFetch = false, isFromMain = false, bodyFile, title, run = spawnSync, lockPath = accountTestLockPath(), fallbackLockPath = accountFallbackLockPath(), readProcessIdentity = processStartIdentity, lockPlatform = process.platform, onCheck, onProgress, onLockPublished, loadJourneys = loadPathJourneys } = {}) => {
   const checks = []
   // Every piece of a line is one of three kinds (#1392). Preflight's own words and values it validated (a list
   // literal, a commit id, a count, a lock file name) and a path committed at HEAD (`shown`) go in `exact`, which
@@ -822,7 +822,7 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
   // An info line, never a failure: the journeys and tests that cover the paths this change touches (#1544).
   // No await, so the touched-tests check below starts in the same turn (the lock race tests depend on it).
   try {
-    const line = journeyLine([...changed])
+    const line = journeyLine([...changed], loadJourneys())
     if (line) add('PASS', line)
   } catch { add('WARN', 'journey map could not be read; check scripts/path-journeys.json.') }
 

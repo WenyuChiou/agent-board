@@ -2595,3 +2595,16 @@ test('preflight runs the tests the case table names on the merge base and here, 
     syncBuiltinESMExports()
   }
 })
+
+test('preflight prints the journeys and tests for a mapped path, and only warns when the map cannot be read (#1544)', async t => {
+  const f = fixture(t)
+  f.write('hooks/messaging.ts', 'export const sent = true\n')
+  const mapped = await f.check()
+  assert.ok(has(mapped, 'PASS', 'touched paths are covered by (delivery): journeys tests/journeys.test.tsx: L3b messages between sessions and agents'), JSON.stringify(mapped))
+  const broken = await f.check({ loadJourneys: () => { throw new Error('synthetic unreadable map') } })
+  assert.ok(has(broken, 'WARN', 'journey map could not be read'), JSON.stringify(broken))
+  assert.ok(!broken.some(item => item.state === 'FAIL' && item.message.includes('journey')))
+  const other = fixture(t)
+  other.write('docs/unmapped.md', 'text\n')
+  assert.ok(!(await other.check()).some(item => item.message.includes('covered by')))
+})
