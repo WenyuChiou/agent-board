@@ -1973,6 +1973,78 @@ test('pr-check reads one Surface line outside code fences and skips the template
   assert.match(hidden.problems[0]?.message ?? '', /"speed", which is not a surface/)
 })
 
+test('pr-check reads the tier when a comment marker sits inside a code fence or a code span (#1492)', () => {
+  // The issue's example: a fenced example holding the marker before `Tier: risk` made tierOf() return null.
+  assert.equal(tierOf('```\n<!--\n```\nTier: risk\n'), 'risk')
+  assert.equal(tierOf('Note: `<!--` opens a comment.\nTier: risk\n'), 'risk')
+  // An example `Tier:` line inside a fence is not a line.
+  assert.equal(tierOf('```\nTier: risk\n```\n'), null)
+  assert.equal(tierOf('```\nTier: risk\n```\nTier: light\n'), 'light')
+})
+
+test('pr-check reads the issue line and its closing keywords when a comment marker sits inside a code fence or a code span (#1492)', () => {
+  // A fenced example holding the marker before `Fixes #42` hid the line.
+  assert.equal(issueLine('```\n<!--\n```\nFixes #42\n', 'fix: example').issue, 42)
+  // A code span holding the marker before a closing keyword hid the keyword: a prose line ends the issue list
+  // either way, so the span case is read through the closing-keyword scan.
+  assert.equal(issueLine('Fixes #42\nNote: `<!--` opens a comment.\nCloses #43\n', 'fix: example').problems.length, 1)
+  // An example `Fixes` line inside a fence is not a line.
+  assert.equal(issueLine('```\nFixes #42\n```\n', 'fix: example').problems.length, 1)
+})
+
+test('pr-check still finds a duplicate pull request when its Fixes line follows a comment marker in a fence (#1492)', () => {
+  const other = body => ({ number: 1213, createdAt: '2026-11-01T00:00:00Z', title: 'fix: first fix', body, headRef: 'fix/1203-first' })
+  const second = open => duplicatePr({
+    number: 1240,
+    createdAt: '2026-11-02T00:00:00Z',
+    title: 'fix: duplicate fix',
+    body: 'Fixes #1203\nAuthor: codex, fix/1203-second',
+    open,
+  })
+  // A code span holding the marker on a prose line ends the leading run either way, so only the fence case is read
+  // here; the span case is covered by the issueLine closing-keyword test.
+  assert.equal(second([other('```\n<!--\n```\nFixes #1203\nAuthor: claude, fix/1203-first')]).problems.length, 1)
+})
+
+test('pr-check reads the Author line when a comment marker sits inside a code fence or a code span (#1492)', () => {
+  assert.equal(authorLine('```\n<!--\n```\nAuthor: codex, fix/synthetic-check\n', branch).agent, 'codex')
+  assert.equal(authorLine('```\n<!--\n```\nAuthor: codex, fix/synthetic-check\n', branch).problems.length, 0)
+  assert.equal(authorLine('Note: `<!--` opens a comment.\nAuthor: codex, fix/synthetic-check\n', branch).agent, 'codex')
+  assert.equal(authorLine('Note: `<!--` opens a comment.\nAuthor: codex, fix/synthetic-check\n', branch).problems.length, 0)
+  assert.equal(authorKey('```\n<!--\n```\nAuthor: `Codex (Phase1)`, branch `fix/x`'), 'codex (phase1)')
+  assert.equal(authorKey('Note: `<!--` opens a comment.\nAuthor: `Codex (Phase1)`, branch `fix/x`'), 'codex (phase1)')
+})
+
+test('pr-check reads the template sections and checklist when a comment marker sits inside a code fence or a code span (#1492)', () => {
+  const done = '## What and why\nDone\n'
+  const checks = '## Checks\n- [x] Run the tests - passed\n'
+  // A fenced example holding the marker before `## Checks` hid the section (#1491).
+  assert.deepEqual(sections(done + '```\n<!--\n```\n' + checks, template).problems, [])
+  assert.deepEqual(sections(done + 'Note: `<!--` opens a comment.\n' + checks, template).problems, [])
+  // The checklist item is still read when the marker comes first: an exact template checkbox with no result is flagged.
+  const exact = '## Checks\n- [x] Run the tests\n'
+  const flagged = body => sections(body, template).problems.map(item => item.message).join('\n')
+  assert.match(flagged(done + '```\n<!--\n```\n' + exact), /template checkbox has no result/)
+  assert.match(flagged(done + 'Note: `<!--` opens a comment.\n' + exact), /template checkbox has no result/)
+})
+
+test('pr-check counts a fenced block as a section answer (#1492)', () => {
+  // A section whose whole answer is a fenced block (pasted preflight output) is not empty:
+  // merged PR #1459's Checks section is exactly this. The first head of this fix dropped fenced
+  // content from the answer, so this test fails there; it passes on the base, which kept it.
+  const done = '## What and why\nDone\n'
+  const checks = '## Checks\n```\nPASS the branch contains the base.\n```\n'
+  assert.deepEqual(sections(done + checks, template).problems, [])
+  // An empty fence is still no answer.
+  assert.match(sections(done + '## Checks\n```\n```\n', template).problems.map(item => item.message).join('\n'), /"Checks" section is missing or empty/)
+})
+
+test('pr-check finds the source pull request link when a comment marker sits inside a code fence or a code span (#1492)', () => {
+  const finding = body => findingLink({ title: 'Finding: button flickers on resize', body })
+  assert.deepEqual(finding('Found while reviewing.\n\n```\n<!-- example\n```\nFound in PR #1299.\n').problems, [])
+  assert.deepEqual(finding('Found while reviewing. `<!--` is a marker.\nFound in PR #1299.\n').problems, [])
+})
+
 test('pr-check leaves the Surface line to risk pull requests above SURFACE_FROM that are not releases', () => {
   assert.deepEqual(surface({ body: 'Fixes #1\nTier: normal\n', title: 'fix(x): y', number: SURFACE_FROM + 1 }).problems, [])
   assert.deepEqual(surfaceRun(undefined, { number: SURFACE_FROM }).problems, [])
