@@ -2354,6 +2354,14 @@ Checks a synthetic change.
   }
   const failed = await runWith('fix/synthetic-merge-only')
   assert.match(failed.stdout, /FAIL evidence: the first commit of this delivery pull request changes `hooks\/messaging\.ts`/, failed.stdout)
+  // A topic merged first and a test committed after it: the merge is the branch's first commit, so its code still fails.
+  setup.git('switch', '-q', '-c', 'fix/synthetic-merge-then-test', base)
+  git('merge', '-q', '--no-ff', '-m', 'merge the topic', 'topic/code')
+  setup.put('tests/synthetic-later.test.mjs', "import { test } from 'node:test'\ntest('synthetic later', () => {})\n")
+  setup.git('add', '--', 'tests/synthetic-later.test.mjs')
+  git('commit', '-q', '-m', 'test: after the merge')
+  const later = await runWith('fix/synthetic-merge-then-test')
+  assert.match(later.stdout, /FAIL evidence: the first commit of this delivery pull request changes `hooks\/messaging\.ts`/, later.stdout)
   // A branch that only merges main (which moved on) has no change of its own and passes.
   setup.git('switch', '-q', 'main')
   setup.put('hooks/other.ts', 'export const other = true\n')

@@ -1671,12 +1671,16 @@ export const main = async (argv = process.argv.slice(2)) => {
       const [added, deleted, ...name] = line.split('\t')
       return { path: diffPath(name.join('\t')), added: Number(added) || 0, deleted: Number(deleted) || 0 }
     }).filter(item => item.path)
-    // The oldest commit of the branch itself (a merge of main and the commits it brought are left out), for the evidence-first check.
-    const firstCommit = linesOf(git(cwd, 'rev-list', '--first-parent', '--no-merges', '--reverse', `${base}..${data.head}`)).find(Boolean)
-    // A branch made only of merges (a merge of a topic branch) has no such commit: judge the paths it changes against the base instead.
-    // A merge of main alone changes nothing against the base, so it still passes.
+    // The oldest commit of the branch itself, for the evidence-first check: the first commit on its first-parent line that is
+    // not a merge of main (a merge whose other parents are all in the base). A merge of a topic branch counts, judged by the
+    // paths it brings in, so code merged in before the tests still fails. A branch with no such commit (a merge of main alone)
+    // is judged by the paths it changes against the base, which are none.
+    const isInBase = commit => spawnSync('git', ['merge-base', '--is-ancestor', commit, base], { cwd, encoding: 'utf8' }).status === 0
+    const firstCommit = linesOf(git(cwd, 'rev-list', '--first-parent', '--reverse', '--parents', `${base}..${data.head}`)).filter(Boolean)
+      .map(line => line.split(' ')).find(([, , ...others]) => !others.length || !others.every(isInBase))
     if (!firstCommit) data.firstCommitPaths = data.paths
-    else data.firstCommitPaths = linesOf(git(cwd, 'show', '--format=', '--name-only', '--no-renames', '--no-ext-diff', firstCommit)).filter(Boolean).map(diffPath)
+    else if (firstCommit.length > 2) data.firstCommitPaths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', '--no-ext-diff', firstCommit[1], firstCommit[0])).filter(Boolean).map(diffPath)
+    else data.firstCommitPaths = linesOf(git(cwd, 'show', '--format=', '--name-only', '--no-renames', '--no-ext-diff', firstCommit[0])).filter(Boolean).map(diffPath)
     data.template = git(cwd, 'show', `${base}:.github/pull_request_template.md`)
     // The risk-tier paths as the base lists them, so a pull request cannot take its own path off the list (#1531).
     const riskList = spawnSync('git', ['show', `${base}:docs/dev/risk-paths.md`], { cwd, encoding: 'utf8', maxBuffer })
