@@ -248,6 +248,11 @@ fs.renameSync = (from, to) => {
   assert.notEqual(install.status, 0, install.stdout)
 }))
 
+// Setup stopped because a file changed under it, not for another reason.
+const stoppedOnChange = result => {
+  assert.notEqual(result.status, 0, result.stdout)
+  assert.match(`${result.stdout}${result.stderr}`, /a file changed, or another setup was running, while setup worked/)
+}
 // A standalone install (no connector) goes through setup's main writer, not the sidecar-only one (#1488).
 // The preload edits one file the first time setup opens that file's temporary copy, after the plan and the batch check.
 const editOnOpen = (home, name) => seam(home, `const open = fs.openSync
@@ -263,7 +268,7 @@ for (const name of ['sidecar.json', 'sidecar.mjs', 'hooks.json']) {
     const hooks = join(home, '.gemini', 'config', 'hooks.json')
     const file = name === 'hooks.json' ? hooks : join(dir, name)
     const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env: editOnOpen(home, name) })
-    assert.notEqual(install.status, 0, install.stdout)
+    stoppedOnChange(install)
     assert.equal(readFileSync(file, 'utf8'), EDIT)
   }))
 }
@@ -276,7 +281,7 @@ fs.unlinkSync = file => {
   if (typeof file === 'string' && file.endsWith('sidecar.json')) fs.writeFileSync(file.slice(0, -'sidecar.json'.length) + 'sidecar.mjs', ${JSON.stringify(EDIT)})
 }`)
   const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
-  assert.notEqual(removed.status, 0, removed.stdout)
+  stoppedOnChange(removed)
   assert.equal(readFileSync(join(dir, 'sidecar.mjs'), 'utf8'), EDIT)
 }))
 
@@ -290,7 +295,7 @@ fs.unlinkSync = file => {
   if (!done && typeof file === 'string' && !file.endsWith('hooks.json') && fs.existsSync(${JSON.stringify(hooks)})) { done = true; fs.writeFileSync(${JSON.stringify(hooks)}, ${JSON.stringify(EDIT)}) }
 }`)
   const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
-  assert.notEqual(removed.status, 0, removed.stdout)
+  stoppedOnChange(removed)
   assert.equal(readFileSync(hooks, 'utf8'), EDIT)
 }))
 
@@ -302,6 +307,6 @@ fs.renameSync = (from, to) => {
   if (typeof to === 'string' && to.endsWith(${JSON.stringify(name)})) fs.writeFileSync(to, ${JSON.stringify(EDIT)})
 }`)
     const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env })
-    assert.notEqual(install.status, 0, install.stdout)
+    stoppedOnChange(install)
   }))
 }
