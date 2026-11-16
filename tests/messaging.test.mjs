@@ -6163,6 +6163,126 @@ test('a moved server lets codexReceiver disconnect before closing messaging so q
   }
 })
 
+test('a page that stops, is replaced, or exits idle while a Codex delivery turn waits on an approval interrupts it and settles uncertain on the card (#1516)', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  for (const mode of ['replaced', 'stop', 'idle']) {
+    const dir = mkdtempSync(join(tmpdir(), `board-codex-approval-${mode}-`))
+    const progress = join(dir, 'progress.md')
+    const messagesDir = join(dir, 'messages')
+    const content = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${codexThread} state=waiting updated=${new Date().toISOString()} -->\n### A Codex task\n- [~] Keep going\n<!-- /auto session=abcdef01 -->\n`
+    writeFileSync(progress, content)
+    const pidFile = join(dir, 'proxy.pid')
+    const daemon = codexDaemon(dir, { approval: 'hold', pidFile })
+    process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
+    process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
+    codexShortWait()
+    let board
+    try {
+      const args = ['--messages-dir', messagesDir, '--codex-send', ...(mode === 'idle' ? ['--idle-minutes', '0.02'] : [])]
+      board = await start(dir, '', args, codexRoutes)
+      delete process.env.AGENT_BOARD_CODEX_BIN
+      const connection = await codexConnection(board)
+      assert.equal(await codexSend(board, connection), 200)
+      await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'accepted')
+      // Once waitingOnApproval arrives, the turn is no longer counted as a blocking active send.
+      await waitFor(async () => (await board.call('/api/ping')).body.sending === 0)
+      const proxy = Number(readFileSync(pidFile, 'utf8'))
+      if (mode === 'replaced') {
+        const tabHeaders = { 'x-board-page': 'tab-1', 'x-board-visible': '1' }
+        assert.equal((await board.call('/api/board', undefined, tabHeaders)).status, 200)
+        assert.equal((await board.call('/api/close', { moved: true })).status, 200)
+        assert.deepEqual((await board.call('/api/board', undefined, tabHeaders)), { status: 200, body: { moved: true } })
+      } else if (mode === 'stop') {
+        assert.equal((await board.call('/api/close', {})).status, 200)
+      }
+      await board.exited
+      board = undefined
+      await waitFor(async () => { try { process.kill(proxy, 0); return false } catch { return true } })
+      assert.deepEqual(codexInterrupts(daemon), ['turn-delivery'])
+      const stored = JSON.parse(readFileSync(join(messagesDir, 'messages.json'), 'utf8'))
+      const message = stored.messages.find(one => one.id === codexId('AB-CX-001'))
+      assert.equal(message?.status, 'uncertain')
+      assert.equal(message?.error, 'APPROVAL_TIMEOUT')
+      assert.equal(message?.hasAccepted, true)
+      const view = buildView(parseProgress(content), [], null, Date.now(), 0, {}, EN)
+      const model = serveModel(view, [], EN, new Set(), false, { ...stored, enabled: true, mailboxes: stored.mailboxes ?? [], connections: [] }, false, { now: Date.now(), repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+      const page = await pageDom(servePage(EN, 'synthetic'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+      assert.ok(page.text().includes(EN.messagesAcceptedUnconfirmed), page.text())
+    } finally {
+      delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG; codexShortWait(false)
+      await board?.close().catch(() => undefined)
+      await removeKilledPageFolder(dir)
+    }
+  }
+})
+
+test('a page that stops, is replaced, or reaches idle while a Codex delivery is under way waits for it to settle (#1516)', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-delivery-close-'))
+  const progress = join(dir, 'progress.md')
+  const messagesDir = join(dir, 'messages')
+  const content = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${codexThread} state=waiting updated=${new Date().toISOString()} -->\n### A Codex task\n- [~] Keep going\n<!-- /auto session=abcdef01 -->\n`
+  writeFileSync(progress, content)
+  const endFlag = join(dir, 'end-person'), ackFlag = join(dir, 'ack-delivery'), pidFile = join(dir, 'proxy.pid')
+  const daemon = codexDaemon(dir, { readActive: true, endFlag, startDelay: 800, ackFlag, pidFile })
+  process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
+  process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
+  codexShortWait()
+  let board
+  try {
+    board = await start(dir, '', ['--messages-dir', messagesDir, '--codex-send', '--idle-minutes', '0.03'], codexRoutes)
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+
+    // 1. Held claim waiting on a busy thread before turn/start.
+    await waitFor(async () => {
+      const one = await codexMessage(board, 'AB-CX-001')
+      return one?.status === 'uncertain' && one.claimed > 0 && one
+    })
+    assert.equal(codexStarts(daemon), 0)
+    assert.equal((await board.call('/api/ping')).body.sending, 1)
+    assert.equal((await board.call('/api/close', {})).status, 409)
+    assert.equal((await board.call('/api/close', { moved: true })).status, 409)
+
+    // 2. turn/start in flight (answer held for 800 ms).
+    writeFileSync(endFlag, '')
+    await waitFor(async () => codexStarts(daemon) === 1)
+    assert.equal((await codexMessage(board, 'AB-CX-001'))?.status, 'uncertain')
+    assert.equal((await board.call('/api/ping')).body.sending, 1)
+    assert.equal((await board.call('/api/close', {})).status, 409)
+    assert.equal((await board.call('/api/close', { moved: true })).status, 409)
+
+    // 3. Delivered turn running: /api/close refuses and idle timeout does not exit mid-delivery.
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'accepted')
+    await pause(2100)
+    assert.equal((await board.call('/api/ping')).body.sending, 1)
+    assert.equal((await board.call('/api/close', {})).status, 409)
+    assert.equal((await board.call('/api/close', { moved: true })).status, 409)
+
+    // 4. Turn settles acknowledged: card shows Replied and the page can stop cleanly.
+    const proxy = Number(readFileSync(pidFile, 'utf8'))
+    writeFileSync(ackFlag, '')
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    await waitFor(async () => (await board.call('/api/ping')).body.sending === 0)
+    const snap = (await board.call('/api/board')).body.messaging
+    const view = buildView(parseProgress(content), [], null, Date.now(), 0, {}, EN)
+    const model = serveModel(view, [], EN, new Set(), false, { ...snap, enabled: true }, false, { now: Date.now(), repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
+    const page = await pageDom(servePage(EN, 'synthetic'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+    assert.ok(page.text().includes(EN.messagesAcknowledged), page.text())
+    assert.equal((await board.call('/api/close', {})).status, 200)
+    await board.exited
+    board = undefined
+    await waitFor(async () => { try { process.kill(proxy, 0); return false } catch { return true } })
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG; codexShortWait(false)
+    await board?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
+  }
+})
+
 test('1139 both ACK parsers accept the same complete lines', async () => {
   const { ackLine: clientAck } = await import('../scripts/message-client.mjs')
   const { ackLine: claudeAck } = await import('../hooks/receiver.ts')

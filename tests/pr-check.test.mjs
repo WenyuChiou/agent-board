@@ -9,7 +9,8 @@ import {
   addedLines, apiReader, authorKey, authorLine, binaryImages, cap, CASES_FROM, cases, changelog, checkIssue, checkPr,
   duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
   main, naming, needsBundle, outsideClaim, privateData, report, reportMarkdown, reviewOf, rulesPage, sections,
-  ROUND_CAP, rounds, stripComments, SURFACE_FROM, surface, testTitles, tierOf, titleKnown, verdict, FAIL_FIRST_FROM, caseRows,
+  riskPathsOf, ROUND_CAP, rounds, stripComments, SURFACE_FROM, surface, testTitles, tier, TIER_FROM, tierOf, titleKnown,
+  verdict, FAIL_FIRST_FROM, caseRows,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -1713,6 +1714,81 @@ test('a reused branch name does not hide the earlier pull request, a CRLF or ind
 })
 
 const riskBody = line => `Fixes #1\nAuthor: codex, fix/x\nTier: risk\n${line === undefined ? '' : `${line}\n`}`
+
+test('pr-check wants one Tier line, and the risk tier for a change to a path risk-paths.md lists (#1531)', () => {
+  const listed = riskPathsOf('# Risk-tier paths\r\n\r\nThe large shared file `hooks/serve.ts` is not listed.\r\n\r\n- `hooks/connect.ts`\r\n* `.claude-plugin/`\r\n- `SECURITY.md` and more\r\n')
+  assert.deepEqual(listed, ['hooks/connect.ts', '.claude-plugin/'])
+  const run = (lines, extra = {}) => tier({ body: `Fixes #1\nAuthor: codex, fix/x\n${lines}\n`, title: 'fix(x): y', number: TIER_FROM + 1, paths: ['hooks/a.ts'], riskPaths: listed, ...extra })
+  const only = (checked, pattern) => {
+    assert.deepEqual(checked.problems.map(item => item.check), ['tier'])
+    assert.match(checked.problems[0].message, pattern)
+  }
+  only(run(''), /no `Tier:` line/)
+  only(run('<!--\nTier: normal\n-->'), /no `Tier:` line/)
+  only(run('Tier: <risk, normal or light: the highest any change reaches>'), /template's placeholder/)
+  only(run('Tier: normal\nTier: risk'), /2 `Tier:` lines/)
+  // An empty line or the placeholder counts as a line too, so a second one cannot hide behind it.
+  only(run('Tier:\nTier: normal'), /2 `Tier:` lines/)
+  only(run('Tier: <risk, normal or light: the highest any change reaches>\nTier: light'), /2 `Tier:` lines/)
+  only(run('Tier:'), /`Tier:` line names no tier/)
+  // A line with a lone \r or a Unicode line separator in it still counts, and still reads as its tier.
+  only(run('Tier: risk note\nTier: normal'), /2 `Tier:` lines/)
+  only(run('Tier: risk\rnote\nTier: normal'), /2 `Tier:` lines/)
+  assert.deepEqual(run('Tier: risk note', { paths: ['hooks/connect.ts'] }).problems, [])
+  assert.deepEqual(surface({ body: 'Fixes #1\nTier: risk note\n', number: TIER_FROM + 1 }).problems.map(item => item.check), ['surface'])
+  only(run('Tier: medium'), /"medium", which is not a tier/)
+  // The value is read as the surface, cases and round checks read it: two backticks are not a tier they see.
+  only(run('Tier: ``risk``'), /"``risk``", which is not a tier/)
+  const doubled = checkPr({ ...syntheticPr(), number: TIER_FROM + 1, body: `${body}Tier: \`\`risk\`\`\n` })
+  assert.ok(doubled.problems.some(item => item.check === 'tier' && /which is not a tier/.test(item.message)))
+  assert.deepEqual(run('Tier: `normal`').problems, [])
+  assert.deepEqual(run('Tier: light').problems, [])
+  // A listed file, a file under a listed folder; the risk tier on either passes.
+  only(run('Tier: normal', { paths: ['hooks/a.ts', 'hooks/connect.ts'] }), /`Tier: normal`, but the pull request changes `hooks\/connect\.ts`, which docs\/dev\/risk-paths\.md lists/)
+  only(run('Tier: light', { paths: ['.claude-plugin/plugin.json'] }), /`Tier: light`, but the pull request changes `\.claude-plugin\/plugin\.json`/)
+  assert.match(run('Tier: normal', { paths: ['hooks/connect.ts', '.claude-plugin/a', '.claude-plugin/b', '.claude-plugin/c'] }).problems[0].message, /and 1 more/)
+  assert.deepEqual(run('Tier: risk', { paths: ['hooks/connect.ts'] }).problems, [])
+  // Unread at the base: a note, never a pass in silence; not given (a caller with no list): nothing.
+  assert.deepEqual(run('Tier: normal', { paths: ['hooks/connect.ts'], riskPaths: null }).problems, [])
+  assert.match(run('Tier: normal', { paths: ['hooks/connect.ts'], riskPaths: null }).info.join('\n'), /could not be read at the base/)
+  assert.match(run('Tier: risk', { paths: ['hooks/connect.ts'], riskPaths: null }).info.join('\n'), /could not be read at the base/)
+  assert.deepEqual(run('Tier: normal', { paths: ['hooks/connect.ts'], riskPaths: undefined }), { problems: [], info: [] })
+  // A release, and a pull request from before the rule, are not checked.
+  assert.deepEqual(run('', { title: 'chore(release): 1.2.3' }).problems, [])
+  assert.deepEqual(run('Tier: light', { number: TIER_FROM, paths: ['hooks/connect.ts'] }).problems, [])
+  // A local run and an outside small docs fix get a note for a missing line; a wrong tier still fails locally.
+  for (const extra of [{ number: null }, { isOptional: true }]) {
+    const noted = run('', extra)
+    assert.deepEqual(noted.problems, [])
+    assert.match(noted.info.join('\n'), /tier: the body has no `Tier:` line\. The PR check fails a pull request without one/)
+  }
+  only(run('Tier: normal', { number: null, paths: ['hooks/connect.ts'] }), /`Tier: normal`, but/)
+})
+
+test('pr-check reads risk-paths.md as the base lists it and counts a moved file by its old path too (#1531)', async t => {
+  const setup = fixture(t)
+  const commit = message => {
+    setup.git('add', '-A')
+    setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', message)
+    return setup.git('rev-parse', 'HEAD')
+  }
+  setup.git('switch', '-q', 'main')
+  setup.put('docs/dev/risk-paths.md', '# Risk-tier paths\n\n- `hooks/listed.ts`\n')
+  setup.put('hooks/listed.ts', 'export const listed = true\n')
+  const base = commit('test: synthetic risk list')
+  setup.git('switch', '-q', '-c', 'fix/synthetic-tier')
+  // The branch moves the listed file and takes it off its own copy of the list.
+  setup.git('mv', 'hooks/listed.ts', 'hooks/moved.ts')
+  setup.put('docs/dev/risk-paths.md', '# Risk-tier paths\n\n- `hooks/other.ts`\n')
+  commit('fix: synthetic move')
+  const runWith = async line => {
+    setup.put('body.txt', `Fixes #42\nAuthor: Codex (local), branch \`fix/synthetic-tier\`\n${line}\n\n## What and why\nChecks a synthetic change.\n\n## Checks\n- [x] Run the tests - passed\n`)
+    return runMain(['--body-file', join(setup.directory, 'body.txt'), '--title', 'fix: synthetic check', '--base', base, '--repo-dir', setup.directory, '--offline', '--no-bundle'])
+  }
+  const normal = await runWith('Tier: normal')
+  assert.match(normal.stdout, /FAIL tier: `Tier: normal`, but the pull request changes `hooks\/listed\.ts`, which docs\/dev\/risk-paths\.md lists/, normal.stdout)
+  assert.doesNotMatch((await runWith('Tier: risk\nSurface: data')).stdout, /FAIL tier/)
+})
 const surfaceRun = (line, extra = {}) => surface({ body: riskBody(line), title: 'fix(x): y', number: SURFACE_FROM + 1, ...extra })
 
 test('pr-check fails a risk pull request with no Surface line, an unknown value, or two values without cannot split', () => {
