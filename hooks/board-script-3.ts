@@ -10373,7 +10373,7 @@ export const LINES = [
 "      const reporting = report(thread);",
 "      if (waitForReport)",
 "        await reporting;",
-"      if (watch.turn === null && daemon !== null && daemon.isOpen())",
+"      if (sub.mayBeSubscribed && watch.turn === null && daemon !== null && daemon.isOpen())",
 "        await nameTurn(thread, watch);",
 "      if (sub.watch !== watch)",
 "        return;",

@@ -496,7 +496,8 @@ export const startCodexReceiver = ({
       const reporting = report(thread)
       if (waitForReport) await reporting
       // The receiver stays in the thread until the interrupt is done, so it hears whether the turn is still running.
-      if (watch.turn === null && daemon !== null && daemon.isOpen()) await nameTurn(thread, watch)
+      // Outside the thread, naming already finished before the status read above, so never name after reading without a fresh read.
+      if (sub.mayBeSubscribed && watch.turn === null && daemon !== null && daemon.isOpen()) await nameTurn(thread, watch)
       if (sub.watch !== watch) return
       if (sub.interrupt === null) {
         // Only a turn shown to be the delivery's is asked to stop: the start's answer named it, or its first user message was the
