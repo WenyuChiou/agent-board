@@ -188,10 +188,11 @@ test('pre-safety board-request plugins upgrade by exact bytes and preserve perso
     const hook = hooks.find(one => one.agent === agent && one.generated)
     assert.equal(hook.edit(old, false), current(ctx))
     assert.equal(hook.edit(old + '// personal edit\n', false), COLLISION)
-    const released = current(ctx).replace(/^const BOARD_WORDS = \[.*\]$/m, () => frozenWords)
+    // 0.24.3 had no delivery flag: its bytes are the current ones without it.
+    const released = current(ctx, true, true, true, false).replace(/^const BOARD_WORDS = \[.*\]$/m, () => frozenWords)
     assert.equal(hook.edit(released, false), current(ctx))
     assert.equal(hook.edit(released + '// personal edit\n', false), COLLISION)
-    const withoutTurnKey = current(ctx, true, true, false)
+    const withoutTurnKey = current(ctx, true, true, false, false)
     assert.equal(createHash('sha256').update(withoutTurnKey).digest('hex'), beforeTurnKeyHash)
     assert.equal(hook.edit(withoutTurnKey, false), current(ctx))
     assert.equal(hook.edit(withoutTurnKey + '// personal edit\n', false), COLLISION)
@@ -240,6 +241,110 @@ test('legacy prompt callbacks flag board commands without retaining their text',
   for (const prompt of prompts) await callbacks.get('before_prompt_build')({ prompt }, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
   assert.equal(saved.length, 8)
   for (const one of saved) assert.deepEqual(JSON.parse(one.body), { session_id: 'synthetic-owner', ...(one.name.includes('opencode-') ? { cwd: '/synthetic' } : { cwd: '' }), board_request: true })
+})
+
+// A message the board delivered into an OpenCode or OpenClaw session (#1334): the plugin must flag it as a delivery
+// (never as the person's prompt, never as a board command, #1306), keep its words out of the receipt, and a board
+// command inside it still wins.
+const deliveryPlugins = async () => {
+  const { deliveryText } = await import('../hooks/messaging.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  const sent = { id: 'AB-1', to: 'opencode:abcdef12', from: 'board', nonce: 'a1b2c3', status: 'claimed' }
+  return [
+    ['a person', 'Continue the task'],
+    ...await deliveryPrompts(),
+    ['a board command inside a delivery', deliveryText({ ...sent, text: EN.boardCommandPrompt }, EN)],
+  ]
+}
+const instantiatePlugin = (saved, script, suffix) => {
+  const descriptors = new Map()
+  const open = name => { const fd = descriptors.size + 1; descriptors.set(fd, name); return fd }
+  return new Function('createRequire', 'closeSync', 'mkdirSync', 'openSync', 'renameSync', 'unlinkSync', 'writeFileSync', 'join', `${script.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoard', 'const AgentBoard').replace('export default', 'const plugin =')}\n${suffix}`)(createRequire, fd => descriptors.delete(fd), () => {}, open, () => {}, () => {}, (fd, body) => saved.push({ name: descriptors.get(fd), body }), (...parts) => parts.join('/'))
+}
+const assertDeliveryFlags = async (agent, bodies) => {
+  const cases = await deliveryPlugins()
+  assert.equal(bodies.length, cases.length, agent)
+  for (const [index, [name]] of cases.entries()) {
+    const body = bodies[index]
+    const sent = JSON.parse(body)
+    const isCommand = index === cases.length - 1
+    const isDelivery = index > 0 && !isCommand
+    assert.equal(sent.board_request, isCommand ? true : undefined, `${agent} ${name}`)
+    assert.equal(sent.delivery_request, isDelivery ? true : undefined, `${agent} ${name}`)
+    assert.ok(!body.includes('Agent Board message') && !body.includes('second plan'), `${agent} ${name}`)
+    // Only the person's own prompt answers an open question; a delivery does not (a board command never did).
+    assert.equal(await answersQuestion(`${agent}-prompt-1700000000000-1.json`, body), index === 0, `${agent} ${name}`)
+  }
+}
+
+test('the installed OpenCode inbox plugin flags a board delivery, so it leaves the open question unanswered', async () => {
+  const saved = []
+  const hooks = await instantiatePlugin(saved, template('opencodePlugin', ''), 'return AgentBoard')({ directory: '/synthetic', client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+  for (const [, text] of await deliveryPlugins()) await hooks['chat.message']({ sessionID: 'synthetic-owner' }, { parts: [{ type: 'text', text }] })
+  await assertDeliveryFlags('opencode', saved.map(one => one.body))
+})
+
+test('the installed OpenClaw inbox plugin flags a board delivery, so it leaves the open question unanswered', async () => {
+  const saved = []
+  const callbacks = new Map()
+  instantiatePlugin(saved, template('openclawPlugin', ''), 'return plugin').register({ on: (name, callback) => callbacks.set(name, callback) })
+  for (const [, prompt] of await deliveryPlugins()) await callbacks.get('before_prompt_build')({ prompt }, { sessionId: 'synthetic-owner', inputProvenance: { kind: 'external_user' } })
+  await assertDeliveryFlags('openclaw', saved.map(one => one.body))
+})
+
+test('the OpenCode and OpenClaw plugins released before the delivery flag are still recognised as ours and upgrade', async () => {
+  const { agentHooks, COLLISION } = await import('../hooks/connect-pure.ts')
+  const hooks = agentHooks({ ...ctx, sep: '/', isWindows: false, script: '/synthetic/progress-report.sh', codexHome: '/synthetic/.codex', grokHome: '/synthetic/.grok', hermesHome: '/synthetic/.hermes', openclawHome: '/synthetic/.openclaw' })
+  for (const [agent, plugin] of [['opencode', opencodePlugin], ['openclaw', openclawPlugin]]) {
+    const hook = hooks.find(one => one.agent === agent && one.generated)
+    // The 0.24.3 bytes: the board-request flag and the turn key, no delivery flag.
+    for (const withTurnKey of [true, false]) {
+      const released = plugin(ctx, true, true, withTurnKey, false)
+      assert.notEqual(released, plugin(ctx), agent)
+      assert.equal(hook.edit(released, false), plugin(ctx), agent)
+      assert.equal(hook.edit(released + '// personal edit\n', false), COLLISION, agent)
+    }
+  }
+})
+
+test('the native OpenCode plugin flags a board delivery as a delivery, not as the person\'s prompt or a board command', async t => {
+  const exitListeners = process.listeners('exit')
+  t.after(() => {
+    for (const listener of process.listeners('exit')) if (!exitListeners.includes(listener)) process.removeListener('exit', listener)
+    delete globalThis[Symbol.for('agent-board.opencode-open-sessions')]
+  })
+  const { opencodePlugin: local } = await import('../hooks/local-agents.ts')
+  const saved = []
+  const source = local('node', '/synthetic/board.mjs', '/synthetic/progress.md', 'Progress', process.env.HOME)
+  const factory = new Function('createRequire', 'spawnSync', 'tool', `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace('export const AgentBoardLocal', 'const AgentBoardLocal')}\nreturn AgentBoardLocal`)(createRequire, (_node, _args, options) => { saved.push(options.input); return { status: 0, stdout: '' } }, Object.assign(value => value, { schema: { string: () => ({ describe: () => ({}) }), enum: () => ({}), array: () => ({}) } }))
+  const hooks = await factory({ client: { session: { get: async ({ path }) => ({ data: { id: path.id } }) } } })
+  const cases = await deliveryPlugins()
+  for (const [, text] of cases) await hooks['chat.message']({ sessionID: 'synthetic-owner' }, { parts: [{ type: 'text', text }] })
+  assert.equal(saved.length, cases.length)
+  for (const [index, [name]] of cases.entries()) {
+    const sent = JSON.parse(saved[index])
+    assert.equal(sent.prompt_submitted, true, name)
+    assert.equal(sent.board_request, index === cases.length - 1 ? true : undefined, name)
+    assert.equal(sent.delivery_request, index > 0 && index < cases.length - 1 ? true : undefined, name)
+    assert.ok(!saved[index].includes('Agent Board message') && !saved[index].includes('second plan'), name)
+  }
+})
+
+test('a board delivery is no answer in Claude Code: the receiver submits it as a plugin prompt, which is not the person\'s', async () => {
+  const { isPersonsAnswer } = await import('../hooks/digest.ts')
+  const { deliveryText } = await import('../hooks/messaging.ts')
+  const { ZH_TW } = await import('../hooks/i18n.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  // hooks/register.tsx hands the delivery to prompt.submit as { text } alone: no origin, no asUser.
+  const source = readFileSync(new URL('../hooks/register.tsx', import.meta.url), 'utf8')
+  assert.match(source, /submit: text => \$\.prompt\.submit\(\{ text \}\),/)
+  const sent = { id: 'AB-1', from: 'board', to: 'claude:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' }
+  for (const s of [EN, ZH_TW]) {
+    const text = deliveryText(sent, s)
+    assert.equal(isPersonsAnswer({ text, origin: { kind: 'plugin' } }), false)
+    assert.equal(isPersonsAnswer({ text, origin: { kind: 'composer' } }), true)
+  }
+  assert.equal(isPersonsAnswer({ text: 'Continue the task', origin: { kind: 'composer' } }), true)
 })
 
 const sh = process.platform === 'win32' ? existsSync('C:/Program Files/Git/bin/bash.exe') ? 'C:/Program Files/Git/bin/bash.exe' : 'sh' : '/bin/sh'

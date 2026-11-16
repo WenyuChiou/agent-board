@@ -6284,6 +6284,20 @@ test('OpenCode status retains its owned question beyond forty user steps and kee
   assert.equal(untouched.askedRevision, undefined)
 }))
 
+test('an OpenCode status that carries delivery_request leaves its owned question open, a person\'s prompt answers it (#1334)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const send = (id, state, extra = {}) => f.command(['--agent-status', '--agent', 'opencode', '--state', state], { session_id: id, ...extra })
+  const read = id => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`opencode:${id}`).digest('hex') + '.json'), 'utf8'))
+  for (const [name, extra, isAnswered] of [['a person', {}, true], ['a delivery', { delivery_request: true }, false], ['a board command', { board_request: true }, false]]) {
+    const id = `synthetic-opencode-delivery-${name.replaceAll(' ', '-')}`
+    assert.equal(send(id, 'waiting', { last_assistant_message: 'Which branch?' }).status, 0)
+    assert.equal(read(id).steps[read(id).asked], '- [?] Which branch?', name)
+    assert.equal(send(id, 'working', { prompt_submitted: true, ...extra }).status, 0)
+    assert.equal(read(id).steps[read(id).asked], isAnswered ? '- [x] Which branch?' : '- [?] Which branch?', name)
+    assert.equal(read(id).state, isAnswered ? 'working' : 'waiting', name)
+  }
+}))
+
 test('local status preserves cached session and step validation after owned-slot retention', () => fixture(f => {
   assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
   const id = 'synthetic-opencode-invalid-cache'
