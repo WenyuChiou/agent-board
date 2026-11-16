@@ -2233,8 +2233,10 @@ test('a press on a choice drawn from options that have since changed is refused 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
     expect(await ui.find({ type: 'Button', key: 'mine::1::A' })).toBeDefined()
-    await $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'choose', options: ['C', 'B'], why: 'Which database should I use?' } })
+    // The options change while the press is in flight, before the pane has redrawn.
+    const changing = $.tool.call({ tool: 'TaskUpdate', taskId: '1', metadata: { waiting: 'you', ask: 'choose', options: ['C', 'B'], why: 'Which database should I use?' } })
     await ui.press({ key: 'mine::1::A' })
+    await changing
     expect(besideButton(await ui.findAll({ type: 'Box' }), 'mine::1::A')).toContain(EN.boardLineChanged)
     expect(submitted).toBe(0)
     await clock.advance(2100)
