@@ -151,9 +151,11 @@ const readLocal = (file: string): string | null => readBytes(file)?.toString('ut
 // What setup saw at a path when it planned (#1488): the kind of the path itself (lstat follows no link), a link's
 // target, and the bytes read through it. Decoded text is not enough to compare later: bytes that decode alike
 // (EF BF BD and FF) would pass, and a dangling link would read as a missing file. lstat sees the last part of the
-// path only: a folder above it swapped for a link is not caught.
-type Snap = { kind: 'none' | 'file' | 'link' | 'other'; link: string | null; bytes: Buffer | null }
-const NO_PATH: Snap = { kind: 'none', link: null, bytes: null }
+// path only: a folder above it swapped for a link is not caught. `real` is the path's real path while it resolves (the OS
+// settles letter case, relative link targets and link chains), so a removal can tell a file this batch removed from one
+// another program removed; it is not compared.
+type Snap = { kind: 'none' | 'file' | 'link' | 'other'; link: string | null; bytes: Buffer | null; real: string | null }
+const NO_PATH: Snap = { kind: 'none', link: null, bytes: null, real: null }
 const take = (file: string): Snap => {
   let kind: Snap['kind']
   try {
@@ -163,7 +165,9 @@ const take = (file: string): Snap => {
     if ((error as { code?: string }).code === 'ENOENT') return NO_PATH
     throw error
   }
-  return { kind, link: kind === 'link' ? readlinkSync(file) : null, bytes: readBytes(file) }
+  let real: string | null = null
+  try { real = realpathSync.native(file) } catch {}
+  return { kind, link: kind === 'link' ? readlinkSync(file) : null, bytes: readBytes(file), real }
 }
 const sameBytes = (a: Buffer | null, b: Buffer | null): boolean => a === null || b === null ? a === b : a.equals(b)
 const same = (a: Snap, b: Snap): boolean => a.kind === b.kind && a.link === b.link && sameBytes(a.bytes, b.bytes)
@@ -505,9 +509,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // before each change and the read-back after it, in both writers. Before a write the path must be as planned, or
   // already hold exactly the new bytes as the same kind of path, or as a new regular file where there was none: one
   // file reached by a second name earlier in this batch (a skills folder linked to the shared one, or another letter
-  // case on Windows), so writing the same bytes over it loses nothing. Before a removal it must be as planned, already
-  // gone (a second name of a file this batch removed), or the same link it was with its target gone (a file link to a
-  // file this batch removed). Anything else stops the batch, a link or other bytes put where the file was included.
+  // case on Windows), so writing the same bytes over it loses nothing. Before a removal it must be as planned, or, only
+  // when its planned real path is a file this batch itself removed, already gone (a second name of that file) or the
+  // same link it was with its target gone (a file link to that file). A file or target another program removed or moved
+  // stops the batch (codex_476 on #1594). Anything else stops the batch, a link or other bytes put where the file was included.
   // A second name may also find a regular file where it planned a file link, when this batch's own write replaced that
   // link (a skills folder linked to the shared one whose SKILL.md is a file link): only when the path's real path is
   // one this batch wrote and it holds exactly the new bytes (Greptile on #1594).
@@ -515,12 +520,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // A plain rename or unlink cannot close the instant between the last re-read and the change.
   const isHolding = (now: Snap, text: string): boolean => sameBytes(now.bytes, Buffer.from(text, 'utf8'))
   const ours = new Set<string>()
+  // The real paths of the regular files this batch removed, each recorded once its removal was checked.
+  const gone = new Set<string>()
   const realOf = (file: string): string | null => { try { return realpathSync.native(file) } catch { return null } }
   const isOurs = (file: string, now: Snap, next: string): boolean => now.kind === 'file' && isHolding(now, next) && ours.has(realOf(file) ?? '')
   const unchanged = (file: string, next: string | null): void => {
     const was = before.get(file) ?? NO_PATH, now = take(file)
     const isSecondName = next !== null && isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' || isOurs(file, now, next))
-    const isGone = next === null && (now.kind === 'none' || was.kind === 'link' && now.kind === 'link' && now.link === was.link && now.bytes === null)
+    const isGone = next === null && was.real !== null && gone.has(was.real) && (now.kind === 'none' || was.kind === 'link' && now.kind === 'link' && now.link === was.link && now.bytes === null)
     if (!same(was, now) && !isSecondName && !isGone) throw new Error('INSTALL_CHANGED')
   }
   const written = (file: string, text: string | null): void => {
@@ -539,6 +546,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     unchanged(file, null)
     try { unlinkSync(file) } catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error }
     written(file, null)
+    const was = before.get(file)
+    if (was?.kind === 'file' && was.real !== null) gone.add(was.real)
   }
   const isAsPlanned = (file: string): boolean => same(take(file), before.get(file) ?? NO_PATH)
   const jsonInitial = (file: string): Json => {
@@ -1787,7 +1796,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (remove) {
       if (handover) put(handover.file, handover.text)
       unchanged(manifestFile, null)
-      if (before.get(manifestFile)?.kind !== 'none') drop(manifestFile)
+      // Only a record that read as one when setup planned, as the plan lists it: a dangling link there stays, as on main.
+      if (initial(manifestFile) !== null) drop(manifestFile)
     } else {
       put(manifestFile, nextManifest)
       for (const other of localAgents.filter(one => one !== agent)) {

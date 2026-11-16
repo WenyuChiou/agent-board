@@ -472,3 +472,51 @@ fs.writeFileSync = (target, data, ...rest) => {
   assert.ok(lstatSync(hooks).isSymbolicLink(), 'the link is still there')
   assert.equal(readlinkSync(hooks), planned)
 }))
+
+// A removal may find a path already gone, or the same link with its target gone, only where the path's planned real
+// path is a file this batch itself removed (codex_476 on #1594). The preload plays another program that removes one
+// file right after remove's first unlink, which is the board's own agent-board.mjs.
+const removeOnFirstUnlink = (home, victim) => seam(home, `const unlink = fs.unlinkSync
+let done = false
+fs.unlinkSync = file => { unlink(file); if (!done) { done = true; unlink(${JSON.stringify(victim)}) } }`)
+
+test('a remove keeps a Hermes SKILL.md file link whose target another program deleted after setup planned: remove fails instead of deleting it', t => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md'), copy = join(home, 'copy-skill.md')
+  writeFileSync(copy, readFileSync(own))
+  rmSync(own)
+  try { symlinkSync(copy, own, 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'], { env: removeOnFirstUnlink(home, copy) })
+  stoppedOnChange(removed)
+  assert.ok(lstatSync(own).isSymbolicLink(), 'the link is still there')
+  assert.equal(readlinkSync(own), copy)
+}))
+
+test('a remove stops when another program deleted a planned Hermes SKILL.md after setup planned', () => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'], { env: removeOnFirstUnlink(home, own) })
+  stoppedOnChange(removed)
+  // Setup stopped before its next removal: the install record is still there for the next run.
+  assert.ok(existsSync(join(home, '.agent-board', 'install-hermes.json')))
+}))
+
+// The install record is removed only when it read as one when setup planned, as on main: a dangling link there is not
+// in the plan, and stays (codex_476 on #1594). A junction on Windows, which needs no privilege.
+test('a Hermes remove keeps a dangling link where the install record goes', t => withHome(({ home, run }) => {
+  mkdirSync(join(home, '.agent-board'), { recursive: true })
+  const record = join(home, '.agent-board', 'install-hermes.json')
+  try { symlinkSync(join(home, 'missing-folder'), record, LINK_TYPE) } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make links'); return }
+    throw error
+  }
+  // setup-agent applies only a plan with changes, so the helper runs the remove itself, as the board's --codex-remove does.
+  const helper = fileURLToPath(new URL('../scripts/setup-codex.mjs', import.meta.url))
+  const removed = spawnSync(process.execPath, [helper, '--home', home, '--codex-remove', '--agent', 'hermes', '--json', '--apply'], { cwd: home, env: makeEnv(home), encoding: 'utf8', windowsHide: true, timeout: 60000 })
+  assert.equal(removed.status, 0, `${removed.stdout}${removed.stderr}`)
+  assert.ok(lstatSync(record).isSymbolicLink(), 'the link is still there')
+  assert.ok(readlinkSync(record).endsWith('missing-folder'), readlinkSync(record))
+}))
