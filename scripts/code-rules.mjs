@@ -54,6 +54,7 @@ const closeOf = (text, from) => {
     else if (c === '`') k = templateEnd(text, k)
     else if (c === '/' && text[k + 1] === '/') return text.length
     else if (c === '/' && text[k + 1] === '*') { const end = text.indexOf('*/', k + 2); if (end === -1) return text.length; k = end + 1 }
+    else if (c === '/') throw AMBIGUOUS
     else if (c === '{') depth++
     else if (c === '}' && --depth === 0) return k
   }
@@ -70,9 +71,17 @@ const templateEnd = (text, start) => {
   return j
 }
 
+// A `/` in code that starts no comment is a regular expression or a division. This reader does not parse regular
+// expressions, whose quotes and braces would mislead it, so such a line is read whole: the strict side (codex_450).
+const AMBIGUOUS = Symbol('ambiguous')
+
 // The line without its strings and comments, so a call inside a string, a `// ...` tail or a `/* ... */` never matches.
-// A template literal's `${...}` expressions run, so they stay as code (round 2 of #1551).
+// A template literal's `${...}` expressions run, so they stay as code (round 2 of #1551). A line this reader cannot
+// take apart (a regular expression, or nesting too deep for it) is returned whole, so a timer in it still fails.
 export const codeOnly = text => {
+  try { return strip(text) } catch { return text }
+}
+const strip = text => {
   let out = ''
   for (let i = 0; i < text.length; i++) {
     const char = text[i]
@@ -89,7 +98,7 @@ export const codeOnly = text => {
         if (text[j] === '\\') { j += 2; continue }
         if (text[j] === '$' && text[j + 1] === '{') {
           const k = closeOf(text, j + 2)
-          out += ` ${codeOnly(text.slice(j + 2, k))} `
+          out += ` ${strip(text.slice(j + 2, k))} `
           j = k + 1
           continue
         }
@@ -102,7 +111,8 @@ export const codeOnly = text => {
       while (j < text.length && text[j] !== char) j += text[j] === '\\' ? 2 : 1
       out += char + char
       i = j
-    } else out += char
+    } else if (char === '/') throw AMBIGUOUS
+    else out += char
   }
   return out
 }
@@ -111,14 +121,14 @@ export const rules = [
   {
     id: 'set-timeout-in-hooks',
     applies: (path, config) => /^hooks\/.+\.tsx?$/.test(path) && !isGenerated(path) && !config.setTimeoutFiles.includes(path),
-    test: text => !isBlockCommentLine(text) && /\bsetTimeout\s*\(/.test(codeOnly(text)),
-    cause: 'a new `setTimeout(` in a hooks/ file that is not on the list of files that already use one: a timer in a hook keeps the hook process alive after its work is done or fires after the agent moved on.',
+    test: text => !isBlockCommentLine(text) && /\bsetTimeout\b/.test(codeOnly(text)),
+    cause: 'a new `setTimeout` (a call, or the function passed on) in a hooks/ file that is not on the list of files that already use one: a timer in a hook keeps the hook process alive after its work is done or fires after the agent moved on.',
     fix: `start the timer from a file already on the list, or add this file to "setTimeoutFiles" in ${CONFIG_PATH} in the same pull request and say why in its body (the check reads the list from the pull request). For a renamed or moved file, move its path in that list.`,
   },
   {
     id: 'only-in-tests',
     applies: path => /^tests\/.+\.test\.(?:mjs|tsx?)$/.test(path),
-    test: text => !isBlockCommentLine(text) && /\b(?:test|describe|it)\.only\s*\(/.test(codeOnly(text)),
+    test: text => !isBlockCommentLine(text) && /\b(?:test|describe|it)\.only\b/.test(codeOnly(text)),
     cause: 'a committed `.only(`: node and the test runners then skip every other test in the file, and the run still passes.',
     fix: 'remove `.only` before committing; run one test with `--test-name-pattern` instead.',
   },

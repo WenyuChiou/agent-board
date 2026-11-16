@@ -87,6 +87,15 @@ test('a quoted or commented brace inside a template expression neither hides a t
   assert.deepEqual(check(added('hooks/new-thing.ts', "const text = `${'{'} setTimeout( as words`")), [])
 })
 
+test('a line the reader cannot take apart is read whole, and passing the timer function on fails too', () => {
+  assert.equal(check(added('hooks/new-thing.ts', 'const result = [`${/"/.test(s)}`, setTimeout(done, 1)]')).length, 1)
+  assert.equal(check(added('hooks/new-thing.ts', "const later = s.replace(/'/g, '') && setTimeout(done, 1)")).length, 1)
+  const deep = '`${'.repeat(6000) + 'setTimeout(done, 1)' + '}`'.repeat(6000)
+  assert.equal(check(added('hooks/new-thing.ts', deep)).length, 1)
+  assert.equal(check(added('hooks/new-thing.ts', 'const wait = setTimeout')).length, 1)
+  assert.deepEqual(check(added('hooks/new-thing.ts', "const label = 'setTimeout( as words, in hooks/a.ts'")), [])
+})
+
 test('it.only after a statement prefix fails, and this test file, which writes the call only inside strings, passes', () => {
   assert.equal(check(added('tests/x.test.mjs', 'if (enabled) it.only("one", () => {})')).length, 1)
   assert.equal(check(added('tests/x.test.mjs', 'for (const x of y) { test.only("one", () => {}) }')).length, 1)
