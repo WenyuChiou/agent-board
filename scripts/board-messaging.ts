@@ -752,7 +752,11 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
       // A board started before claims had names refuses the field until it restarts: ask it as before.
       if ((error as Error).message === 'UNKNOWN_FIELD') {
         if (deadline - Date.now() < boardWait) throw error
-        return (await access.call('mailbox-turn', { agent, session, surface }, Date.now())).message as Message ?? null
+        // A claim with no name cannot be handed back, so one this take may have made stays held (#1631).
+        try { return (await access.call('mailbox-turn', { agent, session, surface }, Date.now())).message as Message ?? null } catch (unnamed) {
+          if (access.isDeferred() || access.isCutOff()) isHeld = true
+          throw unnamed
+        }
       }
       // The board may have claimed a message after this hook stopped waiting: hand it back (#990).
       // Its own budget is what the hook has left; a claim not handed back waits out the lease.
