@@ -5471,6 +5471,35 @@ test('a refused list on a token-marked block stays refused on the inbox card aft
   expect(serveModel(view, [], STRINGS.en).asks.map(ask => ask.answers), 'page').toEqual(view.waiting.map(() => []))
 })
 
+test('a refused list kept only in the saved source of a ledger written before #1630 stays refused on the inbox card after the block is gone (#1630)', () => {
+  const updated = new Date(AT_1277).toISOString()
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'codex-session-1630-older', cwd: '/work/demo', last_assistant_message: EITHER_1277 }), at: AT_1277 }], undefined, undefined, STRINGS.en)
+  const id = inbox[0]!.id!
+  const block = `## demo\n<!-- auto session=${id} agent=codex state=waiting updated=${updated} -->\n### Storage\n- [?] ${EITHER_1277}\n<!-- options=[] -->\n<!-- question=${'c'.repeat(64)}:1 -->\n<!-- /auto session=${id} -->\n`
+  const first = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true, 'fixture:1630', undefined, inbox)
+  // A ledger written before this change has the block's source (with its refused list) but no options field.
+  const older = { ...first.ledger, records: first.ledger.records.map(({ options: _options, ...record }) => record) }
+  expect(older.records.find(record => record.source?.kind === 'block')?.source?.data).toContain('stepOptions')
+  const after = observeQuestions(older, parseProgress('## demo\n'), null, [], AT_1277 + 1000, true, 'fixture:1630', undefined, inbox)
+  const view = buildView(parseProgress('## demo\n'), [], null, AT_1277 + 1000, 0, {}, STRINGS.en, [], {}, after.ledger, undefined, inbox)
+  expect(view.waiting.length > 0, 'still waiting').toBe(true)
+  expect(view.waiting.map(item => [item.kind, item.options]), 'inbox card').toEqual(view.waiting.map(() => ['reply', []]))
+})
+
+test('an inbox turn that matches two token-marked steps of the same words with different lists takes neither list (#1630)', () => {
+  const updated = new Date(AT_1277).toISOString()
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'codex-session-1630-twice', cwd: '/work/demo', last_assistant_message: EITHER_1277 }), at: AT_1277 }], undefined, undefined, STRINGS.en)
+  const id = inbox[0]!.id!
+  const block = `## demo\n<!-- auto session=${id} agent=codex state=waiting updated=${updated} -->\n### Storage\n- [?] ${EITHER_1277}\n<!-- options=[] -->\n<!-- question=${'c'.repeat(64)}:1 -->\n- [?] ${EITHER_1277}\n<!-- options=["MySQL","Redis"] -->\n<!-- question=${'d'.repeat(64)}:1 -->\n<!-- /auto session=${id} -->\n`
+  const first = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true, 'fixture:1630', undefined, inbox)
+  expect(first.ledger.records.filter(record => record.source?.kind === 'block').map(record => record.options), 'both steps keep their own').toEqual([[], ['MySQL', 'Redis']])
+  const after = observeQuestions(first.ledger, parseProgress('## demo\n'), null, [], AT_1277 + 1000, true, 'fixture:1630', undefined, inbox)
+  const view = buildView(parseProgress('## demo\n'), [], null, AT_1277 + 1000, 0, {}, STRINGS.en, [], {}, after.ledger, undefined, inbox)
+  expect(view.waiting.length > 0, 'still waiting').toBe(true)
+  // The turn could be either step's, so it offers no list: neither the other step's choices nor ones made from its words.
+  expect(view.waiting.map(item => [item.kind, item.options]), 'inbox card').toEqual(view.waiting.map(() => ['reply', []]))
+})
+
 test('a task that asks for a yes or no and also lists options is a confirm on its own pane and on the other board (#1277)', () => {
   const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
   const yesNo = { isAsked: true, isChoose: false, row: [], page: [STRINGS.en.yesAnswer, STRINGS.en.noAnswer], kind: 'confirm' }
