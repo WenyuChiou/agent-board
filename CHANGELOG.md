@@ -150,6 +150,8 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - On Windows the docked open reads the screens without compiling C#, so it no longer waits for csc.exe (#1614).
 
+- On a big board the pane uses less processor time while idle: its 2-second check no longer lists the whole board folder (#422, #1619).
+
 - Setup stops instead of writing over a file someone edits while it runs, on a standalone install too (#1488, #1594).
 
 - For contributors: the code rules are read in file context and catch other test extensions, .only aliases and fake board-script files (#1605).
@@ -171,6 +173,8 @@ What changed for the person using Agent Board, one line per change, newest versi
 - When an agent cannot reach the board because the connection was refused or cut, it reports that error instead of "mailbox deferred", and a DeepSeek turn asks the board again within five seconds (#1631, #1633).
 
 - A choice list with an empty entry offers nothing, a refused list stays refused on the inbox card, and each choice shows as sent (#1634).
+
+- Send to Codex waits about 10 minutes, not 1, before it starts a message on an idle thread, so a thread nobody has open gets nothing (#1608).
 
 ## 0.24.3 — 2026-11-10
 
