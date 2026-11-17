@@ -395,6 +395,7 @@ export const parseQuestions = (text: string, isMissing = false): QuestionLedger 
       if (row.isArchived !== undefined && typeof row.isArchived !== 'boolean') return null
       if (row.producerRevisions !== undefined && (!Array.isArray(row.producerRevisions) || row.producerRevisions.some(revision => typeof revision !== 'string' || !/^[a-f0-9]{64}$/.test(revision)))) return null
       if (row.producerSources !== undefined && (!Array.isArray(row.producerSources) || row.producerSources.some(source => typeof source !== 'string'))) return null
+      if (row.options !== undefined && (!Array.isArray(row.options) || row.options.some(option => typeof option !== 'string'))) return null
       if (row.source !== undefined && (row.source === null || typeof row.source !== 'object' || !['block', 'own', 'manual', 'inbox'].includes(row.source.kind) || ['project', 'task', 'context', 'text', 'agent', 'session', 'data'].some(key => typeof (row.source as unknown as Record<string, unknown>)[key] !== 'string'))) return null
       if (row.source !== undefined) row.source = normalizeSource(row.source)
       ids.add(row.id)
@@ -461,7 +462,10 @@ export const withCaptures = (ledger: QuestionLedger, captures: readonly Question
       records.push(record)
       byId.set(record.id, record)
     } else {
-      if (previous.source === undefined) previous.source = capture.record.source
+      if (previous.source === undefined) {
+        previous.source = capture.record.source
+        if (capture.record.options !== undefined) previous.options = capture.record.options
+      }
       if (capture.record.producerRevisions !== undefined) previous.producerRevisions = [...new Set([...(previous.producerRevisions ?? []), ...capture.record.producerRevisions])]
       if (capture.record.producerSources !== undefined) previous.producerSources = [...new Set([...(previous.producerSources ?? []), ...capture.record.producerSources])]
     }
@@ -893,6 +897,16 @@ export const observeQuestions = (
         if (record !== undefined) record.isPresent = false
         const binding = sha256(JSON.stringify([row.scope, words, occurrence, copies.length, incarnation]))
         record = { id: `question:${binding}:${next++}`, scope: row.scope, words, occurrence, copies: copies.length, isWaiting: true, isPresent: true, firstObserved: Number.isFinite(now) && now > 0 ? now : 0, incarnation, producer: row.producer }
+        // A token-marked block keeps its own record, so the inbox turn that stays after that block is gone gets a new one.
+        // It takes the list or refusal of the open records of the same words in this scope only when they all agree: two
+        // steps of the same words with different lists could each be the one it asks, so it offers none. A record from a
+        // ledger written before the options field reads its list from its saved source (#1630).
+        if (row.source.kind === 'inbox') {
+          const held = (byScopeWords.get(partsKey2(row.scope, words)) ?? []).filter(old => old.isUnresolved !== false)
+            .map(old => old.options ?? (old.source === undefined ? undefined : sourceOptions(old.source, old.occurrence)))
+          if (new Set(held.map(one => JSON.stringify(one ?? null))).size > 1) record.options = []
+          else if (held[0] !== undefined) record.options = [...held[0]]
+        }
         records.push(record)
         indexRecord(record)
       }
@@ -901,6 +915,16 @@ export const observeQuestions = (
       record.isUnresolved = row.isWaiting
       if (row.producerRevisions !== undefined) record.producerRevisions = [...new Set([...(record.producerRevisions ?? []), ...row.producerRevisions])]
       if (row.producerSources !== undefined) record.producerSources = [...new Set([...(record.producerSources ?? []), ...row.producerSources])]
+      // The checked list stays with this incarnation when its block gives way to the matching inbox turn (#1630).
+      const checked = sourceOptions(row.source, record.occurrence)
+      if (checked !== undefined) record.options = checked
+      else if (row.source.kind !== 'inbox') delete record.options
+      // A record from a ledger written before the options field holds its list or refusal only in its saved source,
+      // which the inbox turn is about to replace (#1630).
+      else if (record.options === undefined && record.source !== undefined) {
+        const saved = sourceOptions(record.source, record.occurrence)
+        if (saved !== undefined) record.options = saved
+      }
       record.source = row.source
       assigned.add(record.id)
       if (row.isWaiting) keys[questionSlot(row.scope, row.index)] = record.id

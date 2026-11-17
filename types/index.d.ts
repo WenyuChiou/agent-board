@@ -58,6 +58,10 @@ export type QuestionRecord = {
   incarnation: string
   producer?: string
   source?: QuestionSource
+  // The choices its block or own task gave, as `sourceOptions` read them ([] for a refused list).
+  // An inbox turn carries none, so when the source moves to the matching inbox turn this stays and
+  // its card keeps that list or refusal (#1630).
+  options?: string[]
   isUnresolved?: boolean
   resolvedAt?: number
   isArchived?: boolean
