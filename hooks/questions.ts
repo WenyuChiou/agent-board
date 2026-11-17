@@ -646,6 +646,39 @@ export const questionFilesKey = (
   return files.some(([, , mtimeMs]) => now - mtimeMs < freshMs) ? null : files
 }
 
+// What an idle question pass reads, as stats, without listing the folder beside progress.md
+// (#422): progress.md, the ledger and the answered file, by size and time, and the folder's own
+// time, which moves when a capture or a proof is added, removed or renamed, as the inbox's
+// folder time does. Null while one of them is younger than `freshMs`, as questionFilesKey is,
+// and when the folder does not stat. A file that does not stat is left out, as the listing
+// leaves it out; the folder's size is always 0, so the key does not move with a size a file
+// system reports for a folder.
+export const questionStatsKey = (
+  path: string,
+  answered: string,
+  stats: {
+    progress: { size: number; mtimeMs: number } | null
+    ledger: { size: number; mtimeMs: number } | null
+    answered: { size: number; mtimeMs: number } | null
+    dirMtimeMs: number | null
+  },
+  now: number,
+  freshMs: number,
+): Array<readonly [string, number, number]> | null => {
+  if (stats.dirMtimeMs === null) return null
+  const dir = path.replace(/[\\/][^\\/]*$/, '')
+  const files = ([
+    [path.replace(/^.*[\\/]/, ''), stats.progress],
+    [questionsPath(path).replace(/^.*[\\/]/, ''), stats.ledger],
+    [answered.replace(/^.*[\\/]/, ''), stats.answered],
+    [dir, { size: 0, mtimeMs: stats.dirMtimeMs }],
+  ] as const)
+    .flatMap(([name, stat]) => (stat === null ? [] : [[name, stat.size, stat.mtimeMs] as const]))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+
+  return files.some(([, , mtimeMs]) => now - mtimeMs < freshMs) ? null : files
+}
+
 type Observation = { scope: string; session: string; index: number | string; text: string; words: string; isWaiting: boolean; producer: string; producerRevisions?: string[]; producerSources?: string[]; source: QuestionSource }
 
 const ownObservations = (mine: ProgressMirror, scopeOf: QuestionScopeOf = questionScope): Observation[] => {

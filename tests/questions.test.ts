@@ -1,7 +1,7 @@
 import { test, expect } from 'claude-code/testing'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, copiesToKeep, emptyQuestions, isAskedBy, isContinuationTurn, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionScope, questionWords, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
+import { acknowledgementKeys, archiveQuestionsKept, captureCovers, captureJson, compactQuestionsJson, copiesToKeep, emptyQuestions, isAskedBy, isContinuationTurn, isQuestionSnapshot, isTurnRecorded, isTornLedger, ledgerLeftovers, LEDGER_TEMP_MS, migratedAnswered, migrationKey, observeQuestions, ownQuestionsKey, parseCapture, parseQuestions, prunableCaptures, prunableProofs, questionFilesKey, questionStatsKey, questionScope, questionWords, questionsJson, refTasks, resolveQuestion, resolvedQuestionsToRetire, withCaptures } from '../hooks/questions'
 import type { QuestionAnswerEvidence, QuestionLedger } from '../hooks/questions'
 import { edited, finished, held, ledgerOf, named, proof, question, reopened } from './fixtures/question-files'
 import { STRINGS } from '../hooks/strings'
@@ -1290,6 +1290,38 @@ test('the question files key lists the question files in name order, and is null
   ])
   const fresh = entries.map(entry => (entry.name === 'progress-questions.json' ? { ...entry, mtimeMs: now - 1_999 } : entry))
   expect(questionFilesKey(path, '/home/me/.claude/progress-answered.json', fresh, now, 2_000)).toBeNull()
+})
+
+test('the question stats key stats the three files it reads and the folder time, and is null while one was just written or the folder does not stat', () => {
+  const path = '/home/me/.claude/progress.md'
+  const answered = '/home/me/.claude/progress-answered.json'
+  const now = Date.parse('2026-10-16T12:00:00Z')
+  const stats = {
+    progress: { size: 20, mtimeMs: 4 },
+    ledger: { size: 30, mtimeMs: 5 },
+    answered: { size: 10, mtimeMs: 3 },
+    dirMtimeMs: 6,
+  }
+  expect(questionStatsKey(path, answered, stats, now, 2_000)).toEqual([
+    ['/home/me/.claude', 0, 6],
+    ['progress-answered.json', 10, 3],
+    ['progress-questions.json', 30, 5],
+    ['progress.md', 20, 4],
+  ])
+  // A file that does not stat is left out, as the listing leaves it out; the key still moves
+  // when it appears, and when the folder's time moves.
+  expect(questionStatsKey(path, answered, { ...stats, ledger: null }, now, 2_000)).toEqual([
+    ['/home/me/.claude', 0, 6],
+    ['progress-answered.json', 10, 3],
+    ['progress.md', 20, 4],
+  ])
+  expect(questionStatsKey(path, answered, { ...stats, dirMtimeMs: 7 }, now, 2_000)).not.toEqual(questionStatsKey(path, answered, stats, now, 2_000))
+  // A folder that does not stat is null, as a failed listing is.
+  expect(questionStatsKey(path, answered, { ...stats, dirMtimeMs: null }, now, 2_000)).toBeNull()
+  // One of them younger than the poll is null, so a change that lands just before the poll is
+  // passed again instead of read as unchanged.
+  expect(questionStatsKey(path, answered, { ...stats, ledger: { size: 31, mtimeMs: now - 1_999 } }, now, 2_000)).toBeNull()
+  expect(questionStatsKey(path, answered, { ...stats, dirMtimeMs: now - 1 }, now, 2_000)).toBeNull()
 })
 
 test('the own list\'s part of the idle question key moves with its questions, not with its times, turn state or background jobs', () => {
