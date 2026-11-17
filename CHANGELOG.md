@@ -138,6 +138,36 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - For contributors: the README may show one real screenshot of the board's page per language (#1307).
 
+- A board message to Antigravity reads Replied: the turn-end hook reads the model's ACK in its answer (#1416, #1601).
+
+- For contributors: the delivery state table covers combined flag shapes and their cells (#1623).
+
+- For contributors: pr-check decodes safe HTML entities in split reasons without letting hidden text through (#1617).
+
+- For contributors: the pr-check rerun reports early failures and checks timed-out reruns again (#1616).
+
+- For contributors: pr-check ignores Review: approvals from outside the team (#1615).
+
+- On Windows the docked open reads the screens without compiling C#, so it no longer waits for csc.exe (#1614).
+
+- Setup stops instead of writing over a file someone edits while it runs, on a standalone install too (#1488, #1594).
+
+- For contributors: the code rules are read in file context and catch other test extensions, .only aliases and fake board-script files (#1605).
+
+- On Windows the sh reporter runs its PowerShell copy from a file, so a longer reporter still writes its prompt receipt (#1592).
+
+- For contributors: the nested test run on Windows keeps the account's Playwright browsers (#1471, #1590).
+
+- The away line counts the time until you came back, not until the next refresh (#1576).
+
+- For contributors: an outside small docs fix needs a Tier line like any other pull request (#1585).
+
+- For contributors: prompt-hooks.test.mjs gets a 130 s time budget on Windows, so a slow runner alone no longer fails a pull request (#1603, #1604).
+
+- For contributors: stand-in pages use a pid no process can have (#1571).
+
+- OpenCode's card sends a board message instead of offering Copy: at once when OpenCode is idle, and when its step ends when it is busy (#1591, #1599).
+
 ## 0.24.3 — 2026-11-10
 
 - **Tests / native hooks** · Failed Antigravity native-context checks name fixed hook-error codes and their exit status, while reading hook logs only on failure and keeping commands and log text private. Failed setup checks now also distinguish launch errors, deadlines and signals with bounded status, code and timing fields. The missing-context flake remains under investigation (#683).
