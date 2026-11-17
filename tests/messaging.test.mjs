@@ -531,6 +531,41 @@ test('hookMailbox defers only when the store is busy or times out, and exposes s
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('a refused or cut connection to the recorded board reports its own error, not deferred, and a cut take is handed back (#1631)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailbox-transport-'))
+  try {
+    writeFileSync(join(dir, 'server.lock'), String(process.pid))
+    // A port just closed refuses the connection; Windows takes about two seconds to say so, so the board wait is long.
+    const closed = createServer()
+    await new Promise(done => closed.listen(0, '127.0.0.1', done))
+    const closedPort = closed.address().port
+    await new Promise(done => closed.close(done))
+    writeFileSync(join(dir, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${closedPort}/?t=synthetic` }))
+    const refused = hookMailbox(dir, 8000, 6000)
+    assert.equal(await refused.turn('codex', 's-refused', 'CLI', Date.now()), null)
+    assert.equal(refused.hasDeferred, false)
+    assert.equal(refused.error, 'ECONNREFUSED')
+
+    // A board that drops the connection after reading the take may have claimed a message: the hook hands it back.
+    const seen = []
+    const cutting = createServer((req, res) => {
+      seen.push(req.url.split('?')[0])
+      if (req.url.startsWith('/api/messages/mailbox-turn')) { req.socket.destroy(); return }
+      res.setHeader('content-type', 'application/json')
+      res.end(JSON.stringify({ ok: true }))
+    })
+    try {
+      await new Promise(done => cutting.listen(0, '127.0.0.1', done))
+      writeFileSync(join(dir, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${cutting.address().port}/?t=synthetic` }))
+      const cut = hookMailbox(dir, 8000, 6000)
+      assert.equal(await cut.turn('codex', 's-cut', 'CLI', Date.now()), null)
+      assert.equal(cut.hasDeferred, false)
+      assert.equal(cut.error, 'ECONNRESET')
+      assert.deepEqual(seen, ['/api/messages/mailbox-turn', '/api/messages/mailbox-release'])
+    } finally { await new Promise(done => cutting.close(done)) }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('a claim whose file no longer holds its bytes fails its check as a store error (#1484)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'mailbox-claim-check-'))
   try {
