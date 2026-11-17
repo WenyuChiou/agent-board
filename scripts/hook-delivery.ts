@@ -20,19 +20,42 @@ type Json = Record<string, unknown>
 // and a code are kept, never the message text or the reply; a claim lives until the next Stop hook spends it. A claim whose
 // ACK line was read but that the board did not take (busy, or no mailbox) is kept as matched and offered again at each Stop,
 // since a later turn's transcript no longer holds that line. `from` is the transcript's size at the hand-over: the Stop
-// hook reads the replies after it, and a Stop that cannot read the transcript keeps the claim unspent for the next one.
+// hook reads the replies of the turn after it, and a Stop that cannot read the transcript keeps the claim unspent for the
+// next one. A claim with no `from` (the size could not be read at the hand-over) is read only at its first Stop, since
+// a later Stop could not tell its turn from a later one.
+// The claims live in the board's folder; when that write fails they go beside the message store, a separate folder, so
+// one failed write does not lose an ACK. Both are read; a save writes one and removes the other.
 type AckClaim = { id: string; nonce: string; matched?: true; from?: number }
 const ACK_CLAIMS_KEEP = 8
-const ackClaimsFile = (root: string, owner: string): string => join(root, 'antigravity-acks', `${owner}.json`)
+const ackClaimsFiles = (root: string, messages: string, owner: string): string[] =>
+  [join(root, 'antigravity-acks', `${owner}.json`), join(`${messages}-acks`, `${owner}.json`)]
 const isAckClaim = (one: unknown): one is AckClaim =>
   typeof one === 'object' && one !== null && typeof (one as Json).id === 'string' && typeof (one as Json).nonce === 'string' && /^[0-9a-f]{6}$/.test((one as Json).nonce as string)
-const readAckClaims = (file: string, readLocal: (file: string) => string | null): AckClaim[] => {
+const readAckClaimsFile = (file: string, readLocal: (file: string) => string | null): AckClaim[] => {
   try {
     const saved = readLocal(file)
     const parsed = saved === null ? null : JSON.parse(saved) as { claims?: unknown }
     return Array.isArray(parsed?.claims) ? parsed.claims.filter(isAckClaim).map(({ id, nonce, matched, from }) => matched === true ? { id, nonce, matched }
       : Number.isSafeInteger(from) && (from as number) >= 0 ? { id, nonce, from } : { id, nonce }) : []
   } catch { return [] }
+}
+const readAckClaims = (files: string[], readLocal: (file: string) => string | null): AckClaim[] => {
+  const claims: AckClaim[] = []
+  for (const file of files) for (const claim of readAckClaimsFile(file, readLocal)) if (!claims.some(one => one.id === claim.id)) claims.push(claim)
+  return claims.slice(-ACK_CLAIMS_KEEP)
+}
+// True when the claims were saved (or, with none left, removed); false when neither folder took them.
+const saveAckClaims = (files: string[], claims: AckClaim[], atomic: TurnDelivery['atomic'], checkDeadline: () => void): boolean => {
+  if (claims.length === 0) {
+    for (const file of files) try { unlinkSync(file) } catch {}
+    return true
+  }
+  for (const file of files) {
+    try { atomic(file, `${JSON.stringify({ version: 1, claims })}\n`, checkDeadline, true) } catch { continue }
+    for (const other of files) if (other !== file) try { unlinkSync(other) } catch {}
+    return true
+  }
+  return false
 }
 
 // Only Codex's terminal has a live record of a queued message being taken
@@ -117,7 +140,8 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
   if (mode !== '--codex-report' && report !== undefined && hookDeadline - Date.now() >= 300) {
     let mailbox: ReturnType<typeof hookMailbox> | undefined
     let setupError: string | null = null
-    try { mailbox = hookMailbox(defaultMessagesDirectory(progress, home, process.env, process.platform), hookDeadline - Date.now()) } catch (error) {
+    const messages = defaultMessagesDirectory(progress, home, process.env, process.platform)
+    try { mailbox = hookMailbox(messages, hookDeadline - Date.now()) } catch (error) {
       setupError = error instanceof Error && error.message ? error.message : 'MAILBOX_FAILED'
     }
     if (isSessionEnd(agent, event)) {
@@ -125,17 +149,25 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
     } else if (agent === 'antigravity' && event === 'Stop') {
       // The turn is over: a reply whose first line is `ACK <code>` of a message handed over in it acknowledges that message.
       // The claim is spent here, matched or not; only an acknowledgement the board did not take is kept, as matched, for the next Stop.
-      const file = ackClaimsFile(root, hash(`${agent}:${session}`))
-      const claims = readAckClaims(file, readLocal)
+      // Each claim is read from its own hand-over, so one kept claim never moves another's reading window.
+      const files = ackClaimsFiles(root, messages, hash(`${agent}:${session}`))
+      const claims = readAckClaims(files, readLocal)
       if (claims.length > 0) {
-        const open = claims.filter(claim => claim.matched !== true)
-        const from = open.length > 0 && open.every(claim => claim.from !== undefined) ? Math.min(...open.map(claim => claim.from!)) : undefined
-        const lines = open.length > 0 ? antigravityReplyFirstLines(raw.transcriptPath, from) : []
+        const read = new Map<number | undefined, string[] | null>()
+        const repliesOf = (from: number | undefined): string[] | null => {
+          if (!read.has(from)) read.set(from, antigravityReplyFirstLines(raw.transcriptPath, from))
+          return read.get(from) ?? null
+        }
         const kept: typeof claims = []
-        let isAckFailed = false
+        let isAckFailed = false, isUnreadable = false
         for (const claim of claims) {
           if (claim.matched !== true) {
-            if (lines === null) { kept.push(claim); continue }
+            const lines = repliesOf(claim.from)
+            if (lines === null) {
+              isUnreadable = true
+              if (claim.from !== undefined) kept.push(claim)
+              continue
+            }
             if (!lines.some(line => line === `ACK ${claim.nonce}` || line.startsWith(`ACK ${claim.nonce} `))) continue
           }
           try {
@@ -143,13 +175,12 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
             await mailbox.ack(agent, session, claim.id, claim.nonce, `ACK ${claim.nonce}`, Date.now())
           } catch { kept.push({ id: claim.id, nonce: claim.nonce, matched: true }); isAckFailed = true }
         }
-        if (lines === null) process.stderr.write(`${s.localAgentMailboxFailed('TRANSCRIPT_UNREADABLE')}\n`)
+        if (isUnreadable) process.stderr.write(`${s.localAgentMailboxFailed('TRANSCRIPT_UNREADABLE')}\n`)
         if (isAckFailed) {
           if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
           else process.stderr.write(`${s.localAgentMailboxFailed(mailbox?.error ?? setupError ?? 'MAILBOX_FAILED')}\n`)
         }
-        if (kept.length > 0) try { atomic(file, `${JSON.stringify({ version: 1, claims: kept })}\n`, checkDeadline, true) } catch {}
-        else try { unlinkSync(file) } catch {}
+        if (!saveAckClaims(files, kept, atomic, checkDeadline)) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
       }
     } else if (isTurnStart(agent, event)) {
       let message = null
@@ -191,15 +222,16 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
         } catch {}
         if (hasWritten && message !== null && agent === 'antigravity' && /^[0-9a-f]{6}$/.test(message.nonce)) {
           // Written before the acceptance, so a hook stopped after the model saw the message still leaves its code for the Stop hook.
-          // The message is accepted even when this write fails (the model has it; handing it over again would send it twice),
-          // so the failure is reported: that message's ACK cannot be recorded.
+          // The message is accepted even when neither folder takes the claim (the model has it; handing it over again would send
+          // it twice), so that failure is reported: that message's ACK cannot be recorded.
+          let isSaved = false
           try {
-            const file = ackClaimsFile(root, owner)
+            const files = ackClaimsFiles(root, messages, owner)
             const size = antigravityTranscriptSize(raw.transcriptPath)
             const claim = size === null ? { id: message.id, nonce: message.nonce } : { id: message.id, nonce: message.nonce, from: size }
-            const claims = [...readAckClaims(file, readLocal).filter(one => one.id !== message.id), claim].slice(-ACK_CLAIMS_KEEP)
-            atomic(file, `${JSON.stringify({ version: 1, claims })}\n`, checkDeadline, true)
-          } catch { process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`) }
+            isSaved = saveAckClaims(files, [...readAckClaims(files, readLocal).filter(one => one.id !== message.id), claim].slice(-ACK_CLAIMS_KEEP), atomic, checkDeadline)
+          } catch {}
+          if (!isSaved) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
         }
         if (hasWritten && message !== null) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
         if (hasWritten && pushResult.keys.length > 0) {

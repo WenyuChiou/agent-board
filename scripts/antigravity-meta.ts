@@ -1,5 +1,6 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
 import { basename, isAbsolute, join, posix, resolve } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { clip } from '../hooks/mirror'
 import { cutLine, oneLine } from '../hooks/step-words'
 
@@ -321,39 +322,81 @@ export const antigravityTranscriptSize = (path: unknown): number | null => {
   }
 }
 
+const ACK_READ_CHUNK_BYTES = 256 * 1024
+type TranscriptEntry = { type?: unknown; source?: unknown; content?: unknown }
+const entryOf = (line: string): TranscriptEntry | null => {
+  if (line.trim() === '') return null
+  try {
+    const entry: unknown = JSON.parse(line)
+    return typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? entry as TranscriptEntry : null
+  } catch { return null }
+}
+const replyFirstLine = ({ type, source, content }: TranscriptEntry): string | null =>
+  source === 'MODEL' && type === 'PLANNER_RESPONSE' && typeof content === 'string' && content.trim() !== '' ? content.split(/\r?\n/)[0]!.trim() : null
+
 // The first line of each model reply, read from the conversation's own transcript, because the turn-end hook does not
-// carry the reply text (#1416). With `from` (the size at the hand-over, still within the file), every reply written after
-// that offset counts, read forward up to 8 MiB, so a long turn after the ACK line does not push it out of reach. Without it,
-// or when the file is now shorter, only the last turn's replies (after its last USER_INPUT) in the last 256 KiB count.
+// carry the reply text (#1416). With `from` (the size at the hand-over, still within the file), the replies of the turn
+// that hand-over started count, read forward from it up to 8 MiB, so a long turn after the ACK line does not push it out
+// of reach. That turn ends at the first USER_INPUT after one of its replies, or at the second USER_INPUT after `from`
+// (the turn's own input may be written after the hand-over), so a later turn citing the code never counts, even for a
+// claim a Stop could not read and kept. Without `from`, or when the file is now shorter, only the last turn's replies
+// (after its last USER_INPUT) in the last 256 KiB count.
 // Only the reply's own first line is returned (a blank first line stays blank, so an ACK on the line after it does not
 // count), and only for a regular file under one of the known transcript names; a line that is not JSON is skipped.
-// An unknown path reads as no reply; a known one that cannot be read returns null, so the caller can keep its claims.
+// A path that is missing, unknown or cannot be read returns null, so the caller can keep its claims.
 export const antigravityReplyFirstLines = (path: unknown, from?: number): string[] | null => {
-  if (!isKnownTranscript(path)) return []
+  if (!isKnownTranscript(path)) return null
   try {
     if (!lstatSync(path).isFile()) return null
     const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
     try {
       const stat = fstatSync(fd)
       if (!stat.isFile()) return null
-      const isForward = from !== undefined && from <= stat.size
-      const start = isForward ? from : Math.max(0, stat.size - MAX_TRANSCRIPT_HEAD_BYTES)
-      const size = Math.min(stat.size - start, isForward ? MAX_ACK_READ_BYTES : MAX_TRANSCRIPT_HEAD_BYTES)
+      if (from !== undefined && from <= stat.size) {
+        const replies: string[] = []
+        const decoder = new StringDecoder('utf8')
+        let position = from, carry = '', inputs = 0, isTurnEnded = false
+        const take = (line: string): void => {
+          const entry = entryOf(line)
+          if (entry === null) return
+          if (entry.type === 'USER_INPUT') {
+            inputs += 1
+            if (replies.length > 0 || inputs > 1) isTurnEnded = true
+            return
+          }
+          const first = replyFirstLine(entry)
+          if (first !== null) replies.push(first)
+        }
+        while (!isTurnEnded && position < stat.size && position - from < MAX_ACK_READ_BYTES) {
+          const size = Math.min(ACK_READ_CHUNK_BYTES, stat.size - position, from + MAX_ACK_READ_BYTES - position)
+          const bytes = Buffer.alloc(size)
+          if (readSync(fd, bytes, 0, size, position) !== size) return null
+          position += size
+          const lines = (carry + decoder.write(bytes)).split(/\r?\n/)
+          carry = lines.pop() ?? ''
+          for (const line of lines) { take(line); if (isTurnEnded) break }
+        }
+        // The file's last line may have no line break; a line cut at the 8 MiB limit is not read.
+        if (!isTurnEnded && position >= stat.size) take(carry + decoder.end())
+        return replies
+      }
+      const start = Math.max(0, stat.size - MAX_TRANSCRIPT_HEAD_BYTES)
+      const size = stat.size - start
       if (size <= 0) return []
       const bytes = Buffer.alloc(size)
       if (readSync(fd, bytes, 0, size, start) !== size) return null
       let text = bytes.toString('utf8')
-      // A read that starts inside the file starts mid-line in tail mode; forward from the hand-over it starts on a line.
-      if (start > 0 && !isForward) text = text.slice(text.indexOf('\n') + 1)
+      // A read that starts inside the file starts mid-line.
+      if (start > 0) text = text.slice(text.indexOf('\n') + 1)
       let replies: string[] = []
       for (const line of text.split(/\r?\n/)) {
-        if (line.trim() === '') continue
-        let entry: unknown
-        try { entry = JSON.parse(line) } catch { continue }
-        if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
-        const { type, source, content } = entry as Record<string, unknown>
-        if (type === 'USER_INPUT') { if (!isForward) replies = [] }
-        else if (source === 'MODEL' && type === 'PLANNER_RESPONSE' && typeof content === 'string' && content.trim() !== '') replies.push(content.split(/\r?\n/)[0]!.trim())
+        const entry = entryOf(line)
+        if (entry === null) continue
+        if (entry.type === 'USER_INPUT') replies = []
+        else {
+          const first = replyFirstLine(entry)
+          if (first !== null) replies.push(first)
+        }
       }
       return replies
     } finally { closeSync(fd) }
