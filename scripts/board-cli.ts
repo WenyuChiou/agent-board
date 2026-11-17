@@ -1166,7 +1166,7 @@ const dockLaunch = (programs: string[], target: string, done: (isOpen: boolean) 
     clearTimeout(timer)
     done(isOpen)
   }
-  // PowerShell's start, Add-Type's compile and the browser's grace: about 2 s on a slow machine.
+  // PowerShell's start, the screen probe and the browser's grace: about 2 s on a slow machine.
   const timer = setTimeout(() => { child.kill(); finish(false) }, 8000)
   child.once('error', () => finish(false))
   child.once('exit', code => finish(code === 0))

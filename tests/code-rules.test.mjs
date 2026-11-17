@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { checkAdded, loadConfig } from '../scripts/code-rules.mjs'
+import { checkAdded, codeLinesOf, headReader, loadConfig } from '../scripts/code-rules.mjs'
 
 const script = fileURLToPath(new URL('../scripts/code-rules.mjs', import.meta.url))
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -64,26 +64,158 @@ test('the command exits 1 on a hit and 0 on a clean diff, over base...head only'
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('every added line is read whole: the word in a comment or a string fails, and so does a call after a comment or template opened on a line above', () => {
-  const lines = [
-    'if (ok) setTimeout(go, 5) // later',
+test('comments, strings and regexes pass when they only name the word, while code in file context and template interpolations fails (#1561)', () => {
+  const safeFile = [
+    '// a setTimeout here',
     'const a = 1 // then setTimeout( later',
-    'const a = 1 /* setTimeout( */ + 2',
-    "const text = 'setTimeout('",
-    'const text = `setTimeout( is only words here`',
+    'const b = 1 /* setTimeout( */ + 2',
+    '/*',
+    ' * setTimeout(done, 1) on a doc comment line',
+    ' */',
+    "const c = 'setTimeout('",
+    'const d = `setTimeout( is only words here`',
+    'const e = `line one',
+    "  can't // setTimeout(done, 1) inside template text",
+    '`;',
+    "const f = 'continued string \\",
+    "  setTimeout(done, 1) still inside string';",
+    'const re = /setTimeout/',
+  ].join('\n')
+  const safeRows = safeFile.split('\n').map((text, i) => ({ path: 'hooks/new-thing.ts', line: i + 1, text }))
+  assert.deepEqual(checkAdded(safeRows, config, undefined, { files: { 'hooks/new-thing.ts': safeFile } }), [])
+
+  assert.deepEqual(check(added('tests/x.test.mjs', `// it${ONLY}('skipped')`)), [])
+  assert.deepEqual(check(added('tests/x.test.mjs', `'it${ONLY}("a title")', // in a string`)), [])
+  assert.deepEqual(check(added('tests/x.test.mjs', `const pat = /it\\${ONLY}/`)), [])
+
+  const singleLineFail = [
+    'if (ok) setTimeout(go, 5) // later',
     'log(`wait ${ok ? setTimeout(go, 1) : 0} then`)',
+    "const text = `${'}' + setTimeout(done, 10)}`",
     "const later = s.replace(/'/g, '') && setTimeout(done, 1)",
     'const wait = setTimeout',
-    // The template or the block comment was opened on a line above; the call after its end runs (codex_453).
-    '`; setTimeout(done, 1)',
-    '*/ setTimeout(done, 1)',
-    ' * setTimeout(done, 1) on a doc comment line',
   ]
-  for (const text of lines) assert.equal(check(added('hooks/new-thing.ts', text)).length, 1, text)
-  assert.equal(check(added('tests/x.test.mjs', `test('x', () => {}) // it${ONLY}( was here`)).length, 1)
-  assert.equal(check(added('tests/x.test.mjs', `'it${ONLY}("a title")', // in a string`)).length, 1)
-  const [failure] = check(added('hooks/new-thing.ts', '// a setTimeout here'))
-  assert.match(failure.message, /only text in a comment or a string, reword it or split it/)
+  for (const text of singleLineFail) assert.equal(check(added('hooks/new-thing.ts', text)).length, 1, text)
+
+  // Context-dependent added lines read from line 1 of the head file (#1561):
+  const contextCases = [
+    ['template close then call', 'const s = `open\n`; setTimeout(done, 1)\n', 2],
+    ['block comment close then call', '/* open\n*/ setTimeout(done, 1)\n', 2],
+    ['multi-line template text with quote and // before interpolation', "const s = `top\nit's // text ${setTimeout(done, 1)}\n`\n", 2],
+    ['backslash-continued string then close and call', "const s = 'hello \\\n'; setTimeout(done, 1)\n", 2],
+    ['backslash-continued CRLF string then close and call', "const s = 'hello \\\r\n'; setTimeout(done, 1)\r\n", 2],
+  ]
+  for (const [label, source, line] of contextCases) {
+    const text = source.split(/\r?\n/)[line - 1]
+    const hits = checkAdded([{ path: 'hooks/new-thing.ts', line, text }], config, undefined, { files: { 'hooks/new-thing.ts': source } })
+    assert.equal(hits.length, 1, label)
+    assert.equal(hits[0].rule, 'set-timeout-in-hooks', label)
+  }
+
+  // Condition regex (`if (...)` and `for await (...)`) still permits later code on following lines.
+  const condRegex = "if (enabled) /`/.test(text); setTimeout(done, 1)\n"
+  assert.equal(codeLinesOf(condRegex)[0].includes('setTimeout'), true)
+  const forAwaitSource = 'for await (const item of items) /`/.test(item)\nsetTimeout(done, 1)\n'
+  const forAwaitHits = checkAdded(
+    [{ path: 'hooks/new-thing.ts', line: 2, text: 'setTimeout(done, 1)' }],
+    config,
+    undefined,
+    { files: { 'hooks/new-thing.ts': forAwaitSource } },
+  )
+  assert.equal(forAwaitHits.length, 1)
+
+  // JSX text apostrophes inside .tsx and .jsx files do not hide executable `{...}` expressions (#1561 review).
+  const tsxHook = "const view = <Text>Don't {setTimeout(done, 1)}</Text>\n"
+  assert.equal(checkAdded([{ path: 'hooks/view.tsx', line: 1, text: tsxHook }], config, undefined, { files: { 'hooks/view.tsx': tsxHook } }).length, 1)
+  const jsxTest = `const view = <>Don't {test${ONLY}('a', () => {})}</>\n`
+  assert.equal(checkAdded([{ path: 'tests/view.test.jsx', line: 1, text: jsxTest }], config, undefined, { files: { 'tests/view.test.jsx': jsxTest } }).length, 1)
+  const tsxGeneric = 'const fn = <T extends Item>(x: T) => setTimeout(done, 1)\nconst view = <T>text</T>\n'
+  assert.equal(checkAdded([{ path: 'hooks/view.tsx', line: 1, text: 'const fn = <T extends Item>(x: T) => setTimeout(done, 1)' }], config, undefined, { files: { 'hooks/view.tsx': tsxGeneric } }).length, 1)
+  const tsxCommaGeneric = 'const fn = <T,>(x: T) => setTimeout(done, 1)\nconst view = <T>text</T>\n'
+  assert.equal(checkAdded([{ path: 'hooks/view.tsx', line: 1, text: 'const fn = <T,>(x: T) => setTimeout(done, 1)' }], config, undefined, { files: { 'hooks/view.tsx': tsxCommaGeneric } }).length, 1)
+
+  // A failed git show read for a changed file stops the CLI reader instead of silently falling back (#1561 review).
+  const badRead = headReader({
+    cwd: root,
+    head: 'HEAD',
+    requiredPaths: new Set(['hooks/new-thing.ts']),
+    run: () => ({ status: 128, stdout: '', stderr: 'fatal: read failure' }),
+  })
+  assert.throws(() => badRead('hooks/new-thing.ts'), /could not read hooks\/new-thing\.ts/)
+})
+
+test('test extensions (.js, .cjs, .jsx), aliases before .only, and hand-written board-script files fail (#1563)', () => {
+  for (const path of ['tests/example.test.js', 'tests/example.test.cjs', 'tests/example.test.jsx']) {
+    const [hit] = check(added(path, `test${ONLY}('one', () => {})`))
+    assert.equal(hit?.rule, 'only-in-tests', path)
+  }
+  const [aliasHit] = check(added('tests/example.test.mjs', `const mytest = test; mytest${ONLY}('one', () => {})`))
+  assert.equal(aliasHit?.rule, 'only-in-tests')
+  assert.deepEqual(check(added('tests/example.test.mjs', "const item = { name: 'only' }")), [])
+
+  // Hand-written file named like a bundle fails even with a synthetic part header if board-script.ts does not import it.
+  const fakePart = '// Generated by scripts/build-board.ts: part 987 of the board bundle; do not edit by hand.\nexport const LINES = [\nsetTimeout(stop, 10)\n]\n'
+  const [bundleHit] = checkAdded(
+    [{ path: 'hooks/board-script-987.ts', line: 3, text: 'setTimeout(stop, 10)' }],
+    config,
+    undefined,
+    { files: { 'hooks/board-script.ts': readFileSync(join(root, 'hooks/board-script.ts'), 'utf8'), 'hooks/board-script-987.ts': fakePart } },
+  )
+  assert.equal(bundleHit?.rule, 'set-timeout-in-hooks')
+  assert.equal(check(added('hooks/board-script-987.ts', 'setTimeout(stop, 10)')).length, 1)
+})
+
+test('CLI execution reads full files from --head even when another branch is checked out (#1561, #1563)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'code-rules-context-'))
+  try {
+    const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd: dir, encoding: 'utf8' })
+    const run = head => spawnSync(process.execPath, [script, '--repo-dir', dir, '--base', 'main', '--head', head], { encoding: 'utf8' })
+    git('init', '-q', '-b', 'main')
+    mkdirSync(join(dir, 'hooks')); mkdirSync(join(dir, 'scripts')); mkdirSync(join(dir, 'tests'))
+    writeFileSync(join(dir, 'scripts', 'code-rules.json'), JSON.stringify({ setTimeoutFiles: [] }))
+    writeFileSync(join(dir, 'hooks', 'ctx.ts'), 'const s = `open\n`\n/* block\n*/\nconst q = "a \\\n"\n')
+    git('add', '.'); git('commit', '-q', '-m', 'base')
+
+    // Branch that safely adds comment/string/template mentions passes.
+    git('checkout', '-q', '-b', 'safe', 'main')
+    writeFileSync(join(dir, 'hooks', 'ctx.ts'), 'const s = `open\n  // setTimeout(done, 1)\n`\n/* block\n * setTimeout(done, 1)\n*/\nconst q = "a \\\n  setTimeout(done, 1)"\n')
+    writeFileSync(join(dir, 'tests', 'example.test.js'), `// it${ONLY}("note")\n`)
+    git('add', '.'); git('commit', '-q', '-m', 'safe')
+
+    // Another branch checked out at HEAD while we still test `safe`, plus a failing branch `unsafe`.
+    git('checkout', '-q', '-b', 'unsafe', 'main')
+    mkdirSync(join(dir, 'tests'), { recursive: true })
+    writeFileSync(join(dir, 'hooks', 'ctx.ts'), 'const s = `open\n`; setTimeout(done, 1)\n/* block\n*/ setTimeout(done, 1)\nconst q = "a \\\n"; setTimeout(done, 1)\n')
+    writeFileSync(join(dir, 'hooks', 'board-script-987.ts'), 'setTimeout(done, 1)\n')
+    writeFileSync(join(dir, 'tests', 'example.test.jsx'), `const mytest = test; mytest${ONLY}("x", () => {})\n`)
+    git('add', '.'); git('commit', '-q', '-m', 'unsafe')
+
+    // An authentic generated entry + part passes even when checked via CLI.
+    git('checkout', '-q', '-b', 'bundle', 'main')
+    writeFileSync(join(dir, 'hooks', 'board-script.ts'), [
+      '// Generated by scripts/build-board.ts from scripts/board-cli.ts; do not edit by hand.',
+      "import { LINES as PART_1 } from './board-script-1.ts'",
+      "export const BOARD_SCRIPT = [...PART_1].join('\\n')",
+    ].join('\n') + '\n')
+    writeFileSync(join(dir, 'hooks', 'board-script-1.ts'), [
+      '// Generated by scripts/build-board.ts: part 1 of the board bundle; do not edit by hand.',
+      'export const LINES = [',
+      '"setTimeout(done, 1)"',
+      ']',
+    ].join('\n') + '\n')
+    git('add', '.'); git('commit', '-q', '-m', 'bundle')
+
+    assert.equal(run('safe').status, 0, run('safe').stderr)
+    assert.equal(run('bundle').status, 0, run('bundle').stderr)
+    const bad = run('unsafe')
+    assert.equal(bad.status, 1)
+    assert.match(bad.stderr, /hooks\/ctx\.ts:2: \[set-timeout-in-hooks\]/)
+    assert.match(bad.stderr, /hooks\/ctx\.ts:4: \[set-timeout-in-hooks\]/)
+    assert.match(bad.stderr, /hooks\/ctx\.ts:6: \[set-timeout-in-hooks\]/)
+    assert.match(bad.stderr, /hooks\/board-script-987\.ts:1: \[set-timeout-in-hooks\]/)
+    assert.match(bad.stderr, /tests\/example\.test\.jsx:1: \[only-in-tests\]/)
+    assert.match(bad.stderr, /code-rules: 5 FAIL/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('a .only after a statement prefix fails, and this test file, which builds the word from parts, passes', () => {

@@ -685,6 +685,59 @@ test('approval gate: a ready pull request requires a qualifying review approval 
     ],
   })
   assert.equal(humanApprovedAfterBot.problems.filter(p => p.check === 'review').length, 0)
+  assert.equal(humanApprovedAfterBot.info.filter(line => line.startsWith('review: ignored approval')).length, 1)
+})
+
+test('pr-check ignores approvals from outside associations with a note while keeping team approvals and outside change requests (#1535)', () => {
+  const head = syntheticPr().head
+  const basePr = { ...syntheticPr(), prComments: [] }
+
+  for (const association of ['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'MANNEQUIN']) {
+    for (const outsider of [
+      { body: `Review: APPROVE ${head} by visitor`, user: { login: 'visitor', type: 'User' }, author_association: association },
+      { state: 'APPROVED', commit_id: head, body: '', user: { login: 'visitor', type: 'User' }, author_association: association },
+    ]) {
+      assert.equal(reviewOf(outsider), null, association)
+      const checked = checkPr({ ...basePr, prComments: [outsider] })
+      assert.ok(checked.problems.some(p => p.check === 'review' && p.message.includes('needs a qualifying review approval')), association)
+      const ignoredNotes = checked.info.filter(line => line.startsWith('review: ignored approval'))
+      assert.equal(ignoredNotes.length, 1, association)
+      assert.match(ignoredNotes[0], /visitor/, association)
+      assert.match(ignoredNotes[0], new RegExp(`outside association \\(${association}\\)`), association)
+    }
+  }
+
+  for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR', 'member']) {
+    const teamApproval = { body: `Review: APPROVE ${head} by team reviewer`, user: { login: 'teammate', type: 'User' }, author_association: association }
+    assert.deepEqual(reviewOf(teamApproval), { kind: 'APPROVE', sha: head.toLowerCase(), reviewer: 'team reviewer' }, association)
+    const checked = checkPr({ ...basePr, prComments: [teamApproval] })
+    assert.equal(checked.problems.filter(p => p.check === 'review').length, 0, association)
+    assert.equal(checked.info.filter(line => line.startsWith('review: ignored approval')).length, 0, association)
+  }
+
+  const teamPlusOutsideApproval = checkPr({
+    ...basePr,
+    prComments: [
+      { body: `Review: APPROVE ${head} by team reviewer`, user: { login: 'teammate', type: 'User' }, author_association: 'COLLABORATOR' },
+      { body: `Review: APPROVE ${head} by visitor`, user: { login: 'visitor', type: 'User' }, author_association: 'NONE' },
+    ],
+  })
+  assert.equal(teamPlusOutsideApproval.problems.filter(p => p.check === 'review').length, 0)
+  assert.equal(teamPlusOutsideApproval.info.filter(line => line.startsWith('review: ignored approval')).length, 1)
+
+  for (const outsideHold of [
+    { body: `Review: REQUEST CHANGES ${head} by visitor`, user: { login: 'visitor', type: 'User' }, author_association: 'NONE' },
+    { state: 'CHANGES_REQUESTED', commit_id: head, body: '', user: { login: 'contributor', type: 'User' }, author_association: 'CONTRIBUTOR' },
+  ]) {
+    const held = checkPr({
+      ...basePr,
+      prComments: [
+        { body: `Review: APPROVE ${head} by team reviewer`, user: { login: 'teammate', type: 'User' }, author_association: 'MEMBER' },
+        outsideHold,
+      ],
+    })
+    assert.ok(held.problems.some(p => p.check === 'review' && p.message.includes('latest review requested changes')))
+  }
 })
 
 test('pr-check combines issue state and draft information without mutating inputs', () => {
@@ -814,7 +867,8 @@ test('pr-check still rejects closed or missing issues unless the event is both c
       globalThis.fetch = async url => {
         calls.push(url.pathname)
         const isIssue = url.pathname.endsWith('/issues/42')
-        return { ok: !(isIssue && isMissing), status: isIssue && isMissing ? 404 : 200, json: async () => isIssue ? { state: 'closed' } : [], headers: new Headers() }
+        const payload = isIssue ? { state: 'closed' } : url.pathname.endsWith('/pulls/17') ? { head: { sha: '0'.repeat(40) } } : []
+        return { ok: !(isIssue && isMissing), status: isIssue && isMissing ? 404 : 200, json: async () => payload, headers: new Headers() }
       }
       const checked = await runMain(args, apiEnv)
       assert.equal(checked.status, 1, JSON.stringify(lifecycle) + checked.stdout + checked.stderr)
@@ -920,7 +974,7 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
     assert.equal(url.searchParams.get('per_page'), '100')
     const isClaim = url.pathname.endsWith('/issues/42/comments')
     const isSecond = url.searchParams.has('page')
-    const payload = url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${setup.head} by independent reviewer` }] : isClaim ? (isSecond ? [{ body: `Claim: codex, ${branch}` }] : []) : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
+    const payload = url.pathname.endsWith('/pulls/17') ? { number: 17, title: 'fix: synthetic check', body, draft: false, labels: [], head: { ref: branch, sha: setup.head } } : url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${setup.head} by independent reviewer` }] : isClaim ? (isSecond ? [{ body: `Claim: codex, ${branch}` }] : []) : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
     return { ok: true, status: 200, json: async () => payload, headers: new Headers(isClaim && !isSecond ? { link: '<https://api.example.invalid/repos/synthetic/example/issues/42/comments?per_page=100&page=2>; rel="next"' } : {}) }
   }
   const args = ['--event', event, '--repo-dir', setup.directory]
@@ -930,7 +984,7 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   // as it is now (#1258).
   assert.equal(calls.length, 7)
   assert.ok(calls.every(call => call.host === 'api.example.invalid' && call.authorization === 'Bearer synthetic-token-value'))
-  globalThis.fetch = async url => (url.pathname.endsWith('/issues/42') ? { ok: false, status: 404, headers: new Headers() } : { ok: true, status: 200, json: async () => [], headers: new Headers() })
+  globalThis.fetch = async url => (url.pathname.endsWith('/issues/42') ? { ok: false, status: 404, headers: new Headers() } : { ok: true, status: 200, json: async () => (url.pathname.endsWith('/pulls/17') ? { head: { sha: '0'.repeat(40) } } : []), headers: new Headers() })
   const missing = await runMain(args, env)
   assert.equal(missing.status, 1)
   assert.match(missing.stdout, /issue #42 does not exist/)
@@ -944,7 +998,7 @@ test('pr-check paginates CI API data and fails closed on network errors', async 
   calls.length = 0
   globalThis.fetch = async (url, options) => {
     calls.push({ host: url.host, authorization: options.headers.Authorization })
-    return { ok: true, status: 200, json: async () => (url.pathname.endsWith('/issues/42') ? { state: 'open' } : []), headers: new Headers({ link: '<https://untrusted.invalid/?token=synthetic01234567890123456789>; rel="next"' }) }
+    return { ok: true, status: 200, json: async () => (url.pathname.endsWith('/pulls/17') ? { head: { sha: '0'.repeat(40) } } : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []), headers: new Headers({ link: '<https://untrusted.invalid/?token=synthetic01234567890123456789>; rel="next"' }) }
   }
   assert.equal((await runMain(args, env)).status, 2)
   assert.equal(calls.some(call => call.host === 'untrusted.invalid'), false)
@@ -974,6 +1028,11 @@ test('pr-check reads the pull request as it is now, so a re-run of a draft event
   globalThis.fetch = answer('f'.repeat(40))
   const older = await runMain(args, env)
   assert.equal(older.status, 0, older.stdout + older.stderr)
+  // An API answer to pulls/17 without a valid head fails closed rather than keeping the draft event (#1538).
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => [], headers: new Headers() })
+  const malformed = await runMain(args, env)
+  assert.equal(malformed.status, 2)
+  assert.match(malformed.stderr, /pull request metadata is incomplete or invalid/)
 })
 
 test('pr-check reads the release numbers after reading the pull request as it is now, so an event from before a rename to a release still checks its changelog (#1258)', async t => {
@@ -1016,7 +1075,7 @@ test('pr-check looks up each further issue with the token and reads a repeated i
   const answer = async (url, options) => {
     calls.push({ path: url.pathname, authorization: options.headers.Authorization })
     const issue = url.pathname.match(/\/issues\/(\d+)(\/comments)?$/)
-    const payload = url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${head} by independent reviewer` }] : !issue ? [] : !issue[2] ? { state: 'open' } : []
+    const payload = url.pathname.endsWith('/pulls/17') ? { head: { sha: '0'.repeat(40) } } : url.pathname.endsWith('/issues/17/comments') ? [{ body: `Review: APPROVE ${head} by independent reviewer` }] : !issue ? [] : !issue[2] ? { state: 'open' } : []
     return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
   }
   const listed = body.replace('Fixes #42', 'Fixes #42\nFixes #43')
@@ -1060,7 +1119,8 @@ const githubAnswers = (calls, { labels = [], comments = [], pulls = [], reviews 
   calls.push(url.pathname)
   const isPrComments = url.pathname.endsWith('/issues/17/comments')
   const defaultReview = currentFixtureHead ? [{ body: `Review: APPROVE ${currentFixtureHead} by independent reviewer` }] : []
-  const payload = isPrComments ? (reviews.length ? reviews : defaultReview) :
+  const payload = url.pathname.endsWith('/pulls/17') ? { head: { sha: '0'.repeat(40) } } :
+    isPrComments ? (reviews.length ? reviews : defaultReview) :
     url.pathname.endsWith('/issues/42') ? { state: 'open', labels } :
     url.pathname.endsWith('/issues/42/comments') ? comments :
     url.pathname.endsWith('/pulls') ? pulls : []
@@ -1863,19 +1923,44 @@ test('pr-check limits the changed lines of a pull request by its tier, unless th
   assert.equal(run(`${risk}\nSurface: delivery, cannot split: \`<reason>\``, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: **<reason>**`, lines(SIZE_RISK + 1)).problems.length, 1)
   assert.equal(run(`${risk}\nSize: cannot split: 同一個遷移`, lines(SIZE_RISK + 1)).problems.length, 0)
-  // A reason with an HTML entity or a tag in it is no reason, since Markdown can hide what it holds, and neither is an
-  // invisible character (a zero-width space, the Hangul filler); a reason starting with an unclosed `<` still counts.
-  assert.equal(run(`${risk}\nSurface: delivery + data, cannot split: &#8203;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: &lt;reason&gt;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: &amp;lt;reason&amp;gt;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: &#60;reason&#x3E;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: &ZeroWidthSpace;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: \u3164`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: <placeholder<reason>>`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: one migration &amp; its reader`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: &constructor;`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSurface: delivery + data, cannot split: <span title="&gt;hidden"></span>`, lines(SIZE_RISK + 1)).problems.length, 1)
-  assert.equal(run(`${risk}\nSize: cannot split: <span title=">hidden"></span>`, lines(SIZE_RISK + 1)).problems.length, 1)
+  // Real entities in visible prose count, while entity-encoded placeholders, unknown/invisible entities, HTML tags and
+  // empty Markdown links/images remain hidden/empty in both size and surface; a leading unclosed `<` still counts (#1556).
+  assert.equal(run(`${risk}\nSize: cannot split: one migration &amp; its reader`, lines(SIZE_RISK + 1)).problems.length, 0)
+  let nestedPlaceholder = '<reason>'
+  for (let i = 0; i < 8; i++) nestedPlaceholder = nestedPlaceholder.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const hiddenSplitTexts = [
+    '&#8203;',
+    '&lt;reason&gt;',
+    '&amp;lt;reason&amp;gt;',
+    '&#60;reason&#x3E;',
+    '&ZeroWidthSpace;',
+    '&constructor;',
+    '\u3164',
+    '<placeholder<reason>>',
+    '<span title="&gt;hidden"></span>',
+    '<span title=">hidden"></span>',
+    '<span title=a"b></span>',
+    '<span title=a\'b></span>',
+    '<span title="a"b"></span>',
+    '[](<3>)',
+    '![](<3>)',
+    '[](<&#51;(((x)))>)',
+    '[](<a)b>)',
+    '[](https://example.com "a)b")',
+    "[](https://example.com 'a)b')",
+    '[](https://example.com/a\\)b)',
+    "[](https://example.com/a'b(c'd)e)",
+    '[]( "hidden words")',
+    '[]( (foo)bar)',
+    '[]( (hidden words))',
+    '[][ref]',
+    '![][ref]',
+    nestedPlaceholder,
+  ]
+  for (const hidden of hiddenSplitTexts) {
+    assert.equal(run(`${risk}\nSize: cannot split: ${hidden}`, lines(SIZE_RISK + 1)).problems.length, 1, hidden)
+    assert.equal(run(`Tier: risk\nSurface: delivery + data, cannot split: ${hidden}`, lines(SIZE_RISK + 1)).problems.length, 1, hidden)
+  }
   assert.equal(run(`${risk}\nSize: cannot split: <- the schema and its reader change together`, lines(SIZE_RISK + 1)).problems.length, 0)
   // The template's own lines are not a reason, and neither is one inside a code fence or an HTML comment.
   const template = readFileSync(new URL('../.github/pull_request_template.md', import.meta.url), 'utf8')
@@ -1942,9 +2027,42 @@ test('pr-check accepts two surfaces with cannot split and says it waits for an a
   const checked = surfaceRun('Surface: delivery + setup-writes, cannot split: main breaks between steps', { paths: ['hooks/connect.ts', 'hooks/messaging.ts'] })
   assert.deepEqual(checked.problems, [])
   assert.match(checked.info.join('\n'), /cannot split: main breaks between steps" waits for the maintainer's or the owner's answer before the first review/)
-  for (const empty of ['Surface: delivery + data, cannot split:', 'Surface: delivery + data, cannot split:   ', 'Surface: delivery + data, cannot split: <reason>', 'Surface: delivery + data, cannot split: <reason>, cannot split: <reason>', 'Surface: delivery + data, cannot split: \`<reason>\`', 'Surface: delivery + data, cannot split: &lt;reason&gt;', 'Surface: delivery + data, cannot split: \u3164']) {
+  for (const empty of [
+    'Surface: delivery + data, cannot split:',
+    'Surface: delivery + data, cannot split:   ',
+    'Surface: delivery + data, cannot split: <reason>',
+    'Surface: delivery + data, cannot split: <reason>, cannot split: <reason>',
+    'Surface: delivery + data, cannot split: `<reason>`',
+    'Surface: delivery + data, cannot split: &#8203;',
+    'Surface: delivery + data, cannot split: &lt;reason&gt;',
+    'Surface: delivery + data, cannot split: &amp;lt;reason&amp;gt;',
+    'Surface: delivery + data, cannot split: &#60;reason&#x3E;',
+    'Surface: delivery + data, cannot split: &ZeroWidthSpace;',
+    'Surface: delivery + data, cannot split: &constructor;',
+    'Surface: delivery + data, cannot split: \u3164',
+    'Surface: delivery + data, cannot split: <placeholder<reason>>',
+    'Surface: delivery + data, cannot split: <span title="&gt;hidden"></span>',
+    'Surface: delivery + data, cannot split: <span title=">hidden"></span>',
+    'Surface: delivery + data, cannot split: <span title=a"b></span>',
+    "Surface: delivery + data, cannot split: <span title=a'b></span>",
+    'Surface: delivery + data, cannot split: <span title="a"b"></span>',
+    'Surface: delivery + data, cannot split: [](<3>)',
+    'Surface: delivery + data, cannot split: ![](<3>)',
+    'Surface: delivery + data, cannot split: [](<&#51;(((x)))>)',
+    'Surface: delivery + data, cannot split: [](<a)b>)',
+    'Surface: delivery + data, cannot split: [](https://example.com "a)b")',
+    "Surface: delivery + data, cannot split: [](https://example.com 'a)b')",
+    'Surface: delivery + data, cannot split: [](https://example.com/a\\)b)',
+    "Surface: delivery + data, cannot split: [](https://example.com/a'b(c'd)e)",
+    'Surface: delivery + data, cannot split: []( "hidden words")',
+    'Surface: delivery + data, cannot split: []( (foo)bar)',
+    'Surface: delivery + data, cannot split: []( (hidden words))',
+    'Surface: delivery + data, cannot split: [][ref]',
+    'Surface: delivery + data, cannot split: ![][ref]',
+  ]) {
     assert.match(surfaceRun(empty).problems[0]?.message ?? '', /`cannot split:` with no reason/, empty)
   }
+  assert.deepEqual(surfaceRun('Surface: delivery + data, cannot split: one migration &amp; its reader').problems, [])
   // A filled reason may start with `<`; only the template's own `<reason>` is a placeholder.
   assert.deepEqual(surfaceRun('Surface: delivery + data, cannot split: <30 seconds of a broken main still blocks a release').problems, [])
   // The exception covers two surfaces, not three.
@@ -2266,7 +2384,7 @@ test('pr-check fails the round count of a risk-tier pull request whose reviews c
   const args = ['--event', event, '--repo-dir', setup.directory]
   const answers = isReviewsDown => async url => {
     if (isReviewsDown && url.pathname.endsWith('/reviews')) return { ok: false, status: 502, headers: new Headers() }
-    const payload = /\/issues\/\d+\/comments$/.test(url.pathname) && !url.pathname.endsWith('/issues/42/comments') ? [{ body: `Review: APPROVE ${setup.head} by independent reviewer` }] : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
+    const payload = /\/pulls\/\d+$/.test(url.pathname) ? { head: { sha: '0'.repeat(40) } } : /\/issues\/\d+\/comments$/.test(url.pathname) && !url.pathname.endsWith('/issues/42/comments') ? [{ body: `Review: APPROVE ${setup.head} by independent reviewer` }] : url.pathname.endsWith('/issues/42') ? { state: 'open' } : []
     return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
   }
   const risk = `${body}Tier: risk\nSurface: none\n`

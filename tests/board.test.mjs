@@ -5981,12 +5981,17 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
   for (const pipe of closed) pipe.catch(() => {})
   let timer
   let abort
+  let aborted = false
   const stopped = new Promise((_, fail) => {
     abort = () => {
-      if (child.exitCode !== null || child.signalCode !== null) return
-      mark('test abort: ending the command')
-      if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
-      else child.kill('SIGKILL')
+      if (aborted) return
+      aborted = true
+      const stillRunning = child.exitCode === null && child.signalCode === null
+      mark(stillRunning ? 'test abort: ending the command' : 'test abort: stopping pipe wait after bash exit')
+      if (stillRunning) {
+        if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+        else child.kill('SIGKILL')
+      }
       fail(new Error("the Cursor shell command was stopped by the test's abort"))
     }
     if (signal?.aborted) abort()
@@ -6000,14 +6005,21 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
     const result = await Promise.race([exited, stopped])
     await Promise.race([
       Promise.all(closed),
+      stopped,
       new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds after bash exit; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
     ])
     assert.equal(result.code, 0, stderr)
     return { stdout, stderr }
   } catch (error) {
     mark(`cursor shell failed: ${error.message.split('\n')[0]}`)
-    await stop()
-    mark('stop done')
+    try {
+      await stop()
+      mark('stop done')
+    } catch (cleanupError) {
+      mark(`stop failed: ${cleanupError.message.split('\n')[0]}`)
+      error.message = `${error.message}; page cleanup failed: ${cleanupError.message}`
+      error.cause ??= cleanupError
+    }
     throw error
   } finally {
     clearTimeout(timer)
@@ -6266,6 +6278,57 @@ test('the Cursor shell helper still fails, naming the pipe, when a command retur
     )
     assert.ok(marks.some(line => line.includes('bash exit code=0')), `bash had already exited: ${marks.join('\n')}`)
   } finally { await board.end([]) }
+})
+
+const withFd3Holder = async (board, name, run) => {
+  const holderPidFile = join(board.dir, `${name}.pid`)
+  const holder = `import { writeFileSync } from 'node:fs'\nimport { spawn } from 'node:child_process'\nconst c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })\nwriteFileSync(${JSON.stringify(holderPidFile)}, String(c.pid))\nc.unref()`
+  try {
+    return await run(fakeBoard(board, holder))
+  } finally {
+    if (existsSync(holderPidFile)) {
+      const pid = Number(readFileSync(holderPidFile, 'utf8'))
+      if (pid && processAlive(pid)) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true })
+    }
+    rmSync(board.served, { recursive: true, force: true })
+    await board.end([])
+  }
+}
+
+test('the Cursor shell helper keeps the open-pipe error naming fd3 when page cleanup also fails (#1451)', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
+  const board = serveIn()
+  writeFileSync(board.served, '{bad json')
+  await withFd3Holder(board, 'holder-1451-cleanup', async target => {
+    await assert.rejects(
+      () => cursorShell(target, [], {}, () => closeFixturePage(board), () => {}, t.signal),
+      error => /did not all reach EOF in 5 seconds after bash exit; still open: [^;]*fd3/.test(error.message) && error.message.includes('page cleanup failed:'),
+    )
+  })
+})
+
+test('the Cursor shell helper stops at once on test abort when bash exited with fd3 still open instead of waiting 5 seconds (#1451)', { skip: process.platform !== 'win32', timeout: 15_000 }, async () => {
+  const board = serveIn()
+  const controller = new AbortController()
+  let abortTimer
+  await withFd3Holder(board, 'holder-1451-abort', async target => {
+    try {
+      const began = performance.now()
+      const marks = []
+      await assert.rejects(
+        () => cursorShell(target, [], {}, async () => {}, line => {
+          marks.push(line)
+          // Fire asynchronously after `exited` resolves so cursorShell is in the 5 s pipe-wait Promise.race.
+          if (line.startsWith('bash exit code=0')) abortTimer = setTimeout(() => controller.abort(), 50)
+        }, controller.signal),
+        /stopped by the test's abort/,
+      )
+      assert.ok(marks.some(line => line.includes('stopping pipe wait after bash exit')), marks.join('\n'))
+      assert.ok(performance.now() - began < 3_500, 'test abort after bash exit must not wait out the 5 s pipe deadline')
+    } finally {
+      clearTimeout(abortTimer)
+      controller.abort()
+    }
+  })
 })
 
 test('a browser startup failure keeps the launcher lines the launcher log held before the cleanup removed it', async () => {

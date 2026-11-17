@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -148,6 +148,25 @@ const readBytes = (file: string): Buffer | null => {
   }
 }
 const readLocal = (file: string): string | null => readBytes(file)?.toString('utf8') ?? null
+// What setup saw at a path when it planned (#1488): the kind of the path itself (lstat follows no link), a link's
+// target, and the bytes read through it. Decoded text is not enough to compare later: bytes that decode alike
+// (EF BF BD and FF) would pass, and a dangling link would read as a missing file. lstat sees the last part of the
+// path only: a folder above it swapped for a link is not caught.
+type Snap = { kind: 'none' | 'file' | 'link' | 'other'; link: string | null; bytes: Buffer | null }
+const NO_PATH: Snap = { kind: 'none', link: null, bytes: null }
+const take = (file: string): Snap => {
+  let kind: Snap['kind']
+  try {
+    const stat = lstatSync(file)
+    kind = stat.isSymbolicLink() ? 'link' : stat.isFile() ? 'file' : 'other'
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') return NO_PATH
+    throw error
+  }
+  return { kind, link: kind === 'link' ? readlinkSync(file) : null, bytes: readBytes(file) }
+}
+const sameBytes = (a: Buffer | null, b: Buffer | null): boolean => a === null || b === null ? a === b : a.equals(b)
+const same = (a: Snap, b: Snap): boolean => a.kind === b.kind && a.link === b.link && sameBytes(a.bytes, b.bytes)
 
 // The repository name in a remote's address: `demo` from `https://host/x/demo.git` or `git@host:x/demo.git`.
 // `origin` when there is one, else the first remote; only that section's own `url` counts.
@@ -477,11 +496,44 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const home = resolve(flag('--home') ?? homedir())
   const root = resolve(flag('--data-dir') ?? baked?.codexRoot ?? join(home, '.agent-board'))
-  const before = new Map<string, string | null>()
+  const before = new Map<string, Snap>()
   const initial = (file: string): string | null => {
-    if (!before.has(file)) before.set(file, readLocal(file))
-    return before.get(file)!
+    if (!before.has(file)) before.set(file, take(file))
+    return before.get(file)!.bytes?.toString('utf8') ?? null
   }
+  // The batch check and the re-read just before each write compare a path with what setup saw there (#1488), in both
+  // writers. Before a write the path must be as planned, or already hold exactly the new bytes as the same kind of
+  // path, or as a new regular file where there was none: one file reached by a second name earlier in this batch (a
+  // skills folder linked to the shared one, or another letter case on Windows), so writing the same bytes over it loses
+  // nothing. A second name may also find a regular file where it planned a file link, when this batch's own write
+  // replaced that link (a skills folder linked to the shared one whose SKILL.md is a file link): only when the path's
+  // real path is one this batch wrote and it holds exactly the new bytes (Greptile on #1594). Anything else stops the
+  // batch, a link or other bytes put where the file was included. After a write the rename target must be a regular
+  // file holding exactly the bytes. A plain rename cannot close the instant between the last re-read and the write.
+  // Removals are as on main: the main writer unlinks with no re-read, and the sidecar-only writer compares the text
+  // just before and checks after that the path reads as gone. Not covered here, and left as on main: a re-read before a
+  // removal in the main writer, a file another program removes just before setup's unlink (#1611), and a remove through
+  // a skills folder linked to the shared one whose SKILL.md is a file link (#1610).
+  const isHolding = (now: Snap, text: string): boolean => sameBytes(now.bytes, Buffer.from(text, 'utf8'))
+  const ours = new Set<string>()
+  const realOf = (file: string): string | null => { try { return realpathSync.native(file) } catch { return null } }
+  const isOurs = (file: string, now: Snap, next: string): boolean => now.kind === 'file' && isHolding(now, next) && ours.has(realOf(file) ?? '')
+  const unchanged = (file: string, next: string): void => {
+    const was = before.get(file) ?? NO_PATH, now = take(file)
+    const isSecondName = isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' || isOurs(file, now, next))
+    if (!same(was, now) && !isSecondName) throw new Error('INSTALL_CHANGED')
+  }
+  const written = (file: string, text: string): void => {
+    const now = take(file)
+    if (now.kind !== 'file' || !isHolding(now, text)) throw new Error('INSTALL_CHANGED')
+  }
+  const put = (file: string, text: string, target = file): void => {
+    atomic(target, text, () => unchanged(file, text))
+    written(target, text)
+    const real = realOf(target)
+    if (real !== null) ours.add(real)
+  }
+  const isAsPlanned = (file: string): boolean => same(take(file), before.get(file) ?? NO_PATH)
   const jsonInitial = (file: string): Json => {
     try {
       const record = object(JSON.parse(initial(file) ?? '{}'))
@@ -688,15 +740,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     if (args.includes('--apply') && !sidecarConflicts.length) {
       withInstallLock(home, () => {
-        for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
-        // Each file is read again just before its change and checked after it, so an edit made while setup runs
-        // is never overwritten or removed, and a change that did not land is not reported as applied.
+        for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED')
+        // Each file is read again just before its change and checked after it, so an edit made before that last re-read
+        // is never overwritten or removed, and a change that did not land is not reported as applied. A write goes
+        // through put; a removal compares the decoded text and checks that the path reads as gone after, as on main.
         for (const change of sidecarChanges) {
-          const unchanged = (): void => { if (readLocal(change.file) !== before.get(change.file)) throw new Error('INSTALL_CHANGED') }
-          const text = change.action === 'remove' ? null : change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!
-          if (text === null) { unchanged(); unlinkSync(change.file) }
-          else atomic(change.file, text, unchanged)
-          if (readLocal(change.file) !== text) throw new Error('INSTALL_CHANGED')
+          if (change.action !== 'remove') put(change.file, change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!)
+          else {
+            if (readLocal(change.file) !== initial(change.file)) throw new Error('INSTALL_CHANGED')
+            unlinkSync(change.file)
+            if (readLocal(change.file) !== null) throw new Error('INSTALL_CHANGED')
+          }
         }
       })
       if (isRemoving) try { rmdirSync(sidecarDirectory) } catch {}
@@ -1548,7 +1602,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     else if (remove && isReadable && isEmptyCreatedConfig) changes.push({ file: nativeConfig, action: 'remove' })
     else if (agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig)) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
   }
-  if (!remove && readLocal(progress) === null) { before.set(progress, null); changes.push({ file: progress, action: 'create' }) }
+  if (!remove && readLocal(progress) === null) { before.set(progress, NO_PATH); changes.push({ file: progress, action: 'create' }) }
   const createdDirs = new Set(Array.isArray(loaded.createdDirs) ? loaded.createdDirs.filter((value): value is string => typeof value === 'string') : [])
   const folderKey = (folder: string): string => process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)
   const isBelow = (folder: string, parent: string): boolean => folderKey(folder).startsWith(`${folderKey(parent)}${process.platform === 'win32' ? '\\' : '/'}`)
@@ -1628,7 +1682,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const isApplied = args.includes('--apply')
     if (isApplied && missing.length) {
       withInstallLock(home, () => {
-        if (readLocal(allowlistFile) !== initial(allowlistFile)) throw new Error('INSTALL_CHANGED')
+        if (!isAsPlanned(allowlistFile)) throw new Error('INSTALL_CHANGED')
         const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
         atomic(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
       })
@@ -1697,10 +1751,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     throw new Error('INSTALL_CONFLICT')
   }
   withInstallLock(home, () => {
-    // Compare the bytes used to build the plan, not a fresh snapshot taken after
-    // planning: another installer or host may have changed them in that interval.
-    for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
+    // Compare what each path held when the plan was built (its kind, link and bytes), not a fresh
+    // snapshot taken after planning: another installer or host may have changed them in that interval.
+    for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED')
     local?.beforeApply?.(plan)
+    // Each file setup writes is read again just before the write and checked after it (#1488, put, as runSidecarOnly
+    // does), so an edit made before that last re-read is never overwritten, and a write that did not land is not reported
+    // as applied. A removal unlinks as on main, with no re-read. A mismatch stops the batch at once: files written or
+    // removed before it stay (no rollback, as in the connect transaction). This agent's install record changes after every
+    // planned file (on install, other agents' records are updated after it; on remove, the handover to another agent's
+    // record comes first), so a mismatch among the planned files leaves the record as it was. The next setup plans again
+    // from the files as they are.
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue
@@ -1708,25 +1769,26 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         // A linked config.toml stays a link, and the person's permissions stay.
         const target = realpathSync(trustConfig)
         const mode = statSync(target).mode & 0o777
-        atomic(target, nextTrust)
+        put(trustConfig, nextTrust, target)
         if (process.platform !== 'win32') chmodSync(target, mode)
       }
-      else if (change.file === allowlistFile && nextAllowlist !== undefined) atomic(allowlistFile, nextAllowlist)
+      else if (change.file === allowlistFile && nextAllowlist !== undefined) put(allowlistFile, nextAllowlist)
       else if (change.file === nativeConfig) {
         if (change.action === 'remove') unlinkSync(nativeConfig)
-        else atomic(nativeConfig, nextConfigText!)
+        else put(nativeConfig, nextConfigText!)
       }
       else if (change.file === progress) {
         mkdirSync(dirname(progress), { recursive: true })
         writeFileSync(progress, '', { flag: 'wx', mode: 0o600 })
       } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
-      else atomic(change.file, files[change.file] ?? '')
+      else put(change.file, files[change.file] ?? '')
     }
     if (remove) {
-      if (handover) atomic(handover.file, handover.text)
-      if (readLocal(manifestFile) !== null) unlinkSync(manifestFile)
+      if (handover) put(handover.file, handover.text)
+      // Only a record that read as one when setup planned, as the plan lists it: a dangling link there stays, as on main.
+      if (initial(manifestFile) !== null) unlinkSync(manifestFile)
     } else {
-      atomic(manifestFile, nextManifest)
+      put(manifestFile, nextManifest)
       for (const other of localAgents.filter(one => one !== agent)) {
         const siblingFile = join(root, `install-${other}.json`)
         const siblingText = initial(siblingFile)
@@ -1742,7 +1804,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
             updatedSibling = true
           }
         }
-        if (updatedSibling) atomic(siblingFile, `${JSON.stringify({ ...sibling, files: siblingFiles }, null, 2)}\n`)
+        if (updatedSibling) put(siblingFile, `${JSON.stringify({ ...sibling, files: siblingFiles }, null, 2)}\n`)
       }
     }
   })

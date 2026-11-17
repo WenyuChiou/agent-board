@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
@@ -246,4 +246,195 @@ fs.renameSync = (from, to) => {
 }`)
   const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env })
   assert.notEqual(install.status, 0, install.stdout)
+}))
+
+// Setup stopped because a file changed under it, not for another reason.
+const stoppedOnChange = result => {
+  assert.notEqual(result.status, 0, result.stdout)
+  assert.match(`${result.stdout}${result.stderr}`, /a file changed, or another setup was running, while setup worked/)
+}
+// A standalone install (no connector) goes through setup's main writer, not the sidecar-only one (#1488).
+// The preload edits one file the first time setup opens that file's temporary copy, after the plan and the batch check.
+const editOnOpen = (home, name) => seam(home, `const open = fs.openSync
+let done = false
+fs.openSync = (file, ...rest) => {
+  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.lastIndexOf(${JSON.stringify(`${name}.`)}) : -1
+  if (!done && at >= 0) { done = true; fs.writeFileSync(file.slice(0, at) + ${JSON.stringify(name)}, ${JSON.stringify(EDIT)}) }
+  return open(file, ...rest)
+}`)
+
+for (const name of ['sidecar.json', 'sidecar.mjs', 'hooks.json']) {
+  test(`a standalone install keeps an edit to ${name} made after setup planned: setup fails instead of writing over it`, () => withHome(({ home, run, dir }) => {
+    const hooks = join(home, '.gemini', 'config', 'hooks.json')
+    const file = name === 'hooks.json' ? hooks : join(dir, name)
+    const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env: editOnOpen(home, name) })
+    stoppedOnChange(install)
+    assert.equal(readFileSync(file, 'utf8'), EDIT)
+  }))
+}
+
+for (const name of ['sidecar.mjs', 'hooks.json']) {
+  test(`a standalone install fails when ${name} does not hold the text it wrote right after the write`, () => withHome(({ home, run }) => {
+    const env = seam(home, `const rename = fs.renameSync
+fs.renameSync = (from, to) => {
+  rename(from, to)
+  if (typeof to === 'string' && to.endsWith(${JSON.stringify(name)})) fs.writeFileSync(to, ${JSON.stringify(EDIT)})
+}`)
+    const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env })
+    stoppedOnChange(install)
+  }))
+}
+
+// Hermes's skills folder linked to the shared one gives one file two names in one batch. The second write finds the
+// text the first wrote, which loses nothing, so setup goes through (codex_468 on #1594). Its remove stops at the second
+// name, as on main (round cap on #1594).
+test('a Hermes skills folder linked to the shared skills folder installs without a false changed-file stop', () => withHome(({ home, run }) => {
+  mkdirSync(join(home, '.agents', 'skills'), { recursive: true })
+  mkdirSync(join(home, '.hermes'), { recursive: true })
+  symlinkSync(join(home, '.agents', 'skills'), join(home, '.hermes', 'skills'), 'junction')
+  const install = run(['--agent', 'hermes', '--apply'])
+  assert.equal(install.status, 0, `${install.stdout}${install.stderr}`)
+  const skill = readFileSync(join(home, '.agents', 'skills', 'agent-board', 'SKILL.md'), 'utf8')
+  assert.equal(readFileSync(join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md'), 'utf8'), skill)
+}))
+
+// A Hermes SKILL.md that is a file link to the shared one: removing the shared file first leaves the link dangling, and
+// remove still takes the link away instead of skipping it (Greptile on #1594). File links need a privilege on Windows.
+test('a Hermes SKILL.md linked to the shared SKILL.md leaves no dangling link after remove', t => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const shared = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  rmSync(own)
+  try { symlinkSync(shared, own, 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'])
+  assert.equal(removed.status, 0, `${removed.stdout}${removed.stderr}`)
+  assert.throws(() => lstatSync(own), { code: 'ENOENT' })
+}))
+
+// Hermes's skills folder linked to the shared one, and the shared SKILL.md a file link: setup plans both names as that
+// link, and its first write replaces the link with a regular file. The second name then finds this batch's own bytes in
+// a regular file, which loses nothing, so a language change updates both (Greptile on #1594). File links need a
+// privilege on Windows.
+test('a Hermes skills folder linked to the shared one whose SKILL.md is a file link updates both names on a language change', t => withHome(({ home, run }) => {
+  mkdirSync(join(home, '.agents', 'skills'), { recursive: true })
+  mkdirSync(join(home, '.hermes'), { recursive: true })
+  symlinkSync(join(home, '.agents', 'skills'), join(home, '.hermes', 'skills'), 'junction')
+  const install = run(['--agent', 'hermes', '--apply'])
+  assert.equal(install.status, 0, `${install.stdout}${install.stderr}`)
+  const shared = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  const english = readFileSync(shared)
+  const kept = join(home, 'kept-skill.md')
+  writeFileSync(kept, english)
+  rmSync(shared)
+  try { symlinkSync(kept, shared, 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const update = run(['--agent', 'hermes', '--apply'], { lang: 'zh-TW' })
+  assert.equal(update.status, 0, `${update.stdout}${update.stderr}`)
+  const now = readFileSync(shared)
+  assert.notDeepEqual(now, english)
+  assert.deepEqual(readFileSync(own), now)
+}))
+
+// U+FFFD written as UTF-8 (EF BF BD) and a lone FF byte decode to the same text, so only the bytes tell them apart.
+// The batch check and the re-read before each write compare a path's kind, link and bytes with what setup saw when it
+// planned (#1488).
+const FFFD = Buffer.from([0xef, 0xbf, 0xbd])
+const withFF = bytes => { const at = bytes.indexOf(FFFD); return Buffer.concat([bytes.subarray(0, at), Buffer.from([0xff]), bytes.subarray(at + 3)]) }
+// The preload swaps EF BF BD for FF in one file the first time setup opens that file's temporary copy.
+const byteEditOnOpen = (home, name) => seam(home, `const open = fs.openSync
+let done = false
+fs.openSync = (file, ...rest) => {
+  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.lastIndexOf(${JSON.stringify(`${name}.`)}) : -1
+  if (!done && at >= 0) {
+    done = true
+    const real = file.slice(0, at) + ${JSON.stringify(name)}
+    const bytes = fs.readFileSync(real), i = bytes.indexOf(Buffer.from([0xef, 0xbf, 0xbd]))
+    fs.writeFileSync(real, Buffer.concat([bytes.subarray(0, i), Buffer.from([0xff]), bytes.subarray(i + 3)]))
+  }
+  return open(file, ...rest)
+}`)
+
+test('a standalone install keeps a one-byte edit to hooks.json that decodes the same: setup fails instead of writing over it', () => withHome(({ home, run }) => {
+  const hooks = join(home, '.gemini', 'config', 'hooks.json')
+  mkdirSync(join(home, '.gemini', 'config'), { recursive: true })
+  // The person's own entry, which setup keeps beside its own, holds U+FFFD.
+  const own = Buffer.concat([Buffer.from('{\n  "my-hooks": { "note": "a'), FFFD, Buffer.from('b" }\n}\n')])
+  writeFileSync(hooks, own)
+  const install = run(['--agent', 'antigravity', '--apply'], { env: byteEditOnOpen(home, 'hooks.json') })
+  stoppedOnChange(install)
+  assert.deepEqual(readFileSync(hooks), withFF(own))
+}))
+
+test('the sidecar-only writer keeps a one-byte edit to sidecar.mjs that decodes the same: setup fails instead of writing over it', () => withHome(({ home, run, dir }) => {
+  const { root } = connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  // An older sidecar.mjs holding U+FFFD, under the hash the sidecar's record keeps, so this setup plans to update it.
+  const file = join(dir, 'sidecar.mjs')
+  const old = Buffer.concat([Buffer.from('// an older sidecar '), FFFD, Buffer.from('\n')])
+  writeFileSync(file, old)
+  const recordFile = join(root, 'install-antigravity-sidecar.json')
+  const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+  record.files[Object.keys(record.files).find(key => key.endsWith('sidecar.mjs'))] = createHash('sha256').update(old).digest('hex')
+  writeFileSync(recordFile, `${JSON.stringify(record, null, 2)}\n`)
+  const install = run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'], { env: byteEditOnOpen(home, 'sidecar.mjs') })
+  stoppedOnChange(install)
+  assert.deepEqual(readFileSync(file), withFF(old))
+}))
+
+// A link to a path that is not there: on Windows a junction to a missing folder, which needs no privilege.
+const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'file'
+
+test('a standalone install stops when hooks.json became a link to a file holding the planned text', t => withHome(({ home, run }) => {
+  const probe = join(home, 'probe.txt')
+  writeFileSync(probe, '')
+  try { symlinkSync(probe, join(home, 'probe-link.txt'), 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const hooks = join(home, '.gemini', 'config', 'hooks.json'), planned = join(home, 'planned.json')
+  // Once setup wrote hooks.json's temporary copy, another process puts a link where hooks.json goes, to a file holding
+  // exactly that text: writing over it would turn the link into a plain file.
+  const env = seam(home, `const open = fs.openSync, write = fs.writeFileSync
+let fd = -1, done = false
+fs.openSync = (file, ...rest) => {
+  const got = open(file, ...rest)
+  if (!done && typeof file === 'string' && file.endsWith('.tmp') && file.includes('hooks.json.')) fd = got
+  return got
+}
+fs.writeFileSync = (target, data, ...rest) => {
+  write(target, data, ...rest)
+  if (!done && target === fd) {
+    done = true
+    write(${JSON.stringify(planned)}, data)
+    if (fs.existsSync(${JSON.stringify(hooks)})) fs.unlinkSync(${JSON.stringify(hooks)})
+    fs.symlinkSync(${JSON.stringify(planned)}, ${JSON.stringify(hooks)}, 'file')
+  }
+}`)
+  const install = run(['--agent', 'antigravity', '--apply'], { env })
+  stoppedOnChange(install)
+  assert.ok(lstatSync(hooks).isSymbolicLink(), 'the link is still there')
+  assert.equal(readlinkSync(hooks), planned)
+}))
+
+// The install record is removed only when it read as one when setup planned, as on main: a dangling link there is not
+// in the plan, and stays (codex_476 on #1594). A junction on Windows, which needs no privilege.
+test('a Hermes remove keeps a dangling link where the install record goes', t => withHome(({ home, run }) => {
+  mkdirSync(join(home, '.agent-board'), { recursive: true })
+  const record = join(home, '.agent-board', 'install-hermes.json')
+  try { symlinkSync(join(home, 'missing-folder'), record, LINK_TYPE) } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make links'); return }
+    throw error
+  }
+  // setup-agent applies only a plan with changes, so the helper runs the remove itself, as the board's --codex-remove does.
+  const helper = fileURLToPath(new URL('../scripts/setup-codex.mjs', import.meta.url))
+  const removed = spawnSync(process.execPath, [helper, '--home', home, '--codex-remove', '--agent', 'hermes', '--json', '--apply'], { cwd: home, env: makeEnv(home), encoding: 'utf8', windowsHide: true, timeout: 60000 })
+  assert.equal(removed.status, 0, `${removed.stdout}${removed.stderr}`)
+  assert.ok(lstatSync(record).isSymbolicLink(), 'the link is still there')
+  assert.ok(readlinkSync(record).endsWith('missing-folder'), readlinkSync(record))
 }))

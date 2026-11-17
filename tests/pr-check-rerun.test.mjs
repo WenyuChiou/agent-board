@@ -1,7 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { CALL_LIMIT_MS, GH_TIMEOUT_MS, ghRunner, isRunOf, isTrustedComment, MAX_PAGES, mentionsVerdict, newestRun, noticeText, PER_PAGE, POLL_MS, rerun, WAIT_MS } from '../scripts/pr-check-rerun.mjs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { CALL_LIMIT_MS, GH_TIMEOUT_MS, ghRunner, isRunOf, isTrustedComment, main, MAX_PAGES, mentionsVerdict, newestRun, noticeText, PER_PAGE, POLL_MS, rerun, WAIT_MS } from '../scripts/pr-check-rerun.mjs'
 import { reviewOf } from '../scripts/pr-check.mjs'
 
 const head = 'abcdef1234567890abcdef1234567890abcdef12'
@@ -189,6 +191,41 @@ test('pr-check-rerun does nothing without a team comment or an open pull request
   const unsaid = fake({ ...base, [filesPath()]: [{ filename: '.github/workflows/pr-check.yml' }] })
   const noticeTimesOut = args => args.includes(noticePath) ? (unsaid.calls.push(args), { error: hung.error, status: null, stdout: '', stderr: '' }) : unsaid.gh(args)
   await assert.rejects(rerun(event(approval), { gh: noticeTimesOut, log: quiet }), /could not post the notice on #7 \(the pull request changes [^)]*\): spawnSync .*ETIMEDOUT/)
+  // When POST .../rerun fails (e.g. times out) but the follow-up run read shows the run already started, stop without posting a notice (#1538).
+  const runDetailPath = id => `repos/synthetic/board/actions/runs/${id}`
+  for (const status of ['queued', 'in_progress']) {
+    const startedAnyway = fake({ ...base, [runsPath()]: { workflow_runs: [run(81, 'completed')] }, [runDetailPath(81)]: { id: 81, status } })
+    const timedOutRerun = args => args.includes(rerunPath(81)) ? (startedAnyway.calls.push(args), { error: hung.error, status: null, stdout: '', stderr: '' }) : startedAnyway.gh(args)
+    assert.equal(await rerun(event(approval), { gh: timedOutRerun, log: quiet }), 'rerun', status)
+    assert.deepEqual(notices(startedAnyway.calls), [], status)
+  }
+  // If the new attempt already finished before the follow-up read, a higher run_attempt still counts as started (#1538).
+  const finishedAttempt = fake({ ...base, [runsPath()]: { workflow_runs: [run(83, 'completed', undefined, { run_attempt: 1 })] }, [runDetailPath(83)]: { id: 83, status: 'completed', run_attempt: 2 } })
+  const timedOutAttempt = args => args.includes(rerunPath(83)) ? (finishedAttempt.calls.push(args), { error: hung.error, status: null, stdout: '', stderr: '' }) : finishedAttempt.gh(args)
+  assert.equal(await rerun(event(approval), { gh: timedOutAttempt, log: quiet }), 'rerun')
+  assert.deepEqual(notices(finishedAttempt.calls), [])
+  // When POST .../rerun is refused and the follow-up read shows the run is still completed, still post the notice once (#1538).
+  const reallyRefused = fake({ ...base, [runsPath()]: { workflow_runs: [run(82, 'completed')] }, [runDetailPath(82)]: { id: 82, status: 'completed' } })
+  await assert.rejects(rerun(event(approval), { gh: reallyRefused.gh, log: quiet }), /gh api --method POST failed: gh: Not Found \(HTTP 404\)/)
+  assert.equal(notices(reallyRefused.calls).length, 1)
+  // When main cannot read the event file, it posts the notice once via env repo/number without leaking the path and marks GITHUB_OUTPUT (#1538).
+  const temp = mkdtempSync(join(tmpdir(), 'pr-check-rerun-'))
+  try {
+    const outputFile = join(temp, 'github-output.txt')
+    const missingEvent = join(temp, 'missing-event.json')
+    const earlyFail = fake({ [noticePath]: {} })
+    await assert.rejects(main(['--event', missingEvent], { gh: earlyFail.gh, env: { REPO: 'synthetic/board', NUMBER: '7', GITHUB_OUTPUT: outputFile }, log: quiet }), /ENOENT/)
+    assert.equal(notices(earlyFail.calls).length, 1)
+    assert.equal(notices(earlyFail.calls)[0].includes('missing-event.json'), false)
+    assert.match(readFileSync(outputFile, 'utf8'), /^noticed=true$/m)
+    // An unwritable GITHUB_OUTPUT after posting a notice does not trigger a second notice (#1538).
+    const unwritableOutput = join(temp, 'missing-dir', 'github-output.txt')
+    const heldBadOutput = fake({ ...base, [filesPath()]: [{ filename: '.github/workflows/pr-check.yml' }] })
+    assert.equal(await rerun(event(approval), { gh: heldBadOutput.gh, log: quiet, outputFile: unwritableOutput }), 'held')
+    assert.equal(notices(heldBadOutput.calls).length, 1)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
 })
 
 test('a pr-check-rerun notice is one line pr-check never reads as a verdict (#1258)', () => {
@@ -219,17 +256,16 @@ test('the pr-check-rerun workflow runs main\'s script on the team\'s comment eve
   assert.doesNotMatch(workflow, /\$\{\{ *github\.event\.comment/)
   assert.doesNotMatch(workflow, /run:[^\n]*\$\{\{/)
   assert.doesNotMatch(workflow, /^ {10}gh [^\n]*\$\{\{/m)
-  // A step before the script that fails still leaves a notice on the pull request; the script's own failure does not
-  // post a second one.
+  // A step before the script that fails, or a script failure before posting its own notice, still leaves one notice on the pull request (#1538).
   assert.match(workflow, /^ {8}id: rerun\n/m)
-  assert.match(workflow, /^ {6}- name: Say on the pull request that the check did not run again\n {8}if: failure\(\) && steps\.rerun\.outcome == 'skipped'\n/m)
-  assert.match(workflow, /body=The PR check did not run again after the last verdict comment: the pr-check-rerun job failed before its script ran\./)
+  assert.match(workflow, /^ {6}- name: Say on the pull request that the check did not run again\n {8}if: failure\(\) && steps\.rerun\.outputs\.noticed != 'true'\n/m)
+  assert.match(workflow, /body=The PR check did not run again after the last verdict comment: the pr-check-rerun job failed before reporting a reason\./)
   // The steps end a job that cannot run the check again, with a notice, before the job's timeout does: a job the
   // timeout ends is cancelled and says nothing. The checkout and Node each fail at their own limit, then either the
   // script (its call limit, a call under way and its notice) or the notice step runs.
   const minutes = Number(workflow.match(/^ {4}timeout-minutes: (\d+)$/m)?.[1])
   const setup = [...workflow.matchAll(/^ {6}- uses: actions\/(?:checkout|setup-node)@[^\n]*\n {8}timeout-minutes: (\d+)\n/gm)].map(found => Number(found[1]))
-  const notice = Number(workflow.match(/if: failure\(\) && steps\.rerun\.outcome == 'skipped'\n {8}timeout-minutes: (\d+)\n/)?.[1])
+  const notice = Number(workflow.match(/if: failure\(\) && steps\.rerun\.outputs\.noticed != 'true'\n {8}timeout-minutes: (\d+)\n/)?.[1])
   assert.equal(setup.length, 2)
   const before = setup.reduce((sum, value) => sum + value, 0) * 60 * 1000
   assert.ok(minutes * 60 * 1000 > before + CALL_LIMIT_MS + 2 * GH_TIMEOUT_MS, String(minutes))
