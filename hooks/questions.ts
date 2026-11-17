@@ -897,11 +897,15 @@ export const observeQuestions = (
         if (record !== undefined) record.isPresent = false
         const binding = sha256(JSON.stringify([row.scope, words, occurrence, copies.length, incarnation]))
         record = { id: `question:${binding}:${next++}`, scope: row.scope, words, occurrence, copies: copies.length, isWaiting: true, isPresent: true, firstObserved: Number.isFinite(now) && now > 0 ? now : 0, incarnation, producer: row.producer }
-        // A token-marked block keeps its own record, so the inbox turn that stays after that block is gone gets a new one:
-        // it takes the list or refusal the newest open record of the same words in this scope holds (#1630).
+        // A token-marked block keeps its own record, so the inbox turn that stays after that block is gone gets a new one.
+        // It takes the list or refusal of the open records of the same words in this scope only when they all agree: two
+        // steps of the same words with different lists could each be the one it asks, so it offers none. A record from a
+        // ledger written before the options field reads its list from its saved source (#1630).
         if (row.source.kind === 'inbox') {
-          const kept = (byScopeWords.get(partsKey2(row.scope, words)) ?? []).filter(old => old.options !== undefined && old.isUnresolved !== false).at(-1)?.options
-          if (kept !== undefined) record.options = [...kept]
+          const held = (byScopeWords.get(partsKey2(row.scope, words)) ?? []).filter(old => old.isUnresolved !== false)
+            .map(old => old.options ?? (old.source === undefined ? undefined : sourceOptions(old.source, old.occurrence)))
+          if (new Set(held.map(one => JSON.stringify(one ?? null))).size > 1) record.options = []
+          else if (held[0] !== undefined) record.options = [...held[0]]
         }
         records.push(record)
         indexRecord(record)
