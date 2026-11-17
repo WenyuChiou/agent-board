@@ -44,10 +44,11 @@ const fixture = async (folder, fn) => {
     }
     const directory = defaultMessagesDirectory(progress, home, env, process.platform)
     const transcript = join(home, '.gemini', folder, 'brain', 'synthetic-conversation', '.system_generated', 'logs', 'transcript.jsonl')
-    const call = event => spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress,
+    // `fields` changes the hook's input, so a test can send a turn end without a transcript path.
+    const call = (event, fields = {}) => spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress,
       '--agent', 'antigravity', '--agent-status', '--state', event === 'Stop' || event === 'SessionStart' ? 'waiting' : 'working', '--event', event,
     ], { cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15000,
-      input: JSON.stringify({ conversationId: session, hook_event_name: event, transcriptPath: transcript }) })
+      input: JSON.stringify({ conversationId: session, hook_event_name: event, transcriptPath: transcript, ...fields }) })
     const state = () => JSON.parse(readFileSync(join(directory, 'messages.json'), 'utf8'))
     const seed = id => {
       let current
@@ -168,13 +169,68 @@ for (const [surface, folder] of SURFACES) {
     assert.equal(f.one('unread-message').status, 'acknowledged')
   }))
 
-  test(`${surface}: a hand-over whose code cannot be kept is still accepted, and the hook says so`, () => fixture(folder, async f => {
+  test(`${surface}: a hand-over whose code cannot be kept in either folder is still accepted, and the hook says so`, () => fixture(folder, async f => {
     f.seed('unsaved-claim')
-    // A file where the codes' folder goes makes the write fail.
+    // A file where each codes' folder goes makes both writes fail.
     writeFileSync(join(f.root, 'antigravity-acks'), 'not a folder')
+    writeFileSync(`${f.directory}-acks`, 'not a folder')
     const result = await hookOrDeferred(() => f.call('PreInvocation'), () => f.one('unsaved-claim').status === 'accepted')
     assert.equal(f.one('unsaved-claim').status, 'accepted')
     assert.match(result.stderr, /^board: mailbox failed \(ACK_CLAIM_UNSAVED\)$/m)
+  }))
+
+  test(`${surface}: a hand-over whose code cannot be kept in the board folder keeps it beside the message store, and its ACK is taken`, () => fixture(folder, async f => {
+    f.seed('second-place')
+    writeFileSync(join(f.root, 'antigravity-acks'), 'not a folder')
+    const result = await hookOrDeferred(() => f.call('PreInvocation'), () => f.one('second-place').status === 'accepted')
+    assert.doesNotMatch(result.stderr, /ACK_CLAIM_UNSAVED/)
+    const nonce = f.one('second-place').nonce
+    f.say(`ACK ${nonce}`)
+    f.stop('second-place', true)
+    assert.equal(f.one('second-place').status, 'acknowledged')
+  }))
+
+  test(`${surface}: a turn end with no transcript path keeps the claim, and the next turn end takes the ACK`, () => fixture(folder, async f => {
+    f.seed('no-path')
+    const nonce = await f.handOver('no-path')
+    f.say(`ACK ${nonce}`)
+    const blind = f.call('Stop', { transcriptPath: undefined })
+    assert.equal(blind.status, 0, blind.stderr)
+    assert.match(blind.stderr, /^board: mailbox failed \(TRANSCRIPT_UNREADABLE\)$/m)
+    assert.equal(f.one('no-path').status, 'accepted')
+    f.stop('no-path', true)
+    assert.equal(f.one('no-path').status, 'acknowledged')
+  }))
+
+  test(`${surface}: a claim kept after a turn end that could not read it is not acknowledged by a later turn citing its code`, () => fixture(folder, async f => {
+    f.seed('kept-claim')
+    const nonce = await f.handOver('kept-claim')
+    f.say('Got it, no line.')
+    renameSync(f.transcript, `${f.transcript}.away`)
+    assert.match(f.call('Stop').stderr, /TRANSCRIPT_UNREADABLE/)
+    renameSync(`${f.transcript}.away`, f.transcript)
+    // A later turn hands nothing over; its reply cites the kept claim's code.
+    f.say(`ACK ${nonce}`)
+    const before = JSON.stringify(f.state().messages)
+    f.stop('kept-claim', false)
+    assert.equal(JSON.stringify(f.state().messages), before)
+  }))
+
+  test(`${surface}: a claim still kept does not move a later hand-over's reading window past its ACK`, () => fixture(folder, async f => {
+    f.seed('older-claim')
+    await f.handOver('older-claim')
+    f.say('Got it, no line.')
+    renameSync(f.transcript, `${f.transcript}.away`)
+    assert.match(f.call('Stop').stderr, /TRANSCRIPT_UNREADABLE/)
+    renameSync(`${f.transcript}.away`, f.transcript)
+    // More than 8 MiB of later turns, then a new hand-over answered at once.
+    f.append({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Synthetic prompt' }, { source: 'SYSTEM', type: 'TOOL_RESULT', content: 'x'.repeat(9 * 1024 * 1024) })
+    f.seed('newer-claim')
+    const nonce = await f.handOver('newer-claim')
+    f.say(`ACK ${nonce}`)
+    f.stop('newer-claim', true)
+    assert.equal(f.one('newer-claim').status, 'acknowledged')
+    assert.equal(f.one('older-claim').status, 'accepted')
   }))
 
   test(`${surface}: a turn that handed over no message changes nothing, even when its reply carries the code of an earlier one`, () => fixture(folder, async f => {
