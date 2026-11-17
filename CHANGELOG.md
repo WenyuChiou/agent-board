@@ -168,6 +168,10 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - OpenCode's card sends a board message instead of offering Copy: at once when OpenCode is idle, and when its step ends when it is busy (#1591, #1599).
 
+- When an agent cannot reach the board because the connection was refused or cut, it reports that error instead of "mailbox deferred", and a DeepSeek turn asks the board again within five seconds (#1631, #1633).
+
+- A choice list with an empty entry offers nothing, a refused list stays refused on the inbox card, and each choice shows as sent (#1634).
+
 ## 0.24.3 — 2026-11-10
 
 - **Tests / native hooks** · Failed Antigravity native-context checks name fixed hook-error codes and their exit status, while reading hook logs only on failure and keeping commands and log text private. Failed setup checks now also distinguish launch errors, deadlines and signals with bounded status, code and timing fields. The missing-context flake remains under investigation (#683).
