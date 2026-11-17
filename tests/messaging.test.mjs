@@ -2688,7 +2688,7 @@ const pollingProxy = async (board, mode, onClaim) => {
       }
       // forbidden-after-claim: the poll that hands a message out is answered, every later poll is refused for good (403).
       if (isPoll && mode === 'forbidden-after-claim' && hasClaimed) return fail(403)
-      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim' && mode !== 'pass' && mode !== 'forbidden-after-claim' && mode !== 'unsent-lost') {
+      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim' && mode !== 'pass' && mode !== 'forbidden-after-claim' && !String(mode).startsWith('unsent-')) {
         if (mode === 'network' || mode === 'timeout') {
           faults += 1
           if (mode === 'network') req.socket.destroy()
@@ -2696,6 +2696,14 @@ const pollingProxy = async (board, mode, onClaim) => {
         }
         if (mode === 'malformed') { faults += 1; res.writeHead(200); res.end('{'); return }
         return fail(mode === 'forbidden' || mode === 'forbidden-always' ? 403 : mode === 'stale' ? 409 : 503)
+      }
+      // unsent-refused, unsent-busy: an unsent receipt never reaches the board, and is answered as the board answers one it refuses
+      // (409) or one it could not save because its store was busy (503).
+      if ((mode === 'unsent-refused' || mode === 'unsent-busy') && req.url === '/api/messages/receipt' && JSON.parse(body).status === 'unsent') {
+        faults += 1
+        res.writeHead(mode === 'unsent-busy' ? 503 : 409, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: mode === 'unsent-busy' ? 'MESSAGE_STORE_BUSY' : 'INVALID_RECEIPT' }))
+        return
       }
       const answer = await fetch(new URL(req.url, upstream), {
         method: req.method, headers: { 'x-board-token': upstream.searchParams.get('t'), 'content-type': 'application/json' }, body,
@@ -5035,7 +5043,7 @@ test('a Codex receiver with its own default wait starts nothing on a listed idle
   const reads = () => daemon.calls().filter(one => one.method === 'thread/read').length
   const daemon = codexDaemon(dir, { person })
   const receiver = codexReceiver(board, daemon, { unloadMs: undefined, unloadMarginMs: undefined, now: () => clock, watchTickMs: 10_000 })
-  // Moves the clock one step once the stand-in has answered a thread/read since the last step, until `done` or `limit`.
+  // Moves the clock one step once the stand-in has answered a thread/read since the last step, until `done` or `limit` (never past it).
   // A receiver that stops looking for 20 s of real time fails the test instead of hanging it.
   const advance = async (done, limit) => {
     while (clock < limit) {
@@ -5046,15 +5054,23 @@ test('a Codex receiver with its own default wait starts nothing on a listed idle
         assert.ok(Date.now() < until, `no thread/read for 20 s at ${clock / 1000} s by the receiver's clock`)
         await pause(20)
       }
-      clock += 5000
+      clock = Math.min(limit, clock + 5000)
     }
   }
   try {
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
+    // The clock stays at 0 for five looks, so the stretch of watching begins at 0 by the receiver's clock.
+    const first = reads()
+    await waitFor(async () => reads() >= first + 5)
     // Well past the old 65 s and past a 300 s per-thread delay, by the receiver's clock: nothing is started.
     await advance(() => false, 330_000)
     assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
+    // One second short of 10 minutes and 5 s, the clock stands still for six board polls and more looks: nothing is started. A
+    // receiver that waited 600 s would start it here.
+    await advance(() => false, 604_000)
+    await pause(6 * codexPollMs)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status, clock], [0, 'queued', 604_000])
     // After 10 minutes and 5 s of unbroken watching the thread reads as a person's, and the message is started.
     let at = null
     await advance(() => { if (codexStarts(daemon) > 0) at ??= clock; return at !== null }, 700_000)
@@ -5086,6 +5102,33 @@ test('an unsent receipt from the connection that holds a claim puts the message 
   assert.throws(() => messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent', reply: 'ACK abcdef' }, now + 2), /INVALID_RECEIPT/)
   assert.throws(() => messageReceipt(queued, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2), /CLAIM_REQUIRED/)
 })
+
+// The claim meets the person's turn, which ends 0.2 s later. A whole wait is 2 s here and the claim's time 3 s, so the receiver gives
+// the claim back while it watches the idle thread again (with less than 2.2 s left), and the thread reads as a person's about 2 s
+// after the turn ended, inside the claim's time. The give-back never reaches the board; the proxy answers it as the board would.
+const codexRefusedGiveBack = mode => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { readActive: true, endFlag, person })
+  const proxy = await pollingProxy(board, mode)
+  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 3000 })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    writeFileSync(endFlag, '')
+    // The give-back was answered, and the board still holds the claim for this receiver, which started nothing yet.
+    await waitFor(async () => proxy.faults() > 0)
+    assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
+    // The claim is still the receiver's: it is started once when the thread reads as a person's, and acknowledged.
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    assert.equal(codexStarts(daemon), 1)
+  } finally { await receiver.close(); await proxy.close() }
+})
+
+test("a Codex claim whose give-back the board refuses (409) is still the receiver's, and is started once when the thread reads as a person's in time (#1578)", () => codexRefusedGiveBack('unsent-refused'))
+
+test("a Codex claim whose give-back met a busy message store (503, nothing saved) is still the receiver's, and is started once when the thread reads as a person's in time (#1578)", () => codexRefusedGiveBack('unsent-busy'))
 
 test('a Codex claim whose unsent receipt got no answer is not started by that delivery: the board may have queued it again, and it is started once (#1578)', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
