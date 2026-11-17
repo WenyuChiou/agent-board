@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -66,13 +66,15 @@ const fixture = async (folder, fn) => {
       assert.equal(one(id).status, 'accepted')
       return one(id).nonce
     }
-    const say = (...replies) => {
+    // A turn's entries are added to the end of the transcript, as Antigravity does.
+    const append = (...entries) => {
       mkdirSync(dirname(transcript), { recursive: true })
-      writeFileSync(transcript, [
-        { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Synthetic prompt' },
-        ...replies.map(content => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', content })),
-      ].map(line => JSON.stringify(line)).join('\n') + '\n')
+      appendFileSync(transcript, entries.map(line => JSON.stringify(line)).join('\n') + '\n')
     }
+    const say = (...replies) => append(
+      { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Synthetic prompt' },
+      ...replies.map(content => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', content })),
+    )
     // A turn end. A slow board defers the acknowledgement by design and the next turn end does it (the claim is kept).
     const stop = (id, isExpected) => {
       const first = call('Stop')
@@ -83,7 +85,7 @@ const fixture = async (folder, fn) => {
         assert.equal(again.status, 0, again.stderr)
       }
     }
-    await fn({ state, seed, one, handOver, say, stop, call, directory })
+    await fn({ state, seed, one, handOver, say, append, stop, call, directory, root, transcript })
   } finally { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 
@@ -138,6 +140,41 @@ for (const [surface, folder] of SURFACES) {
     await hookOrDeferred(() => f.call('Stop'), () => f.one('busy-message').status === 'acknowledged')
     assert.equal(f.one('busy-message').status, 'acknowledged')
     assert.equal(f.one('busy-message').reply, `ACK ${nonce}`)
+  }))
+
+  test(`${surface}: an ACK line followed by more than 256 KiB of the same turn is still read at the turn end`, () => fixture(folder, async f => {
+    f.say('An earlier turn.')
+    f.seed('long-turn')
+    const nonce = await f.handOver('long-turn')
+    f.say(`ACK ${nonce}`)
+    f.append({ source: 'SYSTEM', type: 'TOOL_RESULT', content: 'x'.repeat(300 * 1024) }, { source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Done.' })
+    f.stop('long-turn', true)
+    assert.equal(f.one('long-turn').status, 'acknowledged')
+    assert.equal(f.one('long-turn').reply, `ACK ${nonce}`)
+  }))
+
+  test(`${surface}: a turn end that cannot read the transcript keeps the claim, and the next turn end takes the ACK`, () => fixture(folder, async f => {
+    f.seed('unread-message')
+    const nonce = await f.handOver('unread-message')
+    f.say(`ACK ${nonce}`)
+    renameSync(f.transcript, `${f.transcript}.away`)
+    const blind = f.call('Stop')
+    assert.equal(blind.status, 0, blind.stderr)
+    assert.match(blind.stderr, /^board: mailbox failed \(TRANSCRIPT_UNREADABLE\)$/m)
+    assert.equal(f.one('unread-message').status, 'accepted')
+    renameSync(`${f.transcript}.away`, f.transcript)
+    f.say('A later turn about something else.')
+    f.stop('unread-message', true)
+    assert.equal(f.one('unread-message').status, 'acknowledged')
+  }))
+
+  test(`${surface}: a hand-over whose code cannot be kept is still accepted, and the hook says so`, () => fixture(folder, async f => {
+    f.seed('unsaved-claim')
+    // A file where the codes' folder goes makes the write fail.
+    writeFileSync(join(f.root, 'antigravity-acks'), 'not a folder')
+    const result = await hookOrDeferred(() => f.call('PreInvocation'), () => f.one('unsaved-claim').status === 'accepted')
+    assert.equal(f.one('unsaved-claim').status, 'accepted')
+    assert.match(result.stderr, /^board: mailbox failed \(ACK_CLAIM_UNSAVED\)$/m)
   }))
 
   test(`${surface}: a turn that handed over no message changes nothing, even when its reply carries the code of an earlier one`, () => fixture(folder, async f => {
