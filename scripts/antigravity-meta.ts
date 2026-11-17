@@ -308,28 +308,43 @@ export const resolveAntigravityTitle = (
   return promptTitle === null ? null : { title: promptTitle, titleSource: 'prompt' }
 }
 
-// The first line of each reply the model gave in the conversation's last turn (after its last USER_INPUT), read from
-// the tail of the conversation's own transcript, because the turn-end hook does not carry the reply text (#1416).
+const isKnownTranscript = (path: unknown): path is string =>
+  typeof path === 'string' && isAbsolute(path) && ANTIGRAVITY_TRANSCRIPTS.has(basename(path))
+const MAX_ACK_READ_BYTES = 8 * 1024 * 1024
+
+// The transcript's size when the turn-start hook hands a message over: the model's replies to it come after this
+// offset (#1416). A transcript not written yet reads as 0; an unknown or unreadable path as null.
+export const antigravityTranscriptSize = (path: unknown): number | null => {
+  if (!isKnownTranscript(path)) return null
+  try { const stat = lstatSync(path); return stat.isFile() ? stat.size : null } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : null
+  }
+}
+
+// The first line of each model reply, read from the conversation's own transcript, because the turn-end hook does not
+// carry the reply text (#1416). With `from` (the size at the hand-over, still within the file), every reply written after
+// that offset counts, read forward up to 8 MiB, so a long turn after the ACK line does not push it out of reach. Without it,
+// or when the file is now shorter, only the last turn's replies (after its last USER_INPUT) in the last 256 KiB count.
 // Only the reply's own first line is returned (a blank first line stays blank, so an ACK on the line after it does not
-// count), and only for a regular file under one of the known transcript names; a line that
-// is not JSON is skipped, and anything unreadable reads as no reply.
-export const antigravityReplyFirstLines = (path: unknown): string[] => {
-  if (typeof path !== 'string' || !isAbsolute(path) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(path))) return []
+// count), and only for a regular file under one of the known transcript names; a line that is not JSON is skipped.
+// An unknown path reads as no reply; a known one that cannot be read returns null, so the caller can keep its claims.
+export const antigravityReplyFirstLines = (path: unknown, from?: number): string[] | null => {
+  if (!isKnownTranscript(path)) return []
   try {
-    if (!lstatSync(path).isFile()) return []
+    if (!lstatSync(path).isFile()) return null
     const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
     try {
       const stat = fstatSync(fd)
-      if (!stat.isFile() || stat.size <= 0) return []
-      const size = Math.min(stat.size, MAX_TRANSCRIPT_HEAD_BYTES), start = stat.size - size
+      if (!stat.isFile()) return null
+      const isForward = from !== undefined && from <= stat.size
+      const start = isForward ? from : Math.max(0, stat.size - MAX_TRANSCRIPT_HEAD_BYTES)
+      const size = Math.min(stat.size - start, isForward ? MAX_ACK_READ_BYTES : MAX_TRANSCRIPT_HEAD_BYTES)
+      if (size <= 0) return []
       const bytes = Buffer.alloc(size)
-      if (readSync(fd, bytes, 0, size, start) !== size) return []
+      if (readSync(fd, bytes, 0, size, start) !== size) return null
       let text = bytes.toString('utf8')
-      if (start > 0) {
-        const end = text.indexOf('\n')
-        if (end < 0) return []
-        text = text.slice(end + 1)
-      }
+      // A read that starts inside the file starts mid-line in tail mode; forward from the hand-over it starts on a line.
+      if (start > 0 && !isForward) text = text.slice(text.indexOf('\n') + 1)
       let replies: string[] = []
       for (const line of text.split(/\r?\n/)) {
         if (line.trim() === '') continue
@@ -337,10 +352,10 @@ export const antigravityReplyFirstLines = (path: unknown): string[] => {
         try { entry = JSON.parse(line) } catch { continue }
         if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
         const { type, source, content } = entry as Record<string, unknown>
-        if (type === 'USER_INPUT') replies = []
+        if (type === 'USER_INPUT') { if (!isForward) replies = [] }
         else if (source === 'MODEL' && type === 'PLANNER_RESPONSE' && typeof content === 'string' && content.trim() !== '') replies.push(content.split(/\r?\n/)[0]!.trim())
       }
       return replies
     } finally { closeSync(fd) }
-  } catch { return [] }
+  } catch { return null }
 }

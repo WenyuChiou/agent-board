@@ -9,7 +9,7 @@ import type { CodexReport } from '../hooks/codex.ts'
 import type { Strings } from '../hooks/i18n.ts'
 import type { CodexMeta } from '../hooks/runs.ts'
 import { hookMailbox } from './board-messaging.ts'
-import { antigravityReplyFirstLines } from './antigravity-meta.ts'
+import { antigravityReplyFirstLines, antigravityTranscriptSize } from './antigravity-meta.ts'
 import { readSessionMeta } from './codex-history.ts'
 import { defaultMessagesDirectory } from './runtime-folder.ts'
 
@@ -19,8 +19,9 @@ type Json = Record<string, unknown>
 // conversation's transcript (the hook does not carry it). A message's nonce is the code of its ACK line (#1416). Only an id
 // and a code are kept, never the message text or the reply; a claim lives until the next Stop hook spends it. A claim whose
 // ACK line was read but that the board did not take (busy, or no mailbox) is kept as matched and offered again at each Stop,
-// since a later turn's transcript no longer holds that line.
-type AckClaim = { id: string; nonce: string; matched?: true }
+// since a later turn's transcript no longer holds that line. `from` is the transcript's size at the hand-over: the Stop
+// hook reads the replies after it, and a Stop that cannot read the transcript keeps the claim unspent for the next one.
+type AckClaim = { id: string; nonce: string; matched?: true; from?: number }
 const ACK_CLAIMS_KEEP = 8
 const ackClaimsFile = (root: string, owner: string): string => join(root, 'antigravity-acks', `${owner}.json`)
 const isAckClaim = (one: unknown): one is AckClaim =>
@@ -29,7 +30,8 @@ const readAckClaims = (file: string, readLocal: (file: string) => string | null)
   try {
     const saved = readLocal(file)
     const parsed = saved === null ? null : JSON.parse(saved) as { claims?: unknown }
-    return Array.isArray(parsed?.claims) ? parsed.claims.filter(isAckClaim).map(({ id, nonce, matched }) => matched === true ? { id, nonce, matched } : { id, nonce }) : []
+    return Array.isArray(parsed?.claims) ? parsed.claims.filter(isAckClaim).map(({ id, nonce, matched, from }) => matched === true ? { id, nonce, matched }
+      : Number.isSafeInteger(from) && (from as number) >= 0 ? { id, nonce, from } : { id, nonce }) : []
   } catch { return [] }
 }
 
@@ -126,20 +128,28 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
       const file = ackClaimsFile(root, hash(`${agent}:${session}`))
       const claims = readAckClaims(file, readLocal)
       if (claims.length > 0) {
-        const lines = antigravityReplyFirstLines(raw.transcriptPath)
+        const open = claims.filter(claim => claim.matched !== true)
+        const from = open.length > 0 && open.every(claim => claim.from !== undefined) ? Math.min(...open.map(claim => claim.from!)) : undefined
+        const lines = open.length > 0 ? antigravityReplyFirstLines(raw.transcriptPath, from) : []
         const kept: typeof claims = []
+        let isAckFailed = false
         for (const claim of claims) {
-          if (claim.matched !== true && !lines.some(line => line === `ACK ${claim.nonce}` || line.startsWith(`ACK ${claim.nonce} `))) continue
+          if (claim.matched !== true) {
+            if (lines === null) { kept.push(claim); continue }
+            if (!lines.some(line => line === `ACK ${claim.nonce}` || line.startsWith(`ACK ${claim.nonce} `))) continue
+          }
           try {
             if (mailbox === undefined) throw new Error(setupError ?? 'MAILBOX_FAILED')
             await mailbox.ack(agent, session, claim.id, claim.nonce, `ACK ${claim.nonce}`, Date.now())
-          } catch { kept.push({ id: claim.id, nonce: claim.nonce, matched: true }) }
+          } catch { kept.push({ id: claim.id, nonce: claim.nonce, matched: true }); isAckFailed = true }
         }
-        if (kept.length > 0) {
+        if (lines === null) process.stderr.write(`${s.localAgentMailboxFailed('TRANSCRIPT_UNREADABLE')}\n`)
+        if (isAckFailed) {
           if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
           else process.stderr.write(`${s.localAgentMailboxFailed(mailbox?.error ?? setupError ?? 'MAILBOX_FAILED')}\n`)
-          try { atomic(file, `${JSON.stringify({ version: 1, claims: kept })}\n`, checkDeadline, true) } catch {}
-        } else try { unlinkSync(file) } catch {}
+        }
+        if (kept.length > 0) try { atomic(file, `${JSON.stringify({ version: 1, claims: kept })}\n`, checkDeadline, true) } catch {}
+        else try { unlinkSync(file) } catch {}
       }
     } else if (isTurnStart(agent, event)) {
       let message = null
@@ -181,11 +191,15 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
         } catch {}
         if (hasWritten && message !== null && agent === 'antigravity' && /^[0-9a-f]{6}$/.test(message.nonce)) {
           // Written before the acceptance, so a hook stopped after the model saw the message still leaves its code for the Stop hook.
+          // The message is accepted even when this write fails (the model has it; handing it over again would send it twice),
+          // so the failure is reported: that message's ACK cannot be recorded.
           try {
             const file = ackClaimsFile(root, owner)
-            const claims = [...readAckClaims(file, readLocal).filter(one => one.id !== message.id), { id: message.id, nonce: message.nonce }].slice(-ACK_CLAIMS_KEEP)
+            const size = antigravityTranscriptSize(raw.transcriptPath)
+            const claim = size === null ? { id: message.id, nonce: message.nonce } : { id: message.id, nonce: message.nonce, from: size }
+            const claims = [...readAckClaims(file, readLocal).filter(one => one.id !== message.id), claim].slice(-ACK_CLAIMS_KEEP)
             atomic(file, `${JSON.stringify({ version: 1, claims })}\n`, checkDeadline, true)
-          } catch {}
+          } catch { process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`) }
         }
         if (hasWritten && message !== null) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
         if (hasWritten && pushResult.keys.length > 0) {
