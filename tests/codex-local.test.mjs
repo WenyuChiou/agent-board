@@ -8112,13 +8112,26 @@ test('a DeepSeek take whose connection to the board is cut asks again within its
   const { createServer } = await import('node:http')
   mkdirSync(f.directory, { recursive: true })
   f.save(join(f.directory, 'server.lock'), String(process.pid))
-  // cuts: takes cut; isAllCut: every request cut, the hand-back too; isHanging: takes never answered; late: the first cut waits.
-  let seen = [], cuts = 0, isAllCut = false, isHanging = false, late = 0, asked = []
+  // cuts: takes cut; isAllCut: every request cut, the hand-back too; isHanging: takes never answered; late: the first cut waits;
+  // isOlder: a board from before named claims (a named take refused, an unnamed one cut); isLong: an answer too long to read.
+  let seen = [], cuts = 0, isAllCut = false, isHanging = false, late = 0, asked = [], isOlder = false, isLong = false
   const board = createServer((req, res) => {
     seen.push(req.url.split('?')[0].split('/').at(-1))
     const isTake = req.url.startsWith('/api/messages/mailbox-turn')
     if (isTake) asked.push(Date.now())
     if (isAllCut) { req.socket.destroy(); return }
+    if (isTake && isOlder) {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', () => {
+        if (JSON.parse(body).ref === undefined) { req.socket.destroy(); return }
+        res.statusCode = 400
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify({ error: 'UNKNOWN_FIELD' }))
+      })
+      return
+    }
+    if (isTake && isLong) { res.setHeader('content-type', 'application/json'); res.end('x'.repeat(70_000)); return }
     if (isTake && isHanging) return
     if (isTake && cuts > 0) {
       cuts--
@@ -8191,6 +8204,26 @@ test('a DeepSeek take whose connection to the board is cut asks again within its
     assert.notEqual(slow.status, 0)
     assert.match(slow.stderr, /ECONNRESET/)
     assert.ok(asked.length > 1 && asked.at(-1) - asked[0] < 5000, asked.map(at => at - asked[0]).join(' '))
+
+    // A board from before named claims: its unnamed take is cut, and a claim with no name cannot be handed back, so the
+    // error is reported at once, not asked again.
+    seen = []
+    isOlder = true
+    const older = await take()
+    isOlder = false
+    assert.notEqual(older.status, 0)
+    assert.equal(older.stdout, '')
+    assert.match(older.stderr, /ECONNRESET/)
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-turn'])
+
+    // An answer too long to read is ended by the take itself: deferred, as before #1631, and not asked again.
+    seen = []
+    isLong = true
+    const long = await take()
+    isLong = false
+    assert.equal(long.status, 0, long.stderr)
+    assert.deepEqual(JSON.parse(long.stdout.trim().split(/\r?\n/).pop()), { watch: f.directory, message: null, deferred: true })
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release'])
   } finally {
     board.closeAllConnections()
     await new Promise(done => board.close(done))
