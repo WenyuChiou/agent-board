@@ -172,7 +172,32 @@ const OWN_SHAPES: Partial<Record<DeliveryState, Record<string, Shape>>> = {
   rejected: { stopped: { error: 'STOPPED' } },
   acknowledged: { withReply: { reply: 'ACK a1b2c3 on it' } },
 }
-export const shapesOf = (name: DeliveryState): Record<string, Shape> => ({ ...COMMON_SHAPES, ...(ANY_RECEIVER.includes(name) ? RECEIVER_SHAPES : {}), ...OWN_SHAPES[name] })
+export const shapesOf = (name: DeliveryState): Record<string, Shape> => {
+  const base = { ...COMMON_SHAPES, ...(ANY_RECEIVER.includes(name) ? RECEIVER_SHAPES : {}), ...OWN_SHAPES[name] }
+  const receiverKeys = ['onHook', 'awaitsAck', 'onPull', 'onWake'].filter(key => key in base)
+  const extraKeys = Object.keys(base).filter(key => key !== 'acceptedBefore' && key !== 'otherSurface' && !receiverKeys.includes(key))
+  const axes: (string | undefined)[][] = [
+    'acceptedBefore' in base ? [undefined, 'acceptedBefore'] : [undefined],
+    'otherSurface' in base ? [undefined, 'otherSurface'] : [undefined],
+    [undefined, ...receiverKeys],
+    [undefined, ...extraKeys],
+  ]
+  const out: Record<string, Shape> = {}
+  for (const acc of axes[0]) {
+    for (const surf of axes[1]) {
+      for (const rec of axes[2]) {
+        for (const ext of axes[3]) {
+          const parts = [acc, surf, rec, ext].filter((part): part is string => part !== undefined)
+          if (parts.length === 0) continue
+          // OpenCode's expired message with acceptedBefore is its own row, wakeExpired.
+          if (name === 'expired' && acc === 'acceptedBefore' && rec === 'onWake') continue
+          out[parts.join('+')] = Object.assign({}, ...parts.map(part => base[part]))
+        }
+      }
+    }
+  }
+  return out
+}
 const messageOf = (binding: Connection, fields: Partial<Message>): Message => ({
   id: 'm1', target: binding.id, turn: binding.turn, from: 'board', to: address(binding.agent, binding.session), text: 'hello', hash: textHash('hello'),
   origin: 'local', status: 'queued', updated: SAMPLE_NOW, reply: '', error: '', hops: 1, claimed: 0, nonce: '', ...fields,
@@ -249,11 +274,21 @@ export const observeHolds = (name: DeliveryState, shape?: string): Pick<Delivery
   const claimed = claimMessages({ ...state, messages: [next, message] }, binding, at, 'd4e5f6', binding.scope === 'mailbox' ? 'ba9876543210' : undefined)
   return { holdsSend, holdsStart: !claimed.messages.some(one => one.id === 'm2') }
 }
-// The row's cells and card for one shape of a state.
+// The row's cells and card for one shape (single or `+`-combined flags) of a state.
 export const rowOf = (name: DeliveryState, shape?: string): Omit<DeliveryRow, 'shapes'> => {
   const { shapes, ...row } = DELIVERY_TABLE[name]
-  const own = shape === undefined ? undefined : shapes?.[shape]
-  return own === undefined ? row : { ...row, ...own, on: { ...row.on, ...own.on } }
+  if (shape === undefined) return row
+  const parts = shape.split('+')
+  const matching = Object.keys(shapes ?? {})
+    .filter(key => key.split('+').every(part => parts.includes(part)))
+    .sort((a, b) => a.split('+').length - b.split('+').length)
+  let merged: Omit<DeliveryRow, 'shapes'> = { ...row, on: { ...row.on } }
+  for (const key of matching) {
+    const own = shapes?.[key]
+    if (own === undefined) continue
+    merged = { ...merged, ...own, on: { ...merged.on, ...own.on } }
+  }
+  return merged
 }
 
 // The receipt that sends a message twice today (#1553): an uncertain receipt with no error on an open mailbox message
@@ -295,6 +330,7 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     shapes: {
       acceptedBefore: { card: 'messagesAcceptedUnconfirmed' },
       onWake: { on: { attempt: 'CLAIM_LOST' } },
+      'acceptedBefore+onWake': { on: { openLimit: 'wakeExpired', dayLimit: 'wakeExpired' } },
     } },
   leased: { holdsSend: true, holdsStart: true, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'leased', claimLate: 'sent:leased', pull: 'leased', accept: 'handed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'leased',
@@ -303,6 +339,7 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
       acceptedBefore: { card: 'messagesAcceptedUnconfirmed' },
       otherSurface: { on: { claimLate: 'leased' } },
       lastRepeat: { on: { claimLate: 'sent:leaseSpent' } },
+      'otherSurface+lastRepeat': { on: { claimLate: 'leased' } },
     } },
   leaseSpent: { holdsSend: true, holdsStart: true, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'leaseSpent', claimLate: 'leaseSpent', pull: 'leaseSpent', accept: 'handed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'leaseSpent',
@@ -349,6 +386,8 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
       awaitsAck: { card: 'messagesHandedNow', on: { unsure: 'leased' } },
       onWake: { card: 'messagesHandedNow', on: { unsure: 'wakeStarted', attempt: 'CLAIM_LOST', openLimit: 'unconfirmed', dayLimit: 'unconfirmed' } },
       otherError: { card: 'messagesAccepted', claudeCard: 'claudeDelivered' },
+      'awaitsAck+otherError': { card: 'messagesHandedNow' },
+      'onWake+otherError': { card: 'messagesHandedNow' },
     } },
   handedLost: { holdsSend: false, holdsStart: false, card: 'messagesHandedNow', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'handedLost', claimLate: 'handedLost', pull: 'handedLost', accept: 'handedLost', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'leased',
@@ -366,6 +405,7 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
       awaitsAck: { on: { accept: 'acceptedAwaitsAck', unsure: 'leased' } },
       onPull: { on: { accept: 'handed', unsure: 'pulled' } },
       onWake: { on: { accept: 'handed', unsure: 'wakeStarted', attempt: 'CLAIM_LOST' } },
+      'acceptedBefore+onWake': { on: { openLimit: 'wakeExpired', dayLimit: 'wakeExpired' } },
     } },
   inDoubt: { holdsSend: true, holdsStart: true, card: 'messagesTimeout', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'inDoubt', claimLate: 'inDoubt', pull: 'inDoubt', accept: 'accepted', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'claimed',
@@ -377,6 +417,8 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
       onPull: { on: { accept: 'handed', unsure: 'pulled' } },
       onWake: { on: { accept: 'handed', unsure: 'wakeStarted', attempt: 'CLAIM_LOST' } },
       otherError: { card: 'messagesUncertain' },
+      'acceptedBefore+onWake': { on: { openLimit: 'wakeExpired', dayLimit: 'wakeExpired' } },
+      'acceptedBefore+otherError': { card: 'messagesAcceptedUnconfirmed' },
     } },
   disconnected: { holdsSend: true, holdsStart: true, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'disconnected', claimLate: 'disconnected', pull: 'disconnected', accept: 'accepted', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'claimed',
@@ -387,6 +429,7 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
       awaitsAck: { on: { accept: 'acceptedAwaitsAck', unsure: 'leased' } },
       onPull: { on: { accept: 'handed', unsure: 'pulled' } },
       onWake: { on: { accept: 'handed', unsure: 'wakeStarted', attempt: 'CLAIM_LOST' } },
+      'acceptedBefore+onWake': { on: { openLimit: 'wakeExpired', dayLimit: 'wakeExpired' } },
     } },
   unconfirmed: { holdsSend: false, holdsStart: false, card: 'messagesSentUnconfirmed', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'unconfirmed', claimLate: 'unconfirmed', pull: 'unconfirmed', accept: 'unconfirmed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'wakeStarted',
