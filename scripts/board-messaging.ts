@@ -551,6 +551,9 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
   const root = resolve(directory)
   let hasDeferred = false
   let lastError: string | null = null
+  // The connection to the board failed after the request may have reached it: a failed take then hands back what the
+  // board may have claimed, as after a timeout (#990), while the error itself is reported, not read as busy (#1631).
+  let isCutOff = false
   // The one place that decides "no folder": the first look at the root said ENOENT. Nothing at that path, so no board has run here;
   // a link (even a dead one), a file in its place or any other failure is not that, and no caller looks at the disk again.
   let isAbsent = false
@@ -576,6 +579,7 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
     hasDeferred = false
     lastError = null
     isAbsent = false
+    isCutOff = false
     const wait = budget
     try {
       const started = Date.now()
@@ -628,10 +632,12 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
                 done(result)
               } catch (error) { fail(error) }
             })
-            res.on('error', () => { clearTimeout(timer); hasDeferred = true; fail(new Error('BOARD_NOT_RUNNING')) })
+            res.on('error', error => { clearTimeout(timer); isCutOff = true; fail(error) })
           })
           const timer = setTimeout(() => { req.destroy(); hasDeferred = true; fail(new Error('BOARD_NOT_RUNNING')) }, wait)
-          req.on('error', () => { clearTimeout(timer); hasDeferred = true; fail(new Error('BOARD_NOT_RUNNING')) })
+          // Only the timer above is a timeout; any other transport failure keeps its own code (ECONNREFUSED, ECONNRESET).
+          // A refused connection never reached the board, so it claimed nothing to hand back.
+          req.on('error', error => { clearTimeout(timer); isCutOff = (error as NodeJS.ErrnoException).code !== 'ECONNREFUSED'; fail(error) })
           req.end(JSON.stringify(action === 'mailbox-turn' ? { ...body, before: started + wait } : body))
         })
       }
@@ -699,7 +705,7 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
       throw error
     }
   }
-  return { call, isDeferred: () => hasDeferred, isAbsent: () => isAbsent, error: () => lastError }
+  return { call, isDeferred: () => hasDeferred, isCutOff: () => isCutOff, isAbsent: () => isAbsent, error: () => lastError }
 }
 export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(directory, budget).call
 // A turn-start hook has little time, so its waits are short (150 ms for the board, 120 ms for the store). An
@@ -735,7 +741,7 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
       // The board may have claimed a message after this hook stopped waiting: hand it back (#990).
       // Its own budget is what the hook has left; a claim not handed back waits out the lease.
       const left = deadline - Date.now()
-      if (access.isDeferred() && left > 0) try { await mailboxAccess(directory, Math.min(boardWait, left)).call('mailbox-release', { agent, session, ref }, Date.now()) } catch {}
+      if ((access.isDeferred() || access.isCutOff()) && left > 0) try { await mailboxAccess(directory, Math.min(boardWait, left)).call('mailbox-release', { agent, session, ref }, Date.now()) } catch {}
       throw error
     }
   }
