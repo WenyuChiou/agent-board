@@ -5456,6 +5456,19 @@ test("a refused list stays refused on the inbox card after the question's block 
   expect(parseQuestions(JSON.stringify({ ...after.ledger, records: after.ledger.records.map(record => ({ ...record, options: ['Postgres', 7] })) }))).toBe(null)
 })
 
+test('a refused list kept only in the saved source of a ledger written before #1630 stays refused when its record moves to the inbox turn (#1630)', () => {
+  const updated = new Date(AT_1277).toISOString()
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'codex-session-1630-moved', cwd: '/work/demo', last_assistant_message: EITHER_1277 }), at: AT_1277 }], undefined, undefined, STRINGS.en)
+  const id = inbox[0]!.id!
+  const block = `## demo\n<!-- auto session=${id} agent=codex state=waiting updated=${updated} -->\n### Storage\n- [?] ${EITHER_1277}\n<!-- options=[] -->\n<!-- /auto session=${id} -->\n`
+  const first = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true, 'fixture:1630', undefined, inbox)
+  // A ledger written before this change has the block's source (with its refused list) but no options field.
+  const older = { ...first.ledger, records: first.ledger.records.map(({ options: _options, ...record }) => record) }
+  const after = observeQuestions(older, parseProgress('## demo\n'), null, [], AT_1277 + 1000, true, 'fixture:1630', undefined, inbox)
+  expect(after.ledger.records.map(record => [record.id, record.source?.kind]), 'the same record').toEqual([[first.ledger.records[0]!.id, 'inbox']])
+  expect(offeredAs(buildView(parseProgress('## demo\n'), [], null, AT_1277 + 1000, 0, {}, STRINGS.en, [], {}, after.ledger, undefined, inbox)), 'inbox card').toEqual(REPLY_ONLY)
+})
+
 test('a refused list on a token-marked block stays refused on the inbox card after the block is gone (#1630)', () => {
   const updated = new Date(AT_1277).toISOString()
   const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'codex-session-1630-token', cwd: '/work/demo', last_assistant_message: EITHER_1277 }), at: AT_1277 }], undefined, undefined, STRINGS.en)
