@@ -176,17 +176,15 @@ export const shapesOf = (name: DeliveryState): Record<string, Shape> => {
   const base = { ...COMMON_SHAPES, ...(ANY_RECEIVER.includes(name) ? RECEIVER_SHAPES : {}), ...OWN_SHAPES[name] }
   const receiverKeys = ['onHook', 'awaitsAck', 'onPull', 'onWake'].filter(key => key in base)
   const extraKeys = Object.keys(base).filter(key => key !== 'acceptedBefore' && key !== 'otherSurface' && !receiverKeys.includes(key))
-  const axes: (string | undefined)[][] = [
-    'acceptedBefore' in base ? [undefined, 'acceptedBefore'] : [undefined],
-    'otherSurface' in base ? [undefined, 'otherSurface'] : [undefined],
-    [undefined, ...receiverKeys],
-    [undefined, ...extraKeys],
-  ]
+  const acceptedOpts: readonly (string | undefined)[] = 'acceptedBefore' in base ? [undefined, 'acceptedBefore'] : [undefined]
+  const surfaceOpts: readonly (string | undefined)[] = 'otherSurface' in base ? [undefined, 'otherSurface'] : [undefined]
+  const receiverOpts: readonly (string | undefined)[] = [undefined, ...receiverKeys]
+  const extraOpts: readonly (string | undefined)[] = [undefined, ...extraKeys]
   const out: Record<string, Shape> = {}
-  for (const acc of axes[0]) {
-    for (const surf of axes[1]) {
-      for (const rec of axes[2]) {
-        for (const ext of axes[3]) {
+  for (const acc of acceptedOpts) {
+    for (const surf of surfaceOpts) {
+      for (const rec of receiverOpts) {
+        for (const ext of extraOpts) {
           const parts = [acc, surf, rec, ext].filter((part): part is string => part !== undefined)
           if (parts.length === 0) continue
           // OpenCode's expired message with acceptedBefore is its own row, wakeExpired.
