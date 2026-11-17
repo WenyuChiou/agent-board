@@ -46,7 +46,10 @@ export const boardClient = address => {
         body: JSON.stringify(body), signal: AbortSignal.timeout(5000),
       })
       const result = await response.json()
-      if (!response.ok) throw Object.assign(new Error(result.error || 'BOARD_UNAVAILABLE'), { isRetryable: response.status >= 500 && response.status < 600 })
+      // isRefused: the board answered that it saved nothing: it refused the request (4xx, decided before any save) or its store was
+      // busy (503 MESSAGE_STORE_BUSY, a save that did not happen). Any other answer may come after a save.
+      const isBusy = response.status === 503 && result.error === 'MESSAGE_STORE_BUSY'
+      if (!response.ok) throw Object.assign(new Error(result.error || 'BOARD_UNAVAILABLE'), { isRetryable: response.status >= 500 && response.status < 600, isRefused: response.status >= 400 && response.status < 500 || isBusy, isBusy })
       return result
     } catch (error) {
       // Only the poller uses this hint. Sending, receipts and registration
@@ -81,9 +84,11 @@ export const boardClient = address => {
           if (!await verify()) { await receipt(message, 'rejected'); return }
           const begin = () => { hasStarted = true }
           const accept = () => { begin(); return receipt(message, 'accepted') }
+          // For a delivery that never asked for any of the message to be sent: the board puts it back in the queue (#1578).
+          const unsent = () => hasStarted ? Promise.reject(new Error('DELIVERY_STARTED')) : receipt(message, 'unsent')
           // Older adapters have no explicit boundary, so entering them remains uncertain.
           if (deliver.length < 3) begin()
-          const reply = await (deliver.length >= 3 ? deliver(message, accept, begin) : deliver(message, accept))
+          const reply = await (deliver.length >= 3 ? deliver(message, accept, begin, unsent) : deliver(message, accept))
           if (typeof reply === 'string' && reply.trim()) await receipt(message, 'acknowledged', reply)
         } catch (error) {
           if (!hasStarted) await receipt(message, 'rejected', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : undefined).catch(() => undefined)

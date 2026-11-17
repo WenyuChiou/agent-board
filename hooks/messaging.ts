@@ -396,6 +396,13 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   // OpenCode's 204 answer means the model works in the background and may ack after the open limit: that ack is still taken.
   const isLateAck = input.status === 'acknowledged' && one.status === 'uncertain' && one.hasAccepted === true && one.to.startsWith('opencode:')
   if (one.status === 'uncertain' && one.error === 'EXPIRED' && !isLateAck) throw new Error('MESSAGE_EXPIRED')
+  // unsent: the connection that holds a claim says it never asked for any of it to be sent, so the message goes back to the
+  // queue with its text and the next claim gets its own 30 minutes (#1578). Only a claim nothing else was said of (no accept,
+  // no error) and only from the connection the board handed it to; a receiver that cannot tell whether it was sent says uncertain.
+  if (input.status === 'unsent') {
+    if (one.status !== 'uncertain' || one.error !== '' || one.hasAccepted === true || one.target !== target.id || isMailboxTarget(one.target) || input.reply !== undefined || input.error !== undefined) throw new Error('INVALID_RECEIPT')
+    return { ...state, messages: state.messages.map(message => message === one ? { ...one, status: 'queued' as const, claimed: 0, updated: now } : message) }
+  }
   if (!['uncertain', 'accepted', 'acknowledged', 'rejected'].includes(String(input.status))) throw new Error('INVALID_RECEIPT')
   const status = input.status as Message['status']
   const reply = input.reply === undefined ? '' : input.reply
