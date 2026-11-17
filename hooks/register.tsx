@@ -149,7 +149,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
-import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionFilesKey, questionProofJson, questionProofOf, questionProofPath, questionScope, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
+import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionProofJson, questionProofOf, questionProofPath, questionScope, questionStatsKey, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from './questions'
 
 const PANE = 'agent-board'
@@ -502,20 +502,22 @@ const complete = ($: EngineInterface, request: Parameters<EngineInterface['model
 // Null until the first look, so a list kept in the store is checked against the file even when
 // the file is gone.
 let answeredSeen: string | null = null
-const pollAnswered = async ($: EngineInterface, path: string): Promise<void> => {
+// The stat it took, for the idle question key, so the key does not stat the file again.
+const pollAnswered = async ($: EngineInterface, path: string): Promise<{ mtimeMs: number; size: number } | null> => {
   const file = answeredPath(path)
   const stat = await $.fs.stat(file).catch(() => undefined)
   const seen = stat === undefined ? '' : `${stat.mtimeMs}:${stat.size}`
-  if (seen === answeredSeen) return
+  const taken = stat === undefined ? null : { mtimeMs: stat.mtimeMs, size: stat.size }
+  if (seen === answeredSeen) return taken
   const now = await $.clock.now()
   const list = stat === undefined ? [] : await $.fs.read(file).then(text => parseAnswered(text, now - stat.mtimeMs), () => null)
-  if (list === null) return
+  if (list === null) return taken
   answeredSeen = seen
   await update($, hiddenAsks, () => list)
   // Before progress.md is first read the snapshot is empty; that first read draws both.
-  if ((await read($, snapshot)).path !== path) return
+  if ((await read($, snapshot)).path !== path) return taken
   await refreshStatus($)
-
+  return taken
 }
 
 // Marks whose question has left the file go, so the same words asked again later show. Run once
@@ -937,23 +939,44 @@ const pollQuestions = async ($: EngineInterface, path: string, projects: readonl
 }
 
 // What an idle question pass is made from (#156): the files beside progress.md it reads
-// (`questionFilesKey`), the inbox turns, the questions of this session's list
+// (`questionStatsKey`), the inbox turns, the questions of this session's list
 // (`ownQuestionsKey`), the asks it hides and how many answers were added. A pass that went
 // through cleanly is not made again until one of them moves, so a quiet poll lists two folders
 // instead of reading the question files. Null, so the pass is made, while a file there was just
-// written or the folder does not list: a pass that cannot list still counts toward the questions
+// written or the folder does not stat: a pass that cannot stat still counts toward the questions
 // problem, as before.
 let questionsSeen: string | null = null
-const questionsKey = async ($: EngineInterface, path: string, added: number): Promise<string | null> => {
+// The idle check, without listing the folder beside progress.md (#422): the stats of the three
+// files a pass reads and the folder's own time, which moves when a capture or a proof is added,
+// removed or renamed. The poll already stats progress.md and the answered file, so their stats
+// arrive here; a caller that has none leaves them undefined and each is stat'ed here instead.
+// A stat that is null says the file does not stat, so it is left out of the key.
+const questionsKey = async ($: EngineInterface, path: string, added: number, progress?: { mtimeMs: number; size: number } | null, answered?: { mtimeMs: number; size: number } | null): Promise<string | null> => {
   const at = await $.clock.now()
-  const entries = await $.fs.list(path.replace(/[\\/][^\\/]*$/, '')).catch(() => null)
-  const files = entries === null ? null : questionFilesKey(path, answeredPath(path), entries, at, POLL_MS)
+  const dir = path.replace(/[\\/][^\\/]*$/, '')
+  const dirStat = await $.fs.stat(dir).catch(() => undefined)
+  if (dirStat === undefined) return null
+  const progressStat = progress !== undefined ? progress : await $.fs.stat(path).catch(() => undefined)
+  const ledgerStat = await $.fs.stat(questionsPath(path)).catch(() => undefined)
+  const answeredStat = answered !== undefined ? answered : await $.fs.stat(answeredPath(path)).catch(() => undefined)
+  const files = questionStatsKey(
+    path,
+    answeredPath(path),
+    {
+      progress: progressStat === undefined || progressStat === null ? null : { size: progressStat.size, mtimeMs: progressStat.mtimeMs },
+      ledger: ledgerStat === undefined ? null : { size: ledgerStat.size, mtimeMs: ledgerStat.mtimeMs },
+      answered: answeredStat === undefined || answeredStat === null ? null : { size: answeredStat.size, mtimeMs: answeredStat.mtimeMs },
+      dirMtimeMs: dirStat.mtimeMs,
+    },
+    at,
+    POLL_MS,
+  )
   if (files === null) return null
 
   return JSON.stringify([path, files, await pendingTurns($), ownQuestionsKey(await read($, mine)), await read($, hiddenAsks), added])
 }
 
-const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[] | undefined, evidence: readonly AgentTurn[] = []): Promise<void> => {
+const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[] | undefined, evidence: readonly AgentTurn[] = [], progress?: { mtimeMs: number; size: number } | null, answered?: { mtimeMs: number; size: number } | null): Promise<void> => {
   rememberAnswered(evidence)
   if (evidence.length > 0 && questionsRunning !== null) return
   try {
@@ -967,7 +990,7 @@ const pollAnsweredQuestions = async ($: EngineInterface, path: string, projects:
       if (!batch.some(([, turn]) => ledger.records.some(record => record.isUnresolved && matches(record, turn)))) return
     }
     // Taken before the pass, so a write that lands while it runs makes the next poll pass again.
-    const key = evidence.length > 0 ? null : await questionsKey($, path, added)
+    const key = evidence.length > 0 ? null : await questionsKey($, path, added, progress, answered)
     // A pass skipped as unchanged had no answer added since the clean pass it stands for, which
     // carried every answer in this batch, so they still age out below.
     if (key === null || key !== questionsSeen) {
@@ -1156,9 +1179,9 @@ const isDoneWithin = ($: EngineInterface, work: Promise<unknown>, ms: number): P
 
 // The poll skips a running question pass instead of piling up reads behind a held file. Waiting
 // for at most one poll here lets the pane draw while that pass is held.
-const questionPass = async ($: EngineInterface, path: string, projects: readonly ProgressProject[]): Promise<void> => {
+const questionPass = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], progress?: { mtimeMs: number; size: number } | null, answered?: { mtimeMs: number; size: number } | null): Promise<void> => {
   if (questionPassing !== null || questionsRunning !== null) return
-  const pass: Promise<void> = pollAnsweredQuestions($, path, projects).finally(() => {
+  const pass: Promise<void> = pollAnsweredQuestions($, path, projects, [], progress, answered).finally(() => {
     if (questionPassing === pass) questionPassing = null
   })
   questionPassing = pass
@@ -1198,7 +1221,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
   try {
     pollStartedAt = await $.clock.now()
     const path = await progressPath($)
-    await pollAnswered($, path).catch(() => undefined)
+    const answeredStat = await pollAnswered($, path).catch(() => undefined)
     await pollBarStyle($, path).catch(() => undefined)
     const previous = await read($, snapshot)
     const stat = await $.fs.stat(path).catch(() => undefined)
@@ -1232,7 +1255,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       }
       await pollSeen($, path, previous.projects, false, isPrunePending ? { mtimeMs: stat.mtimeMs, size: stat.size } : null)
       if (!isCurrent()) return
-      await questionPass($, path, previous.projects)
+      await questionPass($, path, previous.projects, stat, answeredStat)
       if (!isCurrent()) return
       const gone = [...(await pluginGoneBlocks($, previous.projects))].sort()
       if (!isCurrent()) return
@@ -1272,7 +1295,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
       }))
       await pollSeen($, path, projects, true)
       if (!isCurrent()) return
-      await questionPass($, path, projects)
+      await questionPass($, path, projects, stat, answeredStat)
       if (!isCurrent()) return
       const gone = [...(await pluginGoneBlocks($, projects))].sort()
       if (!isCurrent()) return
