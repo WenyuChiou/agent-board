@@ -5183,19 +5183,26 @@ test('a give-back case whose setup fails after its proxy and receiver started cl
 }))
 
 test('a Codex receiver closed while it is still connecting to Codex ends that connection before close() is done (#1632)', () => codexFixture(async (board, dir) => {
-  const daemon = codexDaemon(dir)
-  // The first tick starts connecting at once; close() comes before the connection is made.
-  await codexReceiver(board, daemon).close()
-  // The stand-in writes its state every 50 ms while it runs: once close() is done, that stops.
-  const state = daemon.log + '.state'
-  const seen = () => { try { return JSON.parse(readFileSync(state, 'utf8')).seen } catch { return null } }
-  await pause(500)
-  const first = seen()
-  await pause(500)
-  // The connection was made (the stand-in logged its handshake), and the stand-in no longer runs: its state, if it wrote any, is
-  // not written again.
-  assert.ok(readFileSyncSafe(daemon.log).includes('handshake'))
-  assert.equal(seen(), first)
+  const pidFile = join(dir, 'proxy.pid')
+  const daemon = codexDaemon(dir, { pidFile })
+  try {
+    // The first tick starts connecting at once; close() comes before the connection is made.
+    await codexReceiver(board, daemon).close()
+    // The stand-in writes its state every 50 ms while it runs: once close() is done, that stops.
+    const state = daemon.log + '.state'
+    const seen = () => { try { return JSON.parse(readFileSync(state, 'utf8')).seen } catch { return null } }
+    await pause(500)
+    const first = seen()
+    await pause(500)
+    // The connection was made (the stand-in logged its handshake), and the stand-in no longer runs: its state, if it wrote any, is
+    // not written again.
+    assert.ok(readFileSyncSafe(daemon.log).includes('handshake'))
+    assert.equal(seen(), first)
+  } finally {
+    // A receiver that kept the connection leaves the stand-in running, which would keep the test run from ending: the test ends it
+    // by its pid, so a receiver without the fix fails here instead of hanging.
+    try { process.kill(Number(readFileSync(pidFile, 'utf8'))) } catch {}
+  }
 }))
 
 test('a Codex claim whose unsent receipt got no answer is not started by that delivery: the board may have queued it again, and it is started once (#1578)', () => codexFixture(async (board, dir) => {
