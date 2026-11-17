@@ -27,9 +27,17 @@ Date: 2026-11-16. Part of #1416 (pull request #1601). The wake (#1396) moved to 
 3. `agy --conversation <turn-1 id> -i 'Synthetic test 1601: go on.'` resumed the turn-1 conversation (18:49:29). The turn-start hook claimed the message; the reply's first lines were `ACK ebdea7` and `PONG-TUI`.
 4. Store line after the turn: status `acknowledged`, `reply` "ACK ebdea7", `error` empty, 27.8 s after the claim; hops 1.
 
+## Run 3: agy TUI on the review fix
+
+Commit under test: fe5565df (the turn-end hook reads the replies written after the hand-over), installed the same way; the board page restarted. The app window had closed by then, so this run is in the TUI only; both surfaces run the same hook code.
+
+1. The turn-1 conversation's card now read "Replied" for run 2's message. I queued a message on it and resumed the conversation with `agy --conversation <turn-1 id> -i 'Synthetic test 1601: go on.'`.
+2. The hook handed it over with the line `Reply first with this line alone: ACK 6e6988` (read back from the transcript), but the model answered `ACK c88a02`, a code it was not given. The board did not acknowledge it: status stayed `accepted`, and the claim was spent at that turn end.
+3. A second message, the same way: the model answered `ACK 88d058`, its own code, and the store line went to `acknowledged`, `reply` "ACK 88d058", 11.2 s after the claim.
+
 ## Result
 
-PASS on both surfaces: the message was handed over once at the next turn, and the turn-end hook took the model's ACK line and marked it acknowledged. The board's hook error log got no new line during either run.
+PASS on both surfaces: the message was handed over once at the next turn, and the turn-end hook took the model's ACK line and marked it acknowledged; a reply with a code the model was not given acknowledged nothing. The board's hook error log got no new line during any run.
 
 ## Notes, outside #1601
 
