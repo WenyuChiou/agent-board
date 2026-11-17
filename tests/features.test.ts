@@ -5456,6 +5456,21 @@ test("a refused list stays refused on the inbox card after the question's block 
   expect(parseQuestions(JSON.stringify({ ...after.ledger, records: after.ledger.records.map(record => ({ ...record, options: ['Postgres', 7] })) }))).toBe(null)
 })
 
+test('a refused list on a token-marked block stays refused on the inbox card after the block is gone (#1630)', () => {
+  const updated = new Date(AT_1277).toISOString()
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'codex-session-1630-token', cwd: '/work/demo', last_assistant_message: EITHER_1277 }), at: AT_1277 }], undefined, undefined, STRINGS.en)
+  const id = inbox[0]!.id!
+  // The question token gives the block's question its own record, which the inbox turn (with no token) cannot reuse.
+  const block = `## demo\n<!-- auto session=${id} agent=codex state=waiting updated=${updated} -->\n### Storage\n- [?] ${EITHER_1277}\n<!-- options=[] -->\n<!-- question=${'c'.repeat(64)}:1 -->\n<!-- /auto session=${id} -->\n`
+  const first = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true, 'fixture:1630', undefined, inbox)
+  expect(first.ledger.records.find(record => record.source?.kind === 'block')?.producer).toBe(`${'c'.repeat(64)}:1`)
+  const after = observeQuestions(first.ledger, parseProgress('## demo\n'), null, [], AT_1277 + 1000, true, 'fixture:1630', undefined, inbox)
+  const view = buildView(parseProgress('## demo\n'), [], null, AT_1277 + 1000, 0, {}, STRINGS.en, [], {}, after.ledger, undefined, inbox)
+  expect(view.waiting.length > 0, 'still waiting').toBe(true)
+  expect(view.waiting.map(item => [item.kind, item.options]), 'inbox card').toEqual(view.waiting.map(() => ['reply', []]))
+  expect(serveModel(view, [], STRINGS.en).asks.map(ask => ask.answers), 'page').toEqual(view.waiting.map(() => []))
+})
+
 test('a task that asks for a yes or no and also lists options is a confirm on its own pane and on the other board (#1277)', () => {
   const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
   const yesNo = { isAsked: true, isChoose: false, row: [], page: [STRINGS.en.yesAnswer, STRINGS.en.noAnswer], kind: 'confirm' }
