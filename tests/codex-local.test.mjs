@@ -8112,10 +8112,22 @@ test('a DeepSeek take whose connection to the board is cut asks again within its
   const { createServer } = await import('node:http')
   mkdirSync(f.directory, { recursive: true })
   f.save(join(f.directory, 'server.lock'), String(process.pid))
-  let seen = [], cuts = 0
+  // cuts: takes cut; isAllCut: every request cut, the hand-back too; isHanging: takes never answered; late: the first cut waits.
+  let seen = [], cuts = 0, isAllCut = false, isHanging = false, late = 0, asked = []
   const board = createServer((req, res) => {
     seen.push(req.url.split('?')[0].split('/').at(-1))
-    if (req.url.startsWith('/api/messages/mailbox-turn') && cuts > 0) { cuts--; req.socket.destroy(); return }
+    const isTake = req.url.startsWith('/api/messages/mailbox-turn')
+    if (isTake) asked.push(Date.now())
+    if (isAllCut) { req.socket.destroy(); return }
+    if (isTake && isHanging) return
+    if (isTake && cuts > 0) {
+      cuts--
+      const wait = late
+      late = 0
+      if (wait > 0) setTimeout(() => req.socket.destroy(), wait)
+      else req.socket.destroy()
+      return
+    }
     res.setHeader('content-type', 'application/json')
     res.end(JSON.stringify(req.url.startsWith('/api/messages/mailbox-turn') ? { message: null } : { ok: true }))
   })
@@ -8147,7 +8159,42 @@ test('a DeepSeek take whose connection to the board is cut asks again within its
     assert.equal(failed.stdout, '')
     assert.match(failed.stderr, /ECONNRESET/)
     assert.ok(seen.filter(one => one === 'mailbox-turn').length > 1, seen.join(' '))
-  } finally { await new Promise(done => board.close(done)) }
+
+    // The take's own time ran out (the board never answered): deferred, and not asked again, though ending the request
+    // raises a connection error of its own.
+    seen = []
+    cuts = 0
+    isHanging = true
+    const waited = await take()
+    isHanging = false
+    assert.equal(waited.status, 0, waited.stderr)
+    assert.deepEqual(JSON.parse(waited.stdout.trim().split(/\r?\n/).pop()), { watch: f.directory, message: null, deferred: true })
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release'])
+
+    // Cut, and the hand-back cut too: the board may still hold the message, so the error is reported at once, not asked again.
+    seen = []
+    isAllCut = true
+    const held = await take()
+    isAllCut = false
+    assert.notEqual(held.status, 0)
+    assert.equal(held.stdout, '')
+    assert.match(held.stderr, /ECONNRESET/)
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release'])
+
+    // The five seconds count from the first ask: a first take cut late in its wait does not stretch them.
+    seen = []
+    asked = []
+    cuts = Infinity
+    late = 1800
+    const slow = await take()
+    cuts = 0
+    assert.notEqual(slow.status, 0)
+    assert.match(slow.stderr, /ECONNRESET/)
+    assert.ok(asked.length > 1 && asked.at(-1) - asked[0] < 5000, asked.map(at => at - asked[0]).join(' '))
+  } finally {
+    board.closeAllConnections()
+    await new Promise(done => board.close(done))
+  }
 }))
 
 test('a take that returns after its last session was removed opens no watcher and logs no failure (#1442)', () => fixture(async f => {
