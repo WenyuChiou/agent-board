@@ -49,7 +49,7 @@ export const boardClient = address => {
       // isRefused: the board answered that it saved nothing: it refused the request (4xx, decided before any save) or its store was
       // busy (503 MESSAGE_STORE_BUSY, a save that did not happen). Any other answer may come after a save.
       const isBusy = response.status === 503 && result.error === 'MESSAGE_STORE_BUSY'
-      if (!response.ok) throw Object.assign(new Error(result.error || 'BOARD_UNAVAILABLE'), { isRetryable: response.status >= 500 && response.status < 600, isRefused: response.status >= 400 && response.status < 500 || isBusy })
+      if (!response.ok) throw Object.assign(new Error(result.error || 'BOARD_UNAVAILABLE'), { isRetryable: response.status >= 500 && response.status < 600, isRefused: response.status >= 400 && response.status < 500 || isBusy, isBusy })
       return result
     } catch (error) {
       // Only the poller uses this hint. Sending, receipts and registration

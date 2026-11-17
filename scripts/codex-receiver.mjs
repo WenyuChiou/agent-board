@@ -752,19 +752,23 @@ export const startCodexReceiver = ({
           // of Codex for it, since turn/start comes only after this loop. The board then hands it out again when the thread reads as a
           // person's, with its own 30 minutes. Without this the claim ran out and the board dropped its text (#1578). An answer that says
           // the board saved nothing (it refused the give-back, as an older board does, or its store was busy) leaves the claim this
-          // delivery's: it goes on waiting, and starts the message if the thread reads as a person's in time. It is not asked again
-          // (receipts are never retried). A give-back whose answer is not known (none came, or any other error answer) may have put the
-          // message back in the queue, so this delivery ends with no turn/start: the board hands the message out again if it took the
-          // give-back, and expires the claim if it did not.
-          let canGiveBack = typeof unsent === 'function'
+          // delivery's: it goes on waiting, and starts the message if the thread reads as a person's in time. A refused give-back is
+          // not asked again. A busy store is asked again a tick later, while the claim still waits, so a claim held through a long busy
+          // turn still goes back before it runs out (#1625; the owner's choice, 2026-11-16, over "receipts are never retried": the store
+          // saved nothing, so the give-back is asked for the first time again, not a second time). A give-back whose answer is not
+          // known (none came, or any other error answer) may have put the message back in the queue, so this delivery ends with no
+          // turn/start and never asks again: the board hands the message out again if it took the give-back, and expires the claim if
+          // it did not.
+          let canGiveBack = typeof unsent === 'function', giveBackAt = 0
           const isShort = () => ackMs - (Date.now() - waitsSince) < Math.max(unloadMs, (quiet.get(thread)?.delay ?? 0) + unloadMarginMs) + 2 * tickMs
           // 'back': the board took it; 'held': the board saved nothing, so the claim is still this delivery's; 'unknown': either may be so.
           const giveBack = async () => {
-            if (!canGiveBack) return 'held'
+            if (!canGiveBack || Date.now() < giveBackAt) return 'held'
             try { await unsent(); return 'back' } catch (error) {
               onError(error)
               if (error?.isRefused !== true) return 'unknown'
-              canGiveBack = false
+              if (error?.isBusy === true) giveBackAt = Date.now() + tickMs
+              else canGiveBack = false
               return 'held'
             }
           }
