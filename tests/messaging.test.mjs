@@ -4909,12 +4909,33 @@ test('a Codex thread the receiver was dropped from while it could not leave it i
   // The first leave is refused and the ones after it get no answer (their limit is 2 s here), so the receiver stays subscribed. The
   // stand-in keeps the thread 5 s from the moment the connection is lost: time for the next Codex program to start, for the
   // receiver to register again and for a board poll, so that a receiver that read the thread as a person's would take the message.
-  const daemon = codexDaemon(dir, { person, pidFile, unloadDelay: 5000, unsubscribeFaults: ['error', 'mute', 'mute'] })
-  const receiver = codexReceiver(board, daemon, { unloadMs: 6000, leaveMs: 2000 })
+  const hold = join(dir, 'read-hold')
+  const daemon = codexDaemon(dir, { person, pidFile, unloadDelay: 5000, unsubscribeFaults: ['error', 'mute', 'mute'], readHold: hold })
+  // Until the first message is acknowledged the receiver reads the time on a clock this test moves by hand: 1 s each time the
+  // stand-in has had another thread/read, so its looks are at most two steps apart on that clock, inside the gap rule's 20 s
+  // (watchTickMs), however slow the runner is. On the wall clock with its 100 ms tick, the 6 s wait for the first message needed
+  // 6 s of looks never more than 200 ms apart, and a runner that paused for longer started it again past the test's deadline
+  // (#1639). From the acknowledgement on, the clock runs with the wall clock from where it stands, so the 6 s wait after the lost
+  // connection is real time against the stand-in's real 5 s: the gap rule only ever starts a wait again, so its 20 s there can
+  // only bring a wrong start sooner, never hide one.
+  let clock = 0, since = null
+  const reads = () => daemon.calls().filter(one => one.method === 'thread/read').length
+  const receiver = codexReceiver(board, daemon, { unloadMs: 6000, leaveMs: 2000, now: () => since === null ? clock : clock + performance.now() - since, watchTickMs: 10_000 })
   try {
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
-    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    // Every third step the stand-in holds the answers to thread/read for 400 ms, a runner's pause of four ticks: on the wall
+    // clock each such pause would start the wait again, and the first message would never come.
+    let seen = reads(), steps = 0
+    await waitFor(async () => {
+      if ((await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged') return true
+      if (reads() > seen) {
+        seen = reads(); clock += 1000; steps += 1
+        if (steps % 3 === 0) { writeFileSync(hold, ''); await pause(400); unlinkSync(hold) }
+      }
+      return false
+    })
+    since = performance.now()
     const acknowledged = Date.now()
     // The person quits, and another connection registers for the session: the receiver's board connection ends while it is
     // still subscribed to the thread.
