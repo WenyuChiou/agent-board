@@ -219,8 +219,10 @@ const askFields = (
   task: ProgressMirrorTask,
 ): Pick<ProgressMirrorTask, 'ask' | 'options' | 'command' | 'link'> => {
   if (waiting === null) return { ask: null, options: [], command: null, link: null }
+  // The list is kept whole: an empty or non-text entry stays as an empty one, so the writer and the
+  // panes refuse the list whole (#1277) instead of offering what is left of it (#1628).
   const options = Array.isArray(meta.options)
-    ? meta.options.filter((one): one is string => typeof one === 'string' && one.trim() !== '').map(one => one.trim())
+    ? meta.options.map(one => typeof one === 'string' ? one.trim() : '')
     : meta.options === null
       ? []
       : (task.options ?? [])

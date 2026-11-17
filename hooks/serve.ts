@@ -2264,7 +2264,7 @@ const PAGE_SCRIPT = String.raw`
       // Answered in the agent's own window: the options are only listed, so no button, reply box or copy is offered.
       if (ask.native.options.length) {
         var choices = el('ul', 'native-options');
-        ask.native.options.forEach(function (option) { add(choices, el('li', '', clean(option))); });
+        ask.native.options.forEach(function (option) { add(choices, el('li', '', String(option))); });
         add(body, choices);
       }
       add(body, el('p', 'note', ask.native.line));
@@ -2286,8 +2286,9 @@ const PAGE_SCRIPT = String.raw`
         var choiceNodes = [];
         choiceArea = el('div', 'answer-picks');
         add(answers, choiceArea);
+        // A choice shows as it is sent: the prose cleanup would make "Fix #123" and "Fix #456" read the same (#1629).
         var makeChoice = function (answer, index) {
-          var node = navButton(clean(answer), function () {
+          var node = navButton(String(answer), function () {
             if (pickerSend.dotsNode) return;
             selected = index;
             cardChoices[key] = { identity: identity, index: index };

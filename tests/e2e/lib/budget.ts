@@ -5,8 +5,11 @@ export const PAGE_MS = 4000
 // Receipt slack on top of the connector and page polls: covers one delivery round trip on a loaded CI runner.
 export const RECEIPT_SLACK_MS = 2000
 // D24: file operations per idle poll. The page server's check is in l4-time.test.mjs. The pane's
-// is in tests/ledger-reads.test.tsx (#156), since plain Node cannot load the pane.
-export const IDLE_POLL_FILE_OPS = 6
+// is in tests/ledger-reads.test.tsx (#156), since plain Node cannot load the pane. The pane's
+// poll traded its folder listing for two stats (#422), so the count is seven: the stats of
+// progress.md, the answered file, the settings file, the seen file, the ledger and the folder,
+// and the inbox listing. The page server's check shares the number and stays under it.
+export const IDLE_POLL_FILE_OPS = 7
 // D24, the plan's scale budget: 100 live sessions, 300 blocks, 1,000 question records.
 export const LIVE_SESSIONS = 100
 export const BLOCKS = 300

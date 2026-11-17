@@ -8108,6 +8108,128 @@ const deepseekStub = async (f, tag, queued) => {
   return stub
 }
 
+test('a DeepSeek take whose connection to the board is cut asks again within its five seconds and reports the error only when it keeps failing (#1631)', () => mailboxFixture(async f => {
+  const { createServer } = await import('node:http')
+  mkdirSync(f.directory, { recursive: true })
+  f.save(join(f.directory, 'server.lock'), String(process.pid))
+  // cuts: takes cut; isAllCut: every request cut, the hand-back too; isHanging: takes never answered; late: the first cut waits;
+  // isOlder: a board from before named claims (a named take refused, an unnamed one cut); isLong: an answer too long to read.
+  let seen = [], cuts = 0, isAllCut = false, isHanging = false, late = 0, asked = [], isOlder = false, isLong = false
+  const board = createServer((req, res) => {
+    seen.push(req.url.split('?')[0].split('/').at(-1))
+    const isTake = req.url.startsWith('/api/messages/mailbox-turn')
+    if (isTake) asked.push(Date.now())
+    if (isAllCut) { req.socket.destroy(); return }
+    if (isTake && isOlder) {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', () => {
+        if (JSON.parse(body).ref === undefined) { req.socket.destroy(); return }
+        res.statusCode = 400
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify({ error: 'UNKNOWN_FIELD' }))
+      })
+      return
+    }
+    if (isTake && isLong) { res.setHeader('content-type', 'application/json'); res.end('x'.repeat(70_000)); return }
+    if (isTake && isHanging) return
+    if (isTake && cuts > 0) {
+      cuts--
+      const wait = late
+      late = 0
+      if (wait > 0) setTimeout(() => req.socket.destroy(), wait)
+      else req.socket.destroy()
+      return
+    }
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify(req.url.startsWith('/api/messages/mailbox-turn') ? { message: null } : { ok: true }))
+  })
+  // The take runs as its own process, as DeepSeek's receiver starts it; the board answers in this one, so it is awaited.
+  const take = () => new Promise(done => {
+    const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--mailbox', 'take', '--session', 'deepseek-cut-session'], { cwd: f.home, env: f.env, windowsHide: true })
+    let stdout = '', stderr = ''
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    const timer = setTimeout(() => child.kill(), 15000)
+    child.on('close', status => { clearTimeout(timer); done({ status, stdout, stderr }) })
+  })
+  try {
+    await new Promise(done => board.listen(0, '127.0.0.1', done))
+    f.save(join(f.directory, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${board.address().port}/?t=synthetic` }))
+
+    // Cut once, then back: the claim is handed back and the take asks again, so the receiver gets a plain answer.
+    cuts = 1
+    const recovered = await take()
+    assert.equal(recovered.status, 0, recovered.stderr)
+    assert.deepEqual(JSON.parse(recovered.stdout.trim().split(/\r?\n/).pop()), { watch: f.directory, message: null, deferred: false })
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release', 'mailbox-turn'])
+
+    // Cut every time: the take asks again until its five seconds are spent, then fails with the transport's code.
+    seen = []
+    cuts = Infinity
+    const failed = await take()
+    assert.notEqual(failed.status, 0)
+    assert.equal(failed.stdout, '')
+    assert.match(failed.stderr, /ECONNRESET/)
+    assert.ok(seen.filter(one => one === 'mailbox-turn').length > 1, seen.join(' '))
+
+    // The take's own time ran out (the board never answered): deferred, and not asked again, though ending the request
+    // raises a connection error of its own.
+    seen = []
+    cuts = 0
+    isHanging = true
+    const waited = await take()
+    isHanging = false
+    assert.equal(waited.status, 0, waited.stderr)
+    assert.deepEqual(JSON.parse(waited.stdout.trim().split(/\r?\n/).pop()), { watch: f.directory, message: null, deferred: true })
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release'])
+
+    // Cut, and the hand-back cut too: the board may still hold the message, so the error is reported at once, not asked again.
+    seen = []
+    isAllCut = true
+    const held = await take()
+    isAllCut = false
+    assert.notEqual(held.status, 0)
+    assert.equal(held.stdout, '')
+    assert.match(held.stderr, /ECONNRESET/)
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release'])
+
+    // The five seconds count from the first ask: a first take cut late in its wait does not stretch them.
+    seen = []
+    asked = []
+    cuts = Infinity
+    late = 1800
+    const slow = await take()
+    cuts = 0
+    assert.notEqual(slow.status, 0)
+    assert.match(slow.stderr, /ECONNRESET/)
+    assert.ok(asked.length > 1 && asked.at(-1) - asked[0] < 5000, asked.map(at => at - asked[0]).join(' '))
+
+    // A board from before named claims: its unnamed take is cut, and a claim with no name cannot be handed back, so the
+    // error is reported at once, not asked again.
+    seen = []
+    isOlder = true
+    const older = await take()
+    isOlder = false
+    assert.notEqual(older.status, 0)
+    assert.equal(older.stdout, '')
+    assert.match(older.stderr, /ECONNRESET/)
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-turn'])
+
+    // An answer too long to read is ended by the take itself: deferred, as before #1631, and not asked again.
+    seen = []
+    isLong = true
+    const long = await take()
+    isLong = false
+    assert.equal(long.status, 0, long.stderr)
+    assert.deepEqual(JSON.parse(long.stdout.trim().split(/\r?\n/).pop()), { watch: f.directory, message: null, deferred: true })
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release'])
+  } finally {
+    board.closeAllConnections()
+    await new Promise(done => board.close(done))
+  }
+}))
+
 test('a take that returns after its last session was removed opens no watcher and logs no failure (#1442)', () => fixture(async f => {
   const s = await deepseekStub(f, 'late', [])
   for (const [id, late] of [['late-a', { watch: s.directory, message: null }], ['late-b', 'fail']]) {

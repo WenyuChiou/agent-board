@@ -1403,7 +1403,9 @@ export const buildView = (
     const id = observed?.keys[pendingQuestionSlot(scope, turn.text)] ?? observed?.ledger.records.find(record => record.scope === scope && record.isUnresolved && record.producerSources?.includes(JSON.stringify(turn)))?.id
     if (id === undefined || waiting.some(item => item.questionId === id)) return []
     const parts = splitNote(turn.text)
-    return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
+    // The list or refusal its block gave stays with the question after the block is gone (#1630).
+    const kept = observed?.ledger.records.find(record => record.id === id)?.options
+    return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note, kept === undefined ? undefined : { options: optionsGiven(validOptions(kept)) }), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
   const isRepliedMine = mine !== null && mine.replied !== undefined && Number.isFinite(mine.replied) && (mine.updated === null || mine.replied >= (mine.updated ?? 0))
   const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).flatMap(item => {
@@ -1481,7 +1483,8 @@ export const buildView = (
     }
     const rowStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
     const stage = rowStopped ? 'older' : age.stage
-    const retainedOptions = sourceOptions(source, record.occurrence)
+    // An inbox turn carries no list, so its card reads the one its block gave (#1630); any other source reads its own.
+    const retainedOptions = sourceOptions(source, record.occurrence) ?? (source.kind !== 'inbox' || record.options === undefined ? undefined : validOptions(record.options) ?? [])
     const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, dir: recordFolder(record) ?? saved?.auto?.dir ?? null, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), at: record.firstObserved, ...askOf(parts.text, parts.note, retainedOptions === undefined ? undefined : { options: optionsGiven(retainedOptions) }), where: 'other', agent: agent === 'claude' ? '' : agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
     // The inbox file can be gone while its ledger copy still waits for the report.
     // Require the full binding and a newer source clock before moving its Resolve action.
