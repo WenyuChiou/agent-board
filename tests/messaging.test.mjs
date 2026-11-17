@@ -5103,27 +5103,32 @@ test('an unsent receipt from the connection that holds a claim puts the message 
   assert.throws(() => messageReceipt(queued, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2), /CLAIM_REQUIRED/)
 })
 
-// The claim meets the person's turn, which ends 0.2 s later. A whole wait is 2 s here and the claim's time 3 s, so the receiver gives
-// the claim back while it watches the idle thread again (with less than 2.2 s left), and the thread reads as a person's about 2 s
-// after the turn ended, inside the claim's time. The give-back never reaches the board; the proxy answers it as the board would.
-const codexRefusedGiveBack = mode => codexFixture(async (board, dir) => {
+// The claim meets the person's turn, which ends right after the receiver leaves again. A whole wait is 2 s here and the claim's time
+// 4 s, so the receiver gives the claim back while it watches the idle thread again (with less than 2.2 s left, about 1.8 s in), and the
+// thread reads as a person's about 2 s after the turn ended, well inside the claim's time.
+const codexGiveBackCase = async (board, dir, mode) => {
   const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
   writeFileSync(person, '')
   const daemon = codexDaemon(dir, { readActive: true, endFlag, person })
   const proxy = await pollingProxy(board, mode)
-  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 3000 })
+  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 4000 })
+  const connection = await codexConnection(board)
+  assert.equal(await codexSend(board, connection), 200)
+  await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+  writeFileSync(endFlag, '')
+  return { daemon, proxy, close: async () => { await receiver.close(); await proxy.close() } }
+}
+// The give-back never reaches the board; the proxy answers it as the board would.
+const codexRefusedGiveBack = mode => codexFixture(async (board, dir) => {
+  const { daemon, proxy, close } = await codexGiveBackCase(board, dir, mode)
   try {
-    const connection = await codexConnection(board)
-    assert.equal(await codexSend(board, connection), 200)
-    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
-    writeFileSync(endFlag, '')
     // The give-back was answered, and the board still holds the claim for this receiver, which started nothing yet.
     await waitFor(async () => proxy.faults() > 0)
     assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
     // The claim is still the receiver's: it is started once when the thread reads as a person's, and acknowledged.
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
     assert.equal(codexStarts(daemon), 1)
-  } finally { await receiver.close(); await proxy.close() }
+  } finally { await close() }
 })
 
 test("a Codex claim whose give-back the board refuses (409) is still the receiver's, and is started once when the thread reads as a person's in time (#1578)", () => codexRefusedGiveBack('unsent-refused'))
@@ -5131,25 +5136,19 @@ test("a Codex claim whose give-back the board refuses (409) is still the receive
 test("a Codex claim whose give-back met a busy message store (503, nothing saved) is still the receiver's, and is started once when the thread reads as a person's in time (#1578)", () => codexRefusedGiveBack('unsent-busy'))
 
 test('a Codex claim whose unsent receipt got no answer is not started by that delivery: the board may have queued it again, and it is started once (#1578)', () => codexFixture(async (board, dir) => {
-  const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
-  writeFileSync(person, '')
-  // As in the test below, the claim meets the person's turn and its time runs short, so the receiver gives it back. The board puts it
-  // back in the queue, but the answer never reaches the receiver: it cannot tell whether the claim is still its own, so it starts
-  // nothing for it. The board hands the message out again once the thread reads as a person's.
-  const daemon = codexDaemon(dir, { readActive: true, endFlag, person })
-  const proxy = await pollingProxy(board, 'unsent-lost')
-  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs, ackMs: 3000 })
+  // As in the two tests above, the thread is idle again when the receiver gives the claim back, and reads as a person's in time, so a
+  // delivery that kept the claim would start it. The board puts the message back in the queue, but the answer never reaches the
+  // receiver: it cannot tell whether the claim is still its own, so it starts nothing for it. The board hands the message out again
+  // once the thread reads as a person's.
+  const { daemon, proxy, close } = await codexGiveBackCase(board, dir, 'unsent-lost')
   try {
-    const connection = await codexConnection(board)
-    assert.equal(await codexSend(board, connection), 200)
     await waitFor(async () => proxy.faults() > 0)
     assert.equal(codexStarts(daemon), 0)
-    writeFileSync(endFlag, '')
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
     // Two ticks' worth of waits more: no second start.
     await pause(1500)
     assert.equal(codexStarts(daemon), 1)
-  } finally { await receiver.close(); await proxy.close() }
+  } finally { await close() }
 }))
 
 test('a Codex claim that meets a busy thread goes back to the queue with its text before too little of its time is left for a whole wait, and is delivered once after (#1578)', () => codexFixture(async (board, dir) => {
