@@ -919,6 +919,12 @@ export const observeQuestions = (
       const checked = sourceOptions(row.source, record.occurrence)
       if (checked !== undefined) record.options = checked
       else if (row.source.kind !== 'inbox') delete record.options
+      // A record from a ledger written before the options field holds its list or refusal only in its saved source,
+      // which the inbox turn is about to replace (#1630).
+      else if (record.options === undefined && record.source !== undefined) {
+        const saved = sourceOptions(record.source, record.occurrence)
+        if (saved !== undefined) record.options = saved
+      }
       record.source = row.source
       assigned.add(record.id)
       if (row.isWaiting) keys[questionSlot(row.scope, row.index)] = record.id
