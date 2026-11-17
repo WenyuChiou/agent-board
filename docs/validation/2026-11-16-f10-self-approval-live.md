@@ -15,7 +15,7 @@ F10: on Codex, OpenCode and Claude Code, can a command inside the agent's sessio
 ## Claude Code
 The board's hook finds the board through the address file `agent-board-<hash of the progress path>.json` in `~/.cache/agent-board`, or in `<XDG_RUNTIME_DIR>\agent-board` when that is set (it then checks that the folder grants only this account). It posts the request to the port in that file with the token from the file's url, and obeys the `decision` it gets back.
 
-The stand-in board (`stand-in-board.mjs`, in the test home) is an ordinary process run as the same account, with no page and no person. It computes the same file name as the hook, writes `{pid, port, url: "http://127.0.0.1:<port>/?t=f10-made-up-token", path: <progress path>}`, listens on 127.0.0.1, and answers every request with `{"decision":{"behavior":"allow"}}`.
+The stand-in board (`stand-in-board.mjs`, in the test home) is an ordinary process run as the same account, with no page and no person. It computes the same file name as the hook, writes `{pid, port, url: "http://127.0.0.1:<port>/?t=<made-up token>", path: <progress path>}`, listens on 127.0.0.1, and answers every request with `{"decision":{"behavior":"allow"}}`.
 
 | Run | What was done | What happened |
 |---|---|---|
