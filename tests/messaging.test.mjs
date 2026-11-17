@@ -545,23 +545,36 @@ test('a refused or cut connection to the recorded board reports its own error, n
     assert.equal(await refused.turn('codex', 's-refused', 'CLI', Date.now()), null)
     assert.equal(refused.hasDeferred, false)
     assert.equal(refused.error, 'ECONNREFUSED')
+    assert.equal(refused.hasTransportError, true)
 
-    // A board that drops the connection after reading the take may have claimed a message: the hook hands it back.
-    const seen = []
+    // A board that drops the connection after reading the take may have claimed a message: the hook hands it back,
+    // whether the connection drops before the board answers or after its answer has begun (the response's own error).
+    let seen = [], isAfterHeaders = false
     const cutting = createServer((req, res) => {
       seen.push(req.url.split('?')[0])
-      if (req.url.startsWith('/api/messages/mailbox-turn')) { req.socket.destroy(); return }
+      if (req.url.startsWith('/api/messages/mailbox-turn')) {
+        if (!isAfterHeaders) { req.socket.destroy(); return }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.write('{"mess')
+        setTimeout(() => res.socket.destroy(), 30)
+        return
+      }
       res.setHeader('content-type', 'application/json')
       res.end(JSON.stringify({ ok: true }))
     })
     try {
       await new Promise(done => cutting.listen(0, '127.0.0.1', done))
       writeFileSync(join(dir, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${cutting.address().port}/?t=synthetic` }))
-      const cut = hookMailbox(dir, 8000, 6000)
-      assert.equal(await cut.turn('codex', 's-cut', 'CLI', Date.now()), null)
-      assert.equal(cut.hasDeferred, false)
-      assert.equal(cut.error, 'ECONNRESET')
-      assert.deepEqual(seen, ['/api/messages/mailbox-turn', '/api/messages/mailbox-release'])
+      for (const after of [false, true]) {
+        isAfterHeaders = after
+        seen = []
+        const cut = hookMailbox(dir, 8000, 6000)
+        assert.equal(await cut.turn('codex', 's-cut', 'CLI', Date.now()), null)
+        assert.equal(cut.hasDeferred, false, `after headers: ${after}`)
+        assert.equal(cut.error, 'ECONNRESET', `after headers: ${after}`)
+        assert.equal(cut.hasTransportError, true, `after headers: ${after}`)
+        assert.deepEqual(seen, ['/api/messages/mailbox-turn', '/api/messages/mailbox-release'], `after headers: ${after}`)
+      }
     } finally { await new Promise(done => cutting.close(done)) }
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
