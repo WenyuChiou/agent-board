@@ -34,10 +34,18 @@ const APPROVAL_LIMIT_MS = 120_000
 const MIN_DAEMON = [0, 169, 0]
 // The daemon's unload delay when its config names none (60 s), and the margin added to it for the time a request and its answer
 // take and for two clocks that do not run alike. A person can set the delay (`thread_unload_delay_secs` in Codex's config), so the
-// receiver asks the daemon for it and never waits less than the default with its margin (UNLOAD_MS).
+// receiver asks the daemon for the delay of the thread's folder. A delay set for one thread only (`codex -c
+// thread_unload_delay_secs=…`, or a client's `config` on `thread/start`) is not in that answer, and no answer of the daemon names
+// it (Codex 0.169.0), so the receiver never waits less than 10 minutes with the margin (UNLOAD_LEAST_MS): a per-thread delay
+// up to 10 minutes cannot keep a thread listed past that with nobody on it (#1578).
 const UNLOAD_DEFAULT_SECS = 60
 const UNLOAD_MARGIN_MS = 5000
-const UNLOAD_MS = UNLOAD_DEFAULT_SECS * 1000 + UNLOAD_MARGIN_MS
+const UNLOAD_LEAST_MS = 10 * 60_000
+const UNLOAD_MS = UNLOAD_LEAST_MS + UNLOAD_MARGIN_MS
+// Whether a listing asked at `listedAt` is one wait after a stretch that began at `since`: the longer of `unloadMs` and the
+// folder's unload delay (`delay`) with its margin (#1578).
+export const isWaitOver = ({ since, listedAt, delay, unloadMs = UNLOAD_MS, unloadMarginMs = UNLOAD_MARGIN_MS }) =>
+  listedAt >= since + Math.max(unloadMs, delay + unloadMarginMs)
 // How long the answer to a leave is waited for, and how many leaves in a row may fail before the receiver ends its connection to
 // the daemon: a connection that is gone is in no thread.
 const LEAVE_LIMIT_MS = 5000
@@ -218,11 +226,14 @@ export const startCodexReceiver = ({
   pollMs = 2000,
   // A clock that never goes back and is not the wall clock, which a person or a time sync can move.
   now = () => performance.now(), onError = () => undefined,
+  // The tick that the watch's gap rule counts in on `now`'s clock (two looks more than two of these apart end the stretch). It
+  // is tickMs, the timer's own period, except in a test that runs `now` faster than the wall clock to watch a whole wait (#1578).
+  watchTickMs = tickMs,
 }) => {
   if (typeof threads !== 'function' || !isAbsolute(executable ?? '')) throw new Error('EXPLICIT_EXECUTABLE_REQUIRED')
   const client = boardClient(boardUrl)
   const attached = new Map()
-  let daemon = null, isTicking = false, isClosed = false, closing = null, failures = 0, retryAt = 0
+  let daemon = null, isTicking = false, isClosed = false, closing = null, connecting = null, failures = 0, retryAt = 0
   // The newest list of loaded threads, with the time its request was sent: a thread it shows was still loaded after that time.
   let listing = { set: new Set(), sentAt: 0 }, canTell = false
   // What this receiver's connection to the daemon has in each thread, kept apart from the board connection for it (`attached`),
@@ -308,7 +319,7 @@ export const startCodexReceiver = ({
     if (q.sampling !== null) return q.sampling
     q.sampling = (async () => {
       const on = daemon, sentAt = now()
-      if (q.last === null || sentAt - q.last > 2 * tickMs) restart(thread)
+      if (q.last === null || sentAt - q.last > 2 * watchTickMs) restart(thread)
       // In the thread, or maybe in it, the receiver's own subscription keeps it loaded: nothing read now is about a person.
       if (subs.get(thread)?.mayBeSubscribed === true) { q.since = null; return }
       const epoch = q.epoch
@@ -319,7 +330,7 @@ export const startCodexReceiver = ({
       if (daemon !== on || quiet.get(thread) !== q) return
       const at = now()
       // Asked in time and answered late: what the thread did meanwhile nobody saw, as when it is asked late.
-      if (q.last !== null && at - q.last > 2 * tickMs) q.since = null
+      if (q.last !== null && at - q.last > 2 * watchTickMs) q.since = null
       q.last = at
       if (delay !== null) q.delay = Math.max(q.delay ?? 0, delay)
       const hasMarker = typeof seen?.marker === 'number' || typeof seen?.marker === 'string'
@@ -335,14 +346,14 @@ export const startCodexReceiver = ({
   const isPersonAttached = thread => {
     const q = quiet.get(thread), at = now()
     if (!canTell || q === undefined || q.since === null || q.last === null || q.delay === null || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) return false
-    if (at - q.last > 2 * tickMs || at - listing.sentAt > 2 * tickMs) return false
-    return listing.sentAt >= q.since + Math.max(unloadMs, q.delay + unloadMarginMs)
+    if (at - q.last > 2 * watchTickMs || at - listing.sentAt > 2 * watchTickMs) return false
+    return isWaitOver({ since: q.since, listedAt: listing.sentAt, delay: q.delay, unloadMs, unloadMarginMs })
   }
   // Whether a message can go to the thread now, from a fresh look and a listing no older than two ticks.
   const isReady = async thread => {
     if (!canTell || subs.get(thread)?.mayBeSubscribed === true) return false
     await sample(thread)
-    if (now() - listing.sentAt > 2 * tickMs) try { await list() } catch { return false }
+    if (now() - listing.sentAt > 2 * watchTickMs) try { await list() } catch { return false }
     return isPersonAttached(thread)
   }
   // Leaves the thread so the daemon can unload it once nobody else is on it. One leave at a time: a second caller gets the one in
@@ -642,14 +653,18 @@ export const startCodexReceiver = ({
     hasConfigFailed = false
     for (const sub of subs.values()) { sub.mayBeSubscribed = false; sub.hasLeaveFailed = false; sub.leaveFails = 0; if (sub.interrupt !== null) sub.interrupt.isAsking = false }
   }
-  const connect = async () => {
+  // close() waits for a connection still being made, and one that is made after close() began is ended at once (#1632).
+  const connect = () => connecting ??= (async () => {
     let made
-    // Only the connection in use ends what the receiver knows: an older one that closes late says nothing about the new one.
-    made = await connectDaemon({ executable, socket, env, onMessage: route, onClose: () => { if (daemon === null || daemon === made) lost() } })
-    daemon = made
-    canTell = hasUnloadDelay(daemon.info)
-    failures = 0
-  }
+    try {
+      // Only the connection in use ends what the receiver knows: an older one that closes late says nothing about the new one.
+      made = await connectDaemon({ executable, socket, env, onMessage: route, onClose: () => { if (daemon === null || daemon === made) lost() } })
+      if (isClosed) { await made.close(); throw new Error('RECEIVER_CLOSED') }
+      daemon = made
+      canTell = hasUnloadDelay(daemon.info)
+      failures = 0
+    } finally { connecting = null }
+  })()
 
   // ended: the board read the session as ended. Any other loss (the daemon went, a contest) is no sign of that, so the
   // board keeps what was queued for this connection and hands it to the next one (#318). Only the board connection ends here:
@@ -728,14 +743,39 @@ export const startCodexReceiver = ({
         agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: SURFACE, unclaimed: true, pollMs, verify, onError,
         // Nobody attached, or busy, is not a refusal: the lease stays alive and the message waits in the board, unclaimed.
         canReceive: async () => !state.pending && one.deliveries === 0 && !sub.isInUse && await isReady(thread),
-        deliver: async (message, accepted, begin) => {
+        deliver: async (message, accepted, begin, unsent) => {
           // The claim is held until a person has the thread open and it reads idle: a turn that began after the board's poll, or
           // one this connection has not heard of yet (the thread is read fresh right before the start), keeps the message waiting
-          // here. Nothing is given back. A connection that is lost meanwhile, or a wait past the board's limit, ends this with no
+          // here, or goes back to the board's queue (below). A connection that is lost meanwhile, or a wait past the board's limit, ends this with no
           // receipt: the board settles a claim it lost the connection of (`uncertain`, `DISCONNECTED`) or expired itself.
           // Measured from the board's own claim time, which is what it expires from, so nothing starts for a claim the card already shows as expired.
           const waitsSince = Number.isFinite(message.claimed) && message.claimed > 0 ? message.claimed : Date.now()
           const isDone = () => !isHeld() || Date.now() - waitsSince >= ackMs
+          // A claim that waits (the thread was busy, or a join was refused or got no answer, and each starts the wait again) goes back
+          // to the board's queue, text and all, once too little of its time is left for a whole wait and two ticks: nothing was asked
+          // of Codex for it, since turn/start comes only after this loop. The board then hands it out again when the thread reads as a
+          // person's, with its own 30 minutes. Without this the claim ran out and the board dropped its text (#1578). An answer that says
+          // the board saved nothing (it refused the give-back, as an older board does, or its store was busy) leaves the claim this
+          // delivery's: it goes on waiting, and starts the message if the thread reads as a person's in time. A refused give-back is
+          // not asked again. A busy store is asked again a tick later, while the claim still waits, so a claim held through a long busy
+          // turn still goes back before it runs out (#1625; the owner's choice, 2026-11-16, over "receipts are never retried": the store
+          // saved nothing, so the give-back is asked for the first time again, not a second time). A give-back whose answer is not
+          // known (none came, or any other error answer) may have put the message back in the queue, so this delivery ends with no
+          // turn/start and never asks again: the board hands the message out again if it took the give-back, and expires the claim if
+          // it did not.
+          let canGiveBack = typeof unsent === 'function', giveBackAt = 0, wasBusy = false
+          const isShort = () => ackMs - (Date.now() - waitsSince) < Math.max(unloadMs, (quiet.get(thread)?.delay ?? 0) + unloadMarginMs) + 2 * tickMs
+          // 'back': the board took it; 'held': the board saved nothing, so the claim is still this delivery's; 'unknown': either may be so.
+          const giveBack = async () => {
+            if (!canGiveBack || Date.now() < giveBackAt) return 'held'
+            try { await unsent(); return 'back' } catch (error) {
+              // A store that stays busy is reported once, not on every tick it is asked again.
+              if (error?.isBusy !== true || !wasBusy) onError(error)
+              if (error?.isRefused !== true) return 'unknown'
+              if (error?.isBusy === true) { wasBusy = true; giveBackAt = Date.now() + tickMs } else canGiveBack = false
+              return 'held'
+            }
+          }
           one.deliveries += 1
           // isMine: this delivery is the one in the thread, so only it gives the thread back.
           // hasNoTurn: no turn of this delivery runs, for certain (the daemon refused the start, the request never left, or the
@@ -764,6 +804,7 @@ export const startCodexReceiver = ({
                 // thread for all it knows, and stays out of it until it can tell a person from its own subscription.
                 if (sub.mayBeSubscribed) await leave(thread)
                 else if (!sub.isInUse && await isReady(thread) && !isDone()) break
+                if (!isDone() && isShort() && await giveBack() !== 'held') return undefined
                 await nextEvent()
               }
               // Joining a loaded thread subscribes this connection to its events without starting a turn. The join itself, and the
@@ -883,6 +924,7 @@ export const startCodexReceiver = ({
         if (Date.now() < retryAt) return
         // A daemon that cannot be reached is tried again later, waiting longer after each failure, up to RETRY_MAX_MS.
         const error = await connect().then(() => null, one => one)
+        if (error !== null && isClosed) return
         if (error !== null) {
           failures += 1
           retryAt = Date.now() + Math.min(RETRY_MAX_MS, tickMs * 2 ** Math.min(failures, 5))
@@ -928,6 +970,7 @@ export const startCodexReceiver = ({
     close: () => closing ??= (async () => {
       isClosed = true
       clearInterval(timer)
+      await connecting?.catch(() => undefined)
       for (const one of attached.values()) one.wake()
       await Promise.all([...subs.entries()].map(async ([thread, sub]) => {
         if (sub.watch !== null && !isWaitingOnApproval(sub) && !sub.mayBeSubscribed && daemon !== null && daemon.isOpen()) {

@@ -2736,7 +2736,7 @@ const pollingProxy = async (board, mode, onClaim) => {
       }
       // forbidden-after-claim: the poll that hands a message out is answered, every later poll is refused for good (403).
       if (isPoll && mode === 'forbidden-after-claim' && hasClaimed) return fail(403)
-      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim' && mode !== 'pass' && mode !== 'forbidden-after-claim') {
+      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim' && mode !== 'pass' && mode !== 'forbidden-after-claim' && !String(mode).startsWith('unsent-')) {
         if (mode === 'network' || mode === 'timeout') {
           faults += 1
           if (mode === 'network') req.socket.destroy()
@@ -2745,10 +2745,21 @@ const pollingProxy = async (board, mode, onClaim) => {
         if (mode === 'malformed') { faults += 1; res.writeHead(200); res.end('{'); return }
         return fail(mode === 'forbidden' || mode === 'forbidden-always' ? 403 : mode === 'stale' ? 409 : 503)
       }
+      // unsent-refused, unsent-busy: an unsent receipt never reaches the board, and is answered as the board answers one it refuses
+      // (409) or one it could not save because its store was busy (503). unsent-busy-thrice: only the first three are answered 503;
+      // later ones reach the board.
+      if ((mode === 'unsent-refused' || mode === 'unsent-busy' || mode === 'unsent-busy-thrice' && faults < 3) && req.url === '/api/messages/receipt' && JSON.parse(body).status === 'unsent') {
+        faults += 1
+        res.writeHead(mode === 'unsent-refused' ? 409 : 503, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: mode === 'unsent-refused' ? 'INVALID_RECEIPT' : 'MESSAGE_STORE_BUSY' }))
+        return
+      }
       const answer = await fetch(new URL(req.url, upstream), {
         method: req.method, headers: { 'x-board-token': upstream.searchParams.get('t'), 'content-type': 'application/json' }, body,
       })
       const text = await answer.text()
+      // unsent-lost: an unsent receipt reaches the board, and its answer is lost on the way back.
+      if (mode === 'unsent-lost' && req.url === '/api/messages/receipt' && JSON.parse(body).status === 'unsent') { faults += 1; req.socket.destroy(); return }
       if (isPoll && mode === 'forbidden-after-claim' && JSON.parse(text).messages?.length) hasClaimed = true
       if (isPoll && faults === 0 && mode === 'after-claim' && JSON.parse(text).messages?.length) return fail(503)
       if (isPoll && onClaim && JSON.parse(text).messages?.length) await onClaim()
@@ -4497,11 +4508,11 @@ const codexConnection = async (board, thread = codexCurrent) => waitFor(async ()
 const codexMessage = async (board, id) => (await board.call('/api/board')).body.messaging.messages.find(one => one.id === codexId(id))
 const codexSend = async (board, connection, id = 'AB-CX-001') => (await board.call('/api/messages/send', { id: codexId(id), target: connection.id, turn: 'session', text: 'Check the build and tell me what failed.' })).status
 // The stand-in keeps a thread listed 150 ms after its last subscriber left or its last turn ended (the real daemon's 60 s) and
-// reports that delay as 0 seconds, so the receiver in these tests watches a thread for 400 ms (65 s for real: the least wait, and
+// reports that delay as 0 seconds, so the receiver in these tests watches a thread for 400 ms (10 minutes and 5 s for real: the least wait, and
 // the margin on a delay the daemon reports) before a listing tells it about a person: the first message to a thread waits that
 // long, and so does each one after a delivery.
 const codexUnloadMs = 400
-// The page's own receiver waits 65 seconds before it reads a thread as a person's. A page started by a test may be given the
+// The page's own receiver waits 10 minutes and 5 seconds before it reads a thread as a person's. A page started by a test may be given the
 // stand-in daemon's shorter delay; the page takes it only from a test process, so both names are set and both are cleared.
 const codexShortWait = (isOn = true) => {
   if (isOn) { process.env.AGENT_BOARD_TEST_PID = String(process.pid); process.env.AGENT_BOARD_CODEX_UNLOAD_MS = String(codexUnloadMs) } else { delete process.env.AGENT_BOARD_TEST_PID; delete process.env.AGENT_BOARD_CODEX_UNLOAD_MS }
@@ -5047,6 +5058,236 @@ test('a Codex daemon set to keep a thread longer than the default is watched for
     assert.equal(await codexSend(board, connection), 200)
     await codexSettled(board, daemon, connection, 0)
     assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
+  } finally { await receiver.close() }
+}))
+
+test('a delay set for one Codex thread longer than its folder\'s does not read as a person: the receiver waits at least 10 minutes and 5 s, or the folder\'s longer delay (#1578)', async () => {
+  const { isWaitOver } = await import('../scripts/codex-receiver.mjs')
+  assert.equal(typeof isWaitOver, 'function')
+  // The person opened the thread with `codex -c thread_unload_delay_secs=300` and quit; config/read gives the folder's 60 s. The
+  // daemon keeps the thread listed 300 s with nobody on it, so neither 65 s (the old wait) nor 305 s reads as a person.
+  const folder60 = listedAt => isWaitOver({ since: 0, listedAt, delay: 60_000 })
+  assert.deepEqual([65_000, 305_000, 604_999].map(folder60), [false, false, false])
+  // Listed 10 minutes and 5 s after the stretch began: a per-thread delay up to 10 minutes would have unloaded it by then.
+  assert.deepEqual([605_000, 900_000].map(folder60), [true, true])
+  // A folder's delay longer than 10 minutes still wins, with its margin.
+  const folder900 = listedAt => isWaitOver({ since: 0, listedAt, delay: 900_000 })
+  assert.deepEqual([605_000, 904_999, 905_000].map(folder900), [false, false, true])
+  // The stretch's own start counts: the wait is measured from it, not from zero.
+  assert.deepEqual([664_999, 665_000].map(listedAt => isWaitOver({ since: 60_000, listedAt, delay: 0 })), [false, true])
+  // A test's shorter wait (`unloadMs`, `unloadMarginMs`) replaces the least wait and the margin, as the receiver passes them.
+  assert.deepEqual([399, 400].map(listedAt => isWaitOver({ since: 0, listedAt, delay: 0, unloadMs: 400, unloadMarginMs: 400 })), [false, true])
+})
+
+test('a Codex receiver with its own default wait starts nothing on a listed idle thread before 10 minutes and 5 s of watching, and starts the message after (#1578)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  // The stand-in keeps the thread listed while `person` exists and reports no unload delay, as a thread kept by a per-thread delay
+  // the folder's config does not show would look. The receiver keeps its own default wait (no unloadMs, no margin) and reads the
+  // time on a clock this test moves by hand: 5 s each time the stand-in has answered another thread/read, so its looks are always
+  // 5 s apart on that clock, well inside the gap rule's 20 s (watchTickMs), however slow the machine is. On a clock tied to the
+  // wall clock (50 times faster), the gap rule's 20 s were 400 ms of real time, and a look that took longer on a loaded runner
+  // started the wait again, so the message could miss the test's deadline (codex_484 on bf936697).
+  let clock = 0
+  const reads = () => daemon.calls().filter(one => one.method === 'thread/read').length
+  const daemon = codexDaemon(dir, { person })
+  const receiver = codexReceiver(board, daemon, { unloadMs: undefined, unloadMarginMs: undefined, now: () => clock, watchTickMs: 10_000 })
+  // Moves the clock one step once the stand-in has answered a thread/read since the last step, until `done` or `limit` (never past it).
+  // A receiver that stops looking for 20 s of real time fails the test instead of hanging it.
+  const advance = async (done, limit) => {
+    while (clock < limit) {
+      if (done()) return
+      const seen = reads(), until = Date.now() + 20_000
+      while (reads() === seen) {
+        if (done()) return
+        assert.ok(Date.now() < until, `no thread/read for 20 s at ${clock / 1000} s by the receiver's clock`)
+        await pause(20)
+      }
+      clock = Math.min(limit, clock + 5000)
+    }
+  }
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    // The clock stays at 0 for five looks, so the stretch of watching begins at 0 by the receiver's clock.
+    const first = reads()
+    await waitFor(async () => reads() >= first + 5)
+    // Well past the old 65 s and past a 300 s per-thread delay, by the receiver's clock: nothing is started.
+    await advance(() => false, 330_000)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
+    // One second short of 10 minutes and 5 s, the clock stands still for six board polls and more looks: nothing is started. A
+    // receiver that waited 600 s would start it here.
+    await advance(() => false, 604_000)
+    await pause(6 * codexPollMs)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status, clock], [0, 'queued', 604_000])
+    // After 10 minutes and 5 s of unbroken watching the thread reads as a person's, and the message is started.
+    let at = null
+    await advance(() => { if (codexStarts(daemon) > 0) at ??= clock; return at !== null }, 700_000)
+    assert.equal(codexStarts(daemon), 1)
+    assert.ok(at >= 605_000, `started at ${Math.round(at / 1000)} s by the receiver's clock`)
+  } finally { await receiver.close() }
+}))
+
+test('an unsent receipt from the connection that holds a claim puts the message back in the queue with its text; any other claim refuses it (#1578)', () => {
+  const now = Date.now()
+  const target = { id: 'synthetic-codex-binding', agent: 'codex', session: 'unsent-session', turn: 'session', surface: SURFACE_IDS.codexDaemon, expires: now + OPEN_LIMIT_MS }
+  const other = { ...target, id: 'synthetic-other-binding' }
+  const queued = queueMessage({ messages: [] }, { id: 'unsent-one', target: target.id, turn: target.turn, text: 'Check the build.' }, 'board', target, now).state
+  const claimed = claimMessages(queued, target, now + 1, 'abcdef').state
+  const back = messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2)
+  const one = back.messages[0]
+  assert.deepEqual([one.status, one.text, one.claimed, one.error, one.target], ['queued', 'Check the build.', 0, '', target.id])
+  // Taken again, it is a fresh claim with the same ACK code, not a repeat: nothing of it was sent.
+  const again = claimMessages(back, target, now + 3, '123456').messages[0]
+  assert.deepEqual([again.status, again.claimed, again.nonce, again.redelivered], ['uncertain', now + 3, 'abcdef', undefined])
+  // Refused: another connection of the session, an accepted claim, a claim already reported with an error, an unsent receipt
+  // that carries a reply or an error, and a message that is not claimed.
+  assert.throws(() => messageReceipt(claimed, other, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2), /INVALID_RECEIPT/)
+  const accepted = messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'accepted' }, now + 2)
+  assert.throws(() => messageReceipt(accepted, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 3), /INVALID_RECEIPT/)
+  const reported = messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'uncertain', error: 'ACK_TIMEOUT' }, now + 2)
+  assert.throws(() => messageReceipt(reported, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 3), /INVALID_RECEIPT/)
+  assert.throws(() => messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent', error: 'BUSY' }, now + 2), /INVALID_RECEIPT/)
+  assert.throws(() => messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent', reply: 'ACK abcdef' }, now + 2), /INVALID_RECEIPT/)
+  assert.throws(() => messageReceipt(queued, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2), /CLAIM_REQUIRED/)
+})
+
+// The claim meets the person's turn, which ends right after the receiver leaves again. A whole wait is 2 s here and the claim's time
+// 4 s, so the receiver gives the claim back while it watches the idle thread again (with less than 2.2 s left, about 1.8 s in), and the
+// thread reads as a person's about 2 s after the turn ended, well inside the claim's time.
+// endTurn: when the person's turn ends (by default right after the receiver leaves). started: called once the proxy and the receiver
+// run, before the rest of the setup. Whatever fails after they started closes both before the error goes on (#1626).
+const codexGiveBackCase = async (board, dir, mode, { endTurn, started, onError } = {}) => {
+  const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { readActive: true, endFlag, person })
+  const proxy = await pollingProxy(board, mode)
+  let receiver
+  const close = async () => { await receiver?.close(); await proxy.close() }
+  try {
+    receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 4000, ...(onError ? { onError } : {}) })
+    await started?.({ proxy, receiver, daemon })
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    if (endTurn) await endTurn({ proxy, daemon })
+    writeFileSync(endFlag, '')
+  } catch (error) { await close(); throw error }
+  return { daemon, proxy, close }
+}
+// The give-back never reaches the board; the proxy answers it as the board would.
+const codexRefusedGiveBack = mode => codexFixture(async (board, dir) => {
+  const { daemon, proxy, close } = await codexGiveBackCase(board, dir, mode)
+  try {
+    // The give-back was answered, and the board still holds the claim for this receiver, which started nothing yet.
+    await waitFor(async () => proxy.faults() > 0)
+    assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
+    // The claim is still the receiver's: it is started once when the thread reads as a person's, and acknowledged.
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    assert.equal(codexStarts(daemon), 1)
+  } finally { await close() }
+})
+
+test("a Codex claim whose give-back the board refuses (409) is still the receiver's, and is started once when the thread reads as a person's in time (#1578)", () => codexRefusedGiveBack('unsent-refused'))
+
+test("a Codex claim whose give-back met a busy message store (503, nothing saved) is still the receiver's, and is started once when the thread reads as a person's in time (#1578)", () => codexRefusedGiveBack('unsent-busy'))
+
+// The person's turn runs on past the first give-back: the turn ends about 1.4 s after it (minute 24 of 30 for real), when a whole
+// wait no longer fits in the claim's time. The first three give-backs meet a busy store (503), a tick apart; the fourth reaches the board.
+test("a Codex claim whose give-back met a busy message store and whose thread stays busy is given back a tick later, and is delivered once after (#1625)", () => codexFixture(async (board, dir) => {
+  const errors = []
+  const { daemon, proxy, close } = await codexGiveBackCase(board, dir, 'unsent-busy-thrice', { onError: error => errors.push(error.message), endTurn: async ({ proxy, daemon }) => {
+    await waitFor(async () => proxy.faults() > 0)
+    // The store was busy and saved nothing; the give-back asked again puts the message back in the queue with its text, before the
+    // turn ends. A receiver that held the claim instead would let it run out here.
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'queued')
+    assert.equal(codexStarts(daemon), 0)
+    await pause(1400)
+  } })
+  try {
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    // Two ticks' worth of waits more: no second start, and the start carries the text the message was sent with.
+    await pause(1500)
+    const starts = daemon.calls().filter(one => one.method === 'turn/start')
+    assert.equal(starts.length, 1)
+    assert.ok(JSON.stringify(starts[0].params).includes('Check the build and tell me what failed.'))
+    // Three busy answers, reported once: a store that stays busy does not report every tick it is asked again.
+    assert.deepEqual([proxy.faults(), errors.filter(one => one === 'MESSAGE_STORE_BUSY').length], [3, 1])
+  } finally { await close() }
+}))
+
+test('a give-back case whose setup fails after its proxy and receiver started closes both before the error goes on (#1626)', () => codexFixture(async (board, dir) => {
+  let address, isReceiverClosed = false
+  // The failure comes as soon as the receiver started, while it is still connecting to Codex (#1632 closes that connection too).
+  await assert.rejects(codexGiveBackCase(board, dir, 'unsent-refused', { started: ({ proxy, receiver }) => {
+    address = proxy.address
+    const close = receiver.close
+    receiver.close = () => { isReceiverClosed = true; return close() }
+    throw new Error('SYNTHETIC_SETUP_FAILURE')
+  } }), /SYNTHETIC_SETUP_FAILURE/)
+  // The receiver was closed, and the proxy no longer takes connections.
+  assert.equal(isReceiverClosed, true)
+  await assert.rejects(fetch(new URL(address)), /fetch failed/)
+}))
+
+test('a Codex receiver closed while it is still connecting to Codex ends that connection before close() is done (#1632)', () => codexFixture(async (board, dir) => {
+  const pidFile = join(dir, 'proxy.pid')
+  const daemon = codexDaemon(dir, { pidFile })
+  try {
+    // The first tick starts connecting at once; close() comes before the connection is made.
+    await codexReceiver(board, daemon).close()
+    // The stand-in writes its state every 50 ms while it runs: once close() is done, that stops.
+    const state = daemon.log + '.state'
+    const seen = () => { try { return JSON.parse(readFileSync(state, 'utf8')).seen } catch { return null } }
+    await pause(500)
+    const first = seen()
+    await pause(500)
+    // The connection was made (the stand-in logged its handshake), and the stand-in no longer runs: its state, if it wrote any, is
+    // not written again.
+    assert.ok(readFileSyncSafe(daemon.log).includes('handshake'))
+    assert.equal(seen(), first)
+  } finally {
+    // A receiver that kept the connection leaves the stand-in running, which would keep the test run from ending: the test ends it
+    // by its pid, so a receiver without the fix fails here instead of hanging.
+    try { process.kill(Number(readFileSync(pidFile, 'utf8'))) } catch {}
+  }
+}))
+
+test('a Codex claim whose unsent receipt got no answer is not started by that delivery: the board may have queued it again, and it is started once (#1578)', () => codexFixture(async (board, dir) => {
+  // As in the two tests above, the thread is idle again when the receiver gives the claim back, and reads as a person's in time, so a
+  // delivery that kept the claim would start it. The board puts the message back in the queue, but the answer never reaches the
+  // receiver: it cannot tell whether the claim is still its own, so it starts nothing for it. The board hands the message out again
+  // once the thread reads as a person's.
+  const { daemon, proxy, close } = await codexGiveBackCase(board, dir, 'unsent-lost')
+  try {
+    await waitFor(async () => proxy.faults() > 0)
+    assert.equal(codexStarts(daemon), 0)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    // Two ticks' worth of waits more: no second start.
+    await pause(1500)
+    assert.equal(codexStarts(daemon), 1)
+  } finally { await close() }
+}))
+
+test('a Codex claim that meets a busy thread goes back to the queue with its text before too little of its time is left for a whole wait, and is delivered once after (#1578)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
+  writeFileSync(person, '')
+  // The person's turn begins as the claim joins, so the receiver leaves again. The claim's own time is 3 s here (30 minutes for
+  // real) and a whole wait is 400 ms: with less than that and two ticks left, nothing was sent for the claim, so it goes back.
+  const daemon = codexDaemon(dir, { readActive: true, endFlag, person })
+  const receiver = codexReceiver(board, daemon, { ackMs: 3000 })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'queued')
+    assert.equal(codexStarts(daemon), 0)
+    // The turn ends: the message is taken again and started once, with the text it was sent with.
+    writeFileSync(endFlag, '')
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    const starts = daemon.calls().filter(one => one.method === 'turn/start')
+    assert.equal(starts.length, 1)
+    assert.ok(JSON.stringify(starts[0].params).includes('Check the build and tell me what failed.'))
   } finally { await receiver.close() }
 }))
 
