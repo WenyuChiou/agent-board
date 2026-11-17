@@ -47,16 +47,17 @@ jobs:
         id: rerun
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
         run: node scripts/pr-check-rerun.mjs --event "$GITHUB_EVENT_PATH"
       # The script says why on the pull request whenever it cannot run the check again; this says it when a step before
-      # the script failed or hung past its limit (the checkout, Node), which would otherwise leave the check as it was
-      # with nothing said.
+      # the script failed or hung past its limit (the checkout, Node), or the script failed without posting a notice.
       - name: Say on the pull request that the check did not run again
-        if: failure() && steps.rerun.outcome == 'skipped'
+        if: failure() && steps.rerun.outputs.noticed != 'true'
         timeout-minutes: 2
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           NUMBER: ${{ github.event.issue.number }}
         run: |
-          gh api --method POST "repos/$REPO/issues/$NUMBER/comments" -f "body=The PR check did not run again after the last verdict comment: the pr-check-rerun job failed before its script ran. Its result may be older than that verdict; start pr-check again by hand, or push a commit. (pr-check-rerun, #1258)"
+          gh api --method POST "repos/$REPO/issues/$NUMBER/comments" -f "body=The PR check did not run again after the last verdict comment: the pr-check-rerun job failed before reporting a reason. Its result may be older than that verdict; start pr-check again by hand, or push a commit. (pr-check-rerun, #1258)"

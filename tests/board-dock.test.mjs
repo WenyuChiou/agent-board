@@ -282,9 +282,9 @@ test('#1084: the computer\'s page keeps the window place in a file of its own an
 // the program started with them; a program that does not start, and no arguments, both fail so
 // the caller opens today's plain window. The stand-in program is Node, started hidden.
 const literal = value => `'${value.replace(/'/g, "''")}'`
-const runLaunch = (programs, answer, cwd) => new Promise(done => {
+const runLaunch = (programs, answer, cwd, env = process.env) => new Promise(done => {
   const command = dockCommand(programs, literal(cwd), 1500, true)
-  const child = spawn(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  const child = spawn(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env })
   let out = ''
   let isAnswered = false
   child.stdout.setEncoding('utf8')
@@ -316,6 +316,25 @@ test('#1084: the launch PowerShell reads the screens, then starts the program wi
     assert.equal(none.code, 1)
     const unanswered = await runLaunch(literal(process.execPath), null, root)
     assert.equal(unanswered.code, 2)
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+  }
+})
+
+// The screen probe compiles nothing (#1440): Add-Type's C# compile started csc.exe on every open,
+// about 0.15 s on a warm computer and over 15 s on a cold CI runner, and the caller's open waited
+// for it. The compiler writes its files to the temporary folder, so with TEMP and TMP naming a
+// file, where no folder can be made, a compiled probe reads nothing ('|'), while one that
+// compiles nothing still reads every monitor.
+test('#1440: the launch PowerShell reads the screens without compiling anything', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'board-dock-probe-'))
+  try {
+    const notFolder = join(root, 'not-a-folder')
+    writeFileSync(notFolder, '')
+    const started = await runLaunch(literal(process.execPath), null, root, { ...process.env, TEMP: notFolder, TMP: notFolder })
+    assert.equal(started.code, 2, started.lines.join('\n'))
+    const probe = probeOf(started.lines[0] ?? '')
+    assert.ok(probe !== null && probe.works.length >= 1 && probe.foreground !== null, `the probe reads the screens with no temporary folder: ${started.lines[0]}`)
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
   }

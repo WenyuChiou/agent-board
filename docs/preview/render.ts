@@ -1366,34 +1366,34 @@ const ANSWER_WORDS: Record<Lang, { title: string; heads: [string, string, string
     title: 'How your answer gets there',
     heads: ['Sent directly', 'Queued for the next turn', 'Copied for one paste'],
     notes: [
-      ['Claude Code CLI received it', 'and confirmed it.'],
+      ['Claude Code CLI and OpenCode received it', 'and confirmed it.'],
       ['Antigravity CLI received it.', 'Codex CLI queues it; delivery not yet tested.'],
-      ['Cursor, OpenCode, Grok Build, Hermes:', 'paste it into the chat once.'],
+      ['Cursor, Grok Build, Hermes:', 'paste it into the chat once.'],
     ],
-    label: 'Three ways an answer from the board reaches its agent: Send to Claude Code, queue for the next turn of Antigravity or Codex, or copy for Cursor, OpenCode, Grok Build and Hermes. Synthetic data.',
+    label: 'Three ways an answer from the board reaches its agent: Send to Claude Code or OpenCode, queue for the next turn of Antigravity or Codex, or copy for Cursor, Grok Build and Hermes. Synthetic data.',
   },
   'zh-TW': {
     title: '你的回覆怎麼送到',
     heads: ['直接送到', '排進下一回合', '複製，貼一次'],
     notes: [
-      ['Claude Code CLI 收到了，', '也回了確認。'],
+      ['Claude Code CLI 和 OpenCode 收到了，', '也回了確認。'],
       ['Antigravity CLI 已收到。', 'Codex CLI 也會排入，送達還沒實測。'],
-      ['Cursor、OpenCode、Grok Build、Hermes：', '在對話裡貼上一次就好。'],
+      ['Cursor、Grok Build、Hermes：', '在對話裡貼上一次就好。'],
     ],
-    label: '看板上的回覆有三種送法：傳給 Claude Code；排進 Antigravity 或 Codex 的下一回合；或複製給 Cursor、OpenCode、Grok Build、Hermes。合成資料。',
+    label: '看板上的回覆有三種送法：傳給 Claude Code 或 OpenCode；排進 Antigravity 或 Codex 的下一回合；或複製給 Cursor、Grok Build、Hermes。合成資料。',
   },
   'zh-CN': {
     title: '你的回复怎么送到',
     heads: ['直接送到', '排进下一回合', '复制，粘贴一次'],
     notes: [
-      ['Claude Code CLI 收到了，', '也回了确认。'],
+      ['Claude Code CLI 和 OpenCode 收到了，', '也回了确认。'],
       ['Antigravity CLI 已收到。', 'Codex CLI 也会排入，送达还没实测。'],
-      ['Cursor、OpenCode、Grok Build、Hermes：', '在对话里粘贴一次就好。'],
+      ['Cursor、Grok Build、Hermes：', '在对话里粘贴一次就好。'],
     ],
-    label: '看板上的回复有三种送法：发给 Claude Code；排进 Antigravity 或 Codex 的下一回合；或复制给 Cursor、OpenCode、Grok Build、Hermes。合成数据。',
+    label: '看板上的回复有三种送法：发给 Claude Code 或 OpenCode；排进 Antigravity 或 Codex 的下一回合；或复制给 Cursor、Grok Build、Hermes。合成数据。',
   },
 }
-const ANSWER_AGENTS: [string[], string[], string[]] = [['Claude Code'], ['Antigravity', 'Codex'], ['Cursor', 'OpenCode', 'Grok Build', 'Hermes Agent']]
+const ANSWER_AGENTS: [string[], string[], string[]] = [['Claude Code', 'OpenCode'], ['Antigravity', 'Codex'], ['Cursor', 'Grok Build', 'Hermes Agent']]
 
 const answer = (lang: Lang): string => {
   const s = STRINGS[lang]

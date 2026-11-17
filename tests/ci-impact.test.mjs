@@ -595,6 +595,8 @@ test('the board time check fails a file over seventy percent of its budget and a
     assert.deepEqual(checkBoardTimes(atLimit), { ok: true, errors: [], warnings: [] })
     assert.equal(checkBoardTimes({ ...atLimit, files: [{ path, ms: limit + 1 }] }).ok, false)
   }
+  // prompt-hooks' slowest Windows run so far, 67.9 s, failed its old 90 s budget (#1603); its new budget passes it.
+  assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/prompt-hooks.test.mjs', ms: 67_900 }] }), { ok: true, errors: [], warnings: [] })
   // merge-check's slowest Windows run so far, 46.4 s, failed the 60 s default budget (#1464); its own budget passes it.
   assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/merge-check.test.mjs', ms: 46_400 }] }), { ok: true, errors: [], warnings: [] })
   const slowFile = { ...base, files: [{ path: 'tests/board.test.mjs', ms: 141_000 }] }
@@ -996,7 +998,7 @@ test('the brief template retains the same local and CI execution policy as AGENT
 // The browser job's tool install tries up to three times when the runner's Ubuntu package mirror is unreachable
 // (#1460). Its loop runs here as written in the workflow, under the bash options Actions uses, with a stand-in
 // installer that fails a set number of times and a sleep that returns at once.
-const gitBash = process.platform === 'win32' ? join(process.env.ProgramFiles ?? 'C:\Program Files', 'Git', 'bin', 'bash.exe') : '/bin/bash'
+const gitBash = process.platform === 'win32' ? join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe') : '/bin/bash'
 test('the browser tool install stops at its first success, tries three times and then fails', async () => {
   const text = await workflow()
   const step = text.slice(text.indexOf('- name: Install isolated browser test tools'))

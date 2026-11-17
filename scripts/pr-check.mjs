@@ -787,31 +787,53 @@ export const isLaneReviewer = (review, tier) => review?.isFresh === true && (tie
 
 const isBotUser = user => user?.type === 'Bot' || /\[bot\]$/i.test(user?.login ?? '')
 
-export const reviewOf = item => {
-  if (!item) return null
-  const isBot = typeof item === 'object' && isBotUser(item.user)
+// Only team associations (OWNER, MEMBER, COLLABORATOR) and allowed apps may approve; no review bot or app is
+// currently allowed (#1343, #1535). When author_association is unknown (synthetic local calls), it reads as the team.
+const ignoredApprovalReason = item => {
+  if (!item || typeof item !== 'object') return null
+  if (isBotUser(item.user)) return 'bot or unapproved app'
+  if (isOutsideAssociation(item.author_association)) return `outside association (${String(item.author_association).trim().toUpperCase()})`
+  return null
+}
+
+const readReview = item => {
+  if (!item) return { review: null, ignored: null }
+  const blocked = ignoredApprovalReason(item)
   const body = typeof item === 'string' ? item : item.body ?? ''
   const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
-  if (match && !(match[1].toUpperCase() === 'APPROVE' && isBot)) {
+  if (match) {
+    const kind = match[1].toUpperCase()
     const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
+    if (kind === 'APPROVE' && blocked) {
+      if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
+        return { review: { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(item.user?.login ? { reviewer: item.user.login } : {}) }, ignored: null }
+      }
+      return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
+    }
     const isFresh = isFreshLine(body.slice(match.index).split(/\r?\n/, 1)[0])
     return {
-      kind: match[1].toUpperCase(),
-      sha: match[2].toLowerCase(),
-      ...(reviewer ? { reviewer } : {}),
-      ...(isFresh ? { isFresh } : {}),
+      review: {
+        kind,
+        sha: match[2].toLowerCase(),
+        ...(reviewer ? { reviewer } : {}),
+        ...(isFresh ? { isFresh } : {}),
+      },
+      ignored: null,
     }
-  }
-  if (!isBot && typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
-    const reviewer = item.user?.login ?? null
-    return { kind: 'APPROVE', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
   }
   if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
     const reviewer = item.user?.login ?? null
-    return { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
+    return { review: { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }, ignored: null }
   }
-  return null
+  if (typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
+    const reviewer = item.user?.login ?? null
+    if (blocked) return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
+    return { review: { kind: 'APPROVE', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }, ignored: null }
+  }
+  return { review: null, ignored: null }
 }
+
+export const reviewOf = item => readReview(item).review
 
 // The tier the body names on its `Tier:` line (RULES R2), or null when it names none.
 export const tierOf = body => visibleBody(body).match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
@@ -912,15 +934,133 @@ const surfaceLine = body => {
 export const SIZE_FROM = 1545
 export const SIZE_RISK = 400
 export const SIZE_NORMAL = 800
-// A reason is the text after `cannot split:` with a letter or a digit, in any language, and no placeholder, tag or
-// HTML entity, so formatting alone is none (surface reads it the same way); the template's own `Surface:` line,
-// which starts with `<`, never counts (as in surface), and neither does a line in a code fence or an HTML comment.
-// A reason a reader sees is plain words: one with an HTML entity (`&#8203;`, `&lt;reason&gt;`) or a tag (`<reason>`,
-// `<span title="...">`) in it is none, since Markdown can hide what such text holds (round cap of #1548). Of the rest,
-// a character Unicode marks default-ignorable (a zero-width space, the Hangul filler) is not a letter.
+// Safe named HTML entities used in prose split reasons, in a null-prototype lookup so inherited Object properties
+// like `constructor` never decode into words (#1556).
+const splitEntities = Object.assign(Object.create(null), {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', hellip: '…',
+  shy: '', zwj: '', zwnj: '', zerowidthspace: '',
+})
+
+const decodeSplitEntity = (_, dec, hex, named) => {
+  if (dec !== undefined || hex !== undefined) {
+    const code = dec !== undefined ? Number(dec) : parseInt(hex, 16)
+    if (!Number.isInteger(code) || code < 0x20 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return ''
+    return String.fromCodePoint(code)
+  }
+  const key = named.toLowerCase()
+  return Object.hasOwn(splitEntities, key) ? splitEntities[key] : ''
+}
+
+const readLinkTitle = (text, start) => {
+  const close = text[start] === '(' ? ')' : text[start]
+  let i = start + 1
+  while (i < text.length && text[i] !== close && text[i] !== '\n' && text[i] !== '\r') {
+    if (text[i] === '\\' && i + 1 < text.length) i++
+    i++
+  }
+  if (text[i] !== close) return -1
+  i++
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++
+  return text[i] === ')' ? i : -1
+}
+
+const readLinkDest = (text, start) => {
+  let i = start
+  if (text[i] === '<') {
+    i++
+    while (i < text.length && text[i] !== '>' && text[i] !== '\n' && text[i] !== '\r') {
+      if (text[i] === '\\' && i + 1 < text.length) i++
+      i++
+    }
+    return text[i] === '>' ? i + 1 : -1
+  }
+  let depth = 0
+  while (i < text.length) {
+    const ch = text[i]
+    if (ch === '\n' || ch === '\r' || ch === ' ' || ch === '\t') break
+    if (ch === '\\' && i + 1 < text.length) { i += 2; continue }
+    if (ch === '(') depth++
+    else if (ch === ')') {
+      if (depth === 0) break
+      depth--
+    }
+    i++
+  }
+  return depth === 0 ? i : -1
+}
+
+const findClosingParen = (text, openAt) => {
+  let i = openAt + 1
+  let hadSpace = false
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) { hadSpace = true; i++ }
+  if (text[i] === ')') return i
+  const afterDest = readLinkDest(text, i)
+  if (afterDest !== -1) {
+    let j = afterDest
+    let sepSpace = false
+    while (j < text.length && (text[j] === ' ' || text[j] === '\t')) { sepSpace = true; j++ }
+    if (text[j] === ')') return j
+    if (sepSpace && (text[j] === '"' || text[j] === "'" || text[j] === '(')) {
+      const end = readLinkTitle(text, j)
+      if (end !== -1) return end
+    }
+  }
+  if (hadSpace && (text[i] === '"' || text[i] === "'" || text[i] === '(')) return readLinkTitle(text, i)
+  return -1
+}
+
+const stripMarkdownLinks = text => {
+  let out = ''
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\' && i + 1 < text.length) { out += text[i] + text[i + 1]; i++; continue }
+    const start = text[i] === '!' && text[i + 1] === '[' ? i + 1 : text[i] === '[' ? i : -1
+    if (start !== -1) {
+      const closeBracket = text.indexOf(']', start + 1)
+      if (closeBracket !== -1) {
+        const after = closeBracket + 1
+        if (text[after] === '(') {
+          const closeParen = findClosingParen(text, after)
+          if (closeParen !== -1) {
+            out += text.slice(start + 1, closeBracket)
+            i = closeParen
+            continue
+          }
+        } else if (text[after] === '[') {
+          const closeRef = text.indexOf(']', after + 1)
+          if (closeRef !== -1 && !text.slice(after + 1, closeRef).includes('\n')) {
+            out += text.slice(start + 1, closeBracket)
+            i = closeRef
+            continue
+          }
+        }
+      }
+    }
+    out += text[i]
+  }
+  return out
+}
+
+// A reason is the visible text after `cannot split:` with a letter or a digit, in any language, and no placeholder,
+// HTML tag or empty link/image hiding non-visible words (#1556). Tags and link destinations are stripped before decoding
+// entities on each pass so `<span title="&gt;hidden"></span>` never decodes into visible text while real entities
+// like `&amp;` still count. Characters Unicode marks default-ignorable (zero-width space, Hangul filler) are ignored.
 const isSplitReason = text => {
-  const reason = text.replace(/cannot split:/gi, '')
-  if (/&(?:#\d+|#x[0-9a-f]+|[a-z][a-z0-9]*);|<[a-z/!?]/i.test(reason)) return false
+  let reason = text.replace(/cannot split:/gi, '')
+  let converged = false
+  for (let pass = 0; pass < 8; pass++) {
+    const next = stripMarkdownLinks(reason)
+      .replace(/<\/?[a-z](?:=\s*(?:"[^"]*"|'[^']*')|[^>=]|=(?!\s*["']))*>/gi, '')
+      .replace(/<\/?[a-z][^>]*>/gi, '')
+      .replace(/<!(?:--[\s\S]*?--|[^>]*?)>/g, '')
+      .replace(/<\?[\s\S]*?\?>/g, '')
+      .replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z][a-z0-9]*));/gi, decodeSplitEntity)
+    if (next === reason) {
+      converged = true
+      break
+    }
+    reason = next
+  }
+  if (!converged) return false
   return /[\p{L}\p{N}]/u.test(reason.replace(/\p{Default_Ignorable_Code_Point}/gu, ''))
 }
 const hasSplitReason = body => surfaceLine(body).filled.some(value => isSplitReason(value.split(/,[ \t]*cannot split:/i).slice(1).join(','))) ||
@@ -932,7 +1072,7 @@ export const size = ({ body = '', title = '', number = null, numstat, tier = vis
   const limit = tier === 'risk' ? SIZE_RISK : SIZE_NORMAL
   const counted = `${lines} changed lines (tests, generated files and string tables not counted)`
   if (lines > limit && !hasSplitReason(body)) {
-    output.problems.push(problem('size', `${counted} is more than ${limit}, the limit on the ${tier === 'risk' ? 'risk' : 'normal'} tier (RULES.md, R6).`, 'split it into smaller pull requests, or say why it cannot be split: end the `Surface:` line with `, cannot split: <reason>`, or add a line `Size: cannot split: <reason>`, in plain words (no HTML tag or entity).'))
+    output.problems.push(problem('size', `${counted} is more than ${limit}, the limit on the ${tier === 'risk' ? 'risk' : 'normal'} tier (RULES.md, R6).`, 'split it into smaller pull requests, or say why it cannot be split: end the `Surface:` line with `, cannot split: <reason>`, or add a line `Size: cannot split: <reason>`, in visible words (not a tag, hidden character or empty link).'))
   } else if (lines > SIZE_RISK && tier !== 'risk') output.info.push(`size note: ${counted} is more than ${SIZE_RISK}; above ${SIZE_NORMAL} it fails without a reason it cannot be split.`)
   return output
 }
@@ -954,7 +1094,7 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   const [named, ...reasonParts] = line.split(/,[ \t]*cannot split:/i)
   const reason = reasonParts.join(',').trim()
   if (reasonParts.length && !isSplitReason(reason)) {
-    fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.','write the reason after `cannot split:` in plain words (no HTML tag or entity), for the maintainer or the owner to accept or refuse before the first review.')
+    fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.', 'write the reason after `cannot split:` in visible words (not a tag, hidden character or empty link), for the maintainer or the owner to accept or refuse before the first review.')
     return output
   }
   const values = named.split('+').map(value => value.replace(/`/g, '').trim().toLowerCase())
@@ -1023,15 +1163,16 @@ export const evidenceFirst = ({ body = '', title = '', number = null, firstCommi
 
 // Every pull request names its tier on a `Tier:` line, and one that changes a path docs/dev/risk-paths.md lists is risk
 // tier (RULES R2; #1531). Both apply to pull requests numbered above TIER_FROM, the issue they came in with, other than a
-// release, which is risk tier whatever it says. A local --body-file run, which often checks a draft body, and a small
-// docs fix from outside the team get a note for a missing line instead of a failure.
+// release, which is risk tier whatever it says. A local --body-file run, which often checks a draft body, gets a note for
+// a missing line instead of a failure. A small docs fix from outside the team is spared the issue and claim lines only,
+// not the tier, which decides who may approve (#1577).
 export const TIER_FROM = 1531
 // The paths risk-paths.md lists: one per bullet, in backticks; a path ending in `/` is a folder. The large shared files
 // the page names in its prose are not on the list, and stay the reviewer's call (R2).
 export const riskPathsOf = text => linesOf(text ?? '').flatMap(line => line.trimEnd().match(/^[ \t]*[-*][ \t]+`([^`\s]+)`$/)?.[1] ?? [])
 const isRiskPath = (path, riskPaths) => riskPaths.some(listed => listed.endsWith('/') ? path.startsWith(listed) : path === listed)
 // riskPaths: the list read at the base, null when it could not be read there, undefined when not given.
-export const tier = ({ body = '', title = '', number = null, paths = [], riskPaths, isOptional = false } = {}) => {
+export const tier = ({ body = '', title = '', number = null, paths = [], riskPaths } = {}) => {
   const output = result()
   if (isReleaseTitle(title) || (number !== null && number <= TIER_FROM)) return output
   const fail = (message, fix) => output.problems.push(problem('tier', message, fix))
@@ -1045,7 +1186,7 @@ export const tier = ({ body = '', title = '', number = null, paths = [], riskPat
   const value = found[0] ?? ''
   if (value.trim() === '' || value.startsWith('<')) {
     const message = !found.length ? 'the body has no `Tier:` line.' : value.trim() === '' ? 'the `Tier:` line names no tier.' : 'the `Tier:` line is still the template\'s placeholder.'
-    if (number === null || isOptional) output.info.push(`tier: ${message} The PR check fails a pull request without one (docs/dev/RULES.md, R2).`)
+    if (number === null) output.info.push(`tier: ${message} The PR check fails a pull request without one (docs/dev/RULES.md, R2).`)
     else fail(message, how)
     return output
   }
@@ -1291,7 +1432,16 @@ export const rounds = (comments, { body = '', title = '', number = null, isDraft
 export const verdict = (comments, head, options = {}) => {
   const output = result()
   const { isDraft = false, authorAgent = null, number = null, tier = null } = options
-  const reviews = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
+  const reviews = []
+  for (const comment of comments ?? []) {
+    const { review, ignored } = readReview(comment)
+    if (review) reviews.push(review)
+    else if (ignored) {
+      const who = safeText(String(ignored.who).replace(/\s+/g, ' ').trim())
+      const reason = safeText(String(ignored.reason).replace(/\s+/g, ' ').trim())
+      output.info.push(`review: ignored approval from ${who} (${reason}); only a team member or an allowed app may approve.`)
+    }
+  }
   const last = reviews.at(-1)
 
   if (!last) {
@@ -1355,7 +1505,7 @@ export const checkPr = data => {
   add(privateData({ added: data.added, body: data.body }))
   add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
-  add(tier({ body: data.body, title: data.title, number: data.number, paths: data.paths, riskPaths: data.riskPaths, isOptional: isSmallDocs }))
+  add(tier({ body: data.body, title: data.title, number: data.number, paths: data.paths, riskPaths: data.riskPaths }))
   add(surface({ body: data.body, title: data.title, number: data.number, paths: data.paths, numstat: data.numstat }))
   add(evidenceFirst({ body: data.body, title: data.title, number: data.number, firstCommitPaths: data.firstCommitPaths }))
   add(size({ body: data.body, title: data.title, number: data.number, numstat: data.numstat }))
@@ -1776,7 +1926,8 @@ export const main = async (argv = process.argv.slice(2)) => {
     // release numbers are read after it, so a pull request renamed a release since its event is checked as a release.
     if (api && options['--event'] && data.number !== null) {
       const current = await api(`pulls/${data.number}`)
-      if (current?.head?.sha === data.head) {
+      if (typeof current?.head?.sha !== 'string' || !/^[0-9a-f]{40}$/i.test(current.head.sha)) throw new Error('pull request metadata is incomplete or invalid.')
+      if (current.head.sha === data.head) {
         if (typeof current.title !== 'string' || !Array.isArray(current.labels) || typeof current.draft !== 'boolean') throw new Error('pull request metadata is incomplete or invalid.')
         Object.assign(data, { title: current.title, body: current.body ?? '', isDraft: current.draft, labels: current.labels })
       }
