@@ -233,7 +233,7 @@ export const startCodexReceiver = ({
   if (typeof threads !== 'function' || !isAbsolute(executable ?? '')) throw new Error('EXPLICIT_EXECUTABLE_REQUIRED')
   const client = boardClient(boardUrl)
   const attached = new Map()
-  let daemon = null, isTicking = false, isClosed = false, closing = null, failures = 0, retryAt = 0
+  let daemon = null, isTicking = false, isClosed = false, closing = null, connecting = null, failures = 0, retryAt = 0
   // The newest list of loaded threads, with the time its request was sent: a thread it shows was still loaded after that time.
   let listing = { set: new Set(), sentAt: 0 }, canTell = false
   // What this receiver's connection to the daemon has in each thread, kept apart from the board connection for it (`attached`),
@@ -653,14 +653,18 @@ export const startCodexReceiver = ({
     hasConfigFailed = false
     for (const sub of subs.values()) { sub.mayBeSubscribed = false; sub.hasLeaveFailed = false; sub.leaveFails = 0; if (sub.interrupt !== null) sub.interrupt.isAsking = false }
   }
-  const connect = async () => {
+  // close() waits for a connection still being made, and one that is made after close() began is ended at once (#1632).
+  const connect = () => connecting ??= (async () => {
     let made
-    // Only the connection in use ends what the receiver knows: an older one that closes late says nothing about the new one.
-    made = await connectDaemon({ executable, socket, env, onMessage: route, onClose: () => { if (daemon === null || daemon === made) lost() } })
-    daemon = made
-    canTell = hasUnloadDelay(daemon.info)
-    failures = 0
-  }
+    try {
+      // Only the connection in use ends what the receiver knows: an older one that closes late says nothing about the new one.
+      made = await connectDaemon({ executable, socket, env, onMessage: route, onClose: () => { if (daemon === null || daemon === made) lost() } })
+      if (isClosed) { await made.close(); throw new Error('RECEIVER_CLOSED') }
+      daemon = made
+      canTell = hasUnloadDelay(daemon.info)
+      failures = 0
+    } finally { connecting = null }
+  })()
 
   // ended: the board read the session as ended. Any other loss (the daemon went, a contest) is no sign of that, so the
   // board keeps what was queued for this connection and hands it to the next one (#318). Only the board connection ends here:
@@ -920,6 +924,7 @@ export const startCodexReceiver = ({
         if (Date.now() < retryAt) return
         // A daemon that cannot be reached is tried again later, waiting longer after each failure, up to RETRY_MAX_MS.
         const error = await connect().then(() => null, one => one)
+        if (error !== null && isClosed) return
         if (error !== null) {
           failures += 1
           retryAt = Date.now() + Math.min(RETRY_MAX_MS, tickMs * 2 ** Math.min(failures, 5))
@@ -965,6 +970,7 @@ export const startCodexReceiver = ({
     close: () => closing ??= (async () => {
       isClosed = true
       clearInterval(timer)
+      await connecting?.catch(() => undefined)
       for (const one of attached.values()) one.wake()
       await Promise.all([...subs.entries()].map(async ([thread, sub]) => {
         if (sub.watch !== null && !isWaitingOnApproval(sub) && !sub.mayBeSubscribed && daemon !== null && daemon.isOpen()) {

@@ -2698,9 +2698,9 @@ const pollingProxy = async (board, mode, onClaim) => {
         return fail(mode === 'forbidden' || mode === 'forbidden-always' ? 403 : mode === 'stale' ? 409 : 503)
       }
       // unsent-refused, unsent-busy: an unsent receipt never reaches the board, and is answered as the board answers one it refuses
-      // (409) or one it could not save because its store was busy (503). unsent-busy-once: only the first one is answered 503; later
-      // ones reach the board.
-      if ((mode === 'unsent-refused' || mode === 'unsent-busy' || mode === 'unsent-busy-once' && faults === 0) && req.url === '/api/messages/receipt' && JSON.parse(body).status === 'unsent') {
+      // (409) or one it could not save because its store was busy (503). unsent-busy-thrice: only the first three are answered 503;
+      // later ones reach the board.
+      if ((mode === 'unsent-refused' || mode === 'unsent-busy' || mode === 'unsent-busy-thrice' && faults < 3) && req.url === '/api/messages/receipt' && JSON.parse(body).status === 'unsent') {
         faults += 1
         res.writeHead(mode === 'unsent-refused' ? 409 : 503, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ error: mode === 'unsent-refused' ? 'INVALID_RECEIPT' : 'MESSAGE_STORE_BUSY' }))
@@ -5109,7 +5109,7 @@ test('an unsent receipt from the connection that holds a claim puts the message 
 // thread reads as a person's about 2 s after the turn ended, well inside the claim's time.
 // endTurn: when the person's turn ends (by default right after the receiver leaves). started: called once the proxy and the receiver
 // run, before the rest of the setup. Whatever fails after they started closes both before the error goes on (#1626).
-const codexGiveBackCase = async (board, dir, mode, { endTurn, started } = {}) => {
+const codexGiveBackCase = async (board, dir, mode, { endTurn, started, onError } = {}) => {
   const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
   writeFileSync(person, '')
   const daemon = codexDaemon(dir, { readActive: true, endFlag, person })
@@ -5117,7 +5117,7 @@ const codexGiveBackCase = async (board, dir, mode, { endTurn, started } = {}) =>
   let receiver
   const close = async () => { await receiver?.close(); await proxy.close() }
   try {
-    receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 4000 })
+    receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 4000, ...(onError ? { onError } : {}) })
     await started?.({ proxy, receiver, daemon })
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
@@ -5145,9 +5145,10 @@ test("a Codex claim whose give-back the board refuses (409) is still the receive
 test("a Codex claim whose give-back met a busy message store (503, nothing saved) is still the receiver's, and is started once when the thread reads as a person's in time (#1578)", () => codexRefusedGiveBack('unsent-busy'))
 
 // The person's turn runs on past the first give-back: the turn ends about 1.4 s after it (minute 24 of 30 for real), when a whole
-// wait no longer fits in the claim's time. The first give-back meets a busy store (503), the next one a tick later reaches the board.
+// wait no longer fits in the claim's time. The first three give-backs meet a busy store (503), a tick apart; the fourth reaches the board.
 test("a Codex claim whose give-back met a busy message store and whose thread stays busy is given back a tick later, and is delivered once after (#1625)", () => codexFixture(async (board, dir) => {
-  const { daemon, proxy, close } = await codexGiveBackCase(board, dir, 'unsent-busy-once', { endTurn: async ({ proxy, daemon }) => {
+  const errors = []
+  const { daemon, proxy, close } = await codexGiveBackCase(board, dir, 'unsent-busy-thrice', { onError: error => errors.push(error.message), endTurn: async ({ proxy, daemon }) => {
     await waitFor(async () => proxy.faults() > 0)
     // The store was busy and saved nothing; the give-back asked again puts the message back in the queue with its text, before the
     // turn ends. A receiver that held the claim instead would let it run out here.
@@ -5162,16 +5163,15 @@ test("a Codex claim whose give-back met a busy message store and whose thread st
     const starts = daemon.calls().filter(one => one.method === 'turn/start')
     assert.equal(starts.length, 1)
     assert.ok(JSON.stringify(starts[0].params).includes('Check the build and tell me what failed.'))
-    assert.equal(proxy.faults(), 1)
+    // Three busy answers, reported once: a store that stays busy does not report every tick it is asked again.
+    assert.deepEqual([proxy.faults(), errors.filter(one => one === 'MESSAGE_STORE_BUSY').length], [3, 1])
   } finally { await close() }
 }))
 
 test('a give-back case whose setup fails after its proxy and receiver started closes both before the error goes on (#1626)', () => codexFixture(async (board, dir) => {
   let address, isReceiverClosed = false
-  await assert.rejects(codexGiveBackCase(board, dir, 'unsent-refused', { started: async ({ proxy, receiver, daemon }) => {
-    // The receiver has its Codex connection first: a receiver closed while it is still connecting leaves that connection open,
-    // which is a separate issue, not this cleanup.
-    await waitFor(async () => codexMethods(daemon).some(method => method !== 'initialize'))
+  // The failure comes as soon as the receiver started, while it is still connecting to Codex (#1632 closes that connection too).
+  await assert.rejects(codexGiveBackCase(board, dir, 'unsent-refused', { started: ({ proxy, receiver }) => {
     address = proxy.address
     const close = receiver.close
     receiver.close = () => { isReceiverClosed = true; return close() }
@@ -5180,6 +5180,22 @@ test('a give-back case whose setup fails after its proxy and receiver started cl
   // The receiver was closed, and the proxy no longer takes connections.
   assert.equal(isReceiverClosed, true)
   await assert.rejects(fetch(new URL(address)), /fetch failed/)
+}))
+
+test('a Codex receiver closed while it is still connecting to Codex ends that connection before close() is done (#1632)', () => codexFixture(async (board, dir) => {
+  const daemon = codexDaemon(dir)
+  // The first tick starts connecting at once; close() comes before the connection is made.
+  await codexReceiver(board, daemon).close()
+  // The stand-in writes its state every 50 ms while it runs: once close() is done, that stops.
+  const state = daemon.log + '.state'
+  const seen = () => { try { return JSON.parse(readFileSync(state, 'utf8')).seen } catch { return null } }
+  await pause(500)
+  const first = seen()
+  await pause(500)
+  // The connection was made (the stand-in logged its handshake), and the stand-in no longer runs: its state, if it wrote any, is
+  // not written again.
+  assert.ok(readFileSyncSafe(daemon.log).includes('handshake'))
+  assert.equal(seen(), first)
 }))
 
 test('a Codex claim whose unsent receipt got no answer is not started by that delivery: the board may have queued it again, and it is started once (#1578)', () => codexFixture(async (board, dir) => {
