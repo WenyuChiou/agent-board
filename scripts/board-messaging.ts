@@ -618,10 +618,20 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
         if (!owner || typeof owner !== 'object' || owner.pid !== pid || typeof owner.url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url)) throw new Error('INVALID_SERVER_OWNER')
         return await new Promise<Record<string, unknown>>((done, fail) => {
           const url = new URL(owner.url as string)
+          // This call ends the request itself when its time is up or the answer is too long to read. The error that ending
+          // raises is no transport failure: the call stays deferred, as before #1631, and is not asked again.
+          let isEndedHere = false
+          const endHere = (): void => {
+            isEndedHere = true
+            clearTimeout(timer)
+            req.destroy()
+            hasDeferred = true
+            fail(new Error('BOARD_NOT_RUNNING'))
+          }
           const req = request(new URL(`/api/messages/${action}`, url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t')!, 'content-type': 'application/json' } }, res => {
             let text = ''
             res.setEncoding('utf8')
-            res.on('data', chunk => { text += chunk; if (text.length > 65_536) req.destroy() })
+            res.on('data', chunk => { text += chunk; if (text.length > 65_536 && !isEndedHere) endHere() })
             res.on('end', () => {
               clearTimeout(timer)
               try {
@@ -635,12 +645,12 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
                 done(result)
               } catch (error) { fail(error) }
             })
-            res.on('error', error => { clearTimeout(timer); isCutOff = true; hasTransportError = true; fail(error) })
+            res.on('error', error => { if (isEndedHere) return; clearTimeout(timer); isCutOff = true; hasTransportError = true; fail(error) })
           })
-          const timer = setTimeout(() => { req.destroy(); hasDeferred = true; fail(new Error('BOARD_NOT_RUNNING')) }, wait)
+          const timer = setTimeout(endHere, wait)
           // Only the timer above is a timeout; any other transport failure keeps its own code (ECONNREFUSED, ECONNRESET).
           // A refused connection never reached the board, so it claimed nothing to hand back.
-          req.on('error', error => { clearTimeout(timer); isCutOff = (error as NodeJS.ErrnoException).code !== 'ECONNREFUSED'; hasTransportError = true; fail(error) })
+          req.on('error', error => { if (isEndedHere) return; clearTimeout(timer); isCutOff = (error as NodeJS.ErrnoException).code !== 'ECONNREFUSED'; hasTransportError = true; fail(error) })
           req.end(JSON.stringify(action === 'mailbox-turn' ? { ...body, before: started + wait } : body))
         })
       }
@@ -716,11 +726,14 @@ export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(di
 export const hookMailbox = (directory: string, budget: number, boardWait = 150, storeWait = 120) => {
   const deadline = Date.now() + budget
   const access = mailboxAccess(directory, Math.min(boardWait, budget), Math.min(storeWait, budget))
+  // The last take failed after the board may have claimed a message, and handing it back did not go through.
+  let isHeld = false
   const call = async (action: string, body: Record<string, unknown>, now: number): Promise<Message | null> => {
     try { return (await access.call(action, body, now)).message as Message ?? null } catch { return null }
   }
   // The take itself; a failure is thrown, so a caller that must tell it from an empty mailbox can.
   const takeTurn = async (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => {
+    isHeld = false
     const ref = named ?? randomBytes(6).toString('hex')
     // A plugin that names its claim also marks its wake (attempt) and gives it back as unsent, which a board started before
     // the plugin existed refuses with UNKNOWN_FIELD, so a claim it took could never go back: it waits out 30 minutes and its text
@@ -744,7 +757,10 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
       // The board may have claimed a message after this hook stopped waiting: hand it back (#990).
       // Its own budget is what the hook has left; a claim not handed back waits out the lease.
       const left = deadline - Date.now()
-      if ((access.isDeferred() || access.isCutOff()) && left > 0) try { await mailboxAccess(directory, Math.min(boardWait, left)).call('mailbox-release', { agent, session, ref }, Date.now()) } catch {}
+      if (access.isDeferred() || access.isCutOff()) {
+        isHeld = true
+        if (left > 0) try { await mailboxAccess(directory, Math.min(boardWait, left)).call('mailbox-release', { agent, session, ref }, Date.now()); isHeld = false } catch {}
+      }
       throw error
     }
   }
@@ -754,6 +770,9 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
     // True when the last call failed on the connection to the board itself (refused, reset or cut): its error is reported,
     // and a caller with time to spare may ask again, as after a deferred take (#1631).
     get hasTransportError() { return access.hasTransportError() },
+    // True when the board may still hold a claim from the last take (handing it back failed): asking again would find
+    // nothing while that message waits, so the caller reports the error instead (#1631).
+    get hasHeldClaim() { return isHeld },
     // True only when the last call found nothing at the messages folder's path.
     get hasNoFolder() { return access.isAbsent() },
     // An in-process plugin may name the claim (a 12-hex ref), so it can hand the claim back with release.

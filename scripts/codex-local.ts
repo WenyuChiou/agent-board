@@ -588,11 +588,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       let taker = mailbox
       if (agent !== 'opencode') {
         // DeepSeek's receiver reads a failed take from the exit status and the code on stderr; a deferred take answers null (#1448).
-        message = await taker.turn(agent, session, surfaceOf(surface), Date.now())
-        // A refused or cut connection to the board is asked again within this take's own five seconds, as the receiver asks
-        // again after a deferred take, so a board back in a moment still delivers; one that keeps failing is reported (#1631).
+        // A refused or cut connection to the board is asked again within this take's own five seconds, counted from its
+        // first ask, as the receiver asks again after a deferred take, so a board back in a moment still delivers; one that
+        // keeps failing is reported. A cut take whose claim did not go back is reported at once: asking again would find
+        // nothing while the board still holds that message (#1631).
         const until = Date.now() + 5000
-        while (message === null && taker.hasTransportError && Date.now() + 500 < until) {
+        message = await taker.turn(agent, session, surfaceOf(surface), Date.now())
+        while (message === null && taker.hasTransportError && !taker.hasHeldClaim && Date.now() + 500 < until) {
           await new Promise(done => setTimeout(done, 250))
           taker = hookMailbox(directory, Math.max(until - Date.now(), 0), 2000, 2000)
           message = await taker.turn(agent, session, surfaceOf(surface), Date.now())
