@@ -897,6 +897,12 @@ export const observeQuestions = (
         if (record !== undefined) record.isPresent = false
         const binding = sha256(JSON.stringify([row.scope, words, occurrence, copies.length, incarnation]))
         record = { id: `question:${binding}:${next++}`, scope: row.scope, words, occurrence, copies: copies.length, isWaiting: true, isPresent: true, firstObserved: Number.isFinite(now) && now > 0 ? now : 0, incarnation, producer: row.producer }
+        // A token-marked block keeps its own record, so the inbox turn that stays after that block is gone gets a new one:
+        // it takes the list or refusal the newest open record of the same words in this scope holds (#1630).
+        if (row.source.kind === 'inbox') {
+          const kept = (byScopeWords.get(partsKey2(row.scope, words)) ?? []).filter(old => old.options !== undefined && old.isUnresolved !== false).at(-1)?.options
+          if (kept !== undefined) record.options = [...kept]
+        }
         records.push(record)
         indexRecord(record)
       }
