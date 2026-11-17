@@ -5118,7 +5118,7 @@ const codexGiveBackCase = async (board, dir, mode, { endTurn, started } = {}) =>
   const close = async () => { await receiver?.close(); await proxy.close() }
   try {
     receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 4000 })
-    await started?.({ proxy, receiver })
+    await started?.({ proxy, receiver, daemon })
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
     await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
@@ -5168,7 +5168,10 @@ test("a Codex claim whose give-back met a busy message store and whose thread st
 
 test('a give-back case whose setup fails after its proxy and receiver started closes both before the error goes on (#1626)', () => codexFixture(async (board, dir) => {
   let address, isReceiverClosed = false
-  await assert.rejects(codexGiveBackCase(board, dir, 'unsent-refused', { started: ({ proxy, receiver }) => {
+  await assert.rejects(codexGiveBackCase(board, dir, 'unsent-refused', { started: async ({ proxy, receiver, daemon }) => {
+    // The receiver has its Codex connection first: a receiver closed while it is still connecting leaves that connection open,
+    // which is a separate issue, not this cleanup.
+    await waitFor(async () => codexMethods(daemon).some(method => method !== 'initialize'))
     address = proxy.address
     const close = receiver.close
     receiver.close = () => { isReceiverClosed = true; return close() }

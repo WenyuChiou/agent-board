@@ -742,7 +742,7 @@ export const startCodexReceiver = ({
         deliver: async (message, accepted, begin, unsent) => {
           // The claim is held until a person has the thread open and it reads idle: a turn that began after the board's poll, or
           // one this connection has not heard of yet (the thread is read fresh right before the start), keeps the message waiting
-          // here. Nothing is given back. A connection that is lost meanwhile, or a wait past the board's limit, ends this with no
+          // here, or goes back to the board's queue (below). A connection that is lost meanwhile, or a wait past the board's limit, ends this with no
           // receipt: the board settles a claim it lost the connection of (`uncertain`, `DISCONNECTED`) or expired itself.
           // Measured from the board's own claim time, which is what it expires from, so nothing starts for a claim the card already shows as expired.
           const waitsSince = Number.isFinite(message.claimed) && message.claimed > 0 ? message.claimed : Date.now()
@@ -759,16 +759,16 @@ export const startCodexReceiver = ({
           // known (none came, or any other error answer) may have put the message back in the queue, so this delivery ends with no
           // turn/start and never asks again: the board hands the message out again if it took the give-back, and expires the claim if
           // it did not.
-          let canGiveBack = typeof unsent === 'function', giveBackAt = 0
+          let canGiveBack = typeof unsent === 'function', giveBackAt = 0, wasBusy = false
           const isShort = () => ackMs - (Date.now() - waitsSince) < Math.max(unloadMs, (quiet.get(thread)?.delay ?? 0) + unloadMarginMs) + 2 * tickMs
           // 'back': the board took it; 'held': the board saved nothing, so the claim is still this delivery's; 'unknown': either may be so.
           const giveBack = async () => {
             if (!canGiveBack || Date.now() < giveBackAt) return 'held'
             try { await unsent(); return 'back' } catch (error) {
-              onError(error)
+              // A store that stays busy is reported once, not on every tick it is asked again.
+              if (error?.isBusy !== true || !wasBusy) onError(error)
               if (error?.isRefused !== true) return 'unknown'
-              if (error?.isBusy === true) giveBackAt = Date.now() + tickMs
-              else canGiveBack = false
+              if (error?.isBusy === true) { wasBusy = true; giveBackAt = Date.now() + tickMs } else canGiveBack = false
               return 'held'
             }
           }
