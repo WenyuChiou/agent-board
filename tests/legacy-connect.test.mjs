@@ -37,6 +37,22 @@ const fixture = async fn => {
 
 const taggedBoards = new Map()
 
+const originalForeignHermes = mode => fixture(async f => {
+  const folder = join(f.home, '.hermes')
+  mkdirSync(folder)
+  const config = join(folder, 'config.yaml')
+  const original = 'model: synthetic\nhooks:\n  post_tool_call:\n    - {command: "node ./tools/progress-hook.mjs --hook-version 1 --hook-event post_tool_call --plan-event --agent hermes --progress-file ./synthetic-progress.md", matcher: external, timeout: 5}\n    - {command: "node ./tools/keep-this.mjs", matcher: terminal, timeout: 5}\n'
+  writeFileSync(config, original)
+  f.run(f.request(mode))
+  const after = readFileSync(config, 'utf8')
+  for (const line of original.split('\n').filter(line => line.includes('command:'))) assert.ok(after.includes(line), `${mode} must preserve the original foreign hook and its metadata`)
+  if (mode === 'remove') assert.equal(after, original, 'Without an installation, removal must not alter the foreign config')
+})
+
+test('Hermes legacy connect preserves the original foreign-hook reproduction', () => originalForeignHermes('connect'))
+test('Hermes legacy probe preserves the original foreign-hook reproduction', () => originalForeignHermes('auto'))
+test('Hermes legacy removal without an installation preserves the original foreign-hook reproduction', () => originalForeignHermes('remove'))
+
 test('a malformed remembered Codex approval makes the connect state invalid', () => fixture(async f => {
   f.run(f.request('connect'))
   const state = JSON.parse(readFileSync(f.control, 'utf8'))
