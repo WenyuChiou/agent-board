@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { BOARD_SCRIPT } from '../../hooks/board-script.ts'
 import { makeWorld } from './lib/world.mjs'
@@ -292,10 +291,21 @@ test('three real --serve starts on the default store collide and every start pri
 // A "dead page" is the real board script run as a page child whose server never listens.
 const isAlive = pid => { try { process.kill(pid, 0); return true } catch (error) { return error.code === 'EPERM' } }
 const untilGone = async (pid, ms = 5000) => { const end = Date.now() + ms; while (isAlive(pid) && Date.now() < end) await wait(50); return !isAlive(pid) }
+// The default store folder, wherever this system keeps the board's runtime folder (XDG_RUNTIME_DIR itself on
+// Linux, an agent-board folder in it on Windows): the only agent-board-<hash>-messages folder in the world.
 const storeOf = world => {
-  const run = join(world.root, 'run', 'agent-board')
-  const found = existsSync(run) ? readdirSync(run).find(name => name.endsWith('-messages')) : undefined
-  return found === undefined ? undefined : join(run, found)
+  const look = (folder, depth) => {
+    let names
+    try { names = readdirSync(folder, { withFileTypes: true }) } catch { return undefined }
+    for (const one of names) {
+      if (!one.isDirectory()) continue
+      if (/^agent-board-[0-9a-f]+-messages$/.test(one.name)) return join(folder, one.name)
+      const found = depth > 0 ? look(join(folder, one.name), depth - 1) : undefined
+      if (found) return found
+    }
+    return undefined
+  }
+  return look(world.root, 4)
 }
 const holderWorld = ageMs => {
   const world = makeWorld()
@@ -436,7 +446,7 @@ test('an OpenCode board command that cannot open says so on stdout', { timeout: 
   // As OpenCode runs a command's shell line: through a shell, stdout only, exit code ignored.
   const q = value => `"${value}"`
   const result = await new Promise(done => {
-    const child = spawn(`${q(process.execPath)} ${q(h.world.script)} --lang en`, { shell: true, cwd: h.world.root, env: h.env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    const child = spawnIsolated(`${q(process.execPath)} ${q(h.world.script)} --lang en`, [], { shell: true, cwd: h.world.root, env: h.env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
     let stdout = ''
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stdout.once('end', () => done(stdout))
@@ -471,8 +481,11 @@ test('a start while the page runs reaches that page', { timeout: 120_000 }, () =
   const first = await h.board(['--serve', '--no-open'])
   const link = h.linkOf(first.stdout)
   assert.ok(link, JSON.stringify(first))
-  const run = join(h.world.root, 'run', 'agent-board')
-  const addresses = readdirSync(run).filter(name => name.endsWith('.json'))
+  // The page's address file sits beside its store folder, under the same name.
+  const store = storeOf(h.world)
+  const run = dirname(store)
+  const addresses = [basename(store).replace(/-messages$/, '.json')]
+  assert.ok(existsSync(join(run, addresses[0])), 'the page has no address file beside its store')
   // An address file this start will not use never leads it to the page behind it, and that page is not ended.
   for (const name of addresses) writeFileSync(join(run, name), '{"not":"an address"}')
   const unusable = await h.board()
