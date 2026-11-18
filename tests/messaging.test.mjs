@@ -7807,6 +7807,56 @@ test('shape 28: an OpenCode mailbox card sends from the board on its idle and wo
   assert.deepEqual([queued.status, queued.body.line], [200, 'stepEnd'])
   assert.equal((await w.remove('shape-opencode-working')).status, 200)
 })
+test('shape 29: an OpenCode card whose OpenCode has quit stops offering Send and reads closed, a fresh one or an old one alike (#1595)', async () => {
+  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const host = readingHostHash()
+  assert.notEqual(host, null, 'this machine has a host hash')
+  const quit = spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid
+  assert.throws(() => process.kill(quit, 0), error => error.code === 'ESRCH', `stand-in OpenCode ${quit} is unexpectedly alive`)
+  const w = await shapeCase({ agent: 'opencode', kind: 'mailbox', surface: SURFACE_IDS.cli })
+  shapeRoutes.splice(0, shapeRoutes.length, ...RECEIVER_ROUTES)
+  // The board's own read: the process check of scripts/session-liveness.ts, on every view.
+  shapeViewTransform = () => {
+    const projects = parseProgress(shapeFile)
+    return buildView(projects, [], null, Date.now(), 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, goneBlocksOf(projects))
+  }
+  const file = (pid, minutes, state = 'waiting', where = host) => `## Synthetic\n<!-- auto session=abcdef01 agent=opencode resume=${w.session} state=${state} updated=${new Date(Date.now() - minutes * 60_000).toISOString()} agentpid=${pid} host=${where} -->\n### Route table\n${state === 'waiting' ? '- [?] Continue?' : '- [~] Keep going'}\n<!-- /auto session=abcdef01 -->\n`
+  const shown = async () => {
+    const model = (await w.call('/api/board')).body.model
+    const all = [...model.asks, ...model.idle, ...model.stopped, ...model.groups.flatMap(group => group.rows)].filter(one => one.agent === 'opencode')
+    return { model, all }
+  }
+  // OpenCode still open: the card sends at once, as shape 28 shows.
+  shapeFile = file(process.pid, 0)
+  const open = await w.card()
+  assert.deepEqual([open.delivery?.id, open.line, open.canSend], [w.target.id, 'now', true])
+  // OpenCode quit just now, and an older session 41 minutes ago: no card offers Send or says it starts at once.
+  for (const minutes of [0, 41]) {
+    shapeFile = file(quit, minutes)
+    const { model, all } = await shown()
+    assert.ok(all.length > 0, `${minutes} min: the session is still shown`)
+    assert.equal(model.asks.filter(one => one.agent === 'opencode').length, 0, `${minutes} min: not under Needs you`)
+    for (const one of all) {
+      assert.notEqual(one.canSend, true, `${minutes} min: no Send`)
+      assert.equal(one.delivery, undefined, `${minutes} min: no delivery target`)
+      assert.ok(!JSON.stringify(one).includes(EN.serveLineNow('OpenCode')), `${minutes} min: never "starts on this right away"`)
+    }
+    // The Agents list reads a source that is ended as closed, not open.
+    assert.ok(model.stopped.some(one => one.agent === 'opencode' && one.auto === 'ended'), `${minutes} min: the row reads ended`)
+    // The process stays in progress.md: the page's data names neither it nor the host (#1092, PM Q3).
+    assert.doesNotMatch(JSON.stringify(model), /agentpid|agentPid/, `${minutes} min: no pid on the page`)
+    assert.ok(!JSON.stringify(model).includes(host), `${minutes} min: no host hash on the page`)
+  }
+  // A session still replying when OpenCode quit ends too: it no longer waits 12 hours as working.
+  shapeFile = file(quit, 0, 'working')
+  const replying = await shown()
+  assert.ok(replying.all.length > 0 && replying.all.every(one => one.canSend !== true && one.delivery === undefined), 'a working row of a quit OpenCode offers no Send')
+  assert.ok(replying.model.stopped.some(one => one.agent === 'opencode' && one.auto === 'ended'), 'it reads ended, not working')
+  // A row written on another machine is never ended by this machine's process check: the card is kept.
+  shapeFile = file(quit, 0, 'waiting', 'f'.repeat(64))
+  const elsewhere = await w.card()
+  assert.deepEqual([elsewhere.delivery?.id, elsewhere.line, elsewhere.canSend], [w.target.id, 'now', true])
+})
 test('a live route whose only note for its surface is in surfaceRecords takes the place of the mailbox, on the card and in the API (#318)', async () => {
   const w = await shapeCase({ agent: 'codex', kind: 'mailbox', surface: SURFACE_IDS.cli })
   const note = line => ({ line, record: shapeNote, surfaces: [SURFACE_IDS.cli] }), none = { line: 'none', record: null, surfaces: [] }

@@ -6284,6 +6284,63 @@ test('OpenCode status retains its owned question beyond forty user steps and kee
   assert.equal(untouched.askedRevision, undefined)
 }))
 
+// A stand-in for OpenCode (#1595): a process that runs the installed hook worker the way the generated plugin does,
+// then stays open until the test lets it go. Its pid is the one the row must carry: the worker's parent.
+const openCodeStandIn = (f, payload) => new Promise((done, fail) => {
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const args = [worker, '--hook-version', '1', '--agent-status', '--agent', 'opencode', '--progress-file', f.progress, '--hook-deadline', String(Date.now() + 20000)]
+  const source = `const { spawnSync } = require('node:child_process')
+const result = spawnSync(process.execPath, ${JSON.stringify(args)}, { input: ${JSON.stringify(JSON.stringify(payload))}, encoding: 'utf8', windowsHide: true, timeout: 25000 })
+process.stdout.write(JSON.stringify({ status: result.status, stderr: result.stderr }) + '\\n')
+process.stdin.resume()
+process.stdin.on('end', () => process.exit(0))`
+  const child = spawn(process.execPath, ['-e', source], { env: f.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  const exited = new Promise(resolve => child.once('exit', resolve))
+  let out = ''
+  child.once('error', fail)
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', chunk => {
+    out += chunk
+    if (!out.includes('\n')) return
+    done({ pid: child.pid, ran: JSON.parse(out.split('\n')[0]), quit: async () => { child.stdin.end(); await exited } })
+  })
+})
+
+test('an OpenCode row carries the OpenCode process the worker ran under, ends on the first read after that process quits, and a status from elsewhere keeps it (#1595)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { goneBlocksOf, readingHostHash } = await importTs('../scripts/session-liveness.ts')
+  const host = readingHostHash()
+  assert.notEqual(host, null, 'this machine has a host hash')
+  const id = 'synthetic-opencode-exit-1595'
+  const marker = () => readFileSync(f.progress, 'utf8').split(/\r?\n/).find(line => line.startsWith('<!-- auto ') && line.includes(' agent=opencode ')) ?? ''
+  const first = await openCodeStandIn(f, { session_id: id, state: 'waiting', last_assistant_message: 'Which branch?' })
+  try {
+    assert.equal(first.ran.status, 0, first.ran.stderr)
+    assert.match(marker(), new RegExp(` agentpid=${first.pid}(?= |$)`))
+    assert.ok(marker().includes(` host=${host}`), marker())
+    assert.deepEqual([...goneBlocksOf(parseProgress(readFileSync(f.progress, 'utf8')))], [], 'OpenCode is still open')
+  } finally { await first.quit() }
+  // No clock is waited on: the first read after OpenCode has quit already ends the row.
+  assert.equal(goneBlocksOf(parseProgress(readFileSync(f.progress, 'utf8'))).size, 1, 'the row ends once OpenCode has quit')
+  // The same session resumed in a new OpenCode, with the same state and question: the row moves to the new process.
+  const second = await openCodeStandIn(f, { session_id: id, state: 'waiting', last_assistant_message: 'Which branch?' })
+  try {
+    assert.equal(second.ran.status, 0, second.ran.stderr)
+    assert.match(marker(), new RegExp(` agentpid=${second.pid}(?= |$)`))
+    assert.deepEqual([...goneBlocksOf(parseProgress(readFileSync(f.progress, 'utf8')))], [])
+  } finally { await second.quit() }
+  // A status the worker did not start (the board's replay of a queued event, a person's command) names no process: it keeps the
+  // one the row names, so after OpenCode has quit it cannot reopen the row with Send.
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'waiting'], { session_id: id, last_assistant_message: 'Still there?' }).status, 0)
+  assert.match(marker(), new RegExp(` agentpid=${second.pid}(?= |$)`))
+  assert.ok(marker().includes(` host=${host}`), marker())
+  assert.equal(goneBlocksOf(parseProgress(readFileSync(f.progress, 'utf8'))).size, 1, 'a status from elsewhere does not reopen a row whose OpenCode quit')
+  // The process stays out of the session record: only progress.md holds it (#1092, PM Q3).
+  const record = readFileSync(join(f.root, 'sessions', createHash('sha256').update(`opencode:${id}`).digest('hex') + '.json'), 'utf8')
+  assert.ok(!record.includes('agentPid') && !record.includes(host), record)
+}))
+
 test('an OpenCode status that carries delivery_request leaves its owned question open, a person\'s prompt answers it (#1334)', () => fixture(f => {
   assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
   const send = (id, state, extra = {}) => f.command(['--agent-status', '--agent', 'opencode', '--state', state], { session_id: id, ...extra })
