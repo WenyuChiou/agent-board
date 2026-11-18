@@ -740,10 +740,10 @@ export const startCodexReceiver = ({
         return isLoaded
       }
       one.receiver = await client.attach({
-        agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: SURFACE, unclaimed: true, pollMs, verify, onError,
+        agent: 'codex', session: thread, scope: 'session', turn: 'session', surface: SURFACE, unclaimed: true, marksStart: true, pollMs, verify, onError,
         // Nobody attached, or busy, is not a refusal: the lease stays alive and the message waits in the board, unclaimed.
         canReceive: async () => !state.pending && one.deliveries === 0 && !sub.isInUse && await isReady(thread),
-        deliver: async (message, accepted, begin, unsent) => {
+        deliver: async (message, accepted, begin, unsent, starting) => {
           // The claim is held until a person has the thread open and it reads idle: a turn that began after the board's poll, or
           // one this connection has not heard of yet (the thread is read fresh right before the start), keeps the message waiting
           // here, or goes back to the board's queue (below). A connection that is lost meanwhile, or a wait past the board's limit, ends this with no
@@ -774,6 +774,19 @@ export const startCodexReceiver = ({
               if (error?.isRefused !== true) return 'unknown'
               if (error?.isBusy === true) { wasBusy = true; giveBackAt = Date.now() + tickMs } else canGiveBack = false
               return 'held'
+            }
+          }
+          // Tells the board, right before turn/start, that this delivery is about to ask Codex for the message: until then a
+          // connection that ends sends the claim back to the queue (#1507). 'said': the board took it; 'held': its store was busy
+          // and saved nothing, so it is asked again a tick later, as a give-back is (#1625); 'end': any other answer, or none. The
+          // board may have taken it or not, so, as for a give-back whose answer is not known, this delivery ends with no turn/start
+          // and asks nothing again: a claim the board did not mark goes back when the connection ends, and one it marked expires.
+          let wasStartBusy = false
+          const sayStarting = async () => {
+            try { await starting(); return 'said' } catch (error) {
+              if (error?.isBusy !== true || !wasStartBusy) onError(error)
+              if (error?.isBusy === true) { wasStartBusy = true; return 'held' }
+              return 'end'
             }
           }
           one.deliveries += 1
@@ -833,7 +846,12 @@ export const startCodexReceiver = ({
                 if (error?.message === 'OWNER_DISCONNECTED') return undefined
                 if (error?.message !== 'OWNER_TIMEOUT') throw error
               }
-              if (status === 'idle' && isIdle() && !isDone()) break
+              if (status === 'idle' && isIdle() && !isDone()) {
+                const said = await sayStarting()
+                if (said === 'end') return undefined
+                // A turn heard to start while the board was asked holds the claim, as a busy read does (#1370).
+                if (said === 'said' && isIdle() && !isDone()) break
+              }
               // Busy: the receiver leaves again, so the thread is not kept loaded for a person who has gone.
               release()
               await leave(thread)

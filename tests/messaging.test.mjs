@@ -2719,9 +2719,9 @@ test('a store rename refused for another reason is not retried, and the receiver
 
 // A disposable loopback proxy faults only heartbeat responses. The real store still
 // decides whether a message was durably claimed before the response was lost.
-const pollingProxy = async (board, mode, onClaim) => {
+const pollingProxy = async (board, mode, onClaim, onStarting) => {
   const upstream = new URL(board.address)
-  let faults = 0, polls = 0, registrations = 0, hasClaimed = false
+  let faults = 0, polls = 0, registrations = 0, startings = 0, hasClaimed = false, hasStarted = false
   const server = createServer(async (req, res) => {
     try {
       let body = ''
@@ -2736,6 +2736,18 @@ const pollingProxy = async (board, mode, onClaim) => {
       }
       // forbidden-after-claim: the poll that hands a message out is answered, every later poll is refused for good (403).
       if (isPoll && mode === 'forbidden-after-claim' && hasClaimed) return fail(403)
+      // A starting receipt (#1507). starting-busy: the first is answered as a busy store that saved nothing (503); starting-lost:
+      // each reaches the board and its answer is lost; forbidden-after-starting: every poll after the first one is refused for good.
+      const isStarting = req.url === '/api/messages/receipt' && JSON.parse(body || '{}').status === 'starting'
+      if (isStarting) startings += 1
+      if (isPoll && mode === 'forbidden-after-starting' && hasStarted) return fail(403)
+      if (isStarting && mode === 'starting-busy' && faults === 0) {
+        faults += 1
+        res.writeHead(503, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: 'MESSAGE_STORE_BUSY' }))
+        return
+      }
+      if (isStarting && onStarting) await onStarting()
       if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim' && mode !== 'pass' && mode !== 'forbidden-after-claim' && !String(mode).startsWith('unsent-')) {
         if (mode === 'network' || mode === 'timeout') {
           faults += 1
@@ -2758,6 +2770,8 @@ const pollingProxy = async (board, mode, onClaim) => {
         method: req.method, headers: { 'x-board-token': upstream.searchParams.get('t'), 'content-type': 'application/json' }, body,
       })
       const text = await answer.text()
+      if (isStarting) hasStarted = true
+      if (isStarting && mode === 'starting-lost') { faults += 1; req.socket.destroy(); return }
       // unsent-lost: an unsent receipt reaches the board, and its answer is lost on the way back.
       if (mode === 'unsent-lost' && req.url === '/api/messages/receipt' && JSON.parse(body).status === 'unsent') { faults += 1; req.socket.destroy(); return }
       if (isPoll && mode === 'forbidden-after-claim' && JSON.parse(text).messages?.length) hasClaimed = true
@@ -2770,7 +2784,7 @@ const pollingProxy = async (board, mode, onClaim) => {
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   return {
     address: `http://127.0.0.1:${server.address().port}/?t=${upstream.searchParams.get('t')}`,
-    faults: () => faults, polls: () => polls, registrations: () => registrations,
+    faults: () => faults, polls: () => polls, registrations: () => registrations, startings: () => startings,
     close: () => new Promise(done => { server.close(done); server.closeAllConnections() }),
   }
 }
@@ -7105,6 +7119,211 @@ test('1486 reconnect preserves ended-uncertain receipt and lets next receiver cl
   // Disconnecting after an already settled uncertain timeout preserves that settled error rather than overwriting it with DISCONNECTED.
   const ownerTimedOut = messageReceipt(c1, connection1, { id: 'AB-FIRST', nonce: 'abcdef', status: 'uncertain', error: 'OWNER_TIMEOUT' }, now + 2)
   assert.equal(disconnectMessages(ownerTimedOut, connection1.id, now + 4).messages[0].error, 'OWNER_TIMEOUT')
+})
+
+// #1507: a Codex receiver registers with marksStart, so the board marks each claim it hands it until the receiver says
+// `starting`, right before turn/start. A connection that ends while the mark is still there never asked Codex for anything.
+const m5aHub = fn => {
+  const dir = mkdtempSync(join(tmpdir(), 'm5a-hub-'))
+  let hub = createMessaging(dir)
+  const reopen = () => { hub.close(); hub = createMessaging(dir); return hub }
+  try { return fn(() => hub, reopen) } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
+}
+const m5aRegister = (hub, now, session = 'm5a-session') => hub.act('register', { agent: 'codex', session, surface: SURFACE_IDS.cli, turn: 'session', scope: 'session', unclaimed: true, marksStart: true }, now)
+const m5aPoll = (hub, one, now) => hub.act('poll', { connection: one.id, secret: one.secret, turn: 'session' }, now).messages
+const m5aOf = (hub, now, id = 'AB-M5A-1') => hub.snapshot(now).messages.find(one => one.id === id)
+
+test('a Codex receiver\'s claim whose board lease lapses before it says starting goes back to the queue, not no reply confirmed (#1507)', () => m5aHub(hub => {
+  const now = Date.now()
+  const first = m5aRegister(hub(), now)
+  hub().act('send', { id: 'AB-M5A-1', target: first.id, turn: 'session', text: 'Check the build.' }, now)
+  const [claim] = m5aPoll(hub(), first, now + 1)
+  assert.deepEqual([claim.id, m5aOf(hub(), now + 2).status, m5aOf(hub(), now + 2).error], ['AB-M5A-1', 'uncertain', ''])
+  // The page stalls past the board's 15 s lease (the live run of 2026-11-15): the board ends the connection itself.
+  const back = m5aOf(hub(), now + 20_000)
+  assert.deepEqual([back.status, back.error, back.text, back.claimed, typeof back.leftAt], ['queued', '', 'Check the build.', 0, 'number'])
+  // The session's next receiver takes it over and gets it once, with the same ACK code.
+  const second = m5aRegister(hub(), now + 21_000)
+  const again = m5aPoll(hub(), second, now + 21_001)
+  assert.deepEqual(again.map(one => [one.id, one.nonce]), [['AB-M5A-1', claim.nonce]])
+  assert.deepEqual(m5aPoll(hub(), second, now + 21_002), [])
+}))
+
+test('a Codex receiver\'s claim that its session ended on, before it said starting, is refused as not delivered (#1507)', () => m5aHub(hub => {
+  const now = Date.now()
+  const one = m5aRegister(hub(), now)
+  hub().act('send', { id: 'AB-M5A-1', target: one.id, turn: 'session', text: 'Check the build.' }, now)
+  m5aPoll(hub(), one, now + 1)
+  hub().act('disconnect', { connection: one.id, secret: one.secret, turn: 'session', ended: true }, now + 2)
+  const refused = m5aOf(hub(), now + 3)
+  assert.deepEqual([refused.status, refused.error], ['rejected', 'DISCONNECTED'])
+}))
+
+test('a Codex claim whose receiver said starting stays in doubt when its connection then lapses, and is never offered again (#1507)', () => m5aHub(hub => {
+  const now = Date.now()
+  const first = m5aRegister(hub(), now)
+  hub().act('send', { id: 'AB-M5A-1', target: first.id, turn: 'session', text: 'Check the build.' }, now)
+  const [claim] = m5aPoll(hub(), first, now + 1)
+  hub().act('receipt', { connection: first.id, secret: first.secret, id: claim.id, nonce: claim.nonce, status: 'starting' }, now + 2)
+  // turn/start may have left: a lapse now is not known either way.
+  const doubt = m5aOf(hub(), now + 20_000)
+  assert.deepEqual([doubt.status, doubt.error], ['uncertain', 'DISCONNECTED'])
+  const second = m5aRegister(hub(), now + 21_000)
+  assert.deepEqual(m5aPoll(hub(), second, now + 21_001), [])
+}))
+
+test('a starting receipt is taken only from the connection that holds the claim, only before anything else was said, and twice is the same as once (#1507)', () => m5aHub(hub => {
+  const now = Date.now()
+  const one = m5aRegister(hub(), now)
+  const other = m5aRegister(hub(), now, 'm5a-other')
+  hub().act('send', { id: 'AB-M5A-1', target: one.id, turn: 'session', text: 'Check the build.' }, now)
+  const [claim] = m5aPoll(hub(), one, now + 1)
+  const starting = (who, at, nonce = claim.nonce) => hub().act('receipt', { connection: who.id, secret: who.secret, id: claim.id, nonce, status: 'starting' }, at)
+  assert.throws(() => starting(other, now + 2), /TARGET_MISMATCH/)
+  assert.throws(() => starting(one, now + 2, '000000'), /TARGET_MISMATCH/)
+  assert.throws(() => hub().act('receipt', { connection: one.id, secret: one.secret, id: claim.id, nonce: claim.nonce, status: 'starting', error: 'X' }, now + 2), /INVALID_RECEIPT/)
+  starting(one, now + 3)
+  const marked = m5aOf(hub(), now + 4)
+  starting(one, now + 5)
+  assert.deepEqual(m5aOf(hub(), now + 6), marked)
+  assert.deepEqual([marked.status, marked.error, marked.awaitsStart], ['uncertain', '', undefined])
+  // A delivery that said starting and then did not start (the fresh read showed a turn) may still give the claim back.
+  hub().act('receipt', { connection: one.id, secret: one.secret, id: claim.id, nonce: claim.nonce, status: 'unsent' }, now + 7)
+  assert.equal(m5aOf(hub(), now + 8).status, 'queued')
+  const [retaken] = m5aPoll(hub(), one, now + 9)
+  hub().act('receipt', { connection: one.id, secret: one.secret, id: retaken.id, nonce: retaken.nonce, status: 'accepted' }, now + 10)
+  assert.throws(() => starting(one, now + 11), /INVALID_RECEIPT/)
+}))
+
+test('a late give-back from a connection whose claim the board already sent back changes nothing (#1507)', () => m5aHub(hub => {
+  const now = Date.now()
+  const one = m5aRegister(hub(), now)
+  hub().act('send', { id: 'AB-M5A-1', target: one.id, turn: 'session', text: 'Check the build.' }, now)
+  const [claim] = m5aPoll(hub(), one, now + 1)
+  const back = m5aOf(hub(), now + 20_000)
+  assert.equal(back.status, 'queued')
+  for (const status of ['unsent', 'starting']) assert.throws(() => hub().act('receipt', { connection: one.id, secret: one.secret, id: claim.id, nonce: claim.nonce, status }, now + 20_001), /CONNECTOR_NOT_CONNECTED/)
+  assert.deepEqual(m5aOf(hub(), now + 20_002), back)
+}))
+
+test('a board restart with a Codex claim nobody said starting for refuses it as not delivered, not no reply confirmed (#1507)', () => m5aHub((hub, reopen) => {
+  const now = Date.now()
+  const one = m5aRegister(hub(), now)
+  hub().act('send', { id: 'AB-M5A-1', target: one.id, turn: 'session', text: 'Check the build.' }, now)
+  m5aPoll(hub(), one, now + 1)
+  const after = m5aOf(reopen(), now + 2)
+  assert.deepEqual([after.status, after.error], ['rejected', 'DISCONNECTED'])
+}))
+
+test('a Codex message settled with a reason keeps it when its connection later ends by a disconnect, a lapsed lease or a board restart (#1507)', () => {
+  for (const reason of ['APPROVAL_TIMEOUT', 'TURN_JOINED', 'ACK_MISSING', 'OWNER_TIMEOUT']) for (const end of ['disconnect', 'lapse', 'restart']) m5aHub((hub, reopen) => {
+    const now = Date.now()
+    const one = hub().act('register', { agent: 'codex', session: 'm5a-session', surface: SURFACE_IDS.cli, turn: 'session', scope: 'session', unclaimed: true }, now)
+    hub().act('send', { id: 'AB-M5A-1', target: one.id, turn: 'session', text: 'Check the build.' }, now)
+    const [claim] = m5aPoll(hub(), one, now + 1)
+    hub().act('receipt', { connection: one.id, secret: one.secret, id: claim.id, nonce: claim.nonce, status: 'accepted' }, now + 3)
+    hub().act('receipt', { connection: one.id, secret: one.secret, id: claim.id, nonce: claim.nonce, status: 'uncertain', error: reason }, now + 4)
+    const settled = m5aOf(hub(), now + 5)
+    if (end === 'disconnect') hub().act('disconnect', { connection: one.id, secret: one.secret, turn: 'session' }, now + 6)
+    const after = end === 'restart' ? m5aOf(reopen(), now + 7) : m5aOf(hub(), end === 'lapse' ? now + 60_000 : now + 7)
+    assert.deepEqual([after.status, after.error, after.updated], [settled.status, reason, settled.updated], `${reason} after a ${end}`)
+  })
+})
+
+test('a Codex message that went back to the queue stays queued through a second disconnect (#1507)', () => m5aHub(hub => {
+  const now = Date.now()
+  const first = m5aRegister(hub(), now)
+  hub().act('send', { id: 'AB-M5A-1', target: first.id, turn: 'session', text: 'Check the build.' }, now)
+  m5aPoll(hub(), first, now + 1)
+  assert.equal(m5aOf(hub(), now + 20_000).status, 'queued')
+  const second = m5aRegister(hub(), now + 20_001)
+  hub().act('disconnect', { connection: second.id, secret: second.secret, turn: 'session' }, now + 20_002)
+  const kept = m5aOf(hub(), now + 20_003)
+  assert.deepEqual([kept.status, kept.error, kept.text], ['queued', '', 'Check the build.'])
+}))
+
+// The Codex receiver's side of #1507, through a proxy in front of the board that can fault the starting receipt.
+const m5aReceiver = async (board, daemon, mode = 'pass', onStarting) => {
+  const proxy = await pollingProxy(board, mode, undefined, onStarting)
+  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs })
+  return { proxy, close: async () => { await receiver.close(); await proxy.close() } }
+}
+
+test('a Codex delivery whose starting receipt meets a busy board store asks again a tick later and then starts the message once (#1507)', () => codexFixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, {})
+  const held = await m5aReceiver(board, daemon, 'starting-busy')
+  try {
+    assert.equal(await codexSend(board, await codexConnection(board)), 200)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    assert.deepEqual([codexStarts(daemon), held.proxy.faults(), held.proxy.startings() >= 2], [1, 1, true])
+  } finally { await held.close() }
+}))
+
+test('a Codex delivery whose starting receipt gets no answer starts nothing and asks nothing again (#1507)', () => codexFixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, {})
+  const held = await m5aReceiver(board, daemon, 'starting-lost')
+  try {
+    assert.equal(await codexSend(board, await codexConnection(board)), 200)
+    await waitFor(() => held.proxy.startings() === 1)
+    await pause(1500)
+    const one = await codexMessage(board, 'AB-CX-001')
+    // The board took the receipt, so the claim is in doubt for the board's own limit; nothing was asked of Codex.
+    assert.deepEqual([one.status, one.error, codexStarts(daemon), held.proxy.startings()], ['uncertain', '', 0, 1])
+  } finally { await held.close() }
+}))
+
+test('a turn heard to start while the Codex receiver says starting holds the claim, and the message starts once that turn ends (#1370)', () => codexFixture(async (board, dir) => {
+  const beginFlag = join(dir, 'begin-turn'), endFlag = join(dir, 'end-turn'), daemon = codexDaemon(dir, { beginFlag, endFlag })
+  let isFirst = true
+  const held = await m5aReceiver(board, daemon, 'pass', async () => {
+    if (!isFirst) return
+    isFirst = false
+    writeFileSync(beginFlag, '')
+    await waitFor(async () => !existsSync(beginFlag))
+    await pause(300)
+  })
+  try {
+    assert.equal(await codexSend(board, await codexConnection(board)), 200)
+    await waitFor(() => !isFirst)
+    await pause(800)
+    assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
+    writeFileSync(endFlag, '')
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    assert.equal(codexStarts(daemon), 1)
+  } finally { await held.close() }
+}))
+
+test('a Codex claim whose turn/start had left when its board connection ended stays in doubt and is never offered again (#1507)', () => codexFixture(async (board, dir) => {
+  const daemon = codexDaemon(dir, { startDelay: 4000 })
+  const held = await m5aReceiver(board, daemon, 'forbidden-after-starting')
+  try {
+    assert.equal(await codexSend(board, await codexConnection(board)), 200)
+    await codexUncertain(board, 'AB-CX-001', 'DISCONNECTED')
+    await pause(4500)
+    const one = await codexMessage(board, 'AB-CX-001')
+    assert.deepEqual([one.status, one.error, codexStarts(daemon)], ['uncertain', 'DISCONNECTED', 1])
+  } finally { await held.close() }
+}))
+
+test('a Codex receiver closed while it holds an unstarted claim sends it back to the queue (#1507)', () => codexFixture(async (board, dir) => {
+  const beginFlag = join(dir, 'begin-turn'), daemon = codexDaemon(dir, { beginFlag })
+  const held = await codexHeldClaim(board, daemon, beginFlag)
+  try {
+    assert.equal(await codexSend(board, await codexConnection(board)), 200)
+    await waitFor(async () => held.claimed())
+    await pause(800)
+    assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
+  } finally { await held.close() }
+  const one = await waitFor(async () => { const found = await codexMessage(board, 'AB-CX-001'); return found?.status === 'queued' && found })
+  assert.deepEqual([one.error, one.text, codexStarts(daemon)], ['', 'Check the build and tell me what failed.', 0])
+}))
+
+// With no sign from the daemon of who is on a thread, a person who quits is read as still there until the daemon unloads the
+// thread, one unload delay later; the docs say so (#1504).
+test('docs/MESSAGING.md names the one unload delay after a person quits in which the Codex receiver still reads them on the thread (#1504)', () => {
+  const doc = readFileSync(new URL('../docs/MESSAGING.md', import.meta.url), 'utf8')
+  assert.ok(doc.includes('**A person who quits.**'), 'the Codex receiver section has a bullet on a person who quits')
+  assert.ok(!doc.includes('can be read as still there for about 30 seconds'), 'the old size of the window is gone')
 })
 
 
