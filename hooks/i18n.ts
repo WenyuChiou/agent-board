@@ -951,6 +951,7 @@ export const ZH_TW = {
   serveReopenRunning: (agent: string): string => `正在背景執行這一輪；打開 ${agent} 視窗就能看到。`,
   serveReopenDone: (agent: string): string => `已在背景執行這一輪；打開 ${agent} 視窗就能看到。`,
   serveLineNone: (agent: string): string => `${agent} 還不能從看板收訊息：請複製後貼到它的對話裡。`,
+  serveCodexCopyHint: '現在請複製後貼到 Codex；這個會話連上看板且傳送方式經過現場驗證後，看板訊息才能在之後的一輪送達。',
   serveCodexResumePrompt: '在電腦上續接這個 Codex 對話，再於 Codex 送出一次提示以重新連線。連上後再從那台電腦的看板傳送；只重新開啟對話還不會連線。',
   serveLineUnrecorded: '這條路還沒有現場執行紀錄，所以只提供複製。',
   serveLineStateUnknown: '無法確定對話狀態，所以只提供複製。',

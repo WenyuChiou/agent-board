@@ -7191,6 +7191,41 @@ const stateFile = (agent, state, session) => {
 }
 const sendLabels = (s, name) => [s.serveSend(name), s.serveQueueNextTurn(name), s.serveQueueNextOpen(name)]
 
+test('Copy-only Codex cards use the same honest hint before and after the board starts, in all three languages', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const session = '11111111-2222-4333-8444-555555555555'
+  const words = [
+    [EN, 'Use Copy and paste into Codex for now; board messages can arrive on a later turn once this session connects and sending has been checked live.'],
+    [ZH_TW, '現在請複製後貼到 Codex；這個會話連上看板且傳送方式經過現場驗證後，看板訊息才能在之後的一輪送達。'],
+    [ZH_CN, '现在请复制后粘贴到 Codex；这个会话连接看板且发送方式经过现场验证后，看板消息才能在之后的一轮送达。'],
+  ]
+  for (const state of ['idle', 'working']) for (const [s, expected] of words) {
+    const now = Date.now()
+    const view = buildView(parseProgress(stateFile('codex', state, session)), [], null, now, 0, {}, s)
+    const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+    // A session that started before the board has no mailbox; a later hook can enroll one.
+    // An unverified surface still offers Copy, even after that enrollment.
+    const before = { connections: [], mailboxes: [], messages: [] }
+    const after = { ...before, mailboxes: enrollMailbox({ messages: [] }, 'codex', session, SURFACE_IDS.unknown, now, 43_200_000).mailboxes }
+    for (const [order, messaging] of [['session first', before], ['board first', after]]) {
+      const model = realServeModel(view, [], s, new Set(), false, messaging, false, group, RECEIVER_ROUTES)
+      const card = model.asks[0] ?? [...model.idle, ...model.groups.flatMap(one => one.rows)][0]
+      const label = `${order}/${state}/${s.pgCopyAnswer}`
+      assert.equal(card.lineText || card.info, expected, label)
+      assert.equal(card.canSend, false, label)
+      assert.equal(card.delivery, undefined, label)
+      assert.equal(card.line, order === 'session first' ? 'none' : 'nextTurn', label)
+      const page = await pageDom(servePage(s, 'synthetic-nonce'), model, async () => assert.fail('Copy-only cards cannot send'))
+      page.cards().flatMap(one => page.buttons(one)).find(one => one.textContent === s.pgWriteOwn)?.click()
+      const labels = page.cards().flatMap(one => page.buttons(one)).map(one => one.textContent)
+      assert.ok(labels.includes(s.pgCopyAnswer), label)
+      assert.equal(labels.some(one => sendLabels(s, 'Codex').includes(one)), false, label)
+      assert.ok(page.text().includes(expected), label)
+    }
+  }
+})
+
 test('every receiver record against idle, working and ended shows its line, with Send only where a live note is named and Copy otherwise, in en, zh-TW and zh-CN', async () => {
   const { servePage } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
@@ -7220,9 +7255,10 @@ test('every receiver record against idle, working and ended shows its line, with
     assert.equal(card.send === 'connected' || card.send === 'mailbox', canSend, label)
     if (!canSend && state !== 'ended') assert.ok(labels.includes(s.pgCopyAnswer), label + ' ' + labels.join(' | '))
     if (!isGone) {
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
+      const isCodexCopy = record.agent === 'codex' && route.line === 'nextTurn' && !canSend
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: isCodexCopy ? s.serveCodexCopyHint : s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
       assert.ok(page.text().includes(words), label + ' ' + words)
-      assert.equal(page.text().includes(s.serveLineUnrecorded), !canSend && route.line !== 'none', label)
+      assert.equal(page.text().includes(s.serveLineUnrecorded), !canSend && route.line !== 'none' && !isCodexCopy, label)
     }
     if (canSend) sendable += 1; else copyOnly += 1
   }
@@ -7701,7 +7737,8 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     assert.equal(card.delivery !== undefined, canSend, `${record.source}/${surface.id}/${state}`)
     if (!(record.kind === 'mailbox' && state === 'ended')) {
       const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface.id === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
+      const isCodexCopy = record.agent === 'codex' && route.line === 'nextTurn' && !canSend
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface.id === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: isCodexCopy ? s.serveCodexCopyHint : s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
       assert.equal(card.line, route.line, `${record.source}/${surface.id}/${state}`)
       assert.ok(card.lineText.includes(words), `${record.source}/${surface.id}/${state}: ${card.lineText}`)
     }
