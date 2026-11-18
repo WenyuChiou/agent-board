@@ -605,7 +605,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (ask.target?.dir ?? '') : '',
         archiveNote: isManual ? '' : s.archiveLive,
-        info: found || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? ((!isLan ? codexCopyHint(ask.agent, askState, s) : '') || infoOf(send, ask.agent, ask.task, '', s))),
+        info: found || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? ((!isLan && !(ask.target !== null && send === 'open') ? codexCopyHint(ask.agent, askState, s) : '') || infoOf(send, ask.agent, ask.task, '', s))),
         ...lineOf,
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
@@ -690,7 +690,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (row.target?.dir ?? '') : '',
         // A row says why only when a reply could otherwise be expected here.
-        info: found ? '' : lanInfo(baseMode, row.agent) ?? ((!isLan ? codexCopyHint(row.agent, state, s) : '') || (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : '')),
+        info: found ? '' : lanInfo(baseMode, row.agent) ?? ((!isLan && !(row.target !== null && send === 'open') ? codexCopyHint(row.agent, state, s) : '') || (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : '')),
         ...lineOf,
         isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !isUncertainEnded(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
