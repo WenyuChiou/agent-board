@@ -796,6 +796,9 @@ export const ZH_CN: Strings = {
     : `端口 ${port} 无效（需为 1–65535）。请改用其他 --port，或省略 --port 自动选择。`,
   servePortInUse: (port: number): string => `端口 ${port} 已被占用。请改用其他 --port，或省略 --port 自动选择。`,
   servePortDenied: (port: number): string => `端口 ${port} 无法使用（权限不足）。请改用 1023 以上的 --port，或省略 --port 自动选择。`,
+  serveStoreHeld: (pid: number, isBoard: boolean): string => isBoard
+    ? `Agent Board 没有打开：一个旧的 Agent Board 页面（进程 ${pid}）占着它的消息文件夹，且停不下来。请结束进程 ${pid}，再打开看板。`
+    : `Agent Board 没有打开：进程 ${pid} 占着它的消息文件夹，它不是这个看板能停止的 Agent Board 页面。请结束进程 ${pid}，再打开看板。`,
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `看板无法打开消息文件夹（${code}）：${folder}。请先停止所有看板 server，一并检查 server.lock、server.owner 与 .message-claim-*.json。确认没有 hub 运行后，仅移除已核实过期的持有者数据。请保留 messages.json 与不确定是否送达的记录，不要重发这些消息。`
     : code === 'MESSAGE_STORE_CLOSED'

@@ -30,7 +30,7 @@ import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
 import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
-import { claimMessageStore, hasLiveClaims, patiently } from './message-store-claim'
+import { claimMessageStore, hasLiveClaims, holderDeps, patiently, settleStoreHolder } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -2496,7 +2496,7 @@ interface RunningServer {
   idleMs?: number | undefined
 }
 
-type ServeFailure = { invalidPort?: string; portError?: { code: 'EADDRINUSE' | 'EACCES'; port: number }; storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
+type ServeFailure = { invalidPort?: string; portError?: { code: 'EADDRINUSE' | 'EACCES'; port: number }; storeCode?: string; storeHolder?: { pid: number; isBoard: boolean }; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
 
 // The note a failed start prints: `--port` failures and message folder failures first, then the child's
 // own folder failure, then the generic line. The child prints its folder failure in the
@@ -2504,11 +2504,31 @@ type ServeFailure = { invalidPort?: string; portError?: { code: 'EADDRINUSE' | '
 const serveFailureNote = (failure: ServeFailure): string => {
   if (failure.invalidPort !== undefined) return s.serveFailed(s.serveInvalidPort(failure.invalidPort))
   if (failure.portError !== undefined) return s.serveFailed(failure.portError.code === 'EACCES' ? s.servePortDenied(failure.portError.port) : s.servePortInUse(failure.portError.port))
+  if (failure.storeHolder !== undefined) return s.serveStoreHeld(failure.storeHolder.pid, failure.storeHolder.isBoard)
   if (failure.storeCode !== undefined) return s.serveStoreFailed(failure.storeCode, messagesDirectory())
   if (failure.isChildCheckTimeout) return s.serveFailed(s.serveRuntimeCheckTimeout)
   if (failure.isChildCheckDenied) return s.serveFailed(s.serveRuntimeDenied)
   if (failure.isChildCheckPrivate) return s.serveFailed(s.serveRuntimePrivate)
   return s.serveFailed(s.serveNotStarted)
+}
+
+// How old a board page that holds the store and answers nowhere must be before a start ends it: older
+// than any page start (a start gives up after 20 s). Only a test process may shorten it.
+const holderAgeMs = (): number => process.env.AGENT_BOARD_TEST_PID && Number(process.env.AGENT_BOARD_HOLDER_AGE_MS) > 0 ? Number(process.env.AGENT_BOARD_HOLDER_AGE_MS) : 30_000
+
+// The page of the default store's owner, from the owner record beside its lock, when that record names
+// `pid` and its page answers for this store. A child run whose runtime folder differs from the page's
+// finds no address file, yet meets the page through its store (#1587). A page that answers here is
+// never ended.
+const ownerPage = async (pid: number): Promise<Running | null> => {
+  try {
+    const owner = JSON.parse(readFileSync(join(messagesDirectory(), 'server.owner'), 'utf8')) as Partial<Running>
+    if (owner.pid !== pid || typeof owner.port !== 'number' || !Number.isInteger(owner.port) || typeof owner.url !== 'string'
+      || !/^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url) || owner.port !== Number(new URL(owner.url).port)) return null
+    const running = { pid, port: owner.port, url: owner.url, path: '', built: '' } as Running
+    const answer = await ping(running)
+    return answer !== null && answer !== 'silent' && typeof answer.path === 'string' && answer.messagesDirectory === messagesDirectory() ? running : null
+  } catch { return null }
 }
 
 const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | null> => {
@@ -2681,7 +2701,26 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
         held = readFileSync(lock, 'utf8')
       } catch { held = '' }
     }
-    const until = storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
+    // M6 (#1596, #1587): a live holder of the default store. Its own page, when it answers, is the page to
+    // show; an old board page that answers nowhere is ended and the start tried again. A holder that
+    // cannot be proven to be one is not waited for: the owner-record move below still runs (a number
+    // another program took after a restart), and only when the lock stays is the holder named, with one
+    // action. A page still starting, or a hub of a folder given with --messages-dir, is waited for as before.
+    let refused: { pid: number; isBoard: boolean } | undefined
+    if (/^[1-9][0-9]*$/.test(held)) {
+      const pid = Number(held)
+      const owned = await ownerPage(pid)
+      // Only a start that finds no address file reaches the page through its store. An address file this
+      // start would not use (one another account may have written) never leads to the page behind it, and
+      // a page that answers is never ended: it is waited for as before.
+      if (owned !== null && !existsSync(file)) return { url: owned.url, port: owned.port, isKept: true, isNew: false }
+      if (owned === null) {
+        const settled = await settleStoreHolder(pid, holderDeps(holderAgeMs()))
+        if (settled.kind === 'gone' || settled.kind === 'ended') continue
+        if (settled.kind === 'refused') refused = { pid, isBoard: settled.isBoard }
+      }
+    }
+    const until = refused !== undefined ? performance.now() : storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
     for (;;) {
       const other = await runningPage(true, false, replaced)
       if (other !== null) return { url: other.page.url, port: other.page.port, isKept: other.isKept, isNew: false, idleMs: other.idleMs }
@@ -2727,6 +2766,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     }
     const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
     if (failure !== undefined && code !== undefined) failure.storeCode = code
+    if (failure !== undefined && code === 'MESSAGE_STORE_IN_USE' && refused !== undefined && !isTaken(lock, String(refused.pid))) failure.storeHolder = refused
     // The child names its own folder failure on its stderr; the command carries that
     // reason instead of the generic line, so the person is told the check did not finish.
     if (failure !== undefined && code === undefined) {

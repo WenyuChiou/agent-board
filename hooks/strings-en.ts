@@ -802,6 +802,10 @@ export const EN: Strings = {
     : `port ${port} is not a valid port (1–65535). Try another --port, or omit --port to pick one automatically.`,
   servePortInUse: (port: number): string => `port ${port} is already in use. Try another --port, or omit --port to pick one automatically.`,
   servePortDenied: (port: number): string => `port ${port} cannot be used (permission denied). Try another --port above 1023, or omit --port to pick one automatically.`,
+  // M6 (#1596): one sentence an agent repeats when another process holds the message folder.
+  serveStoreHeld: (pid: number, isBoard: boolean): string => isBoard
+    ? `Agent Board did not open: an older Agent Board page (process ${pid}) holds its message folder and would not stop. End process ${pid}, then open the board again.`
+    : `Agent Board did not open: process ${pid} holds its message folder and is not an Agent Board page this board can stop. End process ${pid}, then open the board again.`,
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `The board could not open its message folder (${code}): ${folder}. Stop all board servers and check server.lock, server.owner and .message-claim-*.json together. Remove only ownership metadata verified to be stale, after confirming no hub is running. Keep messages.json and uncertain delivery evidence; do not resend uncertain messages.`
     : code === 'MESSAGE_STORE_CLOSED'
