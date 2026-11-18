@@ -506,6 +506,9 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
           }
           return res
         }
+        // The page keeps one board request open (#359), sent with the fetch it had before this patch. A refresh
+        // replaces it with one sent through the patch, so the next board change reaches the race above.
+        document.dispatchEvent(new Event('visibilitychange'))
       })
 
       writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger redraw\n`)

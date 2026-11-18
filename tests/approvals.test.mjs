@@ -5,7 +5,8 @@ import { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { EventEmitter } from 'node:events'
 import { registerHooks } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { after, test } from 'node:test'
@@ -59,7 +60,7 @@ const homeFor = (url, pid = process.pid) => {
 
 // A board started from source, with the tests' shorter waits. No grace window unless a test asks.
 // `open` stands in for the browser opener; the default opens the page and says so.
-const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, open } = {}) => {
+const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, pageMs, open, holdMs, isWatched = false } = {}) => {
   let self
   const place = homeFor()
   const messages = join(place.root, 'messages')
@@ -74,7 +75,11 @@ const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, 
       view: () => buildView(parseProgress(readFileSync(place.progress, 'utf8')), [], null, Date.now(), 0, {}, EN),
       pending: () => [], act: () => '', tidy: () => '', clean: () => '', sweep: () => {}, sweepMs: 60_000,
       paste: () => ({ isAdded: false, note: '' }), failure: () => null, idleMs: 0,
-      approvalTimes: { drawMs, pressMs, secretMs, graceMs },
+      approvalTimes: { drawMs, pressMs, secretMs, graceMs, ...(pageMs === undefined ? {} : { pageMs }) },
+      ...(holdMs === undefined ? {} : { boardTimes: { holdMs } }),
+      // A file watch as the shipped board has (#359), so no timer looks at the board while a request waits; its stand-in
+      // never reports, and nothing in these tests writes the files, so only the board's own changes answer a request.
+      ...(isWatched ? { watch: { progress: place.progress, inbox: join(dirname(place.progress), 'progress-inbox'), fs: () => Object.assign(new EventEmitter(), { close: () => {} }) } } : {}),
       // The browser stand-in: the address the board would open, with its one-time key.
       open: async url => { opened.push(url); return open === undefined ? true : open(url, self) },
       journal: entry => { journal.push(entry) },
@@ -168,6 +173,70 @@ const runHook = (place, input) => {
   done.then(() => { isExited = true })
   return { done, isRunning: () => !isExited }
 }
+
+// The board's etag counts minutes, so a minute turning is a change that answers a waiting request. These tests check
+// which board answers one, so they start at least their own length before the next minute (the server shares this clock).
+const clearOfMinute = async ms => {
+  const left = 60_000 - (Date.now() % 60_000)
+  if (left < ms) await pause(left + 100)
+}
+
+// The page's board request, holding the board it drew (its etag) and waiting on it, as the shipped page asks (#359).
+const waitOn = async (board, page) => {
+  const ask = (headers = {}) => fetch(new URL('/api/board', board.origin), { headers: { 'x-board-token': board.token, ...page.headers, ...headers } })
+  const first = await ask()
+  await first.arrayBuffer()
+  let answer
+  const waiting = ask({ 'if-none-match': first.headers.get('etag'), 'x-board-wait': '1' }).then(response => { answer = response; return response })
+  return { waiting, isOpen: () => answer === undefined }
+}
+
+// These two run with a shorter watching window (the tests' `pageMs`, like `drawMs`) than the board's APPROVAL_PAGE_MS of
+// 8 s, and a hold longer than it, so the same order of events takes seconds instead of a test of 10 s or more.
+const PAGE_MS = 1500
+
+test('a page in sight whose board request is waiting still counts as watching past its watching window (#359)', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 5_000, pressMs: 30_000, pageMs: PAGE_MS, holdMs: 30_000, isWatched: true })
+  const page = await openPage(board)
+  await clearOfMinute(5_000)
+  const { waiting, isOpen } = await waitOn(board, page)
+  // Longer than the window a page's last request counts as watching: on main the page asked every 2 s, inside it.
+  await pause(PAGE_MS + 1000)
+  // The premise: the request is still waiting, so only the server counting a waiting page as watching can keep the
+  // approval on the page.
+  assert.equal(isOpen(), true, 'the board request was answered before the hook asked')
+  const hook = runHook(board, request('rm -rf synthetic-waiting-folder'))
+  const answered = await waiting
+  assert.equal(answered.status, 200)
+  assert.match(await answered.text(), /synthetic-waiting-folder/)
+  const shown = await page.show('rm -rf synthetic-waiting-folder')
+  assert.equal(hook.isRunning(), true, 'the host was told to ask in its own window while the page was in sight')
+  assert.equal((await page.press(shown, 'deny', { confirmed: true })).status, 200)
+  assert.equal((await hook.done).decision?.hookSpecificOutput?.decision?.behavior, 'deny')
+})
+
+test('a page whose board request has just run out still counts as watching until it asks again (#359)', { timeout: 60_000 }, async () => {
+  // The hold runs out past the watching window; the approval then arrives before the page asks again. It is the hook's
+  // own request, sent here directly: starting a hook process can take longer than the window on a slow runner.
+  const board = await startBoard({ drawMs: 5_000, pressMs: 30_000, pageMs: PAGE_MS, holdMs: PAGE_MS + 1000, isWatched: true })
+  const page = await openPage(board)
+  await clearOfMinute(5_000)
+  const { waiting } = await waitOn(board, page)
+  const ended = await waiting
+  assert.equal(ended.status, 304, 'the hold ran out with nothing changed')
+  const asked = fetch(new URL('/api/approvals/ask', board.origin), { method: 'POST', headers: { 'content-type': 'application/json', 'x-board-token': board.token }, body: JSON.stringify(hook.askBody(request('rm -rf synthetic-gap-folder'))) })
+  // Look without the page's headers, which would count as the page asking again: the board decided when the ask came.
+  let card
+  for (let tries = 0; tries < 100 && card === undefined; tries += 1) {
+    card = (await board.call('/api/board')).body.approvals?.cards?.find(one => one.command === 'rm -rf synthetic-gap-folder')
+    if (card === undefined) await pause(50)
+  }
+  assert.ok(card, 'the approval never reached the board')
+  assert.equal(card.state, 'asking', 'an approval between a hold running out and the next request went back to the host')
+  const shown = await page.show('rm -rf synthetic-gap-folder')
+  assert.equal((await page.press(shown, 'deny', { confirmed: true })).status, 200)
+  assert.equal((await (await asked).json()).decision?.behavior, 'deny')
+})
 
 test('the hook finds the address file where hooks/receiver.ts names it and reads it the same way', () => {
   const env = { CLAUDE_PROGRESS_FILE: isWindows ? 'C:\\synthetic\\board\\progress.md' : '/synthetic/board/progress.md', HOME: isWindows ? 'C:\\synthetic\\home' : '/synthetic/home', USERPROFILE: isWindows ? 'C:\\synthetic\\home' : '/synthetic/home' }

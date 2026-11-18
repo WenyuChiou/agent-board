@@ -67,7 +67,7 @@ const observeQuestion = async (responseMs, { isLegacyPoll = false } = {}) => {
           await route.fulfill({ json: { model, now } })
         } else if (path === '/') {
           const original = servePage(EN, 'synthetic')
-          const body = isLegacyPoll ? original.replace('setTimeout(refresh, 2000)', 'setTimeout(refresh, 3000)') : original
+          const body = isLegacyPoll ? original.replace('setTimeout(refresh, boardEtag ? 0 : 2000)', 'setTimeout(refresh, 3000)') : original
           if (isLegacyPoll) assert.notEqual(body, original, 'The causal control restores exactly the old poll delay')
           await route.fulfill({ contentType: 'text/html', body })
         } else await route.fulfill({ status: 404, body: '' })
