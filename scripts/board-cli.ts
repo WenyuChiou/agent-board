@@ -2718,8 +2718,10 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
       // start would not use (one another account may have written) never leads to the page behind it, and
       // a page that answers is never ended: it is waited for as before.
       if (owned !== null && owned !== 'silent' && !existsSync(file)) return { url: owned.url, port: owned.port, isKept: true, isNew: false }
-      if (owned === null) {
-        const settled = await settleStoreHolder(pid, holderDeps(holderAgeMs()))
+      if (owned === null || owned === 'silent') {
+        // A page that takes the connection and says nothing in time is never ended: no age makes it old enough,
+        // so a board page there is waited for, and only a holder that is not one is named.
+        const settled = await settleStoreHolder(pid, holderDeps(owned === 'silent' ? Number.POSITIVE_INFINITY : holderAgeMs()))
         if (settled.kind === 'gone' || settled.kind === 'ended') continue
         if (settled.kind === 'refused') refused = { pid, isBoard: settled.isBoard }
       }
