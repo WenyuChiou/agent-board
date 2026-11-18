@@ -55,15 +55,21 @@ export const blockKey = (auto: { agent: string; session: string; resume: string 
 
 export type LivenessProbe = (claim: AgentClaim) => { alive: boolean; actual: number | 'inaccessible' | null }
 
-// Every working/waiting Claude session block (excluding runs) that carries a
-// valid liveness claim for `hostHash`, with its blockKey and validated claim.
+// The agents whose blocks can carry a liveness claim: Claude Code, from its own
+// process (#1092), and OpenCode, from the process its plugin starts the hook
+// worker in (#1595). Another agent's pid fields are ignored, so its card keeps
+// the 12 h backstop.
+export const CLAIMING_AGENTS: ReadonlySet<string> = new Set(['claude', 'opencode'])
+
+// Every working/waiting session block of a claiming agent (excluding runs) that
+// carries a valid liveness claim for `hostHash`, with its blockKey and validated claim.
 export const claimedBlocksOf = (projects: readonly ProgressProject[], hostHash: string | null): Array<{ key: string; claim: AgentClaim }> => {
   if (hostHash === null) return []
   const seen = new Set<string>()
   const out: Array<{ key: string; claim: AgentClaim }> = []
   for (const project of projects) for (const task of project.tasks) {
     const auto = task.auto
-    if (auto === null || (auto.state !== 'working' && auto.state !== 'waiting') || auto.agent !== 'claude' || auto.isRun === true) continue
+    if (auto === null || (auto.state !== 'working' && auto.state !== 'waiting') || !CLAIMING_AGENTS.has(auto.agent) || auto.isRun === true) continue
     const claim = agentClaimOf(auto)
     if (claim === null || claim.host !== hostHash) continue
     const key = blockKey(auto)

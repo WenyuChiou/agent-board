@@ -267,8 +267,14 @@ const run = async () => {
   const remaining = deadline - Date.now()
   if (remaining <= 0) return queue()
   const childArgs = [...reporterArgs, ...(!isReport && !isPlan ? ['--hook-recovery-parent'] : []), '--hook-deadline', String(deadline), '--hook-started', String(started), '--home', ${JSON.stringify(home)}]
+  // OpenCode starts this worker from its own process, so the parent here is OpenCode: the board script puts it on the row,
+  // and the board ends the row once that process is gone, whether or not OpenCode's exit reached the plugin (#1595).
+  // An environment variable, not a flag: a board script older than this worker ignores it instead of refusing the event.
+  const childEnv = { ...process.env }
+  delete childEnv.AGENT_BOARD_HOOK_PARENT
+  if (agent === 'opencode' && Number.isSafeInteger(process.ppid) && process.ppid > 1) childEnv.AGENT_BOARD_HOOK_PARENT = String(process.ppid)
   const result = spawnSync(process.execPath, [${JSON.stringify(script)}, ...childArgs], {
-    input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true,
+    input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, env: childEnv,
     timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 1048576,
   })
   // A plan that failed in the board script exits 0 there; its code is only logged here.

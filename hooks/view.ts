@@ -176,6 +176,8 @@ export type TaskRow = {
   // The block itself says state=ended (its session closed). `auto` also reads 'ended' for a finished,
   // stale or silent block, which does not mean the session is closed.
   isRecordedEnded?: true
+  // The process check found the session's process gone on this machine (#1595): a close signal, unlike staleness.
+  isProcessGone?: true
   steps: ViewStep[]
   // Source positions before display folding, including a next step outside the shown list.
   stepLines?: readonly number[]
@@ -1287,6 +1289,8 @@ export const buildView = (
         pr: autoPr(task.auto, s),
         agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
         ...(task.auto?.state === 'ended' ? { isRecordedEnded: true as const } : {}),
+        // The process check proved the session's process gone (#1092, #1595): it is closed, as one whose block says ended.
+        ...(livenessOf(task.auto, gone) === 'dead' ? { isProcessGone: true as const } : {}),
         // Only an agent whose resume by id is known gets a command.
         resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
         handoff: handoffOf(task),
