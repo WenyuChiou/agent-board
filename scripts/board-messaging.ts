@@ -29,7 +29,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     if (one.attempted !== undefined && !(Number.isFinite(one.attempted) && one.attempted > 0)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
-    if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
+    if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean' || one.awaitsStart !== undefined && one.awaitsStart !== true) throw new Error('INVALID_MESSAGE_STORE')
     if (one.leftAt !== undefined && !Number.isFinite(one.leftAt)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.line !== undefined && !ROUTE_LINES.includes(one.line)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.surface !== undefined && (typeof one.surface !== 'string' || one.surface === '' || /[\r\n]/.test(one.surface))) throw new Error('INVALID_MESSAGE_STORE')
@@ -127,7 +127,9 @@ const same = (a: string, b: string): boolean => {
   return left.length === right.length && timingSafeEqual(left, right)
 }
 // keepsQueued: an automatic receiver (registered `unclaimed`); its leaving leaves its queued messages queued (#318).
-type Live = Connection & { secret: string; keepsQueued?: boolean }
+// marksStart: a receiver that says `starting` right before it asks its host for anything, so a claim it never said that
+// for was never started (#1507).
+type Live = Connection & { secret: string; keepsQueued?: boolean; marksStart?: boolean }
 // On Windows a virus scanner or indexer can hold a file just written, and a rename onto it then
 // fails for a moment. A short wait clears it, so the store is called busy only if it stays busy.
 const RENAME_WAITS_MS = [10, 25, 50, 100]
@@ -375,7 +377,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       expire(now)
       for (const [id, one] of expectations) expectations.set(id, observeSession(one, reports, now))
       return {
-        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, keepsQueued: _keepsQueued, ...one }) => one), messages: shownMessages(state),
+        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, keepsQueued: _keepsQueued, marksStart: _marksStart, ...one }) => one), messages: shownMessages(state),
         sessions: [
           ...[...expectations.values()].map(one => ({
             id: one.id, agent: one.agent, session: one.session, surface: one.surface,
@@ -429,7 +431,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         return { id, deadline: now + timeoutMs }
       }
       if (action === 'register') {
-        messageFields(body, ['agent', 'session', 'surface', 'turn', 'scope', 'origin', 'connection', 'secret', 'unclaimed'])
+        messageFields(body, ['agent', 'session', 'surface', 'turn', 'scope', 'origin', 'connection', 'secret', 'unclaimed', 'marksStart'])
         const agent = messageId(body.agent), session = messageId(body.session), turn = messageId(body.turn), surface = messageText(body.surface, 100)
         const scope = body.scope ?? 'turn'
         if (scope !== 'turn' && scope !== 'session' || scope === 'session' && turn !== 'session') throw new Error('INVALID_CONNECTION_SCOPE')
@@ -448,10 +450,10 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         if (connections.size >= 100) throw new Error('CONNECTION_LIMIT')
         const matches = [...connections.values()].filter(one => address(one.agent, one.session) === address(agent, session))
         // An automatic receiver asks to join only a session nobody holds, so it never marks a person's own connection contested.
-        if (body.unclaimed !== undefined && typeof body.unclaimed !== 'boolean') throw new Error('INVALID_CONNECTION_REQUEST')
+        if (body.unclaimed !== undefined && typeof body.unclaimed !== 'boolean' || body.marksStart !== undefined && typeof body.marksStart !== 'boolean') throw new Error('INVALID_CONNECTION_REQUEST')
         if (body.unclaimed === true && matches.length > 0) throw new Error('TARGET_CLAIMED')
         for (const live of matches) connections.set(live.id, { ...live, contested: true })
-        const one: Live = { id: randomBytes(16).toString('hex'), secret: randomBytes(24).toString('base64url'), agent, session, surface, turn, scope, origin, expires: now + LEASE_MS, contested: matches.length > 0, ...(body.unclaimed === true ? { keepsQueued: true } : {}) }
+        const one: Live = { id: randomBytes(16).toString('hex'), secret: randomBytes(24).toString('base64url'), agent, session, surface, turn, scope, origin, expires: now + LEASE_MS, contested: matches.length > 0, ...(body.unclaimed === true ? { keepsQueued: true } : {}), ...(body.marksStart === true ? { marksStart: true } : {}) }
         // It takes over what an earlier automatic receiver of this session left queued, before it can be polled.
         if (one.keepsQueued === true) save(rebindMessages(state, one, id => connections.has(id)), now)
         connections.set(one.id, one)
@@ -508,7 +510,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       if (action !== 'poll') throw new Error('UNKNOWN_ACTION')
       if (body.receive !== undefined && typeof body.receive !== 'boolean') throw new Error('INVALID_RECEIVE')
       connections.set(one.id, { ...one, expires: now + LEASE_MS })
-      const claimed = one.contested || body.receive === false ? { state, messages: [] } : claimMessages(state, one, now, randomBytes(3).toString('hex'))
+      const claimed = one.contested || body.receive === false ? { state, messages: [] } : claimMessages(state, one, now, randomBytes(3).toString('hex'), undefined, one.marksStart === true)
       // Claim reaches disk before a connector can perform any external delivery.
       save(claimed.state, now)
       return { messages: claimed.messages.map(message => ({ ...message, prompt: deliveryText(message) })), leaseMs: LEASE_MS, contested: one.contested === true }
