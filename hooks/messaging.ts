@@ -445,8 +445,9 @@ export const disconnectMessages = (state: MessageState, target: string, now: num
   messages: state.messages.map(one => {
     if (one.target !== target || isFinished(one) || isMarkedWake(one) || one.status === 'uncertain' && one.error !== '') return one
     // A claim its receiver never said `starting` for was never asked of the host: it ends as a queued message does (#1507).
+    // One past the open limit is left to expire as before: its claim's time is up, whatever ended the connection.
     const { awaitsStart, leftAt: _leftAt, ...rest } = one
-    const isUnstarted = awaitsStart === true && one.status === 'uncertain'
+    const isUnstarted = awaitsStart === true && one.status === 'uncertain' && now - one.updated <= OPEN_LIMIT_MS
     if (keepQueued && isUnstarted) return { ...rest, status: 'queued', claimed: 0, updated: now, leftAt: now }
     if (keepQueued && one.status === 'queued') return one.leftAt === undefined ? { ...one, leftAt: now } : one
     return settled({

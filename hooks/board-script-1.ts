@@ -8391,7 +8391,7 @@ export const LINES = [
 "    if (one.target !== target || isFinished(one) || isMarkedWake(one) || one.status === \"uncertain\" && one.error !== \"\")",
 "      return one;",
 "    const { awaitsStart, leftAt: _leftAt, ...rest } = one;",
-"    const isUnstarted = awaitsStart === true && one.status === \"uncertain\";",
+"    const isUnstarted = awaitsStart === true && one.status === \"uncertain\" && now - one.updated <= OPEN_LIMIT_MS;",
 "    if (keepQueued && isUnstarted)",
 "      return { ...rest, status: \"queued\", claimed: 0, updated: now, leftAt: now };",
 "    if (keepQueued && one.status === \"queued\")",

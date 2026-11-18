@@ -2748,7 +2748,7 @@ const pollingProxy = async (board, mode, onClaim, onStarting) => {
         return
       }
       if (isStarting && onStarting) await onStarting()
-      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim' && mode !== 'pass' && mode !== 'forbidden-after-claim' && !String(mode).startsWith('unsent-')) {
+      if (isPoll && (faults === 0 || mode === 'always' || mode === 'forbidden-always') && mode !== 'after-claim' && mode !== 'pass' && mode !== 'forbidden-after-claim' && !String(mode).startsWith('unsent-') && !String(mode).includes('starting')) {
         if (mode === 'network' || mode === 'timeout') {
           faults += 1
           if (mode === 'network') req.socket.destroy()
@@ -4877,8 +4877,9 @@ test('a claim that met a busy Codex thread is not started when that turn ends af
     writeFileSync(endFlag, '')
     await codexSettled(board, daemon, connection, 0)
     assert.equal(codexStarts(daemon), 0)
-    // The claim was held, so the card shows it in doubt once the connection is gone: it was never started.
-    await codexUncertain(board, 'AB-CX-001', 'DISCONNECTED')
+    // The claim was held and never said to start, so it goes back to the queue with its text once the connection is gone (#1507).
+    const back = await waitFor(async () => { const one = await codexMessage(board, 'AB-CX-001'); return one?.status === 'queued' && one })
+    assert.deepEqual([back.error, back.text], ['', 'Check the build and tell me what failed.'])
   } finally { await receiver.close() }
 }))
 
@@ -6139,7 +6140,7 @@ const codexTable = [
     } finally { await receiver.close() }
     return [{ daemon, id: 'AB-CX-001' }]
   } },
-  { name: 'the connection is lost while a claim is unstarted: no turn/start, one stated status (uncertain DISCONNECTED)', fixture: 'shared', final: ['uncertain'], run: async ({ board, dir }) => {
+  { name: 'the connection is lost while a claim is unstarted: no turn/start, and the message goes back to the queue with its text (#1507)', fixture: 'shared', final: ['queued'], run: async ({ board, dir }) => {
     const beginFlag = join(dir, 'begin-turn'), pidFile = join(dir, 'proxy.pid'), daemon = codexDaemon(dir, { beginFlag, pidFile })
     const held = await codexHeldClaim(board, daemon, beginFlag)
     try {
@@ -6148,9 +6149,12 @@ const codexTable = [
       await pause(800)
       assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
       process.kill(Number(readFileSync(pidFile, 'utf8')))
-      await codexUncertain(board, 'AB-CX-001', 'DISCONNECTED')
+      // It was never said to start, so the board puts it back for the session's next receiver (#1507). The person's turn still
+      // runs, so the next connection does not take it yet.
+      await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'queued')
       await pause(1500)
-      assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).error, codexStarts(daemon)], ['DISCONNECTED', 0])
+      const one = await codexMessage(board, 'AB-CX-001')
+      assert.deepEqual([one.status, one.error, one.text, codexStarts(daemon)], ['queued', '', 'Check the build and tell me what failed.', 0])
     } finally { await held.close() }
     return [{ daemon, id: 'AB-CX-001' }]
   } },
@@ -6255,7 +6259,7 @@ const codexTable = [
     } finally { await receiver.close() }
     return [{ daemon, id: 'AB-CX-003' }]
   } },
-  { name: 'the board client closes while the idle read is in flight: no turn/start, uncertain DISCONNECTED', fixture: 'shared', final: ['uncertain'], run: async ({ board, dir }) => {
+  { name: 'the board client closes while the idle read is in flight: no turn/start, and the message goes back to the queue (#1507)', fixture: 'shared', final: ['queued'], run: async ({ board, dir }) => {
     const daemon = codexDaemon(dir, { readDelay: 3500 })
     // The poll that hands the message out is answered and every later poll is refused for good, so the client closes about 2 seconds
     // after the claim, 1.5 seconds before the read answers. The next tick is far off, so only the client's own close can stop the start.
@@ -6263,9 +6267,12 @@ const codexTable = [
     const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 30_000, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs })
     try {
       assert.equal(await codexSend(board, await codexConnection(board)), 200)
-      await codexUncertain(board, 'AB-CX-001', 'DISCONNECTED')
+      await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.claimed > 0)
+      // It was never said to start, so the client's close puts it back in the queue (#1507).
+      await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'queued')
       await pause(2500)
-      assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).error, codexStarts(daemon)], ['DISCONNECTED', 0])
+      const one = await codexMessage(board, 'AB-CX-001')
+      assert.deepEqual([one.status, one.error, codexStarts(daemon)], ['queued', '', 0])
     } finally { await receiver.close(); await proxy.close() }
     return [{ daemon, id: 'AB-CX-001' }]
   } },
@@ -7147,6 +7154,15 @@ test('a Codex receiver\'s claim whose board lease lapses before it says starting
   const again = m5aPoll(hub(), second, now + 21_001)
   assert.deepEqual(again.map(one => [one.id, one.nonce]), [['AB-M5A-1', claim.nonce]])
   assert.deepEqual(m5aPoll(hub(), second, now + 21_002), [])
+}))
+
+test('a Codex claim past the open limit when its connection ends expires as before, and does not go back to the queue (#1507)', () => m5aHub(hub => {
+  const now = Date.now()
+  const one = m5aRegister(hub(), now)
+  hub().act('send', { id: 'AB-M5A-1', target: one.id, turn: 'session', text: 'Check the build.' }, now)
+  m5aPoll(hub(), one, now + 1)
+  const late = m5aOf(hub(), now + OPEN_LIMIT_MS + 5000)
+  assert.deepEqual([late.status, late.error], ['uncertain', 'EXPIRED'])
 }))
 
 test('a Codex receiver\'s claim that its session ended on, before it said starting, is refused as not delivered (#1507)', () => m5aHub(hub => {
