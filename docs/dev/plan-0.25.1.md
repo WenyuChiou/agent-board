@@ -89,8 +89,8 @@ Each check takes about half a day and ends in a dated note under `docs/validatio
 - **The one question for 0.25.0 to 0.25.1 says what is new:** a daily version check, and reading the list of Codex's sessions (folder, start time, id, last-written time, never the conversation). Each has an off switch.
 - **A crash cannot leave a half-written home:** writes are staged with a journal, the manifest is written last, and the next start finishes or undoes the journal.
 - **Done when:** J11a (0.25.0 to 0.25.1) counts 3 steps; J11b (0.25.1 to a locally built next version) counts 0 with nothing to ask and 1 with something; a revoked approval stays revoked.
-- **Covers:** all setup agents, the launcher, Windows and Linux. **Test:** J11a and J11b in `tests/host-upgrade.test.mjs` with a step counter; one case per ask condition; a process killed at each activation boundary, with the board running, then recovered; one dated manual row with a real Codex.
-- **Issues:** #1314, #1303, #1305 (part). **Found by C4:** #1661 and #1662 are in this milestone and are not on the must-ship list unless the owner adds them. **R7:** no hook.
+- **Covers:** all setup agents, the launcher, Windows and Linux. **Test:** J11a and J11b in `tests/host-upgrade.test.mjs` with a step counter; one case per ask condition; a person's hook after the board's keeps its slot (#1661); setup from a Node in another folder (#1662); a process killed at each activation boundary, with the board running, then recovered; one dated manual row with a real Codex.
+- **Issues:** #1314, #1303, #1661, #1662, #1305 (part). **R7:** no hook.
 
 ### M3. The board learns of a new version and updates itself
 
@@ -249,7 +249,7 @@ The READMEs use `@next`, so both tags must end on the version that is promoted. 
 |---|---|
 | M0 | #557, and in part #286, #1321, #1322 |
 | M1 | #1302, #1304, #1327, #1488, #1588, #1607 |
-| M2 | #1303, #1314, and in part #1305 |
+| M2 | #1303, #1314, #1661, #1662, and in part #1305 |
 | M3 | #1312, #1315 |
 | M4 | #1651 |
 | M5a | #1370, #1507, #1504, and in part #1613 |
