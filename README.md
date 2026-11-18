@@ -130,4 +130,4 @@ To check Claude Code's setup, run `claude plugin list` and `/progress connect st
 
 [MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) and belong to their owners; an agent without a logo is shown by its initial.
 
-<p align="center"><a href="CHANGELOG.md"><img alt="Source version 0.25.0" src="https://img.shields.io/badge/source-0.25.0-blue"></a><br><sub>Latest stable version: 0.24.2 · <a href="CHANGELOG.md">Changelog</a>.</sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="Source version 0.25.0" src="https://img.shields.io/badge/source-0.25.0-blue"></a><br><sub>Latest stable version: 0.25.0 · <a href="CHANGELOG.md">Changelog</a>.</sub></p>
