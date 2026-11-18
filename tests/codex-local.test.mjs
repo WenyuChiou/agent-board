@@ -14,6 +14,8 @@ import { hookOrDeferred, turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { reporterPs1, reporterSh } from '../hooks/hook-reporters.ts'
 import { deliveryText } from '../hooks/messaging.ts'
+import { EN } from '../hooks/strings-en.ts'
+import { ZH_TW } from '../hooks/i18n.ts'
 import { HOOK_INPUT_TIMEOUT, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
@@ -3759,6 +3761,37 @@ test('a prompt that is a board delivery leaves the question open, like a board r
   assert.deepEqual(states, ['working', 'waiting'])
 }))
 
+test('raw replay of a board delivery leaves the question open and keeps no delivery words, like the live event', () => fixture(f => {
+  assert.equal(f.install('--agent', 'gemini', '--apply').status, 0)
+  holdAutomaticRecovery(f)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const sent = { id: 'AB-1', to: 'gemini:abcdef12', nonce: 'a1b2c3', text: 'Use the second plan.', status: 'claimed' }
+  const prompts = [['a person', 'Continue the task'], ['English board header', deliveryText({ ...sent, from: 'board' }, EN)], ['zh-TW board header', deliveryText({ ...sent, from: 'board' }, ZH_TW)], ['English agent header', deliveryText({ ...sent, from: 'claude:abcdef12' }, EN)], ['zh-TW agent header', deliveryText({ ...sent, from: 'claude:abcdef12' }, ZH_TW)]]
+  for (const [index, [name, prompt]] of prompts.entries()) {
+    const at = Date.now() - 4050
+    const session = `raw-delivery-session-${index}`
+    const report = f.command(['--codex-report', '--agent', 'gemini', '--session', session, '--hook-started', String(at - 1000)], { title: 'Question', state: 'waiting', steps: ['- [?] Choose a path'] })
+    assert.equal(report.status, 0, report.stderr)
+    const args = ['--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress]
+    const queued = spawnSync(process.execPath, [worker, ...args, '--hook-version', '1', '--hook-event', 'BeforeAgent', '--hook-started', String(at)], { env: f.env, input: JSON.stringify({ session_id: session, hook_event_name: 'BeforeAgent', prompt }), encoding: 'utf8', windowsHide: true, timeout: 2000 })
+    assert.equal(queued.status, 0, queued.stderr)
+    const files = pendingFiles(f)
+    assert.equal(files.length, 1, name)
+    const body = readFileSync(join(f.root, 'pending', files[0]), 'utf8')
+    const raw = JSON.parse(body)
+    assert.equal(raw.payload.board_request, false, name)
+    assert.equal(raw.payload.delivery_request, index === 0 ? undefined : true, name)
+    assert.ok(!body.includes('second plan') && !body.includes('Agent Board message'), name)
+    // Replay the queued event the way a later hook run does.
+    const next = f.command(['--agent-status', '--agent', 'gemini', '--state', 'working', '--progress-file', f.progress], { session_id: `${session}-other`, hook_event_name: 'BeforeAgent', prompt: 'Continue the task' })
+    assert.equal(next.status, 0, next.stderr)
+    assert.deepEqual(pendingFiles(f), [], name)
+    const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`gemini:${session}`).digest('hex')}.json`)))
+    // The person's own words start work again; a delivered board message is not the person's and does not.
+    assert.equal(record.state, index === 0 ? 'working' : 'waiting', name)
+  }
+}))
+
 test('raw replay accepts clock skew and removes only old pending temporary files', () => fixture(f => {
   assert.equal(f.install('--apply').status, 0)
   const pending = join(f.root, 'pending'), at = Date.now() + 50000
@@ -6252,6 +6285,20 @@ test('OpenCode status retains its owned question beyond forty user steps and kee
   assert.equal(untouched.askedRevision, undefined)
 }))
 
+test('an OpenCode status that carries delivery_request leaves its owned question open, a person\'s prompt answers it (#1334)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const send = (id, state, extra = {}) => f.command(['--agent-status', '--agent', 'opencode', '--state', state], { session_id: id, ...extra })
+  const read = id => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`opencode:${id}`).digest('hex') + '.json'), 'utf8'))
+  for (const [name, extra, isAnswered] of [['a person', {}, true], ['a delivery', { delivery_request: true }, false], ['a board command', { board_request: true }, false]]) {
+    const id = `synthetic-opencode-delivery-${name.replaceAll(' ', '-')}`
+    assert.equal(send(id, 'waiting', { last_assistant_message: 'Which branch?' }).status, 0)
+    assert.equal(read(id).steps[read(id).asked], '- [?] Which branch?', name)
+    assert.equal(send(id, 'working', { prompt_submitted: true, ...extra }).status, 0)
+    assert.equal(read(id).steps[read(id).asked], isAnswered ? '- [x] Which branch?' : '- [?] Which branch?', name)
+    assert.equal(read(id).state, isAnswered ? 'working' : 'waiting', name)
+  }
+}))
+
 test('local status preserves cached session and step validation after owned-slot retention', () => fixture(f => {
   assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
   const id = 'synthetic-opencode-invalid-cache'
@@ -6846,17 +6893,27 @@ const opencodeOneShot = (home, mode, scenario = 'default') => {
   writeFileSync(calls, '')
   writeFileSync(exits, '')
   writeFileSync(calls + '.timing', '')
+  // #576: a failing Windows run spent 2.6 s between the end of the wait and the first log write, where the
+  // only system call was this stub's own write of its timing record. While exiting, the fixture's records
+  // stay in memory and the last exit listener writes them, after the exit's end mark, so the test's own
+  // file writes are no longer part of the time it measures.
+  const record = `const exitRecords = globalThis[Symbol.for('agent-board.test-576-exit-records')] ??= []
+const record = (file, value) => { if (globalThis.isExiting) exitRecords.push([file, JSON.stringify(value) + '\\n']); else fs.appendFileSync(file, JSON.stringify(value) + '\\n') }`
   const spawnStub = `import { spawnSync as realSpawnSync } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
+${record}
 const spawnSync = (file, args, options) => {
   const { session_id, state, cwd } = JSON.parse(options.input)
-  appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ session: session_id, state, isExiting: globalThis.isExiting === true }) + '\\n')
-  if (globalThis.isExiting) appendFileSync(${JSON.stringify(exits)}, JSON.stringify(cwd ?? null) + '\\n')
+  record(${JSON.stringify(calls)}, { session: session_id, state, isExiting: globalThis.isExiting === true })
+  if (globalThis.isExiting) record(${JSON.stringify(exits)}, cwd ?? null)
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'fail') return { status: 1, stdout: '', stderr: '' }
   if (globalThis.isExiting && ${JSON.stringify(mode)} === 'hang') {
     const t0 = performance.now()
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, options.timeout)
-    try { appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ wait: session_id, asked: options.timeout, t0, t1: performance.now() }) + '\\n') } catch {}
+    const t1 = performance.now()
+    record(${JSON.stringify(calls + '.timing')}, { wait: session_id, asked: options.timeout, t0, t1 })
+    // The last moment before the plugin gets the timeout back; its catch then calls hookError, whose t0 follows.
+    const returned = performance.now()
+    record(${JSON.stringify(calls + '.timing')}, { mark: 'returned', t0: returned, t1: returned })
     return { error: { code: 'ETIMEDOUT' }, status: null, signal: 'SIGKILL' }
   }
   return realSpawnSync(file, args, options)
@@ -6870,16 +6927,20 @@ const spawnSync = (file, args, options) => {
   const t0 = performance.now(), file = ${JSON.stringify(join(home, '.agent-board', 'hook-errors.log'))}
   let size = 0
   try { size = fs.statSync(file).size } catch {}
-  try { return timedHookError(code) } finally { if (globalThis.isExiting) try { fs.appendFileSync(${JSON.stringify(calls + '.timing')}, JSON.stringify({ log: code, size, t0, t1: performance.now() }) + '\\n') } catch {} }
+  try { return timedHookError(code) } finally { if (globalThis.isExiting) record(${JSON.stringify(calls + '.timing')}, { log: code, size, t0, t1: performance.now() }) }
 }
 const timedHookError = code => {`))
   writeFileSync(copy, readFileSync(plugin))
   // Exit listeners run in order, so the ones around the plugin's own time its exit work.
-  writeFileSync(main, `import { writeFileSync } from 'node:fs'
+  writeFileSync(main, `import { appendFileSync, writeFileSync } from 'node:fs'
 const marks = {}
 process.on('exit', () => { marks.start = Date.now(); marks.monotonicStart = performance.now(); globalThis.isExiting = true })
 const { AgentBoardLocal } = await import(${JSON.stringify(pathToFileURL(plugin).href)})
-process.on('exit', () => { marks.end = Date.now(); marks.monotonicEnd = performance.now(); writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks)) })
+process.on('exit', () => {
+  marks.end = Date.now(); marks.monotonicEnd = performance.now()
+  for (const [file, line] of globalThis[Symbol.for('agent-board.test-576-exit-records')] ?? []) appendFileSync(file, line)
+  writeFileSync(${JSON.stringify(marks)}, JSON.stringify(marks))
+})
 let gets = 0, release = () => {}
 const isStalled = ${JSON.stringify(scenario)} === 'stalled'
 const holdAt = { 'late-chat': 0, 'second-chat': 2 }[${JSON.stringify(scenario)}] ?? -1
@@ -7917,7 +7978,9 @@ test('a deferred take asks again for its own session only, and a session closed 
 test('hook delivery and DeepSeek take report corrupt messages.json as an error instead of deferred, while a held claim stays deferred (#1448)', () => mailboxFixture(async f => {
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   f.save(join(f.directory, 'messages.json'), '{not json')
-  const failedHook = f.call('codex', 'UserPromptSubmit')
+  // A slow runner may defer the first try past the store's 120 ms; one deferred turn is allowed (#1581).
+  const isStoreFailure = result => /board: mailbox failed \(INVALID_MESSAGE_STORE\)/.test(result.stderr)
+  const failedHook = await hookOrDeferred(() => f.call('codex', 'UserPromptSubmit'), isStoreFailure)
   assert.equal(failedHook.status, 0, failedHook.stderr)
   assert.equal(failedHook.stdout, '')
   assert.match(failedHook.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
@@ -7931,10 +7994,17 @@ test('hook delivery and DeepSeek take report corrupt messages.json as an error i
     '<!-- /auto session=a1b2c3f9 -->',
     '',
   ].join('\n'))
-  const withQuestion = f.call('codex', 'UserPromptSubmit')
+  let withQuestion = f.call('codex', 'UserPromptSubmit')
   assert.equal(withQuestion.status, 0, withQuestion.stderr)
+  // The question goes out on the first call even when its mailbox look defers; a second call
+  // would not send it again, so the envelope is checked here and only the store error is retried.
   const questionEnvelope = JSON.parse(withQuestion.stdout)
   assert.match(questionEnvelope.hookSpecificOutput.additionalContext, /Auth check/)
+  if (!isStoreFailure(withQuestion)) {
+    assert.match(withQuestion.stderr, /^board: mailbox deferred$/m)
+    withQuestion = f.call('codex', 'UserPromptSubmit')
+    assert.equal(withQuestion.status, 0, withQuestion.stderr)
+  }
   assert.match(withQuestion.stderr, /board: mailbox failed \(INVALID_MESSAGE_STORE\)/)
   f.save(f.progress, '')
 
@@ -8038,6 +8108,128 @@ const deepseekStub = async (f, tag, queued) => {
   }
   return stub
 }
+
+test('a DeepSeek take whose connection to the board is cut asks again within its five seconds and reports the error only when it keeps failing (#1631)', () => mailboxFixture(async f => {
+  const { createServer } = await import('node:http')
+  mkdirSync(f.directory, { recursive: true })
+  f.save(join(f.directory, 'server.lock'), String(process.pid))
+  // cuts: takes cut; isAllCut: every request cut, the hand-back too; isHanging: takes never answered; late: the first cut waits;
+  // isOlder: a board from before named claims (a named take refused, an unnamed one cut); isLong: an answer too long to read.
+  let seen = [], cuts = 0, isAllCut = false, isHanging = false, late = 0, asked = [], isOlder = false, isLong = false
+  const board = createServer((req, res) => {
+    seen.push(req.url.split('?')[0].split('/').at(-1))
+    const isTake = req.url.startsWith('/api/messages/mailbox-turn')
+    if (isTake) asked.push(Date.now())
+    if (isAllCut) { req.socket.destroy(); return }
+    if (isTake && isOlder) {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', () => {
+        if (JSON.parse(body).ref === undefined) { req.socket.destroy(); return }
+        res.statusCode = 400
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify({ error: 'UNKNOWN_FIELD' }))
+      })
+      return
+    }
+    if (isTake && isLong) { res.setHeader('content-type', 'application/json'); res.end('x'.repeat(70_000)); return }
+    if (isTake && isHanging) return
+    if (isTake && cuts > 0) {
+      cuts--
+      const wait = late
+      late = 0
+      if (wait > 0) setTimeout(() => req.socket.destroy(), wait)
+      else req.socket.destroy()
+      return
+    }
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify(req.url.startsWith('/api/messages/mailbox-turn') ? { message: null } : { ok: true }))
+  })
+  // The take runs as its own process, as DeepSeek's receiver starts it; the board answers in this one, so it is awaited.
+  const take = () => new Promise(done => {
+    const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'deepseek', '--mailbox', 'take', '--session', 'deepseek-cut-session'], { cwd: f.home, env: f.env, windowsHide: true })
+    let stdout = '', stderr = ''
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    const timer = setTimeout(() => child.kill(), 15000)
+    child.on('close', status => { clearTimeout(timer); done({ status, stdout, stderr }) })
+  })
+  try {
+    await new Promise(done => board.listen(0, '127.0.0.1', done))
+    f.save(join(f.directory, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${board.address().port}/?t=synthetic` }))
+
+    // Cut once, then back: the claim is handed back and the take asks again, so the receiver gets a plain answer.
+    cuts = 1
+    const recovered = await take()
+    assert.equal(recovered.status, 0, recovered.stderr)
+    assert.deepEqual(JSON.parse(recovered.stdout.trim().split(/\r?\n/).pop()), { watch: f.directory, message: null, deferred: false })
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release', 'mailbox-turn'])
+
+    // Cut every time: the take asks again until its five seconds are spent, then fails with the transport's code.
+    seen = []
+    cuts = Infinity
+    const failed = await take()
+    assert.notEqual(failed.status, 0)
+    assert.equal(failed.stdout, '')
+    assert.match(failed.stderr, /ECONNRESET/)
+    assert.ok(seen.filter(one => one === 'mailbox-turn').length > 1, seen.join(' '))
+
+    // The take's own time ran out (the board never answered): deferred, and not asked again, though ending the request
+    // raises a connection error of its own.
+    seen = []
+    cuts = 0
+    isHanging = true
+    const waited = await take()
+    isHanging = false
+    assert.equal(waited.status, 0, waited.stderr)
+    assert.deepEqual(JSON.parse(waited.stdout.trim().split(/\r?\n/).pop()), { watch: f.directory, message: null, deferred: true })
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release'])
+
+    // Cut, and the hand-back cut too: the board may still hold the message, so the error is reported at once, not asked again.
+    seen = []
+    isAllCut = true
+    const held = await take()
+    isAllCut = false
+    assert.notEqual(held.status, 0)
+    assert.equal(held.stdout, '')
+    assert.match(held.stderr, /ECONNRESET/)
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release'])
+
+    // The five seconds count from the first ask: a first take cut late in its wait does not stretch them.
+    seen = []
+    asked = []
+    cuts = Infinity
+    late = 1800
+    const slow = await take()
+    cuts = 0
+    assert.notEqual(slow.status, 0)
+    assert.match(slow.stderr, /ECONNRESET/)
+    assert.ok(asked.length > 1 && asked.at(-1) - asked[0] < 5000, asked.map(at => at - asked[0]).join(' '))
+
+    // A board from before named claims: its unnamed take is cut, and a claim with no name cannot be handed back, so the
+    // error is reported at once, not asked again.
+    seen = []
+    isOlder = true
+    const older = await take()
+    isOlder = false
+    assert.notEqual(older.status, 0)
+    assert.equal(older.stdout, '')
+    assert.match(older.stderr, /ECONNRESET/)
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-turn'])
+
+    // An answer too long to read is ended by the take itself: deferred, as before #1631, and not asked again.
+    seen = []
+    isLong = true
+    const long = await take()
+    isLong = false
+    assert.equal(long.status, 0, long.stderr)
+    assert.deepEqual(JSON.parse(long.stdout.trim().split(/\r?\n/).pop()), { watch: f.directory, message: null, deferred: true })
+    assert.deepEqual(seen, ['mailbox-turn', 'mailbox-release'])
+  } finally {
+    board.closeAllConnections()
+    await new Promise(done => board.close(done))
+  }
+}))
 
 test('a take that returns after its last session was removed opens no watcher and logs no failure (#1442)', () => fixture(async f => {
   const s = await deepseekStub(f, 'late', [])

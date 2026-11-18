@@ -132,11 +132,15 @@ test('the setup guide documents --html --no-open, and no README gives a command 
     // Every code span and every shell line holds commands or a flag list; a span may join several commands
     // (`a && b`, `a; b`, `a | b`, `a & b`), so look at each command that holds the flag on its own.
     const pieces = [...text.matchAll(/`([^`\n]+)`/g)].map(match => match[1]).concat(text.split(/\r?\n/).filter(line => /^\s*(?:npx|agent-board|node)\b/.test(line)))
-    const lacking = piece => piece.split(/&&|\|\||[;|&]/).filter(command => command.includes('--no-open') && !command.includes('--html'))
+    // Match whole option tokens: a path such as ./--html is not the flag.
+    const has = (command, flag) => command.split(/\s+/).includes(flag)
+    const lacking = piece => piece.split(/&&|\|\||[;|&]/).filter(command => has(command, '--no-open') && !has(command, '--html'))
     for (const piece of pieces) assert.deepEqual(lacking(piece), [], `${file}: ${piece} gives --no-open without --html`)
     // A joined pair where only the first command has --html is caught, not passed as one span.
     assert.deepEqual(lacking('npx a --html && npx a --no-open'), [' npx a --no-open'])
     assert.deepEqual(lacking('npx a --html & npx a --no-open'), [' npx a --no-open'])
+    // A path that merely contains the flag's spelling does not count as the flag.
+    assert.deepEqual(lacking('npx a --data-dir ./--html --no-open'), ['npx a --data-dir ./--html --no-open'])
   }
 })
 

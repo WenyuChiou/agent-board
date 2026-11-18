@@ -49,3 +49,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node checker/scripts/pr-check.mjs --event "$GITHUB_EVENT_PATH" --repo-dir pr
+      # Grep-level code rules over the lines the pull request adds (scripts/code-rules.mjs, #1546). The script comes
+      # from the base branch and is never replaced by the pull request's; only its list of allowed files is read from
+      # the pull request's checkout (scripts/code-rules.json), so a pull request can add its own entry. The pull
+      # request that adds the script has none on the base to run, so the step is skipped there.
+      - name: Code rules
+        if: ${{ hashFiles('checker/scripts/code-rules.mjs') != '' }}
+        run: node checker/scripts/code-rules.mjs --repo-dir pr --base ${{ github.event.pull_request.base.sha }} --head ${{ github.event.pull_request.head.sha }}

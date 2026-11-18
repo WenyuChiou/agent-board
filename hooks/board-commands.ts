@@ -81,6 +81,10 @@ export const boardRequestWords = (strings: readonly Strings[]): string[] => [...
 export const deliveryRequestWords = (strings: readonly Strings[]): string[] =>
   strings.flatMap(s => [s.messagesDeliveryBoard, s.messagesDeliveryAgent('\u0000').split('\u0000')[0]!])
 
+// What every delivery header starts with. A reporter that timed out cannot parse the prompt, so it looks for this text
+// in the raw event the way it looks for BOARD_REQUEST_HINTS; it holds letters and single spaces only.
+export const DELIVERY_REQUEST_HINT = 'Agent Board message'
+
 export const boardPromptText = (value: unknown, depth = 0): string => {
   if (typeof value === 'string') return value
   if (depth >= 16 || value === null || typeof value !== 'object') return ''
@@ -99,9 +103,14 @@ export const isBoardRequest = (value: unknown, words: readonly string[]): boolea
   return BOARD_REQUEST.test(prompt) || /<name>agent-board<\/name>/.test(prompt) || words.some(one => prompt.includes(one))
 }
 
+// A word list as the single-quoted ASCII literals the generated code holds.
+const wordList = (words: readonly string[]): string => [...new Set(words)].map(one => `'${JSON.stringify(one).slice(1, -1).replace(/'/g, "\\'").replace(/\\"/g, '\\u0022').replace(/[^\x20-\x7e]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)}'`).join(',')
+
+// With deliveryWords the helper also holds isDeliveryRequest, for generated code that must tell a board delivery from a
+// person's prompt (#1334). Without them its bytes are what they were.
 // Kept as source so every generated runtime receives identical classifier bytes.
 // ASCII single-quoted literals survive PowerShell 5.1's native argument handling.
-export const boardPromptHelper = (words: readonly string[]): string => `const boardPromptText = (value, depth = 0) => {
+export const boardPromptHelper = (words: readonly string[], deliveryWords: readonly string[] = []): string => `const boardPromptText = (value, depth = 0) => {
   if (typeof value === 'string') return value
   if (depth >= 16 || value === null || typeof value !== 'object') return ''
   if (Array.isArray(value)) return value.map(one => boardPromptText(one, depth + 1)).join('\\n')
@@ -112,16 +121,21 @@ export const boardPromptHelper = (words: readonly string[]): string => `const bo
   }
   return ''
 }
-const BOARD_WORDS = [${[...new Set(words)].map(one => `'${JSON.stringify(one).slice(1, -1).replace(/'/g, "\\'").replace(/\\"/g, '\\u0022').replace(/[^\x20-\x7e]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)}'`).join(',')}]
+const BOARD_WORDS = [${wordList(words)}]
 const isBoardRequest = value => {
   const prompt = boardPromptText(value)
   return /${BOARD_REQUEST.source}/.test(prompt) || prompt.includes('<name>agent-board</name>') || BOARD_WORDS.some(words => prompt.includes(words))
 }
-`
+${deliveryWords.length === 0 ? '' : `const DELIVERY_WORDS = [${wordList(deliveryWords)}]
+const isDeliveryRequest = value => {
+  const prompt = boardPromptText(value)
+  return DELIVERY_WORDS.some(words => prompt.includes(words))
+}
+`}`
 
 // Strip prose from valid JSON before it reaches a temporary inbox file. Native
 // binding and workspace metadata remain usable by old readers.
-export const promptReceiptScript = (words: readonly string[]): string => `${boardPromptHelper(words)}
+export const promptReceiptScript = (words: readonly string[], deliveryWords: readonly string[] = []): string => `${boardPromptHelper(words, deliveryWords)}
 ${inboxTurnKeySource}
 try {
   const raw = JSON.parse((process.argv[1] ?? require('node:fs').readFileSync(0, 'utf8')).replace(/^\\uFEFF/, ''))
@@ -136,6 +150,7 @@ try {
   }
   if (Array.isArray(record.workspace_roots)) receipt.workspace_roots = record.workspace_roots.filter(one => typeof one === 'string')
   if (record.board_request === true || isBoardRequest(record)) receipt.board_request = true
-  process.stdout.write(JSON.stringify(receipt).replace(/[^\\x20-\\x7e]/g, char => String.fromCharCode(92) + 'u' + char.charCodeAt(0).toString(16).padStart(4, '0')))
+${deliveryWords.length === 0 ? '' : `  else if (record.delivery_request === true || isDeliveryRequest(record)) receipt.delivery_request = true
+`}  process.stdout.write(JSON.stringify(receipt).replace(/[^\\x20-\\x7e]/g, char => String.fromCharCode(92) + 'u' + char.charCodeAt(0).toString(16).padStart(4, '0')))
 } catch {}
 `

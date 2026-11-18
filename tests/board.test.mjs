@@ -42,6 +42,16 @@ const test = partTest(nodeTest)
 
 const SWEEP_ARMED_KEY = createHash('sha256').update('hand-kept-sweep-armed').digest('hex')
 
+// A pid no process can have on the systems CI runs, for a stand-in page record of a dead process
+// (#1518): above Linux's pid_max (4194304) and not a multiple of 4, so Windows cannot have it
+// either. The old 999999 can be a real Linux pid.
+const deadPid = 9999999
+
+test('the stand-in dead pid is a number no process has', () => {
+  // If it ever ran, a stand-in record would read as a live page. Signal 0 checks without sending.
+  assert.throws(() => process.kill(deadPid, 0), error => error.code === 'ESRCH')
+})
+
 const TORN_NOW = Date.parse('2026-10-20T12:00:00Z')
 const tornDay = () => '# Progress\r\n\r\n## Synthetic day\r\n### Hand task alpha\r\n- [ ] Plan\r\n\r\n### Hand task beta\r\n- [ ] Review\r\n\r\n' +
   ['codex', 'cursor', 'gemini', 'grok', 'opencode', 'hermes', 'claude'].map((agent, i) =>
@@ -5355,6 +5365,57 @@ process.stdout.write(servePage(STRINGS.en, 'synthetic'))
   assert.equal(dom.node('side').hidden, true)
 })
 
+test('a late failure of a poll sent under an earlier page id does not mark a persisted pageshow page offline (#1475)', async () => {
+  const source = `${BOARD_SCRIPT}
+process.stdout.write(servePage(STRINGS.en, 'synthetic'))
+`
+  const html = run('en', ['--chat'], {}, FILE, source)
+  const emptyModel = { asks: [], groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [] }
+  const polls = []
+  let holdNextPoll = null
+  let failRestored = false
+  const dom = await pageDom(html, null, {
+    width: 1000,
+    getBoard: async options => {
+      polls.push(options.headers)
+      if (holdNextPoll !== null) {
+        const next = holdNextPoll
+        holdNextPoll = null
+        return await next
+      }
+      if (failRestored) return Promise.reject(new Error('synthetic offline failure'))
+      return { ok: true, json: async () => ({ model: emptyModel, now: 1 }) }
+    },
+  })
+  await dom.settle()
+  const firstPage = polls[0]['x-board-page']
+
+  let rejectStale
+  holdNextPoll = new Promise((_, reject) => { rejectStale = reject })
+  await dom.redraw(emptyModel)
+
+  dom.leave({ persisted: true })
+  await dom.flush()
+  const before = polls.length
+  dom.restore(true)
+  await dom.flush()
+  rejectStale(new Error('synthetic late poll failure from bfcache'))
+  await dom.settle()
+
+  // The restored page switched pageId before the old poll rejected, so it stays online with active buttons.
+  assert.ok(polls.length > before)
+  assert.notEqual(polls.at(-1)['x-board-page'], firstPage)
+  assert.equal(dom.node('offline').textContent, '')
+  assert.notEqual(lightsOf(dom)[0], 'is-offline')
+  assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).some(button => !button.disabled))
+
+  // A failure on the restored page's own id still marks it offline.
+  failRestored = true
+  await dom.redraw(emptyModel)
+  assert.equal(dom.node('offline').textContent, JSON.parse(dom.node('words').textContent).serveOffline)
+  assert.deepEqual(lightsOf(dom), ['is-offline', 'is-offline', 'is-offline'])
+})
+
 test('a page the board says was replaced stops asking and shows one line (#265)', async () => {
   const source = `${BOARD_SCRIPT}
 process.stdout.write(servePage(STRINGS.en, 'synthetic'))
@@ -5920,12 +5981,17 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
   for (const pipe of closed) pipe.catch(() => {})
   let timer
   let abort
+  let aborted = false
   const stopped = new Promise((_, fail) => {
     abort = () => {
-      if (child.exitCode !== null || child.signalCode !== null) return
-      mark('test abort: ending the command')
-      if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
-      else child.kill('SIGKILL')
+      if (aborted) return
+      aborted = true
+      const stillRunning = child.exitCode === null && child.signalCode === null
+      mark(stillRunning ? 'test abort: ending the command' : 'test abort: stopping pipe wait after bash exit')
+      if (stillRunning) {
+        if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+        else child.kill('SIGKILL')
+      }
       fail(new Error("the Cursor shell command was stopped by the test's abort"))
     }
     if (signal?.aborted) abort()
@@ -5939,14 +6005,21 @@ const cursorShell = async (board, args, env = {}, stop = async () => {}, mark = 
     const result = await Promise.race([exited, stopped])
     await Promise.race([
       Promise.all(closed),
+      stopped,
       new Promise((_, fail) => { timer = setTimeout(() => fail(new Error(`Cursor stdout, stderr and extra pipes did not all reach EOF in 5 seconds after bash exit; still open: ${[...open].join(', ')}; stdout so far ${JSON.stringify(stdout)}; stderr so far ${JSON.stringify(stderr)}`)), 5000) }),
     ])
     assert.equal(result.code, 0, stderr)
     return { stdout, stderr }
   } catch (error) {
     mark(`cursor shell failed: ${error.message.split('\n')[0]}`)
-    await stop()
-    mark('stop done')
+    try {
+      await stop()
+      mark('stop done')
+    } catch (cleanupError) {
+      mark(`stop failed: ${cleanupError.message.split('\n')[0]}`)
+      error.message = `${error.message}; page cleanup failed: ${cleanupError.message}`
+      error.cause ??= cleanupError
+    }
     throw error
   } finally {
     clearTimeout(timer)
@@ -6205,6 +6278,57 @@ test('the Cursor shell helper still fails, naming the pipe, when a command retur
     )
     assert.ok(marks.some(line => line.includes('bash exit code=0')), `bash had already exited: ${marks.join('\n')}`)
   } finally { await board.end([]) }
+})
+
+const withFd3Holder = async (board, name, run) => {
+  const holderPidFile = join(board.dir, `${name}.pid`)
+  const holder = `import { writeFileSync } from 'node:fs'\nimport { spawn } from 'node:child_process'\nconst c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })\nwriteFileSync(${JSON.stringify(holderPidFile)}, String(c.pid))\nc.unref()`
+  try {
+    return await run(fakeBoard(board, holder))
+  } finally {
+    if (existsSync(holderPidFile)) {
+      const pid = Number(readFileSync(holderPidFile, 'utf8'))
+      if (pid && processAlive(pid)) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true })
+    }
+    rmSync(board.served, { recursive: true, force: true })
+    await board.end([])
+  }
+}
+
+test('the Cursor shell helper keeps the open-pipe error naming fd3 when page cleanup also fails (#1451)', { skip: process.platform !== 'win32', timeout: 25_000 }, async t => {
+  const board = serveIn()
+  writeFileSync(board.served, '{bad json')
+  await withFd3Holder(board, 'holder-1451-cleanup', async target => {
+    await assert.rejects(
+      () => cursorShell(target, [], {}, () => closeFixturePage(board), () => {}, t.signal),
+      error => /did not all reach EOF in 5 seconds after bash exit; still open: [^;]*fd3/.test(error.message) && error.message.includes('page cleanup failed:'),
+    )
+  })
+})
+
+test('the Cursor shell helper stops at once on test abort when bash exited with fd3 still open instead of waiting 5 seconds (#1451)', { skip: process.platform !== 'win32', timeout: 15_000 }, async () => {
+  const board = serveIn()
+  const controller = new AbortController()
+  let abortTimer
+  await withFd3Holder(board, 'holder-1451-abort', async target => {
+    try {
+      const began = performance.now()
+      const marks = []
+      await assert.rejects(
+        () => cursorShell(target, [], {}, async () => {}, line => {
+          marks.push(line)
+          // Fire asynchronously after `exited` resolves so cursorShell is in the 5 s pipe-wait Promise.race.
+          if (line.startsWith('bash exit code=0')) abortTimer = setTimeout(() => controller.abort(), 50)
+        }, controller.signal),
+        /stopped by the test's abort/,
+      )
+      assert.ok(marks.some(line => line.includes('stopping pipe wait after bash exit')), marks.join('\n'))
+      assert.ok(performance.now() - began < 3_500, 'test abort after bash exit must not wait out the 5 s pipe deadline')
+    } finally {
+      clearTimeout(abortTimer)
+      controller.abort()
+    }
+  })
 })
 
 test('a browser startup failure keeps the launcher lines the launcher log held before the cleanup removed it', async () => {
@@ -6544,6 +6668,25 @@ test('agent-board stop stops this file\'s page and says so, and says when none i
   }
 })
 
+test('agent-board stop with a Send to Codex switch stops this file\'s page whatever it was started with, and says so (#318)', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const stopCmd = (...extra) => new Promise((done, fail) => {
+    execFile(process.execPath, [board.script, 'stop', ...extra], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out)))
+  })
+  try {
+    // A page with Send to Codex on (the default): `stop --no-codex-send` stops it and says it stopped, not that none was running.
+    assert.ok(board.urlOf(await board.serve(['--quiet-board'])))
+    assert.equal((await stopCmd('--no-codex-send')).trim(), EN.serveStopped)
+    assert.equal((await stopCmd()).trim(), EN.serveNoneRunning)
+    // A page with it off: `stop --codex-send` stops it the same way.
+    assert.ok(board.urlOf(await board.serve(['--quiet-board', '--no-codex-send'])))
+    assert.equal((await stopCmd('--codex-send')).trim(), EN.serveStopped)
+    assert.equal((await stopCmd()).trim(), EN.serveNoneRunning)
+  } finally {
+    await board.end([])
+  }
+})
+
 test('stop says the board page did not stop and exits 1 when the page refuses to close', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const requests = []
@@ -6769,6 +6912,139 @@ test('a plain board command keeps a page started with --codex-send, and a plain 
     const stopped = await new Promise((done, fail) => execFile(process.execPath, [board.script, 'stop'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
     assert.equal(stopped.trim(), EN.serveStopped)
   } finally { await board.end([url]) }
+})
+
+test('Send to Codex is on by default; --no-codex-send turns it off, a plain command keeps either page, a replacement for another reason keeps it off, and each switch replaces a page with the other setting (#318)', { timeout: 60_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  const pingOf = async url => {
+    const address = new URL(url)
+    return (await fetchAt('127.0.0.1', Number(address.port), 'GET', '/api/ping', { 'x-board-token': address.searchParams.get('t') })).json()
+  }
+  try {
+    // A page started with no switch has the receiver on.
+    const on = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(on)
+    urls.push(on)
+    assert.equal((await pingOf(on)).codexSend, true)
+    // --codex-send, the switch from before, keeps that page: it already has the receiver on.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board', '--codex-send'])), on)
+    // --no-codex-send asks for a page with it off: the running one is replaced.
+    const off = board.urlOf(await board.serve(['--quiet-board', '--no-codex-send']))
+    assert.ok(off)
+    assert.notEqual(off, on)
+    urls.push(off)
+    assert.equal((await pingOf(off)).codexSend, false)
+    const offPid = JSON.parse(readFileSync(board.served, 'utf8')).pid
+    // The plain command (the README's, and /agent-board's) keeps that page, so it does not turn the receiver back on.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board'])), off)
+    assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).pid, offPid, 'the page was not replaced')
+    // With both switches the receiver is off, so that page is kept too.
+    assert.equal(board.urlOf(await board.serve(['--quiet-board', '--codex-send', '--no-codex-send'])), off)
+    // A command with no switch that replaces the page for another reason (here --allow-resume) gives the new page the
+    // switch the old one was started with, so the replacement does not turn the receiver back on.
+    const resumed = board.urlOf(await board.serve(['--quiet-board', '--allow-resume']))
+    assert.ok(resumed)
+    assert.notEqual(resumed, off)
+    urls.push(resumed)
+    const resumedPing = await pingOf(resumed)
+    assert.equal(resumedPing.allowResume, true)
+    assert.equal(resumedPing.codexSend, false)
+    // --codex-send, the switch from before, asks for it on: the page is replaced again.
+    const again = board.urlOf(await board.serve(['--quiet-board', '--codex-send']))
+    assert.ok(again)
+    assert.notEqual(again, resumed)
+    urls.push(again)
+    assert.equal((await pingOf(again)).codexSend, true)
+    // Both switches ask for a page with it off, so the page with it on is replaced by one that has it off.
+    const both = board.urlOf(await board.serve(['--quiet-board', '--codex-send', '--no-codex-send']))
+    assert.ok(both)
+    assert.notEqual(both, again)
+    urls.push(both)
+    assert.equal((await pingOf(both)).codexSend, false)
+  } finally { await board.end(urls) }
+})
+
+test('a page that reports noCodexSend is replaced by one with Send to Codex off (#318)', { timeout: 90_000 }, async () => {
+  const board = serveIn()
+  const urls = []
+  const fakes = []
+  const pingOf = async url => {
+    const address = new URL(url)
+    return (await fetchAt('127.0.0.1', Number(address.port), 'GET', '/api/ping', { 'x-board-token': address.searchParams.get('t') })).json()
+  }
+  // A stand-in page of another build: it answers its ping with `fields`, and agrees to close after running `onClose`; `closes`
+  // counts the requests to close it.
+  const fakePage = async (fields, onClose = () => {}) => {
+    const page = { port: 0, url: '', closes: 0 }
+    const fake = createServer((req, res) => {
+      if (req.url === '/api/ping') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ path: board.path, built: 'synthetic-earlier-build', allowResume: false, ...fields }))
+      } else if (req.url === '/api/close') {
+        page.closes++
+        onClose()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{}')
+      } else {
+        res.writeHead(404)
+        res.end()
+      }
+    })
+    await new Promise(done => fake.listen(0, '127.0.0.1', done))
+    fakes.push(fake)
+    page.port = fake.address().port
+    page.url = `http://127.0.0.1:${page.port}/?t=synthetic-${page.port}`
+    return page
+  }
+  const addressOf = (page, pid) => JSON.stringify({ pid, port: page.port, url: page.url, path: board.path, built: 'synthetic-earlier-build' })
+  let blocker = null
+  try {
+    // A page started with --no-codex-send reports noCodexSend: a plain command that replaces it (here for a newer build) gives
+    // the new page the same switch.
+    const off = await fakePage({ codexSend: false, noCodexSend: true })
+    addressFixture(board.served, addressOf(off, process.pid))
+    const replaced = board.urlOf(await board.serve(['--quiet-board']))
+    assert.ok(replaced)
+    urls.push(replaced)
+    // A new page, not the stand-in: it was asked to close, and the address names another page.
+    assert.equal(off.closes, 1)
+    assert.notEqual(new URL(replaced).port, String(off.port))
+    const replacedPing = await pingOf(replaced)
+    assert.equal(replacedPing.codexSend, false)
+    assert.equal(replacedPing.noCodexSend, true)
+    await closeAt(replaced, board.served)
+    // `--keys "o o"` opens the page twice in one command, as `--watch` can. The first launch lets go of a page with it off;
+    // its own page cannot take the port `blocker` holds, and the page it let go of leaves the address file to a page of a
+    // build before #318, which reports no noCodexSend (deadPid: a number no process has, as for the other stand-ins of this file). The second launch replaces that one, whose closing frees the port.
+    blocker = createNetServer()
+    await new Promise(done => blocker.listen(0, '127.0.0.1', done))
+    const { port } = blocker.address()
+    const earlier = await fakePage({ codexSend: false }, () => blocker.close())
+    const offAgain = await fakePage({ codexSend: false, noCodexSend: true }, () => writeFileSync(board.served, addressOf(earlier, deadPid)))
+    addressFixture(board.served, addressOf(offAgain, process.pid))
+    const keys = await new Promise(done => execFile(process.execPath, [board.script, '--keys', 'o o', '--no-open', '--port', String(port)], { env: board.env, encoding: 'utf8', timeout: 60_000 }, (error, out, err) => done({ error, out, err })))
+    const record = JSON.parse(readFileSync(board.served, 'utf8'))
+    urls.push(record.url)
+    // The command ran both opens and ended on its own: the first open's failure on the held port makes it exit 1, and its
+    // time limit did not stop it. Its board ends with the link of the page the second open started.
+    assert.equal(keys.error?.killed ?? false, false, keys.err)
+    assert.equal(keys.error?.signal ?? null, null, keys.err)
+    assert.equal(keys.error?.code, 1, `${keys.out}${keys.err}`)
+    assert.equal(record.port, port, keys.out)
+    assert.ok(keys.out.trimEnd().endsWith(record.url), keys.out)
+    assert.equal(offAgain.closes, 1)
+    assert.equal(earlier.closes, 1)
+    // The page of the second launch has Send to Codex on: the page it replaced was of a build before #318, and the first
+    // launch's off page is not that launch's to know.
+    const secondPing = await pingOf(record.url)
+    assert.equal(secondPing.codexSend, true)
+    assert.equal(secondPing.noCodexSend, false)
+  } finally {
+    blocker?.close()
+    for (const fake of fakes) { fake.close(); fake.closeAllConnections() }
+    await board.end(urls)
+  }
 })
 
 test('the board command in a read-only sandbox reuses a running page\'s link', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 30_000 }, async () => {
@@ -7942,7 +8218,7 @@ publicationSync340()
 test("the page's address stays out of progress.md's folder, and a file left by a page that is gone does not keep the next one from starting", { timeout: 60_000 }, async () => {
   const board = serveIn()
   const port = await freePort()
-  const gone = { pid: 999999, port, url: `http://127.0.0.1:${port}/?t=gone`, path: board.path, built: '' }
+  const gone = { pid: deadPid, port, url: `http://127.0.0.1:${port}/?t=gone`, path: board.path, built: '' }
   // Where 0.19.0 kept the address, token and all, and where this copy keeps it.
   const old = join(board.dir, 'progress-serve.json')
   addressFixture(old, JSON.stringify(gone))
@@ -8248,6 +8524,9 @@ test('a newer --serve does not start a second page while the page it would repla
     assert.notEqual(url, board.url.href)
     assert.ok(!next.includes('already open is kept'), next)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, url)
+    // The page it replaced was started with no switch, as every page before #318 was: the new page has Send to Codex on.
+    const address = new URL(url)
+    assert.equal((await fetchAt('127.0.0.1', Number(address.port), 'GET', '/api/ping', { 'x-board-token': address.searchParams.get('t') })).json().codexSend, true)
     await held.exited()
   } finally {
     for (const url of urls) await closeAt(url, board.served)
@@ -8256,9 +8535,9 @@ test('a newer --serve does not start a second page while the page it would repla
 })
 
 test('an address file naming a dead process, or a running one with nothing at its port, does not keep the next --serve from starting a page', { timeout: 60_000 }, async () => {
-  // 999999 is a number no process has. The test's own is one that runs, as a number a restarted
+  // deadPid is a number no process has. The test's own is one that runs, as a number a restarted
   // computer gave to another program does.
-  for (const pid of [999999, process.pid]) {
+  for (const pid of [deadPid, process.pid]) {
     const board = serveIn()
     const port = await freePort()
     const stale = `http://127.0.0.1:${port}/?t=gone`
@@ -10635,7 +10914,8 @@ test('a replaced server tells an open tab the board moved instead of dropping of
   const board = serveIn()
   const urls = []
   try {
-    const first = board.urlOf(await board.serve([]))
+    // Started with Send to Codex off, so --codex-send below asks for a page with another setting (#318).
+    const first = board.urlOf(await board.serve(['--no-codex-send']))
     assert.ok(first)
     urls.push(first)
     const firstAddress = new URL(first)
@@ -10935,6 +11215,18 @@ test('a question card puts choices before its copy button and the hide button la
   const row = cardWithKey(dom, 'row')
   assert.ok(row.childNodes.findIndex(node => node.className === 'composer') < row.childNodes.findIndex(node => node.className === 'acts'))
   assert.deepEqual(cardActionNodes(row).map(node => node.textContent), [EN.serveCopyResume, EN.serveArchive, EN.confirmDone])
+})
+
+test('each choice button and each listed native option shows its choice as it is sent, so two choices never read the same (#1629)', async () => {
+  const answers = ['Fix #123', 'Fix #456', 'abcdef12']
+  const model = cardsModel()
+  model.asks[0] = { ...model.asks[0], answers }
+  const dom = await pageDom(await sourcePage(), model)
+  assert.deepEqual(pressWalk(cardWithKey(dom, 'ask')).filter(node => node.className === 'choice').map(node => node.textContent), answers)
+  const native = cardsModel()
+  native.asks[0] = { ...native.asks[0], answers: [], native: { options: answers, line: 'Answer it in its own window.' } }
+  const listed = pressWalk(cardWithKey(await pageDom(await sourcePage(), native), 'ask')).find(node => node.className === 'native-options')
+  assert.deepEqual(listed.childNodes.map(node => node.textContent), answers)
 })
 
 test('a card with more than three actions shows three and the rest behind More', async () => {
@@ -12001,6 +12293,32 @@ test('no away line when the tab was hidden for less than 5 minutes', async () =>
   const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
   const dom = await awayAfter(base, later, 4)
   assert.equal(awayLine(dom), '')
+})
+
+// #715 reopen: the time away ends when the tab is visible again, not when the next refresh arrives.
+const awayReturnThenPoll = async (base, later, hiddenMs, pollMs) => {
+  const dom = await pageDom(await sourcePage('en'), base, { now: ONE_LINE_NOW })
+  dom.hideTab()
+  dom.setNow(ONE_LINE_NOW + hiddenMs)
+  dom.showTab()
+  dom.setNow(ONE_LINE_NOW + pollMs)
+  await dom.redraw(later)
+  await dom.settle()
+  return dom
+}
+
+test('hidden for 4:59, back, and the refresh at 5:01 shows no away line', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
+  const dom = await awayReturnThenPoll(base, later, (4 * 60 + 59) * 1000, (5 * 60 + 1) * 1000)
+  assert.equal(awayLine(dom), '')
+})
+
+test('hidden for 5:01, back, and a later refresh says away for 5 min', async () => {
+  const base = cardsModel('codex')
+  const later = { ...base, asks: [...base.asks, { ...base.asks[0], key: 'ask-2', task: 'Second plan', text: 'Second, OK?' }] }
+  const dom = await awayReturnThenPoll(base, later, (5 * 60 + 1) * 1000, 7 * 60 * 1000)
+  assert.equal(awayLine(dom), 'Away for 5 min · Codex asked a question')
 })
 
 test('a refresh while the tab is still hidden keeps the away snapshot for the return', async () => {

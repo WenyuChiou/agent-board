@@ -101,7 +101,7 @@ export const issueLine = (body, title, { isOptional = false } = {}) => {
     output.info.push('issue: release pull requests need no issue line.')
     return output
   }
-  const clean = stripComments(body)
+  const clean = visibleBody(body)
   // The list is the run of issue lines that opens the body; the first other line ends it.
   const listed = []
   for (const line of linesOf(clean).map(text => text.trim()).filter(Boolean)) {
@@ -134,7 +134,7 @@ export const issueLine = (body, title, { isOptional = false } = {}) => {
 
 const linkedIssues = body => {
   const items = []
-  for (const line of linesOf(stripComments(body ?? '')).map(text => text.trim()).filter(Boolean)) {
+  for (const line of linesOf(visibleBody(body)).map(text => text.trim()).filter(Boolean)) {
     const match = line.match(/^(Fixes|Closes|Resolves|Part of)\s+#(\d+)\b/i)
     if (!match) break
     items.push({ number: Number(match[2]), kind: match[1].toLowerCase() === 'part of' ? 'part of' : 'fixes' })
@@ -239,7 +239,7 @@ export const findingLink = ({ title = '', body = '', number = null, repo = null,
   const output = result()
   const hasFindingTitle = /^\s*(?:[a-z]+(?:\([^)]*\))?!?:\s*)?(?:\[\s*finding\s*\]|finding\s*:)/i.test(String(title ?? ''))
   if (!isFinding && !hasFindingTitle) return output
-  const clean = stripComments(body ?? '')
+  const clean = visibleBody(body)
   // The answer may itself start with #, as the form's placeholder `#1299` does; only the next heading, indented or not, ends
   // the section. Blank lines may be CRLF, as a body edited on the web is.
   const fromPrSection = clean.match(/^#{2,3}[ \t]*Pull request it came from(?:[ \t]*\r?\n)+(?![ \t]*#{1,6}[ \t])([^\r\n]+)/im)?.[1]?.trim() ?? ''
@@ -282,7 +282,7 @@ const namesBranch = (text, branch, boundary = '[\\s`,();.]') => {
 
 export const authorLine = (body, branch) => {
   const output = { agent: null, ...result() }
-  const author = stripComments(body).match(/^Author:[ \t]*(.*)$/m)?.[1]?.trim() ?? ''
+  const author = visibleBody(body).match(/^Author:[ \t]*(.*)$/m)?.[1]?.trim() ?? ''
   const comma = author.indexOf(',')
   const name = comma === -1 ? '' : author.slice(0, comma).replace(/`/g, '').trim()
   // The weekly table and the review queue name the agent by the words before the comma, so a line without one would count as a new author each time.
@@ -308,21 +308,56 @@ export const naming = (title, branch) => {
   return output
 }
 
+// Whether the lines from `from` (inclusive) to `to` (exclusive) hold an answer: text outside a
+// fence or a comment, or a non-empty line inside a fence. A fence delimiter itself is not an
+// answer. A null line is a fence line or a line inside a fence (#1492); a null line that does not
+// start with fence markers and is not blank is a line of fenced content, so a section whose whole
+// answer is a fenced block (pasted preflight output, #1459) is not empty.
+const sectionHasAnswer = (shown, raw, from, to) => {
+  for (let i = from; i < to; i++) {
+    if (shown[i] !== null) {
+      if (shown[i].trim() !== '') return true
+    } else if (raw[i] !== undefined && raw[i].trim() !== '' && !/^ {0,3}(`{3,}|~{3,})/.test(raw[i])) {
+      return true
+    }
+  }
+  return false
+}
+
 export const sections = (body, template) => {
   const output = result()
-  const clean = stripComments(body)
-  const headings = [...clean.matchAll(/^## (.+)\r?$/gm)]
-  for (const heading of stripComments(template).matchAll(/^## (.+)\r?$/gm)) {
-    const name = heading[1].trim()
-    const index = headings.findIndex(item => item[1].trim().toLowerCase() === name.toLowerCase())
-    const found = headings[index]
-    if (!found || !clean.slice(found.index + found[0].length, headings[index + 1]?.index ?? clean.length).trim()) {
+  // Headings and checklist items are read through visible lines, so a `##` or `- [ ]` inside a
+  // fence is not one (#1492). The answer is read off the isPlaceKept lines, so fenced content
+  // counts: the lines keep their positions, and a null line that is a non-empty line inside a
+  // fence is an answer.
+  const shown = visibleLines(body ?? '', { isPlaceKept: true })
+  const raw = (body ?? '').split(/\r?\n/)
+  const headings = []
+  for (let i = 0; i < shown.length; i++) {
+    const match = shown[i]?.match(/^## (.+)$/)
+    if (match) headings.push({ name: match[1].trim(), line: i })
+  }
+  const templateHeadings = []
+  for (const line of visibleLines(template ?? '', { isPlaceKept: true })) {
+    const match = line?.match(/^## (.+)$/)
+    if (match) templateHeadings.push(match[1].trim())
+  }
+  for (const name of templateHeadings) {
+    const at = headings.findIndex(item => item.name.toLowerCase() === name.toLowerCase())
+    const found = headings[at]
+    const next = at === -1 ? shown.length : (headings[at + 1]?.line ?? shown.length)
+    if (!found || !sectionHasAnswer(shown, raw, found.line + 1, next)) {
       output.problems.push(problem('sections', `the "${name}" section is missing or empty.`, `add "## ${name}" and explain its result, or why it is not applicable.`))
     }
   }
-  const items = new Set([...stripComments(template).matchAll(/^- \[ \] (.+)\r?$/gm)].map(match => match[1].trim()))
-  for (const match of clean.matchAll(/^- \[([ xX])\] (.+)\r?$/gm)) {
-    if (items.has(match[2].trim())) {
+  const items = new Set()
+  for (const line of visibleLines(template ?? '', { isPlaceKept: true })) {
+    const match = line?.match(/^- \[ \] (.+)$/)
+    if (match) items.add(match[1].trim())
+  }
+  for (const line of shown) {
+    const match = line?.match(/^- \[([ xX])\] (.+)$/)
+    if (match && items.has(match[2].trim())) {
       output.problems.push(problem('sections', 'a template checkbox has no result or reason.', match[1] === ' ' ? 'tick it and add the result, or add "not run:" and why, or "n/a:" and why.' : 'add the result after a dash on the checked item.'))
     }
   }
@@ -499,7 +534,7 @@ export const needsBundle = paths => paths.some(path => /^(scripts|hooks)\//.test
 // Every agent posts from one GitHub account, so the weekly table and the review queue tell agents apart by the
 // Author line: the words before its first comma, with a dispatching lane in brackets as part of the name.
 export const authorKey = body => {
-  const author = stripComments(body).match(/^Author:[ \t]*(.*)$/m)?.[1] ?? ''
+  const author = visibleBody(body).match(/^Author:[ \t]*(.*)$/m)?.[1] ?? ''
   return author.split(',')[0].replace(/`/g, '').replace(/\s+/g, ' ').trim().toLowerCase() || null
 }
 
@@ -752,34 +787,56 @@ export const isLaneReviewer = (review, tier) => review?.isFresh === true && (tie
 
 const isBotUser = user => user?.type === 'Bot' || /\[bot\]$/i.test(user?.login ?? '')
 
-export const reviewOf = item => {
-  if (!item) return null
-  const isBot = typeof item === 'object' && isBotUser(item.user)
-  const body = typeof item === 'string' ? item : item.body ?? ''
-  const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
-  if (match && !(match[1].toUpperCase() === 'APPROVE' && isBot)) {
-    const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
-    const isFresh = isFreshLine(body.slice(match.index).split(/\r?\n/, 1)[0])
-    return {
-      kind: match[1].toUpperCase(),
-      sha: match[2].toLowerCase(),
-      ...(reviewer ? { reviewer } : {}),
-      ...(isFresh ? { isFresh } : {}),
-    }
-  }
-  if (!isBot && typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
-    const reviewer = item.user?.login ?? null
-    return { kind: 'APPROVE', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
-  }
-  if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
-    const reviewer = item.user?.login ?? null
-    return { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }
-  }
+// Only team associations (OWNER, MEMBER, COLLABORATOR) and allowed apps may approve; no review bot or app is
+// currently allowed (#1343, #1535). When author_association is unknown (synthetic local calls), it reads as the team.
+const ignoredApprovalReason = item => {
+  if (!item || typeof item !== 'object') return null
+  if (isBotUser(item.user)) return 'bot or unapproved app'
+  if (isOutsideAssociation(item.author_association)) return `outside association (${String(item.author_association).trim().toUpperCase()})`
   return null
 }
 
+const readReview = item => {
+  if (!item) return { review: null, ignored: null }
+  const blocked = ignoredApprovalReason(item)
+  const body = typeof item === 'string' ? item : item.body ?? ''
+  const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
+  if (match) {
+    const kind = match[1].toUpperCase()
+    const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
+    if (kind === 'APPROVE' && blocked) {
+      if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
+        return { review: { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(item.user?.login ? { reviewer: item.user.login } : {}) }, ignored: null }
+      }
+      return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
+    }
+    const isFresh = isFreshLine(body.slice(match.index).split(/\r?\n/, 1)[0])
+    return {
+      review: {
+        kind,
+        sha: match[2].toLowerCase(),
+        ...(reviewer ? { reviewer } : {}),
+        ...(isFresh ? { isFresh } : {}),
+      },
+      ignored: null,
+    }
+  }
+  if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
+    const reviewer = item.user?.login ?? null
+    return { review: { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }, ignored: null }
+  }
+  if (typeof item === 'object' && item.state === 'APPROVED' && item.commit_id) {
+    const reviewer = item.user?.login ?? null
+    if (blocked) return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
+    return { review: { kind: 'APPROVE', sha: item.commit_id.toLowerCase(), ...(reviewer ? { reviewer } : {}) }, ignored: null }
+  }
+  return { review: null, ignored: null }
+}
+
+export const reviewOf = item => readReview(item).review
+
 // The tier the body names on its `Tier:` line (RULES R2), or null when it names none.
-export const tierOf = body => stripComments(body ?? '').match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
+export const tierOf = body => visibleBody(body).match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
 
 // A risk-tier pull request changes one failure surface and names it on a `Surface:` line (CONTRIBUTING rule 2, #1490).
 // It applies to pull requests numbered above SURFACE_FROM, the issue (#1490) the rule and this check came in with; a local
@@ -795,8 +852,9 @@ const isUncountedForSurface = path => path.startsWith('tests/') || isGeneratedPa
 // The body's lines as a reader sees them, so an example `Surface:` line is not read: no fenced code (``` or ~~~ after at most
 // three spaces, closed only by a line of the same character at least as long, as CommonMark has it) and no HTML comment (an
 // unclosed `<!--` hides the rest). A comment marker inside a fence or a code span on one line (`<!--`), and a fence marker
-// inside a comment, are plain text.
-const visibleLines = text => {
+// inside a comment, are plain text. With isPlaceKept a fence line and each line inside it stay as null, so that two lines
+// with a fence between them are not read as neighbours.
+const visibleLines = (text, { isPlaceKept = false } = {}) => {
   const shown = []
   let fence = null
   let isComment = false
@@ -804,11 +862,13 @@ const visibleLines = text => {
     if (fence !== null) {
       const close = raw.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/)?.[1]
       if (close !== undefined && close[0] === fence[0] && close.length >= fence.length) fence = null
+      if (isPlaceKept) shown.push(null)
       continue
     }
     const open = isComment ? undefined : raw.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
     if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
       fence = open[1]
+      if (isPlaceKept) shown.push(null)
       continue
     }
     let kept = ''
@@ -851,16 +911,177 @@ const visibleLines = text => {
   }
   return shown
 }
+// The body as a reader sees it: no fenced code, no HTML comment, and a comment marker inside a fence or a code span
+// is plain text, so it hides nothing after it (#1492).
+const visibleBody = body => visibleLines(body ?? '').join('\n')
+// The tier a `Tier:` line's value names, or null. Every check reads the value with this one reader (#1531), so a
+// spelling the tier check accepts is one the surface, cases and round checks read too.
+const tierWord = value => value.match(/^`?(risk|normal|light)\b/i)?.[1].toLowerCase() ?? null
+// The whole rest of the line: `.` stops at a lone \r or a Unicode line separator, and would drop the line.
+const tierValues = body => visibleLines(body).flatMap(line => line.match(/^Tier:[ \t]*([\s\S]*)$/i)?.[1].trimEnd() ?? [])
 // The tier as a reader sees it, for the surface check: a `Tier:` line outside fences and comments.
-const visibleTier = body => visibleLines(body).map(line => line.match(/^Tier:[ \t]*`?(risk|normal|light)\b/i)?.[1].toLowerCase()).find(Boolean) ?? null
+const visibleTier = body => tierValues(body).map(tierWord).find(Boolean) ?? null
+// The `Surface:` lines a reader sees: every value (found), and those that are filled in (the template's own
+// `Surface: <...>` line is a placeholder, not a value).
+const surfaceLine = body => {
+  const found = visibleLines(body).flatMap(line => line.match(/^Surface:[ \t]*(.*)$/i)?.[1].trim() ?? [])
+  return { found, filled: found.filter(value => value !== '' && !value.startsWith('<')) }
+}
+// The size limit (RULES R6, #1545): changed lines, counted as for the surface note, on the risk tier fail above SIZE_RISK and
+// on the normal tier fail above SIZE_NORMAL with a note above SIZE_RISK, unless the body says why the change cannot be split
+// (`cannot split: <reason>` on the `Surface:` line, or a line `Size: cannot split: <reason>`). The light tier and releases
+// have none. It applies to pull requests numbered above SIZE_FROM; a local --body-file run is checked as new.
+export const SIZE_FROM = 1545
+export const SIZE_RISK = 400
+export const SIZE_NORMAL = 800
+// Safe named HTML entities used in prose split reasons, in a null-prototype lookup so inherited Object properties
+// like `constructor` never decode into words (#1556).
+const splitEntities = Object.assign(Object.create(null), {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', hellip: '…',
+  shy: '', zwj: '', zwnj: '', zerowidthspace: '',
+})
+
+const decodeSplitEntity = (_, dec, hex, named) => {
+  if (dec !== undefined || hex !== undefined) {
+    const code = dec !== undefined ? Number(dec) : parseInt(hex, 16)
+    if (!Number.isInteger(code) || code < 0x20 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return ''
+    return String.fromCodePoint(code)
+  }
+  const key = named.toLowerCase()
+  return Object.hasOwn(splitEntities, key) ? splitEntities[key] : ''
+}
+
+const readLinkTitle = (text, start) => {
+  const close = text[start] === '(' ? ')' : text[start]
+  let i = start + 1
+  while (i < text.length && text[i] !== close && text[i] !== '\n' && text[i] !== '\r') {
+    if (text[i] === '\\' && i + 1 < text.length) i++
+    i++
+  }
+  if (text[i] !== close) return -1
+  i++
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++
+  return text[i] === ')' ? i : -1
+}
+
+const readLinkDest = (text, start) => {
+  let i = start
+  if (text[i] === '<') {
+    i++
+    while (i < text.length && text[i] !== '>' && text[i] !== '\n' && text[i] !== '\r') {
+      if (text[i] === '\\' && i + 1 < text.length) i++
+      i++
+    }
+    return text[i] === '>' ? i + 1 : -1
+  }
+  let depth = 0
+  while (i < text.length) {
+    const ch = text[i]
+    if (ch === '\n' || ch === '\r' || ch === ' ' || ch === '\t') break
+    if (ch === '\\' && i + 1 < text.length) { i += 2; continue }
+    if (ch === '(') depth++
+    else if (ch === ')') {
+      if (depth === 0) break
+      depth--
+    }
+    i++
+  }
+  return depth === 0 ? i : -1
+}
+
+const findClosingParen = (text, openAt) => {
+  let i = openAt + 1
+  let hadSpace = false
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) { hadSpace = true; i++ }
+  if (text[i] === ')') return i
+  const afterDest = readLinkDest(text, i)
+  if (afterDest !== -1) {
+    let j = afterDest
+    let sepSpace = false
+    while (j < text.length && (text[j] === ' ' || text[j] === '\t')) { sepSpace = true; j++ }
+    if (text[j] === ')') return j
+    if (sepSpace && (text[j] === '"' || text[j] === "'" || text[j] === '(')) {
+      const end = readLinkTitle(text, j)
+      if (end !== -1) return end
+    }
+  }
+  if (hadSpace && (text[i] === '"' || text[i] === "'" || text[i] === '(')) return readLinkTitle(text, i)
+  return -1
+}
+
+const stripMarkdownLinks = text => {
+  let out = ''
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\' && i + 1 < text.length) { out += text[i] + text[i + 1]; i++; continue }
+    const start = text[i] === '!' && text[i + 1] === '[' ? i + 1 : text[i] === '[' ? i : -1
+    if (start !== -1) {
+      const closeBracket = text.indexOf(']', start + 1)
+      if (closeBracket !== -1) {
+        const after = closeBracket + 1
+        if (text[after] === '(') {
+          const closeParen = findClosingParen(text, after)
+          if (closeParen !== -1) {
+            out += text.slice(start + 1, closeBracket)
+            i = closeParen
+            continue
+          }
+        } else if (text[after] === '[') {
+          const closeRef = text.indexOf(']', after + 1)
+          if (closeRef !== -1 && !text.slice(after + 1, closeRef).includes('\n')) {
+            out += text.slice(start + 1, closeBracket)
+            i = closeRef
+            continue
+          }
+        }
+      }
+    }
+    out += text[i]
+  }
+  return out
+}
+
+// A reason is the visible text after `cannot split:` with a letter or a digit, in any language, and no placeholder,
+// HTML tag or empty link/image hiding non-visible words (#1556). Tags and link destinations are stripped before decoding
+// entities on each pass so `<span title="&gt;hidden"></span>` never decodes into visible text while real entities
+// like `&amp;` still count. Characters Unicode marks default-ignorable (zero-width space, Hangul filler) are ignored.
+const isSplitReason = text => {
+  let reason = text.replace(/cannot split:/gi, '')
+  let converged = false
+  for (let pass = 0; pass < 8; pass++) {
+    const next = stripMarkdownLinks(reason)
+      .replace(/<\/?[a-z](?:=\s*(?:"[^"]*"|'[^']*')|[^>=]|=(?!\s*["']))*>/gi, '')
+      .replace(/<\/?[a-z][^>]*>/gi, '')
+      .replace(/<!(?:--[\s\S]*?--|[^>]*?)>/g, '')
+      .replace(/<\?[\s\S]*?\?>/g, '')
+      .replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z][a-z0-9]*));/gi, decodeSplitEntity)
+    if (next === reason) {
+      converged = true
+      break
+    }
+    reason = next
+  }
+  if (!converged) return false
+  return /[\p{L}\p{N}]/u.test(reason.replace(/\p{Default_Ignorable_Code_Point}/gu, ''))
+}
+const hasSplitReason = body => surfaceLine(body).filled.some(value => isSplitReason(value.split(/,[ \t]*cannot split:/i).slice(1).join(','))) ||
+  visibleLines(body).some(line => isSplitReason(line.match(/^Size:[ \t]*cannot split:(.*)$/i)?.[1] ?? ''))
+export const size = ({ body = '', title = '', number = null, numstat, tier = visibleTier(body) } = {}) => {
+  const output = result()
+  if (!Array.isArray(numstat) || tier === 'light' || isReleaseTitle(title) || (number !== null && number <= SIZE_FROM)) return output
+  const lines = numstat.filter(item => !isUncountedForSurface(item.path)).reduce((sum, item) => sum + item.added + item.deleted, 0)
+  const limit = tier === 'risk' ? SIZE_RISK : SIZE_NORMAL
+  const counted = `${lines} changed lines (tests, generated files and string tables not counted)`
+  if (lines > limit && !hasSplitReason(body)) {
+    output.problems.push(problem('size', `${counted} is more than ${limit}, the limit on the ${tier === 'risk' ? 'risk' : 'normal'} tier (RULES.md, R6).`, 'split it into smaller pull requests, or say why it cannot be split: end the `Surface:` line with `, cannot split: <reason>`, or add a line `Size: cannot split: <reason>`, in visible words (not a tag, hidden character or empty link).'))
+  } else if (lines > SIZE_RISK && tier !== 'risk') output.info.push(`size note: ${counted} is more than ${SIZE_RISK}; above ${SIZE_NORMAL} it fails without a reason it cannot be split.`)
+  return output
+}
 export const surface = ({ body = '', title = '', number = null, paths = [], numstat, tier = visibleTier(body) } = {}) => {
   const output = result()
   if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= SURFACE_FROM)) return output
   const fail = (message, fix) => output.problems.push(problem('surface', message, fix))
   const how = 'name the one failure surface on a line of its own in the body, for example `Surface: delivery` (delivery, setup-writes, data, wording, rules-text or launch, or `none` when the only reason for the tier is the lane under risk-tier review; CONTRIBUTING.md rule 2).'
-  const found = visibleLines(body).flatMap(line => line.match(/^Surface:[ \t]*(.*)$/i)?.[1].trim() ?? [])
-  // The template's own `Surface: <...>` line is a placeholder, not a value.
-  const filled = found.filter(value => value !== '' && !value.startsWith('<'))
+  const { found, filled } = surfaceLine(body)
   if (filled.length > 1) {
     fail(`the body has ${filled.length} \`Surface:\` lines; it names its surface once.`, 'keep one `Surface:` line; put an example inside a code fence.')
     return output
@@ -872,8 +1093,8 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   }
   const [named, ...reasonParts] = line.split(/,[ \t]*cannot split:/i)
   const reason = reasonParts.join(',').trim()
-  if (reasonParts.length && (!reason || /^<[^<>]*>$/.test(reason))) {
-    fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.','write the reason after `cannot split:`, for the maintainer or the owner to accept or refuse before the first review.')
+  if (reasonParts.length && !isSplitReason(reason)) {
+    fail('the `Surface:` line says `cannot split:` with no reason, or only the template\'s `<reason>`.', 'write the reason after `cannot split:` in visible words (not a tag, hidden character or empty link), for the maintainer or the owner to accept or refuse before the first review.')
     return output
   }
   const values = named.split('+').map(value => value.replace(/`/g, '').trim().toLowerCase())
@@ -912,10 +1133,315 @@ export const surface = ({ body = '', title = '', number = null, paths = [], nums
   return output
 }
 
+// On a case surface the first commit of a risk-tier pull request changes only tests or the state table, so the evidence
+// exists before the code does (#1544, Fable proposal 3). It applies to pull requests numbered above EVIDENCE_FROM, set
+// above every open pull request so none is held; a local --body-file run has no number and is checked as new.
+// firstCommitPaths: the paths of the oldest commit of the branch (merges of main left out), undefined when not read.
+export const EVIDENCE_FROM = 1550
+// The result of `git merge-base --is-ancestor`: exit 0 is in the base, 1 is not, and anything else (a git error) stops the
+// check, so a merge whose ancestry git could not read is never taken for a merge of main or for a topic (codex_446).
+export const isAncestor = (result, commit = 'a commit') => {
+  if (result?.error || (result?.status !== 0 && result?.status !== 1)) throw new Error(`git could not tell whether ${commit} is in the base; fetch both commits and run again.`)
+  return result.status === 0
+}
+const isEvidencePath =path => path.startsWith('tests/') || path === 'hooks/delivery-states.ts'
+export const evidenceFirst = ({ body = '', title = '', number = null, firstCommitPaths, tier = visibleTier(body) } = {}) => {
+  const output = result()
+  if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= EVIDENCE_FROM)) return output
+  if (!Array.isArray(firstCommitPaths) || !firstCommitPaths.length) return output
+  const line = surfaceLine(body).filled[0]
+  if (!line) return output
+  const named = line.split(/,[ \t]*cannot split:/i)[0].split('+').map(value => value.replace(/`/g, '').trim().toLowerCase()).filter(value => caseSurfaces.includes(value))
+  if (!named.length) return output
+  const code = firstCommitPaths.filter(path => !isEvidencePath(path))
+  if (code.length) {
+    const names = code.slice(0, 3).map(path => `\`${path}\``).join(', ') + (code.length > 3 ? ` and ${code.length - 3} more` : '')
+    output.problems.push(problem('evidence', `the first commit of this ${named.join(' + ')} pull request changes ${names}, which is neither a test nor the state table.`, 'make the first commit only tests (tests/) or hooks/delivery-states.ts, so the evidence exists before the code; put the code in a later commit (CONTRIBUTING.md rule 2).'))
+  }
+  return output
+}
+
+// Every pull request names its tier on a `Tier:` line, and one that changes a path docs/dev/risk-paths.md lists is risk
+// tier (RULES R2; #1531). Both apply to pull requests numbered above TIER_FROM, the issue they came in with, other than a
+// release, which is risk tier whatever it says. A local --body-file run, which often checks a draft body, gets a note for
+// a missing line instead of a failure. A small docs fix from outside the team is spared the issue and claim lines only,
+// not the tier, which decides who may approve (#1577).
+export const TIER_FROM = 1531
+// The paths risk-paths.md lists: one per bullet, in backticks; a path ending in `/` is a folder. The large shared files
+// the page names in its prose are not on the list, and stay the reviewer's call (R2).
+export const riskPathsOf = text => linesOf(text ?? '').flatMap(line => line.trimEnd().match(/^[ \t]*[-*][ \t]+`([^`\s]+)`$/)?.[1] ?? [])
+const isRiskPath = (path, riskPaths) => riskPaths.some(listed => listed.endsWith('/') ? path.startsWith(listed) : path === listed)
+// riskPaths: the list read at the base, null when it could not be read there, undefined when not given.
+export const tier = ({ body = '', title = '', number = null, paths = [], riskPaths } = {}) => {
+  const output = result()
+  if (isReleaseTitle(title) || (number !== null && number <= TIER_FROM)) return output
+  const fail = (message, fix) => output.problems.push(problem('tier', message, fix))
+  const how = 'name the tier on a line of its own in the body: `Tier: risk`, `Tier: normal` or `Tier: light`, the highest any change reaches (docs/dev/RULES.md, R2).'
+  // Every visible `Tier:` line counts, an empty one or the template's placeholder too, so a second line cannot hide.
+  const found = tierValues(body)
+  if (found.length > 1) {
+    fail(`the body has ${found.length} \`Tier:\` lines; it names its tier once.`, 'keep one `Tier:` line; put an example inside a code fence.')
+    return output
+  }
+  const value = found[0] ?? ''
+  if (value.trim() === '' || value.startsWith('<')) {
+    const message = !found.length ? 'the body has no `Tier:` line.' : value.trim() === '' ? 'the `Tier:` line names no tier.' : 'the `Tier:` line is still the template\'s placeholder.'
+    if (number === null) output.info.push(`tier: ${message} The PR check fails a pull request without one (docs/dev/RULES.md, R2).`)
+    else fail(message, how)
+    return output
+  }
+  const named = tierWord(value)
+  if (!named) {
+    fail(`the \`Tier:\` line names "${value}", which is not a tier.`, how)
+    return output
+  }
+  if (riskPaths === undefined) return output
+  if (!Array.isArray(riskPaths)) {
+    output.info.push('tier: docs/dev/risk-paths.md could not be read at the base, so the changed paths were not checked against the paths it lists.')
+    return output
+  }
+  if (named === 'risk') return output
+  const listed = paths.filter(path => isRiskPath(path, riskPaths))
+  if (listed.length) {
+    const names = listed.slice(0, 3).map(path => `\`${path}\``).join(', ') + (listed.length > 3 ? ` and ${listed.length - 3} more` : '')
+    fail(`\`Tier: ${named}\`, but the pull request changes ${names}, which docs/dev/risk-paths.md lists as risk tier.`, 'set `Tier: risk` with its `Surface:` line, or move the change to that path into a risk-tier pull request of its own (docs/dev/RULES.md, R2).')
+  }
+  return output
+}
+
+// A risk-tier pull request on a surface that handles events arriving in any order lists its cases before the first push
+// (CONTRIBUTING rule 2, RULES R6, #1503), and stops at ROUND_CAP review rounds. Both apply to pull requests numbered above
+// CASES_FROM, the issue they came in with; a local --body-file run has no number and is checked as new.
+export const CASES_FROM = 1503
+export const ROUND_CAP = 5
+const caseSurfaces = ['delivery', 'setup-writes', 'data', 'launch']
+// The case table has one accepted form, the template's, and nothing else is read as a table (#1503):
+//   | State | Event | Expected result | Test |     these four names in this order, in any letter case
+//   |---|---|---|---|                               four cells of dashes, colons allowed
+//   | <state> | <event> | <result> | <test> |       one line for each case: outer pipes, four cells, \| for a pipe in a cell
+// The rows are the unbroken run of lines that start with a pipe. A blank line, a code fence, a comment on its own line or
+// prose ends the table, and a line starting with a pipe after that fails, as any other shape does, with CASE_FORM as the fix.
+const CASE_COLUMNS = ['state', 'event', 'expected result', 'test']
+const CASE_FORM = 'write the table as the template has it: the header line "| State | Event | Expected result | Test |", the line "|---|---|---|---|", then one line for each case that starts and ends with "|" and has four cells. Write a pipe inside a cell as "\\|", keep blank lines, code fences, comments, prose and any second table out of the rows, and leave a blank line under the last row unless a heading or the end of the body comes next.'
+// The cells of a line with outer pipes, split at each pipe that has no backslash before it; null for any other line.
+const tableCells = line => {
+  const parts = line.trim().split(/(?<!\\)\|/)
+  if (parts.length < 3 || parts[0] !== '' || parts.at(-1) !== '') return null
+  return parts.slice(1, -1).map(cell => cell.replace(/\\\|/g, '|').trim())
+}
+// A template placeholder such as <state>, or three dots, is an empty cell.
+const isPlaceholderCell = cell => /^<[^<>]*>$/.test(cell) || /^(?:\.{3}|…)$/.test(cell)
+// The table under a "## Cases" heading: { rows } with four cells a row, { error } when the section has pipes in any
+// other shape than the accepted form, or null with no table at all.
+const caseTable = body => {
+  const lines = visibleLines(body, { isPlaceKept: true })
+  const start = lines.findIndex(line => line !== null && /^ {0,3}##[ \t]+Cases[ \t]*#*[ \t]*$/i.test(line))
+  if (start === -1) return null
+  const end = lines.findIndex((line, i) => i > start && line !== null && /^ {0,3}#{1,6}[ \t]/.test(line))
+  const section = lines.slice(start + 1, end === -1 ? undefined : end)
+  const isRow = line => typeof line === 'string' && /^ {0,3}\|/.test(line)
+  // The line under a table's header, with or without outer pipes ("--- | ---").
+  const isRuleLine = line => typeof line === 'string' && /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)+\|?[ \t]*$/.test(line)
+  const cellCount = line => line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).length
+  // As in GFM, a rule line starts a table only under a header line of as many cells ("a | b" over "--- | ---"):
+  // another table, before or after this one. Under prose such as "Example:" it is prose.
+  const isTableStart = (line, i) => isRuleLine(line) && typeof section[i - 1] === 'string' && section[i - 1].trim() !== '' && cellCount(section[i - 1]) === cellCount(line)
+  const first = section.findIndex(isRow)
+  // With no line that starts with a pipe, only a table GitHub shows (a rule line under a header) is one in the wrong
+  // form; prose with a pipe in it is no table (#1520).
+  if (first === -1) return section.some(isTableStart) ? { error: 'its lines do not start with "|"' } : null
+  let last = first
+  while (isRow(section[last])) last++
+  if (section.slice(last).some(isRow)) return { error: 'a blank line, a code fence, a comment or prose splits its rows, or a second table follows it' }
+  // On GitHub a line right under the last row can join the table as one more row, so a blank line, a heading or the end
+  // of the section comes next (#1513).
+  if (last < section.length && (typeof section[last] !== 'string' || section[last].trim() !== '')) return { error: 'the line right under its last row is not blank; on GitHub such a line can show as one more row' }
+  if (section.some((line, i) => (i < first || i >= last) && isTableStart(line, i))) return { error: 'the section has a second table, with or without outer pipes' }
+  const [header, rule, ...rows] = section.slice(first, last).map(tableCells)
+  if (!header || header.length !== 4 || header.some((cell, i) => cell.toLowerCase() !== CASE_COLUMNS[i])) return { error: 'its header is not "| State | Event | Expected result | Test |"' }
+  if (!rule || rule.length !== 4 || rule.some(cell => !/^:?-+:?$/.test(cell))) return { error: 'the line under its header is not "|---|---|---|---|"' }
+  const odd = rows.findIndex(cells => !cells || cells.length !== 4)
+  if (odd !== -1) return { error: `row ${odd + 1} ${rows[odd] ? `has ${rows[odd].length} cells where four are read` : 'does not start and end with "|"'}` }
+  // `at` is the header row's place among visibleLines(body, { isPlaceKept: true }), the list cases() reads its line from.
+  return { rows: rows.map(cells => cells.map(cell => isPlaceholderCell(cell) ? '' : cell)), at: start + 1 + first }
+}
+// The cells of each case-table row, or none when the body has no table in the accepted form; preflight reads the tests
+// to run from the Test column (#1520).
+export const caseRows = body => caseTable(body)?.rows ?? []
+// From FAIL_FIRST_FROM on, each row names its test by its exact title in backticks, and a Ready pull request carries the
+// `Fail-first:` line preflight prints for its head (CONTRIBUTING rules 2 and 8, #1520). A local --body-file run has no
+// number and is checked as new.
+export const FAIL_FIRST_FROM = 1520
+const failFirstForm = /^(\d+) of (\d+) new or changed tests? fail on ([0-9a-f]{7,40}) and pass on ([0-9a-f]{7,40})\.?$/i
+// The value of each `Fail-first:` line a reader sees (none in a code fence or a comment). Preflight reads a body with
+// this too, so the two never disagree on whether a line is there.
+export const failFirstValues = body => visibleLines(body).flatMap(text => {
+  const match = text.match(/^[ \t]*(?:[-*][ \t]+)?(?:(?:PASS|WARN|FAIL)[ \t]+)?Fail-first:[ \t]*(.*)$/i)
+  return match ? [match[1].trim()] : []
+})
+const failFirst = ({ body, rows, titles, head, isDraft, fail, output, isRequired = false }) => {
+  // Where the surface requires the table, rows with no test are reported with the table's other checks.
+  const untested = isRequired ? 0 : rows.filter(cells => !cells[3]).length
+  if (untested) fail(`${untested} rows of the case table name no test.`, 'name in the Test column, in backticks, the title of the test for each row; on a draft, the title planned (CONTRIBUTING.md rule 2).')
+  if (titles) {
+    rows.forEach((cells, i) => {
+      if (!cells[3]) return
+      const spans = [...cells[3].matchAll(/`([^`\n]+)`/g)].map(match => match[1])
+      if (spans.some(span => titleKnown(span, titles))) return
+      if (isDraft) output.info.push(`cases: row ${i + 1} of the case table names no test of tests/ yet; name its exact title in backticks once the test is written.`)
+      else fail(`row ${i + 1} of the case table names no test of tests/ in backticks.`, 'write the test\'s exact title in backticks in the Test column, as it is in tests/ at the head, with <name> for each variable of a template title; code beside it may stay (CONTRIBUTING.md rule 2).')
+    })
+  }
+  // The line comes from the run on the head that will be reviewed, so a draft has none yet.
+  if (isDraft) return
+  const how = 'run `node scripts/preflight.mjs --body-file <file> --title <title>` on the head and paste its `Fail-first:` line under Checks, or write "Fail-first: none, <reason>" when no test the table names can fail without the change (CONTRIBUTING.md rule 8).'
+  const found = failFirstValues(body)
+  const lines = found.filter(value => value !== '' && !value.startsWith('<'))
+  if (lines.length > 1) {
+    fail(`the body has ${lines.length} \`Fail-first:\` lines; it gives one, for the head.`, 'keep the line preflight printed for the head; put an example inside a code fence.')
+    return
+  }
+  if (!lines.length) {
+    fail(`a Ready risk-tier pull request with a case table has no \`Fail-first:\` line.${found.some(value => value.startsWith('<')) ? ' The template\'s placeholder is still there.' : ''}`, how)
+    return
+  }
+  const line = lines[0].replace(/`/g, '')
+  const none = line.match(/^none\b[ \t]*,?[ \t]*(.*)$/i)
+  if (none) {
+    if (!none[1].trim() || /^<[^<>]*>$/.test(none[1].trim())) fail('the `Fail-first:` line says `none` with no reason.', 'write the reason after `none`, for example "Fail-first: none, the change is a sentence only a person can judge".')
+    return
+  }
+  const counts = line.match(failFirstForm)
+  if (!counts) {
+    fail('the `Fail-first:` line is neither the line preflight prints nor "none, <reason>".', how)
+    return
+  }
+  const [, counted, total, , passOn] = counts
+  if (head && !head.toLowerCase().startsWith(passOn.toLowerCase())) fail(`the \`Fail-first:\` line is for ${passOn}, not the head ${head.slice(0, 8)}.`, 'run preflight again on the head and paste the line it prints.')
+  if (Number(total) === 0) fail('the `Fail-first:` line counts no new or changed test.', 'name in the case table a new or changed test that fails without the change, or write "Fail-first: none, <reason>".')
+  else if (Number(counted) !== Number(total)) fail(`the \`Fail-first:\` line says ${counted} of ${total}: a test it counts passes on the base too, fails here, or gave no verdict.`, 'fix or replace each test preflight names, so that it fails on the merge base and passes on the head, then run preflight again.')
+}
+export const cases = ({ body = '', title = '', number = null, tier = visibleTier(body), titles = null, head = null, isDraft = false } = {}) => {
+  const output = result()
+  if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= CASES_FROM)) return output
+  const { filled } = surfaceLine(body)
+  const named = filled.length === 1 ? filled[0].split(/,[ \t]*cannot split:/i)[0].split('+').map(value => value.replace(/`/g, '').trim().toLowerCase()) : []
+  const on = named.filter(value => caseSurfaces.includes(value))
+  const fail = (message, fix) => output.problems.push(problem('cases', message, fix))
+  const isFailFirst = number === null || number > FAIL_FIRST_FROM
+  // A case table the body has where none is required (another surface, or under `Cases: none`) is held to the same
+  // tests, and to the form pr-check reads (#1520).
+  const heldAnyway = () => {
+    const table = isFailFirst ? caseTable(body) : null
+    if (table?.error) fail(`the "## Cases" table is not in the form pr-check reads: ${table.error}.`, CASE_FORM)
+    else if (table?.rows?.length) failFirst({ body, rows: table.rows, titles, head, isDraft, fail, output })
+  }
+  if (!on.length) {
+    heldAnyway()
+    return output
+  }
+  const how = 'write "Cases: <n> rows" above a "## Cases" table, or "Cases: none, <reason>" when the change handles no event that can arrive while another is under way (CONTRIBUTING.md rule 2).'
+  // Each `Cases:` line is read once, its value with its place, so every later check reads the same line (Fable 5.2, #1514).
+  const found = visibleLines(body, { isPlaceKept: true }).flatMap((text, at) => {
+    const match = typeof text === 'string' ? text.match(/^Cases:[ \t]*(.*)$/i) : null
+    return match ? [{ value: match[1].trim(), at }] : []
+  })
+  const lines = found.filter(({ value }) => value !== '' && !value.startsWith('<'))
+  if (lines.length > 1) {
+    fail(`the body has ${lines.length} \`Cases:\` lines; it names its cases once.`, 'keep one `Cases:` line; put an example inside a code fence.')
+    return output
+  }
+  if (!lines.length) {
+    fail(`a risk-tier pull request on ${on[0]} has no \`Cases:\` line.${found.some(({ value }) => value.startsWith('<')) ? ' The template\'s placeholder is still there.' : ''}`, how)
+    return output
+  }
+  const line = lines[0].value.replace(/`/g, '')
+  const none = line.match(/^none\b[ \t]*,?[ \t]*(.*)$/i)
+  if (none) {
+    if (!none[1].trim() || /^<[^<>]*>$/.test(none[1].trim())) fail('the `Cases:` line says `none` with no reason.', 'write the reason after `none`, for example "Cases: none, the change handles one event in one state".')
+    heldAnyway()
+    return output
+  }
+  const rows = line.match(/^(\d+)[ \t]+rows?\b/i)
+  if (!rows) {
+    fail('the `Cases:` line is neither "<n> rows" nor "none, <reason>".', how)
+    return output
+  }
+  const table = caseTable(body)
+  if (table?.error) {
+    fail(`the "## Cases" table is not in the form pr-check reads: ${table.error}.`, CASE_FORM)
+    return output
+  }
+  if (!table?.rows.length) {
+    fail('the `Cases:` line names a table, but the body has no "## Cases" table.', `add a "## Cases" section with one row for each case; ${CASE_FORM}`)
+    return output
+  }
+  output.info.push(`cases: ${table.rows.length} rows.`)
+  // The line goes above the table (CONTRIBUTING rule 2), so a reader meets the count before the rows.
+  if (lines[0].at > table.at) fail('the `Cases:` line is below the case table.', 'move "Cases: <n> rows" above the table, as in the template (CONTRIBUTING.md rule 2).')
+  if (Number(rows[1]) !== table.rows.length) fail(`the \`Cases:\` line says ${rows[1]} rows; the table has ${table.rows.length}.`, `make the line say "Cases: ${table.rows.length} rows", or add the rows it counts.`)
+  const blank = table.rows.filter(cells => cells.slice(0, 3).some(cell => !cell)).length
+  if (blank) fail(`${blank} rows of the case table leave State, Event or Expected result empty.`, 'fill in the state, the event and the expected result of each row.')
+  // The table is written before any code, with the title of the test planned for each row, so a draft needs it too.
+  const untested = table.rows.filter(cells => !cells[3]).length
+  if (untested) fail(`${untested} rows of the case table name no test.`, 'name in the Test column the title of the test planned for each row; the table has it before any code is written, on a draft too (RULES.md, R6).')
+  if (isFailFirst) failFirst({ body, rows: table.rows, titles, head, isDraft, fail, output, isRequired: true })
+  return output
+}
+
+// The distinct heads with a `Review: REQUEST CHANGES`, over the whole pull request: several verdicts on one head are one
+// round, a short sha and its full sha are one head, and an APPROVE does not reset the count. A bot's review is input for
+// the reviewer, not a verdict (team-process, From claim to merge), so it starts no round.
+export const roundsOf = comments => {
+  const heads = []
+  const add = head => { if (!heads.some(sha => sha.startsWith(head) || head.startsWith(sha))) heads.push(head) }
+  for (const comment of comments ?? []) {
+    if (comment && typeof comment === 'object' && isBotUser(comment.user)) continue
+    // A verdict quoted in a code fence or an HTML comment is an example, not a round.
+    const shown = typeof comment === 'string' ? visibleLines(comment).join('\n')
+      : comment && typeof comment.body === 'string' ? { ...comment, body: visibleLines(comment.body).join('\n') } : comment
+    const review = reviewOf(shown)
+    if (review?.kind === 'REQUEST CHANGES') add(review.sha)
+    // A review that requests changes is a round whatever its text says, even when its body quotes an earlier approval.
+    if (comment && typeof comment === 'object' && comment.state === 'CHANGES_REQUESTED' && typeof comment.commit_id === 'string' && comment.commit_id) add(comment.commit_id.toLowerCase())
+  }
+  return heads.length
+}
+export const rounds = (comments, { body = '', title = '', number = null, isDraft = false, tier = visibleTier(body) } = {}) => {
+  const output = result()
+  if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= CASES_FROM)) return output
+  const count = roundsOf(comments)
+  if (count < 3) return output
+  const lines = visibleLines(body).flatMap(line => line.match(/^Round cap:[ \t]*(.*)$/i)?.[1].trim().replace(/`/g, '') ?? []).filter(value => value !== '' && !value.startsWith('<'))
+  const split = lines.find(value => /^#\d+(?:[ \t]*,[ \t]*#\d+)*\.?$/.test(value))
+  const isWords = lines.some(value => /^one more round,[ \t]*words only\.?$/i.test(value))
+  if (count < ROUND_CAP) {
+    output.info.push(`review rounds: ${count} of ${ROUND_CAP}.`)
+  } else if (split) {
+    output.info.push(`review rounds: ${count}; stopped, the rest is in ${split.replace(/\.$/, '')}.`)
+  } else if (count === ROUND_CAP && isWords) {
+    output.info.push(`review rounds: ${count}; one more round, docs and comments only.`)
+  } else if (isDraft) {
+    output.info.push(`review rounds: ${count}; at the cap of ${ROUND_CAP}, so it needs a "Round cap:" line before it is ready (RULES.md, R6).`)
+  } else {
+    output.problems.push(problem('rounds', `this pull request has had ${count} review rounds; it stops at ${ROUND_CAP} (RULES.md, R6).`, 'push no further fix: the maintainer says in a "Round cap:" comment what is settled; keep that part, open an issue for each open finding and name them on a body line "Round cap: #A, #B"; at exactly five rounds with only words left, the line "Round cap: one more round, words only" gives one more (team-process.md, From claim to merge).'))
+  }
+  return output
+}
+
 export const verdict = (comments, head, options = {}) => {
   const output = result()
   const { isDraft = false, authorAgent = null, number = null, tier = null } = options
-  const reviews = (comments ?? []).map(comment => reviewOf(comment)).filter(Boolean)
+  const reviews = []
+  for (const comment of comments ?? []) {
+    const { review, ignored } = readReview(comment)
+    if (review) reviews.push(review)
+    else if (ignored) {
+      const who = safeText(String(ignored.who).replace(/\s+/g, ' ').trim())
+      const reason = safeText(String(ignored.reason).replace(/\s+/g, ' ').trim())
+      output.info.push(`review: ignored approval from ${who} (${reason}); only a team member or an allowed app may approve.`)
+    }
+  }
   const last = reviews.at(-1)
 
   if (!last) {
@@ -979,7 +1505,11 @@ export const checkPr = data => {
   add(privateData({ added: data.added, body: data.body }))
   add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
+  add(tier({ body: data.body, title: data.title, number: data.number, paths: data.paths, riskPaths: data.riskPaths }))
   add(surface({ body: data.body, title: data.title, number: data.number, paths: data.paths, numstat: data.numstat }))
+  add(evidenceFirst({ body: data.body, title: data.title, number: data.number, firstCommitPaths: data.firstCommitPaths }))
+  add(size({ body: data.body, title: data.title, number: data.number, numstat: data.numstat }))
+  add(cases({ body: data.body, title: data.title, number: data.number, isDraft: data.isDraft, titles: testTitles(data.testFiles ?? []), head: data.head }))
   if (issue.issue !== null) {
     // The first issue is read from issueData and issueComments; each further one from moreIssues[number].
     const lookups = [...new Set(issue.issues)].map((number, index) => {
@@ -1023,7 +1553,14 @@ export const checkPr = data => {
     add(outsideNotes({ paths: data.paths, numstat: data.numstat }))
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
-  else add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body) }))
+  else {
+    add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body) }))
+    add(rounds([...data.prComments, ...(data.prReviews ?? [])], { body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
+    // A round can be a review state alone, so reviews that could not be read leave the count unknown, never zero.
+    if (data.isReviewsUnread && visibleTier(data.body) === 'risk' && !isRelease && data.number !== null && data.number > CASES_FROM) {
+      output.problems.push(problem('rounds', 'the reviews of this pull request could not be read, so its review rounds are not counted.', 'run the check again; the round count reads every review, and it stops a risk-tier pull request at its cap (RULES.md, R6).'))
+    }
+  }
   if (data.isDraft) output.info.push(`draft: the reviewer starts when you run \`gh pr ready ${data.number}\` and comment \`Ready for review ${data.head}\`.`)
   return output
 }
@@ -1360,11 +1897,41 @@ export const main = async (argv = process.argv.slice(2)) => {
       const [added, deleted, ...name] = line.split('\t')
       return { path: diffPath(name.join('\t')), added: Number(added) || 0, deleted: Number(deleted) || 0 }
     }).filter(item => item.path)
+    // The oldest commit of the branch itself, for the evidence-first check: the first commit on its first-parent line that is
+    // not a merge of main (a merge whose other parents are all in the base). A merge of a topic branch counts, judged by the
+    // paths it brings in, so code merged in before the tests still fails. A branch with no such commit (a merge of main alone)
+    // is judged by the paths it changes against the base, which are none.
+    const isInBase = commit => isAncestor(spawnSync('git', ['merge-base', '--is-ancestor', commit, base], { cwd, encoding: 'utf8' }), commit)
+    const firstCommit = linesOf(git(cwd, 'rev-list', '--first-parent', '--reverse', '--parents', `${base}..${data.head}`)).filter(Boolean)
+      .map(line => line.split(' ')).find(([, , ...others]) => !others.length || !others.every(isInBase))
+    if (!firstCommit) data.firstCommitPaths = data.paths
+    else if (firstCommit.length > 2) data.firstCommitPaths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', '--no-ext-diff', firstCommit[1], firstCommit[0])).filter(Boolean).map(diffPath)
+    else data.firstCommitPaths = linesOf(git(cwd, 'show', '--format=', '--name-only', '--no-renames', '--no-ext-diff', firstCommit[0])).filter(Boolean).map(diffPath)
     data.template = git(cwd, 'show', `${base}:.github/pull_request_template.md`)
+    // The risk-tier paths as the base lists them, so a pull request cannot take its own path off the list (#1531).
+    const riskList = spawnSync('git', ['show', `${base}:docs/dev/risk-paths.md`], { cwd, encoding: 'utf8', maxBuffer })
+    data.riskPaths = !riskList.error && riskList.status === 0 ? riskPathsOf(riskList.stdout) : null
     const headPaths = new Set(linesOf(git(cwd, 'ls-tree', '-r', '--name-only', data.head)).filter(Boolean).map(diffPath))
     data.headPaths = headPaths
     data.changelogText = headPaths.has('CHANGELOG.md') ? git(cwd, 'show', `${data.head}:CHANGELOG.md`) : ''
     data.testFiles = linesOf(git(cwd, 'ls-tree', '-r', '--name-only', data.head, '--', 'tests')).filter(path => /\.test\.(mjs|ts|tsx)"?$/.test(path)).map(diffPath).map(path => ({ path, text: git(cwd, 'show', `${data.head}:${path}`) }))
+    data.issueData = null
+    data.issueComments = null
+    data.open = null
+    data.prComments = null
+    const api = options['--offline'] ? null : apiReader(options, repo, cwd)
+    // A re-run of a pull request event reuses that event as it was (pr-check-rerun, #1258): a draft since marked ready,
+    // or a body, title or label changed since, would be checked as it was then, and a REQUEST CHANGES on a draft holds
+    // nothing. So the pull request is read as it is now and, while its head is still the event's, checked as it is. The
+    // release numbers are read after it, so a pull request renamed a release since its event is checked as a release.
+    if (api && options['--event'] && data.number !== null) {
+      const current = await api(`pulls/${data.number}`)
+      if (typeof current?.head?.sha !== 'string' || !/^[0-9a-f]{40}$/i.test(current.head.sha)) throw new Error('pull request metadata is incomplete or invalid.')
+      if (current.head.sha === data.head) {
+        if (typeof current.title !== 'string' || !Array.isArray(current.labels) || typeof current.draft !== 'boolean') throw new Error('pull request metadata is incomplete or invalid.')
+        Object.assign(data, { title: current.title, body: current.body ?? '', isDraft: current.draft, labels: current.labels })
+      }
+    }
     if (isReleaseTitle(data.title)) {
       const tagCheck = spawnSync('git', ['describe', '--tags', '--abbrev=0', '--match', 'agent-board--v*'], { cwd, encoding: 'utf8', maxBuffer })
       const lastTag = tagCheck.status === 0 ? tagCheck.stdout.trim() : null
@@ -1379,12 +1946,7 @@ export const main = async (argv = process.argv.slice(2)) => {
         }
       }
     }
-    data.issueData = null
-    data.issueComments = null
-    data.open = null
-    data.prComments = null
-    if (!options['--offline']) {
-      const api = apiReader(options, repo, cwd)
+    if (api) {
       // Open pull requests are read both for an outside author's cap (#607) and to flag a second pull request fixing the
       // same issue (#1325). Team authors still skip issue-comment claim lookups.
       const isTeam = () => isKnownAssociation(data.association) && !isOutsideAssociation(data.association)
@@ -1419,11 +1981,12 @@ export const main = async (argv = process.argv.slice(2)) => {
           const r = reviewOf(c)
           return r && r.kind === 'APPROVE'
         })
+        // The verdict reads the reviews only while no comment approves; the round count reads them
+        // always, since an approval does not restart it (RULES.md, R6).
         let reviews = []
-        if (!hasApproval) {
-          try { reviews = await api(`pulls/${data.number}/reviews`, { isList: true }) } catch {}
-        }
-        data.prComments = [...(Array.isArray(comments) ? comments : []), ...(Array.isArray(reviews) ? reviews : [])]
+        try { reviews = await api(`pulls/${data.number}/reviews`, { isList: true }) } catch { data.isReviewsUnread = true }
+        data.prReviews = Array.isArray(reviews) ? reviews : []
+        data.prComments = [...(Array.isArray(comments) ? comments : []), ...(hasApproval ? [] : data.prReviews)]
       }
     }
     const checked = checkPr(data)

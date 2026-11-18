@@ -49,7 +49,7 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | `$agent-board` | 卡片有「排入」時可排給它；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | `/agent-board` | 卡片有「排入」時可排給它；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 快速開始的第二個指令 | 你自己貼上 |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 你自己貼上 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | `/agent-board` | 它空下來就送出 |
 | <img src="docs/images/agents/grok-build.svg" width="28" alt="Grok Build"> | Grok Build | `/agent-board` | 你自己貼上 |
 | <img src="docs/images/agents/hermes-agent.svg" width="28" alt="Hermes Agent"> | Hermes Agent | 請它執行 Agent Board skill | 你自己貼上 |
 
@@ -61,7 +61,7 @@ npx @wenyuchiou/agent-board@next
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁 | 尚未支援 |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 卡片有「排入」時可排給它。桌面 app：實際跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板網頁 | 尚未測試 |
-| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁 | 尚未測試 |
+| <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁 | 它空下來就送出。沒有單獨跑過；它的外掛把它回報成終端機，所以跟終端機一樣處理 |
 
 - 看板網頁：在終端機執行 `npx @wenyuchiou/agent-board@next --html`，app 自己的終端機也行。
 - 尚未支援或尚未測試：從看板複製回答，貼到 app 裡。
@@ -69,7 +69,7 @@ npx @wenyuchiou/agent-board@next
 
 ## 在看板上回答
 
-<img alt="看板上的回答送到 agent 的三條路：傳送給 Claude Code、排到 Antigravity 或 Codex 的下一輪、或複製給 Cursor、OpenCode、Grok Build 和 Hermes。合成資料。" src="docs/images/answer-zh-TW.svg" width="100%">
+<img alt="看板上的回答送到 agent 的三條路：傳送給 Claude Code 或 OpenCode、排到 Antigravity 或 Codex 的下一輪、或複製給 Cursor、Grok Build 和 Hermes。合成資料。" src="docs/images/answer-zh-TW.svg" width="100%">
 
 回答 agent 的問題，和主動傳訊息給它，走的是同一條路，看你按哪顆按鈕：
 
@@ -130,4 +130,4 @@ npx @wenyuchiou/agent-board@next remove --apply
 
 [MIT](LICENSE)。agent 的圖示來自 [Simple Icons](https://simpleicons.org)（CC0）和 [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT），這些圖示屬於各自的擁有者；沒有圖示的 agent 以名字的第一個字母表示。
 
-<p align="center"><a href="CHANGELOG.md"><img alt="原始碼版本 0.24.3" src="https://img.shields.io/badge/source-0.24.3-blue"></a><br><sub>最新穩定版本 0.24.2 · 0.24.3 是預先發行版（<code>npx @wenyuchiou/agent-board@next setup</code>）· <a href="CHANGELOG.md">更新紀錄</a></sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="原始碼版本 0.25.0" src="https://img.shields.io/badge/source-0.25.0-blue"></a><br><sub>最新穩定版本 0.25.0 · <a href="CHANGELOG.md">更新紀錄</a></sub></p>

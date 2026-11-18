@@ -17,6 +17,7 @@
 //              'heardWaiting' tells its wait on an approval too
 //   answerOnLookup  when true, the approval the turn waits on is answered as thread/turns/list arrives, before its answer goes
 //              out: the turn runs on and no longer waits
+//   answerFlag a file whose appearance answers the approval the turn waits on: the turn runs on and no longer waits
 //   away       a file: while it is there the daemon cannot be reached, and a proxy that starts ends at once, before its log line
 //   startDelay ms the answer to turn/start is held back on an idle thread, while the turn has begun and its notices (its start, its
 //              first user message, an approval it waits on) have gone out
@@ -153,9 +154,18 @@ const finish = (id, threadId, text) => {
   notice({ method: 'thread/status/changed', params: { threadId, status: { type: 'idle' } } })
   ended()
 }
+const answerApproval = () => {
+  if (!isWaiting || !config.answerFlag || !existsSync(config.answerFlag)) return
+  unlinkSync(config.answerFlag)
+  isWaiting = false
+  notice({ method: 'serverRequest/resolved', params: { threadId: config.loaded[0], requestId: 998 } })
+  notice({ method: 'thread/status/changed', params: { threadId: config.loaded[0], status: { type: 'active', activeFlags: [] } } })
+  save()
+}
 let acking = null
 const handle = (value, emit) => {
   emitNow = emit
+  answerApproval()
   log(value)
   const threadId = value.params?.threadId
   if (value.method === 'initialize') emit({ id: value.id, result: { userAgent: config.userAgent ?? 'codex_cli_rs/0.169.0 (synthetic)' } })
@@ -311,6 +321,7 @@ const watcher = setInterval(() => {
   isListed()
   save()
   if (!emitNow) return
+  answerApproval()
   if (acking && config.ackFlag && existsSync(config.ackFlag)) { unlinkSync(config.ackFlag); finish('turn-delivery', acking.threadId, acking.text); acking = null }
   if (config.closeFlag && existsSync(config.closeFlag)) { unlinkSync(config.closeFlag); emitNow({ method: 'thread/closed', params: { threadId: config.loaded[0] } }) }
   if (config.interruptFlag && existsSync(config.interruptFlag)) for (const stop of interrupts.splice(0)) stop()

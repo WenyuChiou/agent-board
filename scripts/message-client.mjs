@@ -46,7 +46,10 @@ export const boardClient = address => {
         body: JSON.stringify(body), signal: AbortSignal.timeout(5000),
       })
       const result = await response.json()
-      if (!response.ok) throw Object.assign(new Error(result.error || 'BOARD_UNAVAILABLE'), { isRetryable: response.status >= 500 && response.status < 600 })
+      // isRefused: the board answered that it saved nothing: it refused the request (4xx, decided before any save) or its store was
+      // busy (503 MESSAGE_STORE_BUSY, a save that did not happen). Any other answer may come after a save.
+      const isBusy = response.status === 503 && result.error === 'MESSAGE_STORE_BUSY'
+      if (!response.ok) throw Object.assign(new Error(result.error || 'BOARD_UNAVAILABLE'), { isRetryable: response.status >= 500 && response.status < 600, isRefused: response.status >= 400 && response.status < 500 || isBusy, isBusy })
       return result
     } catch (error) {
       // Only the poller uses this hint. Sending, receipts and registration
@@ -65,7 +68,7 @@ export const boardClient = address => {
       if (typeof verify !== 'function' || typeof deliver !== 'function' || canReceive !== undefined && typeof canReceive !== 'function' || !await verify()) throw new Error('HOST_NOT_CONNECTED')
       const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }), ...(unclaimed ? { unclaimed: true } : {}) })
       let credentials = { connection: registered.id, secret: registered.secret }, contestAfter = 0
-      let isContested = false, isClosed = false, isPolling = false, isPollDue = false, isRetried = false, leaseUntil = registered.expires
+      let isContested = false, isClosed = false, isPolling = false, isPollDue = false, isRetried = false, inFlight = 0, leaseUntil = registered.expires
       // ended: the caller read its session as ended. Only then does an automatic receiver's queued message go back refused.
       const close = async ({ ended = false } = {}) => {
         if (isClosed) return
@@ -76,19 +79,24 @@ export const boardClient = address => {
       const receipt = (message, status, reply, error) => call('receipt', { ...credentials, id: message.id, nonce: message.nonce, status, ...(reply === undefined ? {} : { reply }), ...(error === undefined ? {} : { error }) })
       const processMessage = async message => {
         let hasStarted = false
+        inFlight += 1
         try {
           if (!await verify()) { await receipt(message, 'rejected'); return }
           const begin = () => { hasStarted = true }
           const accept = () => { begin(); return receipt(message, 'accepted') }
+          // For a delivery that never asked for any of the message to be sent: the board puts it back in the queue (#1578).
+          const unsent = () => hasStarted ? Promise.reject(new Error('DELIVERY_STARTED')) : receipt(message, 'unsent')
           // Older adapters have no explicit boundary, so entering them remains uncertain.
           if (deliver.length < 3) begin()
-          const reply = await (deliver.length >= 3 ? deliver(message, accept, begin) : deliver(message, accept))
+          const reply = await (deliver.length >= 3 ? deliver(message, accept, begin, unsent) : deliver(message, accept))
           if (typeof reply === 'string' && reply.trim()) await receipt(message, 'acknowledged', reply)
         } catch (error) {
           if (!hasStarted) await receipt(message, 'rejected', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : undefined).catch(() => undefined)
           else await receipt(message, 'uncertain', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : 'DELIVERY_UNCERTAIN').catch(() => undefined)
           // After delivery begins, a timeout or exception never authorizes redelivery.
           onError(error)
+        } finally {
+          inFlight = Math.max(0, inFlight - 1)
         }
       }
       const poll = async () => {
@@ -154,6 +162,7 @@ export const boardClient = address => {
         // True once this connection has ended for good (closed, lost ownership or lease expired), so a caller can attach again.
         isClosed: () => isClosed,
         isContested: () => isContested,
+        isSending: () => inFlight > 0,
         // A function, so the secret never lands in a log of this object.
         credentials: () => ({ ...credentials }),
         // For a receiver that says what became of a message after its delivery has ended (a turn it stopped later on). The board

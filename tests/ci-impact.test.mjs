@@ -57,16 +57,23 @@ test('ci impact selects isolated runtime groups from known paths', () => {
     ['bin/agent-board.mjs', ['npm']],
     ['scripts/pr-check.mjs', ['tooling']],
     ['scripts/preflight.mjs', ['tooling']],
+    ['scripts/fail-first.mjs', ['tooling']],
     ['scripts/changelog-fold.mjs', ['tooling']],
     ['scripts/team-stats.mjs', ['tooling']],
     ['scripts/review-queue.mjs', ['tooling']],
     ['scripts/review-queue-post.mjs', ['tooling']],
+    ['scripts/code-rules.mjs', ['tooling']],
+    ['scripts/code-rules.json', ['tooling']],
+    ['tests/code-rules.test.mjs', ['tooling']],
     ['tests/pr-check.test.mjs', ['tooling']],
     ['tests/preflight.test.mjs', ['tooling']],
+    ['tests/fail-first.test.mjs', ['tooling']],
     ['tests/changelog-fold.test.mjs', ['tooling']],
     ['tests/team-stats.test.mjs', ['tooling']],
     ['tests/review-queue.test.mjs', ['tooling']],
     ['tests/review-queue-post.test.mjs', ['tooling']],
+    ['scripts/pr-check-rerun.mjs', ['tooling']],
+    ['tests/pr-check-rerun.test.mjs', ['tooling']],
   ]
   for (const [path, expected] of cases) assertOnly(makePlan([path], options()), expected)
 })
@@ -588,6 +595,8 @@ test('the board time check fails a file over seventy percent of its budget and a
     assert.deepEqual(checkBoardTimes(atLimit), { ok: true, errors: [], warnings: [] })
     assert.equal(checkBoardTimes({ ...atLimit, files: [{ path, ms: limit + 1 }] }).ok, false)
   }
+  // prompt-hooks' slowest Windows run so far, 67.9 s, failed its old 90 s budget (#1603); its new budget passes it.
+  assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/prompt-hooks.test.mjs', ms: 67_900 }] }), { ok: true, errors: [], warnings: [] })
   // merge-check's slowest Windows run so far, 46.4 s, failed the 60 s default budget (#1464); its own budget passes it.
   assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/merge-check.test.mjs', ms: 46_400 }] }), { ok: true, errors: [], warnings: [] })
   const slowFile = { ...base, files: [{ path: 'tests/board.test.mjs', ms: 141_000 }] }
@@ -878,8 +887,9 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   const ubuntu = '{"os":"ubuntu-latest","node":22,"part":"1/1"}', ubuntu24 = '{"os":"ubuntu-latest","node":24,"part":"1/1"}'
   assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 6)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 6)},${parts(24, 6)}]' }}`))
   assert.ok(text.includes(`journeys_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 2)}]' || '[${ubuntu},${ubuntu24},${parts(22, 2)},${parts(24, 2)}]' }}`))
-  // The local exchange job takes the journeys' split: its Windows run used 75-80% of ten minutes (#1445).
-  assert.ok(text.includes(`messaging_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 2)}]' || '[${ubuntu},${ubuntu24},${parts(22, 2)},${parts(24, 2)}]' }}`))
+  // The local exchange job runs in two parts on Ubuntu and three on Windows: with the Codex delivery tests the whole
+  // Ubuntu run took 92-94% of ten minutes and each Windows part of two up to 67% on main (#1445).
+  assert.ok(text.includes(`messaging_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 3)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 3)},${parts(24, 3)}]' }}`))
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
     assert.ok(block, group)
@@ -988,7 +998,7 @@ test('the brief template retains the same local and CI execution policy as AGENT
 // The browser job's tool install tries up to three times when the runner's Ubuntu package mirror is unreachable
 // (#1460). Its loop runs here as written in the workflow, under the bash options Actions uses, with a stand-in
 // installer that fails a set number of times and a sleep that returns at once.
-const gitBash = process.platform === 'win32' ? join(process.env.ProgramFiles ?? 'C:\Program Files', 'Git', 'bin', 'bash.exe') : '/bin/bash'
+const gitBash = process.platform === 'win32' ? join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe') : '/bin/bash'
 test('the browser tool install stops at its first success, tries three times and then fails', async () => {
   const text = await workflow()
   const step = text.slice(text.indexOf('- name: Install isolated browser test tools'))

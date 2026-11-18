@@ -8,7 +8,7 @@ import { codexFallbackCommand, managedFallback } from '../hooks/codex-fallback'
 import { hermesHome as defaultHermesHome } from '../hooks/hermes-home'
 import { sha256 } from '../hooks/sha256'
 import { hookWorker } from '../hooks/hook-safety'
-import { boardPromptHelper, boardRequestWords } from '../hooks/board-commands'
+import { boardPromptHelper, boardRequestWords, deliveryRequestWords } from '../hooks/board-commands'
 
 const skillFolder = (file: string): string | null => /[\\/]SKILL\.md$/.test(file) ? file.replace(/[\\/][^\\/]*$/, '') : null
 
@@ -111,7 +111,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   // Antigravity's and Hermes' commands run the board through this worker, which queues a late event under
   // the data folder the board's Codex reports already use (#285). Written once, when needed.
   const worker = folder + sep + HOOK_WORKER
-  const workerCode = hookWorker(home, board, boardPromptHelper(boardRequestWords(Object.values(STRINGS))), [home, '.agent-board'].join(sep))
+  const workerCode = hookWorker(home, board, boardPromptHelper(boardRequestWords(Object.values(STRINGS)), deliveryRequestWords(Object.values(STRINGS))), [home, '.agent-board'].join(sep))
   let workerState: boolean | undefined
   const hasWorker = (): boolean => (workerState ??= hasBoard && sharedFile(worker, workerCode))
   const savedBy = remove ? null : openclawSavedBy(readMaybe([openclawHome, 'openclaw.json'].join(sep)) ?? '')

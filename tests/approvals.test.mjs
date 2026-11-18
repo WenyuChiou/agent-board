@@ -705,6 +705,48 @@ test('a page secret is dropped on page-gone (persisted or not), ignores restore,
   assert.equal((await board.call('/api/board', undefined, restoredHeaders)).body.moved, true)
 })
 
+test('a late poll from a retired page that the server has forgotten never displaces a newer keyed page (#1474)', async () => {
+  const board = await startBoard({ secretMs: APPROVAL_SECRET_MS })
+
+  // Unkeyed P retires, >4096 more ids retire (evicting P from retired), keyed Q opens, then P's late poll lands: P answers moved and Q keeps its secret and order.
+  const pPlain = { origin: board.origin, 'x-board-page': 'p-plain-retired', 'x-board-visible': '1' }
+  assert.equal((await board.call('/api/board', undefined, pPlain)).status, 200)
+  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-plain-retired' })).status, 200)
+  for (let start = 0; start < 4100; start += 64) {
+    const batch = Math.min(64, 4100 - start)
+    await Promise.all(Array.from({ length: batch }, (_, offset) =>
+      board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': `r-plain-${start + offset}` })))
+  }
+  const qFirst = await openPage(board, { pageId: 'q-after-256', pairWithPage: true })
+  assert.equal((await board.call('/api/board', undefined, qFirst.headers)).body.moved, undefined)
+  assert.equal((await board.call('/api/board', undefined, pPlain)).body.moved, true)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  assert.equal((await board.call('/api/board', undefined, qFirst.headers)).body.moved, undefined)
+  const askFirst = runHook(board, request('npm run synthetic-1474-unkeyed'))
+  const cardFirst = await qFirst.show('npm run synthetic-1474-unkeyed')
+  assert.equal((await qFirst.press(cardFirst, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await askFirst.done).decision, ALLOW)
+
+  // Keyed P retires and enough subsequent page ids retire (4100 > 4096) that retired evicts P; P's late poll (with P's dropped secret) still never displaces Q.
+  const pKeyed = await openPage(board, { pageId: 'p-keyed-forgotten', pairWithPage: true })
+  assert.equal((await board.call('/api/board', undefined, pKeyed.headers)).status, 200)
+  assert.equal((await board.call('/api/page-gone', { persisted: true }, { origin: board.origin, 'x-board-page': 'p-keyed-forgotten' })).status, 200)
+  for (let start = 0; start < 4100; start += 64) {
+    const batch = Math.min(64, 4100 - start)
+    await Promise.all(Array.from({ length: batch }, (_, offset) =>
+      board.call('/api/page-gone', {}, { origin: board.origin, 'x-board-page': `r-keyed-${start + offset}` })))
+  }
+  const qSecond = await openPage(board, { pageId: 'q-after-evict', pairWithPage: true })
+  assert.equal((await board.call('/api/board', undefined, qSecond.headers)).body.moved, undefined)
+  assert.equal((await board.call('/api/board', undefined, pKeyed.headers)).body.moved, true)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  assert.equal((await board.call('/api/board', undefined, qSecond.headers)).body.moved, undefined)
+  const askSecond = runHook(board, request('npm run synthetic-1474-keyed'))
+  const cardSecond = await qSecond.show('npm run synthetic-1474-keyed')
+  assert.equal((await qSecond.press(cardSecond, 'allow', { confirmed: true })).status, 200)
+  assert.deepEqual((await askSecond.done).decision, ALLOW)
+})
+
 test('a page paired a moment ago cannot press until the grace window has passed', async () => {
   assert.equal(APPROVAL_GRACE_MS, 10_000)
   const board = await startBoard({ graceMs: 3_000 })

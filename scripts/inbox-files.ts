@@ -71,8 +71,10 @@ export const recentInboxFiles = (options: {
           isUncertain = true
           return []
         }
-        const directory = statSync(options.directory)
-        const nextIdentity = `${directory.dev}:${directory.ino}:${directory.birthtimeMs}`
+        // File numbers are 64-bit and Windows gives ones past 2^53, where a Number drops the low
+        // digits a replaced folder differs by, so read them exactly (#1498).
+        const directory = statSync(options.directory, { bigint: true })
+        const nextIdentity = `${directory.dev}:${directory.ino}:${directory.birthtimeNs}`
         if (identity !== nextIdentity) {
           close()
           known.clear()

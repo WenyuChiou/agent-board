@@ -76,9 +76,10 @@ export const immutableQuestionFiles = <T>(options: {
   return {
     read: (isFresh = true): T[] | null => {
       try {
-        // A renamed/replaced directory must not leave a watcher on its old inode.
-        const directory = statSync(options.directory)
-        const nextIdentity = `${directory.dev}:${directory.ino}:${directory.birthtimeMs}`
+        // A renamed/replaced directory must not leave a watcher on its old inode. File numbers are
+        // 64-bit and a Number drops the low digits of the ones past 2^53, so read them exactly (#1498).
+        const directory = statSync(options.directory, { bigint: true })
+        const nextIdentity = `${directory.dev}:${directory.ino}:${directory.birthtimeNs}`
         if (identity !== nextIdentity) {
           close()
           invalidateAll()

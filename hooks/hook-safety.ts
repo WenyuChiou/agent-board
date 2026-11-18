@@ -245,6 +245,8 @@ const run = async () => {
       // session's folder name, #246). Classify the prompt before discarding its text.
       const kept = Object.fromEntries(['session_id', 'sessionId', 'sessionID', 'conversationId', 'conversation_id', 'generation_id', 'turn_id', 'hook_event_name', 'hookEventName', 'state', 'prompt_submitted'].filter(name => typeof payload[name] === 'string' && payload[name].length <= 4096 || name === 'prompt_submitted' && typeof payload[name] === 'boolean').map(name => [name, payload[name]]))
       kept.board_request = payload.board_request === true || isBoardRequest(payload)
+      // A message the board delivered keeps the prompt from answering a question, but is no board turn (#1334).
+      if (!kept.board_request && (payload.delivery_request === true || typeof isDeliveryRequest === 'function' && isDeliveryRequest(payload))) kept.delivery_request = true
       // A bounded folder path: replay must not stall on an oversized one.
       if (typeof payload.cwd === 'string' && payload.cwd.length <= 4096) kept.cwd = payload.cwd
       const roots = payload.workspace_roots

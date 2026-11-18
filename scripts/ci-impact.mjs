@@ -8,7 +8,7 @@ import { hasReceiverRecord } from './messaging-matrix.mjs'
 
 export const GROUPS = ['board', 'messaging', 'tooling', 'npm', 'plugin', 'installers', 'remote', 'journeys', 'browser', 'generated']
 const systems = ['ubuntu-latest', 'windows-latest']
-const toolingTests = ['pr-check', 'preflight', 'changelog-fold', 'team-stats', 'review-queue', 'review-queue-post'].map(name => 'tests/' + name + '.test.mjs')
+const toolingTests = ['pr-check', 'preflight', 'fail-first', 'changelog-fold', 'team-stats', 'review-queue', 'review-queue-post', 'pr-check-rerun', 'code-rules'].map(name => 'tests/' + name + '.test.mjs')
 const messagingTests = ['tests/exchange.test.mjs', 'tests/messaging.test.mjs']
 const safePath = value => {
   if (typeof value !== 'string' || !value || /[\0\r\n\\:]/.test(value) || isAbsolute(value) || value.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('invalid repository path')
@@ -85,7 +85,7 @@ export const makePlan = (files, options = {}) => {
       known = true
     }
     if (path === 'bin/agent-board.mjs') { select('npm', path); known = true }
-    if (/^scripts\/(?:pr-check|preflight|changelog-fold|team-stats|review-queue|review-queue-post)\.mjs$/.test(path)) { select('tooling', path); known = true }
+    if (/^scripts\/(?:pr-check|preflight|fail-first|changelog-fold|team-stats|review-queue|review-queue-post|pr-check-rerun|code-rules)\.(?:mjs|json)$/.test(path)) { select('tooling', path); known = true }
     if (/^(?:scripts\/setup|tests\/setup\.check)\.(?:sh|ps1)$/.test(path)) {
       select('installers', path)
       installers.add(path.endsWith('.ps1') ? 'windows-latest' : 'ubuntu-latest')
@@ -153,7 +153,8 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/legacy-connect.test.mjs': 275_000, // slowest 148.0 s
   'tests/page-regressions.test.mjs': 90_000,
   'tests/codex-fallback.test.mjs': 115_000, // slowest 60.0 s
-  'tests/prompt-hooks.test.mjs': 90_000, // slowest 46.2 s
+  // Re-derived by the same rule (#1603): 49.3-67.9 s on Windows Node 24 on code that does not touch it; 67.9 s in run 43899299170.
+  'tests/prompt-hooks.test.mjs': 130_000, // slowest 67.9 s
   // Grew past the floor with #1162's terminal setup tests (#1159); slowest 52.6 s after #1361.
   'tests/setup-guidance.test.mjs': 100_000,
   'tests/host-upgrade.test.mjs': 80_000, // slowest 42.6 s
