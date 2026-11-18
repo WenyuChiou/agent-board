@@ -1,6 +1,6 @@
 # Plan for 0.25.1
 
-**Status:** proposed on 2026-11-18. It is in force once the owner approves this pull request. The issues live in milestone 14, "0.25.1 It updates itself". The roadmap is #209.
+**Status:** in force since 2026-11-18. Amended the same day with the results of checks C1 to C5 and C8 and the owner's decisions on them. The issues live in milestone 14, "0.25.1 It updates itself". The roadmap is #209.
 
 **Where it comes from:** a Fable 5.2 review of the whole project after 0.25.0, a draft plan, two outside reviews of that draft (21 must-fix findings, answered in section 15), and the owner's decisions of 2026-11-18.
 
@@ -20,7 +20,7 @@ Each moment has a number. The simulated user measures all eight on the release b
 | # | The moment | Today, 0.25.0 | The bar for 0.25.1 |
 |---|---|---|---|
 | 1 | A new version arrives | The person finds out alone and types the commands: 5 of 11 steps in the 11-10 walk | From 0.25.1 on, with npm, they open the board as usual and one line says it updated: **0 steps**, or **1 confirm** when something must be asked. A person with only the Claude Code plugin is told on the board and does **2 steps**: update the plugin, start a new session |
-| 2 | A reply on the board starts the AI | Codex CLI about 10 minutes; Antigravity app only on its next turn; Claude Code CLI acknowledged in about 15 s; OpenCode accepted in 0.9 s | The turn starts with no step in that AI's window, within **10 s** on Claude Code CLI, Codex CLI and the Antigravity app, and **2 s** on OpenCode |
+| 2 | A reply on the board starts the AI | Codex CLI about 10 minutes; Antigravity app only on its next turn; Claude Code CLI acknowledged in about 15 s; OpenCode accepted in 0.9 s | The turn starts with no step in that AI's window, within **10 s** on Claude Code CLI and the Antigravity app, **2 s** on OpenCode, and after **about 10 minutes** on Codex CLI, which the board says (check C1) |
 | 3 | Sessions already open are there | A Codex session that has not reported since the board started is missing | Within **10 s** of opening, Codex sessions from Codex's own records of the last 24 hours are listed. A hook event shows on the page within **2 s** |
 | 4 | The board opens, or says why not | A dead page process can hold the message store and refuse the board (#1587); a failed open can reach the model as no output (#1596) | After a dead page the board opens within **10 s** with no step. If it cannot, it says why and names **one** action |
 | 5 | A card leaves when its window closes | The card stays in Needs you (#1092) | Gone within **60 s** for Claude Code and for a Codex session with a process record. Any other card says the window may be closed |
@@ -36,9 +36,9 @@ The owner's answers of 2026-11-18:
 
 | Question | Answer |
 |---|---|
-| Antigravity starts on a board message | The release waits for it |
+| Antigravity starts on a board message | In 0.25.1. After check C3, the two windows that cannot be closed are accepted with a test and honest card wording (owner, 2026-11-18) |
 | App and IDE rows | Two sittings: discovery on released 0.25.0, then a short rerun on the release build |
-| Codex starts at once | In 0.25.1. The script recording one more process number is not a hook change, and the remaining window of #1370 is accepted with a test and honest card wording |
+| Codex starts at once | Not in 0.25.1. Check C1 failed, so Codex keeps the 10-minute route, the support table says so, and #1652 moves to 0.26.0 (owner, 2026-11-18). The remaining window of #1370 is accepted with a test and honest card wording |
 | Sessions listed at once (#1316) | In 0.25.1, and the date moves |
 | Releases | 0.25.1 has no hook change. 0.26.0 carries all hook changes |
 
@@ -50,7 +50,7 @@ The owner's answers of 2026-11-18:
 
 **Nothing is cut for time.** If the work runs late, the date moves. An item leaves only when its check proves it needs a hook change, which R7 forbids here. That goes back to the owner with the measured reason (section 10).
 
-**Leaves for 0.26.0:** receivers for Cursor, Grok, Hermes and OpenClaw; Codex and OpenCode approval buttons (#1318 rest, #1320); the six row states (#1317 rest); the MCP route (#685, #722, #723); agent sending (#317); the phone (#866); notices that open a card (#1014, #548, #1023).
+**Leaves for 0.26.0:** a Codex start at once (#1652); receivers for Cursor, Grok, Hermes and OpenClaw; Codex and OpenCode approval buttons (#1318 rest, #1320); the six row states (#1317 rest); the MCP route (#685, #722, #723); agent sending (#317); the phone (#866); notices that open a card (#1014, #548, #1023).
 
 ## 3. Milestones
 
@@ -71,6 +71,8 @@ Each check takes about half a day and ends in a dated note under `docs/validatio
 | C7 | The Windows `[Y/n]` setup in a real terminal (F5 of #1321), unrun for three releases | A bug issue, fixed in M10 |
 | C8 | Can the version check reach npm from inside Codex's sandbox and the Codex app (F4 of #1321)? | The check runs only from the page server; a sandboxed run shows the line and the command |
 
+**Results, 2026-11-18:** C1 failed, C2 passed, C3 failed, C4 passed, C5 passed with one step count still to take, and C8 is partial. C6, C7, the C5 count and C8's elevated sandbox and app rows wait for sitting 1. The notes are `docs/validation/2026-11-18-c*.md`.
+
 **Done when:** eight notes and the first sitting record exist. **Issues:** #1321 (part), #1322 (part), #286 (part), #557. **R7:** no hook.
 
 ### M1. An upgrade never stops, and never damages a file
@@ -87,8 +89,8 @@ Each check takes about half a day and ends in a dated note under `docs/validatio
 - **The one question for 0.25.0 to 0.25.1 says what is new:** a daily version check, and reading the list of Codex's sessions (folder, start time, id, last-written time, never the conversation). Each has an off switch.
 - **A crash cannot leave a half-written home:** writes are staged with a journal, the manifest is written last, and the next start finishes or undoes the journal.
 - **Done when:** J11a (0.25.0 to 0.25.1) counts 3 steps; J11b (0.25.1 to a locally built next version) counts 0 with nothing to ask and 1 with something; a revoked approval stays revoked.
-- **Covers:** all setup agents, the launcher, Windows and Linux. **Test:** J11a and J11b in `tests/host-upgrade.test.mjs` with a step counter; one case per ask condition; a process killed at each activation boundary, with the board running, then recovered; one dated manual row with a real Codex.
-- **Issues:** #1314, #1303, #1305 (part). **R7:** no hook.
+- **Covers:** all setup agents, the launcher, Windows and Linux. **Test:** J11a and J11b in `tests/host-upgrade.test.mjs` with a step counter; one case per ask condition; a person's hook after the board's keeps its slot (#1661); setup from a Node in another folder (#1662); a process killed at each activation boundary, with the board running, then recovered; one dated manual row with a real Codex.
+- **Issues:** #1314, #1303, #1661, #1662, #1305 (part). **R7:** no hook.
 
 ### M3. The board learns of a new version and updates itself
 
@@ -108,23 +110,24 @@ Each check takes about half a day and ends in a dated note under `docs/validatio
 Section 4 holds the design.
 - **Done when:** runs 2 and 3b of the F10 note, repeated against the new script, end with no decision and Claude Code's own prompt; the real board still answers; a plugin at 0.25.1 accepts a later board and a 0.25.0 plugin still works with a 0.25.1 board.
 - **Covers:** Claude Code CLI on Windows and Linux. macOS returns no decision (section 14, question 5).
-- **Test:** `tests/approvals.test.mjs`: "an address file naming a process that does not listen on its port gets no request"; "a listener that is not the board script never sees the command"; "the lookup timing out prints nothing"; "the off switch stops the hook before it contacts the listener"; both version directions.
+- **Test:** `tests/approvals.test.mjs`: "an address file naming a process that does not listen on its port gets no request"; "a listener that is not the board script never sees the command"; "the lookup timing out prints nothing"; "the off switch stops the hook before it contacts the listener"; "a process id whose command line reads empty is refused" (C2); both version directions.
 - **Issues:** #1651. **R7:** no hook change; gate line 9 proves it.
 
-### M5a. Codex starts within seconds
+### M5a. Codex delivery says what really happened
 
-- **What is wrong with it:** a live terminal process shows that a window exists, not that a person is looking at it. A turn may start unwatched. The owner accepted this on 2026-11-18.
-- **Work:** the script Codex's hook already runs records the process id, start time, host and thread together. Immediately before each at-once delivery, the receiver checks that identity again, with no cached answer. If the identity is unknown, the message keeps the 10-minute route. The receiver re-reads the thread's state right before `turn/start`, which narrows #1370; the card says plainly that a message sent while the person starts a turn may join that turn. A claimed message that never started is shown as not started (#1507).
-- **Done when:** a dated live record shows Send to turn start within 10 s with the window open, and no start with the window closed.
-- **Covers:** Codex CLI. The desktop app is a sitting row. **Test:** `tests/messaging.test.mjs`: terminal alive and idle starts at once; terminal gone does not start; process id reused does not start; a resumed thread; two windows on one thread; identity unreadable keeps the 10-minute route; a person's turn starting just before `turn/start`.
-- **Issues:** #1652, #1370, #1507, #1613 (part). **R7:** no hook change.
+- **Why the scope changed:** check C1 failed. On the shared server the server runs the hook, so the hook cannot name this session's window, and a live `codex.exe` cannot stand for "a person is there". Codex keeps the 10-minute route (owner, 2026-11-18), and #1652 moves to 0.26.0.
+- **Work:** the receiver re-reads the thread's state right before `turn/start`, which narrows #1370; the card says plainly that a message sent while the person starts a turn may join that turn. A claimed message that never started is shown as not started (#1507). A person who quits during the receiver's watch is not read as still on the thread, or the docs say the window (#1504).
+- **Done when:** the cases below pass, and the support table and the card say "after about 10 minutes" for Codex CLI.
+- **Covers:** Codex CLI. The desktop app is a sitting row. **Test:** `tests/messaging.test.mjs`: a person's turn starting just before `turn/start`; a claimed message that never started; a disconnect keeps the earlier settled reason; a quit during the watch.
+- **Issues:** #1370, #1507, #1504, #1613 (part). **R7:** no hook change.
 
 ### M5b. Antigravity starts on a board message
 
-- **Work:** finish #1612: read the conversation's own state right before the send, and close the missed turn-start window. Fix the `agy` report that fails with permission denied, so its questions reach Needs you (#1384).
+- **Work:** finish #1612. One live run first settles whether `agentapi get-conversation-metadata` prints `num_steps`, whether it rises as soon as a turn starts, and how long the call takes. The hook worker writes the turn's mark first, so a slow hook no longer lets a wake into a running turn. A dismissed failed wake no longer holds the next message's wake (#1609). Fix the `agy` report that fails with permission denied, so its questions reach Needs you (#1384).
+- **Accepted by the owner on 2026-11-18, after check C3:** a turn-start hook that never ran, and the 0.25 to 0.54 s between the board's yes and `send-message` landing. Antigravity offers no "send only if idle" and no public run status, so neither window can be closed from the board. The card says plainly that a message sent while the person starts a turn may join that turn. A review treats only these two windows as accepted.
 - **Done when:** a live record shows an idle start within 10 s and a running turn held.
-- **Covers:** the Antigravity desktop app and `agy`. **Test:** #1612's case table plus one row for each timing window; an `agy` report case.
-- **Issues:** #1396, #1384. **R7:** decided by C3.
+- **Covers:** the Antigravity desktop app and `agy`. **Test:** #1612's case table plus one row for each accepted window; a dismissed failed wake; an `agy` report case.
+- **Issues:** #1396, #1384, #1609. **R7:** no hook change; C3 found that none would close these windows.
 
 ### M6. A dead page cannot lock the board
 
@@ -135,7 +138,7 @@ Section 4 holds the design.
 
 ### M7. What the board shows is true
 
-- **Work:** a closed window takes its card with it. Close detection does not depend on C1: Claude Code uses its process, and Codex uses its process record where one exists and `SessionEnd` otherwise. A Codex card with neither says "the window may be closed", with one action. An `agy -p` row ends. The support table gains "after a wait". One wording for one Codex situation. The Claude Code pane's count matches the page.
+- **Work:** a closed window takes its card with it. Close detection does not depend on C1: Claude Code uses its process, and Codex uses its process record where one exists and `SessionEnd` otherwise. A process walk that reaches the shared server stops there and reports unknown (C1). A Codex card with neither says "the window may be closed", with one action. An `agy -p` row ends. The support table gains "after a wait". One wording for one Codex situation. The Claude Code pane's count matches the page.
 - **First step:** answer on #1092 whether the task stays locked after the card leaves, before taking over #1288.
 - **Done when:** moment 5 holds, and a card with no close signal never claims the window closed.
 - **Covers:** Codex, Claude Code, Antigravity; page and terminal board; `docs/MESSAGING.md`. **Test:** a stale-card case in `tests/e2e/l4-time.test.mjs`, run with and without a Codex process record; the route-record test.
@@ -167,7 +170,7 @@ Section 4 holds the design.
 
 The step ledger and J11 in `docs/validation/USER-SIM.md`; one real reply per receiving host with its seconds; a time budget in every stand-in route test; parity and simulated-user records on the release head; the walks of gate line 10; the four test fixes.
 
-**Issues:** #851, #1313, N3 to N7 (section 7), #1249, #1639, #1646, #1647. **R7:** no hook.
+**Issues:** #851, #1297, #1313, N3 to N7 (section 7), #1249, #1639, #1646, #1647. **R7:** no hook.
 
 ## 4. The F10 fix, exactly
 
@@ -190,11 +193,11 @@ The step ledger and J11 in `docs/validation/USER-SIM.md`; one real reply per rec
 
 `SECURITY.md:53` will say this. The advice stays: on a computer where such a program might run, answer in each agent's window.
 
-**How it reaches people.** The hook ships in the Claude Code plugin, which does not update through npm and, per Claude Code's documentation, does not update itself from a third-party marketplace (C5 checks this live). The release notes lead with the exact command and the sentence "you are not protected until you run this and start a new session".
+**How it reaches people.** The hook ships in the Claude Code plugin, which does not update through npm and, per Claude Code's documentation, does not update itself from a third-party marketplace (C5 checks this live). The release notes lead with the exact commands (C5 found two: `claude plugin marketplace update agent-board`, then `claude plugin update agent-board@agent-board`) and the sentence "you are not protected until you run this and start a new session".
 
 ## 5. The Codex wait
 
-C1 decides. **Pass:** M5a ships, and the support table says "now" for a session with a live process record and "after about 10 minutes" otherwise. **Fail:** the release does not go out on an assumption. The owner gets the measured reason and decides.
+C1 failed (`docs/validation/2026-11-18-c1-codex-terminal-process.md`). The owner decided on 2026-11-18: Codex keeps the 10-minute route, and the support table says "after about 10 minutes". #1652 moves to 0.26.0 to look for another sign that a person is at the window.
 
 ## 6. The owner's two sittings
 
@@ -246,17 +249,17 @@ The READMEs use `@next`, so both tags must end on the version that is promoted. 
 |---|---|
 | M0 | #557, and in part #286, #1321, #1322 |
 | M1 | #1302, #1304, #1327, #1488, #1588, #1607 |
-| M2 | #1303, #1314, and in part #1305 |
+| M2 | #1303, #1314, #1661, #1662, and in part #1305 |
 | M3 | #1312, #1315 |
 | M4 | #1651 |
-| M5a | #1370, #1507, #1652, and in part #1613 |
-| M5b | #1384, #1396 |
+| M5a | #1370, #1507, #1504, and in part #1613 |
+| M5b | #1384, #1396, #1609 |
 | M6 | #1587, #1596 |
 | M7 | #1092, #1296, #1589, #1643 |
 | M8 | #1650, and in part #1119 |
 | M9 | #1316 |
 | M10 | #865, #868, #1272, #1278, #1289 |
-| M11 | #851, #1249, #1313, #1639, #1646, #1647, N3 |
+| M11 | #851, #1249, #1297, #1313, #1639, #1646, #1647, N3 |
 
 **Must-ship:** every issue above except the "in part" ones, plus N3 to N7. The "in part" issues stay open or are narrowed, because this release does not finish them: #286, #1119, #1305, #1321, #1322, #1613.
 
@@ -281,7 +284,7 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 |---|---|---|
 | 1 to 4 | M0 checks in parallel, sitting 1, the pull requests below; M1, M4 and M6 start | |
 | 5 to 7 | M1 finishes; M2, M5a, M5b and M7 start after their checks | **Day 7:** if M1 is not merged, lanes B and E stop and help lane A |
-| 8 to 14 | M2, then M3; M5a, M5b, M8a, M9, M10 | **Day 14:** M2, M4 and M6 merged and one live M5a run recorded, or the owner gets a new date that day |
+| 8 to 14 | M2, then M3; M5a, M5b, M8a, M9, M10 | **Day 14:** M2, M4 and M6 merged and one live M5b run recorded, or the owner gets a new date that day |
 | 15 to 20 | M3, M8b, M10 finish | **Day 20:** code freeze |
 | 21 to 25 | M11 on the release build, sitting 2, walks, candidate on `next`, promote | |
 
@@ -302,7 +305,7 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 ## 10. If it runs late, or a check fails
 
 - **Late:** the date moves. The owner hears at the day 7 and day 14 checkpoints.
-- **A check proves a hook change is needed (C1, C3):** R7 stops it here, and the owner decides between holding the release and moving that item to 0.26.0.
+- **A check proves a hook change is needed:** R7 stops it here, and the owner decides between holding the release and moving that item to 0.26.0. C1 and C3 went to the owner on 2026-11-18 (section 2).
 - **Never shipped around:** the F10 fix, the way back, the page secret on the update confirm and switches, and any gate line.
 
 ## 11. Alternatives considered
@@ -316,6 +319,7 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 | Take over a store when no port answers | An old owner paused at startup can resume and erase the new owner's messages |
 | Cache the Codex process start time | A reused process id could pass and start a turn in a closed window |
 | Lower the Codex wait back to 65 s | Reopens the hole #1608 closed |
+| Count a live `codex.exe` as the person's window | Check C1: the shared server has that name and outlives the window, so a turn could start in a closed window |
 | Hide the token on stdout only | The test passes while an agent can still act as the person |
 | Move the wake, #1316 and first install to 0.26.0 | The owner chose the fullest scope and accepted the later date |
 
@@ -329,9 +333,9 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 | `scripts/message-store-claim.ts`, `scripts/board-messaging.ts` | Proven takeover | M6 |
 | `hooks/serve.ts`, three string tables | Update line and confirm, refusal line, switches, person-only routes, folded group | M3, M4, M7 to M9 |
 | `scripts/claude-approval.mjs` | The checks of section 4, refusal record, off marker | M4 |
-| `scripts/codex-receiver.mjs`, `scripts/session-liveness.ts`, `hooks/session-liveness.ts`, `hooks/blocks.ts` | Process record, fresh identity check, state re-read, close detection | M5a, M7 |
+| `scripts/codex-receiver.mjs`, `scripts/session-liveness.ts`, `hooks/session-liveness.ts`, `hooks/blocks.ts` | State re-read, close detection | M5a, M7 |
 | New bounded code for Codex's records | The list of M9 | M9 |
-| Antigravity files of #1612 | State read before send, report fix | M5b |
+| Antigravity files of #1612 | The hook worker's turn mark, the wake gate, report fix | M5b |
 | `hooks/receiver-routes.ts`, `hooks/receiver-record.ts`, `docs/MESSAGING.md` | "After a wait", Claude's record | M7 |
 | `hooks/board-script*.ts` | Generated; rebuilt, never edited | All |
 | `SECURITY.md`, `docs/RELEASING.md`, READMEs | What runs and what remains; the `next` move; first-upgrade command | M2 to M4, M8, M11 |
@@ -370,7 +374,7 @@ The owner took the proposed answer on all six, 2026-11-18: 「都按照预设吧
 | Finding | Answer |
 |---|---|
 | Codex 1, Opus 6: the hash list rejects a real board and approvals vanish | No hash list; refusal record; both version directions tested (section 4) |
-| Codex 2: a cached start time can authorize a wrong wake | Identity recorded together and checked fresh (M5a) |
+| Codex 2: a cached start time can authorize a wrong wake | Identity recorded together and checked fresh (M5a); that design was dropped after check C1 |
 | Codex 3: no listening port is not proof of a dead owner | Proven end of the old owner; resume test (M6) |
 | Codex 4: restart ignores pending deliveries | Stored states, drain, nothing dropped, never forced (M3) |
 | Codex 5: the token split breaks terminal and receiver callers | Capability table (M8b) |
@@ -393,8 +397,8 @@ The owner took the proposed answer on all six, 2026-11-18: 「都按照预设吧
 
 ## Unconfirmed
 
-- C1 to C8 are open until their notes exist.
-- Claude Code's plugin update behaviour comes from its documentation, not a live run (C5).
+- C6 and C7 are open until sitting 1. The plugin step count of C5 and the elevated sandbox and app rows of C8 are finished there too.
+- Turning on automatic plugin updates comes from Claude Code's documentation, not a live run (C5).
 - Claude Code's turn-start time has not been timed separately from its acknowledgement.
 - The day counts and the 5-week date are estimates.
 - The count of about 140 issues to move comes from titles and is checked issue by issue when moved.

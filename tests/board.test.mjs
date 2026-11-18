@@ -6049,40 +6049,50 @@ const closeFixturePage = async board => {
 const processAlive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
 
 // A stand-in browser: a small Windows program built here, so no real browser opens on the tester's
-// screen. `body` is its Main. Synthetic data only.
-// Each body is built once per test run and copied into place. The .NET Framework compiler that
-// ships with Windows builds one in about a second; Add-Type starts PowerShell and the compiler in
-// one process and took more than 15 s on a cold CI runner (#1166), so it is only the fallback.
-const standInBuilds = new Map()
-const buildStandIn = (body, env) => {
-  const built = standInBuilds.get(body)
-  if (built !== undefined) return built
+// screen. One program serves every test: the `.mode` file beside each copy says what it does, so a
+// run compiles once. Synthetic data only.
+// The build starts when this file loads and has no time limit of its own: a cold runner took more
+// than 15 s for it, which failed a browser test before any board code ran (#1666). It runs beside
+// the tests that come first, and a test that needs it waits on it instead of building it itself
+// (#1166: Add-Type starts PowerShell and the compiler in one process and took longer still, so it
+// is only the fallback when csc.exe is missing).
+const STAND_IN_SOURCE = `using System; using System.IO; using System.Diagnostics; using System.Threading;
+public static class Browser { public static void Main() {
+  string mode = File.ReadAllText(System.Reflection.Assembly.GetEntryAssembly().Location + ".mode");
+  int pid = Process.GetCurrentProcess().Id;
+  if (mode == "sleep") { File.WriteAllText(Environment.GetEnvironmentVariable("BOARD_TEST_BROWSER_PID"), pid.ToString()); Thread.Sleep(20000); }
+  else { File.AppendAllText(Environment.GetEnvironmentVariable("BOARD_TEST_FAILED_BROWSERS"), pid.ToString() + "\\n"); Environment.Exit(1); }
+} }`
+const buildStandIn = () => new Promise((done, fail) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-standin-'))
   process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
   const source = join(dir, 'browser.cs')
   const exe = join(dir, 'browser.exe')
-  writeFileSync(source, `using System; using System.IO; using System.Diagnostics; using System.Threading;\npublic static class Browser { public static void Main() { ${body} } }`)
+  writeFileSync(source, STAND_IN_SOURCE)
   const windows = process.env.SystemRoot ?? 'C:\\Windows'
   const csc = join(windows, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
+  const finish = (error, output) => error ? fail(new Error(`${error.message}\n${output ?? ''}`.trim())) : done(exe)
   if (existsSync(csc)) {
-    execFileSync(csc, ['/nologo', '/target:winexe', `/out:${exe}`, source], { windowsHide: true, stdio: 'pipe', timeout: 15_000 })
+    execFile(csc, ['/nologo', '/target:winexe', `/out:${exe}`, source], { windowsHide: true }, finish)
   } else {
     const powershell = join(windows, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-    execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
-      env: { ...env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: exe }, windowsHide: true, stdio: 'pipe', timeout: 15_000,
-    })
+    execFile(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
+      env: { ...process.env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: exe }, windowsHide: true,
+    }, finish)
   }
-  standInBuilds.set(body, exe)
-  return exe
-}
-const compileStandIn = (board, exe, body) => {
+})
+const standInBuilt = process.platform === 'win32' ? buildStandIn().then(exe => ({ exe }), error => ({ error })) : undefined
+const placeStandIn = async (exe, mode) => {
+  const { exe: built, error } = await standInBuilt
+  if (error) throw new Error(`the stand-in browser could not be built: ${error.message}`)
   mkdirSync(resolve(exe, '..'), { recursive: true })
-  copyFileSync(buildStandIn(body, board.env), exe)
+  copyFileSync(built, exe)
+  writeFileSync(`${exe}.mode`, mode)
 }
 // Writes its PID for the test and stays up, as a browser window does.
-const SLEEPING_BROWSER = 'File.WriteAllText(Environment.GetEnvironmentVariable("BOARD_TEST_BROWSER_PID"), Process.GetCurrentProcess().Id.ToString()); Thread.Sleep(20000);'
+const SLEEPING_BROWSER = 'sleep'
 // Notes that it was started, then exits with an error at once, as a browser with no display does.
-const FAILING_BROWSER = 'File.AppendAllText(Environment.GetEnvironmentVariable("BOARD_TEST_FAILED_BROWSERS"), Process.GetCurrentProcess().Id.ToString() + "\\n"); Environment.Exit(1);'
+const FAILING_BROWSER = 'fail'
 
 // Loaded into the `--html` process: notes every PowerShell it starts, with its exit code, time and
 // stderr (read here instead of dropped), so a run that lost Cursor's pipes says what its launcher did.
@@ -6424,8 +6434,8 @@ test('Windows browser startup releases Cursor pipes while the browser stays runn
   // The Edge slot holds a file that is not a program, so the launcher has to move on to Chrome.
   mkdirSync(resolve(fixture.edge, '..'), { recursive: true })
   writeFileSync(fixture.edge, 'synthetic invalid executable')
-  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
-  log.mark('stand-in browser compiled')
+  await placeStandIn(fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browser placed')
   const result = await htmlThroughCursor(board, fixture, log, signal)
   assert.ok(board.urlOf(result.stdout), result.stdout)
   assert.match(result.stdout, /Opened Agent Board/, result.stdout)
@@ -6437,9 +6447,9 @@ test('Windows browser startup releases Cursor pipes while the browser stays runn
 test('a Windows browser that exits with an error at once gives way to the next browser, and Cursor pipes are still released', { skip: process.platform !== 'win32', timeout: 25_000 }, t => browserStartupTest(async (board, fixture, log, signal) => {
   // Start-Process returns once the program exists, so a browser that exits with an error right
   // away (no display, no sandbox) would otherwise count as opened and the person would see nothing.
-  compileStandIn(board, fixture.edge, FAILING_BROWSER)
-  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
-  log.mark('stand-in browsers compiled')
+  await placeStandIn(fixture.edge, FAILING_BROWSER)
+  await placeStandIn(fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browsers placed')
   const result = await htmlThroughCursor(board, fixture, log, signal)
   assert.ok(board.urlOf(result.stdout), result.stdout)
   assert.match(result.stdout, /Opened Agent Board/, result.stdout)
@@ -10027,6 +10037,33 @@ test('the page sends its ETag and keeps its current view on a 304', { timeout: 3
   assert.equal(jsonReads, 1)
   assert.equal(dom.node('board').firstChild, current, 'a 304 must preserve the rendered nodes')
   assert.equal(dom.node('offline').textContent, '')
+})
+
+test('serve: the shipped page asks again at once while it holds the board, and in 2 s without it (#359)', { timeout: 30_000 }, async () => {
+  const html = await sourcePage()
+  const model = cardsModel()
+  const etag = `W/"${'c'.repeat(64)}"`
+  const asked = []
+  const dom = await pageDom(html, model, { getBoard: async options => {
+    asked.push({ etag: options.headers['if-none-match'], wait: options.headers['x-board-wait'] })
+    if (asked.length === 3) throw new Error('synthetic offline server')
+    if (asked.length === 2) return { ok: false, status: 304, json: async () => { throw new Error('a 304 body must never be read') } }
+    return { ok: true, status: 200, headers: { get: name => name === 'etag' ? etag : null }, json: async () => ({ model, now: 1 }) }
+  } })
+  await dom.settle()
+  // The first answer brought the board and its etag: the next request goes at once and asks the server to hold it.
+  assert.equal(dom.pollMs, 0)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.deepEqual(asked.slice(0, 2), [{ etag: undefined, wait: undefined }, { etag, wait: '1' }])
+  // "No change" from the held request: it asks again at once, still holding the board.
+  assert.equal(dom.pollMs, 0)
+  await dom.redraw(model)
+  await dom.settle()
+  // Offline: no board to hold, so it asks in 2 s, as before (#242).
+  assert.equal(asked.length, 3)
+  assert.ok(dom.node('offline').textContent, 'the page says it lost the board')
+  assert.equal(dom.pollMs, 2000)
 })
 
 test('the page requests a full board when reconnecting after a failed poll', async () => {
