@@ -8094,6 +8094,7 @@ const holderDeps = (overrides = {}) => {
     isAlive: () => kills.length === 0,
     minAgeMs: 30_000,
     waitMs: 300,
+    signals: ['SIGTERM'],
     ...overrides,
   }
   return { deps, kills }
@@ -8209,4 +8210,24 @@ test('a page serving a folder given with --messages-dir is never ended', async (
   const { deps, kills } = holderDeps({ look: () => ({ commandLine: 'node /x/board.mjs --serve-child --messages-dir /x/store', started: Date.now() - 60_000 }) })
   assert.deepEqual(await settleStoreHolder(4242, deps), { kind: 'kept' })
   assert.deepEqual(kills, [])
+})
+
+test('a number another program took after SIGTERM is never sent SIGKILL', async () => {
+  const look = { commandLine: 'node /x/board.mjs --serve-child', started: Date.now() - 60_000 }
+  let reads = 0
+  // The holder ignores SIGTERM for the wait; then its number shows another program's start time.
+  const { deps, kills } = holderDeps({ look: () => look, started: () => (++reads === 1 ? look.started : look.started + 5_000), isAlive: () => true, signals: ['SIGTERM', 'SIGKILL'] })
+  assert.deepEqual(await settleStoreHolder(4242, deps), { kind: 'gone' })
+  assert.deepEqual(kills, ['SIGTERM'])
+  const same = holderDeps({ look: () => look, isAlive: () => false, signals: ['SIGTERM', 'SIGKILL'] })
+  same.deps.isAlive = () => same.kills.length < 2
+  assert.deepEqual(await settleStoreHolder(4242, same.deps), { kind: 'ended' })
+  assert.deepEqual(same.kills, ['SIGTERM', 'SIGKILL'])
+})
+
+test('a command line joined with spaces, as macOS reports it, still finds the board script', () => {
+  const board = '/Users/someone/agent board/agent-board.mjs'
+  const head = file => (file === board ? BOARD_HEAD.slice(0, 'globalThis.AGENT_BOARD = '.length) : null)
+  assert.equal(isBoardServe(`/opt/homebrew/bin/node ${board} --serve-child --lang en`, head), true)
+  assert.equal(isBoardServe(`/opt/homebrew/bin/node /Users/someone/other.mjs --serve-child`, head), false)
 })

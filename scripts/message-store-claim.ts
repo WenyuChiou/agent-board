@@ -282,8 +282,13 @@ const headOf = (file: string): string | null => {
 // identity); any other program is never taken for the board.
 export const isBoardServe = (commandLine: string, head: (file: string) => string | null = headOf): boolean => {
   if (!/(?:^|[\s\0"])--serve(?:-child)?(?=$|[\s\0"])/.test(commandLine)) return false
-  for (const found of commandLine.matchAll(/(?:^|[\s\0"])((?:[A-Za-z]:)?[\\/][^"\0]*?\.(?:mjs|cjs|js|ts))(?=$|[\s\0"])/g)) {
-    if (head(found[1]!) === BOARD_HEAD) return true
+  // macOS's ps joins the arguments with spaces, so a path may hold spaces and the executable's path comes first:
+  // every place a path can start is tried with every place a script name can end.
+  const starts = [...commandLine.matchAll(/(?:^|[\s\0"])(?=(?:[A-Za-z]:)?[\\/])/g)].map(found => found.index + found[0].length)
+  const ends = [...commandLine.matchAll(/\.(?:mjs|cjs|js|ts)(?=$|[\s\0"])/g)].map(found => found.index + found[0].length)
+  for (const start of starts) for (const end of ends) {
+    const file = commandLine.slice(start, end)
+    if (end > start && !/["\0]/.test(file) && head(file) === BOARD_HEAD) return true
   }
   return false
 }
@@ -303,6 +308,8 @@ export type HolderDeps = {
   isAlive: (pid: number) => boolean
   minAgeMs: number
   waitMs: number
+  // Windows ends a process at the first signal; elsewhere one that ignores it, or is stopped, gets SIGKILL.
+  signals: readonly NodeJS.Signals[]
 }
 export const holderDeps = (minAgeMs: number): HolderDeps => ({
   look: pid => lookUpHolder(pid),
@@ -312,6 +319,7 @@ export const holderDeps = (minAgeMs: number): HolderDeps => ({
   isAlive: liveHolder,
   minAgeMs,
   waitMs: 3000,
+  signals: process.platform === 'win32' ? ['SIGTERM'] : ['SIGTERM', 'SIGKILL'],
 })
 export const settleStoreHolder = async (pid: number, deps: HolderDeps): Promise<HolderOutcome> => {
   const look = deps.look(pid)
@@ -333,8 +341,14 @@ export const settleStoreHolder = async (pid: number, deps: HolderDeps): Promise<
     }
     return true
   }
-  // Windows ends a process at the first signal; elsewhere one that ignores it, or is stopped, gets SIGKILL.
-  for (const signal of process.platform === 'win32' ? ['SIGTERM'] as const : ['SIGTERM', 'SIGKILL'] as const) {
+  // SIGKILL goes only while the start time is still the holder's: a number another program took after the holder
+  // exited is left alone.
+  for (const signal of deps.signals) {
+    if (signal === 'SIGKILL') {
+      const now = deps.started(pid, look)
+      if (typeof now !== 'number') return deps.isAlive(pid) ? { kind: 'refused', isBoard: true } : { kind: 'gone' }
+      if (Math.abs(now - look.started) > 1000) return { kind: 'gone' }
+    }
     try { deps.kill(pid, signal) } catch (error) {
       // Windows refuses to end a process that is already exiting (another start ended it first): that one is gone.
       if ((error as NodeJS.ErrnoException).code === 'ESRCH' || !deps.isAlive(pid)) return { kind: 'gone' }

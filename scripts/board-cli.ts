@@ -2520,16 +2520,18 @@ const holderAgeMs = (): number => process.env.AGENT_BOARD_TEST_PID && Number(pro
 
 // The page of the default store's owner, from the owner record beside its lock, when that record names
 // `pid` and its page answers for this store. A child run whose runtime folder differs from the page's
-// finds no address file, yet meets the page through its store (#1587). A page that answers here is
-// never ended.
-const ownerPage = async (pid: number): Promise<Running | null> => {
+// finds no address file, yet meets the page through its store (#1587). A page that answers here, or takes
+// the connection and says nothing in time ('silent'), is never ended.
+const ownerPage = async (pid: number): Promise<Running | 'silent' | null> => {
   try {
     const owner = JSON.parse(readFileSync(join(messagesDirectory(), 'server.owner'), 'utf8')) as Partial<Running>
     if (owner.pid !== pid || typeof owner.port !== 'number' || !Number.isInteger(owner.port) || typeof owner.url !== 'string'
       || !/^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url) || owner.port !== Number(new URL(owner.url).port)) return null
     const running = { pid, port: owner.port, url: owner.url, path: '', built: '' } as Running
-    const answer = await ping(running)
-    return answer !== null && answer !== 'silent' && typeof answer.path === 'string' && answer.messagesDirectory === messagesDirectory() ? running : null
+    // As long as the owner-record move waits: a busy page is not taken for one that listens nowhere.
+    const answer = await ping(running, 5000)
+    if (answer === 'silent') return 'silent'
+    return answer !== null && typeof answer.path === 'string' && answer.messagesDirectory === messagesDirectory() ? running : null
   } catch { return null }
 }
 
@@ -2715,7 +2717,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
       // Only a start that finds no address file reaches the page through its store. An address file this
       // start would not use (one another account may have written) never leads to the page behind it, and
       // a page that answers is never ended: it is waited for as before.
-      if (owned !== null && !existsSync(file)) return { url: owned.url, port: owned.port, isKept: true, isNew: false }
+      if (owned !== null && owned !== 'silent' && !existsSync(file)) return { url: owned.url, port: owned.port, isKept: true, isNew: false }
       if (owned === null) {
         const settled = await settleStoreHolder(pid, holderDeps(holderAgeMs()))
         if (settled.kind === 'gone' || settled.kind === 'ended') continue

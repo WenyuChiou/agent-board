@@ -324,9 +324,10 @@ const holderWorld = ageMs => {
     await board(['stop'])
   })
   // listenAfterMs < 0: the page never listens and never exits; otherwise it listens that late.
+  // listenAfterMs as a string: a preload of the caller's own.
   const deadPage = async (extra = [], listenAfterMs = -1) => {
     const preload = join(world.root, `holder-${kids.length}.cjs`)
-    writeFileSync(preload, listenAfterMs < 0
+    writeFileSync(preload, typeof listenAfterMs === 'string' ? listenAfterMs : listenAfterMs < 0
       ? "require('node:net').Server.prototype.listen = function () { return this }; setInterval(() => {}, 1e8); process.exit = () => {}\n"
       : `const net = require('node:net'), listen = net.Server.prototype.listen; net.Server.prototype.listen = function (...a) { setTimeout(() => listen.apply(this, a), ${listenAfterMs}); return this }\n`)
     const child = spawnIsolated(process.execPath, ['--require', preload, world.script, '--serve-child', '--lang', 'en', ...extra], { cwd: world.root, env, windowsHide: true, stdio: 'ignore', detached: true })
@@ -496,4 +497,22 @@ test('a start while the page runs reaches that page', { timeout: 120_000 }, () =
   const again = await h.board()
   assert.equal(h.linkOf(again.stdout), link, JSON.stringify(again))
   assert.ok(await h.pingOf(link))
+}))
+
+test('a page slow to answer is reached, never ended', { timeout: 120_000 }, () => withHolderWorld(1000, async h => {
+  // A real page whose every answer takes 2.5 s: longer than a quick check, within the 5 s the owner-record move waits.
+  const slow = "const http = require('node:http'), emit = http.Server.prototype.emit; http.Server.prototype.emit = function (name, ...a) { if (name !== 'request') return emit.call(this, name, ...a); setTimeout(() => emit.call(this, name, ...a), 2500); return true }\n"
+  const page = await h.deadPage([], slow)
+  const end = Date.now() + 20_000
+  while (!existsSync(join(page.folder, 'server.owner')) && Date.now() < end) await wait(100)
+  assert.ok(existsSync(join(page.folder, 'server.owner')), 'the slow page never recorded its address')
+  await wait(1500)
+  // As a child run with another runtime folder sees it (#1587): no address file where it looks.
+  const address = join(dirname(page.folder), basename(page.folder).replace(/-messages$/, '.json'))
+  if (existsSync(address)) unlinkSync(address)
+  const opened = await h.board()
+  const link = h.linkOf(opened.stdout)
+  assert.ok(link, JSON.stringify(opened))
+  assert.equal(isAlive(page.pid), true, 'a page slow to answer was ended')
+  assert.equal(new URL(link).port, String(JSON.parse(readFileSync(join(page.folder, 'server.owner'), 'utf8')).port))
 }))
