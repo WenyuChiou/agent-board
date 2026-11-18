@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
 import { BOARD_SCRIPT } from '../../hooks/board-script.ts'
@@ -286,3 +287,200 @@ test('three real --serve starts on the default store collide and every start pri
     await world.close()
   }
 })
+
+// M6 (#1596, #1587): a page that holds the store and serves nothing, and the commands that meet it.
+// A "dead page" is the real board script run as a page child whose server never listens.
+const isAlive = pid => { try { process.kill(pid, 0); return true } catch (error) { return error.code === 'EPERM' } }
+const untilGone = async (pid, ms = 5000) => { const end = Date.now() + ms; while (isAlive(pid) && Date.now() < end) await wait(50); return !isAlive(pid) }
+const storeOf = world => {
+  const run = join(world.root, 'run', 'agent-board')
+  const found = existsSync(run) ? readdirSync(run).find(name => name.endsWith('-messages')) : undefined
+  return found === undefined ? undefined : join(run, found)
+}
+const holderWorld = ageMs => {
+  const world = makeWorld()
+  const env = { ...world.env, AGENT_BOARD_HOLDER_AGE_MS: String(ageMs) }
+  const kids = []
+  const board = (args = [], extraEnv = {}) => new Promise(done => {
+    const started = Date.now()
+    const child = spawnIsolated(process.execPath, [world.script, ...args, '--lang', 'en'], { cwd: world.root, env: { ...env, ...extraEnv }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = '', stderr = ''
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.once('exit', code => done({ code, stdout, stderr, ms: Date.now() - started }))
+  })
+  world.cleanups.push(async () => {
+    for (const pid of kids) if (isAlive(pid)) try { process.kill(pid, 'SIGKILL') } catch {}
+    await board(['stop'])
+  })
+  // listenAfterMs < 0: the page never listens and never exits; otherwise it listens that late.
+  const deadPage = async (extra = [], listenAfterMs = -1) => {
+    const preload = join(world.root, `holder-${kids.length}.cjs`)
+    writeFileSync(preload, listenAfterMs < 0
+      ? "require('node:net').Server.prototype.listen = function () { return this }; setInterval(() => {}, 1e8); process.exit = () => {}\n"
+      : `const net = require('node:net'), listen = net.Server.prototype.listen; net.Server.prototype.listen = function (...a) { setTimeout(() => listen.apply(this, a), ${listenAfterMs}); return this }\n`)
+    const child = spawnIsolated(process.execPath, ['--require', preload, world.script, '--serve-child', '--lang', 'en', ...extra], { cwd: world.root, env, windowsHide: true, stdio: 'ignore', detached: true })
+    child.unref()
+    kids.push(child.pid)
+    const given = extra.includes('--messages-dir') ? extra[extra.indexOf('--messages-dir') + 1] : undefined
+    const end = Date.now() + 20_000
+    for (;;) {
+      const folder = given ?? storeOf(world)
+      const lock = folder && join(folder, 'server.lock')
+      if (lock && existsSync(lock) && readFileSync(lock, 'utf8') === String(child.pid)) return { pid: child.pid, folder }
+      if (Date.now() > end) throw new Error('The holder never took the store')
+      await wait(50)
+    }
+  }
+  const linkOf = text => /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/.exec(text)?.[0]
+  const pingOf = async link => {
+    const uri = new URL(link)
+    const res = await fetch(new URL('/api/ping', uri), { headers: { 'x-board-token': uri.searchParams.get('t') }, signal: AbortSignal.timeout(5000) })
+    return res.ok ? res.json() : null
+  }
+  return { world, env, kids, deadPage, board, linkOf, pingOf }
+}
+const withHolderWorld = async (ageMs, body) => {
+  const h = holderWorld(ageMs)
+  let failure
+  try { await body(h) } catch (error) { failure = error }
+  finally { try { await h.world.close() } catch (cleanup) { failure ??= cleanup } }
+  if (failure) throw failure
+}
+
+test('a lock holder that listens nowhere is replaced', { timeout: 180_000 }, () => withHolderWorld(1000, async h => {
+  const dead = await h.deadPage()
+  await wait(1500)
+  // While it could still be a page starting, it is waited for and never ended.
+  const early = await h.board([], { AGENT_BOARD_HOLDER_AGE_MS: '600000' })
+  assert.equal(h.linkOf(early.stdout), undefined, early.stdout)
+  assert.equal(isAlive(dead.pid), true, 'a holder that may still be starting was ended')
+  // A page on a folder given with --messages-dir is never looked up or taken over, however old.
+  const store = join(h.world.root, 'given-store')
+  mkdirSync(store, { mode: 0o700 })
+  const given = await h.deadPage(['--messages-dir', store])
+  await wait(1500)
+  const onGiven = await h.board(['--messages-dir', store])
+  assert.equal(h.linkOf(onGiven.stdout), undefined, onGiven.stdout)
+  assert.equal(isAlive(given.pid), true, 'a page on a given folder was ended')
+  assert.equal(readFileSync(join(store, 'server.lock'), 'utf8'), String(given.pid))
+  // Old enough, proven to be the board and answering nowhere: ended, and the board opens.
+  const opened = await h.board()
+  const link = h.linkOf(opened.stdout)
+  assert.ok(link, JSON.stringify(opened))
+  assert.ok(opened.ms < 10_000, `took ${opened.ms} ms`)
+  assert.equal(await untilGone(dead.pid), true, 'the dead page still runs')
+  assert.equal((await h.pingOf(link))?.messagesDirectory, dead.folder)
+}))
+
+const noStop = process.platform === 'win32' && 'Windows has no SIGSTOP'
+test('a stopped page is ended and replaced', { timeout: 120_000, skip: noStop && `${noStop}; "a lock holder that listens nowhere is replaced" covers it` }, () => withHolderWorld(1000, async h => {
+  const dead = await h.deadPage()
+  await wait(1500)
+  process.kill(dead.pid, 'SIGSTOP')
+  const opened = await h.board()
+  assert.ok(h.linkOf(opened.stdout), JSON.stringify(opened))
+  assert.equal(await untilGone(dead.pid), true)
+}))
+
+test('an old owner that resumes after replacement cannot write', { timeout: 120_000, skip: noStop && `${noStop}; "a retired owner cannot write to the store" covers it` }, () => withHolderWorld(1000, async h => {
+  const dead = await h.deadPage()
+  await wait(1500)
+  process.kill(dead.pid, 'SIGSTOP')
+  const opened = await h.board()
+  const link = h.linkOf(opened.stdout)
+  assert.ok(link, JSON.stringify(opened))
+  const lock = readFileSync(join(dead.folder, 'server.lock'), 'utf8')
+  try { process.kill(dead.pid, 'SIGCONT') } catch {}
+  assert.equal(await untilGone(dead.pid), true, 'the old owner resumed')
+  await wait(500)
+  assert.equal(readFileSync(join(dead.folder, 'server.lock'), 'utf8'), lock)
+  assert.notEqual(lock, String(dead.pid))
+  assert.equal((await h.pingOf(link))?.messagesDirectory, dead.folder)
+}))
+
+test('a page still starting is waited for, not ended', { timeout: 120_000 }, () => withHolderWorld(60_000, async h => {
+  const starting = await h.deadPage([], 4000)
+  const opened = await h.board()
+  assert.ok(h.linkOf(opened.stdout), JSON.stringify(opened))
+  assert.equal(isAlive(starting.pid), true, 'a starting page was ended')
+}))
+
+// A program that is not the board, holding the store's lock: the board names it and ends nothing.
+const foreignHolder = async h => {
+  const first = await h.board(['--serve', '--no-open'])
+  assert.ok(h.linkOf(first.stdout), JSON.stringify(first))
+  await h.board(['stop'])
+  const folder = storeOf(h.world)
+  const other = spawnIsolated(process.execPath, ['-e', 'setInterval(() => {}, 1e8)'], { cwd: h.world.root, env: h.env, windowsHide: true, stdio: 'ignore', detached: true })
+  other.unref()
+  h.kids.push(other.pid)
+  writeFileSync(join(folder, 'server.lock'), String(other.pid))
+  return { pid: other.pid, folder }
+}
+
+test('a lock holder not proven to be the board is refused', { timeout: 120_000 }, () => withHolderWorld(1000, async h => {
+  const other = await foreignHolder(h)
+  const opened = await h.board()
+  assert.notEqual(opened.code, 0)
+  assert.match(opened.stdout.trim(), /^Agent Board did not open/, opened.stdout)
+  assert.ok(opened.stdout.includes(String(other.pid)), opened.stdout)
+  assert.equal(h.linkOf(opened.stdout), undefined)
+  assert.ok(opened.ms < 10_000, `took ${opened.ms} ms`)
+  assert.equal(isAlive(other.pid), true)
+  assert.equal(readFileSync(join(other.folder, 'server.lock'), 'utf8'), String(other.pid))
+}))
+
+test('an OpenCode board command that cannot open says so on stdout', { timeout: 120_000 }, () => withHolderWorld(1000, async h => {
+  const other = await foreignHolder(h)
+  // As OpenCode runs a command's shell line: through a shell, stdout only, exit code ignored.
+  const q = value => `"${value}"`
+  const result = await new Promise(done => {
+    const child = spawn(`${q(process.execPath)} ${q(h.world.script)} --lang en`, { shell: true, cwd: h.world.root, env: h.env, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    let stdout = ''
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stdout.once('end', () => done(stdout))
+  })
+  assert.match(result, /^Agent Board did not open/, result)
+  assert.ok(result.includes(String(other.pid)), result)
+  assert.doesNotMatch(result, /opened|http:\/\//i, result)
+}))
+
+test('two starts that find the same dead page end with one page', { timeout: 120_000 }, () => withHolderWorld(1000, async h => {
+  const dead = await h.deadPage()
+  await wait(1500)
+  const [a, b] = await Promise.all([h.board(), h.board()])
+  const links = [h.linkOf(a.stdout), h.linkOf(b.stdout)]
+  assert.ok(links[0] && links[1], JSON.stringify([a, b]))
+  assert.equal(links[0], links[1])
+  assert.equal(await untilGone(dead.pid), true)
+}))
+
+test('a folder given with --messages-dir is never looked up or taken over', { timeout: 120_000 }, () => withHolderWorld(1000, async h => {
+  const store = join(h.world.root, 'given-store')
+  mkdirSync(store, { mode: 0o700 })
+  const dead = await h.deadPage(['--messages-dir', store])
+  await wait(1500)
+  const opened = await h.board(['--messages-dir', store])
+  assert.equal(h.linkOf(opened.stdout), undefined, opened.stdout)
+  assert.equal(isAlive(dead.pid), true, 'a page on a given folder was ended')
+  assert.equal(readFileSync(join(store, 'server.lock'), 'utf8'), String(dead.pid))
+}))
+
+test('a start while the page runs reaches that page', { timeout: 120_000 }, () => withHolderWorld(1000, async h => {
+  const first = await h.board(['--serve', '--no-open'])
+  const link = h.linkOf(first.stdout)
+  assert.ok(link, JSON.stringify(first))
+  const run = join(h.world.root, 'run', 'agent-board')
+  const addresses = readdirSync(run).filter(name => name.endsWith('.json'))
+  // An address file this start will not use never leads it to the page behind it, and that page is not ended.
+  for (const name of addresses) writeFileSync(join(run, name), '{"not":"an address"}')
+  const unusable = await h.board()
+  assert.equal(h.linkOf(unusable.stdout), undefined, JSON.stringify(unusable))
+  assert.ok(await h.pingOf(link), 'the page behind an unusable address file was ended')
+  // As a child run with another runtime folder sees it (#1587): the page's address file is not where it looks.
+  for (const name of addresses) unlinkSync(join(run, name))
+  const again = await h.board()
+  assert.equal(h.linkOf(again.stdout), link, JSON.stringify(again))
+  assert.ok(await h.pingOf(link))
+}))
