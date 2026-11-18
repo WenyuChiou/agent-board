@@ -11244,6 +11244,18 @@ test('a question card puts choices before its copy button and the hide button la
   assert.deepEqual(cardActionNodes(row).map(node => node.textContent), [EN.serveCopyResume, EN.serveArchive, EN.confirmDone])
 })
 
+test('each choice button and each listed native option shows its choice as it is sent, so two choices never read the same (#1629)', async () => {
+  const answers = ['Fix #123', 'Fix #456', 'abcdef12']
+  const model = cardsModel()
+  model.asks[0] = { ...model.asks[0], answers }
+  const dom = await pageDom(await sourcePage(), model)
+  assert.deepEqual(pressWalk(cardWithKey(dom, 'ask')).filter(node => node.className === 'choice').map(node => node.textContent), answers)
+  const native = cardsModel()
+  native.asks[0] = { ...native.asks[0], answers: [], native: { options: answers, line: 'Answer it in its own window.' } }
+  const listed = pressWalk(cardWithKey(await pageDom(await sourcePage(), native), 'ask')).find(node => node.className === 'native-options')
+  assert.deepEqual(listed.childNodes.map(node => node.textContent), answers)
+})
+
 test('a card with more than three actions shows three and the rest behind More', async () => {
   const model = cardsModel()
   model.asks[0] = { ...model.asks[0], answers: ['Yes', 'No', 'Maybe'] }

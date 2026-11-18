@@ -738,8 +738,11 @@ test('an idle look preserves held notes for listed files without rewriting the f
   await clock.advance(5000)
   expect((world.store!.inboxFailed as Record<string, string>)[names[0]!]).toBeDefined()
   expect(writes).toBe(0)
+  // The look lists once a minute even when the folder has not changed, so the absence is only
+  // confirmed on a look after that minute: the folder's time no longer moves on a bare clock
+  // bump, as on a real file system.
   world.mtime += 1
-  await clock.advance(5000)
+  await clock.advance(60_000)
   expect((world.store!.inboxFailed as Record<string, string>)[names[0]!]).toBeUndefined()
   expect(writes).toBe(1)
 })
