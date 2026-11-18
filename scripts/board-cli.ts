@@ -37,7 +37,7 @@ import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder'
-import { dockArguments, dockCommand, probeOf, windowPath, windowPlaceOf } from '../hooks/board-dock'
+import { dockArguments, dockCommand, probeOf, windowsStartScript, windowPath, windowPlaceOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
 import { isReceiverRoutes } from '../hooks/messaging'
@@ -1108,10 +1108,14 @@ const windowsArgument = (value: string): string => `"${value.replace(/(\\*)"/g, 
 type WindowsStartOptions = { isHidden?: boolean; env?: NodeJS.ProcessEnv; isPiped?: boolean; graceMs?: number }
 const windowsStart = (bins: string | string[], argv: string[], options: WindowsStartOptions = {}): ChildProcess => {
   const programs = (Array.isArray(bins) ? bins : [bins]).map(bin => isAddress(bin) ? psLiteral(bin) : psWildcardLiteral(bin)).join(', ')
-  const argumentsPart = argv.length === 0 ? '' : ` -ArgumentList ${psLiteral(argv.map(windowsArgument).join(' '))}`
-  const hiddenPart = options.isHidden ? ' -WindowStyle Hidden' : ''
-  const gracePart = options.graceMs === undefined ? '' : ` if ($started.WaitForExit(${Math.round(options.graceMs)}) -and $started.ExitCode -ne 0) { [Console]::Error.WriteLine($program + ' exited with ' + $started.ExitCode); continue };`
-  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); foreach ($program in @(${programs})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program${argumentsPart} -WorkingDirectory ${psWildcardLiteral(dirname(path))} -PassThru${hiddenPart} } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) {${gracePart} [Console]::Out.WriteLine($started.Id) }; exit 0 }; exit 1`
+  const command = windowsStartScript({
+    programs,
+    argumentExpression: argv.length === 0 ? "''" : psLiteral(argv.map(windowsArgument).join(' ')),
+    workingDirectory: psWildcardLiteral(dirname(path)),
+    isHidden: Boolean(options.isHidden),
+    graceMs: options.graceMs,
+    allowExternalEscape: !(process.env.AGENT_BOARD_TEST_PID && process.env.AGENT_BOARD_TEST_NO_JOB_ESCAPE === '1'),
+  })
   return spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
     cwd: dirname(path), stdio: options.isPiped ? ['ignore', 'pipe', 'pipe'] : 'ignore', windowsHide: true, env: options.env,
   })
@@ -2498,15 +2502,16 @@ interface RunningServer {
   idleMs?: number | undefined
 }
 
-type ServeFailure = { invalidPort?: string; portError?: { code: 'EADDRINUSE' | 'EACCES'; port: number }; storeCode?: string; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
+type ServeFailure = { invalidPort?: string; portError?: { code: 'EADDRINUSE' | 'EACCES'; port: number }; storeCode?: string; isJobLocked?: boolean; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
 
-// The note a failed start prints: `--port` failures and message folder failures first, then the child's
-// own folder failure, then the generic line. The child prints its folder failure in the
-// command's language, so the parent matches the same words.
+// The note a failed start prints: `--port` failures and message folder failures first, then host
+// job lock or the child's own folder failure, then the generic line. The child prints its folder
+// failure in the command's language, so the parent matches the same words.
 const serveFailureNote = (failure: ServeFailure): string => {
   if (failure.invalidPort !== undefined) return s.serveFailed(s.serveInvalidPort(failure.invalidPort))
   if (failure.portError !== undefined) return s.serveFailed(failure.portError.code === 'EACCES' ? s.servePortDenied(failure.portError.port) : s.servePortInUse(failure.portError.port))
   if (failure.storeCode !== undefined) return s.serveStoreFailed(failure.storeCode, messagesDirectory())
+  if (failure.isJobLocked) return s.serveFailed(s.serveJobLocked)
   if (failure.isChildCheckTimeout) return s.serveFailed(s.serveRuntimeCheckTimeout)
   if (failure.isChildCheckDenied) return s.serveFailed(s.serveRuntimeDenied)
   if (failure.isChildCheckPrivate) return s.serveFailed(s.serveRuntimePrivate)
@@ -2666,6 +2671,10 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   while (performance.now() < deadline) {
     const { url, stderr, readyBy } = await startPage()
     if (url !== null) return { url, port: Number(new URL(url).port), isKept: false, isNew: true }
+    if (/^JOB_ESCAPE_FAILED\b/m.test(stderr)) {
+      if (failure !== undefined) failure.isJobLocked = true
+      return null
+    }
     const portFailed = /^PORT_FAILED (EADDRINUSE|EACCES) (\d+)\r?$/m.exec(stderr)
     if (portFailed !== null) {
       if (failure !== undefined) failure.portError = { code: portFailed[1] as 'EADDRINUSE' | 'EACCES', port: Number(portFailed[2]) }

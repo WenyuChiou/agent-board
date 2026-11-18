@@ -801,6 +801,7 @@ export const ZH_TW = {
   serveRuntimePrivate: '無法將看板網頁的位址檔保護為僅此帳號可用；沒有啟動網頁。',
   serveRuntimeDenied: '這個 AI 的沙箱不能寫入看板網頁的位址資料夾，所以沒有啟動網頁。請在一般的終端機開啟看板；在 DeepSeek Harness 裡則用它的 agent_board 工具。',
   serveRuntimeCheckTimeout: 'Windows 檢查看板網頁的位址檔花了太久；電腦可能正忙，請稍後再試一次。',
+  serveJobLocked: '這個環境會在指令結束時一併關閉背景程式，看板網頁一開就會被關掉。請在一般的終端機執行 agent-board 來開啟。',
   serveLanAt: (url: string): string => `同一個網路上的手機，打開 ${url} 或掃這個 QR 碼：`,
   serveLanWarn: '這個連結沒有加密，只在你信任的網路上使用；10 分鐘沒人用就會自動關閉。',
   serveLanNone: '找不到這台電腦在區域網路上的位址，手機開不了這個看板。',

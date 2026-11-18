@@ -7871,6 +7871,105 @@ test('a Windows page start leaves its new address file and its folder owned by t
   } finally { await board.end([url]) }
 })
 
+// Helper for #1674: runs a board command inside a Windows Job Object configured with
+// JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000) and no breakaway flags, then lets the wrapper
+// exit so Windows closes the job handle and terminates anything left inside it.
+const runInWindowsKillOnCloseJob = (board, commandArgs, env) => {
+  const resultFile = join(board.dir, `job-result-${Math.random().toString(16).slice(2)}.txt`)
+  const quoted = value => `"${String(value).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
+  const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+  const psScript = [
+    `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'`,
+    `$ab = [AppDomain]::CurrentDomain.DefineDynamicAssembly([Reflection.AssemblyName]::new('TestJob'), [Reflection.Emit.AssemblyBuilderAccess]::Run)`,
+    `$mb = $ab.DefineDynamicModule('M')`,
+    `$tb = $mb.DefineType('K32', 'Public, Abstract, Sealed')`,
+    `$cc = [Runtime.InteropServices.CallingConvention]::Winapi; $cs = [Runtime.InteropServices.CharSet]::Unicode`,
+    `foreach ($sp in @(`,
+    `  @('CreateJobObjectW', [IntPtr], @([IntPtr], [string])),`,
+    `  @('SetInformationJobObject', [bool], @([IntPtr], [int], [IntPtr], [int])),`,
+    `  @('AssignProcessToJobObject', [bool], @([IntPtr], [IntPtr]))`,
+    `)) {`,
+    `  $m = $tb.DefinePInvokeMethod($sp[0], 'kernel32.dll', 'Public, Static, PinvokeImpl', [Reflection.CallingConventions]::Standard, $sp[1], $sp[2], $cc, $cs)`,
+    `  $m.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)`,
+    `}`,
+    `$k32 = $tb.CreateType()`,
+    `$job = $k32::CreateJobObjectW([IntPtr]::Zero, $null)`,
+    `if ($job -eq [IntPtr]::Zero) { throw 'CreateJobObjectW failed' }`,
+    `$extLen = if ([IntPtr]::Size -eq 8) { 144 } else { 112 }`,
+    `$buf = [Runtime.InteropServices.Marshal]::AllocHGlobal($extLen)`,
+    `for ($i = 0; $i -lt $extLen; $i += 4) { [Runtime.InteropServices.Marshal]::WriteInt32($buf, $i, 0) }`,
+    `[Runtime.InteropServices.Marshal]::WriteInt32($buf, 16, 0x2000)`,
+    `if (-not $k32::SetInformationJobObject($job, 9, $buf, $extLen)) { throw 'SetInformationJobObject failed' }`,
+    `[Runtime.InteropServices.Marshal]::FreeHGlobal($buf)`,
+    `if (-not $k32::AssignProcessToJobObject($job, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'AssignProcessToJobObject failed' }`,
+    `$psi = [Diagnostics.ProcessStartInfo]::new($env:TEST_JOB_NODE)`,
+    `$psi.Arguments = $env:TEST_JOB_ARGS`,
+    `$psi.WorkingDirectory = $env:TEST_JOB_CWD`,
+    `$psi.UseShellExecute = $false`,
+    `$psi.RedirectStandardOutput = $true`,
+    `$psi.RedirectStandardError = $true`,
+    `$psi.CreateNoWindow = $true`,
+    `$proc = [Diagnostics.Process]::Start($psi)`,
+    `$errTask = $proc.StandardError.ReadToEndAsync()`,
+    `$stdout = $proc.StandardOutput.ReadToEnd()`,
+    `$stderr = $errTask.GetAwaiter().GetResult()`,
+    `$proc.WaitForExit()`,
+    `$b64Out = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($stdout))`,
+    `$b64Err = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($stderr))`,
+    `[System.IO.File]::WriteAllText($env:TEST_JOB_OUT, "$($proc.ExitCode)|$b64Out|$b64Err")`,
+  ].join('\n')
+  execFileSync(join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+    '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(psScript, 'utf16le').toString('base64'),
+  ], {
+    env: {
+      ...env,
+      TEST_JOB_NODE: process.execPath,
+      TEST_JOB_ARGS: [board.script, ...commandArgs].map(quoted).join(' '),
+      TEST_JOB_CWD: board.dir,
+      TEST_JOB_OUT: resultFile,
+    },
+    windowsHide: true,
+    timeout: 30_000,
+  })
+  const [codeStr, outB64, errB64] = readFileSync(resultFile, 'utf8').split('|')
+  return {
+    status: Number(codeStr),
+    stdout: Buffer.from(outB64 ?? '', 'base64').toString('utf8'),
+    stderr: Buffer.from(errB64 ?? '', 'base64').toString('utf8'),
+  }
+}
+
+test('#1674: a Windows board server started inside a kill-on-close job outlives command exit, or refuses plainly without claiming opened', { skip: process.platform !== 'win32' && 'Windows job objects only', timeout: 60_000 }, async () => {
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    assert.ok(words.serveJobLocked && !words.serveFailed(words.serveJobLocked).includes('Opened Agent Board') && !words.serveFailed(words.serveJobLocked).includes('http:'))
+  }
+  const board = serveIn()
+  let url = null
+  try {
+    const alive = runInWindowsKillOnCloseJob(board, ['--serve', '--no-open', '--quiet-board'], board.env)
+    assert.equal(alive.status, 0, alive.stderr)
+    url = board.urlOf(alive.stdout)
+    assert.ok(url, alive.stdout)
+    await new Promise(done => setTimeout(done, 1200))
+    const page = await fetch(url)
+    assert.equal(page.status, 200, 'board page still answers after the command job closes')
+
+    // When escape is blocked inside the kill-on-close job, --serve and --html must fail honestly
+    // without starting a doomed server or printing an Opened Agent Board / URL line.
+    const locked = serveIn()
+    try {
+      const blockedEnv = { ...locked.env, AGENT_BOARD_TEST_NO_JOB_ESCAPE: '1' }
+      for (const flag of ['--serve', '--html']) {
+        const stopped = runInWindowsKillOnCloseJob(locked, [flag, '--quiet-board'], blockedEnv)
+        assert.equal(stopped.status, 1, `${flag}: ${stopped.stderr}`)
+        assert.equal(stopped.stdout.trim(), EN.serveFailed(EN.serveJobLocked), flag)
+        assert.ok(!stopped.stdout.includes('Opened Agent Board') && !stopped.stdout.includes('http:'), stopped.stdout)
+        assert.ok(!existsSync(locked.served), 'no doomed address file is left behind')
+      }
+    } finally { await locked.end([]) }
+  } finally { await board.end([url]) }
+})
+
 test('server memory arguments retain explicit heap choices and ignore unrelated Node flags', () => {
   assert.deepEqual(serverMemoryArgs([], ''), ['--optimize-for-size'])
   assert.deepEqual(serverMemoryArgs(['--inspect=0', '--require', '--max-semi-space-size=8'], ''), ['--optimize-for-size'])

@@ -109,12 +109,114 @@ const withQuery = (address: string, query: string): string => {
 // public; when it is missing the probe fails and the window opens as before.
 const DOCK_PROBE = `$null = [Reflection.Assembly]::Load('System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'); $window = [System.Windows.Forms.Screen].Assembly.GetType('System.Windows.Forms.UnsafeNativeMethods', $true).GetMethod('GetForegroundWindow', [Reflection.BindingFlags]'NonPublic, Public, Static').Invoke($null, @()); $work = { param($one) $area = $one.WorkingArea; '' + $area.X + ',' + $area.Y + ',' + $area.Width + ',' + $area.Height }; $probe = (& $work ([System.Windows.Forms.Screen]::FromHandle([IntPtr]$window))) + '|' + ((@([System.Windows.Forms.Screen]::AllScreens) | Microsoft.PowerShell.Core\\ForEach-Object { & $work $_ }) -join ';')`
 
+const WINDOWS_PS_PRELUDE = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1')`
+
+// Shared PowerShell job-object check + out-of-job launch runner (#1674). Compiles nothing
+// (#1440): DefinePInvokeMethod checks kernel32!IsProcessInJob and QueryInformationJobObject
+// in memory. When the host runs this command inside a 0x2000 (KILL_ON_JOB_CLOSE) job without
+// silent breakaway, executables launch through WMI Win32_Process.Create (preserving caller
+// environment variables) and URLs launch through Explorer's ShellExecute; if a child still
+// cannot escape the job, it is stopped and JOB_ESCAPE_FAILED is written on stderr.
+export const windowsJobStartScript = ({
+  programs,
+  argumentExpression,
+  workingDirectory,
+  isHidden,
+  graceMs,
+  allowExternalEscape = true,
+}: {
+  programs: string
+  argumentExpression: string
+  workingDirectory: string
+  isHidden: boolean
+  graceMs?: number
+  allowExternalEscape?: boolean
+}): string => {
+  const hiddenStart = isHidden ? ' -WindowStyle Hidden' : ''
+  const graceCheck = graceMs === undefined ? '' : ` if ($started.WaitForExit(${Math.round(graceMs)}) -and $started.ExitCode -ne 0) { [Console]::Error.WriteLine($program + ' exited with ' + $started.ExitCode); continue };`
+  const wmiGraceCheck = graceMs === undefined ? '' : ` $whp = $k32::OpenProcess(0x101000, $false, $pidVal); if ($whp -ne [IntPtr]::Zero) { try { if ($k32::WaitForSingleObject($whp, ${Math.round(graceMs)}) -eq 0) { $pec = 0; if ($k32::GetExitCodeProcess($whp, [ref]$pec) -and $pec -ne 0) { [Console]::Error.WriteLine($program + ' exited with ' + $pec); continue } } } finally { $null = $k32::CloseHandle($whp) } };`
+  const externalFlag = allowExternalEscape ? '$true' : '$false'
+  const showWindow = isHidden ? '0' : '1'
+  return [
+    `$argText = ${argumentExpression}`,
+    `$workDirEscaped = ${workingDirectory}`,
+    `$unescape = { param([string]$v) if ([IO.File]::Exists($v) -or [IO.Directory]::Exists($v)) { return $v }; return ($v -replace '\`([*?\\[\\]])', '$1') }`,
+    `$workDirRaw = & $unescape $workDirEscaped`,
+    `$inJob = $false; $killsOnClose = $false; $inOurJob = { param([int]$targetPid) return $false }; $isInAnyJob = { param([int]$targetPid) return $true }`,
+    `try {`,
+    `  $ab = [AppDomain]::CurrentDomain.DefineDynamicAssembly([Reflection.AssemblyName]::new('BoardJob'), [Reflection.Emit.AssemblyBuilderAccess]::Run);`,
+    `  $mb = $ab.DefineDynamicModule('M');`,
+    `  $tb = $mb.DefineType('K32', 'Public, Abstract, Sealed');`,
+    `  $cc = [Runtime.InteropServices.CallingConvention]::Winapi; $cs = [Runtime.InteropServices.CharSet]::Unicode;`,
+    `  foreach ($sp in @(@('IsProcessInJob', [bool], @([IntPtr], [IntPtr], [bool].MakeByRefType())), @('QueryInformationJobObject', [bool], @([IntPtr], [int], [IntPtr], [int], [int].MakeByRefType())), @('OpenProcess', [IntPtr], @([int], [bool], [int])), @('CloseHandle', [bool], @([IntPtr])), @('GetExitCodeProcess', [bool], @([IntPtr], [int].MakeByRefType())), @('WaitForSingleObject', [int], @([IntPtr], [int])))) {`,
+    `    $m = $tb.DefinePInvokeMethod($sp[0], 'kernel32.dll', 'Public, Static, PinvokeImpl', [Reflection.CallingConventions]::Standard, $sp[1], $sp[2], $cc, $cs);`,
+    `    $m.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig);`,
+    `  };`,
+    `  $k32 = $tb.CreateType();`,
+    `  if ($k32::IsProcessInJob([Diagnostics.Process]::GetCurrentProcess().Handle, [IntPtr]::Zero, [ref]$inJob) -and $inJob) {`,
+    `    $jbuf = [Runtime.InteropServices.Marshal]::AllocHGlobal(256);`,
+    `    try {`,
+    `      $jret = 0; $extLen = if ([IntPtr]::Size -eq 8) { 144 } else { 112 };`,
+    `      if ($k32::QueryInformationJobObject([IntPtr]::Zero, 9, $jbuf, $extLen, [ref]$jret)) {`,
+    `        $jflags = [Runtime.InteropServices.Marshal]::ReadInt32($jbuf, 16);`,
+    `        $killsOnClose = ($jflags -band 0x2000) -ne 0;`,
+    `      };`,
+    `    } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($jbuf) };`,
+    `    $inOurJob = { param([int]$targetPid) if ($targetPid -le 0) { return $false }; $cap = 8192; $ret = 0; for ($pass = 0; $pass -lt 2; $pass++) { $pbuf = [Runtime.InteropServices.Marshal]::AllocHGlobal($cap); try { if (-not $k32::QueryInformationJobObject([IntPtr]::Zero, 3, $pbuf, $cap, [ref]$ret)) { return $false }; $assigned = [Runtime.InteropServices.Marshal]::ReadInt32($pbuf, 0); $cnt = [Runtime.InteropServices.Marshal]::ReadInt32($pbuf, 4); if ($assigned -gt $cnt -and $pass -eq 0) { $cap = 8 + $assigned * [IntPtr]::Size; continue }; for ($i = 0; $i -lt $cnt; $i++) { $off = 8 + $i * [IntPtr]::Size; $p = if ([IntPtr]::Size -eq 8) { [Runtime.InteropServices.Marshal]::ReadInt64($pbuf, $off) } else { [long][Runtime.InteropServices.Marshal]::ReadInt32($pbuf, $off) }; if ($p -eq [long]$targetPid) { return $true } }; return $false } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($pbuf) } }; return $false };`,
+    `    $isInAnyJob = { param([int]$targetPid) if ($targetPid -le 0) { return $true }; $hp = $k32::OpenProcess(0x1000, $false, $targetPid); if ($hp -eq [IntPtr]::Zero) { return $true }; try { $any = $false; if ($k32::IsProcessInJob($hp, [IntPtr]::Zero, [ref]$any)) { return $any }; return $true } finally { $null = $k32::CloseHandle($hp) } };`,
+    `  };`,
+    `} catch {}`,
+    `$hadJobTrap = $false; $allowExt = ${externalFlag}`,
+    `foreach ($program in @(${programs})) {`,
+    `  $isAddr = $program -match '^[a-z][a-z\\d+.-]+://'`,
+    `  $rawProgram = if ($isAddr) { $program } else { & $unescape $program }`,
+    `  $startArgs = if ($argText -eq '') { @{} } else { @{ ArgumentList = $argText } }`,
+    `  if ($killsOnClose) {`,
+    `    if (-not $isAddr -and $allowExt) {`,
+    `      try {`,
+    `        $resolved = $rawProgram;`,
+    `        if (-not ($resolved.Contains('\\') -or $resolved.Contains('/'))) { $cmds = @(Microsoft.PowerShell.Core\\Get-Command $resolved -CommandType Application -ErrorAction SilentlyContinue); if ($cmds.Count -gt 0 -and $cmds[0].Source) { $resolved = $cmds[0].Source } };`,
+    `        $startup = ([wmiclass]'Win32_ProcessStartup').CreateInstance(); $startup.ShowWindow = ${showWindow};`,
+    `        $envList = [System.Collections.Generic.List[string]]::new();`,
+    `        foreach ($entry in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) { $ek = [string]$entry.Key; if ($ek -ne '' -and -not $ek.StartsWith('=')) { $envList.Add($ek + '=' + [string]$entry.Value) } };`,
+    `        $startup.EnvironmentVariables = $envList.ToArray();`,
+    `        $cmdLine = '"' + $resolved + '"' + $(if ($argText -ne '') { ' ' + $argText } else { '' });`,
+    `        $res = ([wmiclass]'Win32_Process').Create($cmdLine, $workDirRaw, $startup);`,
+    `        if ($res.ReturnValue -ne 0 -or -not $res.ProcessId) { throw ('WMI_CREATE_FAILED_' + $res.ReturnValue) };`,
+    `        $pidVal = [int]$res.ProcessId;`,
+    `        if (& $inOurJob $pidVal) { try { ([Diagnostics.Process]::GetProcessById($pidVal)).Kill() } catch {}; $hadJobTrap = $true; [Console]::Error.WriteLine('JOB_ESCAPE_FAILED'); continue };${wmiGraceCheck}`,
+    `        [Console]::Out.WriteLine($pidVal); exit 0`,
+    `      } catch { [Console]::Error.WriteLine($_.Exception.Message) }`,
+    `    };`,
+    `    $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program @startArgs -WorkingDirectory $workDirEscaped -PassThru${hiddenStart} } catch { [Console]::Error.WriteLine($_.Exception.Message); continue };`,
+    `    if ($started) {`,
+    `      if (-not $isAddr -and ((& $inOurJob $started.Id) -or (& $isInAnyJob $started.Id))) { try { $started.Kill() } catch {}; $hadJobTrap = $true; continue };${graceCheck}`,
+    `      [Console]::Out.WriteLine($started.Id)`,
+    `    }; exit 0`,
+    `  };`,
+    `  $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program @startArgs -WorkingDirectory $workDirEscaped -PassThru${hiddenStart} } catch { [Console]::Error.WriteLine($_.Exception.Message); continue };`,
+    `  if ($started) {${graceCheck} [Console]::Out.WriteLine($started.Id) }; exit 0`,
+    `};`,
+    `if ($hadJobTrap) { [Console]::Error.WriteLine('JOB_ESCAPE_FAILED') }`,
+    `exit 1`,
+  ].join('\n')
+}
+
+export const windowsStartScript = (options: {
+  programs: string
+  argumentExpression: string
+  workingDirectory: string
+  isHidden: boolean
+  graceMs?: number
+  allowExternalEscape?: boolean
+}): string => `${WINDOWS_PS_PRELUDE}; ${windowsJobStartScript(options)}`
+
 // The whole launch PowerShell: it prints the probe's line (`|` when the probe fails), reads the
 // browser's arguments back as one base64 UTF-16 line (exit 2 when none comes), and starts the
 // first of `programs` (a PowerShell list) that starts, printing its process id (exit 0); exit 1
 // when none does. `isHidden` starts it hidden, for the test only.
 export const dockCommand = (programs: string, workingDirectory: string, graceMs: number, isHidden = false): string =>
-  `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); $probe = '|'; try { ${DOCK_PROBE} } catch { $probe = '|' }; [Console]::Out.WriteLine($probe); [Console]::Out.Flush(); $line = [Console]::In.ReadLine(); if (-not $line) { exit 2 }; $argumentList = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($line)); foreach ($program in @(${programs})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program -ArgumentList $argumentList -WorkingDirectory ${workingDirectory}${isHidden ? ' -WindowStyle Hidden' : ''} -PassThru } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) { if ($started.WaitForExit(${graceMs}) -and $started.ExitCode -ne 0) { continue }; [Console]::Out.WriteLine($started.Id) }; exit 0 }; exit 1`
+  `${WINDOWS_PS_PRELUDE}; $probe = '|'; try { ${DOCK_PROBE} } catch { $probe = '|' }; [Console]::Out.WriteLine($probe); [Console]::Out.Flush(); $line = [Console]::In.ReadLine(); if (-not $line) { exit 2 }; $argumentList = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($line)); ${windowsJobStartScript({ programs, argumentExpression: '$argumentList', workingDirectory, isHidden, graceMs })}`
 
 // The probe's one line: the foreground window's monitor work area, then every monitor's, each as
 // x,y,width,height, e.g. `0,0,2560,1392|0,0,2560,1392;-1920,0,1920,1040`. Null when it does not read.
