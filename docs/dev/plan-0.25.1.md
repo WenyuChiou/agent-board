@@ -170,7 +170,7 @@ Section 4 holds the design.
 
 The step ledger and J11 in `docs/validation/USER-SIM.md`; one real reply per receiving host with its seconds; a time budget in every stand-in route test; parity and simulated-user records on the release head; the walks of gate line 10; the four test fixes.
 
-**Issues:** #851, #1297, #1313, N3 to N7 (section 7), #1249, #1639, #1646, #1647. **R7:** no hook.
+**Issues:** #851, #1297, #1313, N3 to N7 (section 7), #1249, #1639, #1641, #1646, #1647. **R7:** no hook.
 
 ## 4. The F10 fix, exactly
 
@@ -259,7 +259,7 @@ The READMEs use `@next`, so both tags must end on the version that is promoted. 
 | M8 | #1650, and in part #1119 |
 | M9 | #1316 |
 | M10 | #865, #868, #1272, #1278, #1289 |
-| M11 | #851, #1249, #1297, #1313, #1639, #1646, #1647, N3 |
+| M11 | #851, #1249, #1297, #1313, #1639, #1641, #1646, #1647, N3 |
 
 **Must-ship:** every issue above except the "in part" ones, plus N3 to N7. The "in part" issues stay open or are narrowed, because this release does not finish them: #286, #1119, #1305, #1321, #1322, #1613.
 
@@ -347,8 +347,8 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 
 | Version | Theme |
 |---|---|
-| 0.26.0 | Every hook change in one release, the first to arrive by itself: remaining receivers, desktop apps through the vendor's own door, Codex and OpenCode approvals, six states, notices that open a card |
-| 0.27.0 | Agents use the board: agent sending, one MCP route, hand-off; the cloud-bot bridge plan |
+| 0.26.0 | Every hook change in one release, the first to arrive by itself: remaining receivers, desktop apps through the vendor's own door, Codex and OpenCode approvals, six states, notices that open a card, agent sending (#317) |
+| 0.27.0 | Agents use the board: one MCP route, hand-off; the cloud-bot bridge plan |
 | 0.28.0 | Away from the desk: the phone sends and answers; the server starts at login |
 | 0.29.0 | The first cloud bot reads what the person shared |
 | 0.30.0 | Cloud bots both ways, never approving |
