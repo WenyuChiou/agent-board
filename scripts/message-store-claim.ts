@@ -241,11 +241,13 @@ export const lookUpHolder = (pid: number, timeoutMs = 5000): StoreHolder | 'gone
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null
   try {
     if (process.platform === 'linux') {
+      // The start time is read before and after the command line: the same on both sides, both are one process's.
+      const before = processStarted(pid, timeoutMs)
       let raw: string
       try { raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8') } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'gone' : null }
       const started = processStarted(pid, timeoutMs)
       if (typeof started !== 'number') return liveHolder(pid) ? null : 'gone'
-      return raw === '' ? null : { commandLine: raw.replace(/\0+$/, ''), started }
+      return raw === '' || before !== started ? null : { commandLine: raw.replace(/\0+$/, ''), started }
     }
     if (process.platform === 'win32') {
       const shell = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
@@ -333,9 +335,20 @@ export const settleStoreHolder = async (pid: number, deps: HolderDeps): Promise<
   if (again === null && !deps.isAlive(pid)) return { kind: 'gone' }
   if (typeof again !== 'number' || Math.abs(again - look.started) > 1000) return { kind: 'refused', isBoard: false }
   const pause = (ms: number) => new Promise(done => setTimeout(done, ms))
+  // Whether the holder is gone, as its number or as its identity: while waiting, the start time is read again every
+  // half second (macOS spends a ps start on each read), so a number another program took counts as the holder gone.
+  const isSame = (): boolean | 'unknown' => {
+    const now = deps.started(pid, look)
+    return typeof now === 'number' ? Math.abs(now - look.started) <= 1000 : now === null && !deps.isAlive(pid) ? false : 'unknown'
+  }
   const isEnded = async (ms: number): Promise<boolean> => {
     const end = Date.now() + ms
+    let checked = Date.now()
     while (deps.isAlive(pid)) {
+      if (Date.now() - checked >= 500) {
+        checked = Date.now()
+        if (isSame() === false) return true
+      }
       if (Date.now() >= end) return false
       await pause(50)
     }
@@ -344,10 +357,11 @@ export const settleStoreHolder = async (pid: number, deps: HolderDeps): Promise<
   // SIGKILL goes only while the start time is still the holder's: a number another program took after the holder
   // exited is left alone.
   for (const signal of deps.signals) {
-    if (signal === 'SIGKILL') {
-      const now = deps.started(pid, look)
-      if (typeof now !== 'number') return deps.isAlive(pid) ? { kind: 'refused', isBoard: true } : { kind: 'gone' }
-      if (Math.abs(now - look.started) > 1000) return { kind: 'gone' }
+    if (signal !== deps.signals[0]) {
+      // Before each later signal the identity is read again; the first one follows the check above.
+      const same = isSame()
+      if (same === false) return { kind: 'gone' }
+      if (same === 'unknown') return { kind: 'refused', isBoard: true }
     }
     try { deps.kill(pid, signal) } catch (error) {
       // Windows refuses to end a process that is already exiting (another start ended it first): that one is gone.

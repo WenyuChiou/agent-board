@@ -8231,3 +8231,14 @@ test('a command line joined with spaces, as macOS reports it, still finds the bo
   assert.equal(isBoardServe(`/opt/homebrew/bin/node ${board} --serve-child --lang en`, head), true)
   assert.equal(isBoardServe(`/opt/homebrew/bin/node /Users/someone/other.mjs --serve-child`, head), false)
 })
+
+test('a number another program takes while the board waits after SIGTERM ends the wait without SIGKILL', async () => {
+  const look = { commandLine: 'node /x/board.mjs --serve-child', started: Date.now() - 60_000 }
+  let reads = 0
+  // The first read is the check before SIGTERM; a read during the wait shows another program's start time.
+  const { deps, kills } = holderDeps({ look: () => look, started: () => (++reads === 1 ? look.started : look.started + 5_000), isAlive: () => true, waitMs: 3000, signals: ['SIGTERM', 'SIGKILL'] })
+  const began = Date.now()
+  assert.deepEqual(await settleStoreHolder(4242, deps), { kind: 'ended' })
+  assert.deepEqual(kills, ['SIGTERM'])
+  assert.ok(Date.now() - began < 2500, 'the wait did not end when the identity changed')
+})
