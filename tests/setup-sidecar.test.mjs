@@ -285,9 +285,35 @@ fs.renameSync = (from, to) => {
   }))
 }
 
+test('a standalone remove keeps sidecar.mjs when it is edited after sidecar.json went: remove fails instead of deleting it', () => withHome(({ home, run, dir }) => {
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  const env = seam(home, `const unlink = fs.unlinkSync
+fs.unlinkSync = file => {
+  unlink(file)
+  if (typeof file === 'string' && file.endsWith('sidecar.json')) fs.writeFileSync(file.slice(0, -'sidecar.json'.length) + 'sidecar.mjs', ${JSON.stringify(EDIT)})
+}`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
+  stoppedOnChange(removed)
+  assert.equal(readFileSync(join(dir, 'sidecar.mjs'), 'utf8'), EDIT)
+}))
+
+test('a standalone remove keeps hooks.json when it is edited after another file went: remove fails instead of deleting it', () => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'antigravity', '--apply']).status, 0)
+  const hooks = join(home, '.gemini', 'config', 'hooks.json')
+  const env = seam(home, `const unlink = fs.unlinkSync
+let done = false
+fs.unlinkSync = file => {
+  unlink(file)
+  if (!done && typeof file === 'string' && !file.endsWith('hooks.json') && fs.existsSync(${JSON.stringify(hooks)})) { done = true; fs.writeFileSync(${JSON.stringify(hooks)}, ${JSON.stringify(EDIT)}) }
+}`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
+  stoppedOnChange(removed)
+  assert.equal(readFileSync(hooks, 'utf8'), EDIT)
+}))
+
 // Hermes's skills folder linked to the shared one gives one file two names in one batch. The second write finds the
-// text the first wrote, which loses nothing, so setup goes through (codex_468 on #1594). Its remove stops at the second
-// name, as on main (round cap on #1594).
+// text the first wrote, which loses nothing, so setup goes through (codex_468 on #1594). Its remove finishes through
+// both names: the first removal records the real path for a link too, so the second name finds its own removal (#1610).
 test('a Hermes skills folder linked to the shared skills folder installs without a false changed-file stop', () => withHome(({ home, run }) => {
   mkdirSync(join(home, '.agents', 'skills'), { recursive: true })
   mkdirSync(join(home, '.hermes'), { recursive: true })
@@ -312,6 +338,46 @@ test('a Hermes SKILL.md linked to the shared SKILL.md leaves no dangling link af
   const removed = run(['--remove', '--agent', 'hermes', '--apply'])
   assert.equal(removed.status, 0, `${removed.stdout}${removed.stderr}`)
   assert.throws(() => lstatSync(own), { code: 'ENOENT' })
+}))
+
+// A file-link SKILL.md in a linked skills folder has two names in one batch: the first removal unlinks the link, and
+// the second name finds it gone. The first removal records the link's real path too, so the second name finds its own
+// removal and the batch finishes (#1610). File links need a privilege on Windows.
+test('a remove through both names of a file-link SKILL.md in a linked skills folder finishes', t => withHome(({ home, run }) => {
+  mkdirSync(join(home, '.agents', 'skills'), { recursive: true })
+  mkdirSync(join(home, '.hermes'), { recursive: true })
+  symlinkSync(join(home, '.agents', 'skills'), join(home, '.hermes', 'skills'), 'junction')
+  const install = run(['--agent', 'hermes', '--apply'])
+  assert.equal(install.status, 0, `${install.stdout}${install.stderr}`)
+  const shared = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  const kept = join(home, 'kept-skill.md')
+  writeFileSync(kept, readFileSync(shared))
+  rmSync(shared)
+  try { symlinkSync(kept, shared, 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'])
+  assert.equal(removed.status, 0, `${removed.stdout}${removed.stderr}`)
+  assert.throws(() => lstatSync(shared), { code: 'ENOENT' })
+  assert.throws(() => lstatSync(own), { code: 'ENOENT' })
+}))
+
+test('a remove stops when another program takes a file between setup\'s last re-read and its unlink', () => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const first = join(home, '.agent-board', 'agent-board.mjs')
+  // Another program takes the file just as setup unlinks it: the unlink finds it gone, and setup stops instead of
+  // counting the file as removed by itself (#1611).
+  const env = seam(home, `const unlink = fs.unlinkSync
+fs.unlinkSync = file => {
+  if (String(file) === ${JSON.stringify(first)}) { unlink(file); unlink(file) }
+  else unlink(file)
+}`)
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'], { env })
+  stoppedOnChange(removed)
+  // Setup stopped before its next removal: the install record is still there for the next run.
+  assert.ok(existsSync(join(home, '.agent-board', 'install-hermes.json')))
 }))
 
 // Hermes's skills folder linked to the shared one, and the shared SKILL.md a file link: setup plans both names as that
@@ -390,6 +456,31 @@ test('the sidecar-only writer keeps a one-byte edit to sidecar.mjs that decodes 
 // A link to a path that is not there: on Windows a junction to a missing folder, which needs no privilege.
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'file'
 
+test('a standalone remove keeps a dangling link that replaced sidecar.mjs: remove fails instead of deleting it', t => withHome(({ home, run, dir }) => {
+  const probe = join(home, 'probe-link')
+  try { symlinkSync(join(home, 'nowhere'), probe, LINK_TYPE) } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make links'); return }
+    throw error
+  }
+  rmSync(probe, { force: true })
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  const file = join(dir, 'sidecar.mjs'), missing = join(home, 'missing-folder')
+  // Right after remove took out sidecar.json, another process puts a link to nowhere where sidecar.mjs was.
+  const env = seam(home, `const unlink = fs.unlinkSync
+fs.unlinkSync = file => {
+  unlink(file)
+  if (typeof file === 'string' && file.split(/[\\\\/]/).pop() === 'sidecar.json') {
+    const mjs = file.slice(0, -'sidecar.json'.length) + 'sidecar.mjs'
+    unlink(mjs)
+    fs.symlinkSync(${JSON.stringify(missing)}, mjs, ${JSON.stringify(LINK_TYPE)})
+  }
+}`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
+  stoppedOnChange(removed)
+  assert.ok(lstatSync(file).isSymbolicLink(), 'the link is still there')
+  assert.ok(readlinkSync(file).endsWith('missing-folder'), readlinkSync(file))
+}))
+
 test('a standalone install stops when hooks.json became a link to a file holding the planned text', t => withHome(({ home, run }) => {
   const probe = join(home, 'probe.txt')
   writeFileSync(probe, '')
@@ -420,6 +511,40 @@ fs.writeFileSync = (target, data, ...rest) => {
   stoppedOnChange(install)
   assert.ok(lstatSync(hooks).isSymbolicLink(), 'the link is still there')
   assert.equal(readlinkSync(hooks), planned)
+}))
+
+// A removal may find a path already gone, or the same link with its target gone, only where the path's planned real
+// path is a file this batch itself removed (codex_476 on #1594). The preload plays another program that removes one
+// file right after remove takes out the board's own agent-board.mjs, its first removal. It waits for that exact path:
+// Node 22's recursive rmSync calls fs.unlinkSync too, and the setup helper clears its temporary folder that way after
+// the plan, before the apply has planned.
+const removeOnFirstUnlink = (home, victim) => seam(home, `const unlink = fs.unlinkSync
+const first = ${JSON.stringify(join(home, '.agent-board', 'agent-board.mjs'))}
+let done = false
+fs.unlinkSync = file => { unlink(file); if (!done && String(file) === first) { done = true; unlink(${JSON.stringify(victim)}) } }`)
+
+test('a remove keeps a Hermes SKILL.md file link whose target another program deleted after setup planned: remove fails instead of deleting it', t => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md'), copy = join(home, 'copy-skill.md')
+  writeFileSync(copy, readFileSync(own))
+  rmSync(own)
+  try { symlinkSync(copy, own, 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'], { env: removeOnFirstUnlink(home, copy) })
+  stoppedOnChange(removed)
+  assert.ok(lstatSync(own).isSymbolicLink(), 'the link is still there')
+  assert.equal(readlinkSync(own), copy)
+}))
+
+test('a remove stops when another program deleted a planned Hermes SKILL.md after setup planned', () => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'], { env: removeOnFirstUnlink(home, own) })
+  stoppedOnChange(removed)
+  // Setup stopped before its next removal: the install record is still there for the next run.
+  assert.ok(existsSync(join(home, '.agent-board', 'install-hermes.json')))
 }))
 
 // The install record is removed only when it read as one when setup planned, as on main: a dangling link there is not
