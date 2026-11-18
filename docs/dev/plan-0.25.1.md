@@ -347,8 +347,8 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 
 | Version | Theme |
 |---|---|
-| 0.26.0 | Every hook change in one release, the first to arrive by itself: remaining receivers, desktop apps through the vendor's own door, Codex and OpenCode approvals, six states, notices that open a card, agent sending (#317) |
-| 0.27.0 | Agents use the board: one MCP route, hand-off; the cloud-bot bridge plan |
+| 0.26.0 | Every hook change in one release, the first to arrive by itself: remaining receivers, desktop apps through the vendor's own door, Codex and OpenCode approvals, six states, notices that open a card, agent sending (#317), one MCP route (#685, #722, #723) |
+| 0.27.0 | Agents use the board: hand-off; the cloud-bot bridge plan |
 | 0.28.0 | Away from the desk: the phone sends and answers; the server starts at login |
 | 0.29.0 | The first cloud bot reads what the person shared |
 | 0.30.0 | Cloud bots both ways, never approving |
