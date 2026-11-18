@@ -6341,6 +6341,32 @@ test('an OpenCode row carries the OpenCode process the worker ran under, ends on
   assert.ok(!record.includes('agentPid') && !record.includes(host), record)
 }))
 
+// Review of #1670 (codex_501, P1 1): the process was read from the first marker naming the owner, which may sit in a code
+// example above the real block, while the writer rewrites the one visible block the session owns.
+test('a copy of an OpenCode block in a code example above the real one does not take the row\'s process away (#1595)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const { parseProgress } = await importTs('../hooks/parse.ts')
+  const { goneBlocksOf } = await importTs('../scripts/session-liveness.ts')
+  const id = 'synthetic-opencode-fenced-1595'
+  const markers = () => readFileSync(f.progress, 'utf8').split(/\r?\n/).filter(line => line.startsWith('<!-- auto ') && line.includes(' agent=opencode '))
+  const run = await openCodeStandIn(f, { session_id: id, state: 'waiting', last_assistant_message: 'Which branch?' })
+  try { assert.equal(run.ran.status, 0, run.ran.stderr) } finally { await run.quit() }
+  const [real] = markers()
+  assert.match(real, new RegExp(` agentpid=${run.pid}(?= |$)`))
+  // A note above the block quotes it in a code example, without the process.
+  const copy = real.replace(/ agentpid=\d+/, '').replace(/ host=[0-9a-f]{64}/, '')
+  const session8 = /session=([0-9a-f]{8})/.exec(real)[1]
+  writeFileSync(f.progress, `## Notes\n\n\`\`\`md\n${copy}\n### Example\n<!-- /auto session=${session8} -->\n\`\`\`\n\n${readFileSync(f.progress, 'utf8')}`)
+  assert.equal(goneBlocksOf(parseProgress(readFileSync(f.progress, 'utf8'))).size, 1, 'the real row is gone before the next status')
+  // A status that names no process changes the question: the real block keeps its process, and the copy is left as it was.
+  assert.equal(f.command(['--agent-status', '--agent', 'opencode', '--state', 'waiting'], { session_id: id, last_assistant_message: 'Another question?' }).status, 0)
+  const after = markers()
+  assert.equal(after[0], copy, 'the code example is untouched')
+  assert.match(after[1], new RegExp(` agentpid=${run.pid}(?= |$)`))
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Another question\?/)
+  assert.equal(goneBlocksOf(parseProgress(readFileSync(f.progress, 'utf8'))).size, 1, 'the row of the quit OpenCode stays ended')
+}))
+
 test('an OpenCode status that carries delivery_request leaves its owned question open, a person\'s prompt answers it (#1334)', () => fixture(f => {
   assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
   const send = (id, state, extra = {}) => f.command(['--agent-status', '--agent', 'opencode', '--state', state], { session_id: id, ...extra })

@@ -11642,6 +11642,26 @@ test('a working Codex session with no block of its own names its project once an
   } finally { await waiting.board.close() }
 })
 
+// Review of #1670 (codex_501, P1 2): the row read ended, but the Agents list still said open, because its presence
+// reads only a closed source and fell back to the recent activity.
+test('the Agents list reads OpenCode as closed, not open, once the OpenCode process its row names has quit (#1595)', async () => {
+  const { hostHashOf } = await import('../hooks/session-liveness.ts')
+  const { hostname } = await import('node:os')
+  const host = hostHashOf(process.platform, process.platform === 'win32' ? process.env.COMPUTERNAME ?? hostname() : process.env.HOSTNAME ?? hostname())
+  assert.notEqual(host, null, 'this machine has a host hash')
+  const quit = spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid
+  assert.throws(() => process.kill(quit, 0), error => error.code === 'ESRCH', `stand-in OpenCode ${quit} is unexpectedly alive`)
+  const opencode = pid => groupedBlock('47700009', 'opencode', 'waiting', 'tools-repo', 'Pick the parser', ['- [?] Which parser?'], 2).replace(' -->\n###', ` agentpid=${pid} host=${host} -->\n###`)
+  for (const [label, pid, expected] of [['open', process.pid, 'open'], ['quit', quit, 'offline']]) {
+    const { board, model, html } = await groupedPage([groupedSource(), opencode(pid)].join('\n'))
+    try {
+      const dom = await pageDom(html, model, { width: 1280 })
+      assert.equal(rowAgent(dom, 'opencode')?.getAttribute('data-presence'), expected, label)
+      if (expected === 'offline') assert.ok(shownWords(rowAgent(dom, 'opencode')).includes(EN.pgOffline), shownWords(rowAgent(dom, 'opencode')))
+    } finally { await board.close() }
+  }
+})
+
 test('an agent not heard from for 30 minutes keeps its icon colours, and its state is a mark and a word in every language', async () => {
   // Gemini last wrote 45 minutes ago and nothing says its session ended; it still has a question.
   const geminiBlock = minutes => groupedBlock('47700002', 'gemini', 'waiting', 'docs-repo', 'Choose the short guide', ['- [?] Short or detailed?', '- [ ] Edit'], minutes)
