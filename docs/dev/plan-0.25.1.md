@@ -352,17 +352,17 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 | 1.x | A communication panel for several bots and agents |
 | 2.0 | A published shape that outside hosts join without our code |
 
-## 14. Owner decisions still open
+## 14. Owner decisions
 
-None of these holds up the start of 0.25.1.
+The owner took the proposed answer on all six, 2026-11-18: 「都按照预设吧」.
 
-| # | Question | Assumed until answered |
+| # | Question | Decision |
 |---|---|---|
 | 1 | After 0.26.0: agents use the board first, or the phone first? | Agents first |
 | 2 | Standing allow rules: drop them, or after 1.0? | After 1.0 |
-| 3 | May a board message reach the Claude desktop app through Claude Code's inbox, marked as not from you? | Only check C6 runs |
-| 4 | On delivery, setup and launch changes, may the first review round read only the case table and tests? | Not tried until the owner answers |
-| 5 | macOS has no process lookup here, so board approvals fall back to Claude Code's own prompt there. Accept this for 0.25.1? | M4 does not merge until the owner answers. Recommended: accept, and the notes say so |
+| 3 | May a board message reach the Claude desktop app through Claude Code's inbox, marked as not from you? | Only check C6 runs in 0.25.1; nothing is built |
+| 4 | On delivery, setup and launch changes, may the first review round read only the case table and tests? | Not tried in 0.25.1; review stays as it is |
+| 5 | macOS has no process lookup here, so board approvals fall back to Claude Code's own prompt there. Accept this for 0.25.1? | Accepted, and the release notes say so |
 | 6 | Claude Code does not update a third-party plugin by itself, so a person with only the plugin does 2 steps each release. Accept this bar for 0.25.1? | Accepted. If C5 finds the person can turn on automatic updates, the notes say how |
 
 ## 15. How the review findings were answered
