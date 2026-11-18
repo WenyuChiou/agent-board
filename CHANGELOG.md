@@ -2,7 +2,7 @@
 
 What changed for the person using Agent Board, one line per change, newest version first. How a change was built and tested is in its pull request. Entries up to 0.24.0 were shortened to this form on 2026-11-02; their full text is in `git show ddbef2a:CHANGELOG.md`.
 
-## 0.25.0 — 2026-11-16
+## 0.25.0 — 2026-11-18
 
 - A board message delivered through a generated hook keeps its question open, and the PowerShell hook no longer searches the module folders on every run (#1334, #836, #1573).
 
