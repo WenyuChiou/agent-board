@@ -50,7 +50,7 @@ const isAlivePid = (pid: number): boolean => {
   }
 }
 
-// Keys (`blockKey(auto)`) of working/waiting Claude session blocks whose claimed
+// Keys (`blockKey(auto)`) of working/waiting Claude Code and OpenCode session blocks whose claimed
 // agent process is gone on this machine (#1092). The kill runs first for every
 // claimed pid; dead pids evict the cache without spawning a start lookup, and
 // live pids with an uncached `(pid, started)` share ONE `lookupStart` call.

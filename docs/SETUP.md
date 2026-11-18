@@ -330,8 +330,11 @@ the old scoped installation first, so an orphan plugin cannot continue reporting
 OpenCode sends no session end for a one-shot `opencode run`, so as OpenCode exits the
 plugin ends the top-level sessions it reported that had finished their reply, within 2 s
 plus the worker's 500 ms grace.
-A session still replying is left as it is and goes stale by age. Quitting OpenCode ends
-its rows too; a resumed session reopens its row. New OpenCode blocks are filed under the
+That exit step leaves a session still replying as it is. Quitting OpenCode ends
+its rows too; a resumed session reopens its row. Each row also names the OpenCode process
+it ran under, so once that process is gone the board ends its rows on its next read, a
+replying one included, even if the exit step did not run. Rows written before 0.25.1 name no process and
+keep the 12-hour rule. New OpenCode blocks are filed under the
 folder the session ran in. The progress tool takes each step as one Markdown task line
 (`- [~] Current step`); a refused report names the board's reason, such as `INVALID_STEP`.
 
