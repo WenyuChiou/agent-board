@@ -7196,13 +7196,13 @@ test('Copy-only Codex cards use the same honest hint before and after the board 
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
   const session = '11111111-2222-4333-8444-555555555555'
   const words = [
-    [EN, 'Use Copy and paste into Codex for now; board messages can arrive on a later turn once this session connects and sending has been checked live.'],
-    [ZH_TW, '現在請複製後貼到 Codex；這個會話連上看板且傳送方式經過現場驗證後，看板訊息才能在之後的一輪送達。'],
-    [ZH_CN, '现在请复制后粘贴到 Codex；这个会话连接看板且发送方式经过现场验证后，看板消息才能在之后的一轮送达。'],
+    [EN, "Copy and paste into Codex for now; if this session isn't connected to the board or sending hasn't been checked live, the board can't send, but once both are in place messages can arrive on a later turn."],
+    [ZH_TW, '現在請複製後貼到 Codex；這個會話若未連上看板或傳送方式尚未經過現場驗證，看板就不能傳送，兩個條件都具備後，訊息才可能在之後的一輪送達。'],
+    [ZH_CN, '现在请复制后粘贴到 Codex；这个会话若未连上看板或发送方式尚未经过现场验证，看板就不能发送，两个条件都具备后，消息才可能在之后的一轮送达。'],
   ]
   for (const state of ['idle', 'working']) for (const [s, expected] of words) {
     const now = Date.now()
-    const view = buildView(parseProgress(stateFile('codex', state, session)), [], null, now, 0, {}, s)
+    const view = buildView(parseProgress(stateFile('codex', state, session).replace(`resume=${session}`, `resume=${session} dir=${encodeURIComponent(tmpdir())}`)), [], null, now, 0, {}, s)
     const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
     // A session that started before the board has no mailbox; a later hook can enroll one.
     // An unverified surface still offers Copy, even after that enrollment.
