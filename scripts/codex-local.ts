@@ -1139,7 +1139,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A replay can skip writes only after a board completion reached the cache too.
       // A new hook event is not a replay even when the block reads the same: its record keeps the event.
       const repaired = reporterTail(bytes)
-      const named = blockClaimOf(text, owner)
+      const named = blockClaimOf(text, owner, agent, session)
       const claim = entry === current && liveClaim !== null ? liveClaim : named
       if (repaired.fragment === null && mode !== '--codex-report' && claimText(named) === claimText(claim) && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? null) === JSON.stringify(report.askedOptions ?? null) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)

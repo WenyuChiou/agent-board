@@ -456,10 +456,13 @@ export const hookParentClaim = (parent: string | undefined, host: string | null)
 }
 // The process a block names (#1595). An OpenCode event that names none (the board's replay of a queued event, a command a
 // person typed) keeps it, so a session whose OpenCode has quit is not reopened by a late or hand-made status.
-export const blockClaimOf = (text: string, owner: string): AgentClaim | null => {
-  const line = text.split('\n').find(one => one.startsWith('<!-- auto ') && one.includes(` owner=${owner} `))
-  if (line === undefined) return null
-  const attrs = parseAttrs(line)
+// It is read from the block putCodexBlock writes: the one visible block this session owns, never a copy in a code example.
+export const blockClaimOf = (text: string, owner: string, agent: string, session: string): AgentClaim | null => {
+  const lines = text.split('\n')
+  const found = localBlockSpans(lines, owner, agent, session)
+  const span = found?.length === 1 ? found[0] : undefined
+  if (span === undefined) return null
+  const attrs = parseAttrs(lines[span.start] ?? '')
   return agentClaimOf({ agentPid: Number(attrs.agentpid), ...(attrs.agentstarted === undefined ? {} : { agentStarted: Number(attrs.agentstarted) }), host: attrs.host })
 }
 export const claimText = (claim: AgentClaim | null): string => claim === null ? '' : `${claim.pid}:${claim.started ?? ''}:${claim.host}`

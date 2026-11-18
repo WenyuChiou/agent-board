@@ -692,8 +692,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !isUncertainEnded(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
         hasCopyBox: !(row.auto === 'ended' && row.question === null && send === 'none') && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined || found !== undefined && connection === undefined),
-        // A Claude row has no target, so its closed session is the block's own state=ended.
-        ...(row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true ? { isClosed: true as const } : {}),
+        // A Claude row has no target, so its closed session is the block's own state=ended. A row whose process the board
+        // found gone is closed too, so the Agents list stops saying open (#1595).
+        ...(row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true || row.isProcessGone === true ? { isClosed: true as const } : {}),
       })
       continue
     }
