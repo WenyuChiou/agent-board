@@ -4909,12 +4909,33 @@ test('a Codex thread the receiver was dropped from while it could not leave it i
   // The first leave is refused and the ones after it get no answer (their limit is 2 s here), so the receiver stays subscribed. The
   // stand-in keeps the thread 5 s from the moment the connection is lost: time for the next Codex program to start, for the
   // receiver to register again and for a board poll, so that a receiver that read the thread as a person's would take the message.
-  const daemon = codexDaemon(dir, { person, pidFile, unloadDelay: 5000, unsubscribeFaults: ['error', 'mute', 'mute'] })
-  const receiver = codexReceiver(board, daemon, { unloadMs: 6000, leaveMs: 2000 })
+  const hold = join(dir, 'read-hold')
+  const daemon = codexDaemon(dir, { person, pidFile, unloadDelay: 5000, unsubscribeFaults: ['error', 'mute', 'mute'], readHold: hold })
+  // Until the first message is acknowledged the receiver reads the time on a clock this test moves by hand: 1 s each time the
+  // stand-in has had another thread/read, so its looks are at most two steps apart on that clock, inside the gap rule's 20 s
+  // (watchTickMs), however slow the runner is. On the wall clock with its 100 ms tick, the 6 s wait for the first message needed
+  // 6 s of looks never more than 200 ms apart, and a runner that paused for longer started it again past the test's deadline
+  // (#1639). From the acknowledgement on, the clock runs with the wall clock from where it stands, so the 6 s wait after the lost
+  // connection is real time against the stand-in's real 5 s: the gap rule only ever starts a wait again, so its 20 s there can
+  // only bring a wrong start sooner, never hide one.
+  let clock = 0, since = null
+  const reads = () => daemon.calls().filter(one => one.method === 'thread/read').length
+  const receiver = codexReceiver(board, daemon, { unloadMs: 6000, leaveMs: 2000, now: () => since === null ? clock : clock + performance.now() - since, watchTickMs: 10_000 })
   try {
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
-    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    // Every third step the stand-in holds the answers to thread/read for 400 ms, a runner's pause of four ticks: on the wall
+    // clock each such pause would start the wait again, and the first message would never come.
+    let seen = reads(), steps = 0
+    await waitFor(async () => {
+      if ((await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged') return true
+      if (reads() > seen) {
+        seen = reads(); clock += 1000; steps += 1
+        if (steps % 3 === 0) { writeFileSync(hold, ''); await pause(400); unlinkSync(hold) }
+      }
+      return false
+    })
+    since = performance.now()
     const acknowledged = Date.now()
     // The person quits, and another connection registers for the session: the receiver's board connection ends while it is
     // still subscribed to the thread.
@@ -5157,15 +5178,16 @@ test('an unsent receipt from the connection that holds a claim puts the message 
 // thread reads as a person's about 2 s after the turn ended, well inside the claim's time.
 // endTurn: when the person's turn ends (by default right after the receiver leaves). started: called once the proxy and the receiver
 // run, before the rest of the setup. Whatever fails after they started closes both before the error goes on (#1626).
-const codexGiveBackCase = async (board, dir, mode, { endTurn, started, onError } = {}) => {
+// daemonConfig and receiverOptions: added to the stand-in's config and the receiver's options.
+const codexGiveBackCase = async (board, dir, mode, { endTurn, started, onError, daemonConfig = {}, receiverOptions = {} } = {}) => {
   const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
   writeFileSync(person, '')
-  const daemon = codexDaemon(dir, { readActive: true, endFlag, person })
+  const daemon = codexDaemon(dir, { readActive: true, endFlag, person, ...daemonConfig })
   const proxy = await pollingProxy(board, mode)
   let receiver
   const close = async () => { await receiver?.close(); await proxy.close() }
   try {
-    receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 4000, ...(onError ? { onError } : {}) })
+    receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 4000, ...(onError ? { onError } : {}), ...receiverOptions })
     await started?.({ proxy, receiver, daemon })
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
@@ -5176,16 +5198,42 @@ const codexGiveBackCase = async (board, dir, mode, { endTurn, started, onError }
   return { daemon, proxy, close }
 }
 // The give-back never reaches the board; the proxy answers it as the board would.
+// The receiver watches the thread on a clock this test moves by hand: 1 s each time the stand-in has had another thread/read, so its
+// looks are at most two steps apart on that clock, inside the gap rule's 20 s (watchTickMs), however slow the runner is. The clock
+// stands still from the receiver's leave until the give-back was answered, so the whole wait after the person's turn cannot be over
+// before the claim is given back. On the wall clock with its 100 ms tick, the 2 s wait after the give-back needed looks never more
+// than 200 ms apart inside the claim's last 2.2 s, and a runner that paused for longer started the wait again past the claim's time:
+// the message was never started and the test timed out (#1646). The claim's own 4 s are still the board's real time.
 const codexRefusedGiveBack = mode => codexFixture(async (board, dir) => {
-  const { daemon, proxy, close } = await codexGiveBackCase(board, dir, mode)
+  const hold = join(dir, 'read-hold')
+  let clock = 0, isMoving = true, isDone = false, daemon = null, afterBack = null
+  const reads = () => daemon === null ? 0 : daemon.calls().filter(one => one.method === 'thread/read').length
+  // After the give-back, the second step holds the answers to thread/read for 400 ms, a runner's pause of four ticks: on the wall
+  // clock that pause started the wait again, and the claim ran out before the message was started.
+  const driving = (async () => {
+    let seen = 0
+    while (!isDone) {
+      const now = reads()
+      if (now > seen) {
+        seen = now
+        if (isMoving) clock += 1000
+        if (isMoving && afterBack !== null && ++afterBack === 2) { writeFileSync(hold, ''); await pause(400); unlinkSync(hold) }
+      }
+      await pause(20)
+    }
+  })()
+  const started = ({ daemon: one }) => { daemon = one }
+  const endTurn = () => { isMoving = false }
+  const { proxy, close } = await codexGiveBackCase(board, dir, mode, { started, endTurn, daemonConfig: { readHold: hold }, receiverOptions: { now: () => clock, watchTickMs: 10_000 } }).catch(async error => { isDone = true; await driving; throw error })
   try {
     // The give-back was answered, and the board still holds the claim for this receiver, which started nothing yet.
     await waitFor(async () => proxy.faults() > 0)
     assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
     // The claim is still the receiver's: it is started once when the thread reads as a person's, and acknowledged.
+    afterBack = 0; isMoving = true
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
     assert.equal(codexStarts(daemon), 1)
-  } finally { await close() }
+  } finally { isDone = true; await driving; await close() }
 })
 
 test("a Codex claim whose give-back the board refuses (409) is still the receiver's, and is started once when the thread reads as a person's in time (#1578)", () => codexRefusedGiveBack('unsent-refused'))
@@ -5233,19 +5281,15 @@ test('a give-back case whose setup fails after its proxy and receiver started cl
 test('a Codex receiver closed while it is still connecting to Codex ends that connection before close() is done (#1632)', () => codexFixture(async (board, dir) => {
   const pidFile = join(dir, 'proxy.pid')
   const daemon = codexDaemon(dir, { pidFile })
+  // Whether the stand-in whose id is in pidFile still runs (signal 0 checks, and sends nothing).
+  const isRunning = () => { try { process.kill(Number(readFileSync(pidFile, 'utf8')), 0); return true } catch { return false } }
   try {
     // The first tick starts connecting at once; close() comes before the connection is made.
     await codexReceiver(board, daemon).close()
-    // The stand-in writes its state every 50 ms while it runs: once close() is done, that stops.
-    const state = daemon.log + '.state'
-    const seen = () => { try { return JSON.parse(readFileSync(state, 'utf8')).seen } catch { return null } }
-    await pause(500)
-    const first = seen()
-    await pause(500)
-    // The connection was made (the stand-in logged its handshake), and the stand-in no longer runs: its state, if it wrote any, is
-    // not written again.
-    assert.ok(readFileSyncSafe(daemon.log).includes('handshake'))
-    assert.equal(seen(), first)
+    // Read at once when close() is done, with no wait in between (#1641): the connection was made (the stand-in wrote its id and
+    // logged its handshake) and is closed already (the stand-in no longer runs). A close() that did not wait for the connection
+    // returns before the handshake, with the stand-in still starting or running.
+    assert.deepEqual([(readFileSyncSafe(daemon.log) ?? '').includes('handshake'), existsSync(pidFile), isRunning()], [true, true, false])
   } finally {
     // A receiver that kept the connection leaves the stand-in running, which would keep the test run from ending: the test ends it
     // by its pid, so a receiver without the fix fails here instead of hanging.

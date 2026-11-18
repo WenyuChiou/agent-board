@@ -10029,6 +10029,33 @@ test('the page sends its ETag and keeps its current view on a 304', { timeout: 3
   assert.equal(dom.node('offline').textContent, '')
 })
 
+test('serve: the shipped page asks again at once while it holds the board, and in 2 s without it (#359)', { timeout: 30_000 }, async () => {
+  const html = await sourcePage()
+  const model = cardsModel()
+  const etag = `W/"${'c'.repeat(64)}"`
+  const asked = []
+  const dom = await pageDom(html, model, { getBoard: async options => {
+    asked.push({ etag: options.headers['if-none-match'], wait: options.headers['x-board-wait'] })
+    if (asked.length === 3) throw new Error('synthetic offline server')
+    if (asked.length === 2) return { ok: false, status: 304, json: async () => { throw new Error('a 304 body must never be read') } }
+    return { ok: true, status: 200, headers: { get: name => name === 'etag' ? etag : null }, json: async () => ({ model, now: 1 }) }
+  } })
+  await dom.settle()
+  // The first answer brought the board and its etag: the next request goes at once and asks the server to hold it.
+  assert.equal(dom.pollMs, 0)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.deepEqual(asked.slice(0, 2), [{ etag: undefined, wait: undefined }, { etag, wait: '1' }])
+  // "No change" from the held request: it asks again at once, still holding the board.
+  assert.equal(dom.pollMs, 0)
+  await dom.redraw(model)
+  await dom.settle()
+  // Offline: no board to hold, so it asks in 2 s, as before (#242).
+  assert.equal(asked.length, 3)
+  assert.ok(dom.node('offline').textContent, 'the page says it lost the board')
+  assert.equal(dom.pollMs, 2000)
+})
+
 test('the page requests a full board when reconnecting after a failed poll', async () => {
   const html = await sourcePage()
   const model = cardsModel()
