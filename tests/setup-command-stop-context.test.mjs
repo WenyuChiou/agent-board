@@ -14,6 +14,7 @@ const succeeded = result => {
   assert.equal(result.status, 0, result.stderr)
 }
 const echo = (words, expected) => fixture((unused, f) => {
+  f.env.LANG = 'en_US.UTF-8'
   const data = join(f.root, 'selected install')
   mkdirSync(data)
   writeFileSync(join(data, 'agent-board.mjs'), 'process.stdout.write(JSON.stringify(process.argv.slice(2)))\n')

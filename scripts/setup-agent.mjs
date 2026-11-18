@@ -587,7 +587,7 @@ const main = () => {
   const changedAgents = available.filter(agent => plans[selected.indexOf(agent)].changes.length > 0)
   const hasChanges = changedAgents.length > 0
   const isRepair = hasChanges && changedAgents.every(agent => touched.includes(agent))
-  const shouldInstallPlugin = isPluginNeeded && !isRepair
+  const isPluginInstallNeeded = isPluginNeeded && !isRepair
   if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
     const approvals = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
@@ -600,7 +600,7 @@ const main = () => {
       ...(sharedChanges.length ? [sharedLine] : []),
       ...agentLines.filter((line, i) => !plans[i].conflicts.length && changesFor(plans[i], false).length).map(line => line.split('\n')[0]),
       ...approvals.map(agent => words('trustPart', { host: names[agent] })),
-      ...(shouldInstallPlugin ? [words('installPlugin')] : []),
+      ...(isPluginInstallNeeded ? [words('installPlugin')] : []),
     ]
     const report = (part, isDone, next) => process.stdout.write(`${words(isDone ? 'partDone' : 'partFailed', { part, command: next })}\n`)
     // The sidecar is a second, separate question that defaults to no. A yes only writes its files (the person
@@ -662,7 +662,7 @@ const main = () => {
       }
       let hasInstalledPlugin = hasPlugin(claudeDirectory)
       let isPluginReady = !!claude && hasInstalledPlugin && !isPluginDisabled(claudeDirectory)
-      if (shouldInstallPlugin) {
+      if (isPluginInstallNeeded) {
         let known = null
         try { known = JSON.parse(readFileSync(join(claudeDirectory, 'plugins', 'known_marketplaces.json'), 'utf8').replace(/^\uFEFF/, '')) } catch {}
         // A marketplace Claude Code already knows would make "marketplace add" fail; only the install is left.
