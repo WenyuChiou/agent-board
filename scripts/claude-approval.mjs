@@ -6,12 +6,15 @@
 // It does not use an address folder inside the session's working folder, and it does not ask the board
 // about a request to run without the sandbox. It never answers in a mode where Claude Code would not
 // ask, and it never sends updatedPermissions, updatedInput or interrupt: nothing standing is ever added.
+// Before it sends anything it checks who is listening (#1651): the address file's process must hold the
+// port by the system's own table and be Node running the board script at an expected path. A check that
+// refuses, fails or runs out of time ends the same way as no board: nothing printed, Claude Code asks.
 // Plain Node with no imports outside node:, as the plugin's hooks.json runs it directly. The
 // address rules follow hooks/receiver.ts, plus Windows XDG_RUNTIME_DIR ACL verification matching
 // scripts/runtime-folder.ts; tests/approvals.test.mjs keeps them in step.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,6 +28,8 @@ const ASK_MS = 35_000
 // whoami + PowerShell ACL checks) shares only what remains before the board's reply window.
 const HOOK_MS = 45_000
 export const DISCOVERY_MS = HOOK_MS - ASK_MS
+// The most the check of who is listening may add to a request. Windows needs about 0.6 s of it.
+export const LOOKUP_MS = 2_000
 const INPUT_MS = 5_000
 const INPUT_MAX = 1024 * 1024
 // The board takes a request of up to 64 KB; a tool input past this many bytes is sent with its long
@@ -352,10 +357,231 @@ export const readAddress = (env, platform, cwd, discovery = {}) => {
       text = readFileSync(found.file, 'utf8')
     }
     if (now() >= deadline) return null
-    if (!isRunning(JSON.parse(text)?.pid)) return null
-    return parseAddress(text, found.key)
+    const pid = JSON.parse(text)?.pid
+    if (!isRunning(pid)) return null
+    const parsed = parseAddress(text, found.key)
+    if (parsed === null) return null
+    // The port the request would go to, from the address itself and not the file's separate field.
+    const port = Number(parsed.origin.slice(parsed.origin.lastIndexOf(':') + 1))
+    return { ...parsed, pid, port, file: found.file, scripts: boardScripts(env, found.home, platform) }
   } catch {
     return null
+  }
+}
+
+// Where a board script is installed: beside the progress file, the independent setup's folder, and the
+// copy the Claude Code plugin writes into its config folder. Paths and not hashes, so a board that
+// updates itself still passes.
+export const boardScripts = (env, home, platform) => {
+  const sep = platform === 'win32' ? '\\' : '/'
+  const config = (env.CLAUDE_CONFIG_DIR ?? '').replace(/[\\/]+$/, '')
+  return [
+    progressPath(env).replace(/[^\\/]*$/, 'agent-board.mjs'),
+    [home, '.agent-board', 'agent-board.mjs'].join(sep),
+    [config !== '' ? config : [home, '.claude'].join(sep), 'agent-board.mjs'].join(sep),
+  ]
+}
+
+// Files beside the address file, named for the same board: the page's off switch and what the page shows of a refusal.
+export const approvalsOffFile = file => file.replace(/\.json$/, '-approvals-off.json')
+export const approvalsRefusedFile = file => file.replace(/\.json$/, '-approvals-refused.json')
+
+// The person's off switch: the file being there is the whole signal, whatever it holds. Only a file
+// known to be absent leaves approvals on, so a marker the hook cannot read still stops it.
+export const isSwitchedOff = file => {
+  try {
+    lstatSync(approvalsOffFile(file))
+    return true
+  } catch (error) {
+    return error?.code !== 'ENOENT'
+  }
+}
+
+// So approvals do not vanish without a word: the reason, and never the command. The page reads it, and
+// a record that cannot be written changes nothing about the answer.
+const leaveRefusal = (file, reason) => {
+  const record = approvalsRefusedFile(file)
+  const temp = `${record}.${process.pid}.tmp`
+  try {
+    writeFileSync(temp, `${JSON.stringify({ at: new Date().toISOString(), reason })}\n`, { flag: 'wx', mode: 0o600 })
+    renameSync(temp, record)
+  } catch {
+    try { unlinkSync(temp) } catch {}
+  }
+}
+
+// A check that passes ends what an earlier refusal said, or the page would go on reporting a refusal that is over.
+// A record that cannot be removed changes nothing about the request.
+const clearRefusal = file => {
+  try { unlinkSync(approvalsRefusedFile(file)) } catch {}
+}
+
+// The listening rows for a port in `netstat -ano -p TCP`. Windows translates the state column on some
+// systems, so a listening row is known by its empty foreign address. 0.0.0.0 counts: it takes
+// connections to 127.0.0.1 too.
+export const netstatListeners = (text, port) => {
+  const owners = []
+  for (const line of text.split(/\r?\n/)) {
+    const row = /^\s*TCP\s+(?:127\.0\.0\.1|0\.0\.0\.0):(\d+)\s+0\.0\.0\.0:0\s+.*?(\d+)\s*$/i.exec(line)
+    if (row !== null && Number(row[1]) === port) owners.push(Number(row[2]))
+  }
+  return owners
+}
+
+// The same from Linux's /proc/net/tcp: the socket numbers listening (state 0A) on the port. The kernel prints an
+// address in the machine's own byte order, so 127.0.0.1 is spelled the other way round on a big-endian machine.
+export const procListeners = (text, port) => {
+  const hex = port.toString(16).toUpperCase().padStart(4, '0')
+  const wanted = new Set([`0100007F:${hex}`, `7F000001:${hex}`, `00000000:${hex}`])
+  return text.split('\n').slice(1).map(line => line.trim().split(/\s+/))
+    .filter(cells => cells[3] === '0A' && wanted.has(cells[1])).map(cells => cells[9])
+}
+
+// Every listener on the port must be this process: a port shared with another could hand it the request.
+export const isSoleOwner = (listeners, own) => listeners.length > 0 && listeners.every(one => own.has(one))
+
+// How a Windows program splits its command line (CommandLineToArgvW). The first word takes no escapes.
+export const splitWindowsCommand = text => {
+  const words = []
+  const isGap = char => char === ' ' || char === '\t'
+  let at = 0
+  while (at < text.length) {
+    if (isGap(text[at])) { at += 1; continue }
+    let word = ''
+    let isQuoted = false
+    while (at < text.length && (isQuoted || !isGap(text[at]))) {
+      if (text[at] === '\\' && words.length > 0) {
+        let end = at
+        while (text[end] === '\\') end += 1
+        const slashes = end - at
+        if (text[end] !== '"') word += text.slice(at, end)
+        else word += '\\'.repeat(slashes >> 1) + (slashes % 2 === 1 ? '"' : '')
+        at = text[end] === '"' && slashes % 2 === 1 ? end + 1 : end
+      } else if (text[at] === '"' && isQuoted && text[at + 1] === '"' && words.length > 0) {
+        word += '"'
+        at += 2
+      } else if (text[at] === '"') {
+        isQuoted = !isQuoted
+        at += 1
+      } else {
+        word += text[at]
+        at += 1
+      }
+    }
+    words.push(word)
+  }
+  return words
+}
+
+// Two lines from the query below, each marked so that an empty value is still a line.
+export const parseWindowsProcess = text => {
+  const lines = text.trim().split(/\r?\n/)
+  if (lines.length !== 2 || !lines.every(line => line.startsWith('='))) return null
+  const [exe, command] = lines.map(line => Buffer.from(line.slice(1), 'base64').toString('utf8'))
+  return { exe, argv: splitWindowsCommand(command) }
+}
+
+// Base64, as PowerShell would otherwise print a path in the system's code page.
+const winProcessScript = pid => "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; "
+  + "Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1'); "
+  + "Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\CimCmdlets\\CimCmdlets.psd1'); "
+  + `$found = CimCmdlets\\Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId=${pid}' -Property ExecutablePath,CommandLine; `
+  + 'if ($null -eq $found) { exit 3 }; '
+  + "foreach ($value in @($found.ExecutablePath, $found.CommandLine)) { '=' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$value)) }"
+
+// What the system itself says. Windows: netstat and one process query (Get-NetTCPConnection is too slow
+// for a hook). Linux: /proc, which needs nothing installed. Any other system has no lookup here. `files` reads /proc,
+// so a test can play a state no real process can be held in.
+export const systemLookup = (platform, files = { readdirSync, readlinkSync, readFileSync }) => {
+  if (platform === 'win32') return {
+    isSoleListener: (pid, port, timeout) => isSoleOwner(netstatListeners(execFileSync(join(winSystem(), 'netstat.exe'), ['-ano', '-p', 'TCP'], { ...WIN_OPTIONS, timeout }), port), new Set([pid])),
+    processOf: (pid, timeout) => {
+      const found = parseWindowsProcess(execFileSync(join(winSystem(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', winProcessScript(pid)], { ...WIN_OPTIONS, timeout }))
+      if (found === null) throw new Error('unreadable process query')
+      return found
+    },
+  }
+  if (platform === 'linux') return {
+    isSoleListener: (pid, port) => {
+      const own = new Set()
+      for (const name of files.readdirSync(`/proc/${pid}/fd`)) {
+        // A descriptor can close between the listing and this read.
+        try {
+          const socket = /^socket:\[(\d+)\]$/.exec(files.readlinkSync(`/proc/${pid}/fd/${name}`))
+          if (socket !== null) own.add(socket[1])
+        } catch {}
+      }
+      return isSoleOwner(procListeners(files.readFileSync('/proc/net/tcp', 'utf8'), port), own)
+    },
+    processOf: pid => ({
+      // A Node upgraded while the board runs reads as "<path> (deleted)".
+      exe: files.readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, ''),
+      argv: files.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').slice(0, -1),
+    }),
+  }
+  return null
+}
+
+const isNodeProgram = exe => /^node(?:js)?(?:\d[\d.]*)?(?:\.exe)?$/i.test(exe.split(/[\\/]/).at(-1) ?? '')
+const isFullPath = (path, platform) => platform === 'win32' ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path) : path.startsWith('/')
+
+// The Node options a board's page can start with: what serverMemoryArgs in scripts/server-runtime.ts passes on. This
+// script imports nothing of the board's, so tests/approvals.test.mjs keeps these two lists in step with it.
+export const HEAP_VALUE_OPTIONS = [
+  '--max-semi-space-size', '--min-semi-space-size', '--max-old-space-size',
+  '--max-old-space-size-percentage', '--max-heap-size', '--initial-heap-size',
+  '--initial-old-space-size', '--heap-growing-percent',
+]
+export const HEAP_SWITCH_OPTIONS = ['--optimize-for-size', '--no-optimize-for-size', '--nooptimize-for-size']
+
+// One word, as Node will not start with `--max-old-space-size 512`. Only the name after the leading `--` may use `_`
+// for `-`: a word that starts `__` is a file Node would run.
+const isHeapOption = word => {
+  const parts = /^--([a-z_-]+)(?:=(\d+(?:\.\d+)?))?$/.exec(word)
+  if (parts === null) return false
+  const name = `--${(parts[1] ?? '').replaceAll('_', '-')}`
+  return parts[2] === undefined ? HEAP_SWITCH_OPTIONS.includes(name) : HEAP_VALUE_OPTIONS.includes(name)
+}
+
+// The script a Node command line runs, or null. Only the board's own heap options may come before it: any other option
+// can make Node run other code with the board's path as a mere argument (`-` reads the program from stdin, `--env-file`
+// can set NODE_OPTIONS). Words after the script are the board's own, so a later board may add to them.
+export const scriptOf = argv => {
+  for (const word of argv.slice(1)) {
+    if (!word.startsWith('-')) return word
+    if (!isHeapOption(word)) return null
+  }
+  return null
+}
+
+// Why this process is not the board, or null when it is.
+export const processRefusal = (found, scripts, platform) => {
+  if (found.argv.every(word => word.trim() === '')) return 'empty-command-line'
+  if (!isNodeProgram(found.exe)) return 'not-node'
+  const script = scriptOf(found.argv)
+  if (script === null || !isFullPath(script, platform)) return 'not-board-script'
+  const isSame = one => {
+    try { return realOf(one, platform) === realOf(script, platform) } catch { return false }
+  }
+  return scripts.some(isSame) ? null : 'not-board-script'
+}
+
+// Why the listener on the address file's port may not be told the command, or null when it may. Every way this
+// can go wrong is a reason, so nothing here can fall through to asking the listener.
+export const listenerRefusal = (board, { platform, now = () => performance.now(), deadline = Infinity, lookupMs = LOOKUP_MS, lookup = systemLookup(platform) }) => {
+  if (lookup === null) return 'no-lookup'
+  const stop = Math.min(now() + lookupMs, deadline)
+  const left = () => Math.floor(stop - now())
+  try {
+    if (left() <= 0) return 'lookup-timeout'
+    const isListener = lookup.isSoleListener(board.pid, board.port, left())
+    if (left() <= 0) return 'lookup-timeout'
+    if (!isListener) return 'not-listening'
+    const found = lookup.processOf(board.pid, left())
+    if (left() <= 0) return 'lookup-timeout'
+    return processRefusal(found, board.scripts, platform)
+  } catch (error) {
+    return winIsKilled(error) ? 'lookup-timeout' : 'lookup-failed'
   }
 }
 
@@ -436,6 +662,13 @@ export const run = async (env = process.env, platform = process.platform, option
   if (isSandboxOff(input)) return null
   const address = readAddress(env, platform, input.cwd, { ...options, deadline: discoveryDeadline, now })
   if (address === null || now() >= discoveryDeadline) return null
+  if (isSwitchedOff(address.file)) return null
+  const refusal = (options.checkListener ?? listenerRefusal)(address, { ...options, platform, deadline: discoveryDeadline, now })
+  if (refusal !== null) {
+    leaveRefusal(address.file, refusal)
+    return null
+  }
+  clearRefusal(address.file)
   const stop = new AbortController()
   let timer = setTimeout(() => stop.abort(), HEADERS_MS)
   try {
