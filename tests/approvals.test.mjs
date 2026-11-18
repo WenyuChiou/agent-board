@@ -1017,13 +1017,39 @@ test('the hook gives up within seconds on a board that hangs, answers wrongly or
     assert.equal(answer.decision, null)
     assert.equal(seen.length, before, 'nothing was asked at the stale address')
     assert.doesNotMatch(answer.err, /checked/, 'a process that is gone has no listener to check')
-    // The board stops after the check passed: the request fails and nothing is printed.
-    const stopped = await allowingBoard()
-    const late = homeFor(stopped.url)
-    await stopped.close()
-    const failed = await runHook(late, request('npm run synthetic-stopped'), noting).done
+    // The board stops after the check passed and before the request leaves: the request fails and nothing is printed.
+    const late = homeFor()
+    const doomed = await startStandIn(join(late.root, 'doomed', 'board.mjs'), late.file, late.progress)
+    const stopping = hookWith(`{ checkListener: () => { process.kill(${doomed.pid}, 'SIGKILL'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); process.stderr.write('checked'); return null } }`)
+    const failed = await runHook(late, request('npm run synthetic-stopped'), stopping).done
+    await doomed.exited
     assert.equal(failed.out, '', failed.err)
     assert.match(failed.err, /checked/)
+    assert.deepEqual(doomed.seen(), [])
+    // Asked and waiting for a press, the board restarts: that request ends with no answer and the new board is not asked.
+    const pressing = homeFor()
+    const asked = join(pressing.root, 'asked')
+    const waitingBoard = join(pressing.root, 'waiting-board.mjs')
+    writeFileSync(waitingBoard, `import { createServer } from 'node:http'
+import { appendFileSync } from 'node:fs'
+const server = createServer((req, res) => { req.resume(); req.on('end', () => { res.writeHead(200, { 'content-type': 'application/json' }); res.flushHeaders(); appendFileSync(process.argv[2], 'asked') }) })
+server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'))
+`)
+    const waitingChild = spawn(process.execPath, [waitingBoard, asked], { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true })
+    const waitingPort = await new Promise(done => waitingChild.stdout.once('data', chunk => done(Number(String(chunk).trim()))))
+    pressing.writeAddress(`http://127.0.0.1:${waitingPort}/?t=synthetic-token`, waitingChild.pid)
+    const asking = runHook(pressing, request('npm run synthetic-restarted'), noting)
+    for (let tries = 0; tries < 1_000 && !existsSync(asked); tries += 1) await pause(20)
+    assert.equal(existsSync(asked), true, 'the waiting board was never asked')
+    const waitingGone = new Promise(done => waitingChild.once('exit', done))
+    waitingChild.kill('SIGKILL')
+    await waitingGone
+    const restarted = await allowingBoard()
+    pressing.writeAddress(restarted.url)
+    const unanswered = await asking.done
+    assert.equal(unanswered.out, '', unanswered.err)
+    assert.deepEqual(restarted.seen, [], 'the board that came back was asked')
+    await restarted.close()
   } finally {
     server.closeAllConnections()
     await new Promise(done => server.close(done))
@@ -1033,14 +1059,16 @@ test('the hook gives up within seconds on a board that hangs, answers wrongly or
 // A stand-in board that answers allow to anything it is asked, and counts what it is asked.
 const allowingBoard = async () => {
   const seen = []
+  const tokens = []
   const server = createServer((req, res) => {
     seen.push(req.url)
+    tokens.push(req.headers['x-board-token'])
     req.resume()
     req.on('end', () => res.writeHead(200, { 'content-type': 'application/json' }).end('{"decision":{"behavior":"allow"}}'))
   })
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   return {
-    seen, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token`,
+    seen, tokens, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token`,
     close: async () => { server.closeAllConnections(); await new Promise(done => server.close(done)) },
   }
 }
@@ -1282,6 +1310,7 @@ const startStandIn = async (script, file, progress) => {
     pid: child.pid,
     seen: () => readFileSync(seenFile, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)),
     stop: () => new Promise(done => { child.once('exit', done); child.kill() }),
+    exited: new Promise(done => child.once('exit', done)),
   }
 }
 
@@ -1305,6 +1334,11 @@ test('an address file naming a process that does not listen on its port gets no 
     assert.equal(answered.out, '')
     assert.equal(refusalOf(place).reason, 'not-listening')
     assert.deepEqual(stand.seen, [])
+    // The port comes from the address the request would go to, and not from the file's separate field.
+    const ports = []
+    writeFileSync(place.file, JSON.stringify({ pid: idle.pid, port: 1, url: stand.url, path: place.progress, built: '' }), { mode: 0o600 })
+    await hook.run(place.env, process.platform, { input: request('npm run synthetic-port-field'), lookup: { isSoleListener: (_pid, port) => { ports.push(port); return false } } })
+    assert.deepEqual(ports, [Number(new URL(stand.url).port)])
   } finally {
     await new Promise(done => { idle.once('exit', done); idle.kill() })
     await stand.close()
@@ -1374,6 +1408,12 @@ test('the lookup timing out prints nothing', async () => {
     const given = []
     await hook.run(place.env, process.platform, { input: request('npm run synthetic-budget'), lookup: { isSoleListener: (_pid, _port, timeout) => { given.push(timeout); return false } } })
     assert.ok(given.length === 1 && given[0] > 0 && given[0] <= 2_000, `gave ${given}`)
+    // Each command gets what the one before it left.
+    let at = 0
+    const limits = []
+    const spending = { isSoleListener: (_pid, _port, timeout) => { limits.push(timeout); at += 500; return true }, processOf: (_pid, timeout) => { limits.push(timeout); return JSON.parse(board) } }
+    hook.listenerRefusal({ pid: 1, port: 1, scripts: [] }, { platform: process.platform, now: () => at, lookup: spending })
+    assert.deepEqual(limits, [hook.LOOKUP_MS, hook.LOOKUP_MS - 500])
     assert.deepEqual(stand.seen, [])
   } finally { await stand.close() }
 })
@@ -1446,6 +1486,21 @@ test('a plugin at 0.25.1 accepts a later board, and the same script anywhere els
     assert.deepEqual(hook.boardScripts({ CLAUDE_PROGRESS_FILE: `${root}${sep}board${sep}progress.md`, CLAUDE_CONFIG_DIR: `${root}${sep}config${sep}` }, `${root}${sep}home`, process.platform), [
       `${root}${sep}board${sep}agent-board.mjs`, `${root}${sep}home${sep}.agent-board${sep}agent-board.mjs`, `${root}${sep}config${sep}agent-board.mjs`,
     ])
+    // The board updates itself while it runs: new bytes at its path, written in place and by replacing the file.
+    if (isWindows || process.platform === 'linux') {
+      const live = homeFor()
+      const script = join(live.home, '.agent-board', 'agent-board.mjs')
+      const running = await startStandIn(script, live.file, live.progress)
+      try {
+        const options = { input: request('npm run synthetic-self-update'), lookupMs: 30_000, discoveryMs: 30_000 }
+        writeFileSync(script, `${later}// written in place\n`)
+        assert.deepEqual(await hook.run(live.env, process.platform, options), ALLOW)
+        writeFileSync(`${script}.new`, `${later}// a new file\n`)
+        renameSync(`${script}.new`, script)
+        assert.deepEqual(await hook.run(live.env, process.platform, options), ALLOW)
+        assert.equal(running.seen().length, 2)
+      } finally { await running.stop() }
+    }
   } finally { await stand.close() }
 })
 
@@ -1597,7 +1652,7 @@ test('a command line that only mentions the board script is refused', async () =
       ['-', script], ['--', script], ['--no-warnings', '123', script], ['--env-file=synthetic.env', script], ['--env-file', 'synthetic.env', script],
       ['--inspect', script], ['--inspect-brk=0', script], ['--test', script], ['--run', 'synthetic', script], ['--a-later-node-option', script],
       // Near misses of the board's own options. A word that starts `__` is a file Node would run.
-      ['--max-old-space-size', '123', script], ['--max-old-space-size=', script], ['--max-old-space-size=many', script], ['--optimize-for-size=1', script],
+      ['--max-old-space-size', '123', script], ['--optimize-for-size=1', script], ['--a-later-node-option=512', script],
       ['__max_old_space_size=512', script], ['-_max_old_space_size=512', script],
     ]
     for (const words of starts) assert.equal(refusalFor([node, ...words], script), 'not-board-script', words.join(' '))
@@ -1686,9 +1741,17 @@ test('an address file replaced or removed after it was read never changes who is
     const { found } = boardAt(place)
     const portOf = url => Number(new URL(url).port)
     const input = request('npm run synthetic-replaced')
+    const secondUrl = second.url.replace('synthetic-token', 'synthetic-second-token')
+    // The file is replaced during a check that passes: the request goes to the address and token that were checked.
+    const swapping = { isSoleListener: () => { place.writeAddress(secondUrl, idle.pid); return true }, processOf: () => found }
+    assert.deepEqual(await hook.run(place.env, process.platform, { input, lookup: swapping }), ALLOW)
+    assert.deepEqual([first.tokens, second.tokens], [['synthetic-token'], []])
+    first.seen.length = 0
+    first.tokens.length = 0
+    place.writeAddress(first.url)
     // The board restarts on a new port, with a new process, after the hook read its file.
     const checked = []
-    const replacing = { isSoleListener: (pid, port) => { checked.push([pid, port]); place.writeAddress(second.url, idle.pid); return false } }
+    const replacing = { isSoleListener: (pid, port) => { checked.push([pid, port]); place.writeAddress(secondUrl, idle.pid); return false } }
     assert.equal(await hook.run(place.env, process.platform, { input, lookup: replacing }), null)
     assert.deepEqual(checked, [[process.pid, portOf(first.url)]])
     assert.equal(refusalOf(place).reason, 'not-listening')
@@ -1699,6 +1762,7 @@ test('an address file replaced or removed after it was read never changes who is
     assert.deepEqual(await hook.run(place.env, process.platform, { input, lookup: reading }), ALLOW)
     assert.deepEqual(next, [[idle.pid, portOf(second.url)]])
     assert.deepEqual([first.seen.length, second.seen.length], [0, 1])
+    assert.deepEqual(second.tokens, ['synthetic-second-token'])
     // The board stops and its folder goes too, so the record has nowhere to be written.
     const removing = { isSoleListener: () => { rmSync(dirname(place.file), { recursive: true }); return false } }
     assert.equal(await hook.run(place.env, process.platform, { input, lookup: removing }), null)
@@ -1902,9 +1966,11 @@ test('heap options in one word and NODE_OPTIONS do not change who the board is',
   const place = homeFor()
   const { script } = boardAt(place)
   const node = process.execPath
-  for (const option of ['--max-old-space-size=512', '--max_old_space_size=512', '--max-old-space-size-percentage=12.5', '--heap-growing-percent=30', '--optimize_for_size', '--no-optimize-for-size']) {
+  for (const option of ['--max-old-space-size=512', '--max_old_space_size=512', '--max-old-space-size=+512', '--max-old-space-size-percentage=12.5', '--max-old-space-size-percentage=1e1', '--heap-growing-percent=30', '--optimize_for_size', '--no-optimize-for-size']) {
     assert.equal(refusalFor([node, option, script, '--serve-child'], script), null, option)
   }
+  // Node starts with these spellings of a number, so a board can be running with them.
+  for (const option of ['--max-old-space-size=+512', '--max-old-space-size-percentage=1e1']) assert.equal(execFileSync(node, [option, '-p', '1'], { encoding: 'utf8', windowsHide: true }).trim(), '1', option)
   // NODE_OPTIONS stays in the environment, so the board's command line reads as it does without it.
   const probe = join(place.root, 'probe.mjs')
   writeFileSync(probe, 'process.stdout.write(JSON.stringify(process.execArgv))\n')
@@ -2060,4 +2126,60 @@ test('a big-endian machine spells 127.0.0.1 the other way round in the socket ta
     procRow(2, '7F000002:1004', '00000000:0000', '0A', '9003'),
   ].join('\n')
   assert.deepEqual(hook.procListeners(table, 4100), ['9001'])
+})
+
+test('the request goes straight to the checked address, past any proxy or redirect', async () => {
+  const stand = await allowingBoard()
+  const proxy = await allowingBoard()
+  const elsewhere = await allowingBoard()
+  const redirecting = createServer((req, res) => { req.resume(); res.writeHead(307, { location: new URL('/api/approvals/ask', elsewhere.url).href }).end() })
+  await new Promise(done => redirecting.listen(0, '127.0.0.1', done))
+  try {
+    const place = homeFor(stand.url)
+    const via = new URL(proxy.url).origin
+    const proxied = { ...place, env: { ...place.env, NODE_USE_ENV_PROXY: '1', HTTP_PROXY: via, http_proxy: via, NO_PROXY: '', no_proxy: '' } }
+    const direct = await runHook(proxied, request('npm run synthetic-proxy')).done
+    assert.deepEqual(direct.decision, ALLOW, direct.err)
+    assert.equal(stand.seen.length, 1)
+    assert.deepEqual(proxy.seen, [], 'the command and the token went through a proxy')
+    const moved = homeFor(`http://127.0.0.1:${redirecting.address().port}/?t=synthetic-token`)
+    const refused = await runHook(moved, request('npm run synthetic-redirect')).done
+    assert.equal(refused.out, '', refused.err)
+    assert.deepEqual(elsewhere.seen, [], 'the command and the token followed a redirect')
+  } finally {
+    await new Promise(done => redirecting.close(done))
+    await Promise.all([stand.close(), proxy.close(), elsewhere.close()])
+  }
+})
+
+test('two files whose names differ only by letter case are two boards', () => {
+  const expected = 'C:\\synthetic\\.agent-board\\agent-board.mjs'
+  const sameFile = 'C:\\SYNTHETIC\\.AGENT-BOARD\\AGENT-BOARD.MJS'
+  const otherFile = 'C:\\synthetic\\.agent-board\\Agent-Board.mjs'
+  const ids = { [expected]: '7:1', [sameFile]: '7:1', [otherFile]: '7:2' }
+  const refusal = (script, fileId) => hook.processRefusal({ exe: 'C:\\synthetic\\node.exe', argv: ['node', script, '--serve-child'] }, [expected], 'win32', fileId)
+  assert.equal(refusal(sameFile, path => ids[path]), null)
+  assert.equal(refusal(otherFile, path => ids[path]), 'not-board-script')
+  // A file the system gives no number for cannot be told from another.
+  assert.equal(refusal(expected, () => null), 'not-board-script')
+})
+
+test('a path check that outlasts the deadline is a refusal', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    const { script, found } = boardAt(place)
+    const lookup = { isSoleListener: () => true, processOf: () => found }
+    const check = cost => {
+      let at = 0
+      return hook.listenerRefusal({ pid: 1, port: 1, scripts: [script] }, { platform: process.platform, now: () => at, lookup, fileId: () => { at += cost; return '7:1' } })
+    }
+    assert.equal(check(1), null)
+    assert.equal(check(hook.LOOKUP_MS), 'lookup-timeout')
+    let at = 0
+    const slow = { input: request('npm run synthetic-slow-disk'), now: () => at, lookup, fileId: () => { at += hook.LOOKUP_MS; return '7:1' } }
+    assert.equal(await hook.run(place.env, process.platform, slow), null)
+    assert.equal(refusalOf(place).reason, 'lookup-timeout')
+    assert.deepEqual(stand.seen, [])
+  } finally { await stand.close() }
 })

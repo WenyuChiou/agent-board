@@ -15,6 +15,7 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { Agent, request as httpRequest } from 'node:http'
 import { homedir, hostname } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -535,9 +536,10 @@ export const HEAP_VALUE_OPTIONS = [
 export const HEAP_SWITCH_OPTIONS = ['--optimize-for-size', '--no-optimize-for-size', '--nooptimize-for-size']
 
 // One word, as Node will not start with `--max-old-space-size 512`. Only the name after the leading `--` may use `_`
-// for `-`: a word that starts `__` is a file Node would run.
+// for `-`: a word that starts `__` is a file Node would run. The value is Node's to judge (it takes `+512` and `1e1`),
+// and no value of these options can make it run other code.
 const isHeapOption = word => {
-  const parts = /^--([a-z_-]+)(?:=(\d+(?:\.\d+)?))?$/.exec(word)
+  const parts = /^--([a-z_-]+)(=.*)?$/s.exec(word)
   if (parts === null) return false
   const name = `--${(parts[1] ?? '').replaceAll('_', '-')}`
   return parts[2] === undefined ? HEAP_SWITCH_OPTIONS.includes(name) : HEAP_VALUE_OPTIONS.includes(name)
@@ -554,21 +556,31 @@ export const scriptOf = argv => {
   return null
 }
 
+// Which file a path reaches, however it is spelled: a link, a short name and another letter case all reach the same one,
+// while two names that differ only by case in a case-sensitive Windows folder are two files. Null when the system gives no number.
+export const fileIdOf = path => {
+  const found = statSync(path, { bigint: true })
+  return found.isFile() && found.ino !== 0n ? `${found.dev}:${found.ino}` : null
+}
+
 // Why this process is not the board, or null when it is.
-export const processRefusal = (found, scripts, platform) => {
+export const processRefusal = (found, scripts, platform, fileId = fileIdOf) => {
   if (found.argv.every(word => word.trim() === '')) return 'empty-command-line'
   if (!isNodeProgram(found.exe)) return 'not-node'
   const script = scriptOf(found.argv)
   if (script === null || !isFullPath(script, platform)) return 'not-board-script'
   const isSame = one => {
-    try { return realOf(one, platform) === realOf(script, platform) } catch { return false }
+    try {
+      const id = fileId(script)
+      return id !== null && id === fileId(one)
+    } catch { return false }
   }
   return scripts.some(isSame) ? null : 'not-board-script'
 }
 
 // Why the listener on the address file's port may not be told the command, or null when it may. Every way this
 // can go wrong is a reason, so nothing here can fall through to asking the listener.
-export const listenerRefusal = (board, { platform, now = () => performance.now(), deadline = Infinity, lookupMs = LOOKUP_MS, lookup = systemLookup(platform) }) => {
+export const listenerRefusal = (board, { platform, now = () => performance.now(), deadline = Infinity, lookupMs = LOOKUP_MS, lookup = systemLookup(platform), fileId = fileIdOf }) => {
   if (lookup === null) return 'no-lookup'
   const stop = Math.min(now() + lookupMs, deadline)
   const left = () => Math.floor(stop - now())
@@ -579,7 +591,9 @@ export const listenerRefusal = (board, { platform, now = () => performance.now()
     if (!isListener) return 'not-listening'
     const found = lookup.processOf(board.pid, left())
     if (left() <= 0) return 'lookup-timeout'
-    return processRefusal(found, board.scripts, platform)
+    // The disk can be the slow part (a home folder on a network drive), so the clock is read again after it.
+    const refusal = processRefusal(found, board.scripts, platform, fileId)
+    return refusal ?? (left() <= 0 ? 'lookup-timeout' : null)
   } catch (error) {
     return winIsKilled(error) ? 'lookup-timeout' : 'lookup-failed'
   }
@@ -653,6 +667,38 @@ const readInput = () => new Promise(done => {
   process.stdin.on('error', () => { clearTimeout(timer); done(null) })
 })
 
+// The request goes to the address that was checked and nowhere else: an agent of its own takes no proxy from the
+// environment, and node:http follows no redirect. Any failure, status or unreadable answer is no answer.
+const askBoard = (address, body) => new Promise(done => {
+  const { hostname, port } = new URL(address.origin)
+  const payload = JSON.stringify(body)
+  let timer
+  const finish = value => { clearTimeout(timer); done(value) }
+  const asked = httpRequest({
+    host: hostname,
+    port,
+    path: '/api/approvals/ask',
+    method: 'POST',
+    agent: new Agent(),
+    headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'x-board-token': address.token },
+  }, answer => {
+    // The headers came: the board is alive, and the press may take up to 30 s.
+    clearTimeout(timer)
+    timer = setTimeout(() => asked.destroy(), ASK_MS)
+    const chunks = []
+    answer.on('data', chunk => chunks.push(chunk))
+    answer.on('error', () => finish(null))
+    answer.on('end', () => {
+      const isOk = answer.statusCode >= 200 && answer.statusCode < 300
+      try { finish(isOk ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null) } catch { finish(null) }
+    })
+  })
+  timer = setTimeout(() => asked.destroy(), HEADERS_MS)
+  asked.on('error', () => finish(null))
+  asked.on('close', () => finish(null))
+  asked.end(payload)
+})
+
 export const run = async (env = process.env, platform = process.platform, options = {}) => {
   const now = options.now ?? (() => performance.now())
   const discoveryDeadline = now() + (options.discoveryMs ?? DISCOVERY_MS)
@@ -669,26 +715,8 @@ export const run = async (env = process.env, platform = process.platform, option
     return null
   }
   clearRefusal(address.file)
-  const stop = new AbortController()
-  let timer = setTimeout(() => stop.abort(), HEADERS_MS)
-  try {
-    const answer = await fetch(`${address.origin}/api/approvals/ask`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-board-token': address.token },
-      body: JSON.stringify(askBody(input)),
-      signal: stop.signal,
-    })
-    // The headers came: the board is alive, and the press may take up to 30 s.
-    clearTimeout(timer)
-    timer = setTimeout(() => stop.abort(), ASK_MS)
-    if (!answer.ok) return null
-    const body = await answer.json()
-    return decisionOutput(body?.decision ?? null)
-  } catch {
-    return null
-  } finally {
-    clearTimeout(timer)
-  }
+  const body = await askBoard(address, askBody(input))
+  return decisionOutput(body?.decision ?? null)
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
