@@ -1,4 +1,4 @@
-import { reporterPs1, reporterSh, agentHooks, setupOwnership, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHermesHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
+import { reporterPs1, reporterSh, agentHooks, setupOwnership, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
 import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
@@ -131,7 +131,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     warn(`removeFailed:${folder}`, { message: 'connectRemoveFailed', args: [folder] })
     failedLabels.add(label)
   }
-  const hooks = agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, node: nodePath, antigravityNode, progress: path, s: STRINGS[fileLang] })
+  const hooks = agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, node: nodePath, antigravityNode, progress: path, previousProgress: transaction.state.connectedProgress, s: STRINGS[fileLang] })
   const { managed: setupManaged, skillOnly: setupSkillOnly, held: setupHeld } = setupOwnership(hooks, home, sep, existsSync, readMaybe)
   // A file with none of ours is left as it is: taking nothing out could still reformat it.
   // OpenClaw's config names our plugin, not the reporter, and its edit checks for that itself;
@@ -144,7 +144,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         if (!existsSync(file)) continue
         const before = readLocal(file)
         isReading = false
-        if (before === '' || (!hook.generated && hook.agent !== 'openclaw' && !(hook.agent === 'antigravity' ? before.includes('"agent-board"') : hook.agent === 'hermes' ? hasOurHermesHook(before) : hasOurHook(before)))) continue
+        if (before === '' || (!hook.generated && hook.agent !== 'openclaw' && hook.agent !== 'hermes' && !(hook.agent === 'antigravity' ? before.includes('"agent-board"') : hasOurHook(before)))) continue
         const after = hook.edit(before, true, previousOutput(file))
         if (after === COLLISION) preserve(file)
         else if (after === null) warn(`removeFailed:${file}`, { message: 'connectRemoveFailed', args: [file] })
