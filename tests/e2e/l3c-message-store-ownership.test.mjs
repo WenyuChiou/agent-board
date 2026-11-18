@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { BOARD_SCRIPT } from '../../hooks/board-script.ts'
@@ -375,7 +375,8 @@ test('a lock holder that listens nowhere is replaced', { timeout: 180_000 }, () 
   assert.equal(h.linkOf(onGiven.stdout), undefined, onGiven.stdout)
   assert.equal(isAlive(given.pid), true, 'a page on a given folder was ended')
   assert.equal(readFileSync(join(store, 'server.lock'), 'utf8'), String(given.pid))
-  // Old enough, proven to be the board and answering nowhere: ended, and the board opens.
+  // Old enough, proven to be the board, and proof B: no owner record while its own claim is there.
+  assert.ok(readdirSync(dead.folder).some(name => name.startsWith(`.message-claim-${dead.pid}-`)), 'the dead page holds no claim')
   const opened = await h.board()
   const link = h.linkOf(opened.stdout)
   assert.ok(link, JSON.stringify(opened))
@@ -515,4 +516,115 @@ test('a page slow to answer is reached, never ended', { timeout: 120_000 }, () =
   assert.ok(link, JSON.stringify(opened))
   assert.equal(isAlive(page.pid), true, 'a page slow to answer was ended')
   assert.equal(new URL(link).port, String(JSON.parse(readFileSync(join(page.folder, 'server.owner'), 'utf8')).port))
+}))
+
+// A healthy page the board cannot prove dead: after the board's run, the five things that must still hold.
+const assertUntouched = async (h, run, page) => {
+  assert.equal(h.linkOf(run.stdout), undefined, run.stdout)
+  assert.match(run.stdout.trim(), /^Agent Board did not open/, run.stdout)
+  assert.ok(run.stdout.includes(String(page.pid)), run.stdout)
+  assert.equal(isAlive(page.pid), true, 'a healthy page was ended')
+  assert.equal(readFileSync(join(page.folder, 'server.lock'), 'utf8'), String(page.pid), 'the lock changed hands')
+}
+// A real page started as a page child, its owner record written, and its address file taken away (as a child run
+// with another runtime folder sees it, #1587). `preload` changes how it answers.
+const healthyPage = async (h, preload) => {
+  const page = await h.deadPage([], preload ?? 0)
+  const owner = join(page.folder, 'server.owner')
+  const end = Date.now() + 20_000
+  while (!existsSync(owner) && Date.now() < end) await wait(100)
+  assert.ok(existsSync(owner), 'the page never recorded its address')
+  const recordText = readFileSync(owner, 'utf8')
+  const link = JSON.parse(recordText).url
+  await wait(1500)
+  const address = join(dirname(page.folder), basename(page.folder).replace(/-messages$/, '.json'))
+  if (existsSync(address)) unlinkSync(address)
+  return { ...page, owner, recordText, link, address }
+}
+
+test('a healthy page the board cannot prove dead is never ended', { timeout: 300_000 }, () => withHolderWorld(1000, async h => {
+  const page = await healthyPage(h)
+  const restore = () => {
+    try { rmSync(page.owner, { recursive: true, force: true }) } catch {}
+    writeFileSync(page.owner, page.recordText)
+  }
+  // An owner record that cannot be read: a folder in its place fails the read on every system.
+  rmSync(page.owner, { force: true })
+  mkdirSync(page.owner)
+  await assertUntouched(h, await h.board(), page)
+  restore()
+  // A damaged record, and one naming another process.
+  writeFileSync(page.owner, '{')
+  await assertUntouched(h, await h.board(), page)
+  writeFileSync(page.owner, JSON.stringify({ ...JSON.parse(page.recordText), pid: page.pid + 1 }))
+  await assertUntouched(h, await h.board(), page)
+  // No record, but an address file this start will not use: proof B needs no address file.
+  rmSync(page.owner, { force: true })
+  writeFileSync(page.address, '{"not":"an address"}')
+  await assertUntouched(h, await h.board(), page)
+  unlinkSync(page.address)
+  // As a 0.24.1 page left it: the lock, no record and no claim. Proof B needs the claim.
+  for (const name of readdirSync(page.folder).filter(one => one.startsWith(`.message-claim-${page.pid}-`))) unlinkSync(join(page.folder, name))
+  await assertUntouched(h, await h.board(), page)
+  restore()
+  assert.ok(await h.pingOf(page.link), 'the page no longer answers on its port')
+}))
+
+test('a healthy page whose answer is no proof is never ended', { timeout: 240_000 }, () => withHolderWorld(1000, async h => {
+  const mode = join(h.world.root, 'ping-mode')
+  writeFileSync(mode, '')
+  const preload = `const http = require('node:http'), fs = require('node:fs'), emit = http.Server.prototype.emit, mode = ${JSON.stringify(mode)}
+http.Server.prototype.emit = function (name, request, response) {
+  if (name === 'request' && String(request.url).startsWith('/api/ping')) {
+    let how = ''
+    try { how = fs.readFileSync(mode, 'utf8') } catch {}
+    if (how === '500') { response.writeHead(500, { 'content-type': 'application/json' }); response.end('{}'); return true }
+    if (how === 'reset') { request.socket.destroy(); return true }
+    if (how === 'folder') {
+      const end = response.end
+      response.end = function (chunk, ...rest) {
+        try { const body = JSON.parse(String(chunk)); body.messagesDirectory += '-other'; chunk = JSON.stringify(body) } catch {}
+        return end.call(this, chunk, ...rest)
+      }
+    }
+  }
+  return emit.call(this, name, request, response)
+}
+`
+  const page = await healthyPage(h, preload)
+  for (const how of ['500', 'reset', 'folder']) {
+    writeFileSync(mode, how)
+    const run = await h.board()
+    writeFileSync(mode, '')
+    await assertUntouched(h, run, page)
+    assert.ok(await h.pingOf(page.link), `the page stopped answering after the ${how} run`)
+  }
+}))
+
+test('a page that listened and then stopped serving is replaced', { timeout: 120_000 }, () => withHolderWorld(1000, async h => {
+  // The page's server stops listening 3 s after it starts, and nothing else of the page hears of it.
+  const preload = `const net = require('node:net'), listen = net.Server.prototype.listen
+net.Server.prototype.listen = function (...args) {
+  const server = this
+  server.once('listening', () => setTimeout(() => {
+    const emit = server.emit
+    server.emit = function (name, ...rest) { return name === 'close' ? true : emit.call(server, name, ...rest) }
+    server.close()
+  }, 3000))
+  return listen.apply(server, args)
+}
+setInterval(() => {}, 1e8)
+process.exit = () => {}
+`
+  const page = await h.deadPage([], preload)
+  const owner = join(page.folder, 'server.owner')
+  const end = Date.now() + 20_000
+  while (!existsSync(owner) && Date.now() < end) await wait(100)
+  assert.ok(existsSync(owner), 'the page never recorded its address')
+  await wait(4500)
+  const opened = await h.board()
+  const link = h.linkOf(opened.stdout)
+  assert.ok(link, JSON.stringify(opened))
+  assert.equal(await untilGone(page.pid), true, 'the page that stopped serving still runs')
+  assert.equal((await h.pingOf(link))?.messagesDirectory, page.folder)
 }))

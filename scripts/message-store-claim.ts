@@ -230,6 +230,49 @@ export const hasLiveClaims = (directory: string): boolean => {
   return false
 }
 
+// M6 (Fable diagnosis on #1671): a holder is signalled only on a named, positive proof that its page serves
+// nothing. Every other reading, every error included and any input nobody listed, is 'unknown', and 'unknown'
+// never reaches a signal. Proof A, 'refused': the owner record reads, has its full shape, names the lock's pid,
+// and connecting to its port is refused. Proof B, 'never-listened': there is no owner record (ENOENT exactly) yet
+// the holder's own claim is there; every release with claims writes the record when it listens, before it
+// announces the page. Both need no address file: a start that has one goes by it.
+export type OwnerRead = { kind: 'text'; text: string } | { kind: 'error'; code: string }
+export type PageProbe = { kind: 'answer'; status: number; body: unknown } | { kind: 'error'; code: string }
+export type PageFacts = { pid: number; store: string; record: OwnerRead; probe?: PageProbe | undefined; hasAddressFile: boolean; hasOwnClaim: boolean }
+export type PageState =
+  | { kind: 'answers'; port: number; url: string }
+  | { kind: 'dead'; proof: 'refused' | 'never-listened' }
+  | { kind: 'unknown'; why: string }
+
+// The port and address an owner record names for `pid`, or why it names none.
+export const ownerRecordOf = (text: string, pid: number): { port: number; url: string } | { why: string } => {
+  let owner: unknown
+  try { owner = JSON.parse(text) } catch { return { why: 'owner record is not JSON' } }
+  if (owner === null || typeof owner !== 'object') return { why: 'owner record is not an object' }
+  const { pid: named, port, url } = owner as { pid?: unknown; port?: unknown; url?: unknown }
+  if (named !== pid) return { why: 'owner record names another process' }
+  if (typeof port !== 'number' || !Number.isInteger(port) || typeof url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)
+    || port !== Number(new URL(url).port)) return { why: 'owner record has another shape' }
+  return { port, url }
+}
+
+export const pageState = (facts: PageFacts): PageState => {
+  const unknown = (why: string): PageState => ({ kind: 'unknown', why })
+  if (facts.record.kind === 'error') {
+    if (facts.record.code === 'ENOENT' && !facts.hasAddressFile && facts.hasOwnClaim) return { kind: 'dead', proof: 'never-listened' }
+    return unknown(`owner record: ${facts.record.code}`)
+  }
+  const named = ownerRecordOf(facts.record.text, facts.pid)
+  if ('why' in named) return unknown(named.why)
+  const probe = facts.probe
+  if (probe === undefined) return unknown('page not asked')
+  if (probe.kind === 'error') return probe.code === 'ECONNREFUSED' && !facts.hasAddressFile ? { kind: 'dead', proof: 'refused' } : unknown(`page: ${probe.code}`)
+  const body = probe.body as { path?: unknown; messagesDirectory?: unknown } | null | undefined
+  if (probe.status >= 200 && probe.status < 300 && body !== null && typeof body === 'object' && typeof body.path === 'string'
+    && typeof body.messagesDirectory === 'string' && canonical(body.messagesDirectory) === canonical(facts.store)) return { kind: 'answers', port: named.port, url: named.url }
+  return unknown(`page answered ${probe.status} for another folder or in another form`)
+}
+
 // M6 (#1596, #1587): the process holding a store's lock, as the system reports it. Its command line and
 // start time come from one read. 'gone' when no process has that number; null when it cannot be read
 // (another account's, or the lookup timed out), which never counts as proof of anything.
@@ -296,12 +339,13 @@ export const isBoardServe = (commandLine: string, head: (file: string) => string
 }
 
 // What a start does about a live holder of the default store: 'young' and 'kept' wait (a page may take
-// seconds to start), 'gone' and 'ended' try again (the dead pid's lock and claim go by the proven-dead paths), and
+// seconds to start), 'unproven' waits and is then named (an old board page with no proof its page is gone),
+// 'gone' and 'ended' try again (the dead pid's lock and claim go by the proven-dead paths), and
 // 'refused' names the process that holds the folder. A holder is ended only when it is proven to be a
 // board page older than any start, and only after its start time is read again, so a number another
 // program took meanwhile is never ended. messages.json is replaced whole, so a page ended mid-write
 // leaves a complete file.
-export type HolderOutcome = { kind: 'young' | 'kept' | 'gone' | 'ended' } | { kind: 'refused'; isBoard: boolean }
+export type HolderOutcome = { kind: 'young' | 'kept' | 'unproven' | 'gone' | 'ended' } | { kind: 'refused'; isBoard: boolean }
 export type HolderDeps = {
   look: (pid: number) => StoreHolder | 'gone' | null
   started: (pid: number, look: StoreHolder) => ProcessStart
@@ -312,6 +356,8 @@ export type HolderDeps = {
   waitMs: number
   // Windows ends a process at the first signal; elsewhere one that ignores it, or is stopped, gets SIGKILL.
   signals: readonly NodeJS.Signals[]
+  // The proof taken again just before the first signal: a page that came back is not signalled.
+  stillDead: () => boolean | Promise<boolean>
 }
 export const holderDeps = (minAgeMs: number): HolderDeps => ({
   look: pid => lookUpHolder(pid),
@@ -322,8 +368,9 @@ export const holderDeps = (minAgeMs: number): HolderDeps => ({
   minAgeMs,
   waitMs: 3000,
   signals: process.platform === 'win32' ? ['SIGTERM'] : ['SIGTERM', 'SIGKILL'],
+  stillDead: () => false,
 })
-export const settleStoreHolder = async (pid: number, deps: HolderDeps): Promise<HolderOutcome> => {
+export const settleStoreHolder = async (pid: number, deps: HolderDeps, proof?: 'refused' | 'never-listened'): Promise<HolderOutcome> => {
   const look = deps.look(pid)
   if (look === 'gone') return { kind: 'gone' }
   if (look === null || !deps.isBoard(look.commandLine)) return { kind: 'refused', isBoard: false }
@@ -331,9 +378,12 @@ export const settleStoreHolder = async (pid: number, deps: HolderDeps): Promise<
   // nothing; such a hub is never taken over (board-cli.ts says why), and is waited for as before.
   if (/(?:^|[\s\0"])--messages-dir(?=$|[\s\0"=])/.test(look.commandLine)) return { kind: 'kept' }
   if (Date.now() - look.started < deps.minAgeMs) return { kind: 'young' }
+  // Without a named proof that its page serves nothing, no board page is signalled.
+  if (proof === undefined) return { kind: 'unproven' }
   const again = deps.started(pid, look)
   if (again === null && !deps.isAlive(pid)) return { kind: 'gone' }
   if (typeof again !== 'number' || Math.abs(again - look.started) > 1000) return { kind: 'refused', isBoard: false }
+  if (!(await deps.stillDead())) return { kind: 'unproven' }
   const pause = (ms: number) => new Promise(done => setTimeout(done, ms))
   // Whether the holder is gone, as its number or as its identity: while waiting, the start time is read again every
   // half second (macOS spends a ps start on each read), so a number another program took counts as the holder gone.

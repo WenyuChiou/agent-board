@@ -8082,7 +8082,7 @@ test('a queued Codex CLI message stops waiting forever and offers Copy when a la
 })
 
 // M6 (#1596, #1587): the board ends a message store's holder only after proving it is an old board page.
-const { isBoardServe, lookUpHolder, settleStoreHolder } = await import('../scripts/message-store-claim.ts')
+const { isBoardServe, lookUpHolder, pageState, settleStoreHolder } = await import('../scripts/message-store-claim.ts')
 const BOARD_HEAD = 'globalThis.AGENT_BOARD = {"path":"progress.md"}\n'
 const holderDeps = (overrides = {}) => {
   const kills = []
@@ -8095,6 +8095,7 @@ const holderDeps = (overrides = {}) => {
     minAgeMs: 30_000,
     waitMs: 300,
     signals: ['SIGTERM'],
+    stillDead: () => true,
     ...overrides,
   }
   return { deps, kills }
@@ -8119,29 +8120,29 @@ test('only node running a board script with a serve flag counts as the board', (
 test('an unreadable or timed out process lookup is never proof', async () => {
   for (const look of [() => null, () => ({ commandLine: '', started: Date.now() - 60_000 })]) {
     const { deps, kills } = holderDeps({ look, isBoard: commandLine => commandLine !== '' })
-    assert.deepEqual(await settleStoreHolder(4242, deps), { kind: 'refused', isBoard: false })
+    assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'refused', isBoard: false })
     assert.deepEqual(kills, [])
   }
 })
 
 test('an owner that exits before the kill does not stop the start', async () => {
   const gone = holderDeps({ look: () => 'gone' })
-  assert.deepEqual(await settleStoreHolder(4242, gone.deps), { kind: 'gone' })
+  assert.deepEqual(await settleStoreHolder(4242, gone.deps, 'refused'), { kind: 'gone' })
   assert.deepEqual(gone.kills, [])
   const late = holderDeps({ kill: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) } })
-  assert.deepEqual(await settleStoreHolder(4242, late.deps), { kind: 'gone' })
+  assert.deepEqual(await settleStoreHolder(4242, late.deps, 'refused'), { kind: 'gone' })
   // Windows refuses to end a process already exiting because another start ended it first.
   let exiting = false
   const ended = holderDeps({ kill: () => { exiting = true; throw Object.assign(new Error('denied'), { code: 'EPERM' }) }, isAlive: () => !exiting })
-  assert.deepEqual(await settleStoreHolder(4242, ended.deps), { kind: 'gone' })
+  assert.deepEqual(await settleStoreHolder(4242, ended.deps, 'refused'), { kind: 'gone' })
 })
 
 test('a pid whose start time changed is not ended', async () => {
   const { deps, kills } = holderDeps({ started: (_pid, look) => look.started + 5_000 })
-  assert.equal((await settleStoreHolder(4242, deps)).kind !== 'ended', true)
+  assert.equal((await settleStoreHolder(4242, deps, 'refused')).kind !== 'ended', true)
   assert.deepEqual(kills, [])
   const young = holderDeps({ look: () => ({ commandLine: 'node b.mjs --serve-child', started: Date.now() - 2_000 }) })
-  assert.deepEqual(await settleStoreHolder(4242, young.deps), { kind: 'young' })
+  assert.deepEqual(await settleStoreHolder(4242, young.deps, 'refused'), { kind: 'young' })
   assert.deepEqual(young.kills, [])
 })
 
@@ -8151,17 +8152,17 @@ test('a refused kill moves no lock', async () => {
     const lock = join(dir, 'server.lock')
     writeFileSync(lock, '4242')
     const { deps } = holderDeps({ kill: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) }, isAlive: () => true })
-    assert.deepEqual(await settleStoreHolder(4242, deps), { kind: 'refused', isBoard: true })
+    assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'refused', isBoard: true })
     assert.equal(readFileSync(lock, 'utf8'), '4242')
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('an owner still alive after the wait keeps its lock', async () => {
   const { deps, kills } = holderDeps({ isAlive: () => true })
-  assert.deepEqual(await settleStoreHolder(4242, deps), { kind: 'refused', isBoard: true })
+  assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'refused', isBoard: true })
   assert.ok(kills.length >= 1)
   const ended = holderDeps()
-  assert.deepEqual(await settleStoreHolder(4242, ended.deps), { kind: 'ended' })
+  assert.deepEqual(await settleStoreHolder(4242, ended.deps, 'refused'), { kind: 'ended' })
 })
 
 test('a retired owner cannot write to the store', () => {
@@ -8208,7 +8209,7 @@ test('the process lookup returns command line and start time together', async ()
 
 test('a page serving a folder given with --messages-dir is never ended', async () => {
   const { deps, kills } = holderDeps({ look: () => ({ commandLine: 'node /x/board.mjs --serve-child --messages-dir /x/store', started: Date.now() - 60_000 }) })
-  assert.deepEqual(await settleStoreHolder(4242, deps), { kind: 'kept' })
+  assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'kept' })
   assert.deepEqual(kills, [])
 })
 
@@ -8217,11 +8218,11 @@ test('a number another program took after SIGTERM is never sent SIGKILL', async 
   let reads = 0
   // The holder ignores SIGTERM for the wait; then its number shows another program's start time.
   const { deps, kills } = holderDeps({ look: () => look, started: () => (++reads === 1 ? look.started : look.started + 5_000), isAlive: () => true, signals: ['SIGTERM', 'SIGKILL'] })
-  assert.deepEqual(await settleStoreHolder(4242, deps), { kind: 'gone' })
+  assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'gone' })
   assert.deepEqual(kills, ['SIGTERM'])
   const same = holderDeps({ look: () => look, isAlive: () => false, signals: ['SIGTERM', 'SIGKILL'] })
   same.deps.isAlive = () => same.kills.length < 2
-  assert.deepEqual(await settleStoreHolder(4242, same.deps), { kind: 'ended' })
+  assert.deepEqual(await settleStoreHolder(4242, same.deps, 'refused'), { kind: 'ended' })
   assert.deepEqual(same.kills, ['SIGTERM', 'SIGKILL'])
 })
 
@@ -8238,7 +8239,53 @@ test('a number another program takes while the board waits after SIGTERM ends th
   // The first read is the check before SIGTERM; a read during the wait shows another program's start time.
   const { deps, kills } = holderDeps({ look: () => look, started: () => (++reads === 1 ? look.started : look.started + 5_000), isAlive: () => true, waitMs: 3000, signals: ['SIGTERM', 'SIGKILL'] })
   const began = Date.now()
-  assert.deepEqual(await settleStoreHolder(4242, deps), { kind: 'ended' })
+  assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'ended' })
   assert.deepEqual(kills, ['SIGTERM'])
   assert.ok(Date.now() - began < 2500, 'the wait did not end when the identity changed')
+})
+
+test('a page state is unknown unless a named proof shows the page serves nothing', () => {
+  const store = join(tmpdir(), 'synthetic-store')
+  const record = (fields = {}) => ({ kind: 'text', text: JSON.stringify({ pid: 4242, port: 4100, url: 'http://127.0.0.1:4100/?t=synthetic', ...fields }) })
+  const facts = (over = {}) => ({ pid: 4242, store, record: record(), hasAddressFile: false, hasOwnClaim: true, ...over })
+  const answer = (body, status = 200) => ({ kind: 'answer', status, body })
+  const board = { path: 'progress.md', messagesDirectory: store }
+  // The two proofs, and an answering page.
+  assert.deepEqual(pageState(facts({ probe: { kind: 'error', code: 'ECONNREFUSED' } })), { kind: 'dead', proof: 'refused' })
+  assert.deepEqual(pageState(facts({ record: { kind: 'error', code: 'ENOENT' } })), { kind: 'dead', proof: 'never-listened' })
+  assert.deepEqual(pageState(facts({ probe: answer(board) })), { kind: 'answers', port: 4100, url: 'http://127.0.0.1:4100/?t=synthetic' })
+  // Everything else is unknown, including a value nobody listed.
+  const unknown = [
+    ...['EIO', 'EACCES', 'EBUSY', 'EISDIR', 'EPERM', 'SOMETHING_NEW'].map(code => facts({ record: { kind: 'error', code } })),
+    facts({ record: { kind: 'error', code: 'ENOENT' }, hasOwnClaim: false }),
+    facts({ record: { kind: 'error', code: 'ENOENT' }, hasAddressFile: true }),
+    facts({ record: { kind: 'text', text: '' } }),
+    facts({ record: { kind: 'text', text: '{"pid":4242,"port":41' } }),
+    facts({ record: { kind: 'text', text: 'null' } }),
+    facts({ record: record({ pid: 4243 }), probe: { kind: 'error', code: 'ECONNREFUSED' } }),
+    facts({ record: record({ port: 'x' }), probe: { kind: 'error', code: 'ECONNREFUSED' } }),
+    facts({ record: record({ url: 'http://example.com/' }), probe: { kind: 'error', code: 'ECONNREFUSED' } }),
+    facts({ record: record({ port: 4101 }), probe: { kind: 'error', code: 'ECONNREFUSED' } }),
+    facts({ probe: { kind: 'error', code: 'ECONNREFUSED' }, hasAddressFile: true }),
+    facts({}),
+    ...['TIMEOUT', 'ECONNRESET', 'EADDRNOTAVAIL', 'EMFILE', 'UNKNOWN', 'SOMETHING_NEW'].map(code => facts({ probe: { kind: 'error', code } })),
+    facts({ probe: answer(board, 500) }),
+    facts({ probe: answer(undefined) }),
+    facts({ probe: answer({ ...board, messagesDirectory: store + '-other' }) }),
+    facts({ probe: answer({ messagesDirectory: store }) }),
+    facts({ probe: answer('a page') }),
+  ]
+  for (const one of unknown) assert.equal(pageState(one).kind, 'unknown', JSON.stringify(one))
+})
+
+test('an old board holder with no proof is never signalled', async () => {
+  const { deps, kills } = holderDeps()
+  assert.deepEqual(await settleStoreHolder(4242, deps), { kind: 'unproven' })
+  assert.deepEqual(kills, [])
+})
+
+test('a proof that no longer holds before the first signal sends none', async () => {
+  const { deps, kills } = holderDeps({ stillDead: () => false })
+  assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'unproven' })
+  assert.deepEqual(kills, [])
 })

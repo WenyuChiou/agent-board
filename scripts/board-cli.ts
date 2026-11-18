@@ -30,7 +30,7 @@ import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
 import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
-import { claimMessageStore, hasLiveClaims, holderDeps, patiently, settleStoreHolder } from './message-store-claim'
+import { claimMessageStore, hasLiveClaims, holderDeps, ownerRecordOf, pageState, patiently, settleStoreHolder, type OwnerRead, type PageProbe, type PageState } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -2518,21 +2518,32 @@ const serveFailureNote = (failure: ServeFailure): string => {
 // than any page start (a start gives up after 20 s). Only a test process may shorten it.
 const holderAgeMs = (): number => process.env.AGENT_BOARD_TEST_PID && Number(process.env.AGENT_BOARD_HOLDER_AGE_MS) > 0 ? Number(process.env.AGENT_BOARD_HOLDER_AGE_MS) : 30_000
 
-// The page of the default store's owner, from the owner record beside its lock, when that record names
-// `pid` and its page answers for this store. A child run whose runtime folder differs from the page's
-// finds no address file, yet meets the page through its store (#1587). A page that answers here, or takes
-// the connection and says nothing in time ('silent'), is never ended.
-const ownerPage = async (pid: number): Promise<Running | 'silent' | null> => {
+// The state of the default store owner's page (pageState says what each reading means). A child run whose
+// runtime folder differs from the page's finds no address file, yet meets the page through its store (#1587).
+// The page is asked as long as the owner-record move waits, and the error is kept, never folded into "none".
+const probePage = async (port: number, url: string): Promise<PageProbe> => {
   try {
-    const owner = JSON.parse(readFileSync(join(messagesDirectory(), 'server.owner'), 'utf8')) as Partial<Running>
-    if (owner.pid !== pid || typeof owner.port !== 'number' || !Number.isInteger(owner.port) || typeof owner.url !== 'string'
-      || !/^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url) || owner.port !== Number(new URL(owner.url).port)) return null
-    const running = { pid, port: owner.port, url: owner.url, path: '', built: '' } as Running
-    // As long as the owner-record move waits: a busy page is not taken for one that listens nowhere.
-    const answer = await ping(running, 5000)
-    if (answer === 'silent') return 'silent'
-    return answer !== null && typeof answer.path === 'string' && answer.messagesDirectory === messagesDirectory() ? running : null
-  } catch { return null }
+    const res = await fetch(`http://127.0.0.1:${port}/api/ping`, { headers: { 'x-board-token': tokenOf(url) }, signal: AbortSignal.timeout(5000) })
+    let body: unknown
+    try { body = await res.json() } catch { body = undefined }
+    return { kind: 'answer', status: res.status, body }
+  } catch (error) {
+    if (error instanceof Error && error.name === 'TimeoutError') return { kind: 'error', code: 'TIMEOUT' }
+    const code = (error as { cause?: { code?: unknown } } | null)?.cause?.code ?? (error as { code?: unknown } | null)?.code
+    return { kind: 'error', code: typeof code === 'string' ? code : 'UNKNOWN' }
+  }
+}
+const ownerPageState = async (pid: number, file: string): Promise<PageState> => {
+  const store = messagesDirectory()
+  let record: OwnerRead
+  try { record = { kind: 'text', text: readFileSync(join(store, 'server.owner'), 'utf8') } } catch (error) {
+    record = { kind: 'error', code: String((error as NodeJS.ErrnoException).code ?? 'UNKNOWN') }
+  }
+  const named = record.kind === 'text' ? ownerRecordOf(record.text, pid) : { why: '' }
+  const probe = 'port' in named ? await probePage(named.port, named.url) : undefined
+  let hasOwnClaim = false
+  try { hasOwnClaim = readdirSync(store).some(name => name.startsWith(`.message-claim-${pid}-`)) } catch {}
+  return pageState({ pid, store, record, probe, hasAddressFile: existsSync(file), hasOwnClaim })
 }
 
 const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | null> => {
@@ -2711,19 +2722,19 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     // another program took after a restart), and only when the lock stays is the holder named, with one
     // action. A page still starting, or a hub of a folder given with --messages-dir, is waited for as before.
     let refused: { pid: number; isBoard: boolean } | undefined
+    let unproven: number | undefined
     if (/^[1-9][0-9]*$/.test(held)) {
       const pid = Number(held)
-      const owned = await ownerPage(pid)
+      const page = await ownerPageState(pid, file)
       // Only a start that finds no address file reaches the page through its store. An address file this
       // start would not use (one another account may have written) never leads to the page behind it, and
       // a page that answers is never ended: it is waited for as before.
-      if (owned !== null && owned !== 'silent' && !existsSync(file)) return { url: owned.url, port: owned.port, isKept: true, isNew: false }
-      if (owned === null || owned === 'silent') {
-        // A page that takes the connection and says nothing in time is never ended: no age makes it old enough,
-        // so a board page there is waited for, and only a holder that is not one is named.
-        const settled = await settleStoreHolder(pid, holderDeps(owned === 'silent' ? Number.POSITIVE_INFINITY : holderAgeMs()))
+      if (page.kind === 'answers' && !existsSync(file)) return { url: page.url, port: page.port, isKept: true, isNew: false }
+      if (page.kind !== 'answers') {
+        const settled = await settleStoreHolder(pid, { ...holderDeps(holderAgeMs()), stillDead: async () => (await ownerPageState(pid, file)).kind === 'dead' }, page.kind === 'dead' ? page.proof : undefined)
         if (settled.kind === 'gone' || settled.kind === 'ended') continue
         if (settled.kind === 'refused') refused = { pid, isBoard: settled.isBoard }
+        if (settled.kind === 'unproven') unproven = pid
       }
     }
     const until = refused !== undefined ? performance.now() : storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
@@ -2775,6 +2786,10 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
     if (failure !== undefined && code !== undefined) failure.storeCode = code
     if (failure !== undefined && code === 'MESSAGE_STORE_IN_USE' && refused !== undefined && !isTaken(lock, String(refused.pid))) failure.storeHolder = refused
+    // A board page with no proof that it serves nothing, still holding the lock after the wait: named, never ended.
+    if (failure !== undefined && code === 'MESSAGE_STORE_IN_USE' && refused === undefined && unproven !== undefined && isRunning(unproven) && !isTaken(lock, String(unproven))) {
+      failure.storeHolder = { pid: unproven, isBoard: true }
+    }
     // The child names its own folder failure on its stderr; the command carries that
     // reason instead of the generic line, so the person is told the check did not finish.
     if (failure !== undefined && code === undefined) {
