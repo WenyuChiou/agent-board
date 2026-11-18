@@ -15793,6 +15793,8 @@ export const LINES = [
 "      if (performance.now() < deadline)",
 "        continue;",
 "    }",
+"    if (refused !== undefined && !isRunning(refused.pid) && performance.now() < deadline)",
+"      continue;",
 "    const code = storeCode ?? (isCheckTimeout ? \"ACL_CHECK_TIMEOUT\" : undefined);",
 "    if (failure !== undefined && code !== undefined)",
 "      failure.storeCode = code;",

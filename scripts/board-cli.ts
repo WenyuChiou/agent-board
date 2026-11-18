@@ -2764,6 +2764,8 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
       if (afterWait !== null) return { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs }
       if (performance.now() < deadline) continue
     }
+    // A holder that ended meanwhile (another start ended it) is no reason to refuse: try again.
+    if (refused !== undefined && !isRunning(refused.pid) && performance.now() < deadline) continue
     const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
     if (failure !== undefined && code !== undefined) failure.storeCode = code
     if (failure !== undefined && code === 'MESSAGE_STORE_IN_USE' && refused !== undefined && !isTaken(lock, String(refused.pid))) failure.storeHolder = refused

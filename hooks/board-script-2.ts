@@ -2292,7 +2292,7 @@ export const LINES = [
 "    try {",
 "      deps.kill(pid, signal);",
 "    } catch (error) {",
-"      if (error.code === \"ESRCH\")",
+"      if (error.code === \"ESRCH\" || !deps.isAlive(pid))",
 "        return { kind: \"gone\" };",
 "      return { kind: \"refused\", isBoard: true };",
 "    }",

@@ -336,7 +336,8 @@ export const settleStoreHolder = async (pid: number, deps: HolderDeps): Promise<
   // Windows ends a process at the first signal; elsewhere one that ignores it, or is stopped, gets SIGKILL.
   for (const signal of process.platform === 'win32' ? ['SIGTERM'] as const : ['SIGTERM', 'SIGKILL'] as const) {
     try { deps.kill(pid, signal) } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return { kind: 'gone' }
+      // Windows refuses to end a process that is already exiting (another start ended it first): that one is gone.
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH' || !deps.isAlive(pid)) return { kind: 'gone' }
       return { kind: 'refused', isBoard: true }
     }
     if (await isEnded(deps.waitMs)) return { kind: 'ended' }

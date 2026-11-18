@@ -8079,6 +8079,10 @@ test('an owner that exits before the kill does not stop the start', async () => 
   assert.deepEqual(gone.kills, [])
   const late = holderDeps({ kill: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) } })
   assert.deepEqual(await settleStoreHolder(4242, late.deps), { kind: 'gone' })
+  // Windows refuses to end a process already exiting because another start ended it first.
+  let exiting = false
+  const ended = holderDeps({ kill: () => { exiting = true; throw Object.assign(new Error('denied'), { code: 'EPERM' }) }, isAlive: () => !exiting })
+  assert.deepEqual(await settleStoreHolder(4242, ended.deps), { kind: 'gone' })
 })
 
 test('a pid whose start time changed is not ended', async () => {
