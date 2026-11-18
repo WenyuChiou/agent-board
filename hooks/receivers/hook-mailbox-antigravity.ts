@@ -3,6 +3,10 @@ import { SURFACE_IDS } from '../messaging.ts'
 // The hook reads the surface from the app data folder in its transcript path (scripts/hook-delivery.ts,
 // antigravitySurface): the folder `antigravity-cli` is agy TUI; the folders `antigravity` and `antigravity-ide`
 // both read as IDE (only the app was run).
+// The turn-end (`Stop`) hook reads the model's ACK on both surfaces (#1416): the turn-start hook keeps the id and code of the message it
+// handed over, and `Stop` reads the first line of each reply in the turn the hand-over started from the conversation's transcript. A line
+// `ACK <code>` of a message handed over acknowledges it (only that line is kept); any other reply, or a turn with no hand-over, changes
+// nothing. Recorded live on both surfaces: docs/validation/2026-11-16-antigravity-ack-live.md.
 export const messagingReceiver = {
   host: 'Antigravity',
   agent: 'antigravity',

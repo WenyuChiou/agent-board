@@ -585,10 +585,21 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // OpenCode's plugin names the claim (12 hex), so it can release it again.
       if (ref !== undefined && (agent !== 'opencode' || !/^[0-9a-f]{12}$/.test(ref))) throw new Error('INVALID_MAILBOX_CALL')
       let message: Awaited<ReturnType<typeof mailbox.turnOrThrow>>
+      let taker = mailbox
       if (agent !== 'opencode') {
         // DeepSeek's receiver reads a failed take from the exit status and the code on stderr; a deferred take answers null (#1448).
-        message = await mailbox.turn(agent, session, surfaceOf(surface), Date.now())
-        if (message === null && mailbox.error !== null) throw new Error(mailbox.error)
+        // A refused or cut connection to the board is asked again within this take's own five seconds, counted from its
+        // first ask, as the receiver asks again after a deferred take, so a board back in a moment still delivers; one that
+        // keeps failing is reported. A cut take whose claim did not go back is reported at once: asking again would find
+        // nothing while the board still holds that message (#1631).
+        const until = Date.now() + 5000
+        message = await taker.turn(agent, session, surfaceOf(surface), Date.now())
+        while (message === null && taker.hasTransportError && !taker.hasHeldClaim && Date.now() + 500 < until) {
+          await new Promise(done => setTimeout(done, 250))
+          taker = hookMailbox(directory, Math.max(until - Date.now(), 0), 2000, 2000)
+          message = await taker.turn(agent, session, surfaceOf(surface), Date.now())
+        }
+        if (message === null && taker.error !== null) throw new Error(taker.error)
       } else {
         try {
           message = await mailbox.turnOrThrow(agent, session, surfaceOf(surface), Date.now(), ref)
@@ -603,7 +614,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
       // deferred: the board's store was busy, so null here is "not checked", not "nothing waiting"; the plugin asks again (#1429).
-      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary }, deferred: message === null && mailbox.hasDeferred })
+      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary }, deferred: message === null && taker.hasDeferred })
     } else if (action === 'open') {
       // OpenCode's plugin only. It claims nothing, and the plugin reads the board's file to see whether it worked. The answer
       // names the folder to watch. With no board folder at all no board can queue a message, so nothing is enrolled yet

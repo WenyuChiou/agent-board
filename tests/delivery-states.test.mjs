@@ -123,6 +123,21 @@ test('isDoubleSend names exactly the uncertain receipts that send a message acce
   assert.deepEqual(wrong, [], wrong.join('\n'))
 })
 
+test('combined flag shapes predict both card and transitions when independent flags interact (#1560)', () => {
+  assert.ok('acceptedBefore+onHook' in shapesOf('turnEnded'))
+  const hookAfterAccept = rowOf('turnEnded', 'acceptedBefore+onHook')
+  assert.equal(hookAfterAccept.card, 'messagesAcceptedUnconfirmed')
+  assert.equal(hookAfterAccept.on.accept, 'handed')
+  assert.equal(hookAfterAccept.on.unsure, 'leased')
+  assert.equal(observe('turnEnded', 'accept', 'acceptedBefore+onHook'), 'handed')
+
+  assert.equal(rowOf('leased', 'otherSurface+lastRepeat').on.claimLate, 'leased')
+  assert.equal(rowOf('inDoubt', 'acceptedBefore+otherError').card, 'messagesAcceptedUnconfirmed')
+  assert.equal(rowOf('acceptedLost', 'awaitsAck+otherError').card, 'messagesHandedNow')
+  assert.equal(rowOf('turnEnded', 'acceptedBefore+onWake').on.openLimit, 'wakeExpired')
+  assert.equal('acceptedBefore+onWake' in shapesOf('expired'), false)
+})
+
 // A small seeded generator, so every run plays the same orders.
 const generator = seed => () => {
   seed = (seed + 0x6d2b79f5) | 0

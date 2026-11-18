@@ -127,10 +127,28 @@ export const engineBeneath = (on: On, world: World): MockClock => {
     }
   }
   const files = world.files
+  // A folder's own time moves when a file is added to it or taken out of it, as on a real file
+  // system, so a stat of the folder sees a changed set (#422). The time is kept beside the
+  // files' times, under the folder's path, which is what `fs.stat` reads for a folder.
+  const moveDir = (path: string): void => {
+    const dir = path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')))
+    if (dir !== '') (world.mtimes ??= {})[dir] = Math.max(world.mtimes?.[dir] ?? world.mtime, world.mtime) + 1
+  }
   Object.defineProperty(files, 'set', { configurable: true, writable: true, value: (path: string, text: string) => {
+    // A file added to the folder moves its time; writing the same file again does not, as on a
+    // real file system, so a ledger rewritten in place is caught by its own stat, not the folder's.
+    const isNew = !files.has(path)
     Map.prototype.set.call(files, path, text)
-    if (path !== FILE) (world.mtimes ??= {})[path] = Math.max(world.mtimes?.[path] ?? world.mtime, world.mtime) + 1
+    if (path !== FILE) {
+      (world.mtimes ??= {})[path] = Math.max(world.mtimes?.[path] ?? world.mtime, world.mtime) + 1
+      if (isNew) moveDir(path)
+    }
     return files
+  } })
+  Object.defineProperty(files, 'delete', { configurable: true, writable: true, value: (path: string) => {
+    const had = Map.prototype.delete.call(files, path)
+    if (had && path !== FILE) moveDir(path)
+    return had
   } })
   world.setupDone = new Promise<void>(done => { world.finishSetup = done })
   const clockOn = world.isArchiveClockOnly || world.isInboxClockOnly || world.completeDelayMs !== undefined || world.clockOffset !== undefined ? ((...args: Parameters<On>) => {
