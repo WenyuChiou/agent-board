@@ -54,9 +54,9 @@ Outside the sandbox, through the daemon, live:
 - Not run: a command inside an OpenCode session calling the server.
 
 ## Result
-**F10 does not pass as written on any of the three hosts for a command that runs outside a sandbox. It passes for Codex inside its sandbox.**
+**F10 does not pass as written on any of the three hosts for a command that runs outside a sandbox. For Codex, the `codex sandbox -P` probes found no route; that is not a pass for a real Codex session, whose commands did not run here.**
 - **Claude Code: a command can approve.** Not by pressing (the page secret holds, #1368), but by standing in for the board: the hook trusts any address file for its progress path whose `pid` is a running process and whose folder is not inside the session's working folder (the home folder excepted), in the plain folder and in the private runtime folder alike; the stand-in met both with its own pid, and also sends that process the full command. Any program the session is allowed to run (Claude Code's Bash runs without a sandbox unless its sandbox is turned on; the default was not checked here) can do this once and approve every later request of every session that uses that progress file, faster than the person can answer the prompt.
-- **Codex: inside the sandbox, no route found** (no write to the address folder, no child process, no daemon socket, no press without the page). **Outside the sandbox, yes**: the daemon takes an approval from any same-account client, with no credential. That is Codex's own channel, which the board's receiver also uses; the board adds no new route there.
+- **Codex: in the `codex sandbox -P` probes, no route found** (no write to the address folder, no child process, no daemon socket, no press without the page). This covers those probes only: a real `codex exec` session refused the commands before they ran, so the result assumes a session's commands get the same sandbox. **Outside the sandbox, yes**: the daemon takes an approval from any same-account client, with no credential. That is Codex's own channel, which the board's receiver also uses; the board adds no new route there.
 - **OpenCode: `opencode serve` without a password can be answered by any same-account process**, shown from outside the session. The terminal opens no port. Not shown from inside a session.
 
 ## Not shown
@@ -68,7 +68,7 @@ Outside the sandbox, through the daemon, live:
 
 ## What it means for the plan
 - D3's "An agent cannot press it" holds: the press route needs the page secret.
-- D3's "Ships on a host only if F10 shows, on that host, that a command inside the agent's session cannot approve" is not met for Claude Code as written, and for Codex and OpenCode only inside Codex's sandbox. This is the owner's decision, not this note's. The choices seen here:
+- D3's "Ships on a host only if F10 shows, on that host, that a command inside the agent's session cannot approve" is not met for Claude Code or OpenCode as written. For Codex it is shown only by the `codex sandbox -P` probes, not from a real session. This is the owner's decision, not this note's. The choices seen here:
   1. Read F10's bar as "a command the host runs in its sandbox", and write the unsandboxed case into `SECURITY.md`'s "hole that stays" next to the browser case, by the owner's approval. An unsandboxed command can already change the host's own permission settings, so the board gives it no new power, but it does give it a silent path.
   2. Harden Claude Code's hook before it ships: before asking, check that the port in the address file belongs to the installed board's own process. That closes the stand-in shown here, not a program that can replace the board's own files.
   3. For OpenCode, start or require `opencode serve` with `OPENCODE_SERVER_PASSWORD` wherever the board relies on the server, and say in `SECURITY.md` that the terminal opens no port.
