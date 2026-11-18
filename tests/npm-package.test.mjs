@@ -429,7 +429,7 @@ test('--data-dir selects the explicit installation and preserves its root for th
   save(boardPath(f), 'throw new Error("wrong board")\n')
   const result = f.run(pkg, ['--chat', '--data-dir', data, '--all'])
   success(result)
-  assert.deepEqual(JSON.parse(result.stdout), { argv1: resolve(script), args: ['--data-dir', data, '--chat', '--all'] })
+  assert.deepEqual(JSON.parse(result.stdout), { argv1: resolve(script), args: ['--chat', '--all', '--data-dir', data] })
   assert.equal(result.stderr, '')
   for (const args of [['--data-dir'], ['--data-dir', '--chat']]) {
     const invalid = f.run(pkg, args)
@@ -444,7 +444,7 @@ test('--data-dir selects the explicit installation and preserves its root for th
   const args = ['--progress-file', join(dirname(explicit), 'progress.md'), '--chat']
   const preferred = f.run(pkg, [...args, '--data-dir', data])
   success(preferred)
-  assert.deepEqual(JSON.parse(preferred.stdout), { argv1: resolve(script), args: ['--data-dir', data, ...args] })
+  assert.deepEqual(JSON.parse(preferred.stdout), { argv1: resolve(script), args: [...args, '--data-dir', data] })
   const progressOnly = f.run(pkg, args)
   success(progressOnly)
   assert.deepEqual(JSON.parse(progressOnly.stdout), { argv1: resolve(explicit), args })

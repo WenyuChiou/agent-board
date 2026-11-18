@@ -301,4 +301,4 @@ if (!isChat && !args.includes('--status')) {
 const env = dataDir ? { ...process.env } : process.env
 if (dataDir) delete env.CLAUDE_PROGRESS_FILE
 // An explicit install root selects both the program and its records; progress may belong to another board.
-run(installed, [...(dataDir ? ['--data-dir', dataDir] : []), ...passArgs], { env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v } })
+run(installed, [...passArgs, ...(dataDir ? ['--data-dir', dataDir] : [])], { env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v } })
