@@ -6071,7 +6071,7 @@ const buildStandIn = () => new Promise((done, fail) => {
   writeFileSync(source, STAND_IN_SOURCE)
   const windows = process.env.SystemRoot ?? 'C:\\Windows'
   const csc = join(windows, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
-  const finish = (error, output) => error ? fail(new Error(`${error.message}\n${output}`)) : done(exe)
+  const finish = (error, output) => error ? fail(new Error(`${error.message}\n${output ?? ''}`.trim())) : done(exe)
   if (existsSync(csc)) {
     execFile(csc, ['/nologo', '/target:winexe', `/out:${exe}`, source], { windowsHide: true }, finish)
   } else {
