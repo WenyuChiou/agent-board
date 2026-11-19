@@ -7,8 +7,9 @@
 // about a request to run without the sandbox. It never answers in a mode where Claude Code would not
 // ask, and it never sends updatedPermissions, updatedInput or interrupt: nothing standing is ever added.
 // Before it sends anything it checks who is listening (#1651): the address file's process must hold the
-// port by the system's own table and be Node running the board script at an expected path. A check that
-// refuses, fails or runs out of time ends the same way as no board: nothing printed, Claude Code asks.
+// port by the system's own table, be named Node, and have an expected board script as the word directly before
+// its first --serve-child. A check that refuses, fails or runs out of time ends the same way as no board: nothing
+// printed, Claude Code asks.
 // Plain Node with no imports outside node:, as the plugin's hooks.json runs it directly. The
 // address rules follow hooks/receiver.ts, plus Windows XDG_RUNTIME_DIR ACL verification matching
 // scripts/runtime-folder.ts; tests/approvals.test.mjs keeps them in step.
@@ -28,7 +29,12 @@ const ASK_MS = 35_000
 // hooks/hooks.json gives PermissionRequest 45 s in total; address discovery (including Windows
 // whoami + PowerShell ACL checks) shares only what remains before the board's reply window.
 const HOOK_MS = 45_000
+// The discovery budget is a gate, not a promise about the instant the request starts. The hook reads the clock last,
+// directly before it hands a ready request to node:http, and starts no request when that read is at or past the
+// deadline. Nothing after that read touches the disk, starts a process, or does work that grows with the input.
 export const DISCOVERY_MS = HOOK_MS - ASK_MS
+// What is left of the hook's limit after discovery and the board's 30 s press window (APPROVAL_PRESS_MS).
+export const SEND_ROOM_MS = ASK_MS - 30_000
 // The most the check of who is listening may add to a request. Windows needs about 0.6 s of it.
 export const LOOKUP_MS = 2_000
 const INPUT_MS = 5_000
@@ -649,9 +655,8 @@ const readInput = () => new Promise(done => {
 
 // The request goes to the address that was checked and nowhere else: an agent of its own takes no proxy from the
 // environment, and node:http follows no redirect. Any failure, status or unreadable answer is no answer.
-export const askBoard = (address, body) => new Promise(done => {
+export const askBoard = (address, payload) => new Promise(done => {
   const { hostname, port } = new URL(address.origin)
-  const payload = JSON.stringify(body)
   let timer
   const finish = value => { clearTimeout(timer); done(value) }
   const asked = httpRequest({
@@ -700,8 +705,9 @@ export const run = async (env = process.env, platform = process.platform, option
     return null
   }
   ;(options.clearRefusal ?? clearRefusal)(address.file)
+  const payload = JSON.stringify(askBody(input))
   if (now() >= discoveryDeadline) return null
-  const body = await askBoard(address, askBody(input))
+  const body = await askBoard(address, payload)
   return decisionOutput(body?.decision ?? null)
 }
 
