@@ -387,6 +387,61 @@ test('the sidecar-only writer keeps a one-byte edit to sidecar.mjs that decodes 
   assert.deepEqual(readFileSync(file), withFF(old))
 }))
 
+// The sidecar-only removal checks the file's bytes just before it unlinks (#1607). The preload swaps EF BF BD for FF in
+// sidecar.mjs when setup unlinks sidecar.json, which comes first, after the batch check and before sidecar.mjs's turn.
+const byteEditOnUnlink = home => seam(home, `const unlink = fs.unlinkSync
+let done = false
+fs.unlinkSync = (file, ...rest) => {
+  if (!done && typeof file === 'string' && file.endsWith('sidecar.json')) {
+    done = true
+    const other = file.slice(0, -'sidecar.json'.length) + 'sidecar.mjs'
+    const bytes = fs.readFileSync(other), i = bytes.indexOf(Buffer.from([0xef, 0xbf, 0xbd]))
+    fs.writeFileSync(other, Buffer.concat([bytes.subarray(0, i), Buffer.from([0xff]), bytes.subarray(i + 3)]))
+  }
+  return unlink(file, ...rest)
+}`)
+
+test('the sidecar-only removal keeps a one-byte edit to sidecar.mjs that decodes the same: setup fails instead of removing it (#1607)', () => withHome(({ home, run, dir }) => {
+  const { root } = connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  // An older sidecar.mjs holding U+FFFD, under the hash the sidecar's record keeps, so this removal plans to take it out.
+  const file = join(dir, 'sidecar.mjs')
+  const old = Buffer.concat([Buffer.from('// an older sidecar '), FFFD, Buffer.from('\n')])
+  writeFileSync(file, old)
+  const recordFile = join(root, 'install-antigravity-sidecar.json')
+  const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+  record.files[Object.keys(record.files).find(key => key.endsWith('sidecar.mjs'))] = createHash('sha256').update(old).digest('hex')
+  writeFileSync(recordFile, `${JSON.stringify(record, null, 2)}\n`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env: byteEditOnUnlink(home) })
+  stoppedOnChange(removed)
+  assert.deepEqual(readFileSync(file), withFF(old), 'sidecar.mjs stays with the byte the person put there')
+}))
+
+// The preload changes one other byte of hooks.json, a marker next to the person's FF byte, when setup opens its temporary copy.
+const markerEditOnOpen = (home, name) => seam(home, `const open = fs.openSync
+let done = false
+fs.openSync = (file, ...rest) => {
+  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.lastIndexOf(${JSON.stringify(`${name}.`)}) : -1
+  if (!done && at >= 0) {
+    done = true
+    const real = file.slice(0, at) + ${JSON.stringify(name)}
+    const bytes = fs.readFileSync(real), i = bytes.indexOf(Buffer.from('mark-a'))
+    fs.writeFileSync(real, Buffer.concat([bytes.subarray(0, i), Buffer.from('mark-b'), bytes.subarray(i + 6)]))
+  }
+  return open(file, ...rest)
+}`)
+
+test('an edit made while setup runs to a hook config holding a lone FF byte stops setup and stays (#1607)', () => withHome(({ home, run }) => {
+  const hooks = join(home, '.gemini', 'config', 'hooks.json')
+  mkdirSync(join(home, '.gemini', 'config'), { recursive: true })
+  // The person's own entry, which setup keeps beside its own, holds a lone FF byte.
+  writeFileSync(hooks, Buffer.concat([Buffer.from('{\n  "my-hooks": { "note": "caf'), Buffer.from([0xff]), Buffer.from(' mark-a" }\n}\n')]))
+  const edited = Buffer.concat([Buffer.from('{\n  "my-hooks": { "note": "caf'), Buffer.from([0xff]), Buffer.from(' mark-b" }\n}\n')])
+  const install = run(['--agent', 'antigravity', '--apply'], { env: markerEditOnOpen(home, 'hooks.json') })
+  stoppedOnChange(install)
+  assert.deepEqual(readFileSync(hooks), edited, 'the file holds the person\'s later bytes, FF included')
+}))
+
 // A link to a path that is not there: on Windows a junction to a missing folder, which needs no privilege.
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'file'
 

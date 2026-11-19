@@ -149,6 +149,35 @@ const readBytes = (file: string): Buffer | null => {
   }
 }
 const readLocal = (file: string): string | null => readBytes(file)?.toString('utf8') ?? null
+// Setup reads a file it may write back as text, and a byte that is not valid UTF-8 must come back as the same byte
+// (#1607): a plain decode turns it into U+FFFD, so a rewrite puts EF BF BD where the person's byte was. `decode` keeps
+// valid UTF-8 as a plain decode does and turns each other byte 80-FF into one private-use character, U+10FE80 to
+// U+10FEFF, which `encode` turns back into that byte; a character of that block written in the file is taken as its
+// four bytes, so `encode` undoes `decode` exactly. Such a character equals nothing setup writes or records and is not
+// U+FFFD, so a file with one never matches setup's own and hashes apart from the same file with EF BF BD. `lossy` is
+// what a plain decode made of the same bytes, for a hash an earlier setup recorded that way.
+const CARRIER = /\udbff[\ude80-\udeff]/g
+const VALID = /[\xc2-\xdf][\x80-\xbf]|\xe0[\xa0-\xbf][\x80-\xbf]|[\xe1-\xec\xee\xef][\x80-\xbf]{2}|\xed[\x80-\x9f][\x80-\xbf]|\xf0[\x90-\xbf][\x80-\xbf]{2}|[\xf1-\xf3][\x80-\xbf]{3}|\xf4[\x80-\x8e][\x80-\xbf]{2}|\xf4\x8f[\x80-\xb9\xbc-\xbf][\x80-\xbf]|[\x80-\xff]/g
+export const decode = (bytes: Buffer): string => {
+  const text = bytes.toString('utf8')
+  if (!/\udbff[\ude80-\udeff]/.test(text) && Buffer.from(text, 'utf8').equals(bytes)) return text
+  return bytes.toString('latin1').replace(VALID, run => run.length === 1 ? String.fromCodePoint(0x10fe00 + run.charCodeAt(0)) : Buffer.from(run, 'latin1').toString('utf8'))
+}
+export const encode = (text: string): Buffer => {
+  const parts: Buffer[] = []
+  let at = 0
+  for (const match of text.matchAll(CARRIER)) {
+    const index = match.index!
+    parts.push(Buffer.from(text.slice(at, index), 'utf8'), Buffer.of(match[0].codePointAt(0)! - 0x10fe00))
+    at = index + 2
+  }
+  return parts.length ? Buffer.concat([...parts, Buffer.from(text.slice(at), 'utf8')]) : Buffer.from(text, 'utf8')
+}
+export const lossy = (text: string): string => encode(text).toString('utf8')
+// JSON.parse reads `\/` and `\uXXXX` as one character and JSON.stringify writes that character itself, so a backslash
+// right after a byte that is not valid UTF-8 (the second byte of a Big5 character, say) would not come back. Such a
+// file is one setup cannot write back byte for byte, and is refused as unreadable.
+const isEscapeLost = (text: string): boolean => /\udbff[\ude80-\udeff]\\[/u]/.test(text)
 // What setup saw at a path when it planned (#1488): the kind of the path itself (lstat follows no link), a link's
 // target, and the bytes read through it. Decoded text is not enough to compare later: bytes that decode alike
 // (EF BF BD and FF) would pass, and a dangling link would read as a missing file. lstat sees the last part of the
@@ -229,6 +258,7 @@ const object = (value: unknown): Json => {
 type Approval = Json & { event?: unknown; command?: unknown }
 const readAllowlist = (text: string | null): { data: Json; list: Approval[] } | null => {
   if (text === null) return { data: {}, list: [] }
+  if (isEscapeLost(text)) return null
   try {
     const data = object(JSON.parse(text))
     const list = data.approvals ?? []
@@ -238,8 +268,9 @@ const readAllowlist = (text: string | null): { data: Json; list: Approval[] } | 
 }
 const sortedKeys = (value: unknown): unknown => Array.isArray(value) ? value.map(sortedKeys) : value !== null && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sortedKeys((value as Json)[key])])) : value
 // Hermes writes this file as ASCII and reads it in the system code page, so a raw non-ASCII byte would stop
-// every shell hook from loading: escape it the way Python's json.dumps does.
-const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), null, 2).replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
+// every shell hook from loading: escape it the way Python's json.dumps does. A byte the file already held that is not
+// valid UTF-8 goes back as that byte (#1607), since an escape of it would be another character.
+const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), null, 2).replace(/\udbff[\ude80-\udeff]|[^\x00-\x7f]/g, c => c.length === 2 ? c : `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
 // A root that is not a mapping (a list, a flow document) is not something to add a key to.
 const isYamlMapping = (text: string): boolean => text.split(/\r?\n/).every(line => !/^\S/.test(line) || /^(?:#|---|\.\.\.)/.test(line) || /^(?:"[^"\n]*"|'[^'\n]*'|[^\s#{[!&*|>%@`"'-][^\n]*?)\s*:(?:\s|$)/.test(line))
 const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false): void => {
@@ -515,9 +546,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const home = resolve(flag('--home') ?? homedir())
   const root = resolve(flag('--data-dir') ?? baked?.codexRoot ?? join(home, '.agent-board'))
   const before = new Map<string, Snap>()
+  // What setup plans from is the bytes decoded so that they come back as they were (#1607), once per read.
+  const decoded = new WeakMap<Buffer, string>()
+  const textOf = (bytes: Buffer): string => decoded.get(bytes) ?? decoded.set(bytes, decode(bytes)).get(bytes)!
   const initial = (file: string): string | null => {
     if (!before.has(file)) before.set(file, take(file))
-    return before.get(file)!.bytes?.toString('utf8') ?? null
+    const bytes = before.get(file)!.bytes
+    return bytes === null ? null : textOf(bytes)
   }
   // The batch check and the re-read just before each write compare a path with what setup saw there (#1488), in both
   // writers. Before a write the path must be as planned, or already hold exactly the new bytes as the same kind of
@@ -532,7 +567,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // just before and checks after that the path reads as gone. Not covered here, and left as on main: a re-read before a
   // removal in the main writer, a file another program removes just before setup's unlink (#1611), and a remove through
   // a skills folder linked to the shared one whose SKILL.md is a file link (#1610).
-  const isHolding = (now: Snap, text: string): boolean => sameBytes(now.bytes, Buffer.from(text, 'utf8'))
+  // The bytes of a text are what `encode` makes of it, so a byte kept from the file is compared and written as itself.
+  const isHolding = (now: Snap, text: string): boolean => sameBytes(now.bytes, encode(text))
   const ours = new Set<string>()
   const realOf = (file: string): string | null => { try { return realpathSync.native(file) } catch { return null } }
   const isOurs = (file: string, now: Snap, next: string): boolean => now.kind === 'file' && isHolding(now, next) && ours.has(realOf(file) ?? '')
@@ -546,7 +582,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (now.kind !== 'file' || !isHolding(now, text)) throw new Error('INSTALL_CHANGED')
   }
   const put = (file: string, text: string, target = file): void => {
-    atomic(target, text, () => unchanged(file, text))
+    atomic(target, encode(text), () => unchanged(file, text))
     written(target, text)
     const real = realOf(target)
     if (real !== null) ours.add(real)
@@ -584,7 +620,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const listOf = (snap: Snap | undefined, isNamed: (path: string) => boolean = isOwnCopy): Record<string, string[]> | null => {
     if (snap?.kind !== 'file' || snap.bytes === null) return null
     let held: unknown
-    try { held = JSON.parse(snap.bytes.toString('utf8')) } catch { return null }
+    try { held = JSON.parse(textOf(snap.bytes)) } catch { return null }
     if (typeof held !== 'object' || held === null || Array.isArray(held)) return null
     const entries = Object.entries(held)
     const isList = entries.length > 0 && entries.every(([path, hashes]) => path.endsWith('.new') && isNamed(path) && Array.isArray(hashes) && hashes.length > 0 && hashes.every(value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)))
@@ -766,7 +802,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const output = (value: unknown): void => {
     if (local) local.output(value)
-    else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
+    // A byte kept from a file shows as U+FFFD, as a plain decode would show it.
+    else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`.replace(CARRIER, '�'))
   }
 
   // The sidecar's two files (#1396) have a record of their own, apart from the agent's install record, so an
@@ -798,11 +835,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED')
         // Each file is read again just before its change and checked after it, so an edit made before that last re-read
         // is never overwritten or removed, and a change that did not land is not reported as applied. A write goes
-        // through put; a removal compares the decoded text and checks that the path reads as gone after, as on main.
+        // through put; a removal compares the path with what setup saw there and checks that it reads as gone after.
         for (const change of sidecarChanges) {
           if (change.action !== 'remove') put(change.file, change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!)
           else {
-            if (readLocal(change.file) !== initial(change.file)) throw new Error('INSTALL_CHANGED')
+            if (!isAsPlanned(change.file)) throw new Error('INSTALL_CHANGED')
             unlinkSync(change.file)
             if (readLocal(change.file) !== null) throw new Error('INSTALL_CHANGED')
           }
@@ -1408,7 +1445,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     return true
   }
-  const read = hasHooks && agent !== 'hermes' || agent === 'openclaw' ? readConfig(configText) : {}
+  const read = hasHooks && agent !== 'hermes' || agent === 'openclaw' ? isEscapeLost(configText) ? null : readConfig(configText) : {}
   // Wrong shapes are the same one conflict as unreadable JSON, so other agents still preview (#465).
   const parsedConfig = read !== null && !isShaped(read) ? null : read
   const hookConfig = parsedConfig ?? {}
@@ -1468,7 +1505,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (isReadable && old !== undefined && !entries.some(entry => isSame(entry, old))) {
       // Remember foreign entries so a removed group cannot be confused with an edited command.
       const foreign = manifest.foreignGroups[event]
-      const hasUnknown = entries.some(entry => !Array.isArray(foreign) || !foreign.includes(hash(JSON.stringify(entry))))
+      // A record from before #1607 hashed an entry with a byte that is not valid UTF-8 as a plain decode read it.
+      const hasUnknown = entries.some(entry => !Array.isArray(foreign) || !foreign.includes(hash(JSON.stringify(entry))) && !foreign.includes(hash(lossy(JSON.stringify(entry)))))
       // With foreign history, an unknown entry is the user's edit of this hook; older records cannot tell.
       if (remove && Array.isArray(foreign) && hasUnknown) conflicts.push(`${config}:${event}`)
       else if (remove) alreadyGone.push(`${config}:${event}`)
@@ -1857,7 +1895,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       withInstallLock(home, () => {
         if (!isAsPlanned(allowlistFile)) throw new Error('INSTALL_CHANGED')
         const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-        atomic(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
+        atomic(allowlistFile, encode(allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] })))
       })
     }
     output({ mode: 'trust', agent, file: allowlistFile, entries: wanted.map(([event, command]) => ({ event, command, trusted: isApplied || !missing.some(one => one[0] === event) })), changes: missing.length, ...(isApplied ? { applied: true } : {}) })
