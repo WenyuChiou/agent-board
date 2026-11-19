@@ -1657,6 +1657,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const isWorkerHeld = !isScriptHeld && isKeptRunner(worker)
   const isHeld = isScriptHeld || isWorkerHeld
   const heldBy = basename(isScriptHeld ? script : worker)
+  // A kept board script whose record is not this version's script, in any language, came from an earlier version: new
+  // words can ask it for options it lacks, and only the old /board command is known to work with it. So while it stays,
+  // setup writes no new command and no missing skill, and keeps the /board file with its record entry (#1698).
+  const isOlderHeld = isScriptHeld && !Object.keys(STRINGS).some(lang => manifest.files[script] === hash(`globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang })}\n${original}`))
+  const commandFile = agent === 'gemini' ? join(home, '.gemini', 'commands', 'agent-board.toml') : agent === 'opencode' ? join(opencodeDir, 'commands', 'agent-board.md') : ''
   const keptFiles = new Set<string>()
   const keptText: { file: string; beside: string }[] = []
   const keptCode: string[] = []
@@ -1679,12 +1684,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const owned = existing !== null && isOwnedFile(file, existing)
     const isEdited = existing !== null && !owned && existing !== desired
     // Words setup wrote earlier wait with the person's board script, since new words could ask that script for a flag it
-    // lacks. An edited text file still gets its .new copy, and a missing one is written, because no skill helps nobody.
-    const isHeldText = isScriptHeld && isTextFile(file) && owned
+    // lacks. An edited text file still gets its .new copy. A missing one is written beside an edit of this version's
+    // script, which knows every option the words ask for, and waits beside an older one (#1698).
+    const isHeldText = isScriptHeld && isTextFile(file) && (owned || isOlderHeld && existing === null)
     if (isHeld && (!isTextFile(file) || isHeldText) && !(isWorkerHeld && file === script)) {
       if (existing === desired) continue
       keptFiles.add(file)
-      if (isEdited && manifest.files[file] === undefined) conflicts.push(file)
+      if (isHeldText && !owned) keptHeld.push({ file, by: heldBy })
+      else if (isEdited && manifest.files[file] === undefined) conflicts.push(file)
       else if (isEdited) keptCode.push(file)
       else if (existing === null && manifest.files[file] !== undefined) { missingHeld.push({ file, by: heldBy }); conflicts.push(file) }
       else keptHeld.push({ file, by: heldBy })
@@ -1727,8 +1734,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     for (const key of Object.keys(groups)) delete groups[key]
     Object.assign(groups, manifest.groups)
   }
+  // The old /board command the kept older script answers stays with it, as setup wrote it or as the person edited it.
+  const keptBoards = isOlderHeld ? retired.filter(file => initial(file) !== null) : []
+  for (const file of keptBoards) keptHeld.push({ file, by: heldBy })
   for (const file of retired) {
     const existing = initial(file)
+    if (keptBoards.includes(file)) continue
     if (existing === null) {
       if (remove && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
     } else if (hash(existing) === manifest.files[file] || [script, ...legacyBoards].some(board => isReleased(agent === 'gemini' ? 'gemini' : 'opencode', existing, { board }))) changes.push({ file, action: 'remove' })
@@ -1774,7 +1785,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
   }
   const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
-  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
+  // A kept /board file keeps its record entry, so it still goes as setup wrote it once the script is taken (#1698).
+  const nextManifest = `${JSON.stringify({ files: Object.fromEntries([...Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]]), ...keptBoards.flatMap(file => manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])]), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   if (remove && agent === 'antigravity' && initial(sidecarRecord) !== null) changes.push({ file: sidecarRecord, action: 'remove' })
   if (remove && listOf(ownList) !== null) changes.push({ file: pendingFile(agent), action: 'remove' })
@@ -1818,7 +1830,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), ...(isOlderHeld && keptFiles.has(commandFile) ? { commandWaits: true } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.

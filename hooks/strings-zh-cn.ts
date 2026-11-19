@@ -171,6 +171,8 @@ export const ZH_CN: Strings = {
     "open": "在 {agents} 各开一个新的会话。",
     "openOne": "在 {agents} 开一个新的会话。",
     "thenBoardOne": "接着在那里输入 /agent-board。",
+    "thenBoardIn": "接着在 {agents} 输入 /agent-board。",
+    "thenBoardOld": "在 {agents} 请输入 /board。把你改过的 agent-board.mjs 移走、再运行一次 setup 后，就会有 /agent-board。",
     "appliedRemove": "已移除 {count} 个设置文件",
     "appliedRemoveOne": "已移除 {count} 个设置文件",
     "noInstalled": "没有已安装的 Agent Board 设置可供移除",

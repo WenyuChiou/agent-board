@@ -171,6 +171,8 @@ export const EN: Strings = {
     "open": "Open a new session in each of: {agents}.",
     "openOne": "Open a new session in {agents}.",
     "thenBoardOne": "Then type /agent-board there.",
+    "thenBoardIn": "Then type /agent-board in {agents}.",
+    "thenBoardOld": "In {agents}, type /board. /agent-board comes once you move your edited agent-board.mjs aside and run setup again.",
     "appliedRemove": "removed {count} setup files",
     "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",

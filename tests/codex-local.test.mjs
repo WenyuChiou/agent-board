@@ -5490,14 +5490,37 @@ test('an edited skill beside a kept board script keeps its edit and still gets a
   assert.equal(readFileSync(`${f.skill}.new`, 'utf8'), wanted)
 }))
 
-test('a skill the person deleted is written again while a board script is kept (#1302)', () => fixture(f => {
-  const state = olderCodex(f), wanted = readFileSync(f.skill, 'utf8')
-  unlinkSync(f.skill)
-  f.save(f.script, `${state.older.script}// synthetic line the person added\n`)
-  const result = f.install('--agent', 'codex', '--apply')
-  assert.equal(result.status, 0, result.stderr + result.stdout)
-  assert.equal(readFileSync(f.skill, 'utf8'), wanted)
-}))
+test('a skill the person deleted is not written again while an older board script is kept, and comes back once the edit is undone (#1698)', async () => {
+  await fixture(f => {
+    const state = olderCodex(f), wanted = readFileSync(f.skill, 'utf8')
+    unlinkSync(f.skill)
+    f.save(f.script, `${state.older.script}// synthetic line the person added\n`)
+    const kept = f.install('--agent', 'codex', '--apply')
+    assert.equal(kept.status, 0, kept.stderr + kept.stdout)
+    const plan = JSON.parse(kept.stdout)
+    assert.deepEqual(plan.conflicts, [])
+    assert.ok(plan.keptHeld.some(one => one.file === f.skill && one.by === 'agent-board.mjs'), kept.stdout)
+    assert.equal(existsSync(f.skill), false, 'the new words would ask the older script for options it lacks')
+    f.save(f.script, state.older.script)
+    const updated = f.install('--agent', 'codex', '--apply')
+    assert.equal(updated.status, 0, updated.stderr + updated.stdout)
+    assert.equal(readFileSync(f.skill, 'utf8'), wanted)
+  })
+  // An edit of this version's script knows every option the new words ask for, so a missing skill or command is written.
+  await fixture(f => {
+    assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+    const command = join(f.home, '.config', 'opencode', 'commands', 'agent-board.md')
+    const wanted = { skill: readFileSync(f.skill, 'utf8'), command: readFileSync(command, 'utf8') }
+    unlinkSync(f.skill)
+    unlinkSync(command)
+    f.save(f.script, `${readFileSync(f.script, 'utf8')}// synthetic line the person added\n`)
+    const result = f.install('--agent', 'opencode', '--apply')
+    assert.equal(result.status, 0, result.stderr + result.stdout)
+    assert.deepEqual(JSON.parse(result.stdout).keptCode, [f.script])
+    assert.equal(readFileSync(f.skill, 'utf8'), wanted.skill)
+    assert.equal(readFileSync(command, 'utf8'), wanted.command)
+  })
+})
 
 test('a removal leaves a .new copy the person changed (#1302)', () => fixture(f => {
   assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
@@ -13614,6 +13637,191 @@ for (const agent of ['gemini', 'opencode']) {
     assert.equal(readFileSync(edited.old, 'utf8'), `${edited.text}\nMy own line\n`)
   }))
 }
+
+// A 0.24.2 OpenCode install whose board script the person then edited: the record holds that older script, and the old
+// /board command is the one it answers. Other agents named share the script and its older record entry.
+const olderBoardOpencode = (f, { isEdited = true, others = [] } = {}) => {
+  for (const agent of ['opencode', ...others]) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const wanted = readFileSync(join(f.home, '.config', 'opencode', 'commands', 'agent-board.md'), 'utf8')
+  const old = commandOf0242(f, 'opencode')
+  const olderScript = '// synthetic older board script\n', edited = `${olderScript}// synthetic line the person added\n`
+  for (const agent of ['opencode', ...others]) {
+    const record = recordOf(f, agent)
+    record.files[f.script] = digest(olderScript)
+    saveRecord(f, agent, record)
+  }
+  f.save(f.script, isEdited ? edited : olderScript)
+  return { ...old, wanted, olderScript, edited }
+}
+
+test('an edited older board script keeps the /board command file and no /agent-board command is written (#1698)', async () => {
+  await fixture(f => {
+    const state = olderBoardOpencode(f)
+    const preview = f.install('--agent', 'opencode', '--json')
+    assert.equal(preview.status, 0, preview.stderr + preview.stdout)
+    const plan = JSON.parse(preview.stdout)
+    assert.deepEqual(plan.conflicts, [])
+    assert.deepEqual(plan.changes.filter(change => [state.old, state.now].includes(change.file)), [], preview.stdout)
+    assert.deepEqual(plan.keptHeld.map(one => one.file).filter(file => [state.old, state.now].includes(file)).sort(), [state.now, state.old].sort(), preview.stdout)
+    assert.ok(plan.keptHeld.every(one => one.by === 'agent-board.mjs'), preview.stdout)
+    assert.equal(plan.commandWaits, true)
+    for (const run of ['first', 'second']) {
+      const applied = f.install('--agent', 'opencode', '--apply', '--json')
+      assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+      if (run === 'second') assert.deepEqual(JSON.parse(applied.stdout).changes, [], 'a second apply has nothing to do')
+      assert.equal(readFileSync(state.old, 'utf8'), state.text, run)
+      const record = recordOf(f, 'opencode')
+      assert.equal(record.files[state.old], digest(state.text), `${run}: the record still names /board`)
+      assert.equal(Object.hasOwn(record.files, state.now), false, run)
+      assert.equal(existsSync(state.now), false, run)
+      for (const file of [state.old, state.now]) assert.equal(existsSync(`${file}.new`), false, run)
+    }
+  })
+  // A kept hook runner beside a current board script changes nothing here: the script that answers is the new one.
+  await fixture(f => {
+    assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+    const old = commandOf0242(f, 'opencode'), worker = join(f.root, 'agent-board-hook.mjs')
+    f.save(worker, `${readFileSync(worker, 'utf8')}// synthetic line the person added\n`)
+    const applied = f.install('--agent', 'opencode', '--apply', '--json')
+    assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+    assert.deepEqual(JSON.parse(applied.stdout).keptCode, [worker])
+    assert.equal(existsSync(old.old), false)
+    assert.equal(existsSync(old.now), true)
+  })
+})
+
+test('an edited /board file beside an edited older board script stays, and setup does not say the command changed (#1698)', () => fixture(f => {
+  const state = olderBoardOpencode(f), mine = `${state.text}\nMy own line\n`
+  f.save(state.old, mine)
+  const plain = setupAgent(f, '--lang', 'en', '--agent', 'opencode')
+  assert.equal(plain.status, 0, plain.stderr + plain.stdout)
+  assert.doesNotMatch(plain.stdout, /the command is now \/agent-board|setup removes it/)
+  const applied = f.install('--agent', 'opencode', '--apply', '--json')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  const plan = JSON.parse(applied.stdout)
+  assert.equal(plan.keptEdited, undefined)
+  assert.ok(plan.keptHeld.some(one => one.file === state.old), applied.stdout)
+  assert.equal(readFileSync(state.old, 'utf8'), mine)
+  assert.equal(existsSync(state.now), false)
+}))
+
+test('a /board file the person deleted is not replaced by /agent-board while an older board script is kept (#1698)', () => fixture(f => {
+  const state = olderBoardOpencode(f)
+  rmSync(state.old)
+  const applied = f.install('--agent', 'opencode', '--apply', '--json')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(JSON.parse(applied.stdout).conflicts, [])
+  assert.equal(existsSync(state.old), false)
+  assert.equal(existsSync(state.now), false)
+}))
+
+test('a command file setup wrote waits with an edited older board script, and one the person deleted is not written again (#1698)', async () => {
+  // A home from a version whose board script reads --json still waits: setup cannot tell what an edited script knows.
+  for (const isDeleted of [false, true]) await fixture(f => {
+    assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+    const command = join(f.home, '.config', 'opencode', 'commands', 'agent-board.md'), olderCommand = 'Synthetic /agent-board command of an earlier version\n'
+    const olderScript = '// synthetic older board script that reads --json\n'
+    const record = recordOf(f, 'opencode')
+    record.files[command] = digest(olderCommand)
+    record.files[f.script] = digest(olderScript)
+    saveRecord(f, 'opencode', record)
+    if (isDeleted) rmSync(command)
+    else f.save(command, olderCommand)
+    f.save(f.script, `${olderScript}// synthetic line the person added\n`)
+    const applied = f.install('--agent', 'opencode', '--apply', '--json')
+    assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+    const plan = JSON.parse(applied.stdout)
+    assert.deepEqual(plan.conflicts, [])
+    assert.ok(plan.keptHeld.some(one => one.file === command), applied.stdout)
+    assert.equal(plan.commandWaits, true)
+    assert.equal(existsSync(command) ? readFileSync(command, 'utf8') : null, isDeleted ? null : olderCommand)
+    assert.equal(recordOf(f, 'opencode').files[command], digest(olderCommand), 'its record entry stays')
+  })
+})
+
+test('the person\'s own file at the /agent-board path keeps its .new copy while an older board script is kept (#1698)', () => fixture(f => {
+  const state = olderBoardOpencode(f), mine = 'Synthetic command of the person\n'
+  f.save(state.now, mine)
+  const applied = f.install('--agent', 'opencode', '--apply', '--json')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(JSON.parse(applied.stdout).keptText, [{ file: state.now, beside: `${state.now}.new` }])
+  assert.equal(readFileSync(state.now, 'utf8'), mine)
+  assert.equal(readFileSync(`${state.now}.new`, 'utf8'), state.wanted)
+  assert.equal(readFileSync(state.old, 'utf8'), state.text, 'the /board file is still kept')
+}))
+
+test('undoing the board script edit brings /agent-board and retires /board in the same run (#1698)', () => fixture(f => {
+  const state = olderBoardOpencode(f)
+  unlinkSync(f.skill)
+  const held = f.install('--agent', 'opencode', '--apply', '--json')
+  assert.equal(held.status, 0, held.stderr + held.stdout)
+  assert.equal(existsSync(state.old), true)
+  assert.equal(existsSync(state.now), false)
+  assert.equal(existsSync(f.skill), false)
+  f.save(f.script, state.olderScript)
+  const result = f.install('--agent', 'opencode', '--apply', '--json')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  const plan = JSON.parse(result.stdout)
+  assert.deepEqual(plan.conflicts, [])
+  for (const list of ['keptHeld', 'keptCode', 'keptEdited']) assert.equal(plan[list], undefined, list)
+  assert.equal(existsSync(state.old), false)
+  assert.equal(Object.hasOwn(recordOf(f, 'opencode').files, state.old), false)
+  assert.equal(readFileSync(state.now, 'utf8'), state.wanted)
+  assert.equal(existsSync(f.skill), true)
+  assert.notEqual(readFileSync(f.script, 'utf8'), state.olderScript)
+  assert.deepEqual(JSON.parse(f.install('--agent', 'opencode', '--apply', '--json').stdout).changes, [], 'a second apply has nothing to do')
+}))
+
+test('a board script edited between the preview and the apply keeps the /board file (#1698)', () => fixture(f => {
+  const state = olderBoardOpencode(f, { isEdited: false })
+  const preview = JSON.parse(f.install('--agent', 'opencode', '--json').stdout)
+  assert.ok(preview.changes.some(change => change.file === state.old && change.action === 'remove'), 'the preview retires /board')
+  assert.ok(preview.changes.some(change => change.file === state.now && change.action === 'create'), 'the preview writes /agent-board')
+  f.save(f.script, state.edited)
+  const applied = f.install('--agent', 'opencode', '--apply', '--json')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.equal(readFileSync(state.old, 'utf8'), state.text)
+  assert.equal(existsSync(state.now), false)
+  assert.equal(readFileSync(f.script, 'utf8'), state.edited)
+}))
+
+test('removing an agent takes its kept /board file away while the edited board script stays for another agent (#1698)', async () => {
+  for (const isBoardEdited of [false, true]) await fixture(f => {
+    const state = olderBoardOpencode(f, { others: ['codex'] }), mine = `${state.text}\nMy own line\n`
+    if (isBoardEdited) f.save(state.old, mine)
+    assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+    assert.equal(existsSync(state.old), true, 'the held apply keeps /board')
+    // The removal runs this version's setup: the board script on disk is the person's synthetic one.
+    const removed = f.install('--agent', 'opencode', '--remove', '--apply', '--json')
+    assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+    const plan = JSON.parse(removed.stdout)
+    assert.deepEqual(plan.conflicts, [])
+    assert.equal(existsSync(state.old), isBoardEdited)
+    if (isBoardEdited) assert.deepEqual(plan.keptEdited, [state.old])
+    assert.equal(existsSync(state.now), false)
+    assert.equal(existsSync(join(f.root, 'install-opencode.json')), false)
+    assert.equal(readFileSync(f.script, 'utf8'), state.edited, 'the shared script stays for Codex')
+  })
+})
+
+test('setup says /agent-board waits and /board stays while an edited older board script is kept, in all three languages (#1698)', () => fixture(f => {
+  const state = olderBoardOpencode(f)
+  for (const [lang, kept, gone] of [
+    ['en', /\(not updated: it works with your edited agent-board\.mjs, which setup kept; to update both, move that file aside and run setup again\)/, /setup removes it|the command is now \/agent-board/],
+    ['zh-TW', /（沒有更新：它要配合你改過的 agent-board\.mjs，而 setup 保留了你的版本；要一起更新，請先把該檔案移開，再執行一次 setup）/, /setup 會移除|命令已改成 \/agent-board/],
+    ['zh-CN', /（没有更新：它要配合你改过的 agent-board\.mjs，而 setup 保留了你的版本；要一起更新，请先把该文件移走，再运行一次 setup）/, /setup 会移除|命令已改成 \/agent-board/],
+  ]) for (const extra of [[], ['--apply']]) {
+    const result = setupAgent(f, '--lang', lang, '--agent', 'opencode', ...extra)
+    assert.equal(result.status, 0, result.stderr + result.stdout)
+    const keptLines = result.stdout.split(/\r?\n/).filter(line => kept.test(line))
+    assert.equal(keptLines.filter(line => /[\\/]board\.md/.test(line)).length, 1, `${lang} ${extra}: /board is named once\n${result.stdout}`)
+    assert.equal(keptLines.filter(line => /agent-board\.md/.test(line)).length, 1, `${lang} ${extra}: /agent-board is named once\n${result.stdout}`)
+    assert.doesNotMatch(result.stdout, gone, `${lang} ${extra}`)
+  }
+  const plan = JSON.parse(setupAgent(f, '--agent', 'opencode', '--json').stdout).plans[0]
+  assert.deepEqual(plan.changes.filter(change => [state.old, state.now].includes(change.file)), [])
+  assert.deepEqual(plan.keptHeld.map(one => one.file).filter(file => [state.old, state.now].includes(file)).sort(), [state.now, state.old].sort())
+}))
 
 const cursorSessionRecord = (f, id) => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`cursor:${id}`).digest('hex') + '.json'), 'utf8'))
 const cursorHook = (f, name, id, cwd, extra = {}) => spawnSync(process.execPath, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--codex-event', '--agent', 'cursor'], {

@@ -98,6 +98,8 @@ const summaries = [
     "open": "Open a new session in each of: {agents}.",
     "openOne": "Open a new session in {agents}.",
     "thenBoardOne": "Then type /agent-board there.",
+    "thenBoardIn": "Then type /agent-board in {agents}.",
+    "thenBoardOld": "In {agents}, type /board. /agent-board comes once you move your edited agent-board.mjs aside and run setup again.",
     "appliedRemove": "removed {count} setup files",
     "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",
@@ -163,6 +165,8 @@ const summaries = [
     "open": "在 {agents} 各開一個新的工作階段。",
     "openOne": "在 {agents} 開一個新的工作階段。",
     "thenBoardOne": "接著在那裡輸入 /agent-board。",
+    "thenBoardIn": "接著在 {agents} 輸入 /agent-board。",
+    "thenBoardOld": "在 {agents} 請輸入 /board。把你改過的 agent-board.mjs 移開、再執行一次 setup 後，就會有 /agent-board。",
     "appliedRemove": "已移除 {count} 個設定檔案",
     "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
@@ -228,6 +232,8 @@ const summaries = [
     "open": "在 {agents} 各开一个新的会话。",
     "openOne": "在 {agents} 开一个新的会话。",
     "thenBoardOne": "接着在那里输入 /agent-board。",
+    "thenBoardIn": "接着在 {agents} 输入 /agent-board。",
+    "thenBoardOld": "在 {agents} 请输入 /board。把你改过的 agent-board.mjs 移走、再运行一次 setup 后，就会有 /agent-board。",
     "appliedRemove": "已移除 {count} 个设置文件",
     "appliedRemoveOne": "已移除 {count} 个设置文件",
     "noInstalled": "没有已安装的 Agent Board 设置可供移除",
@@ -677,6 +683,8 @@ const main = () => {
       if (completed.includes('antigravity')) offerSidecar()
       const next = []
       const sessions = []
+      // An agent whose /agent-board command waits with an edited older board script still answers /board (#1698).
+      const oldSessions = []
       for (const agent of completed) {
         const plan = plans[selected.indexOf(agent)]
         if (plan.managedBy === 'connector') continue
@@ -686,6 +694,7 @@ const main = () => {
           // Started from Git Bash, cursor-agent hands its PowerShell hook commands to bash and none runs (#1159).
           if (agent === 'cursor' && process.platform === 'win32') next.push(words('cursorWindows'))
           sessions.push(names[agent])
+          if (plan.commandWaits) oldSessions.push(names[agent])
         }
       }
       // One retry command for every agent that was skipped, here as in the run without a terminal.
@@ -695,7 +704,12 @@ const main = () => {
       if (isPluginReady) sessions.push('Claude Code')
       if (sessions.length) {
         next.push(words(sessions.length === 1 ? 'openOne' : 'open', { agents: sessions.join(message(', ', '、', '、')) }))
-        next.push(words(sessions.length === 1 ? 'thenBoardOne' : 'thenBoard'))
+        const newSessions = sessions.filter(one => !oldSessions.includes(one))
+        if (!oldSessions.length) next.push(words(sessions.length === 1 ? 'thenBoardOne' : 'thenBoard'))
+        else {
+          if (newSessions.length) next.push(words('thenBoardIn', { agents: newSessions.join(message(', ', '、', '、')) }))
+          next.push(words('thenBoardOld', { agents: oldSessions.join(message(', ', '、', '、')) }))
+        }
       }
       if (next.length) process.stdout.write(`\n${words('next')}\n${next.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n`)
       return

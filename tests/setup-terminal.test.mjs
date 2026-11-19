@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -19,6 +20,36 @@ test('terminal setup accepts one yes for files, Codex and Hermes trust, and both
   assert.match(next, /1\. Open a new session in each of: Codex, Hermes Agent, Claude Code\./)
   assert.match(next, /2\. Then type \/agent-board in any of them\./)
   assert.doesNotMatch(next, /--trust|--codex-trust|--hermes-trust|claude plugin/)
+}))
+
+test('setup\'s next steps name /board, not /agent-board, for an agent whose command waits (#1698)', () => terminal(f => {
+  delete f.env.AGENT_BOARD_SETUP_TTY
+  succeeded(f.invoke(['--agent', 'opencode,cursor', '--lang', 'en', '--apply']))
+  f.env.AGENT_BOARD_SETUP_TTY = '1'
+  // The home as 0.24.2 left it, with the board script the person then edited: OpenCode has /board, not /agent-board.
+  const data = join(f.root, 'data'), script = join(data, 'agent-board.mjs'), commands = join(f.env.OPENCODE_CONFIG_DIR, 'commands')
+  const digest = text => createHash('sha256').update(text).digest('hex')
+  const olderScript = '// synthetic older board script\n', oldCommand = 'Synthetic /board command of an earlier version\n'
+  for (const agent of ['opencode', 'cursor']) {
+    const file = join(data, `install-${agent}.json`), record = JSON.parse(readFileSync(file, 'utf8'))
+    record.files[script] = digest(olderScript)
+    if (agent === 'opencode') {
+      delete record.files[join(commands, 'agent-board.md')]
+      record.files[join(commands, 'board.md')] = digest(oldCommand)
+    }
+    writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`)
+  }
+  rmSync(join(commands, 'agent-board.md'))
+  writeFileSync(join(commands, 'board.md'), oldCommand)
+  writeFileSync(script, `${olderScript}// synthetic line the person added\n`)
+  const result = f.invoke(['--agent', 'opencode,cursor', '--lang', 'en'], 'yes\n')
+  succeeded(result)
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.match(next, /Then type \/agent-board in Cursor, Claude Code\./, result.stdout)
+  assert.match(next, /In OpenCode, type \/board\. \/agent-board comes once you move your edited agent-board\.mjs aside and run setup again\./, result.stdout)
+  assert.doesNotMatch(next, /in any of them/)
+  assert.equal(existsSync(join(commands, 'agent-board.md')), false)
+  assert.equal(readFileSync(join(commands, 'board.md'), 'utf8'), oldCommand)
 }))
 
 test('terminal Enter means yes and the question is translated in all three languages', () => {
