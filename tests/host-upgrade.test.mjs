@@ -327,3 +327,57 @@ test('an edited plugin kept beside an updated hook runner still reports (#1302)'
   assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
   assert.ok(blockOf(f, 'opencode').includes('state=working'), `the report landed on the board\n${blockOf(f, 'opencode')}`)
 })
+
+// The upgrade journey of #1588: 0.24.3 is the release before 0.25.0, and the parity run found
+// that an upgrade skips Hermes when config.yaml holds an earlier release's board hooks.
+// The home is set up by the 0.24.3 tag's own setup, then upgraded by this tree's setup.
+const OLD1588 = 'agent-board--v0.24.3'
+const hermesEvents1588 = ['on_session_start', 'pre_llm_call', 'post_llm_call', 'on_session_end', 'post_tool_call']
+
+const oldRelease1588 = t => {
+  const available = spawnSync('git', ['-C', repoRoot, 'cat-file', '-e', `${OLD1588}^{commit}`], { encoding: 'utf8', windowsHide: true })
+  assert.ifError(available.error)
+  if (available.status !== 0) {
+    assert.ok(!process.env.CI, `${OLD1588} is missing in CI; the board job fetches the whole history with its tags`)
+    t.skip(`${OLD1588} is missing locally; run git fetch --tags to run this journey`)
+    return null
+  }
+  const folder = tempFolder()
+  const archive = spawnSync('git', ['-C', repoRoot, 'archive', '--format=tar', OLD1588, 'scripts', 'hooks', 'bin', 'package.json'], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })
+  checked(archive, 'archive 0.24.3')
+  checked(spawnSync('tar', ['-x', '-f', '-'], { cwd: folder, input: archive.stdout, encoding: 'utf8', windowsHide: true }), 'extract 0.24.3')
+  return folder
+}
+
+test('an upgrade from 0.24.3 updates a Hermes config of an earlier release whose install record no longer names its hooks (#1588)', async t => {
+  const old = oldRelease1588(t)
+  if (!old) return
+  const f = fixture(['.hermes'])
+  await apply(f, ['hermes'], old)
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const before = readFileSync(config, 'utf8')
+  assert.ok(before.includes('agent-board-hook.mjs'), '0.24.3 wrote its board hooks')
+  for (const event of hermesEvents1588) assert.ok(before.includes(`  ${event}:`), `0.24.3 wrote ${event}`)
+  // The parity home's install record no longer names the hooks (its marketplace entry was
+  // replaced), so setup must recognise them by their released command, not by the record.
+  const manifest = join(f.home, '.agent-board', 'install-hermes.json')
+  const record = JSON.parse(readFileSync(manifest, 'utf8'))
+  assert.ok(record.groups?.hooks, '0.24.3 recorded its hooks')
+  delete record.groups.hooks
+  writeFileSync(manifest, `${JSON.stringify(record, null, 2)}\n`)
+  // Run this tree's setup for Hermes and read its plan without the no-conflict assertion,
+  // so the failure names the conflict instead of the exit status.
+  const result = await run(f, [join(repoRoot, 'scripts', 'setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--lang', 'en', '--agent', 'hermes', '--apply', '--json'], { timeoutMs: 120000 })
+  assert.ok(result.stdout.trimStart().startsWith('{'), `upgrade prints a JSON plan\n${result.stdout}\n${result.stderr}`)
+  const plan = JSON.parse(result.stdout)
+  assert.deepEqual(plan.targets, ['hermes'])
+  assert.equal(plan.applied, true, 'the upgrade applies instead of skipping Hermes')
+  const hermes = plan.plans.find(target => target.agent === 'hermes')
+  assert.deepEqual(hermes.conflicts, [], 'no conflict on an earlier release\u2019s board hooks')
+  const after = readFileSync(config, 'utf8')
+  for (const event of hermesEvents1588) assert.ok(after.includes(`  ${event}:`), `the upgrade keeps ${event}`)
+  assert.ok(after.includes('agent-board-hook.mjs'), 'the config still holds the board hooks')
+  const repaired = JSON.parse(readFileSync(manifest, 'utf8'))
+  assert.deepEqual(Object.keys(repaired.groups.hooks).sort(), [...hermesEvents1588].sort(), 'the upgrade re-records the hooks')
+  assertRepeat(await repeatApply(f), ['hermes'])
+})
