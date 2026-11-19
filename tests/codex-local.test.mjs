@@ -652,6 +652,7 @@ test('a link further along config.toml\'s chain repointed after setup resolved i
   const mid = join(f.home, 'dotfiles', 'mid.toml')
   const toml = join(f.home, '.codex', 'config.toml')
   f.save(target, planned)
+  chmodSync(target, 0o644)
   f.save(other, planned)
   symlinkSync(target, mid)
   rmSync(toml, { force: true })
@@ -679,6 +680,8 @@ syncBuiltinESMExports()
   // config.toml still reaches the file the write did not land on: its trust entries are still there.
   assert.equal(readFileSync(toml, 'utf8'), planned)
   assert.equal(readFileSync(other, 'utf8'), planned)
+  // The failed write replaced the original target, so its permissions must stay the person's.
+  assert.equal(statSync(target).mode & 0o777, 0o644)
 }))
 
 test('#774 a --data-dir folder the person made stays when empty', () => fixture(f => {
