@@ -2934,7 +2934,9 @@ test('a pending list whose .new path holds a byte that is not valid UTF-8 is not
   await chineseFixture1607(f => {
     assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
     const [file, original] = listed(f)
-    remove774(f, 'codex')
+    const removed = remove774(f, 'codex')
+    assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false, 'the install is removed')
     assert.deepEqual(readFileSync(file), original, 'removal leaves the list')
   }, 'home �')
 })
@@ -2976,6 +2978,7 @@ test('a file that only decodes like the recorded one is not taken as a file setu
   })
   await staged((f, edited) => {
     const removed = remove774(f, 'codex')
+    assert.notEqual(removed.status, 0, removed.stdout)
     assert.deepEqual(readFileSync(f.skill), edited, 'removal keeps the file')
     assert.ok(JSON.parse(removed.stdout).conflicts.includes(f.skill), removed.stdout)
   })

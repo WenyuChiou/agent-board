@@ -534,7 +534,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (!before.has(file)) before.set(file, take(file))
     return before.get(file)!.bytes?.toString('utf8') ?? null
   }
-  // A file whose bytes are not valid UTF-8 is not read as text, so it is never rewritten, deleted or taken as setup's (#1607).
+  // A file whose bytes are not valid UTF-8 is not read as text, so it is never written over or taken as setup's (#1607).
   const isUnreadable = (file: string): boolean => {
     initial(file)
     const bytes = before.get(file)!.bytes
@@ -552,8 +552,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // real path is one this batch wrote and it holds exactly the new bytes (Greptile on #1594). Anything else stops the
   // batch, a link or other bytes put where the file was included. After a write the rename target must be a regular
   // file holding exactly the bytes. A plain rename cannot close the instant between the last re-read and the write.
-  // Removals are as on main: the main writer unlinks with no re-read, and the sidecar-only writer compares the text
-  // just before and checks after that the path reads as gone. Not covered here, and left as on main: a re-read before a
+  // Removals are as on main: the main writer unlinks with no re-read, and the sidecar-only writer compares the path's
+  // kind, link and bytes just before and checks after that the path reads as gone. Not covered here, and left as on main: a re-read before a
   // removal in the main writer, a file another program removes just before setup's unlink (#1611), and a remove through
   // a skills folder linked to the shared one whose SKILL.md is a file link (#1610).
   const isHolding = (now: Snap, text: string): boolean => sameBytes(now.bytes, Buffer.from(text, 'utf8'))
@@ -837,7 +837,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED')
         // Each file is read again just before its change and checked after it, so an edit made before that last re-read
         // is never overwritten or removed, and a change that did not land is not reported as applied. A write goes
-        // through put; a removal compares the decoded text and checks that the path reads as gone after, as on main.
+        // through put; a removal compares the path's kind, link and bytes and checks that the path reads as gone after.
         for (const change of sidecarChanges) {
           if (change.action !== 'remove') put(change.file, change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!)
           else {
