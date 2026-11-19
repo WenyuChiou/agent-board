@@ -27,16 +27,16 @@ test('#1296: the pane counts an answer queued for the next turn as handled and s
   const world: World = { files: new Map([[FILE, BOARD], [STORE, stored()]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
-  await clock.advance(2100)
+  await clock.advance(5100)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
     expect(await ui.find({ type: 'Text', text: '● 1' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: `◌ ${EN.boardQueuedCount(1)}` })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '● 2' })).toBeUndefined()
 
-    // The page's store leaves: every question waits again, at the next poll.
+    // The page's store leaves: every question waits again, at the next inbox look (every 5 s).
     world.files.delete(STORE)
-    await clock.advance(2100)
+    await clock.advance(5100)
     expect(await ui.find({ type: 'Text', text: '● 2' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: `◌ ${EN.boardQueuedCount(1)}` })).toBeUndefined()
   } finally { await ui.unmount() }
@@ -46,7 +46,7 @@ test('#1296: a store that is a link or not a plain file is not read, and every q
   const world: World = { files: new Map([[FILE, BOARD], [STORE, stored()]]), unsafeFiles: new Set([STORE]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
   const clock = engineBeneath(on, world)
   await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
-  await clock.advance(2100)
+  await clock.advance(5100)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
     expect(await ui.find({ type: 'Text', text: '● 2' })).toBeDefined()

@@ -1208,12 +1208,19 @@ const pollBarStyle = async ($: EngineInterface, path: string): Promise<void> => 
   $.ui.invalidate('ui.render')
 }
 
-// The page's message store for this progress.md, read like the settings file: a stat per poll, read only when it
+// The page's message store for this progress.md, read like the settings file: a stat per inbox look (5 s), read only when it
 // changed, through the guarded script, which refuses a link or a file that is not a plain one. A folder that is a
 // link is not read (the page's server refuses it too). Nothing there, or nothing readable: every question waits.
 let queuedStoreSeen = ''
 let queuedFolder: { path: string; folder: string | null } | null = null
+// One look at a time: a read slower than 5 s is not joined by the next look.
+let isLookingAtStore = false
 const pollQueuedStore = async ($: EngineInterface, path: string): Promise<void> => {
+  if (isLookingAtStore) return
+  isLookingAtStore = true
+  try { await lookAtStore($, path) } finally { isLookingAtStore = false }
+}
+const lookAtStore = async ($: EngineInterface, path: string): Promise<void> => {
   if (queuedFolder?.path !== path) {
     const isWin = await isWindows($, path)
     const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '')
@@ -1271,7 +1278,6 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
     const path = await progressPath($)
     const answeredStat = await pollAnswered($, path).catch(() => undefined)
     await pollBarStyle($, path).catch(() => undefined)
-    await pollQueuedStore($, path).catch(() => undefined)
     const previous = await read($, snapshot)
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (!isCurrent()) return
@@ -4373,6 +4379,8 @@ export const register: Register = (on, options) => {
     let isFirstInboxLook = true
     $.clock.every(INBOX_MS, () => {
       const draining = drainInbox($).catch(() => undefined)
+      // The page's message store is looked at here, every 5 s, not on the 2 s poll, which keeps its file budget (#1296).
+      progressPath($).then(path => pollQueuedStore($, path)).catch(() => undefined)
       if (isFirstInboxLook) {
         isFirstInboxLook = false
         // The start's trim waits for the first look at the inbox and the start's archive, so
