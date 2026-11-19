@@ -505,6 +505,22 @@ test('an older plugin copy is told to update the plugin, and an older independen
   assert.equal(moved.stderr.trim().split('\n').length, 1)
 }))
 
+test('--json through an older script prints the notice on stderr and exits 1', () => fixture(f => {
+  const pkg = packed(f)
+  // An older installed script that prints the text board, as a released 0.24.2 script would:
+  // --json must not hand that text to an agent that expects JSON.
+  const text = `${prelude(f)}process.stdout.write('the text board\\n')\n`
+  save(boardPath(f), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.0.1', board: ['${bodyHash(text)}'] }]\n`)
+  const result = f.run(pkg, ['--json'])
+  assert.ifError(result.error)
+  assert.equal(result.status, 1, result.stderr)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr.trim().split('\n').length, 1)
+  assert.ok(result.stderr.includes('is from 0.0.1.'), result.stderr)
+  assert.ok(result.stderr.includes(`npx ${manifest.name}@${manifest.version} setup, then add --apply.`), result.stderr)
+}))
+
 test("--data-dir runs that folder's board without CLAUDE_PROGRESS_FILE", () => fixture(f => {
   const pkg = packed(f)
   const root = join(f.home, 'data dir')
