@@ -1944,11 +1944,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // So before a conflict is reported for an apply, the public command's preview for one included, it is checked again
   // under the install lock: a path this plan was built from that changed since means another setup ran, and a lock
   // still held means one is running. Either stops as busy, and the next run plans again from the files as they are.
-  // Every setup run that writes takes this lock, which lives in the home's .agent-board folder, so with no folder there
-  // no other run has written: a refused run checks nothing and leaves no empty folder behind, as on main.
-  if (conflicts.length && (args.includes('--apply') || args.includes('--check-conflicts')) && existsSync(installControlRoot(home))) withInstallLock(home, () => {
-    for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED')
-  })
+  // The lock lives in the home's .agent-board folder. With no folder no run holds it, so the check runs at once without
+  // taking it: a refused run leaves no empty folder behind, as on main, and a removal that emptied and deleted the
+  // folder after another run wrote does not skip the check.
+  if (conflicts.length && (args.includes('--apply') || args.includes('--check-conflicts'))) {
+    const isChanged = (): void => { for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED') }
+    if (existsSync(installControlRoot(home))) withInstallLock(home, isChanged)
+    else isChanged()
+  }
   if (!args.includes('--apply')) { outputPlan(plan); return true }
   if (conflicts.length) {
     outputPlan(plan)

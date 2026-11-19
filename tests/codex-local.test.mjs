@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test as nodeTest } from 'node:test'
@@ -6144,6 +6144,29 @@ test('a conflict found while another setup holds the lock is reported as busy, a
   assert.deepEqual(JSON.parse(free.stdout).conflicts, [beside], free.stdout)
   assert.match(free.stderr, /fix or move/)
   assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
+}))
+
+test('a second agent stops as busy on the first run\'s .new copy when a removal deleted the home\'s empty .agent-board folder meanwhile (#1694)', () => fixture(async f => {
+  // Codex and Cursor keep their data in one folder of the person's; the install lock still lives in the home's .agent-board.
+  const data = join(f.home, 'synthetic data'), control = join(f.home, '.agent-board')
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--data-dir', data, '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  const hold = heldEnv(f, 'install-pending-codex.json')
+  const late = startSetup(f, hold.env, '--agent', 'cursor', '--data-dir', data, '--apply')
+  await untilExists(hold.at, 'cursor reached the pending lists')
+  assert.equal(f.install('--agent', 'codex', '--data-dir', data, '--apply').status, 0)
+  // A removal of another install then finds the home's folder empty and deletes it.
+  assert.deepEqual(readdirSync(control), [])
+  rmdirSync(control)
+  f.save(hold.go, '')
+  const result = await late
+  assert.ok(isBusy(result), result.stderr + result.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  const again = f.install('--agent', 'cursor', '--data-dir', data, '--apply')
+  assert.equal(again.status, 0, again.stderr + again.stdout)
+  for (const agent of ['codex', 'cursor']) assert.equal(recordOf({ ...f, root: data }, agent).files[beside], digest(wanted), agent)
 }))
 
 test('the public setup command does not tell the person to fix a .new copy that another setup run wrote (#1694)', async () => {
