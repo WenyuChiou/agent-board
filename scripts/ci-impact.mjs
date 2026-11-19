@@ -148,7 +148,8 @@ export const checkResults = (plan, results) => {
 // rounded up to five seconds (board and codex-local: one part's share): it fails a pull request only when it
 // runs 30% slower than its slowest recent run. page-regressions (6.5 s at most) keeps its old budget.
 export const BOARD_FILE_BUDGETS_MS = Object.freeze({
-  'tests/codex-local.test.mjs': 225_000, // slowest 120.4 s
+  // Re-derived by the same rule (#1715): one part's share took 158.7-167.4 s on Windows Node 24 on #1709, which does not touch it.
+  'tests/codex-local.test.mjs': 315_000, // slowest 167.4 s
   'tests/board.test.mjs': 200_000, // slowest 105.5 s
   'tests/legacy-connect.test.mjs': 275_000, // slowest 148.0 s
   'tests/page-regressions.test.mjs': 90_000,
@@ -158,8 +159,12 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // Grew past the floor with #1162's terminal setup tests (#1159); slowest 52.6 s after #1361.
   'tests/setup-guidance.test.mjs': 100_000,
   // Grew with #1302's two upgrade tests: 57.6 s on Windows Node 24 with the same two journeys on #1328 (run 43181075103).
-  'tests/host-upgrade.test.mjs': 110_000, // slowest 57.6 s
-  'tests/setup-terminal.test.mjs': 70_000, // slowest 36.0 s
+  // Grew with #1686's upgrade tests: 79.0-80.6 s on Windows Node 24 on #1709 (#1715).
+  'tests/host-upgrade.test.mjs': 150_000, // slowest 80.6 s
+  // Grows with #1709's terminal setup tests: 60.6-73.4 s on Windows Node 24 there (#1715).
+  'tests/setup-terminal.test.mjs': 140_000, // slowest 73.4 s
+  // Past the 60 s default on main: 42.4-47.1 s on Windows Node 24 (#1715).
+  'tests/approvals.test.mjs': 90_000, // slowest 47.1 s
   // Grew with #1339's lock tests (several wait out the 2 s bounded lock wait): 43.4 s on Windows Node 24 (run 43190652904).
   'tests/settings-symlink.test.mjs': 85_000, // slowest 43.4 s
   // New with #1366 and self-parted since its round 18, so this is one part's share. The whole file took 164.0 s on
