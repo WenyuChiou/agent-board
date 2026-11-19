@@ -526,34 +526,12 @@ export const systemLookup = (platform, files = { readdirSync, readlinkSync, read
 const isNodeProgram = exe => /^node(?:js)?(?:\d[\d.]*)?(?:\.exe)?$/i.test(exe.split(/[\\/]/).at(-1) ?? '')
 const isFullPath = (path, platform) => platform === 'win32' ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path) : path.startsWith('/')
 
-// The Node options a board's page can start with: what serverMemoryArgs in scripts/server-runtime.ts passes on. This
-// script imports nothing of the board's, so tests/approvals.test.mjs keeps these two lists in step with it.
-export const HEAP_VALUE_OPTIONS = [
-  '--max-semi-space-size', '--min-semi-space-size', '--max-old-space-size',
-  '--max-old-space-size-percentage', '--max-heap-size', '--initial-heap-size',
-  '--initial-old-space-size', '--heap-growing-percent',
-]
-export const HEAP_SWITCH_OPTIONS = ['--optimize-for-size', '--no-optimize-for-size', '--nooptimize-for-size']
-
-// One word, as Node will not start with `--max-old-space-size 512`. Only the name after the leading `--` may use `_`
-// for `-`: a word that starts `__` is a file Node would run. The value is Node's to judge (it takes `+512` and `1e1`),
-// and no value of these options can make it run other code.
-const isHeapOption = word => {
-  const parts = /^--([a-z_-]+)(=.*)?$/s.exec(word)
-  if (parts === null) return false
-  const name = `--${(parts[1] ?? '').replaceAll('_', '-')}`
-  return parts[2] === undefined ? HEAP_SWITCH_OPTIONS.includes(name) : HEAP_VALUE_OPTIONS.includes(name)
-}
-
-// The script a Node command line runs, or null. Only the board's own heap options may come before it: any other option
-// can make Node run other code with the board's path as a mere argument (`-` reads the program from stdin, `--env-file`
-// can set NODE_OPTIONS). Words after the script are the board's own, so a later board may add to them.
-export const scriptOf = argv => {
-  for (const word of argv.slice(1)) {
-    if (!word.startsWith('-')) return word
-    if (!isHeapOption(word)) return null
-  }
-  return null
+// The word the board's launcher writes directly after its script, in every release since 0.25.0, whatever Node options
+// come before them. Judging these two words leaves Node's own option rules to Node. A program that copies them chooses
+// its own command line, which SECURITY.md names as the limit of this check. The program's own word is never the script.
+export const launcherScriptOf = argv => {
+  const at = argv.indexOf('--serve-child')
+  return at < 2 ? null : argv[at - 1]
 }
 
 // Which file a path reaches, however it is spelled: a link, a short name and another letter case all reach the same one,
@@ -567,13 +545,15 @@ export const fileIdOf = path => {
 export const processRefusal = (found, scripts, platform, fileId = fileIdOf) => {
   if (found.argv.every(word => word.trim() === '')) return 'empty-command-line'
   if (!isNodeProgram(found.exe)) return 'not-node'
-  const script = scriptOf(found.argv)
+  const script = launcherScriptOf(found.argv)
   if (script === null || !isFullPath(script, platform)) return 'not-board-script'
+  // Read once, so a self-update that replaces the file during this check cannot make the script differ from itself.
+  let id
+  try { id = fileId(script) } catch { return 'not-board-script' }
+  if (id === null) return 'not-board-script'
   const isSame = one => {
-    try {
-      const id = fileId(script)
-      return id !== null && id === fileId(one)
-    } catch { return false }
+    if (one === script) return true
+    try { return fileId(one) === id } catch { return false }
   }
   return scripts.some(isSame) ? null : 'not-board-script'
 }
@@ -669,7 +649,7 @@ const readInput = () => new Promise(done => {
 
 // The request goes to the address that was checked and nowhere else: an agent of its own takes no proxy from the
 // environment, and node:http follows no redirect. Any failure, status or unreadable answer is no answer.
-const askBoard = (address, body) => new Promise(done => {
+export const askBoard = (address, body) => new Promise(done => {
   const { hostname, port } = new URL(address.origin)
   const payload = JSON.stringify(body)
   let timer
@@ -682,6 +662,12 @@ const askBoard = (address, body) => new Promise(done => {
     agent: new Agent(),
     headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'x-board-token': address.token },
   }, answer => {
+    // A refusal is known from its status, so a body left open cannot hold the person's prompt back.
+    if (answer.statusCode < 200 || answer.statusCode >= 300) {
+      finish(null)
+      asked.destroy()
+      return
+    }
     // The headers came: the board is alive, and the press may take up to 30 s.
     clearTimeout(timer)
     timer = setTimeout(() => asked.destroy(), ASK_MS)
@@ -689,8 +675,7 @@ const askBoard = (address, body) => new Promise(done => {
     answer.on('data', chunk => chunks.push(chunk))
     answer.on('error', () => finish(null))
     answer.on('end', () => {
-      const isOk = answer.statusCode >= 200 && answer.statusCode < 300
-      try { finish(isOk ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null) } catch { finish(null) }
+      try { finish(JSON.parse(Buffer.concat(chunks).toString('utf8'))) } catch { finish(null) }
     })
   })
   timer = setTimeout(() => asked.destroy(), HEADERS_MS)
@@ -714,7 +699,8 @@ export const run = async (env = process.env, platform = process.platform, option
     leaveRefusal(address.file, refusal)
     return null
   }
-  clearRefusal(address.file)
+  ;(options.clearRefusal ?? clearRefusal)(address.file)
+  if (now() >= discoveryDeadline) return null
   const body = await askBoard(address, askBody(input))
   return decisionOutput(body?.decision ?? null)
 }
