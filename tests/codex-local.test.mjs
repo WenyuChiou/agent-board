@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test as nodeTest } from 'node:test'
@@ -5625,8 +5625,9 @@ test('when one agent refreshes a shared .new copy, the other agent records the b
 // One setup run in which the write to a file of this name is refused, or the process ends right after that write lands.
 const stoppedSetup = (f, name, how, ...args) => {
   const preload = join(f.home, 'stop-setup.cjs')
-  const stop = how === 'refuse' ? `throw Object.assign(new Error('synthetic refused write'), { code: 'EIO' })` : 'rename(from, to); process.exit(9)'
-  f.save(preload, `const fs = require('node:fs')\nconst rename = fs.renameSync\nfs.renameSync = (from, to) => { if (!String(to).endsWith(${JSON.stringify(name)})) return rename(from, to); ${stop} }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  const stop = how === 'refuse' ? `throw Object.assign(new Error('synthetic refused write'), { code: 'EIO' })` : 'original(from, to, ...rest); process.exit(9)'
+  // Setup places a file by a rename, and a .new copy where nothing was by a link.
+  f.save(preload, `const fs = require('node:fs')\nfor (const call of ['renameSync', 'linkSync']) {\n  const original = fs[call]\n  fs[call] = (from, to, ...rest) => { if (!String(to).endsWith(${JSON.stringify(name)})) return original(from, to, ...rest); ${stop} }\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
   f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
   try { return f.install(...args) } finally {
     delete f.env.NODE_OPTIONS
@@ -5924,10 +5925,11 @@ const startSetup = (f, env, ...args) => new Promise((done, fail) => {
   child.once('error', fail)
   child.once('close', status => { clearTimeout(timer); done({ status, stdout, stderr }) })
 })
-// An environment in which setup waits before it renames a file of this name into place, with the install lock held.
+// An environment in which setup waits before it places a file of this name, with the install lock held: by a rename,
+// or for a .new copy where nothing was, by a link.
 const pausedEnv = (f, name, ms) => {
   const preload = join(f.home, 'pause-setup.cjs')
-  f.save(preload, `const fs = require('node:fs')\nconst rename = fs.renameSync\nfs.renameSync = (from, to) => { if (String(to).endsWith(${JSON.stringify(name)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${ms}); return rename(from, to) }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.save(preload, `const fs = require('node:fs')\nfor (const call of ['renameSync', 'linkSync']) {\n  const original = fs[call]\n  fs[call] = (from, to, ...rest) => { if (String(to).endsWith(${JSON.stringify(name)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${ms}); return original(from, to, ...rest) }\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
   return { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
 }
 // Waits for a file the other run writes as its signal; this is not a retry of the thing under test.
@@ -6364,6 +6366,583 @@ test('an edited OpenClaw plugin with a record is kept, and the same file with no
   assert.deepEqual(JSON.parse(refused.stdout).conflicts, [plugin], refused.stdout)
   assert.equal(readFileSync(config, 'utf8'), before)
 }))
+
+// A Hermes skills folder that is a link to the shared one (a junction on Windows), so the skill has two names.
+const linkHermesSkills = f => {
+  mkdirSync(join(f.home, '.agents', 'skills'), { recursive: true })
+  mkdirSync(join(f.home, '.hermes'), { recursive: true })
+  symlinkSync(join(f.home, '.agents', 'skills'), join(f.home, '.hermes', 'skills'), process.platform === 'win32' ? 'junction' : 'dir')
+  return join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+}
+const newNamesOf = (f, agent) => Object.keys(recordOf(f, agent).files).filter(file => file.endsWith('.new')).sort()
+// An environment in which setup stops the first time it looks at a path of this name, says so by writing `at`, and goes
+// on once `go` exists. It holds no lock while it waits, as setup takes the install lock only to apply.
+const heldEnv = (f, name) => {
+  const preload = join(f.home, 'hold-setup.cjs'), at = join(f.home, 'held-at'), go = join(f.home, 'held-go')
+  f.save(preload, `const fs = require('node:fs')\nconst lstat = fs.lstatSync\nlet held = false\nfs.lstatSync = (file, ...rest) => {\n  if (!held && String(file).endsWith(${JSON.stringify(name)})) {\n    held = true\n    fs.writeFileSync(${JSON.stringify(at)}, '')\n    while (!fs.existsSync(${JSON.stringify(go)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)\n  }\n  return lstat(file, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
+  return { env: { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }, at, go }
+}
+// One run of the public setup command that is not waited for.
+const startPublic = (f, env, ...args) => new Promise((done, fail) => {
+  const child = spawn(process.execPath, [resolve('scripts/setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env, encoding: 'utf8', windowsHide: true })
+  let stdout = '', stderr = ''
+  const timer = setTimeout(() => child.kill(), 30000)
+  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  child.once('error', fail)
+  child.once('close', status => { clearTimeout(timer); done({ status, stdout, stderr }) })
+})
+// Codex and Cursor both installed, sharing one skill the person then edited.
+const twoAgentsEdited = f => {
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8')
+  f.save(f.skill, 'Synthetic edited skill\n')
+  return { wanted, beside: `${f.skill}.new` }
+}
+const isBusy = result => result.status !== 0 && /another setup was running/.test(result.stderr + result.stdout) && !/fix or move/i.test(result.stderr + result.stdout)
+
+test('a file with the wanted bytes that lands at the .new path during the write stops the apply and is never recorded (#1693)', async () => {
+  await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(f.skill, 'Synthetic edited skill\n')
+    // Another program puts exactly the new version at the .new path when setup opens its temporary copy of it.
+    const preload = join(f.home, 'appear-wanted.cjs')
+    f.save(preload, `const fs = require('node:fs')\nconst open = fs.openSync\nlet done = false\nfs.openSync = (file, ...rest) => {\n  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.indexOf('SKILL.md.new.') : -1\n  if (!done && at >= 0) { done = true; fs.writeFileSync(file.slice(0, at) + 'SKILL.md.new', ${JSON.stringify(wanted)}) }\n  return open(file, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
+    f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+    let stopped
+    try { stopped = f.install('--agent', 'codex', '--apply') } finally { delete f.env.NODE_OPTIONS }
+    assert.ok(isBusy(stopped), stopped.stderr + stopped.stdout)
+    assert.equal(recordOf(f, 'codex').files[beside], undefined)
+    assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+    assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+    // The next run does not take that file as its own through a list the stopped run wrote.
+    const next = f.install('--agent', 'codex', '--apply')
+    assert.notEqual(next.status, 0, next.stdout)
+    assert.deepEqual(JSON.parse(next.stdout).conflicts, [beside], next.stdout)
+    assert.equal(readFileSync(beside, 'utf8'), wanted)
+    assert.equal(recordOf(f, 'codex').files[beside], undefined)
+  })
+  // A second name of the copy this batch wrote is still accepted: a Hermes skills folder linked to the shared one.
+  await fixture(f => {
+    const second = linkHermesSkills(f)
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(f.skill, 'Synthetic edited skill\n')
+    const kept = f.install('--agent', 'hermes', '--apply')
+    assert.equal(kept.status, 0, kept.stderr + kept.stdout)
+    assert.equal(readFileSync(beside, 'utf8'), wanted)
+    assert.deepEqual(newNamesOf(f, 'hermes'), [beside, `${second}.new`].sort())
+    assert.deepEqual(JSON.parse(f.install('--agent', 'hermes', '--apply').stdout).changes, [])
+  })
+})
+
+// One setup run with node:fs changed by `body` before the bundle loads it.
+const withFs = (f, name, body, run) => {
+  const preload = join(f.home, name)
+  f.save(preload, `const fs = require('node:fs')\n${body}\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try { return run() } finally { delete f.env.NODE_OPTIONS }
+}
+// Another program puts `text` at the skill's .new path the moment setup places its copy there, by whatever call
+// setup places it with, and notes which file it put there.
+const takeName = (text, mark) => `let done = false
+for (const name of ['renameSync', 'linkSync']) {
+  const original = fs[name]
+  fs[name] = (from, to, ...rest) => {
+    if (!done && String(to).endsWith('SKILL.md.new')) {
+      done = true
+      fs.writeFileSync(to, ${JSON.stringify(text)})
+      fs.writeFileSync(${JSON.stringify(mark)}, String(fs.statSync(to, { bigint: true }).ino))
+    }
+    return original(from, to, ...rest)
+  }
+}`
+// A disk with no hard links: linking a .new copy fails as it does there, after `before` runs.
+const noLinks = before => `const link = fs.linkSync
+fs.linkSync = (from, to, ...rest) => {
+  if (!String(to).endsWith('.new')) return link(from, to, ...rest)
+  ${before}
+  throw Object.assign(new Error('EPERM: operation not permitted, link'), { code: 'EPERM' })
+}`
+
+test('a file with the wanted bytes that takes the .new name in the instant setup places its copy stops the apply and stays (#1693)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`, mark = join(f.home, 'taken-ino')
+  f.save(f.skill, 'Synthetic edited skill\n')
+  const stopped = withFs(f, 'take-name.cjs', takeName(wanted, mark), () => f.install('--agent', 'codex', '--apply'))
+  assert.ok(isBusy(stopped), stopped.stderr + stopped.stdout)
+  // The file that took the name is still the one there, and no record or list names it.
+  assert.equal(String(statSync(beside, { bigint: true }).ino), readFileSync(mark, 'utf8'))
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'codex').files[beside], undefined)
+  assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+  const next = f.install('--agent', 'codex', '--apply')
+  assert.notEqual(next.status, 0, next.stdout)
+  assert.deepEqual(JSON.parse(next.stdout).conflicts, [beside], next.stdout)
+}))
+
+test('on a disk without hard links a .new copy is placed by a rename after one more check (#1693)', async () => {
+  await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(f.skill, 'Synthetic edited skill\n')
+    const placed = withFs(f, 'no-links.cjs', noLinks(''), () => f.install('--agent', 'codex', '--apply'))
+    assert.equal(placed.status, 0, placed.stderr + placed.stdout)
+    assert.equal(readFileSync(beside, 'utf8'), wanted)
+    assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+    assert.deepEqual(readdirSync(dirname(beside)).filter(name => name.endsWith('.tmp')), [])
+  })
+  // A file that takes the name as the link fails stops the copy too.
+  await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(f.skill, 'Synthetic edited skill\n')
+    const stopped = withFs(f, 'no-links-taken.cjs', noLinks(`if (String(to).endsWith('SKILL.md.new')) fs.writeFileSync(to, ${JSON.stringify(wanted)})`), () => f.install('--agent', 'codex', '--apply'))
+    assert.ok(isBusy(stopped), stopped.stderr + stopped.stdout)
+    assert.equal(readFileSync(beside, 'utf8'), wanted)
+    assert.equal(recordOf(f, 'codex').files[beside], undefined)
+    assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+  })
+})
+
+test('a .new copy whose read-back fails once after it landed is still setup\'s on the next run (#1693)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  // The copy lands, then reading it back fails once, as a scanner holding a new file can make it.
+  const failed = withFs(f, 'read-back.cjs', `const read = fs.readFileSync
+let done = false
+fs.readFileSync = (file, ...rest) => {
+  if (!done && String(file).endsWith('SKILL.md.new') && fs.existsSync(file)) { done = true; throw Object.assign(new Error('EACCES: permission denied, open'), { code: 'EACCES' }) }
+  return read(file, ...rest)
+}`, () => f.install('--agent', 'codex', '--apply'))
+  assert.notEqual(failed.status, 0, failed.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  const next = f.install('--agent', 'codex', '--apply')
+  assert.equal(next.status, 0, next.stderr + next.stdout)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+  assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+}))
+
+test('a .new copy reached by a second name is placed once and never written again (#1693)', () => fixture(f => {
+  const second = linkHermesSkills(f)
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`, mark = join(f.home, 'placements')
+  f.save(f.skill, 'Synthetic edited skill\n')
+  // Every call that puts a file at either .new name is noted.
+  const applied = withFs(f, 'count-places.cjs', `for (const name of ['renameSync', 'linkSync']) {
+  const original = fs[name]
+  fs[name] = (from, to, ...rest) => {
+    if (String(to).endsWith('SKILL.md.new')) fs.appendFileSync(${JSON.stringify(mark)}, name + '\\n')
+    return original(from, to, ...rest)
+  }
+}`, () => f.install('--agent', 'hermes', '--apply'))
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(readFileSync(mark, 'utf8').trim().split('\n'), ['linkSync'])
+  assert.equal(readFileSync(`${second}.new`, 'utf8'), wanted)
+  assert.deepEqual(newNamesOf(f, 'hermes'), [beside, `${second}.new`].sort())
+  assert.deepEqual(JSON.parse(f.install('--agent', 'hermes', '--apply').stdout).changes, [])
+}))
+
+test('an edit saved to a .new copy before setup reaches its second name stays and stops the apply (#1693)', () => fixture(f => {
+  linkHermesSkills(f)
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  // The person saves the copy the moment it lands under its first name.
+  const stopped = withFs(f, 'save-copy.cjs', `let done = false
+for (const name of ['renameSync', 'linkSync']) {
+  const original = fs[name]
+  fs[name] = (from, to, ...rest) => {
+    const result = original(from, to, ...rest)
+    if (!done && String(to).endsWith('SKILL.md.new')) { done = true; fs.writeFileSync(to, 'Synthetic saved copy\\n') }
+    return result
+  }
+}`, () => f.install('--agent', 'hermes', '--apply'))
+  assert.ok(isBusy(stopped), stopped.stderr + stopped.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), 'Synthetic saved copy\n')
+  assert.deepEqual(newNamesOf(f, 'hermes'), [])
+  assert.equal(existsSync(pendingListOf(f, 'hermes')), false)
+  const next = f.install('--agent', 'hermes', '--apply')
+  assert.notEqual(next.status, 0, next.stdout)
+  assert.ok(JSON.parse(next.stdout).conflicts.includes(beside), next.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), 'Synthetic saved copy\n')
+}))
+
+test('a write that fails after a .new copy landed in a linked Hermes skills folder leaves both names setup\'s on the next run (#1693)', () => fixture(f => {
+  const second = linkHermesSkills(f)
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  const failed = withFs(f, 'read-back-linked.cjs', `const read = fs.readFileSync
+let done = false
+fs.readFileSync = (file, ...rest) => {
+  if (!done && String(file).endsWith('SKILL.md.new') && fs.existsSync(file)) { done = true; throw Object.assign(new Error('EACCES: permission denied, open'), { code: 'EACCES' }) }
+  return read(file, ...rest)
+}`, () => f.install('--agent', 'hermes', '--apply'))
+  assert.notEqual(failed.status, 0, failed.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(pendingListOf(f, 'hermes'), 'utf8'))).sort(), [beside, `${second}.new`].sort())
+  const next = f.install('--agent', 'hermes', '--apply')
+  assert.equal(next.status, 0, next.stderr + next.stdout)
+  assert.deepEqual(newNamesOf(f, 'hermes'), [beside, `${second}.new`].sort())
+  assert.equal(existsSync(pendingListOf(f, 'hermes')), false)
+}))
+
+test('a file that takes the .new name in a linked Hermes skills folder is not made setup\'s under either name (#1693)', () => fixture(f => {
+  linkHermesSkills(f)
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`, mark = join(f.home, 'taken-ino')
+  f.save(f.skill, 'Synthetic edited skill\n')
+  const stopped = withFs(f, 'take-linked.cjs', takeName(wanted, mark), () => f.install('--agent', 'hermes', '--apply'))
+  assert.ok(isBusy(stopped), stopped.stderr + stopped.stdout)
+  assert.equal(String(statSync(beside, { bigint: true }).ino), readFileSync(mark, 'utf8'))
+  assert.deepEqual(newNamesOf(f, 'hermes'), [])
+  assert.equal(existsSync(pendingListOf(f, 'hermes')), false)
+  const next = f.install('--agent', 'hermes', '--apply')
+  assert.notEqual(next.status, 0, next.stdout)
+  assert.ok(JSON.parse(next.stdout).conflicts.includes(beside), next.stdout)
+  assert.equal(String(statSync(beside, { bigint: true }).ino), readFileSync(mark, 'utf8'))
+}))
+
+test('a .new copy whose write is refused before it lands is placed by the next run (#1693)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  const refused = withFs(f, 'refuse-open.cjs', `const open = fs.openSync
+let done = false
+fs.openSync = (file, ...rest) => {
+  if (!done && typeof file === 'string' && file.includes('SKILL.md.new.') && file.endsWith('.tmp')) { done = true; throw Object.assign(new Error('EACCES: permission denied, open'), { code: 'EACCES' }) }
+  return open(file, ...rest)
+}`, () => f.install('--agent', 'codex', '--apply'))
+  assert.notEqual(refused.status, 0, refused.stdout)
+  assert.equal(existsSync(beside), false)
+  const next = f.install('--agent', 'codex', '--apply')
+  assert.equal(next.status, 0, next.stderr + next.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+  assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+}))
+
+test('a file that takes one .new name leaves setup\'s other .new copy on the list (#1693)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const second = join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  assert.ok(existsSync(second) && !lstatSync(join(f.home, '.hermes', 'skills')).isSymbolicLink())
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`, secondBeside = `${second}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  f.save(second, 'Synthetic edited skill\n')
+  // Setup's shared copy lands first. Then another program puts exactly the new version at Hermes Agent's .new name the
+  // moment setup places its copy there.
+  const stopped = withFs(f, 'take-second.cjs', `const { resolve } = require('node:path')
+let done = false
+for (const name of ['renameSync', 'linkSync']) {
+  const original = fs[name]
+  fs[name] = (from, to, ...rest) => {
+    if (!done && resolve(String(to)) === resolve(${JSON.stringify(secondBeside)})) { done = true; fs.writeFileSync(to, ${JSON.stringify(wanted)}) }
+    return original(from, to, ...rest)
+  }
+}`, () => f.install('--agent', 'hermes', '--apply'))
+  assert.ok(isBusy(stopped), stopped.stderr + stopped.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), wanted, 'the shared copy landed first')
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(pendingListOf(f, 'hermes'), 'utf8'))), [beside])
+  // Only the file that took Hermes Agent's name stops the next run; the shared copy is still setup's.
+  const next = f.install('--agent', 'hermes', '--apply')
+  assert.notEqual(next.status, 0, next.stdout)
+  assert.deepEqual(JSON.parse(next.stdout).conflicts, [secondBeside], next.stdout)
+}))
+
+test('on a disk without hard links a stop while a .new copy is placed leaves no partial file and the next run finishes (#1693)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  // Setup ends at the moment it places the copy: a rename happens whole or not at all, a copy can end part-way.
+  const stopped = withFs(f, 'no-links-stop.cjs', `${noLinks('')}
+const rename = fs.renameSync
+fs.renameSync = (from, to, ...rest) => { if (String(to).endsWith('SKILL.md.new')) process.exit(9); return rename(from, to, ...rest) }
+const copy = fs.copyFileSync
+fs.copyFileSync = (from, to, ...rest) => {
+  if (!String(to).endsWith('SKILL.md.new')) return copy(from, to, ...rest)
+  fs.writeFileSync(to, fs.readFileSync(from).subarray(0, 20))
+  process.exit(9)
+}`, () => f.install('--agent', 'codex', '--apply'))
+  assert.notEqual(stopped.status, 0, stopped.stdout)
+  assert.ok(!existsSync(beside) || readFileSync(beside, 'utf8') === wanted)
+  const past = new Date(Date.now() - 120000)
+  lutimesSync(join(f.root, 'install.lock'), past, past)
+  const next = f.install('--agent', 'codex', '--apply')
+  assert.equal(next.status, 0, next.stderr + next.stdout)
+  assert.deepEqual(JSON.parse(next.stdout).conflicts, [])
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+}))
+
+test('a temporary name that could not be removed after a .new copy landed does not cost setup the copy (#1693)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  const refused = withFs(f, 'refuse-unlink.cjs', `const unlink = fs.unlinkSync
+let done = false
+fs.unlinkSync = (file, ...rest) => {
+  if (!done && String(file).includes('SKILL.md.new.') && String(file).endsWith('.tmp')) { done = true; throw Object.assign(new Error('EPERM: operation not permitted, unlink'), { code: 'EPERM' }) }
+  return unlink(file, ...rest)
+}`, () => f.install('--agent', 'codex', '--apply'))
+  assert.notEqual(refused.status, 0, refused.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  const next = f.install('--agent', 'codex', '--apply')
+  assert.equal(next.status, 0, next.stderr + next.stdout)
+  assert.deepEqual(JSON.parse(next.stdout).conflicts, [])
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+  assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+}))
+
+test('a second agent whose plan spans the first agent\'s whole apply stops as busy, not on the first run\'s .new copy (#1694)', () => fixture(async f => {
+  const { wanted, beside } = twoAgentsEdited(f)
+  // Cursor has read Codex's record and waits before Codex's pending list; Codex's whole apply runs then.
+  const hold = heldEnv(f, 'install-pending-codex.json')
+  const late = startSetup(f, hold.env, '--agent', 'cursor', '--apply')
+  await untilExists(hold.at, 'cursor reached the pending lists')
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  f.save(hold.go, '')
+  const result = await late
+  assert.ok(isBusy(result), result.stderr + result.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  const again = f.install('--agent', 'cursor', '--apply')
+  assert.equal(again.status, 0, again.stderr + again.stdout)
+  for (const agent of ['codex', 'cursor']) assert.equal(recordOf(f, agent).files[beside], digest(wanted), agent)
+}))
+
+test('a second agent that sees the first run\'s .new copy before any list or record names it stops as busy (#1694)', () => fixture(async f => {
+  const { wanted, beside } = twoAgentsEdited(f)
+  // Cursor has read the pending lists and waits before the .new path; Codex then writes its copy and waits, with the
+  // install lock held, before its record.
+  const hold = heldEnv(f, 'SKILL.md.new')
+  const late = startSetup(f, hold.env, '--agent', 'cursor', '--apply')
+  await untilExists(hold.at, 'cursor reached the .new path')
+  const first = startSetup(f, pausedEnv(f, 'install-codex.json', 3000), '--agent', 'codex', '--apply')
+  await untilExists(beside, 'codex wrote its .new copy')
+  f.save(hold.go, '')
+  const [result, winner] = await Promise.all([late, first])
+  assert.equal(winner.status, 0, winner.stderr + winner.stdout)
+  assert.ok(isBusy(result), result.stderr + result.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  const again = f.install('--agent', 'cursor', '--apply')
+  assert.equal(again.status, 0, again.stderr + again.stdout)
+  assert.equal(recordOf(f, 'cursor').files[beside], digest(wanted))
+}))
+
+test('a second agent that meets the .new copy of a first run that died stops as busy, then takes the copy on the next run (#1694)', () => fixture(async f => {
+  const { wanted, beside } = twoAgentsEdited(f)
+  const hold = heldEnv(f, 'SKILL.md.new')
+  const late = startSetup(f, hold.env, '--agent', 'cursor', '--apply')
+  await untilExists(hold.at, 'cursor reached the .new path')
+  // Codex ends right after its .new copy lands, leaving its pending list and an install lock old enough to take over.
+  assert.notEqual(stoppedSetup(f, 'SKILL.md.new', 'exit', '--agent', 'codex', '--apply').status, 0)
+  f.save(hold.go, '')
+  const result = await late
+  assert.ok(isBusy(result), result.stderr + result.stdout)
+  const again = f.install('--agent', 'cursor', '--apply')
+  assert.equal(again.status, 0, again.stderr + again.stdout)
+  assert.deepEqual(JSON.parse(again.stdout).conflicts, [])
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'cursor').files[beside], digest(wanted))
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+}))
+
+test('a conflict found while another setup holds the lock is reported as busy, and as a conflict once the lock is free (#1694)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const beside = `${f.skill}.new`, lock = join(f.root, 'install.lock')
+  f.save(f.skill, 'Synthetic edited skill\n')
+  f.save(beside, 'Synthetic note of the person\n')
+  // A live setup's lock, held for longer than this run waits.
+  f.save(lock, JSON.stringify({ version: 1, pid: process.pid, started: Math.round(performance.timeOrigin), token: 'synthetic-held-lock' }))
+  const was = bytesOf(f)
+  const held = f.install('--agent', 'codex', '--apply')
+  assert.ok(isBusy(held), held.stderr + held.stdout)
+  assert.deepEqual(bytesOf(f), was)
+  unlinkSync(lock)
+  const free = f.install('--agent', 'codex', '--apply')
+  assert.notEqual(free.status, 0, free.stdout)
+  assert.deepEqual(JSON.parse(free.stdout).conflicts, [beside], free.stdout)
+  assert.match(free.stderr, /fix or move/)
+  assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
+}))
+
+test('a progress file that is a link to nothing under a pending list\'s name is reported as a conflict, not as another setup running (#1694)', () => fixture(f => {
+  // With the home's .agent-board folder there (the data folder) and without it (an outside data folder).
+  const outside = join(f.home, 'synthetic data')
+  for (const [data, args] of [[f.root, []], [outside, ['--data-dir', outside]]]) {
+    mkdirSync(data, { recursive: true })
+    const board = join(data, 'install-pending-codex.json')
+    symlinkSync(join(f.home, 'synthetic gone'), board, process.platform === 'win32' ? 'junction' : 'file')
+    if (data === outside) rmSync(f.root, { recursive: true, force: true })
+    for (const mode of [['--apply'], ['--check-conflicts']]) {
+      const result = f.install('--agent', 'codex', ...args, '--progress-file', board, ...mode)
+      if (mode[0] === '--apply') assert.notEqual(result.status, 0, result.stdout)
+      assert.doesNotMatch(result.stderr + result.stdout, /another setup was running/)
+      assert.deepEqual(JSON.parse(result.stdout).conflicts, [board], result.stdout)
+      assert.equal(existsSync(join(data, 'install-codex.json')), false)
+    }
+    if (data === outside) assert.equal(existsSync(f.root), false)
+    unlinkSync(board)
+  }
+}))
+
+test('a setup run whose progress file is its own record stops as busy when another run\'s whole apply runs during its plan (#1694)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`, record = join(f.root, 'install-codex.json')
+  f.save(f.skill, 'Synthetic edited skill\n')
+  // The first run names Codex's record as its progress file, has read it, and waits before its pending list; another
+  // run's whole apply writes the .new copy and the record then.
+  const hold = heldEnv(f, 'install-pending-codex.json')
+  const late = startSetup(f, hold.env, '--agent', 'codex', '--progress-file', record, '--apply')
+  await untilExists(hold.at, 'the first run reached its pending list')
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  f.save(hold.go, '')
+  const result = await late
+  assert.ok(isBusy(result), result.stderr + result.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+}))
+
+test('a second agent stops as busy on the first run\'s .new copy when a removal deleted the home\'s empty .agent-board folder meanwhile (#1694)', () => fixture(async f => {
+  // Codex and Cursor keep their data in one folder of the person's; the install lock still lives in the home's .agent-board.
+  const data = join(f.home, 'synthetic data'), control = join(f.home, '.agent-board')
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--data-dir', data, '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  const hold = heldEnv(f, 'install-pending-codex.json')
+  const late = startSetup(f, hold.env, '--agent', 'cursor', '--data-dir', data, '--apply')
+  await untilExists(hold.at, 'cursor reached the pending lists')
+  assert.equal(f.install('--agent', 'codex', '--data-dir', data, '--apply').status, 0)
+  // A removal of another install then finds the home's folder empty and deletes it.
+  assert.deepEqual(readdirSync(control), [])
+  rmdirSync(control)
+  f.save(hold.go, '')
+  const result = await late
+  assert.ok(isBusy(result), result.stderr + result.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  const again = f.install('--agent', 'cursor', '--data-dir', data, '--apply')
+  assert.equal(again.status, 0, again.stderr + again.stdout)
+  for (const agent of ['codex', 'cursor']) assert.equal(recordOf({ ...f, root: data }, agent).files[beside], digest(wanted), agent)
+}))
+
+test('the public setup command does not tell the person to fix a .new copy that another setup run wrote (#1694)', async () => {
+  for (const ordering of ['whole apply first', 'copy before its record']) await fixture(async f => {
+    const { wanted, beside } = twoAgentsEdited(f)
+    const hold = heldEnv(f, ordering === 'whole apply first' ? 'install-pending-codex.json' : 'SKILL.md.new')
+    const late = startPublic(f, hold.env, '--agent', 'cursor', '--apply', '--lang', 'en')
+    await untilExists(hold.at, `${ordering}: cursor's preview reached the path`)
+    let first
+    if (ordering === 'whole apply first') first = f.install('--agent', 'codex', '--apply')
+    else {
+      first = startSetup(f, pausedEnv(f, 'install-codex.json', 3000), '--agent', 'codex', '--apply')
+      await untilExists(beside, 'codex wrote its .new copy')
+    }
+    f.save(hold.go, '')
+    const [result, winner] = await Promise.all([late, first])
+    assert.equal(winner.status, 0, `${ordering}: ${winner.stderr}${winner.stdout}`)
+    assert.ok(result.status === 0 ? recordOf(f, 'cursor').files[beside] === digest(wanted) : isBusy(result), `${ordering}: ${result.status} ${result.stderr}${result.stdout}`)
+    assert.doesNotMatch(result.stdout + result.stderr, /fix or move/i, ordering)
+    assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n', ordering)
+  })
+})
+
+test('undoing an edit removes each .new copy setup wrote once, in one run, and keeps one the person changed, with a Hermes skills folder linked or not (#1695)', async () => {
+  for (const isChanged of [false, true]) await fixture(f => {
+    const second = linkHermesSkills(f)
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(f.skill, 'Synthetic edited skill\n')
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    assert.deepEqual(newNamesOf(f, 'hermes'), [beside, `${second}.new`].sort())
+    if (isChanged) f.save(beside, 'Synthetic note of the person\n')
+    f.save(f.skill, wanted)
+    const undone = f.install('--agent', 'hermes', '--apply')
+    assert.equal(undone.status, 0, `${isChanged}: ${undone.stderr}${undone.stdout}`)
+    assert.equal(existsSync(beside), isChanged)
+    if (isChanged) assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
+    assert.deepEqual(newNamesOf(f, 'hermes'), [], `${isChanged}`)
+    assert.deepEqual(JSON.parse(f.install('--agent', 'hermes', '--apply').stdout).changes, [], `${isChanged}`)
+  })
+  // Without the link the two skills are two files, and both copies go.
+  await fixture(f => {
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    const own = join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+    const wanted = { shared: readFileSync(f.skill, 'utf8'), own: readFileSync(own, 'utf8') }
+    f.save(f.skill, 'Synthetic edited skill\n')
+    f.save(own, 'Synthetic edited Hermes skill\n')
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    assert.deepEqual(newNamesOf(f, 'hermes'), [`${f.skill}.new`, `${own}.new`].sort())
+    f.save(f.skill, wanted.shared)
+    f.save(own, wanted.own)
+    const undone = f.install('--agent', 'hermes', '--apply')
+    assert.equal(undone.status, 0, undone.stderr + undone.stdout)
+    assert.equal(existsSync(`${f.skill}.new`), false)
+    assert.equal(existsSync(`${own}.new`), false)
+    assert.deepEqual(newNamesOf(f, 'hermes'), [])
+  })
+})
+
+test('two agents that share a .new copy through a linked folder each finish in one run, whichever goes first (#1695)', async () => {
+  for (const order of [['hermes', 'codex'], ['codex', 'hermes']]) await fixture(f => {
+    linkHermesSkills(f)
+    for (const agent of order) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+    const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(f.skill, 'Synthetic edited skill\n')
+    for (const agent of order) assert.equal(f.install('--agent', agent, '--apply').status, 0, agent)
+    f.save(f.skill, wanted)
+    const [first, last] = order
+    const one = f.install('--agent', first, '--apply')
+    assert.equal(one.status, 0, `${order}: ${one.stderr}${one.stdout}`)
+    // The other agent's record still names the copy, by one of its names, so it stays.
+    assert.equal(readFileSync(beside, 'utf8'), wanted, `${order}`)
+    assert.deepEqual(newNamesOf(f, first), [], `${order}`)
+    const two = f.install('--agent', last, '--apply')
+    assert.equal(two.status, 0, `${order}: ${two.stderr}${two.stdout}`)
+    assert.equal(existsSync(beside), false, `${order}`)
+    for (const agent of order) assert.deepEqual(newNamesOf(f, agent), [], `${order} ${agent}`)
+  })
+})
+
+test('an apply or a cleanup that stopped part-way in a linked Hermes skills folder is finished by the next run (#1695)', async () => {
+  // The apply that wrote the copy stopped before its record: the pending list names the copy by both names.
+  await fixture(f => {
+    const second = linkHermesSkills(f)
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(f.skill, 'Synthetic edited skill\n')
+    assert.notEqual(stoppedSetup(f, 'install-hermes.json', 'refuse', '--agent', 'hermes', '--apply').status, 0)
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(pendingListOf(f, 'hermes'), 'utf8'))).sort(), [beside, `${second}.new`].sort())
+    assert.deepEqual(newNamesOf(f, 'hermes'), [])
+    f.save(f.skill, wanted)
+    const undone = f.install('--agent', 'hermes', '--apply')
+    assert.equal(undone.status, 0, undone.stderr + undone.stdout)
+    assert.equal(existsSync(beside), false)
+    assert.equal(existsSync(pendingListOf(f, 'hermes')), false)
+    assert.deepEqual(newNamesOf(f, 'hermes'), [])
+  })
+  // The cleanup removed the copy and stopped before its record, which still names the copy by both names.
+  await fixture(f => {
+    linkHermesSkills(f)
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(f.skill, 'Synthetic edited skill\n')
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    f.save(f.skill, wanted)
+    const record = readFileSync(join(f.root, 'install-hermes.json'), 'utf8')
+    assert.notEqual(stoppedSetup(f, 'install-hermes.json', 'refuse', '--agent', 'hermes', '--apply').status, 0)
+    assert.equal(existsSync(beside), false)
+    assert.equal(readFileSync(join(f.root, 'install-hermes.json'), 'utf8'), record)
+    const retry = f.install('--agent', 'hermes', '--apply')
+    assert.equal(retry.status, 0, retry.stderr + retry.stdout)
+    assert.deepEqual(newNamesOf(f, 'hermes'), [])
+    assert.equal(readFileSync(f.skill, 'utf8'), wanted)
+  })
+})
 
 test('Codex-only setup respects an explicit progress path and preserves its bytes', () => fixture(f => {
   const path = join(f.home, 'custom', 'board.md')
