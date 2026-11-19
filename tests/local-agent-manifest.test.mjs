@@ -19,6 +19,7 @@ const isolatedEnv = home => ({
   XDG_CONFIG_HOME: join(home, '.config'),
   CLAUDE_CONFIG_DIR: '',
   CLAUDE_PROGRESS_FILE: '',
+  LANG: 'en',
 })
 
 const fixture = async fn => {

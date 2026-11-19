@@ -5060,6 +5060,8 @@ test('an edit undone after an apply stopped part-way takes the copy and the pend
   const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
   f.save(f.skill, 'Synthetic edited skill\n')
   assert.notEqual(stoppedSetup(f, 'install-codex.json', 'refuse', '--agent', 'codex', '--apply').status, 0)
+  assert.equal(readFileSync(beside, 'utf8'), wanted, 'the stopped apply left its copy')
+  assert.equal(existsSync(pendingListOf(f, 'codex')), true, 'the stopped apply left its pending list')
   f.save(f.skill, wanted)
   const retry = f.install('--agent', 'codex', '--apply')
   assert.equal(retry.status, 0, retry.stderr + retry.stdout)
@@ -5073,6 +5075,8 @@ test('removing an agent after an apply stopped part-way takes away the copy and 
   const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
   f.save(f.skill, 'Synthetic edited skill\n')
   assert.notEqual(stoppedSetup(f, 'install-codex.json', 'refuse', '--agent', 'codex', '--apply').status, 0)
+  assert.equal(readFileSync(beside, 'utf8'), wanted, 'the stopped apply left its copy')
+  assert.equal(existsSync(pendingListOf(f, 'codex')), true, 'the stopped apply left its pending list')
   f.save(f.skill, wanted)
   const removed = f.install('--agent', 'codex', '--remove', '--apply')
   assert.equal(removed.status, 0, removed.stderr + removed.stdout)
