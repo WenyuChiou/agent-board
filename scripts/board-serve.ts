@@ -497,25 +497,6 @@ export const startServer = (o: ServeOptions): void => {
   let lastApprovalFilesReadAt = 0
   let isApprovalWatchLive = false
   let approvalWatcher: FSWatcher | null = null
-  if (o.addressFile !== undefined && o.watch !== undefined) {
-    try {
-      const watchFn = o.watch.fs ?? fsWatch
-      const watcher = watchFn(dirname(o.addressFile), () => {
-        isApprovalFilesDirty = true
-        wakeAll()
-      })
-      watcher.on('error', () => {
-        isApprovalWatchLive = false
-        isApprovalFilesDirty = true
-        try { watcher.close() } catch {}
-        if (approvalWatcher === watcher) approvalWatcher = null
-      })
-      approvalWatcher = watcher
-      isApprovalWatchLive = true
-    } catch {
-      isApprovalWatchLive = false
-    }
-  }
   const refreshApprovalFiles = (now: number): void => {
     if (o.addressFile === undefined) return
     if (isApprovalWatchLive && !isApprovalFilesDirty && now - lastApprovalFilesReadAt < REFUSAL_PROBE_MS) return
@@ -1233,6 +1214,8 @@ export const startServer = (o: ServeOptions): void => {
   let isListening = false
   server.on('error', (error: NodeJS.ErrnoException) => {
     try { messaging.close() } catch {}
+    try { approvalWatcher?.close() } catch {}
+    approvalWatcher = null
     if (!isListening && o.onListenError !== undefined) o.onListenError(error)
     else o.onStop()
   })
@@ -1263,6 +1246,25 @@ export const startServer = (o: ServeOptions): void => {
     if (o.watch !== undefined) {
       const { progress, inbox, fs } = o.watch
       boardWatch = watchBoard({ progress, inbox, onChange: wakeAll, onFail: () => { syncFallback(); wakeAll() }, ...(fs === undefined ? {} : { watch: fs }) })
+      if (o.addressFile !== undefined) {
+        try {
+          const watchFn = fs ?? fsWatch
+          const watcher = watchFn(dirname(o.addressFile), () => {
+            isApprovalFilesDirty = true
+            wakeAll()
+          })
+          watcher.on('error', () => {
+            isApprovalWatchLive = false
+            isApprovalFilesDirty = true
+            try { watcher.close() } catch {}
+            if (approvalWatcher === watcher) approvalWatcher = null
+          })
+          approvalWatcher = watcher
+          isApprovalWatchLive = true
+        } catch {
+          isApprovalWatchLive = false
+        }
+      }
     }
     // Preparing a private address can block; inactivity starts once that address is ready.
     lastSeen = Date.now()

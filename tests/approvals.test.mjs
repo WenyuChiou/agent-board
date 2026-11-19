@@ -64,7 +64,7 @@ const homeFor = (url, pid = process.pid) => {
 
 // A board started from source, with the tests' shorter waits. No grace window unless a test asks.
 // `open` stands in for the browser opener; the default opens the page and says so.
-const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, pageMs, open, holdMs, isWatched = false, watchFs, place = homeFor(), addressFile = place.file, now } = {}) => {
+const startBoard = async ({ port = 0, drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, pageMs, open, holdMs, isWatched = false, watchFs, place = homeFor(), addressFile = place.file, now } = {}) => {
   let self
   const messages = join(place.root, `messages-${Date.now()}-${Math.random().toString(16).slice(2)}`)
   mkdirSync(messages)
@@ -74,7 +74,7 @@ const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, 
   const isStopped = new Promise(done => { stopped = done })
   const address = await new Promise((resolve, reject) => {
     startServer({
-      port: 0, messagesDirectory: messages, routes: [], s: EN, ping: {}, addressFile,
+      port, messagesDirectory: messages, routes: [], s: EN, ping: {}, addressFile,
       view: () => buildView(parseProgress(readFileSync(place.progress, 'utf8')), [], null, Date.now(), 0, {}, EN),
       pending: () => [], act: () => '', tidy: () => '', clean: () => '', sweep: () => {}, sweepMs: 60_000,
       paste: () => ({ isAdded: false, note: '' }), failure: () => null, idleMs: 0,
@@ -88,6 +88,7 @@ const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, 
       open: async url => { opened.push(url); return open === undefined ? true : open(url, self) },
       journal: entry => { journal.push(entry) },
       onReady: url => { resolve(url); return true },
+      onListenError: reject,
       onStop: () => { stopped(); reject(new Error('stopped before ready')) },
     })
   })
@@ -3096,6 +3097,13 @@ test('a watched board caches idle refusal and off-switch checks until the folder
   rmSync(hook.approvalsRefusedFile(board.file))
   runtimeWatcher.listener('rename', basename(hook.approvalsRefusedFile(board.file)))
   assert.equal(await page.look(), undefined)
+  const busyPort = Number(new URL(board.origin).port)
+  const busyWatchers = []
+  await assert.rejects(
+    startBoard({ port: busyPort, isWatched: true, watchFs: (path, listener) => { busyWatchers.push(path); return watchFs(path, listener) } }),
+    error => error?.code === 'EADDRINUSE',
+  )
+  assert.equal(busyWatchers.length, 0)
   await board.close()
   assert.equal(runtimeWatcher.closed, true)
 })
