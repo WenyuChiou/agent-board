@@ -1949,12 +1949,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // folder after another run wrote does not skip the check.
   if (conflicts.length && (args.includes('--apply') || args.includes('--check-conflicts'))) {
     // A progress file setup cannot read, a link to nothing, is planned as absent, so it would never match and is left out
-    // while it still reads so (#1712). One setup can read, setup's own record included, is checked like every other path.
-    // This is read before the lock is taken: the lock is a file the check itself writes, so a progress file linked to it
-    // would read only during the check.
-    const seen = before.get(progress)?.kind === 'none' ? take(progress) : null
-    const isUnreadProgress = seen?.kind === 'link' && seen.bytes === null
-    const isChanged = (): void => { for (const file of before.keys()) if (!(isUnreadProgress && file === progress) && !isAsPlanned(file)) throw new Error('INSTALL_CHANGED') }
+    // while it still reads so (#1712): a new plan would read it the same way. One setup can read, setup's own record
+    // included, is checked like every other path, so a target that appeared since the plan stops the run as busy. A link
+    // to the install lock reads only while this check holds the lock, a file the check itself writes, and is left out too.
+    const lockFile = join(installControlRoot(home), 'install.lock')
+    const isUnreadProgress = (file: string): boolean => {
+      const now = file === progress && before.get(file)?.kind === 'none' ? take(file) : null
+      if (now?.kind !== 'link') return false
+      const real = now.bytes === null ? null : realOf(file)
+      return now.bytes === null || real !== null && real === realOf(lockFile)
+    }
+    const isChanged = (): void => { for (const file of before.keys()) if (!isUnreadProgress(file) && !isAsPlanned(file)) throw new Error('INSTALL_CHANGED') }
     if (existsSync(installControlRoot(home))) withInstallLock(home, isChanged)
     else isChanged()
   }
