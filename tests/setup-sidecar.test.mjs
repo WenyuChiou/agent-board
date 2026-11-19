@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, join, sep } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { antigravitySidecarSource } from '../hooks/antigravity-sidecar.ts'
@@ -623,6 +623,43 @@ test('a remove through a chain of SKILL.md links finishes: the Hermes link to th
   assert.throws(() => lstatSync(own), { code: 'ENOENT' })
   assert.deepEqual(readFileSync(copy), skill)
   assert.ok(!existsSync(join(home, '.agent-board', 'install-hermes.json')), 'the install record is gone')
+}))
+
+// A link text with `hop/..` in it names the file the OS reaches through `hop`, not the file a lexical
+// collapse names: the shared skill is a regular file, `hop` links to a folder holding the copy, and the
+// Hermes link reads that copy through `hop/..`. Removing the shared skill must not let setup accept the
+// dangling Hermes link when another program deleted the copy (Greptile 4627685622). The link text is
+// built by string concatenation, not join, so `hop/..` survives into the link itself.
+test('a remove keeps a Hermes SKILL.md link whose text reaches its copy through a hop link when another program deleted the copy', t => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const sharedDir = join(home, '.agents', 'skills', 'agent-board')
+  const shared = join(sharedDir, 'SKILL.md')
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  const copies = join(home, 'copies')
+  const subdir = join(copies, 'subdir')
+  const copy = join(copies, 'SKILL.md')
+  const skill = readFileSync(shared)
+  mkdirSync(subdir, { recursive: true })
+  writeFileSync(copy, skill)
+  rmSync(own)
+  const linkText = `${join(sharedDir, 'hop')}${sep}..${sep}SKILL.md`
+  try {
+    symlinkSync(subdir, join(sharedDir, 'hop'), LINK_TYPE)
+    symlinkSync(linkText, own, 'file')
+  } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make links'); return }
+    throw error
+  }
+  const env = seam(home, `const unlink = fs.unlinkSync
+fs.unlinkSync = file => {
+  unlink(file)
+  if (String(file) === ${JSON.stringify(shared)}) unlink(${JSON.stringify(copy)})
+}`)
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'], { env })
+  stoppedOnChange(removed)
+  assert.ok(lstatSync(own).isSymbolicLink(), 'the Hermes link is still there')
+  assert.equal(readlinkSync(own), linkText)
+  assert.ok(existsSync(join(home, '.agent-board', 'install-hermes.json')))
 }))
 
 // The install record is removed only when it read as one when setup planned, as on main: a dangling link there is not
