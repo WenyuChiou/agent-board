@@ -11915,6 +11915,27 @@ test('a reply button on an unconnected question says it copies and the card then
   } finally { await board.close() }
 })
 
+test('the page says the installed script is older and how to update it (#1304)', async () => {
+  const runtime = await sourceBoard()
+  const view = (words) => runtime.buildView([], [], null, groupedNow, 0, {}, words)
+  const model = (words, versions, olderScript) => runtime.serveModel(view(words), [], words, new Set(), false, undefined, false, { now: groupedNow, repoOf: () => null, versions, unreadable: [], ...(olderScript === undefined ? {} : { olderScript }) })
+  const command = 'npx @wenyuchiou/agent-board@9.9.9 setup'
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const setup = model(words, { board: '1.2.3', package: '9.9.9' }, { update: 'setup', command })
+    assert.equal(setup.health?.length, 1, JSON.stringify(setup.health))
+    assert.equal(setup.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', command))
+    const plugin = model(words, { board: '1.2.3', package: '9.9.9' }, { update: 'plugin' })
+    assert.equal(plugin.health?.length, 1, JSON.stringify(plugin.health))
+    assert.equal(plugin.health[0], words.serveOlderScriptPlugin('1.2.3', '9.9.9'))
+    // No package, the same version, or a newer script: the page shows nothing.
+    for (const versions of [{ board: '1.2.3', package: null }, { board: '1.2.3', package: '1.2.3' }, { board: '9.9.9', package: '1.2.3' }]) {
+      assert.equal(model(words, versions, { update: 'setup', command }).health, undefined)
+    }
+    // A newer package with no update instruction: nothing to say.
+    assert.equal(model(words, { board: '1.2.3', package: '9.9.9' }).health, undefined)
+  }
+})
+
 test('the empty page lists the connected agents and how their work appears', async () => {
   const runtime = await sourceBoard()
   const options = { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null } }
