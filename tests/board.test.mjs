@@ -7991,6 +7991,7 @@ test('#1674: a Windows board server started inside a kill-on-close job (includin
         }
       }
       const delayPreload = join(locked.dir, 'delay-launcher-check.cjs')
+      const needle = 'if($nj -and -not $ia -and (-not $started.HasExited) -and ((& $ij $started.Id)'
       writeFileSync(delayPreload, `const cp = require('node:child_process')
 const orig = cp.spawn
 cp.spawn = function (file, args, options) {
@@ -7998,8 +7999,9 @@ cp.spawn = function (file, args, options) {
     const at = args.indexOf('-EncodedCommand')
     if (at >= 0) {
       const cmd = Buffer.from(args[at + 1], 'base64').toString('utf16le')
-      if (cmd.includes('$inOurJob $started.Id')) {
-        const patched = cmd.replace('if ((-not $started.HasExited) -and ((& $inOurJob $started.Id)', '[Threading.Thread]::Sleep(1200); if ((-not $started.HasExited) -and ((& $inOurJob $started.Id)')
+      if (cmd.includes('--serve-child')) {
+        if (!cmd.includes(${JSON.stringify(needle)})) throw new Error('delay-launcher-check patch did not match')
+        const patched = cmd.replace(${JSON.stringify(needle)}, '[Threading.Thread]::Sleep(1200); ' + ${JSON.stringify(needle)})
         const copy = [...args]
         copy[at + 1] = Buffer.from(patched, 'utf16le').toString('base64')
         return orig.call(this, file, copy, options)
