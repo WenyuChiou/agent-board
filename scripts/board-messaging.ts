@@ -291,6 +291,8 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
     requireOpen()
     const next = pruneMessages(changed, now)
     if (next === state) return
+    // An owner whose claim another board retired (after proving it ended, M6) writes nothing.
+    claim.check(root)
     const temp = `${file}.${process.pid}.tmp`
     try {
       // A temp file an earlier save could not remove would block every save after it.
