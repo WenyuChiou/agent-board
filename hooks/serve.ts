@@ -1629,6 +1629,7 @@ const PAGE_SCRIPT = String.raw`
     document.querySelectorAll('button[data-static]').forEach(function (node) { node.disabled = false; });
     offlineButtons.forEach(function (node) { node.disabled = false; });
     offlineButtons = [];
+    if (approvalsToggle && isApprovalsLocked) approvalsToggle.disabled = true;
     // A press that met the offline server keeps its failure, no longer the offline advice.
     Object.keys(results).forEach(function (key) { if (results[key].text === w('serveOffline')) { results[key].text = w('pressFailed'); paintResult(key); } });
     // Redraw even an unchanged model to restore each action's own sending state.
@@ -3363,22 +3364,31 @@ const PAGE_SCRIPT = String.raw`
   var reasonOpen = {};
   var approvalsToggle = document.getElementById('settings-approvals-toggle');
   var isApprovalsOff = false;
-  function approvalsSwitchShown(isOff) {
-    isApprovalsOff = isOff === true;
+  var isApprovalsLocked = false;
+  var isApprovalsSwitching = false;
+  function approvalsSwitchShown(approvals) {
+    isApprovalsOff = Boolean(approvals && approvals.isOff);
+    isApprovalsLocked = Boolean(approvals && approvals.isLockdown);
     if (!approvalsToggle) return;
-    var nextOn = !isApprovalsOff;
+    var nextOn = !isApprovalsOff && !isApprovalsLocked;
     approvalsToggle.setAttribute('aria-checked', String(nextOn));
     approvalsToggle.textContent = w(nextOn ? 'settingsOn' : 'settingsOff');
+    approvalsToggle.disabled = isApprovalsLocked || isApprovalsSwitching || isUnreachable;
   }
   if (approvalsToggle) approvalsToggle.addEventListener('click', function () {
+    if (isApprovalsLocked || isApprovalsSwitching) return;
     var nextEnabled = isApprovalsOff;
+    isApprovalsSwitching = true;
     approvalsToggle.disabled = true;
     call('/api/approvals/switch', { enabled: nextEnabled }).then(function (data) {
       if (!data.ok) { settingsSay(data.note || w('approvalSwitchFailed'), true); return; }
-      approvalsSwitchShown(Boolean(data.isOff));
+      approvalsSwitchShown({ isOff: Boolean(data.isOff), isLockdown: false });
       settingsSay(data.note || w('settingsChanged', w('settingsApprovals'), w(data.isOff ? 'settingsOff' : 'settingsOn')));
       refresh(true);
-    }, function () { settingsSay(w('approvalSwitchFailed'), true); }).finally(function () { approvalsToggle.disabled = false; });
+    }, function () { settingsSay(w('approvalSwitchFailed'), true); }).finally(function () {
+      isApprovalsSwitching = false;
+      approvalsToggle.disabled = isApprovalsLocked || isUnreachable;
+    });
   });
   function approvalsWaiting(approvals) {
     if (!approvals) return 0;
@@ -3416,7 +3426,7 @@ const PAGE_SCRIPT = String.raw`
       return add(lanWrap, el('p', 't-quiet', approvals.note));
     }
     var hasCards = approvals.cards.length > 0;
-    var showNote = Boolean(approvals.note && !approvals.isOff);
+    var showNote = Boolean(approvals.note && (approvals.isLockdown || !approvals.isOff));
     if (!hasCards && !approvals.refusal && !showNote) return null;
     var wrap = el('section', 'needs-wrap approvals');
     wrap.setAttribute('data-sec', 'needs');
@@ -3647,7 +3657,7 @@ const PAGE_SCRIPT = String.raw`
       notifyWaiting(data.model);
       connections = data.messaging && data.messaging.connections || [];
       latestApprovals = data.approvals || null;
-      approvalsSwitchShown(Boolean(latestApprovals && latestApprovals.isOff));
+      approvalsSwitchShown(latestApprovals);
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; }), latestApprovals], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
       // Under a press this answer is not drawn, and the next poll asks for the whole board again (#1468).
       if (text !== last && isHeld()) {

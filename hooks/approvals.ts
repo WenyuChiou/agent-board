@@ -275,14 +275,14 @@ export const parseApprovalRefusal = (raw: string): { reason: ApprovalRefusalReas
 // What /api/board carries: nothing when nothing waits; on the page on the network only how many
 // wait and the line that says so, never the command, button, off-switch, or hook refusal. With
 // approvals turned off by key-replay lockdown, cards still shown carry no button, and one line says so.
-export const approvalsPayload = (items: readonly Approval[], view: View, isLan: boolean, isPaired: boolean, s: Strings = ZH_TW, state: boolean | ApprovalsState = false): { waiting: number; note: string } | { cards: ApprovalCard[]; note?: string; isOff?: true; refusal?: ApprovalRefusal } | undefined => {
+export const approvalsPayload = (items: readonly Approval[], view: View, isLan: boolean, isPaired: boolean, s: Strings = ZH_TW, state: boolean | ApprovalsState = false): { waiting: number; note: string } | { cards: ApprovalCard[]; note?: string; isOff?: true; isLockdown?: true; refusal?: ApprovalRefusal } | undefined => {
   if (isLan) {
     const waiting = items.filter(one => one.state !== 'window').length
     return waiting === 0 ? undefined : { waiting, note: s.approvalLanWaiting(waiting) }
   }
   const { isLockdown = false, isOff = false, refusal } = typeof state === 'boolean' ? { isLockdown: state } : state
   const cards = approvalCards(items, view, isLockdown || isOff ? false : isPaired, s)
-  if (isLockdown) return { cards, note: s.approvalOff, ...(refusal === undefined ? {} : { refusal }) }
+  if (isLockdown) return { cards, note: s.approvalOff, isLockdown: true, ...(isOff ? { isOff: true } : {}), ...(refusal === undefined ? {} : { refusal }) }
   if (cards.length === 0 && !isOff && refusal === undefined) return undefined
 
   return { cards, ...(isOff ? { isOff: true } : {}), ...(refusal === undefined ? {} : { refusal }) }
