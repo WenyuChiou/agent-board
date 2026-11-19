@@ -630,7 +630,13 @@ test('a remove through a chain of SKILL.md links finishes: the Hermes link to th
 // Hermes link reads that copy through `hop/..`. Removing the shared skill must not let setup accept the
 // dangling Hermes link when another program deleted the copy (Greptile 4627685622). The link text is
 // built by string concatenation, not join, so `hop/..` survives into the link itself.
+// POSIX-only: Win32 resolves `hop/..` lexically before following the junction — CreateFileW normalizes
+// `..` in the path string first, without taking reparse points into account — so on Windows the link
+// reads the shared skill, not the copy, and the layout this test needs does not exist there. The
+// implementation names the same entry the OS reads on each platform (realpathSync.native), so there is
+// no divergence to test on Windows; the P1 is a POSIX case.
 test('a remove keeps a Hermes SKILL.md link whose text reaches its copy through a hop link when another program deleted the copy', t => withHome(({ home, run }) => {
+  if (process.platform === 'win32') { t.skip('Win32 collapses hop/.. lexically before following the junction, so the link reads the shared skill, not the copy'); return }
   assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
   const sharedDir = join(home, '.agents', 'skills', 'agent-board')
   const shared = join(sharedDir, 'SKILL.md')
