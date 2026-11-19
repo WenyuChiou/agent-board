@@ -5041,8 +5041,9 @@ test('a .new copy the person changed after an apply stopped part-way stops that 
   assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
 }))
 
-test('a board file named like a pending list stops setup before it writes, and a removal leaves that file (#1302)', async () => {
+test('a file under a pending list\'s name that setup did not write stays through setup and removal, and stops setup before it would write there (#1302)', async () => {
   const notes = '# Progress\n\n- [ ] Synthetic note only the person holds\n'
+  // A board named like a pending list, by any name that reaches it, stops setup before it writes, with the board named.
   await fixture(f => {
     const linked = join(f.home, 'linked-data')
     mkdirSync(f.root, { recursive: true })
@@ -5060,9 +5061,50 @@ test('a board file named like a pending list stops setup before it writes, and a
       assert.equal(existsSync(f.script), false, board)
       unlinkSync(board)
     }
-    const fresh = f.install('--agent', 'codex', '--progress-file', pendingListOf(f, 'codex'), '--apply')
-    assert.notEqual(fresh.status, 0, fresh.stdout)
-    assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+    // The same before the board exists, through the linked folder too: nothing is written, the board included.
+    for (const board of [pendingListOf(f, 'codex'), join(linked, 'install-pending-codex.json')]) {
+      const fresh = f.install('--agent', 'codex', '--progress-file', board, '--apply')
+      assert.notEqual(fresh.status, 0, `${board}: ${fresh.stdout}`)
+      assert.deepEqual(JSON.parse(fresh.stdout).conflicts, [board], fresh.stdout)
+      assert.equal(existsSync(pendingListOf(f, 'codex')), false, board)
+      assert.equal(existsSync(join(f.root, 'install-codex.json')), false, board)
+      assert.equal(existsSync(f.script), false, board)
+    }
+  })
+  // A file of the person's own there that is not a board stays through setup and removal; when a .new copy is due,
+  // setup stops before it writes and names that file.
+  for (const own of ['{\n  "note": "synthetic note of the person"\n}\n', notes]) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const list = pendingListOf(f, 'codex'), wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(list, own)
+    const setup = f.install('--agent', 'codex', '--apply')
+    assert.equal(setup.status, 0, setup.stderr + setup.stdout)
+    assert.equal(readFileSync(list, 'utf8'), own)
+    f.save(f.skill, 'Synthetic edited skill\n')
+    const due = f.install('--agent', 'codex', '--apply')
+    assert.notEqual(due.status, 0, due.stdout)
+    assert.deepEqual(JSON.parse(due.stdout).conflicts, [list], due.stdout)
+    assert.equal(readFileSync(list, 'utf8'), own)
+    assert.equal(existsSync(beside), false)
+    f.save(f.skill, wanted)
+    const removed = f.install('--agent', 'codex', '--remove', '--apply')
+    assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+    assert.equal(readFileSync(list, 'utf8'), own)
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+  })
+  // A recorded board under that name stays when setup or a removal is given another board, by flag or by environment.
+  for (const how of ['setup by flag', 'removal by flag', 'setup by environment']) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const board = pendingListOf(f, 'codex'), other = join(f.home, 'other', 'progress.md')
+    f.save(board, notes)
+    saveRecord(f, 'codex', { ...recordOf(f, 'codex'), progress: board })
+    let result
+    if (how === 'setup by environment') {
+      f.env.CLAUDE_PROGRESS_FILE = other
+      try { result = f.install('--agent', 'codex', '--apply') } finally { delete f.env.CLAUDE_PROGRESS_FILE }
+    } else result = f.install('--agent', 'codex', ...(how === 'removal by flag' ? ['--remove'] : []), '--progress-file', other, '--apply')
+    assert.equal(result.status, 0, `${how}: ${result.stderr}${result.stdout}`)
+    assert.equal(readFileSync(board, 'utf8'), notes, how)
   })
   await fixture(f => {
     assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
@@ -5081,7 +5123,9 @@ test('a pending list that cannot be read names nothing, so a copy no record hold
   const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
   f.save(f.skill, 'Synthetic edited skill\n')
   f.save(beside, wanted)
-  for (const text of ['{ not json', '[]', `${JSON.stringify({ [beside]: digest(wanted) })}\n`, `${JSON.stringify({ [f.skill]: [digest(wanted)] })}\n`]) {
+  // A list with one entry setup could have written and one it could not is not setup's list, so it names nothing at all.
+  const halfList = `${JSON.stringify({ [beside]: [digest(wanted)], [f.skill]: [digest(wanted)] })}\n`
+  for (const text of ['{ not json', '[]', `${JSON.stringify({ [beside]: digest(wanted) })}\n`, `${JSON.stringify({ [f.skill]: [digest(wanted)] })}\n`, halfList]) {
     f.save(pendingListOf(f, 'codex'), text)
     const result = f.install('--agent', 'codex', '--apply')
     assert.notEqual(result.status, 0, `${text}: ${result.stdout}`)

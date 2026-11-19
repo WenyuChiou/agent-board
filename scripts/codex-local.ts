@@ -570,14 +570,24 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const otherManifests = otherAgents.map(one => jsonInitial(join(root, `install-${one}.json`)))
   // A .new copy reaches the disk before the install record names it, so a setup that stops between the two leaves a copy
   // no record holds (#1302). This list is written before the copy and removed after the record, and it is how the next
-  // setup knows that copy is its own: the wanted bytes alone would also match a file the person put there. A list that
-  // cannot be read names nothing, so the copy stops that agent as any unknown file does.
+  // setup knows that copy is its own: the wanted bytes alone would also match a file the person put there.
+  // A file under that name is a list only when it reads as one setup could have written: a regular file holding a JSON
+  // object of .new paths, each with hashes. Its name alone says nothing, since a board named there or any note of the
+  // person's can have it too. So setup reads, writes over and deletes the file only when it reads so; anything else names
+  // nothing, a copy no record holds then stops that agent as any unknown file does, and the file stays.
   const pendingFile = (one: string): string => join(root, `install-pending-${one}.json`)
-  const pendingOf = (one: string): Record<string, string[]> => {
+  const listOf = (snap: Snap | undefined): Record<string, string[]> | null => {
+    if (snap?.kind !== 'file' || snap.bytes === null) return null
     let held: unknown
-    try { held = JSON.parse(initial(pendingFile(one)) ?? '{}') } catch { return {} }
-    if (!isRecord(held)) return {}
-    return Object.fromEntries(Object.entries(held).filter((entry): entry is [string, string[]] => entry[0].endsWith('.new') && Array.isArray(entry[1]) && entry[1].every(value => typeof value === 'string')))
+    try { held = JSON.parse(snap.bytes.toString('utf8')) } catch { return null }
+    if (typeof held !== 'object' || held === null || Array.isArray(held)) return null
+    const entries = Object.entries(held)
+    const isList = entries.length > 0 && entries.every(([path, hashes]) => path.endsWith('.new') && Array.isArray(hashes) && hashes.length > 0 && hashes.every(value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)))
+    return isList ? Object.fromEntries(entries) as Record<string, string[]> : null
+  }
+  const pendingOf = (one: string): Record<string, string[]> => {
+    initial(pendingFile(one))
+    return listOf(before.get(pendingFile(one))) ?? {}
   }
   const control = join(installControlRoot(home), 'legacy-connect.json')
   const authority = join(installControlRoot(home), 'legacy-connect-authority')
@@ -1740,10 +1750,23 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const createdDirs = new Set(Array.isArray(loaded.createdDirs) ? loaded.createdDirs.filter((value): value is string => typeof value === 'string') : [])
   const folderKey = (folder: string): string => process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)
   const isBelow = (folder: string, parent: string): boolean => folderKey(folder).startsWith(`${folderKey(parent)}${process.platform === 'win32' ? '\\' : '/'}`)
-  // Setup overwrites its pending lists and deletes them after each apply. A board file kept under one of those names, by
-  // any name that reaches it, stops setup before it writes, and a removal leaves that file where it is.
-  const isPendingList = (file: string, one: string): boolean => folderKey(file) === folderKey(pendingFile(one)) || realOf(file) !== null && realOf(file) === realOf(pendingFile(one))
+  // A board file named like a pending list stops setup before it writes, with the board named, so the person learns why.
+  // This is for the message only: the list is written over or deleted only when it reads as one (listOf), whatever path
+  // the board has. A name through a linked folder is compared by the real folder above it, so it is caught before the
+  // file exists.
+  const realNameOf = (file: string): string | null => {
+    const folder = realOf(dirname(file))
+    return folder === null ? null : join(folder, basename(file))
+  }
+  const isPendingList = (file: string, one: string): boolean => {
+    const real = realNameOf(file), list = realNameOf(pendingFile(one))
+    return folderKey(file) === folderKey(pendingFile(one)) || realOf(file) !== null && realOf(file) === realOf(pendingFile(one)) || real !== null && list !== null && folderKey(real) === folderKey(list)
+  }
   if (!remove && localAgents.some(one => isPendingList(progress, one))) conflicts.push(progress)
+  // A .new copy is due, so setup would write its pending list first: a file there that is not a list stops it before that.
+  const ownList = before.get(pendingFile(agent)) ?? NO_PATH
+  const isCopyDue = keptText.some(one => changes.some(change => change.file === one.beside))
+  if (!remove && isCopyDue && ownList.kind !== 'none' && listOf(ownList) === null && !conflicts.includes(pendingFile(agent))) conflicts.push(pendingFile(agent))
   if (!remove) for (const file of [...changes.filter(change => change.action === 'create').map(change => change.file), ...(initial(manifestFile) === null ? [manifestFile] : [])]) {
     for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
   }
@@ -1751,7 +1774,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   if (remove && agent === 'antigravity' && initial(sidecarRecord) !== null) changes.push({ file: sidecarRecord, action: 'remove' })
-  if (remove && initial(pendingFile(agent)) !== null && !isPendingList(progress, agent)) changes.push({ file: pendingFile(agent), action: 'remove' })
+  if (remove && listOf(ownList) !== null) changes.push({ file: pendingFile(agent), action: 'remove' })
   const removedDirs = new Set<string>()
   let handover: { file: string; text: string } | undefined
   if (remove) {
@@ -1951,8 +1974,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         }
         if (updatedSibling) put(siblingFile, `${JSON.stringify({ ...sibling, files: siblingFiles }, null, 2)}\n`)
       }
-      // The records now name every copy. This also clears a list an earlier setup left when it stopped after its record.
-      if (take(pendingFile(agent)).kind !== 'none') unlinkSync(pendingFile(agent))
+      // The records now name every copy. This also clears a list an earlier setup left when it stopped after its record;
+      // a file under that name that is not a list stays.
+      if (listOf(take(pendingFile(agent))) !== null) unlinkSync(pendingFile(agent))
     }
   })
   // A folder that cannot go (something appeared in it, or Windows holds it) stays and is not reported as removed.
