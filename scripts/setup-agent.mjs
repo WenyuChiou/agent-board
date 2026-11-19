@@ -98,6 +98,10 @@ const summaries = [
     "open": "Open a new session in each of: {agents}.",
     "openOne": "Open a new session in {agents}.",
     "thenBoardOne": "Then type /agent-board there.",
+    "thenBoardIn": "Then type /agent-board in {agents}.",
+    "thenBoardOld": "In {agents}, type /board. /agent-board comes once you move your edited agent-board.mjs aside and run setup again.",
+    "thenBoardCodex": "In Codex, type $agent-board.",
+    "thenBoardHermes": "In Hermes Agent, ask it to run the Agent Board skill.",
     "appliedRemove": "removed {count} setup files",
     "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",
@@ -163,6 +167,10 @@ const summaries = [
     "open": "在 {agents} 各開一個新的工作階段。",
     "openOne": "在 {agents} 開一個新的工作階段。",
     "thenBoardOne": "接著在那裡輸入 /agent-board。",
+    "thenBoardIn": "接著在 {agents} 輸入 /agent-board。",
+    "thenBoardOld": "在 {agents} 請輸入 /board。把你改過的 agent-board.mjs 移開、再執行一次 setup 後，就會有 /agent-board。",
+    "thenBoardCodex": "在 Codex 請輸入 $agent-board。",
+    "thenBoardHermes": "在 Hermes Agent 請它執行 Agent Board skill。",
     "appliedRemove": "已移除 {count} 個設定檔案",
     "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
@@ -228,6 +236,10 @@ const summaries = [
     "open": "在 {agents} 各开一个新的会话。",
     "openOne": "在 {agents} 开一个新的会话。",
     "thenBoardOne": "接着在那里输入 /agent-board。",
+    "thenBoardIn": "接着在 {agents} 输入 /agent-board。",
+    "thenBoardOld": "在 {agents} 请输入 /board。把你改过的 agent-board.mjs 移走、再运行一次 setup 后，就会有 /agent-board。",
+    "thenBoardCodex": "在 Codex 请输入 $agent-board。",
+    "thenBoardHermes": "在 Hermes Agent 请让它执行 Agent Board skill。",
     "appliedRemove": "已移除 {count} 个设置文件",
     "appliedRemoveOne": "已移除 {count} 个设置文件",
     "noInstalled": "没有已安装的 Agent Board 设置可供移除",
@@ -434,7 +446,9 @@ const main = () => {
   let removing = selected
   const run = (agent, isApplying, extra = []) => {
     const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')] : common
-    const result = spawnSync(process.execPath, [script, ...runArgs, ...extra, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
+    // A preview taken for an apply checks a conflict again under the install lock, so a copy another setup run is
+    // writing stops this command as busy instead of being shown as a file to fix or move (#1694).
+    const result = spawnSync(process.execPath, [script, ...runArgs, ...extra, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : apply ? ['--check-conflicts'] : [])], { encoding: 'utf8', windowsHide: true })
     const fallback = () => {
       const cause = isCode(result.error?.code) ? result.error.code : 'UNKNOWN'
       const reason = result.error?.message || (result.stderr ?? '').trim().split(/\r?\n/).filter(Boolean).pop() || 'The setup helper did not return a result.'
@@ -626,20 +640,30 @@ const main = () => {
       process.stdout.write('\n')
     }
     if (hasConsent) {
+      // A folder or a link to nothing is not a file a way can rest on; a link to a file is (#1698).
+      const isFile = file => { try { return statSync(file).isFile() } catch { return false } }
       const completed = []
+      // What each apply did. The files can change while setup waits for the answer, and the apply plans again (#1698).
+      const appliedPlans = {}
+      // Every apply runs before any agent is called done: a later agent's apply can write back the board script an
+      // earlier agent with nothing to apply shares (#1698).
+      for (const [i, agent] of selected.entries()) {
+        if (plans[i].conflicts.length || !plans[i].changes.length) continue
+        try {
+          const applied = run(agent, true)
+          if (applied.applied === true && !applied.conflicts.length) appliedPlans[agent] = applied
+        } catch {}
+      }
       for (const [i, agent] of selected.entries()) {
         const plan = plans[i]
         // A skipped agent's preview line already names its files and the command to apply it.
         if (plan.conflicts.length) continue
-        let isDone = true
-        try {
-          if (plan.changes.length) {
-            const applied = run(agent, true)
-            isDone = applied.applied === true && !applied.conflicts.length
-          }
-          if (isDone) completed.push(agent)
-        } catch { isDone = false }
-        if (!isDone) process.exitCode = 1
+        // With nothing to apply, an agent setup writes for is done only while the board script every way runs is there
+        // after the applies; else the line says to run setup for it again, which writes the script back. An agent the
+        // connector manages has no file of setup's to look at (#1698).
+        const isDone = plan.changes.length ? appliedPlans[agent] !== undefined : plan.managedBy === 'connector' || isFile(join(plan.data, 'agent-board.mjs'))
+        if (isDone) completed.push(agent)
+        else process.exitCode = 1
         report(words('filesPart', { host: names[agent] }), isDone, setupCommand(['--agent', agent, '--apply']))
       }
       for (const agent of approvals) {
@@ -677,8 +701,13 @@ const main = () => {
       if (completed.includes('antigravity')) offerSidecar()
       const next = []
       const sessions = []
+      // How each agent opens the board (docs/SETUP.md, After setup): /agent-board, $agent-board in Codex, the skill in
+      // Hermes Agent, and /board where /agent-board waits with an edited older board script. The plan names the way and
+      // the file it rests on; a way is named only while that file is there now. An agent with no way left, and Cursor,
+      // which has no command, is named in no "then" line: a terminal command for them waits for #1714 (#1698).
+      const ways = new Map()
       for (const agent of completed) {
-        const plan = plans[selected.indexOf(agent)]
+        const plan = appliedPlans[agent] ?? plans[selected.indexOf(agent)]
         if (plan.managedBy === 'connector') continue
         if (plan.capabilities.lifecycle === 'adapter-pending') next.push(words('skill', { host: names[agent] }))
         else {
@@ -686,16 +715,30 @@ const main = () => {
           // Started from Git Bash, cursor-agent hands its PowerShell hook commands to bash and none runs (#1159).
           if (agent === 'cursor' && process.platform === 'win32') next.push(words('cursorWindows'))
           sessions.push(names[agent])
+          const opens = plan.opens
+          const isThere = opens !== undefined && isFile(opens.file)
+          ways.set(names[agent], !isThere ? 'none' : opens.way === '/board' ? 'old' : opens.way === 'skill' && ['codex', 'hermes'].includes(agent) ? agent : 'slash')
         }
       }
       // One retry command for every agent that was skipped, here as in the run without a terminal.
       const skippedAgents = selected.filter((agent, i) => plans[i].conflicts.length)
       if (skippedAgents.length) next.push(words('retry', { command: setupCommand(['--agent', skippedAgents.join(','), '--apply']) }))
       if (hasInstalledPlugin && isPluginDisabled(claudeDirectory)) next.push(enablePluginStep())
-      if (isPluginReady) sessions.push('Claude Code')
+      if (isPluginReady) {
+        sessions.push('Claude Code')
+        ways.set('Claude Code', 'slash')
+      }
       if (sessions.length) {
         next.push(words(sessions.length === 1 ? 'openOne' : 'open', { agents: sessions.join(message(', ', '、', '、')) }))
-        next.push(words(sessions.length === 1 ? 'thenBoardOne' : 'thenBoard'))
+        // Agents are named only when they do not all open the board the same way.
+        const named = way => sessions.filter(one => ways.get(one) === way).join(message(', ', '、', '、'))
+        if (sessions.every(one => ways.get(one) === 'slash')) next.push(words(sessions.length === 1 ? 'thenBoardOne' : 'thenBoard'))
+        else {
+          if (named('slash')) next.push(words('thenBoardIn', { agents: named('slash') }))
+          if (named('codex')) next.push(words('thenBoardCodex'))
+          if (named('hermes')) next.push(words('thenBoardHermes'))
+          if (named('old')) next.push(words('thenBoardOld', { agents: named('old') }))
+        }
       }
       if (next.length) process.stdout.write(`\n${words('next')}\n${next.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n`)
       return

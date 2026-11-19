@@ -209,6 +209,10 @@ export const ZH_TW = {
     "open": "在 {agents} 各開一個新的工作階段。",
     "openOne": "在 {agents} 開一個新的工作階段。",
     "thenBoardOne": "接著在那裡輸入 /agent-board。",
+    "thenBoardIn": "接著在 {agents} 輸入 /agent-board。",
+    "thenBoardOld": "在 {agents} 請輸入 /board。把你改過的 agent-board.mjs 移開、再執行一次 setup 後，就會有 /agent-board。",
+    "thenBoardCodex": "在 Codex 請輸入 $agent-board。",
+    "thenBoardHermes": "在 Hermes Agent 請它執行 Agent Board skill。",
     "appliedRemove": "已移除 {count} 個設定檔案",
     "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
@@ -851,6 +855,9 @@ export const ZH_TW = {
     : `連接埠 ${port} 無效（需為 1–65535）。請改用其他 --port，或省略 --port 自動選擇。`,
   servePortInUse: (port: number): string => `連接埠 ${port} 已被使用。請改用其他 --port，或省略 --port 自動選擇。`,
   servePortDenied: (port: number): string => `連接埠 ${port} 無法使用（權限不足）。請改用 1023 以上的 --port，或省略 --port 自動選擇。`,
+  serveStoreHeld: (pid: number, isBoard: boolean): string => isBoard
+    ? `Agent Board 沒有開啟：一個 Agent Board 頁面（程序 ${pid}）佔著它的訊息資料夾，看板無法確認它已停止服務。請結束程序 ${pid}，再開啟看板。`
+    : `Agent Board 沒有開啟：程序 ${pid} 佔著它的訊息資料夾，它不是這個看板能停止的 Agent Board 頁面。請結束程序 ${pid}，再開啟看板。`,
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `看板無法開啟訊息資料夾（${code}）：${folder}。請先停止所有看板 server，一併檢查 server.lock、server.owner 與 .message-claim-*.json。確認沒有 hub 執行後，僅移除已核實過期的持有者資料。請保留 messages.json 與不確定是否送達的紀錄，勿重送這些訊息。`
     : code === 'MESSAGE_STORE_CLOSED'
