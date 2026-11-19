@@ -5041,8 +5041,9 @@ test('a .new copy the person changed after an apply stopped part-way stops that 
   assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
 }))
 
-test('a board file named like a pending list stops setup before it writes, and a removal leaves that file (#1302)', async () => {
+test('a file under a pending list\'s name that setup did not write stays through setup and removal, and stops setup before it would write there (#1302)', async () => {
   const notes = '# Progress\n\n- [ ] Synthetic note only the person holds\n'
+  // A board named like a pending list, by any name that reaches it, stops setup before it writes, with the board named.
   await fixture(f => {
     const linked = join(f.home, 'linked-data')
     mkdirSync(f.root, { recursive: true })
@@ -5060,9 +5061,50 @@ test('a board file named like a pending list stops setup before it writes, and a
       assert.equal(existsSync(f.script), false, board)
       unlinkSync(board)
     }
-    const fresh = f.install('--agent', 'codex', '--progress-file', pendingListOf(f, 'codex'), '--apply')
-    assert.notEqual(fresh.status, 0, fresh.stdout)
-    assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+    // The same before the board exists, through the linked folder too: nothing is written, the board included.
+    for (const board of [pendingListOf(f, 'codex'), join(linked, 'install-pending-codex.json')]) {
+      const fresh = f.install('--agent', 'codex', '--progress-file', board, '--apply')
+      assert.notEqual(fresh.status, 0, `${board}: ${fresh.stdout}`)
+      assert.deepEqual(JSON.parse(fresh.stdout).conflicts, [board], fresh.stdout)
+      assert.equal(existsSync(pendingListOf(f, 'codex')), false, board)
+      assert.equal(existsSync(join(f.root, 'install-codex.json')), false, board)
+      assert.equal(existsSync(f.script), false, board)
+    }
+  })
+  // A file of the person's own there that is not a board stays through setup and removal; when a .new copy is due,
+  // setup stops before it writes and names that file.
+  for (const own of ['{\n  "note": "synthetic note of the person"\n}\n', notes]) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const list = pendingListOf(f, 'codex'), wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(list, own)
+    const setup = f.install('--agent', 'codex', '--apply')
+    assert.equal(setup.status, 0, setup.stderr + setup.stdout)
+    assert.equal(readFileSync(list, 'utf8'), own)
+    f.save(f.skill, 'Synthetic edited skill\n')
+    const due = f.install('--agent', 'codex', '--apply')
+    assert.notEqual(due.status, 0, due.stdout)
+    assert.deepEqual(JSON.parse(due.stdout).conflicts, [list], due.stdout)
+    assert.equal(readFileSync(list, 'utf8'), own)
+    assert.equal(existsSync(beside), false)
+    f.save(f.skill, wanted)
+    const removed = f.install('--agent', 'codex', '--remove', '--apply')
+    assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+    assert.equal(readFileSync(list, 'utf8'), own)
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+  })
+  // A recorded board under that name stays when setup or a removal is given another board, by flag or by environment.
+  for (const how of ['setup by flag', 'removal by flag', 'setup by environment']) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const board = pendingListOf(f, 'codex'), other = join(f.home, 'other', 'progress.md')
+    f.save(board, notes)
+    saveRecord(f, 'codex', { ...recordOf(f, 'codex'), progress: board })
+    let result
+    if (how === 'setup by environment') {
+      f.env.CLAUDE_PROGRESS_FILE = other
+      try { result = f.install('--agent', 'codex', '--apply') } finally { delete f.env.CLAUDE_PROGRESS_FILE }
+    } else result = f.install('--agent', 'codex', ...(how === 'removal by flag' ? ['--remove'] : []), '--progress-file', other, '--apply')
+    assert.equal(result.status, 0, `${how}: ${result.stderr}${result.stdout}`)
+    assert.equal(readFileSync(board, 'utf8'), notes, how)
   })
   await fixture(f => {
     assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
@@ -5081,7 +5123,9 @@ test('a pending list that cannot be read names nothing, so a copy no record hold
   const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
   f.save(f.skill, 'Synthetic edited skill\n')
   f.save(beside, wanted)
-  for (const text of ['{ not json', '[]', `${JSON.stringify({ [beside]: digest(wanted) })}\n`, `${JSON.stringify({ [f.skill]: [digest(wanted)] })}\n`]) {
+  // A list with one entry setup could have written and one it could not is not setup's list, so it names nothing at all.
+  const halfList = `${JSON.stringify({ [beside]: [digest(wanted)], [f.skill]: [digest(wanted)] })}\n`
+  for (const text of ['{ not json', '[]', `${JSON.stringify({ [beside]: digest(wanted) })}\n`, `${JSON.stringify({ [f.skill]: [digest(wanted)] })}\n`, halfList]) {
     f.save(pendingListOf(f, 'codex'), text)
     const result = f.install('--agent', 'codex', '--apply')
     assert.notEqual(result.status, 0, `${text}: ${result.stdout}`)
@@ -6356,6 +6400,52 @@ test('Hermes removal preserves a foreign bare-dash list item after a recorded ho
   const removed = remove774(f, 'hermes')
   assert.equal(removed.status, 0, removed.stderr)
   assert.equal(readFileSync(config, 'utf8'), `hooks:\n  post_tool_call:\n${sibling}\n`)
+}))
+
+test('Hermes setup refuses only the entry the person changed and names its event (#1588)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  const hooks = hermesHooksOf(text)
+  assert.deepEqual(Object.keys(hooks).sort(), [...hermesEvents].sort())
+  // The person changed the on_session_start entry to their own command; the other four stay the board's.
+  const changed = text.replace(JSON.stringify(hooks.on_session_start.command), '"my-start.sh"')
+  assert.notEqual(changed, text, 'the changed entry is replaced')
+  f.save(config, changed)
+  const result = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.ok(result.stdout.trimStart().startsWith('{'), `setup prints a JSON plan\n${result.stdout}\n${result.stderr}`)
+  // f.install runs setup-codex.mjs, which prints the plan itself, not setup-agent's wrapper.
+  const plan = JSON.parse(result.stdout)
+  assert.equal(plan.conflicts.length, 1, `one refused entry, not the whole file: ${JSON.stringify(plan.conflicts)}`)
+  assert.ok(plan.conflicts[0].includes('config.yaml'), `the refusal names the file: ${plan.conflicts[0]}`)
+  assert.ok(plan.conflicts[0].endsWith(':on_session_start'), `the refusal names the exact entry: ${plan.conflicts[0]}`)
+  assert.equal(readFileSync(config, 'utf8'), changed, 'the refused run writes nothing')
+  // Fixing that one entry unblocks the rest.
+  f.save(config, text)
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  assert.equal(readFileSync(config, 'utf8'), text)
+}))
+
+test('Hermes setup adopts an entry that already runs this release\'s command when no install record names it (#1588)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  // The install record is gone (a replaced marketplace entry, a copied config), but the
+  // entries still run this release's command: setup recognises them as its own.
+  const manifest = join(f.root, 'install-hermes.json')
+  const record = JSON.parse(readFileSync(manifest, 'utf8'))
+  assert.ok(record.groups?.hooks, 'the install recorded its hooks')
+  delete record.groups.hooks
+  writeFileSync(manifest, `${JSON.stringify(record, null, 2)}\n`)
+  const again = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.equal(again.status, 0, again.stderr)
+  // f.install runs setup-codex.mjs, which prints the plan itself, not setup-agent's wrapper.
+  const plan = JSON.parse(again.stdout)
+  assert.deepEqual(plan.conflicts, [], 'no conflict on the board\u2019s own entries')
+  assert.equal(readFileSync(config, 'utf8'), text, 'the entries already run this release\u2019s command')
+  const repaired = JSON.parse(readFileSync(manifest, 'utf8'))
+  assert.deepEqual(Object.keys(repaired.groups.hooks).sort(), [...hermesEvents].sort(), 'the install re-records the hooks')
+  assert.deepEqual(JSON.parse(f.install('--agent', 'hermes', '--apply', '--json').stdout).changes, [], 'a third apply reports no changes')
 }))
 
 test('Hermes refresh and removal recognize a recorded Unicode path after YAML escaping', () => fixture(f => {
