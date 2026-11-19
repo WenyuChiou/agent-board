@@ -147,6 +147,8 @@ import { makeFolderCommand, moveFileCommand } from './old-months-run'
 import { addPruned, boardRecords, boardTag, companionKeys, countPruned, currentPart, doneRecord, inboxDropped, isExpiredRecord, isSameWrite, monthParts, overCapKeys, pruneBatch, prunedNote, prunedSince, prunedTotal, readMonthParts, RETENTION, sizeWarnings, storageDetails, staleFailedInbox, staleInboxTemps, staleStoreTemps, storeBytes, STORE_FILE, unseenFailedInbox } from './retention'
 import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
+import { withQueuedAnswers } from './board-status'
+import { messagesFolder, queuedMessagingOf } from './queued-store'
 import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionProofJson, questionProofOf, questionProofPath, questionScope, questionStatsKey, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
@@ -194,6 +196,9 @@ const isLegendOpen = atom({ plugin: 'agent-board', key: 'isLegendOpen' } as cons
 // The progress bar's style (#1085), as the board's settings file last said: the page, the pane and
 // the terminal board all write it there, and each poll looks again.
 const barStyle = atom({ plugin: 'agent-board', key: 'barStyle' } as const, DEFAULT_BAR_STYLE as BarStyle)
+// The page's message store as text, as the last poll read it (#1296): the answers queued for a session's next turn,
+// which the pane counts as handled, as the page does. Null when there is none or it cannot be read.
+const queuedStore = atom({ plugin: 'agent-board', key: 'queuedStore' } as const, null as string | null)
 // The language the pane speaks (strings.ts resolveLang), settled at session start.
 const lang = atom({ plugin: 'agent-board', key: 'lang' } as const, 'zh-TW')
 // Which folded sections the person opened; kept across sessions in $.store.
@@ -1203,6 +1208,49 @@ const pollBarStyle = async ($: EngineInterface, path: string): Promise<void> => 
   $.ui.invalidate('ui.render')
 }
 
+// The page's message store for this progress.md, read like the settings file: a stat per poll, read only when it
+// changed, through the guarded script, which refuses a link or a file that is not a plain one. A folder that is a
+// link is not read (the page's server refuses it too). Nothing there, or nothing readable: every question waits.
+let queuedStoreSeen = ''
+let queuedFolder: { path: string; folder: string | null } | null = null
+const pollQueuedStore = async ($: EngineInterface, path: string): Promise<void> => {
+  if (queuedFolder?.path !== path) {
+    const isWin = await isWindows($, path)
+    const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '')
+    const runtime = await $.env.get('XDG_RUNTIME_DIR')
+    const isRuntimeOwn = !isWin && runtime !== undefined && runtime !== '' && await isOwnAddress($, runtime)
+    queuedFolder = { path, folder: messagesFolder(isWin, path, home, runtime, isRuntimeOwn) }
+  }
+  const folder = queuedFolder.folder
+  const dir = folder === null ? undefined : await $.fs.stat(folder).catch(() => undefined)
+  const file = folder === null ? '' : `${folder}${sepOf(folder)}messages.json`
+  const stat = dir === undefined || dir.isLink || dir.kind !== 'dir' ? undefined : await $.fs.stat(file).catch(() => undefined)
+  const seen = stat === undefined ? '' : `${file}:${stat.mtimeMs}:${stat.size}`
+  if (seen === queuedStoreSeen) return
+  const text = stat === undefined || stat.isLink || stat.kind !== 'file' ? '' : await readSettingsText($, file).catch(() => '')
+  queuedStoreSeen = seen
+  const kept = text === '' ? null : text
+  if ((await read($, queuedStore)) === kept) return
+  await update($, queuedStore, () => kept)
+  $.ui.invalidate('ui.render')
+  await refreshStatus($)
+}
+
+// The view with the answers queued for a session's next turn counted as handled (#1296), from the store the last poll
+// read. A store that does not parse counts nothing as queued.
+// The last answer is kept for the same view and the same text: the view cache hands back one view for the same
+// inputs, so a redraw parses nothing again.
+let queuedLast: { view: View; text: string; lang: string; shown: View } | null = null
+const withQueued = async ($: EngineInterface, view: View, s: Strings): Promise<View> => {
+  const text = await read($, queuedStore)
+  if (text === null) return view
+  if (queuedLast !== null && queuedLast.view === view && queuedLast.text === text && queuedLast.lang === s.lang) return queuedLast.shown
+  let shown = view
+  try { shown = withQueuedAnswers(view, await pendingTurns($), s, queuedMessagingOf(text, view.now)) } catch {}
+  queuedLast = { view, text, lang: s.lang, shown }
+  return shown
+}
+
 // Re-reads the file only when its mtime or size moved, so the 2s timer is a stat. Only the 2s
 // timer (`canReplace`) takes a held poll's place: the polls the write queue runs return at once,
 // as before, so no write waits behind a second held read.
@@ -1223,6 +1271,7 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
     const path = await progressPath($)
     const answeredStat = await pollAnswered($, path).catch(() => undefined)
     await pollBarStyle($, path).catch(() => undefined)
+    await pollQueuedStore($, path).catch(() => undefined)
     const previous = await read($, snapshot)
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (!isCurrent()) return
@@ -1674,7 +1723,7 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
   let text = isPaneOpen
     ? undefined
     : statusLine(
-        boardView(
+        await withQueued($, boardView(
           snap.projects,
           await read($, here),
           await read($, mine),
@@ -1690,7 +1739,7 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
           cutOffScopes(snap.projects, snap.cutSpans ?? []),
           new Set(await read($, goneSessions)),
           true,
-        ),
+        ), s),
         s,
       )
   if (!isPaneOpen) {
@@ -4859,10 +4908,8 @@ export const register: Register = (on, options) => {
       const latest = await read($, snapshot)
       const currentAt = (await read($, now)) || (await $.clock.now())
       const seen = await read($, firstSeen)
-      return {
-        ...boardView(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), seen, await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($), cutOffScopes(latest.projects, latest.cutSpans ?? []), new Set(await read($, goneSessions)), true),
-        ...warningOf(latest, s, seen, currentAt),
-      }
+      const built = await withQueued($, boardView(latest.projects, await read($, here), await read($, mine), currentAt, await read($, today), await read($, doneSeen), s, await read($, hiddenAsks), seen, await read($, questionLedger), await questionProofsFor($, latest.path || (await progressPath($))), await pendingTurns($), cutOffScopes(latest.projects, latest.cutSpans ?? []), new Set(await read($, goneSessions)), true), s)
+      return { ...built, ...warningOf(latest, s, seen, currentAt) }
     }
     const view = await paneView()
     const ui: PaneUi = {
