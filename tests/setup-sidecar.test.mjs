@@ -598,6 +598,33 @@ test('a remove stops when another program deleted a planned Hermes SKILL.md afte
   assert.ok(existsSync(join(home, '.agent-board', 'install-hermes.json')))
 }))
 
+// A chain of links H -> S -> C: the shared link goes first and leaves the Hermes link dangling, and remove still
+// takes the Hermes link away, because the break is explained by setup's own removal of the shared link. The saved
+// copy stays, and the install record goes with the finished removal. File links need a privilege on Windows.
+test('a remove through a chain of SKILL.md links finishes: the Hermes link to the shared link to a saved copy goes with it', t => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const shared = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  const copy = join(home, 'saved-skill.md')
+  const skill = readFileSync(shared)
+  writeFileSync(copy, skill)
+  rmSync(shared)
+  rmSync(own)
+  try {
+    symlinkSync(copy, shared, 'file')
+    symlinkSync(shared, own, 'file')
+  } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'])
+  assert.equal(removed.status, 0, `${removed.stdout}${removed.stderr}`)
+  assert.throws(() => lstatSync(shared), { code: 'ENOENT' })
+  assert.throws(() => lstatSync(own), { code: 'ENOENT' })
+  assert.deepEqual(readFileSync(copy), skill)
+  assert.ok(!existsSync(join(home, '.agent-board', 'install-hermes.json')), 'the install record is gone')
+}))
+
 // The install record is removed only when it read as one when setup planned, as on main: a dangling link there is not
 // in the plan, and stays (codex_476 on #1594). A junction on Windows, which needs no privilege.
 test('a Hermes remove keeps a dangling link where the install record goes', t => withHome(({ home, run }) => {
