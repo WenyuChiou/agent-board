@@ -30,7 +30,7 @@ import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
 import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
-import { claimMessageStore, hasLiveClaims, holderDeps, ownerRecordOf, pageState as storePageState, patiently, settleStoreHolder, type OwnerRead, type PageProbe, type PageState as StorePageState } from './message-store-claim'
+import { claimMessageStore, hasLiveClaims, holderDeps, ownerRecordOf, pageState as storePageState, patiently, settleStoreHolder, untilDeadline, type OwnerRead, type PageProbe, type PageState as StorePageState, type StartPass } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -2711,17 +2711,19 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     try { return readFileSync(lock, 'utf8') !== held } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' }
   }
   const deadline = performance.now() + 20_000
-  while (performance.now() < deadline) {
+  // #1721: one start of the page. It ends the start with its result, or asks to be tried again with the reason it
+  // would report; untilDeadline reads the deadline in one place, so no retry taken near it drops that reason.
+  const onePass = async (): Promise<StartPass<RunningServer | null>> => {
     const { url, stderr, readyBy } = await startPage()
-    if (url !== null) return { url, port: Number(new URL(url).port), isKept: false, isNew: true }
+    if (url !== null) return { result: { url, port: Number(new URL(url).port), isKept: false, isNew: true } }
     if (/^JOB_ESCAPE_FAILED\b/m.test(stderr)) {
       if (failure !== undefined) failure.isJobLocked = true
-      return null
+      return { result: null }
     }
     const portFailed = /^PORT_FAILED (EADDRINUSE|EACCES) (\d+)\r?$/m.exec(stderr)
     if (portFailed !== null) {
       if (failure !== undefined) failure.portError = { code: portFailed[1] as 'EADDRINUSE' | 'EACCES', port: Number(portFailed[2]) }
-      return null
+      return { result: null }
     }
     // Another `--serve` started at the same moment may have written its address first: this
     // page stopped then, and that one is the page to show. When it took the message folder
@@ -2742,24 +2744,49 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     // action. A page still starting, or a hub of a folder given with --messages-dir, is waited for as before.
     let refused: { pid: number; isBoard: boolean } | undefined
     let unproven: number | undefined
+    // #1721: a holder that has exited but still answers a signal (not reaped yet, or still exiting).
+    let exiting: number | undefined
+    // What this pass reports when it is the start's last: the store's reason, and the holder to name if any.
+    const report = (): null => {
+      const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
+      if (failure !== undefined && code !== undefined) failure.storeCode = code
+      if (failure !== undefined && code === 'MESSAGE_STORE_IN_USE' && refused !== undefined && !isTaken(lock, String(refused.pid))) failure.storeHolder = refused
+      // A board page with no proof that it serves nothing, still holding the lock after the wait: named, never ended.
+      if (failure !== undefined && code === 'MESSAGE_STORE_IN_USE' && refused === undefined && unproven !== undefined && isRunning(unproven) && !isTaken(lock, String(unproven))) {
+        failure.storeHolder = { pid: unproven, isBoard: true }
+      }
+      // The child names its own folder failure on its stderr; the command carries that
+      // reason instead of the generic line, so the person is told the check did not finish.
+      if (failure !== undefined && code === undefined) {
+        if (stderr.includes(s.serveRuntimeCheckTimeout)) failure.isChildCheckTimeout = true
+        else if (stderr.includes(s.serveRuntimeDenied)) failure.isChildCheckDenied = true
+        else if (stderr.includes(s.serveRuntimePrivate)) failure.isChildCheckPrivate = true
+      }
+      return null
+    }
+    const again = (pauseMs = 0): StartPass<RunningServer | null> => ({ retry: true, pauseMs, report })
     if (/^[1-9][0-9]*$/.test(held)) {
       const pid = Number(held)
       const page = await ownerPageState(pid, file)
       // Only a start that finds no address file reaches the page through its store. An address file this
       // start would not use (one another account may have written) never leads to the page behind it, and
       // a page that answers is never ended: it is waited for as before.
-      if (page.kind === 'answers' && !existsSync(file)) return { url: page.url, port: page.port, isKept: true, isNew: false }
+      if (page.kind === 'answers' && !existsSync(file)) return { result: { url: page.url, port: page.port, isKept: true, isNew: false } }
       if (page.kind !== 'answers') {
         const settled = await settleStoreHolder(pid, { ...holderDeps(holderAgeMs()), stillDead: async () => (await ownerPageState(pid, file)).kind === 'dead' }, page.kind === 'dead' ? page.proof : undefined)
-        if (settled.kind === 'gone' || settled.kind === 'ended') continue
+        if (settled.kind === 'gone' || settled.kind === 'ended') return again()
+        // A holder that has exited but is not reaped yet still answers a signal: trying again at once would meet it
+        // again. Its lock moves below as a dead page's does, once no live writer's claim is left; its own claim stays
+        // until it is reaped, so until then the start tries again after a pause (#1721).
+        if (settled.kind === 'exited') exiting = pid
         if (settled.kind === 'refused') refused = { pid, isBoard: settled.isBoard }
         if (settled.kind === 'unproven') unproven = pid
       }
     }
-    const until = refused !== undefined ? performance.now() : storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
+    const until = refused !== undefined || exiting !== undefined ? performance.now() : storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
     for (;;) {
       const other = await runningPage(true, false, replaced)
-      if (other !== null) return { url: other.page.url, port: other.page.port, isKept: other.isKept, isNew: false, idleMs: other.idleMs }
+      if (other !== null) return { result: { url: other.page.url, port: other.page.port, isKept: other.isKept, isNew: false, idleMs: other.idleMs } }
       if (performance.now() >= until) break
       // A protected Windows address may still be publishing within this launch deadline.
       if (storeCode !== 'MESSAGE_STORE_IN_USE' && (process.platform !== 'win32' || !existsSync(file))) break
@@ -2792,33 +2819,21 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
       // Another try only when this --serve moved the lock, or the lock is gone or holds another pid.
       // It may be gone because its hub stopped meanwhile; another --serve's page may still be starting.
       // The next try waits for that page; the same pid (put back, or never moved) is not tried again.
-      if (isMoved || isTaken(lock, held)) continue
+      if (isMoved || isTaken(lock, held)) return again()
     } else if (storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
       // Collision in claims or another start is in flight: back off with randomized jitter, then retry or wait for its page
       await new Promise(done => setTimeout(done, Math.floor(Math.random() * 150) + 50))
       const afterWait = await runningPage(true, false, replaced)
-      if (afterWait !== null) return { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs }
-      if (performance.now() < deadline) continue
+      if (afterWait !== null) return { result: { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs } }
+      return again()
     }
     // A holder that ended meanwhile (another start ended it) is no reason to refuse: try again.
-    if (refused !== undefined && !isRunning(refused.pid) && performance.now() < deadline) continue
-    const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
-    if (failure !== undefined && code !== undefined) failure.storeCode = code
-    if (failure !== undefined && code === 'MESSAGE_STORE_IN_USE' && refused !== undefined && !isTaken(lock, String(refused.pid))) failure.storeHolder = refused
-    // A board page with no proof that it serves nothing, still holding the lock after the wait: named, never ended.
-    if (failure !== undefined && code === 'MESSAGE_STORE_IN_USE' && refused === undefined && unproven !== undefined && isRunning(unproven) && !isTaken(lock, String(unproven))) {
-      failure.storeHolder = { pid: unproven, isBoard: true }
-    }
-    // The child names its own folder failure on its stderr; the command carries that
-    // reason instead of the generic line, so the person is told the check did not finish.
-    if (failure !== undefined && code === undefined) {
-      if (stderr.includes(s.serveRuntimeCheckTimeout)) failure.isChildCheckTimeout = true
-      else if (stderr.includes(s.serveRuntimeDenied)) failure.isChildCheckDenied = true
-      else if (stderr.includes(s.serveRuntimePrivate)) failure.isChildCheckPrivate = true
-    }
-    return null
+    if (refused !== undefined && !isRunning(refused.pid)) return again()
+    // An exited holder is never named: it is tried again, after a pause, until it is gone or the deadline passes.
+    if (exiting !== undefined) return again(100)
+    return { retry: false, pauseMs: 0, report }
   }
-  return null
+  return untilDeadline(onePass, deadline)
 }
 
 // Prints the board, then the address of its page, started in the background if no page of this
