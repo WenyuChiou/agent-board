@@ -536,9 +536,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const ours = new Set<string>()
   const realOf = (file: string): string | null => { try { return realpathSync.native(file) } catch { return null } }
   const isOurs = (file: string, now: Snap, next: string): boolean => now.kind === 'file' && isHolding(now, next) && ours.has(realOf(file) ?? '')
+  // A .new path is the exception: a file that appeared there is a second name only when this batch wrote it, since bytes
+  // alone would also match a file another program put there (#1693).
   const unchanged = (file: string, next: string): void => {
     const was = before.get(file) ?? NO_PATH, now = take(file)
-    const isSecondName = isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' || isOurs(file, now, next))
+    const isSecondName = isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' && !file.endsWith('.new') || isOurs(file, now, next))
     if (!same(was, now) && !isSecondName) throw new Error('INSTALL_CHANGED')
   }
   const written = (file: string, text: string): void => {
@@ -1698,11 +1700,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // agent. It goes only as setup wrote it, and only when no other agent that stays still names it.
   const ownPending = pendingOf(agent)
   const staleBeside = new Set([...Object.keys(manifest.files), ...Object.keys(ownPending)].filter(file => file.endsWith('.new') && !(file in files) && file.slice(0, -4) in files))
+  // One copy can have two names, as through a Hermes skills folder linked to the shared one (#1695). Names are compared
+  // by real path, so another agent that names the copy by either name keeps it, and the copy is removed once.
+  const isSameCopy = (one: string, other: string): boolean => one === other || other.endsWith('.new') && realOf(one) !== null && realOf(one) === realOf(other)
+  const removedCopies = new Set<string>()
   for (const file of staleBeside) {
     const current = initial(file)
-    const isStillNamed = otherAgents.some((one, index) => !removingAgents.includes(one) && (object(otherManifests[index]?.files ?? {})[file] !== undefined || pendingOf(one)[file] !== undefined))
+    const isStillNamed = otherAgents.some((one, index) => !removingAgents.includes(one) && [...Object.keys(object(otherManifests[index]?.files ?? {})), ...Object.keys(pendingOf(one))].some(name => isSameCopy(file, name)))
     if (current === null) { if (remove && manifest.files[file] !== undefined) alreadyGone.push(file) }
-    else if ((hash(current) === manifest.files[file] || ownPending[file]?.includes(hash(current))) && !isStillNamed) changes.push({ file, action: 'remove' })
+    else if ((hash(current) === manifest.files[file] || ownPending[file]?.includes(hash(current))) && !isStillNamed && !removedCopies.has(realOf(file) ?? file)) {
+      removedCopies.add(realOf(file) ?? file)
+      changes.push({ file, action: 'remove' })
+    }
   }
   const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
   // The hook lines stay as the kept program knows them. A hook the person's program needs and no longer has cannot be
@@ -1882,6 +1891,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup', ['--plain']), host ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable!]) : undefined))
     return true
   }
+  // A copy another setup run is writing reads as a file setup did not write until that run's record names it (#1694).
+  // So before a conflict is reported for an apply, the public command's preview for one included, it is checked again
+  // under the install lock: a path this plan was built from that changed since means another setup ran, and a lock
+  // still held means one is running. Either stops as busy, and the next run plans again from the files as they are.
+  if (conflicts.length && (args.includes('--apply') || args.includes('--check-conflicts'))) withInstallLock(home, () => {
+    for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED')
+  })
   if (!args.includes('--apply')) { outputPlan(plan); return true }
   if (conflicts.length) {
     outputPlan(plan)
@@ -1904,7 +1920,19 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // beside the new one, since a stop right here leaves the older copy on disk.
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
     const copies = keptText.filter(one => changes.some(change => change.file === one.beside))
-    if (copies.length) put(pendingFile(agent), `${JSON.stringify({ ...ownPending, ...Object.fromEntries(copies.map(one => [one.beside, [...new Set([...(ownPending[one.beside] ?? []), hash(files[one.beside] ?? '')])]])) }, null, 2)}\n`)
+    const pendingWith = (named: typeof copies): string => `${JSON.stringify({ ...ownPending, ...Object.fromEntries(named.map(one => [one.beside, [...new Set([...(ownPending[one.beside] ?? []), hash(files[one.beside] ?? '')])]])) }, null, 2)}\n`
+    const pendingText = pendingWith(copies)
+    if (copies.length) put(pendingFile(agent), pendingText)
+    const landed: typeof copies = []
+    // When a copy's own write stops, the list goes back to naming only the copies that landed (#1693). Otherwise the
+    // next setup would find a file with the wanted bytes at that .new path, named by the list, and take it as its own.
+    // A list someone else changed in the meantime is left as it is.
+    const settlePending = (): void => {
+      const list = pendingFile(agent)
+      if (!isHolding(take(list), pendingText)) return
+      if (!landed.length && initial(list) === null) unlinkSync(list)
+      else atomic(list, pendingWith(landed), () => { if (!isHolding(take(list), pendingText)) throw new Error('INSTALL_CHANGED') })
+    }
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue
       if (change.file === trustConfig && nextTrust !== undefined) {
@@ -1926,7 +1954,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (!isAsPlanned(change.file)) throw new Error('INSTALL_CHANGED')
         unlinkSync(change.file)
       } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
-      else put(change.file, files[change.file] ?? '')
+      else {
+        const copy = copies.find(one => one.beside === change.file)
+        try { put(change.file, files[change.file] ?? '') }
+        catch (error) {
+          if (copy !== undefined) try { settlePending() } catch {}
+          throw error
+        }
+        if (copy !== undefined) landed.push(copy)
+      }
     }
     if (remove) {
       if (handover) put(handover.file, handover.text)
