@@ -98,7 +98,7 @@ export type MessageStoreClaim = {
 
 // Publish before scanning. A later contender must see this claim; contenders that
 // see each other both refuse rather than electing a later writer over a live one.
-export const claimMessageStore = (directory: string): MessageStoreClaim => {
+export const claimMessageStore = (directory: string, read: ProcRead = readProc): MessageStoreClaim => {
   const root = resolve(directory)
   const kind = lstatSync(root)
   if (!kind.isDirectory() || kind.isSymbolicLink()) throw blocked()
@@ -182,7 +182,7 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
         process.kill(Number(value.pid), 0)
         // #1721: on Linux a writer that has exited and is not reaped yet, or is being ended, still answers a signal.
         // It can start no write any more, so its claim goes as a dead writer's does.
-        if (process.platform !== 'linux' || !isExiting(Number(value.pid))) throw new Error('MESSAGE_STORE_IN_USE')
+        if (process.platform !== 'linux' || !isExiting(Number(value.pid), read)) throw new Error('MESSAGE_STORE_IN_USE')
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
           if (error instanceof Error && error.message === 'MESSAGE_STORE_IN_USE') throw error
@@ -279,39 +279,43 @@ export const pageState = (facts: PageFacts): PageState => {
 // start time come from one read. 'gone' when no process has that number; null when it cannot be read
 // (another account's, or the lookup timed out), which never counts as proof of anything.
 export type StoreHolder = { commandLine: string; started: number }
-export const liveHolder = (pid: number): boolean => {
-  try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
+// Whether a process answers signal zero. EPERM (another account's process) answers too: it is there.
+export const liveHolder = (pid: number, kill: (pid: number, signal: 0) => void = (one, signal) => { process.kill(one, signal) }): boolean => {
+  try { kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
 // #1721: on Linux a process that is exiting, or has exited and is not reaped yet, still answers a signal but reads an
-// empty command line. It holds nothing any more, so it is gone, not a process to name. Flag 0x4 is the kernel's
-// PF_EXITING; the command name in the stat line may hold ") ", so the fields are read after its last ")". A stat
-// file that is gone when read means the process is gone too. Either is proof only from a /proc of this process's own
-// PID namespace, where its own stat line starts with its own number: a /proc mounted for another namespace describes
-// other processes under the same numbers, or none.
-const isOwnProc = (read: (path: string) => string): boolean => {
-  try { return read('/proc/self/stat').split(' ', 1)[0] === String(process.pid) } catch { return false }
+// empty command line. Flag 0x4 is the kernel's PF_EXITING; the command name in the stat line may hold ") ", so the
+// fields are read after its last ")". Only a stat line actually read is proof: a stat file that is gone proves nothing,
+// since the next look finds no process if it was reaped. And only from a /proc of this process's own PID namespace:
+// the NSpid line of its own status names it once, by its own number. A /proc of an ancestor namespace names it there
+// too (two entries, even when the numbers are the same), and one of another namespace has no entry for it at all.
+export type ProcRead = (path: string) => string
+const readProc: ProcRead = path => readFileSync(path, 'utf8')
+const isOwnProc = (read: ProcRead): boolean => {
+  try { return /^NSpid:[ \t]*(\S+)[ \t]*$/m.exec(read('/proc/self/status'))?.[1] === String(process.pid) } catch { return false }
 }
-export const isExiting = (pid: number, read: (path: string) => string = path => readFileSync(path, 'utf8')): boolean => {
+export const isExiting = (pid: number, read: ProcRead = readProc): boolean => {
   let stat: string
-  try { stat = read(`/proc/${pid}/stat`) } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' && isOwnProc(read)
-  }
+  try { stat = read(`/proc/${pid}/stat`) } catch { return false }
   const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
   return (fields[0] === 'Z' || fields[0] === 'X' || (Number(fields[6]) & 4) !== 0) && isOwnProc(read)
 }
-export const lookUpHolder = (pid: number, timeoutMs = 5000): StoreHolder | 'gone' | null => {
+// The Linux lookup. 'gone' only when the holder answers no signal, which holds whatever /proc is mounted; 'exited' only
+// on the proof above; any other reading is null, which names the holder and never signals it.
+export const lookUpLinux = (pid: number, probe: { read: ProcRead; started: (pid: number) => ProcessStart; answers: (pid: number) => boolean }): StoreHolder | 'gone' | 'exited' | null => {
+  // The start time is read before and after the command line: the same on both sides, both are one process's.
+  const before = probe.started(pid)
+  let raw: string
+  try { raw = probe.read(`/proc/${pid}/cmdline`) } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' && !probe.answers(pid) ? 'gone' : null }
+  const started = probe.started(pid)
+  if (typeof started !== 'number') return probe.answers(pid) ? null : 'gone'
+  if (raw === '') return isExiting(pid, probe.read) ? 'exited' : null
+  return before !== started ? null : { commandLine: raw.replace(/\0+$/, ''), started }
+}
+export const lookUpHolder = (pid: number, timeoutMs = 5000): StoreHolder | 'gone' | 'exited' | null => {
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null
   try {
-    if (process.platform === 'linux') {
-      // The start time is read before and after the command line: the same on both sides, both are one process's.
-      const before = processStarted(pid, timeoutMs)
-      let raw: string
-      try { raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8') } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'gone' : null }
-      const started = processStarted(pid, timeoutMs)
-      if (typeof started !== 'number') return liveHolder(pid) ? null : 'gone'
-      if (raw === '') return isExiting(pid) ? 'gone' : null
-      return before !== started ? null : { commandLine: raw.replace(/\0+$/, ''), started }
-    }
+    if (process.platform === 'linux') return lookUpLinux(pid, { read: readProc, started: one => processStarted(one, timeoutMs), answers: one => liveHolder(one) })
     if (process.platform === 'win32') {
       const shell = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
       // UTF-8 out, so a folder name outside the console's code page survives the read.
@@ -365,14 +369,11 @@ export const isBoardServe = (commandLine: string, head: (file: string) => string
 // board page older than any start, and only after its start time is read again, so a number another
 // program took meanwhile is never ended. messages.json is replaced whole, so a page ended mid-write
 // leaves a complete file.
-export type HolderOutcome = { kind: 'young' | 'kept' | 'unproven' | 'gone' | 'ended' } | { kind: 'refused'; isBoard: boolean }
-// #1721: a start tries again at once only after a holder it ended, or one that is gone and answers no signal at all.
-// One that still answers, exited and not reaped yet or another account's (EPERM), would only be met again: its lock
-// goes to the owner-record move and the pause instead.
-export const retriesAtOnce = (outcome: HolderOutcome, pid: number, answers: (pid: number) => boolean = liveHolder): boolean =>
-  outcome.kind === 'ended' || outcome.kind === 'gone' && !answers(pid)
+// #1721: 'exited' is a holder that has exited but still answers a signal (not reaped yet): it is neither signalled nor
+// named, and its lock goes by the owner-record move, then the start pauses before it tries again.
+export type HolderOutcome = { kind: 'young' | 'kept' | 'unproven' | 'gone' | 'exited' | 'ended' } | { kind: 'refused'; isBoard: boolean }
 export type HolderDeps = {
-  look: (pid: number) => StoreHolder | 'gone' | null
+  look: (pid: number) => StoreHolder | 'gone' | 'exited' | null
   started: (pid: number, look: StoreHolder) => ProcessStart
   isBoard: (commandLine: string) => boolean
   kill: (pid: number, signal: NodeJS.Signals) => void
@@ -397,7 +398,7 @@ export const holderDeps = (minAgeMs: number): HolderDeps => ({
 })
 export const settleStoreHolder = async (pid: number, deps: HolderDeps, proof?: 'refused' | 'never-listened'): Promise<HolderOutcome> => {
   const look = deps.look(pid)
-  if (look === 'gone') return { kind: 'gone' }
+  if (look === 'gone' || look === 'exited') return { kind: look }
   if (look === null || !deps.isBoard(look.commandLine)) return { kind: 'refused', isBoard: false }
   // A board serving a folder given with --messages-dir writes no owner record, so its silence there proves
   // nothing; such a hub is never taken over (board-cli.ts says why), and is waited for as before.
@@ -444,4 +445,20 @@ export const settleStoreHolder = async (pid: number, deps: HolderDeps, proof?: '
     if (await isEnded(deps.waitMs)) return { kind: 'ended' }
   }
   return { kind: 'refused', isBoard: true }
+}
+
+// #1721: how a start tries again. A pass ends the start with its result, or asks to be tried again, at once or after a
+// pause. Every way out that is not a result goes through that pass's own report, so the reason the store gave is never
+// dropped, and the deadline is read only here, after the pass that would report.
+export type StartPass<T> = { result: T } | { retry: boolean; pauseMs: number; report: () => T }
+export const untilDeadline = async <T>(pass: () => Promise<StartPass<T>>, deadline: number, now: () => number = () => performance.now(), pause: (ms: number) => Promise<unknown> = ms => new Promise(done => setTimeout(done, ms))): Promise<T> => {
+  for (;;) {
+    const one = await pass()
+    if ('result' in one) return one.result
+    if (!one.retry || now() >= deadline) return one.report()
+    if (one.pauseMs > 0) {
+      await pause(one.pauseMs)
+      if (now() >= deadline) return one.report()
+    }
+  }
 }
