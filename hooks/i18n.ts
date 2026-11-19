@@ -213,7 +213,6 @@ export const ZH_TW = {
     "thenBoardOld": "在 {agents} 請輸入 /board。把你改過的 agent-board.mjs 移開、再執行一次 setup 後，就會有 /agent-board。",
     "thenBoardCodex": "在 Codex 請輸入 $agent-board。",
     "thenBoardHermes": "在 Hermes Agent 請它執行 Agent Board skill。",
-    "thenBoardTerminal": "{agents} 請改在終端機執行 {command} 開啟看板。",
     "appliedRemove": "已移除 {count} 個設定檔案",
     "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",

@@ -175,7 +175,6 @@ export const EN: Strings = {
     "thenBoardOld": "In {agents}, type /board. /agent-board comes once you move your edited agent-board.mjs aside and run setup again.",
     "thenBoardCodex": "In Codex, type $agent-board.",
     "thenBoardHermes": "In Hermes Agent, ask it to run the Agent Board skill.",
-    "thenBoardTerminal": "For {agents}, open the board from a terminal with {command}",
     "appliedRemove": "removed {count} setup files",
     "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",

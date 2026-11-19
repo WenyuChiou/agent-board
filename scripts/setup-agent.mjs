@@ -102,7 +102,6 @@ const summaries = [
     "thenBoardOld": "In {agents}, type /board. /agent-board comes once you move your edited agent-board.mjs aside and run setup again.",
     "thenBoardCodex": "In Codex, type $agent-board.",
     "thenBoardHermes": "In Hermes Agent, ask it to run the Agent Board skill.",
-    "thenBoardTerminal": "For {agents}, open the board from a terminal with {command}",
     "appliedRemove": "removed {count} setup files",
     "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",
@@ -172,7 +171,6 @@ const summaries = [
     "thenBoardOld": "在 {agents} 請輸入 /board。把你改過的 agent-board.mjs 移開、再執行一次 setup 後，就會有 /agent-board。",
     "thenBoardCodex": "在 Codex 請輸入 $agent-board。",
     "thenBoardHermes": "在 Hermes Agent 請它執行 Agent Board skill。",
-    "thenBoardTerminal": "{agents} 請改在終端機執行 {command} 開啟看板。",
     "appliedRemove": "已移除 {count} 個設定檔案",
     "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
@@ -242,7 +240,6 @@ const summaries = [
     "thenBoardOld": "在 {agents} 请输入 /board。把你改过的 agent-board.mjs 移走、再运行一次 setup 后，就会有 /agent-board。",
     "thenBoardCodex": "在 Codex 请输入 $agent-board。",
     "thenBoardHermes": "在 Hermes Agent 请让它执行 Agent Board skill。",
-    "thenBoardTerminal": "{agents} 请改在终端运行 {command} 打开看板。",
     "appliedRemove": "已移除 {count} 个设置文件",
     "appliedRemoveOne": "已移除 {count} 个设置文件",
     "noInstalled": "没有已安装的 Agent Board 设置可供移除",
@@ -600,10 +597,10 @@ const main = () => {
   const boardPlan = available.length ? results[selected.indexOf(available[0])] : null
   const boardFile = boardPlan ? boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs') : ''
   // The package launcher cannot discover a custom install from the account's default locations.
-  const commandFor = file => command
-    ? [command.replace(/\s+(?:setup|remove)\s*$/, ''), ...(dirname(resolve(file)) !== resolve(homedir(), '.agent-board') ? ['--data-dir', quote(dirname(resolve(file)))] : [])].join(' ')
-    : nodeCommand(file)
-  const boardCommand = boardFile ? commandFor(boardFile) : ''
+  const boardDirectory = boardFile ? dirname(resolve(boardFile)) : ''
+  const boardCommand = boardFile ? command
+    ? [command.replace(/\s+(?:setup|remove)\s*$/, ''), ...(boardDirectory !== resolve(homedir(), '.agent-board') ? ['--data-dir', quote(boardDirectory)] : [])].join(' ')
+    : nodeCommand(boardFile) : ''
   if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
     const approvals = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
@@ -704,11 +701,9 @@ const main = () => {
       const sessions = []
       // How each agent opens the board (docs/SETUP.md, After setup): /agent-board, $agent-board in Codex, the skill in
       // Hermes Agent, and /board where /agent-board waits with an edited older board script. The plan names the way and
-      // the file it rests on; a way is named only while that file is there now, else the board opens from a terminal,
-      // as it always does in Cursor, which has no command (#1698).
+      // the file it rests on; a way is named only while that file is there now. An agent with no way left, and Cursor,
+      // which has no command, is named in no "then" line: a terminal command for them waits for #1714 (#1698).
       const ways = new Map()
-      // The terminal line's command runs the board script of the agents it names; setup writes one for them all.
-      let terminalFile = ''
       for (const agent of completed) {
         const plan = appliedPlans[agent] ?? plans[selected.indexOf(agent)]
         if (plan.managedBy === 'connector') continue
@@ -720,8 +715,7 @@ const main = () => {
           sessions.push(names[agent])
           const opens = plan.opens
           const isThere = opens !== undefined && isFile(opens.file)
-          ways.set(names[agent], !isThere ? 'terminal' : opens.way === '/board' ? 'old' : opens.way === 'skill' && ['codex', 'hermes'].includes(agent) ? agent : 'slash')
-          if (!isThere) terminalFile = join(plan.data, 'agent-board.mjs')
+          ways.set(names[agent], !isThere ? 'none' : opens.way === '/board' ? 'old' : opens.way === 'skill' && ['codex', 'hermes'].includes(agent) ? agent : 'slash')
         }
       }
       // One retry command for every agent that was skipped, here as in the run without a terminal.
@@ -742,7 +736,6 @@ const main = () => {
           if (named('codex')) next.push(words('thenBoardCodex'))
           if (named('hermes')) next.push(words('thenBoardHermes'))
           if (named('old')) next.push(words('thenBoardOld', { agents: named('old') }))
-          if (named('terminal')) next.push(words('thenBoardTerminal', { agents: named('terminal'), command: commandFor(terminalFile) }))
         }
       }
       if (next.length) process.stdout.write(`\n${words('next')}\n${next.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n`)
