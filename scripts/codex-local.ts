@@ -1740,6 +1740,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const createdDirs = new Set(Array.isArray(loaded.createdDirs) ? loaded.createdDirs.filter((value): value is string => typeof value === 'string') : [])
   const folderKey = (folder: string): string => process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)
   const isBelow = (folder: string, parent: string): boolean => folderKey(folder).startsWith(`${folderKey(parent)}${process.platform === 'win32' ? '\\' : '/'}`)
+  // Setup overwrites its pending lists and deletes them after each apply. A board file kept under one of those names, by
+  // any name that reaches it, stops setup before it writes, and a removal leaves that file where it is.
+  const isPendingList = (file: string, one: string): boolean => folderKey(file) === folderKey(pendingFile(one)) || realOf(file) !== null && realOf(file) === realOf(pendingFile(one))
+  if (!remove && localAgents.some(one => isPendingList(progress, one))) conflicts.push(progress)
   if (!remove) for (const file of [...changes.filter(change => change.action === 'create').map(change => change.file), ...(initial(manifestFile) === null ? [manifestFile] : [])]) {
     for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
   }
@@ -1747,7 +1751,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   if (remove && agent === 'antigravity' && initial(sidecarRecord) !== null) changes.push({ file: sidecarRecord, action: 'remove' })
-  if (remove && initial(pendingFile(agent)) !== null) changes.push({ file: pendingFile(agent), action: 'remove' })
+  if (remove && initial(pendingFile(agent)) !== null && !isPendingList(progress, agent)) changes.push({ file: pendingFile(agent), action: 'remove' })
   const removedDirs = new Set<string>()
   let handover: { file: string; text: string } | undefined
   if (remove) {
