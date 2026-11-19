@@ -369,6 +369,8 @@ export type LocalPlan = {
   keptCode?: string[]
   keptHeld?: { file: string; by: string }[]
   missingHeld?: { file: string; by: string }[]
+  // How the person opens the board in this agent, and the file that way rests on (#1698).
+  opens?: { way: string; file: string }
   applied?: boolean
 }
 
@@ -1743,8 +1745,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     Object.assign(groups, manifest.groups)
   }
   // The old /board command the kept older script answers stays with it, as setup wrote it or as the person edited it.
-  // The plan says so (boardKept), so setup's next steps name /board only while that file is there.
   const keptBoards = isOlderHeld ? retired.filter(file => initial(file) !== null) : []
+  // How the person opens the board in this agent once the plan is done, and the file that way rests on: /board while
+  // its /agent-board waits with an older script, the command file, else the agent's own skill or the shared one it reads.
+  // Setup names the way only while that file is there as it prints its next steps, and otherwise gives the board command
+  // for a terminal. Cursor has no board command (#1698).
+  const isCommandHeld = isOlderHeld && keptFiles.has(commandFile)
+  const opensFile = isCommandHeld ? keptBoards[0] ?? '' : commandFile || Object.keys(files).find(file => file.endsWith('SKILL.md') && file !== skill) || (BOARD_FOR.skills?.includes(agent) ? skill : undefined)
+  const opens = remove || agent === 'cursor' || opensFile === undefined ? undefined : { way: isCommandHeld ? '/board' : commandFile ? '/agent-board' : 'skill', file: opensFile }
   for (const file of keptBoards) keptHeld.push({ file, by: heldBy })
   for (const file of retired) {
     const existing = initial(file)
@@ -1839,7 +1847,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), ...(isOlderHeld && keptFiles.has(commandFile) ? { commandWaits: true, ...(keptBoards.length ? { boardKept: true } : {}) } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), ...(opens === undefined ? {} : { opens }), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.

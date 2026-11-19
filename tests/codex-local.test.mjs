@@ -13735,7 +13735,7 @@ test('an edited older board script keeps the /board command file and no /agent-b
     assert.deepEqual(plan.changes.filter(change => [state.old, state.now].includes(change.file)), [], preview.stdout)
     assert.deepEqual(plan.keptHeld.map(one => one.file).filter(file => [state.old, state.now].includes(file)).sort(), [state.now, state.old].sort(), preview.stdout)
     assert.ok(plan.keptHeld.every(one => one.by === 'agent-board.mjs'), preview.stdout)
-    assert.equal(plan.commandWaits, true)
+    assert.deepEqual(plan.opens, { way: '/board', file: state.old })
     for (const run of ['first', 'second']) {
       const applied = f.install('--agent', 'opencode', '--apply', '--json')
       assert.equal(applied.status, 0, applied.stderr + applied.stdout)
@@ -13804,9 +13804,41 @@ test('a command file setup wrote waits with an edited older board script, and on
     const plan = JSON.parse(applied.stdout)
     assert.deepEqual(plan.conflicts, [])
     assert.ok(plan.keptHeld.some(one => one.file === command), applied.stdout)
-    assert.equal(plan.commandWaits, true)
+    // No /board file is kept, so the plan names no file to open the board from in OpenCode.
+    assert.deepEqual(plan.opens, { way: '/board', file: '' })
     assert.equal(existsSync(command) ? readFileSync(command, 'utf8') : null, isDeleted ? null : olderCommand)
     assert.equal(recordOf(f, 'opencode').files[command], digest(olderCommand), 'its record entry stays')
+  })
+})
+
+test('the plan names how each agent opens the board and the file that way rests on (#1698)', async () => {
+  // An older kept board script: /board while its file is there, in the preview and the apply, and no file once it is gone.
+  await fixture(f => {
+    const state = olderBoardOpencode(f)
+    for (const args of [['--json'], ['--apply', '--json']]) {
+      const result = f.install('--agent', 'opencode', ...args)
+      assert.equal(result.status, 0, result.stderr + result.stdout)
+      assert.deepEqual(JSON.parse(result.stdout).opens, { way: '/board', file: state.old }, args.join(' '))
+    }
+    rmSync(state.old)
+    const gone = f.install('--agent', 'opencode', '--json')
+    assert.equal(gone.status, 0, gone.stderr + gone.stdout)
+    assert.deepEqual(JSON.parse(gone.stdout).opens, { way: '/board', file: '' })
+  })
+  // Nothing held: the agent's own command or skill, else the shared skill it reads, and none for Cursor.
+  await fixture(f => {
+    const skillIn = folder => join(f.home, folder, 'skills', 'agent-board', 'SKILL.md')
+    for (const [agent, opens] of [
+      ['opencode', { way: '/agent-board', file: join(f.home, '.config', 'opencode', 'commands', 'agent-board.md') }],
+      ['codex', { way: 'skill', file: skillIn('.agents') }],
+      ['hermes', { way: 'skill', file: skillIn('.hermes') }],
+      ['openclaw', { way: 'skill', file: skillIn('.openclaw') }],
+      ['cursor', undefined],
+    ]) {
+      const result = f.install('--agent', agent, '--apply', '--json')
+      assert.equal(result.status, 0, result.stderr + result.stdout)
+      assert.deepEqual(JSON.parse(result.stdout).opens, opens, agent)
+    }
   })
 })
 
