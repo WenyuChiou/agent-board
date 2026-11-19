@@ -7874,10 +7874,15 @@ test('a Windows page start leaves its new address file and its folder owned by t
 // Helper for #1674: runs a board command inside a Windows Job Object configured with
 // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000) and no breakaway flags, then lets the wrapper
 // exit so Windows closes the job handle and terminates anything left inside it.
-const runInWindowsKillOnCloseJob = (board, commandArgs, env) => {
+const runInWindowsKillOnCloseJob = (board, commandArgs, env, { nestedZeroFlagsChild = false } = {}) => {
   const resultFile = join(board.dir, `job-result-${Math.random().toString(16).slice(2)}.txt`)
   const quoted = value => `"${String(value).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
   const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+  const innerSetup = !nestedZeroFlagsChild ? [] : [
+    `$inner = $k32::CreateJobObjectW([IntPtr]::Zero, $null)`,
+    `if ($inner -eq [IntPtr]::Zero) { throw 'CreateJobObjectW inner failed' }`,
+    `if (-not $k32::AssignProcessToJobObject($inner, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'AssignProcessToJobObject inner failed' }`,
+  ]
   const psScript = [
     `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'`,
     `$ab = [AppDomain]::CurrentDomain.DefineDynamicAssembly([Reflection.AssemblyName]::new('TestJob'), [Reflection.Emit.AssemblyBuilderAccess]::Run)`,
@@ -7902,6 +7907,7 @@ const runInWindowsKillOnCloseJob = (board, commandArgs, env) => {
     `if (-not $k32::SetInformationJobObject($job, 9, $buf, $extLen)) { throw 'SetInformationJobObject failed' }`,
     `[Runtime.InteropServices.Marshal]::FreeHGlobal($buf)`,
     `if (-not $k32::AssignProcessToJobObject($job, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'AssignProcessToJobObject failed' }`,
+    ...innerSetup,
     `$psi = [Diagnostics.ProcessStartInfo]::new($env:TEST_JOB_NODE)`,
     `$psi.Arguments = $env:TEST_JOB_ARGS`,
     `$psi.WorkingDirectory = $env:TEST_JOB_CWD`,
@@ -7939,12 +7945,13 @@ const runInWindowsKillOnCloseJob = (board, commandArgs, env) => {
   }
 }
 
-test('#1674: a Windows board server started inside a kill-on-close job outlives command exit, or refuses plainly without claiming opened', { skip: process.platform !== 'win32' && 'Windows job objects only', timeout: 60_000 }, async () => {
+test('#1674: a Windows board server started inside a kill-on-close job (including nested jobs) outlives command exit, or refuses plainly even if readiness races check', { skip: process.platform !== 'win32' && 'Windows job objects only', timeout: 90_000 }, async () => {
   for (const words of [EN, ZH_TW, ZH_CN]) {
     assert.ok(words.serveJobLocked && !words.serveFailed(words.serveJobLocked).includes('Opened Agent Board') && !words.serveFailed(words.serveJobLocked).includes('http:'))
   }
   const board = serveIn()
   let url = null
+  let nestedUrl = null
   try {
     const alive = runInWindowsKillOnCloseJob(board, ['--serve', '--no-open', '--quiet-board'], board.env)
     assert.equal(alive.status, 0, alive.stderr)
@@ -7954,18 +7961,61 @@ test('#1674: a Windows board server started inside a kill-on-close job outlives 
     const page = await fetch(url)
     assert.equal(page.status, 200, 'board page still answers after the command job closes')
 
-    // When escape is blocked inside the kill-on-close job, --serve and --html must fail honestly
-    // without starting a doomed server or printing an Opened Agent Board / URL line.
+    // Nested job: inner job has LimitFlags=0 inside an outer 0x2000 kill-on-close job.
+    const nested = serveIn()
+    try {
+      const escaped = runInWindowsKillOnCloseJob(nested, ['--serve', '--no-open', '--quiet-board'], nested.env, { nestedZeroFlagsChild: true })
+      assert.equal(escaped.status, 0, escaped.stderr)
+      nestedUrl = nested.urlOf(escaped.stdout)
+      assert.ok(nestedUrl, escaped.stdout)
+      await new Promise(done => setTimeout(done, 1200))
+      assert.equal((await fetch(nestedUrl)).status, 200, 'board page outlives nested inner=0 outer=0x2000 job close')
+    } finally { await nested.end(nestedUrl ? [nestedUrl] : []) }
+
+    // When escape is blocked inside either direct or nested kill-on-close jobs, --serve and --html
+    // fail honestly without leaving a doomed server or printing an Opened Agent Board / URL line,
+    // even when the launcher containment check is delayed until after the trapped child writes ready.
     const locked = serveIn()
     try {
       const blockedEnv = { ...locked.env, AGENT_BOARD_TEST_NO_JOB_ESCAPE: '1' }
-      for (const flag of ['--serve', '--html']) {
-        const stopped = runInWindowsKillOnCloseJob(locked, [flag, '--quiet-board'], blockedEnv)
-        assert.equal(stopped.status, 1, `${flag}: ${stopped.stderr}`)
-        assert.equal(stopped.stdout.trim(), EN.serveFailed(EN.serveJobLocked), flag)
-        assert.ok(!stopped.stdout.includes('Opened Agent Board') && !stopped.stdout.includes('http:'), stopped.stdout)
-        assert.ok(!existsSync(locked.served), 'no doomed address file is left behind')
+      for (const [label, opts, extraEnv] of [
+        ['direct', {}, blockedEnv],
+        ['nested', { nestedZeroFlagsChild: true }, blockedEnv],
+      ]) {
+        for (const flag of ['--serve', '--html']) {
+          const stopped = runInWindowsKillOnCloseJob(locked, [flag, '--quiet-board'], extraEnv, opts)
+          assert.equal(stopped.status, 1, `${label}/${flag}: ${stopped.stderr}`)
+          assert.equal(stopped.stdout.trim(), EN.serveFailed(EN.serveJobLocked), `${label}/${flag}`)
+          assert.ok(!stopped.stdout.includes('Opened Agent Board') && !stopped.stdout.includes('http:'), stopped.stdout)
+          assert.ok(!existsSync(locked.served), `${label}/${flag}: no doomed address file left`)
+        }
       }
+      const delayPreload = join(locked.dir, 'delay-launcher-check.cjs')
+      writeFileSync(delayPreload, `const cp = require('node:child_process')
+const orig = cp.spawn
+cp.spawn = function (file, args, options) {
+  if (/(?:^|[\\\\/])powershell(?:\\.exe)?$/i.test(String(file)) && Array.isArray(args)) {
+    const at = args.indexOf('-EncodedCommand')
+    if (at >= 0) {
+      const cmd = Buffer.from(args[at + 1], 'base64').toString('utf16le')
+      if (cmd.includes('$inOurJob $started.Id')) {
+        const patched = cmd.replace('if ((-not $started.HasExited) -and ((& $inOurJob $started.Id)', '[Threading.Thread]::Sleep(1200); if ((-not $started.HasExited) -and ((& $inOurJob $started.Id)')
+        const copy = [...args]
+        copy[at + 1] = Buffer.from(patched, 'utf16le').toString('base64')
+        return orig.call(this, file, copy, options)
+      }
+    }
+  }
+  return orig.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+      const raceEnv = { ...blockedEnv, NODE_OPTIONS: `--require ${JSON.stringify(delayPreload)}` }
+      const raced = runInWindowsKillOnCloseJob(locked, ['--serve', '--no-open', '--quiet-board'], raceEnv)
+      assert.equal(raced.status, 1, `race: ${raced.stderr}`)
+      assert.equal(raced.stdout.trim(), EN.serveFailed(EN.serveJobLocked))
+      assert.ok(!raced.stdout.includes('http:'), 'ready file written before containment kill never leaks a URL')
+      assert.ok(!existsSync(locked.served), 'trapped child address file is removed')
     } finally { await locked.end([]) }
   } finally { await board.end([url]) }
 })

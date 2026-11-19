@@ -1170,8 +1170,8 @@ const dockLaunch = (programs: string[], target: string, done: (isOpen: boolean) 
     clearTimeout(timer)
     done(isOpen)
   }
-  // PowerShell's start, the screen probe and the browser's grace: about 2 s on a slow machine.
-  const timer = setTimeout(() => { child.kill(); finish(false) }, 8000)
+  // PowerShell's start, the screen probe, optional WMI job-escape hop, and the browser's grace.
+  const timer = setTimeout(() => { child.kill(); finish(false) }, 12000)
   child.once('error', () => finish(false))
   child.once('exit', code => finish(code === 0))
   child.stdin?.on('error', () => {})
@@ -2602,6 +2602,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
       let child: ChildProcess | undefined
       let pid: number | undefined
       let isLauncherDone = false
+      let launcherCode: number | null = null
       let launcherOutput = ''
       let launcherError = ''
       let url: string | null = null
@@ -2614,12 +2615,16 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
           if (found?.[1] !== undefined) pid = Number(found[1])
         })
         child.stderr?.on('data', (chunk: Buffer) => { launcherError = (launcherError + chunk.toString('utf8')).slice(-16_384) })
-        child.once('close', () => { isLauncherDone = true })
-        child.once('error', () => { isLauncherDone = true })
+        child.once('close', code => { launcherCode = code; isLauncherDone = true })
+        child.once('error', () => { launcherCode = 1; isLauncherDone = true })
         while (performance.now() < readyBy) {
           const contents = readFileSync(ready, 'utf8')
           const text = contents.trim()
-          if (contents.endsWith('\n') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(text)) { url = text; break }
+          // Wait until the PowerShell launcher finishes cleanly (exit 0) before accepting a ready URL,
+          // so a child trapped in a job that writes the ready file before the launcher kills it never
+          // causes the command to report success (#1674).
+          if (isLauncherDone && launcherCode !== 0) break
+          if (isLauncherDone && launcherCode === 0 && contents.endsWith('\n') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(text)) { url = text; break }
           if (isLauncherDone && (pid === undefined || !isRunning(pid))) break
           await new Promise(done => setTimeout(done, 50))
         }
@@ -2627,10 +2632,15 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
         try { stderr = (stderr + '\n' + readFileSync(err, 'utf8')).slice(-16_384) } catch {}
         return { url, stderr, readyBy }
       } finally {
-        // In finally, so a server whose ready file could not be read is stopped too.
+        // In finally, so a server whose ready file could not be read, or whose child was stopped by
+        // the launcher after failing job escape, leaves no process or address file behind.
         if (url === null && pid !== undefined && isRunning(pid)) {
           try { process.kill(pid) } catch {}
         }
+        if (url === null) unlinkIf(file, () => {
+          const cur = readRunning(file)
+          return Boolean(cur && (cur.pid === pid || !isRunning(cur.pid)))
+        })
         if (url === null && child !== undefined && !isLauncherDone) child.kill()
         child?.stdout?.destroy()
         child?.stderr?.destroy()
