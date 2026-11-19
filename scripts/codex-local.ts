@@ -1948,7 +1948,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // taking it: a refused run leaves no empty folder behind, as on main, and a removal that emptied and deleted the
   // folder after another run wrote does not skip the check.
   if (conflicts.length && (args.includes('--apply') || args.includes('--check-conflicts'))) {
-    const isChanged = (): void => { for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED') }
+    // The progress file is left out: its conflict is its name, which no other run changes, and one setup cannot read is
+    // planned as absent, so it would never match (#1712).
+    const isChanged = (): void => { for (const file of before.keys()) if (file !== progress && !isAsPlanned(file)) throw new Error('INSTALL_CHANGED') }
     if (existsSync(installControlRoot(home))) withInstallLock(home, isChanged)
     else isChanged()
   }

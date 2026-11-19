@@ -2179,7 +2179,7 @@ export const LINES = [
 "  if (conflicts.length && (args.includes(\"--apply\") || args.includes(\"--check-conflicts\"))) {",
 "    const isChanged = () => {",
 "      for (const file of before.keys())",
-"        if (!isAsPlanned(file))",
+"        if (file !== progress && !isAsPlanned(file))",
 "          throw new Error(\"INSTALL_CHANGED\");",
 "    };",
 "    if (existsSync5(installControlRoot(home)))",

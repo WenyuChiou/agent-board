@@ -6146,6 +6146,26 @@ test('a conflict found while another setup holds the lock is reported as busy, a
   assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
 }))
 
+test('a progress file that is a link to nothing under a pending list\'s name is reported as a conflict, not as another setup running (#1694)', () => fixture(f => {
+  // With the home's .agent-board folder there (the data folder) and without it (an outside data folder).
+  const outside = join(f.home, 'synthetic data')
+  for (const [data, args] of [[f.root, []], [outside, ['--data-dir', outside]]]) {
+    mkdirSync(data, { recursive: true })
+    const board = join(data, 'install-pending-codex.json')
+    symlinkSync(join(f.home, 'synthetic gone'), board, process.platform === 'win32' ? 'junction' : 'file')
+    if (data === outside) rmSync(f.root, { recursive: true, force: true })
+    for (const mode of [['--apply'], ['--check-conflicts']]) {
+      const result = f.install('--agent', 'codex', ...args, '--progress-file', board, ...mode)
+      if (mode[0] === '--apply') assert.notEqual(result.status, 0, result.stdout)
+      assert.doesNotMatch(result.stderr + result.stdout, /another setup was running/)
+      assert.deepEqual(JSON.parse(result.stdout).conflicts, [board], result.stdout)
+      assert.equal(existsSync(join(data, 'install-codex.json')), false)
+    }
+    if (data === outside) assert.equal(existsSync(f.root), false)
+    unlinkSync(board)
+  }
+}))
+
 test('a second agent stops as busy on the first run\'s .new copy when a removal deleted the home\'s empty .agent-board folder meanwhile (#1694)', () => fixture(async f => {
   // Codex and Cursor keep their data in one folder of the person's; the install lock still lives in the home's .agent-board.
   const data = join(f.home, 'synthetic data'), control = join(f.home, '.agent-board')
