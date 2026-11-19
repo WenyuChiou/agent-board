@@ -2775,7 +2775,8 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
         const settled = await settleStoreHolder(pid, { ...holderDeps(holderAgeMs()), stillDead: async () => (await ownerPageState(pid, file)).kind === 'dead' }, page.kind === 'dead' ? page.proof : undefined)
         if (settled.kind === 'gone' || settled.kind === 'ended') return again()
         // A holder that has exited but is not reaped yet still answers a signal: trying again at once would meet it
-        // again. Its lock moves below as a dead page's does, with no wait, as for a refused holder (#1721).
+        // again. Its lock moves below as a dead page's does, once no live writer's claim is left; its own claim stays
+        // until it is reaped, so until then the start tries again after a pause (#1721).
         if (settled.kind === 'exited') exiting = pid
         if (settled.kind === 'refused') refused = { pid, isBoard: settled.isBoard }
         if (settled.kind === 'unproven') unproven = pid

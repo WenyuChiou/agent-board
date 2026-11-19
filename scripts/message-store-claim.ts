@@ -98,7 +98,7 @@ export type MessageStoreClaim = {
 
 // Publish before scanning. A later contender must see this claim; contenders that
 // see each other both refuse rather than electing a later writer over a live one.
-export const claimMessageStore = (directory: string, read: ProcRead = readProc): MessageStoreClaim => {
+export const claimMessageStore = (directory: string): MessageStoreClaim => {
   const root = resolve(directory)
   const kind = lstatSync(root)
   if (!kind.isDirectory() || kind.isSymbolicLink()) throw blocked()
@@ -180,9 +180,7 @@ export const claimMessageStore = (directory: string, read: ProcRead = readProc):
         || !Number.isSafeInteger(value.pid) || Number(value.pid) > 2147483647) throw damaged()
       try {
         process.kill(Number(value.pid), 0)
-        // #1721: on Linux a writer that has exited and is not reaped yet, or is being ended, still answers a signal.
-        // It can start no write any more, so its claim goes as a dead writer's does.
-        if (process.platform !== 'linux' || !isExiting(Number(value.pid), read)) throw new Error('MESSAGE_STORE_IN_USE')
+        throw new Error('MESSAGE_STORE_IN_USE')
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
           if (error instanceof Error && error.message === 'MESSAGE_STORE_IN_USE') throw error

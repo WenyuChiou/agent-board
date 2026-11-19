@@ -8232,16 +8232,6 @@ const procOf = (files, status = `Name:\tnode\nNSpid:\t${process.pid}\n`) => path
 const procError = code => Object.assign(new Error(code), { code })
 const ZOMBIE_STAT = '4242 (node) Z 1 4242 4242 0 -1 4194560 0 0 0 0\n'
 const linuxProbe = (files, options = {}) => ({ read: procOf(files, options.status), started: () => 1_000, answers: () => options.answers ?? true })
-// #1721: a claim file another live process holds, in a fresh store folder.
-const claimOfChild = () => {
-  const dir = mkdtempSync(join(tmpdir(), 'board-claim-'))
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' })
-  const nonce = 'a'.repeat(32)
-  const file = join(dir, `.message-claim-${child.pid}-${nonce}.json`)
-  const bytes = JSON.stringify({ version: 1, pid: child.pid, nonce }) + '\n'
-  writeFileSync(file, bytes, { mode: 0o600 })
-  return { dir, child, file, bytes, done: () => { child.kill(); rmSync(dir, { recursive: true, force: true }) } }
-}
 
 test('a holder that has exited but is not yet reaped reads as exited, never as a process to name (#1721)', async () => {
   // It answers a signal, its command line reads empty, and its stat line shows a zombie: it has exited.
@@ -8285,7 +8275,7 @@ test('a missing stat file is no proof of exit (#1721)', () => {
   assert.equal(isExiting(4242, procOf({ '/proc/4242/stat': procError('EACCES') })), false)
 })
 
-test('a /proc of another PID namespace never retires a live writer\'s claim (#1721)', async () => {
+test('a /proc of another PID namespace is no proof of exit (#1721)', async () => {
   // A /proc mounted for an ancestor namespace names this process there too, so its NSpid line has two entries, even
   // when both numbers are the same. Its stat files describe other processes under the same numbers.
   const ancestor = `NSpid:\t${process.pid}\t${process.pid}\n`
@@ -8297,15 +8287,6 @@ test('a /proc of another PID namespace never retires a live writer\'s claim (#17
   const { deps, kills } = holderDeps({ look: () => null })
   assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'refused', isBoard: false })
   assert.deepEqual(kills, [])
-  // A live writer's claim, with that /proc showing its number as a zombie: the claim stays, byte for byte.
-  const held = claimOfChild()
-  try {
-    await new Promise(done => setTimeout(done, 200))
-    const read = procOf({ [`/proc/${held.child.pid}/stat`]: `${held.child.pid} (node) Z 1 1 1 0 -1 4194560 0 0 0 0\n` }, ancestor)
-    assert.throws(() => claimMessageStore(held.dir, read), /MESSAGE_STORE_IN_USE/)
-    assert.equal(readFileSync(held.file, 'utf8'), held.bytes)
-    assert.deepEqual(readdirSync(held.dir), [basename(held.file)])
-  } finally { held.done() }
 })
 
 test('a missing /proc entry for a holder that answers a signal is unknown, not gone (#1721)', () => {
@@ -8323,19 +8304,6 @@ test('without a one-entry NSpid line nothing in /proc is proof (#1721)', () => {
     assert.equal(isExiting(4242, procOf(zombie, status)), false, String(status))
   }
   assert.equal(isExiting(4242, procOf(zombie)), true)
-})
-
-test('a claim whose writer has exited but is not reaped is retired (#1721)', { skip: process.platform !== 'linux' && 'needs Linux /proc' }, async () => {
-  const { pid, parent } = await zombieChild()
-  const dir = mkdtempSync(join(tmpdir(), 'board-claim-'))
-  try {
-    const nonce = 'b'.repeat(32)
-    writeFileSync(join(dir, `.message-claim-${pid}-${nonce}.json`), JSON.stringify({ version: 1, pid, nonce }) + '\n', { mode: 0o600 })
-    const claim = claimMessageStore(dir)
-    assert.deepEqual(readdirSync(dir).filter(name => name.startsWith(`.message-claim-${pid}-`)), [])
-    assert.equal(readdirSync(dir).filter(name => name.startsWith(`.message-claim-${process.pid}-`)).length, 1)
-    claim.release()
-  } finally { parent.kill(); rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('signal zero refused with EPERM counts as answering (#1721)', () => {

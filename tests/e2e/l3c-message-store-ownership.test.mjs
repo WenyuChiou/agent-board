@@ -468,45 +468,6 @@ test('two starts that find the same dead page end with one page', { timeout: 120
   assert.equal(await untilGone(dead.pid), true)
 }))
 
-// #1721: a page that ended but that nobody reaps still answers a signal and reads an empty command line. Its owner
-// record's port refuses, so its lock moves as a dead page's does, and one start opens a page without naming it.
-test('a start still opens when the dead page is never reaped (#1721)', { timeout: 120_000, skip: process.platform !== 'linux' && 'needs Linux /proc' }, () => withHolderWorld(1000, async h => {
-  // The shell starts the page and then becomes a long sleep that never reaps it.
-  const parent = spawnIsolated('/bin/sh', ['-c', '"$0" "$1" --serve-child --lang en >/dev/null 2>&1 & echo $!; exec sleep 120', process.execPath, h.world.script], { cwd: h.world.root, env: h.env, stdio: ['ignore', 'pipe', 'ignore'], detached: true })
-  h.kids.push(parent.pid)
-  const pid = Number(await new Promise((done, fail) => {
-    let text = ''
-    parent.stdout.on('data', chunk => { text += chunk; if (text.includes('\n')) done(text.trim()) })
-    parent.once('exit', () => fail(new Error('the shell ended before it named the page')))
-  }))
-  h.kids.push(pid)
-  const readOr = (path, fallback) => { try { return readFileSync(path, 'utf8') } catch { return fallback } }
-  const end = Date.now() + 20_000
-  let folder
-  for (;;) {
-    folder = storeOf(h.world)
-    const owner = folder ? (() => { try { return JSON.parse(readOr(join(folder, 'server.owner'), '')) } catch { return undefined } })() : undefined
-    if (owner?.pid === pid && readOr(join(folder, 'server.lock'), '') === String(pid)) break
-    if (Date.now() > end) throw new Error('the page never took the store and wrote its owner record')
-    await wait(50)
-  }
-  process.kill(pid, 'SIGKILL')
-  const stateOf = () => { const stat = readOr(`/proc/${pid}/stat`, ''); return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) }
-  const zombieBy = Date.now() + 10_000
-  while (stateOf() !== 'Z' && Date.now() < zombieBy) await wait(20)
-  assert.equal(stateOf(), 'Z', 'the page never became a zombie')
-  assert.equal(isAlive(pid), true)
-  assert.equal(readOr(join(folder, 'server.lock'), ''), String(pid))
-  const opened = await h.board()
-  const link = h.linkOf(opened.stdout)
-  assert.ok(link, JSON.stringify(opened))
-  assert.ok(opened.ms < 10_000, `took ${opened.ms} ms`)
-  assert.equal((await h.pingOf(link))?.messagesDirectory, folder)
-  // The dead page's claim and lock are gone, and the store is the new page's.
-  assert.deepEqual(readdirSync(folder).filter(name => name.startsWith(`.message-claim-${pid}-`)), [])
-  assert.notEqual(readOr(join(folder, 'server.lock'), ''), String(pid))
-}))
-
 test('a folder given with --messages-dir is never looked up or taken over', { timeout: 120_000 }, () => withHolderWorld(1000, async h => {
   const store = join(h.world.root, 'given-store')
   mkdirSync(store, { mode: 0o700 })
