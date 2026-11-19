@@ -8082,7 +8082,7 @@ test('a queued Codex CLI message stops waiting forever and offers Copy when a la
 })
 
 // M6 (#1596, #1587): the board ends a message store's holder only after proving it is an old board page.
-const { isBoardServe, lookUpHolder, pageState, settleStoreHolder } = await import('../scripts/message-store-claim.ts')
+const { isBoardServe, isExiting, liveHolder, lookUpHolder, lookUpLinux, pageState, settleStoreHolder, untilDeadline } = await import('../scripts/message-store-claim.ts')
 const BOARD_HEAD = 'globalThis.AGENT_BOARD = {"path":"progress.md"}\n'
 const holderDeps = (overrides = {}) => {
   const kills = []
@@ -8205,6 +8205,157 @@ test('the process lookup returns command line and start time together', async ()
     await new Promise(done => child.once('exit', done))
     assert.equal(lookUpHolder(child.pid, 15_000), 'gone')
   } finally { if (child.exitCode === null) child.kill(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+// #1721: a child its parent never reaps. The shell starts a short child and then becomes a long sleep, so the child
+// stays a zombie: it still answers a signal and reads an empty command line.
+const zombieChild = async () => {
+  const parent = spawn('/bin/sh', ['-c', 'sleep 0 & echo $!; exec sleep 30'], { stdio: ['ignore', 'pipe', 'ignore'] })
+  const pid = Number(await new Promise((done, fail) => {
+    let text = ''
+    parent.stdout.on('data', chunk => { text += chunk; if (text.includes('\n')) done(text.trim()) })
+    parent.once('exit', () => fail(new Error('the shell ended before it named its child')))
+  }))
+  const stateOf = () => { try { const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) } catch { return '' } }
+  const end = Date.now() + 10_000
+  while (stateOf() !== 'Z' && Date.now() < end) await new Promise(done => setTimeout(done, 20))
+  assert.equal(stateOf(), 'Z', 'the child never became a zombie')
+  return { pid, parent }
+}
+// #1721: a /proc read from a table of files; any other path is missing. Its own status names this process once.
+const procOf = (files, status = `Name:\tnode\nNSpid:\t${process.pid}\n`) => path => {
+  const value = path === '/proc/self/status' ? status : files[path]
+  if (value instanceof Error) throw value
+  if (value === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+  return value
+}
+const procError = code => Object.assign(new Error(code), { code })
+const ZOMBIE_STAT = '4242 (node) Z 1 4242 4242 0 -1 4194560 0 0 0 0\n'
+const linuxProbe = (files, options = {}) => ({ read: procOf(files, options.status), started: () => 1_000, answers: () => options.answers ?? true })
+
+test('a holder that has exited but is not yet reaped reads as exited, never as a process to name (#1721)', async () => {
+  // It answers a signal, its command line reads empty, and its stat line shows a zombie: it has exited.
+  assert.equal(lookUpLinux(4242, linuxProbe({ '/proc/4242/cmdline': '', '/proc/4242/stat': ZOMBIE_STAT })), 'exited')
+  // A kernel thread also reads an empty command line, but it has not exited.
+  assert.equal(lookUpLinux(4242, linuxProbe({ '/proc/4242/cmdline': '', '/proc/4242/stat': '4242 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0\n' })), null)
+  // An exited holder is neither signalled nor named.
+  const { deps, kills } = holderDeps({ look: () => 'exited' })
+  assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'exited' })
+  assert.deepEqual(kills, [])
+  if (process.platform !== 'linux') return
+  // The same for a real child its parent never reaps.
+  const { pid, parent } = await zombieChild()
+  try {
+    process.kill(pid, 0)
+    assert.equal(readFileSync(`/proc/${pid}/cmdline`, 'utf8'), '')
+    assert.equal(lookUpHolder(pid, 15_000), 'exited')
+  } finally { parent.kill() }
+})
+
+test('a stat line with the exiting flag reads as exiting, and a kernel thread\'s does not (#1721)', () => {
+  const statOf = line => procOf({ '/proc/4242/stat': line })
+  // Flag 0x4 is the kernel's PF_EXITING; 4194560 is a live program's flags, 4194564 the same while it exits.
+  assert.equal(isExiting(4242, statOf('4242 (node) S 1 4242 4242 0 -1 4194560 0 0 0 0\n')), false)
+  assert.equal(isExiting(4242, statOf('4242 (node) R 1 4242 4242 0 -1 4194564 0 0 0 0\n')), true)
+  assert.equal(isExiting(4242, statOf(ZOMBIE_STAT)), true)
+  assert.equal(isExiting(4242, statOf('4242 (node) X 1 4242 4242 0 -1 4194560 0 0 0 0\n')), true)
+  // A kernel thread also reads an empty command line, but its flags have no exiting bit.
+  assert.equal(isExiting(4242, statOf('4242 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0\n')), false)
+  // The command name may hold ") " and a state letter: the fields are read after its last ")".
+  assert.equal(isExiting(4242, statOf('4242 (x) Z 1 1 1 0 -1 4 (y) S 1 4242 4242 0 -1 4194560 0 0\n')), false)
+  assert.equal(isExiting(4242, statOf('4242 (x) S 1 1 1 0 -1 0 (y) R 1 4242 4242 0 -1 4194564 0 0\n')), true)
+  // A line cut short has no flags field: not read as exiting.
+  assert.equal(isExiting(4242, statOf('4242 (node) S 1 4242\n')), false)
+})
+
+test('a missing stat file is no proof of exit (#1721)', () => {
+  // The holder answered a signal, so a stat file that is gone when read proves nothing: if it was reaped meanwhile,
+  // the next look finds no process at all.
+  assert.equal(isExiting(4242, procOf({})), false)
+  assert.equal(isExiting(4242, procOf({ '/proc/4242/stat': procError('EACCES') })), false)
+})
+
+test('a /proc of another PID namespace is no proof of exit (#1721)', async () => {
+  // A /proc mounted for an ancestor namespace names this process there too, so its NSpid line has two entries, even
+  // when both numbers are the same. Its stat files describe other processes under the same numbers.
+  const ancestor = `NSpid:\t${process.pid}\t${process.pid}\n`
+  for (const status of [ancestor, `NSpid:\t${process.pid + 7}\t${process.pid}\n`]) {
+    assert.equal(isExiting(4242, procOf({ '/proc/4242/stat': ZOMBIE_STAT }, status)), false)
+    assert.equal(lookUpLinux(4242, linuxProbe({ '/proc/4242/cmdline': '', '/proc/4242/stat': ZOMBIE_STAT }, { status })), null)
+  }
+  // The holder that cannot be proven to have exited is named, never signalled.
+  const { deps, kills } = holderDeps({ look: () => null })
+  assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'refused', isBoard: false })
+  assert.deepEqual(kills, [])
+})
+
+test('a missing /proc entry for a holder that answers a signal is unknown, not gone (#1721)', () => {
+  // Hidden from this account, or another namespace's /proc: the process answered, so it is there.
+  assert.equal(lookUpLinux(4242, linuxProbe({}, { answers: true })), null)
+  assert.equal(lookUpLinux(4242, linuxProbe({ '/proc/4242/cmdline': procError('EACCES') }, { answers: false })), null)
+  // A holder that answers no signal and has no entry has ended.
+  assert.equal(lookUpLinux(4242, linuxProbe({}, { answers: false })), 'gone')
+})
+
+test('without a one-entry NSpid line nothing in /proc is proof (#1721)', () => {
+  const zombie = { '/proc/4242/stat': ZOMBIE_STAT }
+  // A kernel before 4.1 writes no NSpid line; a status file that cannot be read; a number that is not this process's.
+  for (const status of ['Name:\tnode\n', procError('EACCES'), `NSpid:\t${process.pid + 1}\n`, 'NSpid:\t\n']) {
+    assert.equal(isExiting(4242, procOf(zombie, status)), false, String(status))
+  }
+  assert.equal(isExiting(4242, procOf(zombie)), true)
+})
+
+test('signal zero refused with EPERM counts as answering (#1721)', () => {
+  const answering = code => () => { if (code) throw procError(code) }
+  // Another account's process refuses the signal, but it is there: never read as gone.
+  assert.equal(liveHolder(4242, answering('EPERM')), true)
+  assert.equal(liveHolder(4242, answering('ESRCH')), false)
+  assert.equal(liveHolder(4242, answering(undefined)), true)
+})
+
+test('a start that runs out of time at any retry still reports the store\'s reason (#1721)', async () => {
+  // A fake clock: each pass and each pause moves it on. Each pass that asks to be tried again carries its own report.
+  const run = async (passes, deadline) => {
+    let clock = 0
+    let calls = 0
+    const reports = []
+    const result = await untilDeadline(async () => {
+      const one = passes[calls++]
+      clock += one.takes ?? 0
+      if (one.result !== undefined) return { result: one.result }
+      return { retry: one.retry, pauseMs: one.pauseMs ?? 0, report: () => { reports.push(calls); return `MESSAGE_STORE_IN_USE after pass ${calls}` } }
+    }, deadline, () => clock, async ms => { clock += ms })
+    return { result, calls, reports }
+  }
+  // A retry at once asked just as the deadline passes: that pass's reason, and no further start.
+  assert.deepEqual(await run([{ retry: true, takes: 10 }, { retry: true }], 10), { result: 'MESSAGE_STORE_IN_USE after pass 1', calls: 1, reports: [1] })
+  // A pause that ends past the deadline: the reason of the pass that asked for it.
+  assert.deepEqual(await run([{ retry: true, pauseMs: 100, takes: 5 }, { retry: true }], 50), { result: 'MESSAGE_STORE_IN_USE after pass 1', calls: 1, reports: [1] })
+  // A pass that asks for no retry reports at once, whatever the time.
+  assert.deepEqual(await run([{ retry: false }], 1_000), { result: 'MESSAGE_STORE_IN_USE after pass 1', calls: 1, reports: [1] })
+  // Retries before the deadline run, the last one's reason is reported, and a result ends the start with no report.
+  assert.deepEqual(await run([{ retry: true, takes: 1 }, { retry: true, pauseMs: 100, takes: 1 }, { retry: true, takes: 900 }], 1_000), { result: 'MESSAGE_STORE_IN_USE after pass 3', calls: 3, reports: [3] })
+  assert.deepEqual(await run([{ retry: true, takes: 1 }, { result: 'page' }], 1_000), { result: 'page', calls: 2, reports: [] })
+})
+
+const epermOfOne = (() => {
+  if (process.platform === 'win32') return 'no process 1 to ask on Windows'
+  try { process.kill(1, 0); return 'process 1 answers this account' } catch (error) { return error.code === 'EPERM' ? false : `process 1: ${error.code}` }
+})()
+test('process 1 of another account answers EPERM (#1721)', { skip: epermOfOne }, () => {
+  assert.equal(liveHolder(1), true)
+})
+
+const kernelThread = (() => {
+  if (process.platform !== 'linux') return 'needs Linux /proc'
+  try {
+    const stat = readFileSync('/proc/2/stat', 'utf8')
+    return readFileSync('/proc/2/cmdline', 'utf8') === '' && stat.slice(stat.lastIndexOf(')') + 2)[0] !== 'Z' ? false : 'process 2 is not a kernel thread here'
+  } catch { return 'no process 2 here' }
+})()
+test('a kernel thread\'s empty command line is not read as gone (#1721)', { skip: kernelThread }, () => {
+  assert.equal(lookUpHolder(2, 15_000), null)
 })
 
 test('a page serving a folder given with --messages-dir is never ended', async () => {
