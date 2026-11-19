@@ -1930,7 +1930,7 @@ export const LINES = [
 "  }",
 "  const keptBoards = isOlderHeld ? retired.filter((file) => initial(file) !== null) : [];",
 "  const isCommandHeld = isOlderHeld && keptFiles.has(commandFile);",
-"  const opensFile = isCommandHeld ? keptBoards[0] ?? \"\" : commandFile || Object.keys(files).find((file) => file.endsWith(\"SKILL.md\") && file !== skill) || (BOARD_FOR.skills?.includes(agent) ? skill : undefined);",
+"  const opensFile = isCommandHeld ? retired[0] : commandFile || Object.keys(files).find((file) => file.endsWith(\"SKILL.md\") && file !== skill) || (BOARD_FOR.skills?.includes(agent) ? skill : undefined);",
 "  const opens = remove || agent === \"cursor\" || opensFile === undefined ? undefined : { way: isCommandHeld ? \"/board\" : commandFile ? \"/agent-board\" : \"skill\", file: opensFile };",
 "  for (const file of keptBoards)",
 "    keptHeld.push({ file, by: heldBy });",

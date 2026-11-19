@@ -181,6 +181,64 @@ test('setup\'s next steps give the board command for a terminal when /agent-boar
   assert.match(next, /Then type \/agent-board in Claude Code\./, result.stdout)
 }))
 
+test('setup\'s next steps give the board command for a terminal when a folder takes the skill\'s place while setup waits (#1698)', () => terminal(f => {
+  olderHome(f, ['codex'])
+  rmSync(skillOf(f, 'codex'))
+  const result = invokeChanging(f, ['--agent', 'codex', '--lang', 'en'], `fs.mkdirSync(${JSON.stringify(skillOf(f, 'codex'))})`)
+  succeeded(result)
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.doesNotMatch(next, /\$agent-board/, result.stdout)
+  assert.match(next, /For Codex, open the board from a terminal with \S/, result.stdout)
+  assert.match(next, /Then type \/agent-board in Claude Code\./, result.stdout)
+}))
+
+test('setup does not say an agent\'s files are done, or name a way to open the board, when the board script is deleted while setup waits and the agent had nothing to apply (#1698)', () => {
+  const check = (f, script, result) => {
+    assert.equal(result.status, 1, result.stderr + result.stdout)
+    assert.match(result.stdout, /OpenClaw files: failed\. Run: \S[^\n]*--agent openclaw --apply/, result.stdout)
+    assert.doesNotMatch(result.stdout, /OpenClaw files: done/)
+    const next = result.stdout.split('Next steps:')[1] ?? ''
+    assert.doesNotMatch(next, /OpenClaw|in any of them/, result.stdout)
+    assert.ok(!next.includes(script), result.stdout)
+    assert.match(next, /Open a new session in Claude Code\./, result.stdout)
+    assert.equal(existsSync(script), false)
+  }
+  // An older kept script with the skills deleted: the agent has nothing to apply, and the script goes while setup waits.
+  terminal(f => {
+    const { script } = olderHome(f, ['openclaw'])
+    for (const agent of ['openclaw', 'codex']) rmSync(skillOf(f, agent))
+    check(f, script, invokeChanging(f, ['--agent', 'openclaw', '--lang', 'en'], `fs.rmSync(${JSON.stringify(script)})`))
+    // The command the line gives writes the board script and the skill again.
+    delete f.env.AGENT_BOARD_SETUP_TTY
+    succeeded(f.invoke(['--agent', 'openclaw', '--lang', 'en', '--apply']))
+    assert.equal(existsSync(script), true)
+    assert.equal(existsSync(skillOf(f, 'openclaw')), true)
+  })
+  // A plain install, nothing kept: the same.
+  terminal(f => {
+    delete f.env.AGENT_BOARD_SETUP_TTY
+    succeeded(f.invoke(['--agent', 'openclaw', '--lang', 'en', '--apply']))
+    f.env.AGENT_BOARD_SETUP_TTY = '1'
+    const script = join(f.root, 'data', 'agent-board.mjs')
+    check(f, script, invokeChanging(f, ['--agent', 'openclaw', '--lang', 'en'], `fs.rmSync(${JSON.stringify(script)})`))
+  })
+})
+
+test('setup\'s next steps name /board when the /board file is put back while setup waits and the agent had nothing to apply (#1698)', () => terminal(f => {
+  const { commands } = olderHome(f, ['opencode'], { board: null })
+  // One apply first, so OpenCode has nothing left to apply; the Claude plugin is what setup asks about.
+  delete f.env.AGENT_BOARD_SETUP_TTY
+  succeeded(f.invoke(['--agent', 'opencode', '--lang', 'en', '--apply']))
+  f.env.AGENT_BOARD_SETUP_TTY = '1'
+  const record = join(f.root, 'data', 'install-opencode.json'), recorded = readFileSync(record, 'utf8')
+  const result = invokeChanging(f, ['--agent', 'opencode', '--lang', 'en'], `fs.writeFileSync(${JSON.stringify(join(commands, 'board.md'))}, ${JSON.stringify(oldCommand)})`)
+  succeeded(result)
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.match(next, /In OpenCode, type \/board\./, result.stdout)
+  assert.doesNotMatch(next, /For OpenCode[^\n]*open the board from a terminal/, result.stdout)
+  assert.equal(readFileSync(record, 'utf8'), recorded, 'nothing was written for OpenCode')
+}))
+
 test('setup\'s next steps do not name /agent-board for an agent whose skill waits with an older kept script (#1698)', () => terminal(f => {
   olderHome(f, ['openclaw'])
   for (const agent of ['openclaw', 'codex']) rmSync(skillOf(f, agent))

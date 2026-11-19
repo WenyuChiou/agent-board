@@ -641,6 +641,8 @@ const main = () => {
       process.stdout.write('\n')
     }
     if (hasConsent) {
+      // A folder or a link to nothing is not a file a way can rest on; a link to a file is (#1698).
+      const isFile = file => { try { return statSync(file).isFile() } catch { return false } }
       const completed = []
       // What each apply did. The files can change while setup waits for the answer, and the apply plans again (#1698).
       const appliedPlans = {}
@@ -654,7 +656,9 @@ const main = () => {
             const applied = run(agent, true)
             isDone = applied.applied === true && !applied.conflicts.length
             if (isDone) appliedPlans[agent] = applied
-          }
+          // With nothing to apply, the agent is done only while the board script every way runs is still there; else the
+          // line says to run setup for it again, which writes the script back (#1698).
+          } else isDone = isFile(plan.script ?? join(plan.data, 'agent-board.mjs'))
           if (isDone) completed.push(agent)
         } catch { isDone = false }
         if (!isDone) process.exitCode = 1
@@ -710,7 +714,7 @@ const main = () => {
           if (agent === 'cursor' && process.platform === 'win32') next.push(words('cursorWindows'))
           sessions.push(names[agent])
           const opens = plan.opens
-          const isThere = opens !== undefined && opens.file !== '' && existsSync(opens.file)
+          const isThere = opens !== undefined && isFile(opens.file)
           ways.set(names[agent], !isThere ? 'terminal' : opens.way === '/board' ? 'old' : opens.way === 'skill' && ['codex', 'hermes'].includes(agent) ? agent : 'slash')
         }
       }

@@ -13804,15 +13804,15 @@ test('a command file setup wrote waits with an edited older board script, and on
     const plan = JSON.parse(applied.stdout)
     assert.deepEqual(plan.conflicts, [])
     assert.ok(plan.keptHeld.some(one => one.file === command), applied.stdout)
-    // No /board file is kept, so the plan names no file to open the board from in OpenCode.
-    assert.deepEqual(plan.opens, { way: '/board', file: '' })
+    // No /board file is kept; the plan still names its path, and setup's next steps look for it as they print.
+    assert.deepEqual(plan.opens, { way: '/board', file: join(dirname(command), 'board.md') })
     assert.equal(existsSync(command) ? readFileSync(command, 'utf8') : null, isDeleted ? null : olderCommand)
     assert.equal(recordOf(f, 'opencode').files[command], digest(olderCommand), 'its record entry stays')
   })
 })
 
 test('the plan names how each agent opens the board and the file that way rests on (#1698)', async () => {
-  // An older kept board script: /board while its file is there, in the preview and the apply, and no file once it is gone.
+  // An older kept board script: /board and its file in the preview and the apply, and the same path once the file is gone.
   await fixture(f => {
     const state = olderBoardOpencode(f)
     for (const args of [['--json'], ['--apply', '--json']]) {
@@ -13823,7 +13823,7 @@ test('the plan names how each agent opens the board and the file that way rests 
     rmSync(state.old)
     const gone = f.install('--agent', 'opencode', '--json')
     assert.equal(gone.status, 0, gone.stderr + gone.stdout)
-    assert.deepEqual(JSON.parse(gone.stdout).opens, { way: '/board', file: '' })
+    assert.deepEqual(JSON.parse(gone.stdout).opens, { way: '/board', file: state.old })
   })
   // Nothing held: the agent's own command or skill, else the shared skill it reads, and none for Cursor.
   await fixture(f => {

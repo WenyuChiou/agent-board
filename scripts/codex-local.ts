@@ -1748,10 +1748,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const keptBoards = isOlderHeld ? retired.filter(file => initial(file) !== null) : []
   // How the person opens the board in this agent once the plan is done, and the file that way rests on: /board while
   // its /agent-board waits with an older script, the command file, else the agent's own skill or the shared one it reads.
-  // Setup names the way only while that file is there as it prints its next steps, and otherwise gives the board command
-  // for a terminal. Cursor has no board command (#1698).
+  // The plan names that file even when it is not there now: setup names the way only while it is a file as it prints its
+  // next steps, and otherwise gives the board command for a terminal. Cursor has no board command (#1698).
   const isCommandHeld = isOlderHeld && keptFiles.has(commandFile)
-  const opensFile = isCommandHeld ? keptBoards[0] ?? '' : commandFile || Object.keys(files).find(file => file.endsWith('SKILL.md') && file !== skill) || (BOARD_FOR.skills?.includes(agent) ? skill : undefined)
+  const opensFile = isCommandHeld ? retired[0] : commandFile || Object.keys(files).find(file => file.endsWith('SKILL.md') && file !== skill) || (BOARD_FOR.skills?.includes(agent) ? skill : undefined)
   const opens = remove || agent === 'cursor' || opensFile === undefined ? undefined : { way: isCommandHeld ? '/board' : commandFile ? '/agent-board' : 'skill', file: opensFile }
   for (const file of keptBoards) keptHeld.push({ file, by: heldBy })
   for (const file of retired) {
