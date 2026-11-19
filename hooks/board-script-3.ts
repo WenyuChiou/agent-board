@@ -2176,7 +2176,7 @@ export const LINES = [
 "      process.stdout.write(codexDoctorOutput(result, s, nextCommand(\"--codex-setup\", [\"--plain\"]), host ? nextCommand(\"--codex-trust\", explicitBin ? [] : [\"--codex-bin\", executable]) : undefined));",
 "    return true;",
 "  }",
-"  if (conflicts.length && (args.includes(\"--apply\") || args.includes(\"--check-conflicts\")))",
+"  if (conflicts.length && (args.includes(\"--apply\") || args.includes(\"--check-conflicts\")) && existsSync5(installControlRoot(home)))",
 "    withInstallLock(home, () => {",
 "      for (const file of before.keys())",
 "        if (!isAsPlanned(file))",
