@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -242,18 +242,12 @@ const sortedKeys = (value: unknown): unknown => Array.isArray(value) ? value.map
 const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), null, 2).replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
 // A root that is not a mapping (a list, a flow document) is not something to add a key to.
 const isYamlMapping = (text: string): boolean => text.split(/\r?\n/).every(line => !/^\S/.test(line) || /^(?:#|---|\.\.\.)/.test(line) || /^(?:"[^"\n]*"|'[^'\n]*'|[^\s#{[!&*|>%@`"'-][^\n]*?)\s*:(?:\s|$)/.test(line))
-// A name that was free when setup planned is taken only if it is still free at that instant (#1693): a rename would
-// replace a file that landed there after the last check. A hard link of the finished temporary file fails when the
-// name is taken, and so does an exclusive copy, for a disk that has no hard links.
-const createOnly = (temporary: string, file: string): void => {
-  try { linkSync(temporary, file) } catch (error) {
-    if ((error as { code?: string }).code === 'EEXIST') throw error
-    copyFileSync(temporary, file, constants.COPYFILE_EXCL)
-  }
-}
-// `placed` runs once the file holds the new bytes, before anything that can still fail: a caller that lists what landed
-// must count this file even when reading it back or removing the temporary file then fails.
-const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false, isFresh = false, placed: () => void = () => {}): void => {
+// A name that was free when setup planned (`isFresh`) is created, never written over (#1693): a rename would replace a
+// file that landed there after the last check. A hard link of the finished temporary file places it whole in one step
+// and fails when the name is taken, and setup then stops as busy. Where a link is refused for any other reason, as on a
+// disk with no hard links, setup checks once more and renames, as for any other file: a file that lands between that
+// check and the rename is written over there, a stated limit.
+const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false, isFresh = false): void => {
   mkdirSync(dirname(file), { recursive: true })
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   const fd = openSync(temporary, 'wx', 0o600)
@@ -266,12 +260,15 @@ const atomic = (file: string, text: string | Buffer, current: () => void = () =>
     for (;;) {
       current()
       try {
-        if (isFree) createOnly(temporary, file)
+        if (isFree) linkSync(temporary, file)
         else renameSync(temporary, file)
         break
       } catch (error) {
-        // The name was taken after the last check: check again, which stops unless this batch wrote that file itself.
-        if (isFree && (error as { code?: string }).code === 'EEXIST') { isFree = false; continue }
+        if (isFree) {
+          if ((error as { code?: string }).code === 'EEXIST') throw new Error('INSTALL_CHANGED')
+          isFree = false
+          continue
+        }
         if (!retryRecord || process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(String((error as { code?: string }).code)) || waited >= 250) throw error
         const wait = Math.min(delay, 250 - waited)
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait)
@@ -279,7 +276,6 @@ const atomic = (file: string, text: string | Buffer, current: () => void = () =>
         delay *= 2
       }
     }
-    placed()
   } finally {
     if (isOpen) closeSync(fd)
     if (existsSync(temporary)) unlinkSync(temporary)
@@ -562,9 +558,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const now = take(file)
     if (now.kind !== 'file' || !isHolding(now, text)) throw new Error('INSTALL_CHANGED')
   }
-  // A .new copy where the plan found nothing is created, never written over (#1693).
-  const put = (file: string, text: string, target = file, placed?: () => void): void => {
-    atomic(target, text, () => unchanged(file, text), false, target.endsWith('.new') && (before.get(file) ?? NO_PATH).kind === 'none', placed)
+  // A .new copy where the plan found nothing is created, never written over (#1693). A name this batch already wrote as
+  // the same file through another name (a skills folder linked to the shared one) is not written again: it holds the
+  // bytes already, and a person's save there would be lost.
+  const put = (file: string, text: string, target = file): void => {
+    if (isOurs(target, take(target), text)) return
+    atomic(target, text, () => unchanged(file, text), false, target.endsWith('.new') && (before.get(file) ?? NO_PATH).kind === 'none')
     written(target, text)
     const real = realOf(target)
     if (real !== null) ours.add(real)
@@ -1974,15 +1973,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const pendingWith = (named: typeof copies): string => `${JSON.stringify({ ...ownPending, ...Object.fromEntries(named.map(one => [one.beside, [...new Set([...(ownPending[one.beside] ?? []), hash(files[one.beside] ?? '')])]])) }, null, 2)}\n`
     const pendingText = pendingWith(copies)
     if (copies.length) put(pendingFile(agent), pendingText)
-    const landed: typeof copies = []
-    // When a copy's own write stops, the list goes back to naming only the copies that landed (#1693). Otherwise the
-    // next setup would find a file with the wanted bytes at that .new path, named by the list, and take it as its own.
+    // A copy leaves the list only when its write stops on proof that someone else's file is at its name (#1693), and
+    // under every name of that file (a skills folder linked to the shared one): otherwise the next setup would take that
+    // file as its own. Any other failure leaves the list whole, as on main, so the next run still finds setup's copy.
     // A list someone else changed in the meantime is left as it is.
-    const settlePending = (): void => {
+    const realName = (file: string): string => join(realOf(dirname(file)) ?? dirname(file), basename(file))
+    const dropPending = (file: string): void => {
       const list = pendingFile(agent)
       if (!isHolding(take(list), pendingText)) return
-      if (!landed.length && initial(list) === null) unlinkSync(list)
-      else atomic(list, pendingWith(landed), () => { if (!isHolding(take(list), pendingText)) throw new Error('INSTALL_CHANGED') })
+      const kept = copies.filter(one => realName(one.beside) !== realName(file))
+      if (!kept.length && initial(list) === null) unlinkSync(list)
+      else atomic(list, pendingWith(kept), () => { if (!isHolding(take(list), pendingText)) throw new Error('INSTALL_CHANGED') })
     }
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue
@@ -2008,11 +2009,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         unlinkSync(change.file)
       } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
       else {
-        const copy = copies.find(one => one.beside === change.file)
-        // A copy has landed once its name holds it: a read-back that fails after that still leaves it on the list.
-        try { put(change.file, files[change.file] ?? '', change.file, () => { if (copy !== undefined) landed.push(copy) }) }
+        try { put(change.file, files[change.file] ?? '') }
         catch (error) {
-          if (copy !== undefined) try { settlePending() } catch {}
+          if ((error as Error).message === 'INSTALL_CHANGED' && copies.some(one => one.beside === change.file)) try { dropPending(change.file) } catch {}
           throw error
         }
       }
