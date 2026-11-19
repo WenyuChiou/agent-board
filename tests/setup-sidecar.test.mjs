@@ -417,6 +417,38 @@ test('the sidecar-only removal keeps a one-byte edit to sidecar.mjs that decodes
   assert.deepEqual(readFileSync(file), withFF(old), 'sidecar.mjs stays with the byte the person put there')
 }))
 
+test('the sidecar-only removal keeps a sidecar.mjs that became a link to the same bytes: setup fails instead of removing the link (#1607)', t => withHome(({ home, run, dir }) => {
+  const probe = join(home, 'probe.txt')
+  writeFileSync(probe, '')
+  try { symlinkSync(probe, join(home, 'probe-link.txt'), 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  const file = join(dir, 'sidecar.mjs'), copy = join(home, 'sidecar-copy.mjs')
+  const bytes = readFileSync(file)
+  // When setup unlinks sidecar.json, which comes first, after the batch check: sidecar.mjs becomes a link to a copy of
+  // its own bytes. Main compared the text through the link, so it removed the link.
+  const env = seam(home, `const unlink = fs.unlinkSync
+let done = false
+fs.unlinkSync = (file, ...rest) => {
+  if (!done && typeof file === 'string' && file.endsWith('sidecar.json')) {
+    done = true
+    const other = file.slice(0, -'sidecar.json'.length) + 'sidecar.mjs'
+    fs.writeFileSync(${JSON.stringify(copy)}, fs.readFileSync(other))
+    unlink(other)
+    fs.symlinkSync(${JSON.stringify(copy)}, other, 'file')
+  }
+  return unlink(file, ...rest)
+}`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
+  stoppedOnChange(removed)
+  assert.equal(lstatSync(file).isSymbolicLink(), true, 'sidecar.mjs is still the link')
+  assert.equal(readlinkSync(file), copy, 'the link still points at the copy')
+  assert.deepEqual(readFileSync(copy), bytes, 'the copy holds the same bytes')
+}))
+
 test('a sidecar record holding a byte that is not valid UTF-8 stops setup and removal, which name install-antigravity-sidecar.json (#1607)', () => withHome(({ home, run }) => {
   const { root } = connectorHome(home)
   assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
