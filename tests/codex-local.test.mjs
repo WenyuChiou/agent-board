@@ -5041,6 +5041,41 @@ test('a .new copy the person changed after an apply stopped part-way stops that 
   assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
 }))
 
+test('a board file named like a pending list stops setup before it writes, and a removal leaves that file (#1302)', async () => {
+  const notes = '# Progress\n\n- [ ] Synthetic note only the person holds\n'
+  await fixture(f => {
+    const linked = join(f.home, 'linked-data')
+    mkdirSync(f.root, { recursive: true })
+    symlinkSync(f.root, linked, process.platform === 'win32' ? 'junction' : 'dir')
+    const names = [pendingListOf(f, 'codex'), pendingListOf(f, 'hermes'), join(linked, 'install-pending-codex.json'), ...(process.platform === 'win32' ? [join(f.root, 'INSTALL-PENDING-codex.json')] : [])]
+    for (const board of names) {
+      f.save(board, notes)
+      const preview = f.install('--agent', 'codex', '--progress-file', board)
+      assert.deepEqual(JSON.parse(preview.stdout).conflicts, [board], preview.stdout)
+      const applied = f.install('--agent', 'codex', '--progress-file', board, '--apply')
+      assert.notEqual(applied.status, 0, `${board}: ${applied.stdout}`)
+      assert.deepEqual(JSON.parse(applied.stdout).conflicts, [board], applied.stdout)
+      assert.equal(readFileSync(board, 'utf8'), notes, board)
+      assert.equal(existsSync(join(f.root, 'install-codex.json')), false, board)
+      assert.equal(existsSync(f.script), false, board)
+      unlinkSync(board)
+    }
+    const fresh = f.install('--agent', 'codex', '--progress-file', pendingListOf(f, 'codex'), '--apply')
+    assert.notEqual(fresh.status, 0, fresh.stdout)
+    assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+  })
+  await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const board = pendingListOf(f, 'codex')
+    f.save(board, notes)
+    f.save(join(f.root, 'install-codex.json'), `${JSON.stringify({ ...recordOf(f, 'codex'), progress: board }, null, 2)}\n`)
+    const removed = f.command(['--codex-remove', '--agent', 'codex', '--apply', '--json'])
+    assert.equal(removed.status, 0, `${removed.stderr}${removed.stdout}`)
+    assert.equal(readFileSync(board, 'utf8'), notes)
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+  })
+})
+
 test('a pending list that cannot be read names nothing, so a copy no record holds stops that agent (#1302)', () => fixture(f => {
   assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
   const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
