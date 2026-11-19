@@ -157,7 +157,8 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/prompt-hooks.test.mjs': 130_000, // slowest 67.9 s
   // Grew past the floor with #1162's terminal setup tests (#1159); slowest 52.6 s after #1361.
   'tests/setup-guidance.test.mjs': 100_000,
-  'tests/host-upgrade.test.mjs': 80_000, // slowest 42.6 s
+  // Grew with #1302's two upgrade tests: 57.6 s on Windows Node 24 with the same two journeys on #1328 (run 43181075103).
+  'tests/host-upgrade.test.mjs': 110_000, // slowest 57.6 s
   'tests/setup-terminal.test.mjs': 70_000, // slowest 36.0 s
   // Grew with #1339's lock tests (several wait out the 2 s bounded lock wait): 43.4 s on Windows Node 24 (run 43190652904).
   'tests/settings-symlink.test.mjs': 85_000, // slowest 43.4 s

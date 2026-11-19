@@ -367,8 +367,21 @@ export type LocalPlan = {
   keptShared?: { file: string; usedBy: string[] }[]
   // An old /board command file the person edited: setup leaves it and names it here (#868).
   keptEdited?: string[]
+  // Generated files the person edited, which setup never overwrites (#1302). Text a host only reads gets the new
+  // version beside it. Code a host loads stays as it is, and the code and hooks that work with it stay with it.
+  keptText?: { file: string; beside: string }[]
+  keptCode?: string[]
+  keptHeld?: { file: string; by: string }[]
+  missingHeld?: { file: string; by: string }[]
   applied?: boolean
 }
+
+const keptLines = (result: LocalPlan, words: Strings['localSummary']): string[] => [
+  ...(result.keptText ?? []).map(one => words.keptText(one.file, one.beside)),
+  ...(result.keptCode ?? []).map(file => words.keptCode(file)),
+  ...(result.keptHeld ?? []).map(one => words.keptHeld(one.file, one.by)),
+  ...(result.missingHeld ?? []).map(one => words.heldMissing(one.file, one.by)),
+]
 
 export const codexDoctorOutput = (result: LocalPlan & {
   installed: boolean
@@ -380,8 +393,10 @@ export const codexDoctorOutput = (result: LocalPlan & {
   const words = s.localSummary
   const host = s.agentNames[result.agent] ?? result.agent
   const hasHook = result.installed || result.reportHook === 'connect'
-  const lines = [words.doctor(host, result.installed ? words.installed : hasHook ? words.connector : words.missing)]
+  const isOutdated = result.installed && Boolean(result.keptCode?.length || result.keptHeld?.length)
+  const lines = [words.doctor(host, isOutdated ? words.outdated : result.installed ? words.installed : hasHook ? words.connector : words.missing)]
   if (result.problem) lines.push(result.problem)
+  lines.push(...keptLines(result, words))
   for (const file of result.conflicts) lines.push(words.conflict(file))
   if (!hasHook) for (const change of result.changes) lines.push(words.needsUpdate(change.file))
   const isPending = result.capabilities.lifecycle === 'adapter-pending'
@@ -390,6 +405,7 @@ export const codexDoctorOutput = (result: LocalPlan & {
   lines.push(s.codexDoctor)
   lines.push(result.conflicts.length ? words.review(command)
     : !hasHook ? words.setup(command)
+    : isOutdated ? words.outdatedNext
     : isPending ? words.skill(host)
     // --codex-trust works only on an installed Codex, not on one the connector hooked.
     : result.agent === 'codex' && result.installed && result.hooksTrusted !== true ? trustCommand ? words.trustRun(trustCommand) : words.trust
@@ -421,6 +437,7 @@ export const codexSetupOutput = (result: LocalPlan, s: Strings, command: string,
   const isApplied = result.applied === true && result.changes.length > 0
   const lines = [words.removal(host, isApplied ? words.setupApplied : result.conflicts.length ? words.setupBlocked : result.changes.length ? words.setupPreview : words.setupCurrent)]
   for (const change of result.changes) lines.push(isApplied ? words.setupWritten(change.file) : words.setupFile(change.file))
+  lines.push(...keptLines(result, words))
   for (const file of result.conflicts) lines.push(words.conflict(file))
   lines.push(result.conflicts.length ? words.review(command)
     : isApplied || !result.changes.length ? words.setupCheck(check)
@@ -598,6 +615,32 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const loaded = jsonInitial(manifestFile)
   const otherAgents = localAgents.filter(one => one !== agent)
   const otherManifests = otherAgents.map(one => jsonInitial(join(root, `install-${one}.json`)))
+  // A .new copy reaches the disk before the install record names it, so a setup that stops between the two leaves a copy
+  // no record holds (#1302). This list is written before the copy and removed after the record, and it is how the next
+  // setup knows that copy is its own: the wanted bytes alone would also match a file the person put there.
+  // A file under that name is a list only when it reads as one setup could have written: a regular file holding a JSON
+  // object of .new paths, each with hashes. Its name alone says nothing, since a board named there or any note of the
+  // person's can have it too. So setup reads, writes over and deletes the file only when it reads so; anything else names
+  // nothing, a copy no record holds then stops that agent as any unknown file does, and the file stays.
+  // Setup writes into this agent's list only the .new path beside a text file of this run's plan, so its list may name
+  // only those. Another agent's list is only read here and its plan is not known, so its paths need only be full ones;
+  // an entry of it names a copy only under the exact path this run plans (isOurBeside). That is as far as setup can
+  // tell: a file naming this plan's own .new paths with hashes is its list, whoever wrote it.
+  const pendingFile = (one: string): string => join(root, `install-pending-${one}.json`)
+  const isOwnCopy = (path: string): boolean => isTextFile(path.slice(0, -4)) && Object.hasOwn(files, path.slice(0, -4))
+  const listOf = (snap: Snap | undefined, isNamed: (path: string) => boolean = isOwnCopy): Record<string, string[]> | null => {
+    if (snap?.kind !== 'file' || snap.bytes === null) return null
+    let held: unknown
+    try { held = JSON.parse(snap.bytes.toString('utf8')) } catch { return null }
+    if (typeof held !== 'object' || held === null || Array.isArray(held)) return null
+    const entries = Object.entries(held)
+    const isList = entries.length > 0 && entries.every(([path, hashes]) => path.endsWith('.new') && isNamed(path) && Array.isArray(hashes) && hashes.length > 0 && hashes.every(value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)))
+    return isList ? Object.fromEntries(entries) as Record<string, string[]> : null
+  }
+  const pendingOf = (one: string): Record<string, string[]> => {
+    initial(pendingFile(one))
+    return listOf(before.get(pendingFile(one)), one === agent ? isOwnCopy : isAbsolute) ?? {}
+  }
   const control = join(installControlRoot(home), 'legacy-connect.json')
   const authority = join(installControlRoot(home), 'legacy-connect-authority')
   let connection: ConnectTransaction['state'] | undefined
@@ -1549,6 +1592,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     [planEvents.hermes!.event, hermesCommand(planEvents.hermes!.event), planEvents.hermes!.matcher],
   ]
   let nextAllowlist: string | undefined
+  let isHermesPartial = false
   if (agent === 'hermes') {
     const text = initial(nativeConfig) ?? ''
     const events = hermesEvents()
@@ -1559,6 +1603,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       else hasMissingGroup = true
     }
     if (patch === null) conflicts.push(nativeConfig)
+    // An entry the person changed is refused by its event, like the JSON agents' `${config}:${event}`,
+    // so the message names the exact lines instead of the whole file.
+    else for (const event of patch.refused) conflicts.push(`${nativeConfig}:${event}`)
+    isHermesPartial = manifest.groups.hooks !== undefined && patch !== null && !patch.isComplete
     nextConfigText = patch?.text ?? text
     if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
     if (remove) {
@@ -1619,10 +1667,55 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // away when it is still the bytes setup or a release wrote, and leaves one the person edited (#868).
   const retired = agent === 'gemini' ? [join(home, '.gemini', 'commands', 'board.toml')] : agent === 'opencode' ? [join(opencodeDir, 'commands', 'board.md')] : []
   const keptEdited: string[] = []
+  const records = [manifest.files, ...otherManifests.map(one => object(one.files ?? {}))]
+  const boardRecords = records.map(record => record[script]).filter(value => typeof value === 'string')
+  // A released board is one setup may replace: its body is a release's, and its settings line is exactly what setup or
+  // the connect writes for this install. Any other settings line is the person's own (#1302). A record that held this
+  // same body under another settings line means the line was changed after setup wrote it; a body other than the
+  // recorded one is a board a later connect replaced, which still upgrades.
   const isReleasedBoard = (text: string): boolean => {
-    const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))
-    return RELEASED.some(release => release.board.includes(bodyHash))
+    const head = /^globalThis\.AGENT_BOARD = ([^\n]*)\n/.exec(text)
+    if (head === null) return false
+    const body = text.slice(head[0].length)
+    if (!RELEASED.some(release => release.board.includes(hash(body)))) return false
+    let settings: unknown
+    try { settings = JSON.parse(head[1]!) } catch { return false }
+    if (!isRecord(settings) || JSON.stringify(settings) !== head[1]) return false
+    const { hookVersion, path, codexRoot, lang } = settings
+    const paths = boardRecords.length ? [progress] : [progress, ...legacyProgress.filter(one => one !== '')]
+    if (Object.keys(settings).some(key => !['hookVersion', 'path', 'codexRoot', 'lang'].includes(key))) return false
+    if (hookVersion !== undefined && !(Number.isInteger(hookVersion) && (hookVersion as number) >= 1 && (hookVersion as number) <= HOOK_VERSION)) return false
+    if (typeof path !== 'string' || !paths.includes(path) || codexRoot !== undefined && codexRoot !== root) return false
+    if (typeof lang !== 'string' || !Object.hasOwn(STRINGS, lang)) return false
+    const versions = [undefined, ...Array.from({ length: HOOK_VERSION }, (_, index) => index + 1)]
+    const heads = Object.keys(STRINGS).flatMap(one => versions.flatMap(version => [undefined, root].map(folder => JSON.stringify({ hookVersion: version, path: progress, codexRoot: folder, lang: one }))))
+    return !heads.some(line => boardRecords.includes(hash(`globalThis.AGENT_BOARD = ${line}\n${body}`)))
   }
+  const isOwnedFile = (file: string, existing: string): boolean => hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing)))
+  // Text a host only reads can take a new version beside it. Everything else is code a host loads or a manifest it trusts.
+  const isTextFile = (file: string): boolean => /\.(?:toml|md)$/.test(file)
+  const isKeptRunner = (file: string): boolean => {
+    const existing = initial(file)
+    return !remove && existing !== null && existing !== files[file] && !isOwnedFile(file, existing) && manifest.files[file] !== undefined
+  }
+  // The board script and the hook runner are what the host starts. While the person's copy of one stays, the code and
+  // the hook lines written for it stay too, since a new hook line could ask the old program for something it cannot do.
+  const isScriptHeld = isKeptRunner(script)
+  const isWorkerHeld = !isScriptHeld && isKeptRunner(worker)
+  const isHeld = isScriptHeld || isWorkerHeld
+  const heldBy = basename(isScriptHeld ? script : worker)
+  const keptFiles = new Set<string>()
+  const keptText: { file: string; beside: string }[] = []
+  const keptCode: string[] = []
+  const keptHeld: { file: string; by: string }[] = []
+  const missingHeld: { file: string; by: string }[] = []
+  // The limit, as far as setup can tell: a record or a pending list that names a .new path with the SHA-256 of the bytes
+  // now at it makes that copy setup's, whoever wrote that file. A list entry counts only under the exact path this run
+  // plans; only a record also counts through a second name for the same file (a skills folder linked to the shared one,
+  // or another letter case on Windows).
+  const pendingCopies = [agent, ...otherAgents].flatMap(one => Object.entries(pendingOf(one)).flatMap(([path, hashes]) => hashes.map((value): [string, unknown] => [path, value])))
+  const isOurBeside = (copy: string, text: string): boolean => pendingCopies.some(([path, value]) => path === copy && value === hash(text))
+    || records.flatMap(record => Object.entries(record)).some(([path, value]) => value === hash(text) && (path === copy || path.endsWith('.new') && realOf(path) !== null && realOf(path) === realOf(copy)))
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
@@ -1633,9 +1726,56 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (usedBy.length) { keptShared.push({ file, usedBy }); continue }
     }
     if (remove && existing === null && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
-    const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing))))
-    if (existing !== null && !owned && existing !== desired) conflicts.push(file)
+    const owned = existing !== null && isOwnedFile(file, existing)
+    const isEdited = existing !== null && !owned && existing !== desired
+    // Words setup wrote earlier wait with the person's board script, since new words could ask that script for a flag it
+    // lacks. An edited text file still gets its .new copy, and a missing one is written, because no skill helps nobody.
+    const isHeldText = isScriptHeld && isTextFile(file) && owned
+    if (isHeld && (!isTextFile(file) || isHeldText) && !(isWorkerHeld && file === script)) {
+      if (existing === desired) continue
+      keptFiles.add(file)
+      if (isEdited && manifest.files[file] === undefined) conflicts.push(file)
+      else if (isEdited) keptCode.push(file)
+      else if (existing === null && manifest.files[file] !== undefined) { missingHeld.push({ file, by: heldBy }); conflicts.push(file) }
+      else keptHeld.push({ file, by: heldBy })
+    } else if (isEdited && !remove && isTextFile(file)) {
+      keptFiles.add(file)
+      const beside = `${file}.new`
+      const current = initial(beside)
+      // An edited text file stops this agent only when the .new path holds something setup did not write.
+      if (current === null ? before.get(beside)?.kind !== 'none' : !isOurBeside(beside, current)) conflicts.push(beside)
+      else {
+        keptText.push({ file, beside })
+        files[beside] = desired
+        if (current !== desired) changes.push({ file: beside, action: current === null ? 'create' : 'update' })
+      }
+    } else if (isEdited && !remove && manifest.files[file] !== undefined) {
+      keptFiles.add(file)
+      keptCode.push(file)
+    }
+    // An edited file with no record may not be setup's at all, and a removal never takes a file it did not write.
+    else if (isEdited) conflicts.push(file)
     else if (remove ? owned : existing !== desired) changes.push({ file, action: remove ? 'remove' : existing === null ? 'create' : 'update' })
+  }
+  // A new version left beside a file that no longer needs one: the person's edit is gone, or setup is removing this
+  // agent. It goes only as setup wrote it, and only when no other agent that stays still names it.
+  const ownPending = pendingOf(agent)
+  const staleBeside = new Set([...Object.keys(manifest.files), ...Object.keys(ownPending)].filter(file => file.endsWith('.new') && !(file in files) && file.slice(0, -4) in files))
+  for (const file of staleBeside) {
+    const current = initial(file)
+    const isStillNamed = otherAgents.some((one, index) => !removingAgents.includes(one) && (object(otherManifests[index]?.files ?? {})[file] !== undefined || pendingOf(one)[file] !== undefined))
+    if (current === null) { if (remove && manifest.files[file] !== undefined) alreadyGone.push(file) }
+    else if ((hash(current) === manifest.files[file] || ownPending[file]?.includes(hash(current))) && !isStillNamed) changes.push({ file, action: 'remove' })
+  }
+  const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
+  // The hook lines stay as the kept program knows them. A hook the person's program needs and no longer has cannot be
+  // put back from here, and a moved board file would leave that program writing to the old one.
+  if (isHeld) {
+    if (typeof loaded.progress === 'string' && resolve(loaded.progress) !== progress) conflicts.push(isScriptHeld ? script : worker)
+    if (hasMissingGroup || isHermesPartial) { missingHeld.push({ file: nativeConfig, by: heldBy }); conflicts.push(nativeConfig) }
+    else if (hasNativeConfig && Object.keys(groups).some(key => !isSame(groups[key], manifest.groups[key]))) keptHeld.push({ file: nativeConfig, by: heldBy })
+    for (const key of Object.keys(groups)) delete groups[key]
+    Object.assign(groups, manifest.groups)
   }
   for (const file of retired) {
     const existing = initial(file)
@@ -1646,8 +1786,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   // A host-directory override must not strand an old active plugin outside the
   // new ownership record. Remove the old scoped install before changing roots.
-  for (const file of Object.keys(manifest.files)) if (!(file in files) && !retired.includes(file)) conflicts.push(file)
-  const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
+  for (const file of Object.keys(manifest.files)) if (!(file in files) && !retired.includes(file) && !staleBeside.has(file)) conflicts.push(file)
   nextConfigText ??= `${JSON.stringify(nextConfig, null, 2)}\n`
   if (hasNativeConfig && (!remove || Object.keys(manifest.groups).length)) {
     const isHollowOpenclaw = (): boolean => {
@@ -1658,19 +1797,37 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (parsedConfig === null) conflicts.push(nativeConfig)
     else if (remove && initial(nativeConfig) === null) alreadyGone.push(nativeConfig)
     else if (remove && isReadable && isEmptyCreatedConfig) changes.push({ file: nativeConfig, action: 'remove' })
-    else if (agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig)) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
+    else if (!isHeld && (agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig))) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
   }
   if (!remove && readLocal(progress) === null) { before.set(progress, NO_PATH); changes.push({ file: progress, action: 'create' }) }
   const createdDirs = new Set(Array.isArray(loaded.createdDirs) ? loaded.createdDirs.filter((value): value is string => typeof value === 'string') : [])
   const folderKey = (folder: string): string => process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)
   const isBelow = (folder: string, parent: string): boolean => folderKey(folder).startsWith(`${folderKey(parent)}${process.platform === 'win32' ? '\\' : '/'}`)
+  // A board file named like a pending list stops setup before it writes, with the board named, so the person learns why.
+  // This is for the message only: the list is written over or deleted only when it reads as one (listOf), whatever path
+  // the board has. A name through a linked folder is compared by the real folder above it, so it is caught before the
+  // file exists.
+  const realNameOf = (file: string): string | null => {
+    const folder = realOf(dirname(file))
+    return folder === null ? null : join(folder, basename(file))
+  }
+  const isPendingList = (file: string, one: string): boolean => {
+    const real = realNameOf(file), list = realNameOf(pendingFile(one))
+    return folderKey(file) === folderKey(pendingFile(one)) || realOf(file) !== null && realOf(file) === realOf(pendingFile(one)) || real !== null && list !== null && folderKey(real) === folderKey(list)
+  }
+  if (!remove && localAgents.some(one => isPendingList(progress, one))) conflicts.push(progress)
+  // A .new copy is due, so setup would write its pending list first: a file there that is not a list stops it before that.
+  const ownList = before.get(pendingFile(agent)) ?? NO_PATH
+  const isCopyDue = keptText.some(one => changes.some(change => change.file === one.beside))
+  if (!remove && isCopyDue && ownList.kind !== 'none' && listOf(ownList) === null && !conflicts.includes(pendingFile(agent))) conflicts.push(pendingFile(agent))
   if (!remove) for (const file of [...changes.filter(change => change.action === 'create').map(change => change.file), ...(initial(manifestFile) === null ? [manifestFile] : [])]) {
     for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
   }
   const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
-  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
+  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   if (remove && agent === 'antigravity' && initial(sidecarRecord) !== null) changes.push({ file: sidecarRecord, action: 'remove' })
+  if (remove && listOf(ownList) !== null) changes.push({ file: pendingFile(agent), action: 'remove' })
   const removedDirs = new Set<string>()
   let handover: { file: string; text: string } | undefined
   if (remove) {
@@ -1711,7 +1868,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.
@@ -1815,11 +1972,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     local?.beforeApply?.(plan)
     // Each file is read again just before its change and checked after it (#1488, put and drop, as runSidecarOnly does),
     // so an edit made before that last re-read is never overwritten or removed, and a change that did not land is not
-    // reported as applied. A mismatch stops the batch at once: files written or removed before it stay (no rollback, as
-    // in the connect transaction). This agent's install record changes after every planned file (on install, other agents'
+    // reported as applied. A stale copy and the pending list go only as planned, not through the re-read removal.
+    // A mismatch stops the batch at once: files written or removed before it stay (no rollback, as in the connect
+    // transaction). This agent's install record changes after every planned file (on install, other agents'
     // records are updated after it; on remove, the handover to another agent's record comes first), so a mismatch among
-    // the planned files leaves the record as it was. The next setup plans again from the files as they are.
+    // the planned files leaves the record as it was. The next setup plans again from the files as they are. A .new copy is named in the pending list before any of them, and an older entry stays
+    // beside the new one, since a stop right here leaves the older copy on disk.
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
+    const copies = keptText.filter(one => changes.some(change => change.file === one.beside))
+    if (copies.length) put(pendingFile(agent), `${JSON.stringify({ ...ownPending, ...Object.fromEntries(copies.map(one => [one.beside, [...new Set([...(ownPending[one.beside] ?? []), hash(files[one.beside] ?? '')])]])) }, null, 2)}\n`)
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue
       if (change.file === trustConfig && nextTrust !== undefined) {
@@ -1837,6 +1998,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       else if (change.file === progress) {
         mkdirSync(dirname(progress), { recursive: true })
         writeFileSync(progress, '', { flag: 'wx', mode: 0o600 })
+      } else if (staleBeside.has(change.file) || change.file === pendingFile(agent)) {
+        // The list goes as planned or not at all, as a stale copy does. A file saved there between this read and the
+        // unlink is a gap no check closes, the same for every file a removal deletes.
+        if (!isAsPlanned(change.file)) throw new Error('INSTALL_CHANGED')
+        unlinkSync(change.file)
       } else if (remove || retired.includes(change.file)) drop(change.file)
       else put(change.file, files[change.file] ?? '')
     }
@@ -1855,7 +2021,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (sibling.files === undefined) continue
         const siblingFiles = { ...object(sibling.files) } as Record<string, string>
         let updatedSibling = false
-        for (const sharedFile of [script, worker, skill]) {
+        for (const sharedFile of [script, worker, skill, ...Object.keys(siblingFiles).filter(one => one.endsWith('.new'))]) {
           const nextText = files[sharedFile]
           if (Object.hasOwn(siblingFiles, sharedFile) && nextText !== undefined && changes.some(change => change.file === sharedFile) && siblingFiles[sharedFile] !== hash(nextText)) {
             siblingFiles[sharedFile] = hash(nextText)
@@ -1864,6 +2030,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         }
         if (updatedSibling) put(siblingFile, `${JSON.stringify({ ...sibling, files: siblingFiles }, null, 2)}\n`)
       }
+      // The records now name every copy. This also clears a list an earlier setup left when it stopped after its record;
+      // a file under that name that is not a list stays.
+      if (listOf(take(pendingFile(agent))) !== null) unlinkSync(pendingFile(agent))
     }
   })
   // A folder that cannot go (something appeared in it, or Windows holds it) stays and is not reported as removed.
