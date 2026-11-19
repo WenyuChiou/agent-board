@@ -1792,8 +1792,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         // config.toml no longer reaches (#1606): the write counts only where config.toml still points.
         let resolved: string | null = null
         try { resolved = realpathSync(trustConfig) } catch {}
-        if (resolved !== target) throw new Error('INSTALL_CHANGED')
+        // `put` already replaced the target (its temp file is 0600), so restore the person's
+        // permissions before the resolution check can report a failure (#1606).
         if (process.platform !== 'win32') chmodSync(target, mode)
+        if (resolved !== target) throw new Error('INSTALL_CHANGED')
       }
       else if (change.file === allowlistFile && nextAllowlist !== undefined) put(allowlistFile, nextAllowlist)
       else if (change.file === nativeConfig) {
