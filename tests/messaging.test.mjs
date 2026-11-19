@@ -2789,7 +2789,11 @@ const pollingProxy = async (board, mode, onClaim, onStarting) => {
     faults: () => faults, polls: () => polls, registrations: () => registrations, startings: () => startings, isIdle: () => active === 0,
     // Waits for the clients' own keep-alive connections to end instead of cutting them: a cut one can leave a client's parser
     // timer running after the test has ended.
-    closeGently: () => new Promise(done => server.close(done)),
+    // Bounded: past 6 s (a client keeps a connection 4 s after its last request) the rest are cut, as close() does.
+    closeGently: () => new Promise(done => {
+      const timer = setTimeout(() => server.closeAllConnections(), 6000)
+      server.close(() => { clearTimeout(timer); done() })
+    }),
     close: () => new Promise(done => { server.close(done); server.closeAllConnections() }),
   }
 }
