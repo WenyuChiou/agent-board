@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -242,7 +242,18 @@ const sortedKeys = (value: unknown): unknown => Array.isArray(value) ? value.map
 const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), null, 2).replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
 // A root that is not a mapping (a list, a flow document) is not something to add a key to.
 const isYamlMapping = (text: string): boolean => text.split(/\r?\n/).every(line => !/^\S/.test(line) || /^(?:#|---|\.\.\.)/.test(line) || /^(?:"[^"\n]*"|'[^'\n]*'|[^\s#{[!&*|>%@`"'-][^\n]*?)\s*:(?:\s|$)/.test(line))
-const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false): void => {
+// A name that was free when setup planned is taken only if it is still free at that instant (#1693): a rename would
+// replace a file that landed there after the last check. A hard link of the finished temporary file fails when the
+// name is taken, and so does an exclusive copy, for a disk that has no hard links.
+const createOnly = (temporary: string, file: string): void => {
+  try { linkSync(temporary, file) } catch (error) {
+    if ((error as { code?: string }).code === 'EEXIST') throw error
+    copyFileSync(temporary, file, constants.COPYFILE_EXCL)
+  }
+}
+// `placed` runs once the file holds the new bytes, before anything that can still fail: a caller that lists what landed
+// must count this file even when reading it back or removing the temporary file then fails.
+const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false, isFresh = false, placed: () => void = () => {}): void => {
   mkdirSync(dirname(file), { recursive: true })
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   const fd = openSync(temporary, 'wx', 0o600)
@@ -251,13 +262,16 @@ const atomic = (file: string, text: string | Buffer, current: () => void = () =>
     writeFileSync(fd, text)
     closeSync(fd)
     isOpen = false
-    let delay = 10, waited = 0
+    let delay = 10, waited = 0, isFree = isFresh
     for (;;) {
       current()
       try {
-        renameSync(temporary, file)
+        if (isFree) createOnly(temporary, file)
+        else renameSync(temporary, file)
         break
       } catch (error) {
+        // The name was taken after the last check: check again, which stops unless this batch wrote that file itself.
+        if (isFree && (error as { code?: string }).code === 'EEXIST') { isFree = false; continue }
         if (!retryRecord || process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(String((error as { code?: string }).code)) || waited >= 250) throw error
         const wait = Math.min(delay, 250 - waited)
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait)
@@ -265,6 +279,7 @@ const atomic = (file: string, text: string | Buffer, current: () => void = () =>
         delay *= 2
       }
     }
+    placed()
   } finally {
     if (isOpen) closeSync(fd)
     if (existsSync(temporary)) unlinkSync(temporary)
@@ -547,8 +562,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const now = take(file)
     if (now.kind !== 'file' || !isHolding(now, text)) throw new Error('INSTALL_CHANGED')
   }
-  const put = (file: string, text: string, target = file): void => {
-    atomic(target, text, () => unchanged(file, text))
+  // A .new copy where the plan found nothing is created, never written over (#1693).
+  const put = (file: string, text: string, target = file, placed?: () => void): void => {
+    atomic(target, text, () => unchanged(file, text), false, target.endsWith('.new') && (before.get(file) ?? NO_PATH).kind === 'none', placed)
     written(target, text)
     const real = realOf(target)
     if (real !== null) ours.add(real)
@@ -1993,12 +2009,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
       else {
         const copy = copies.find(one => one.beside === change.file)
-        try { put(change.file, files[change.file] ?? '') }
+        // A copy has landed once its name holds it: a read-back that fails after that still leaves it on the list.
+        try { put(change.file, files[change.file] ?? '', change.file, () => { if (copy !== undefined) landed.push(copy) }) }
         catch (error) {
           if (copy !== undefined) try { settlePending() } catch {}
           throw error
         }
-        if (copy !== undefined) landed.push(copy)
       }
     }
     if (remove) {
