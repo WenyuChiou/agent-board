@@ -417,6 +417,21 @@ test('the sidecar-only removal keeps a one-byte edit to sidecar.mjs that decodes
   assert.deepEqual(readFileSync(file), withFF(old), 'sidecar.mjs stays with the byte the person put there')
 }))
 
+test('a sidecar record holding a byte that is not valid UTF-8 stops setup and removal, which name install-antigravity-sidecar.json (#1607)', () => withHome(({ home, run }) => {
+  const { root } = connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  const recordFile = join(root, 'install-antigravity-sidecar.json')
+  const kept = Buffer.concat([Buffer.from('{\n  "note": "caf'), Buffer.of(0xff), Buffer.from(readFileSync(recordFile, 'utf8').replace(/^\{\n/, '",\n'))])
+  writeFileSync(recordFile, kept)
+  // Each command is checked before the next one runs.
+  for (const [when, args] of [['--apply', ['--agent', 'antigravity', '--antigravity-sidecar', '--apply']], ['removal', ['--remove', '--agent', 'antigravity', '--apply']]]) {
+    const result = run(args)
+    assert.notEqual(result.status, 0, `${when}: ${result.stdout}`)
+    assert.match(result.stderr, /install-antigravity-sidecar\.json/, `${when}: names the record: ${result.stderr}`)
+    assert.deepEqual(readFileSync(recordFile), kept, `${when}: the record stays byte for byte`)
+  }
+}))
+
 test('the sidecar-only removal keeps a sidecar.json holding a byte that is not valid UTF-8 where its record has a private-use character (#1607)', () => withHome(({ home, run, dir }) => {
   const { root } = connectorHome(home)
   assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
