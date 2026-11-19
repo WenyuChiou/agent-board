@@ -537,9 +537,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const isSecondName = next !== null && isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' || isOurs(file, now, next))
     // A path already gone, or the same link with its target gone, only where this batch itself removed the entry or
     // the target: a second name of a file this batch removed (its own real path), a second name of a link this batch
-    // removed (the link entry's real path, not its target), or a link whose target this batch removed.
+    // removed (the link entry's real path, not its target), a link whose target this batch removed, or a dangling
+    // link whose link text names an entry this batch removed (a chain H -> S -> C where S went first: H's final
+    // target C is not in `gone`, but the break is explained by setup's own verified removal of S).
     const entry = was.kind === 'link' ? entryReal(file) : was.real
-    const isGone = next === null && ((now.kind === 'none' && entry !== null && gone.has(entry)) || (was.kind === 'link' && now.kind === 'link' && now.link === was.link && now.bytes === null && was.real !== null && gone.has(was.real)))
+    // The entry the link text names: resolve it against the link's folder, then take that entry's real path. The
+    // first removed entry in a chain explains the break; a target another program deleted is not named by the link
+    // text, so it still stops the batch (F2).
+    const linkEntry = was.kind === 'link' && was.link !== null ? entryReal(resolve(dirname(file), was.link)) : null
+    const isGone = next === null && ((now.kind === 'none' && entry !== null && gone.has(entry)) || (was.kind === 'link' && now.kind === 'link' && now.link === was.link && now.bytes === null && was.real !== null && (gone.has(was.real) || (linkEntry !== null && gone.has(linkEntry)))))
     if (!same(was, now) && !isSecondName && !isGone) throw new Error('INSTALL_CHANGED')
     return now
   }
