@@ -8082,7 +8082,7 @@ test('a queued Codex CLI message stops waiting forever and offers Copy when a la
 })
 
 // M6 (#1596, #1587): the board ends a message store's holder only after proving it is an old board page.
-const { isBoardServe, lookUpHolder, pageState, settleStoreHolder } = await import('../scripts/message-store-claim.ts')
+const { isBoardServe, isExiting, lookUpHolder, pageState, settleStoreHolder } = await import('../scripts/message-store-claim.ts')
 const BOARD_HEAD = 'globalThis.AGENT_BOARD = {"path":"progress.md"}\n'
 const holderDeps = (overrides = {}) => {
   const kills = []
@@ -8205,6 +8205,60 @@ test('the process lookup returns command line and start time together', async ()
     await new Promise(done => child.once('exit', done))
     assert.equal(lookUpHolder(child.pid, 15_000), 'gone')
   } finally { if (child.exitCode === null) child.kill(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a holder that has exited but is not yet reaped reads as gone, not as a process the board cannot stop (#1721)', { skip: process.platform !== 'linux' && 'needs Linux /proc' }, async () => {
+  // The shell starts a short child and then becomes a long sleep that never reaps it, so the child stays a zombie.
+  const parent = spawn('/bin/sh', ['-c', 'sleep 0 & echo $!; exec sleep 30'], { stdio: ['ignore', 'pipe', 'ignore'] })
+  try {
+    const pid = Number(await new Promise((done, fail) => {
+      let text = ''
+      parent.stdout.on('data', chunk => { text += chunk; if (text.includes('\n')) done(text.trim()) })
+      parent.once('exit', () => fail(new Error('the shell ended before it named its child')))
+    }))
+    const stateOf = () => { try { const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) } catch { return '' } }
+    const end = Date.now() + 10_000
+    while (stateOf() !== 'Z' && Date.now() < end) await new Promise(done => setTimeout(done, 20))
+    assert.equal(stateOf(), 'Z', 'the child never became a zombie')
+    // It still answers a signal, as a live process does, and its command line reads empty.
+    process.kill(pid, 0)
+    assert.equal(readFileSync(`/proc/${pid}/cmdline`, 'utf8'), '')
+    assert.equal(lookUpHolder(pid, 15_000), 'gone')
+  } finally { parent.kill() }
+})
+
+test('a stat line with the exiting flag reads as exiting, and a kernel thread\'s does not (#1721)', () => {
+  const statOf = line => path => { assert.equal(path, '/proc/4242/stat'); return line }
+  // Flag 0x4 is the kernel's PF_EXITING; 4194560 is a live program's flags, 4194564 the same while it exits.
+  assert.equal(isExiting(4242, statOf('4242 (node) S 1 4242 4242 0 -1 4194560 0 0 0 0\n')), false)
+  assert.equal(isExiting(4242, statOf('4242 (node) R 1 4242 4242 0 -1 4194564 0 0 0 0\n')), true)
+  assert.equal(isExiting(4242, statOf('4242 (node) Z 1 4242 4242 0 -1 4194560 0 0 0 0\n')), true)
+  // A kernel thread also reads an empty command line, but its flags have no exiting bit.
+  assert.equal(isExiting(4242, statOf('4242 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0\n')), false)
+  // The command name may hold ") " and a state letter: the fields are read after its last ")".
+  assert.equal(isExiting(4242, statOf('4242 (x) Z 1 1 1 0 -1 4 (y) S 1 4242 4242 0 -1 4194560 0 0\n')), false)
+  assert.equal(isExiting(4242, statOf('4242 (x) S 1 1 1 0 -1 0 (y) R 1 4242 4242 0 -1 4194564 0 0\n')), true)
+  // A line cut short has no flags field: not read as exiting.
+  assert.equal(isExiting(4242, statOf('4242 (node) S 1 4242\n')), false)
+})
+
+test('a holder reaped while its state is read is gone, not unreadable (#1721)', () => {
+  const failing = code => () => { throw Object.assign(new Error(code), { code }) }
+  // No stat file any more: the process was reaped between the two reads, so it is gone.
+  assert.equal(isExiting(4242, failing('ENOENT')), true)
+  // A stat file this account cannot read proves nothing.
+  assert.equal(isExiting(4242, failing('EACCES')), false)
+})
+
+const kernelThread = (() => {
+  if (process.platform !== 'linux') return 'needs Linux /proc'
+  try {
+    const stat = readFileSync('/proc/2/stat', 'utf8')
+    return readFileSync('/proc/2/cmdline', 'utf8') === '' && stat.slice(stat.lastIndexOf(')') + 2)[0] !== 'Z' ? false : 'process 2 is not a kernel thread here'
+  } catch { return 'no process 2 here' }
+})()
+test('a kernel thread\'s empty command line is not read as gone (#1721)', { skip: kernelThread }, () => {
+  assert.equal(lookUpHolder(2, 15_000), null)
 })
 
 test('a page serving a folder given with --messages-dir is never ended', async () => {
