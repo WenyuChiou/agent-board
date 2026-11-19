@@ -1810,7 +1810,8 @@ test('a conflict in one agent leaves the others set up and names the skipped age
       const result = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', ...args)
       assert.equal(result.status, 1)
       assert.equal(result.stderr, '')
-      for (const text of ['Codex', 'Cursor', 'skipped', '--agent codex', '--agent cursor']) assert.ok(result.stdout.includes(text), result.stdout)
+      for (const text of ['Codex', 'Cursor', 'skipped', '--agent codex,cursor --apply']) assert.ok(result.stdout.includes(text), result.stdout)
+      assert.equal(result.stdout.split('Retry after fixing the conflicting files').length - 1, 1, result.stdout)
       assert.equal(existsSync(f.root), false)
     }
     const json = setupAgent(f, '--lang', 'en', '--agent', 'codex,cursor', '--apply', '--json')
@@ -2519,20 +2520,22 @@ test('Antigravity removal finishes when owned files and hook entries are already
   assert.ok(existsSync(f.progress))
 }))
 
-test('Antigravity setup still reports a user-edited owned file as a conflict', () => fixture(f => {
+test('Antigravity setup keeps a user-edited skill and puts the new version beside it (#1302)', () => fixture(f => {
   const antigravitySkill = join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')
   const installed = f.install('--agent', 'antigravity', '--apply')
   assert.equal(installed.status, 0, installed.stderr)
-  const edited = `${readFileSync(antigravitySkill, 'utf8')}Synthetic user edit\n`
+  const wanted = readFileSync(antigravitySkill, 'utf8')
+  const edited = `${wanted}Synthetic user edit\n`
   f.save(antigravitySkill, edited)
 
   const preview = f.install('--agent', 'antigravity')
   assert.equal(preview.status, 0, preview.stderr)
-  assert.ok(JSON.parse(preview.stdout).conflicts.includes(antigravitySkill), preview.stdout)
+  assert.deepEqual(JSON.parse(preview.stdout).conflicts, [], preview.stdout)
   const applied = f.install('--agent', 'antigravity', '--apply')
-  assert.notEqual(applied.status, 0)
-  assert.ok(JSON.parse(applied.stdout).conflicts.includes(antigravitySkill), applied.stdout)
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(JSON.parse(applied.stdout).keptText, [{ file: antigravitySkill, beside: `${antigravitySkill}.new` }], applied.stdout)
   assert.equal(readFileSync(antigravitySkill, 'utf8'), edited)
+  assert.equal(readFileSync(`${antigravitySkill}.new`, 'utf8'), wanted)
 }))
 
 test('setup hashes foreign hook entries and restores a missing owned hook beside them', () => fixture(f => {
@@ -4886,7 +4889,7 @@ test('--codex-doctor fails when explicit --codex-bin cannot be executed', () => 
   assert.notEqual(result.status, 0)
 }))
 
-test('Codex-only setup preserves unrelated hooks and refuses edited skill files', () => fixture(f => {
+test('Codex-only setup preserves unrelated hooks and keeps edited skill files (#1302)', () => fixture(f => {
   const unrelated = { hooks: [{ type: 'command', command: 'echo other' }] }
   f.save(f.hooks, JSON.stringify({ other: true, hooks: { Stop: [unrelated] } }))
   assert.equal(f.install('--apply').status, 0)
@@ -4895,8 +4898,848 @@ test('Codex-only setup preserves unrelated hooks and refuses edited skill files'
   assert.deepEqual(config.hooks.Stop[0], unrelated)
   writeFileSync(f.skill, 'user edited skill')
   const result = f.install('--apply')
-  assert.notEqual(result.status, 0)
+  assert.equal(result.status, 0, result.stderr + result.stdout)
   assert.equal(readFileSync(f.skill, 'utf8'), 'user edited skill')
+}))
+
+// What the install record of one agent holds, and the digest setup stores there.
+const recordOf = (f, agent) => JSON.parse(readFileSync(join(f.root, `install-${agent}.json`), 'utf8'))
+const saveRecord = (f, agent, record) => f.save(join(f.root, `install-${agent}.json`), `${JSON.stringify(record, null, 2)}\n`)
+const digest = text => createHash('sha256').update(text).digest('hex')
+
+test('an edited skill stays, its new version goes beside it, and every agent that shares it still upgrades (#1302)', () => fixture(f => {
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), edited = `${wanted}Synthetic line the person added\n`, beside = `${f.skill}.new`
+  f.save(f.skill, edited)
+
+  const preview = setupAgent(f, '--agent', 'codex,cursor', '--lang', 'en')
+  assert.equal(preview.status, 0, preview.stderr + preview.stdout)
+  assert.equal(preview.stdout.split('you edited it, so setup leaves your copy as it is').length - 1, 1, preview.stdout)
+  assert.ok(preview.stdout.includes('SKILL.md.new'), preview.stdout)
+  assert.ok(!preview.stdout.includes('setup removes it'), preview.stdout)
+  assert.match(setupAgent(f, '--agent', 'codex', '--lang', 'zh-TW').stdout, /你改過這個檔案，所以 setup 不動它/)
+  assert.match(setupAgent(f, '--agent', 'codex', '--lang', 'zh-CN').stdout, /你改过这个文件，所以 setup 不动它/)
+
+  const applied = setupAgent(f, '--agent', 'codex,cursor', '--apply', '--json')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  for (const plan of JSON.parse(applied.stdout).plans) {
+    assert.deepEqual(plan.conflicts, [], plan.agent)
+    assert.deepEqual(plan.keptText, [{ file: f.skill, beside }], plan.agent)
+    assert.equal(recordOf(f, plan.agent).files[beside], digest(wanted), plan.agent)
+  }
+  assert.equal(readFileSync(f.skill, 'utf8'), edited)
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  const repeat = setupAgent(f, '--agent', 'codex,cursor', '--apply', '--json')
+  assert.ok(JSON.parse(repeat.stdout).plans.every(plan => plan.changes.length === 0), repeat.stdout)
+  assert.match(f.command(['--codex-doctor', '--agent', 'cursor']).stdout, /Kept your edited file: .*SKILL\.md; the new version is in .*SKILL\.md\.new/)
+
+  // The person takes their edit back: the copy has no reason to stay, and no record names it.
+  f.save(f.skill, wanted)
+  assert.equal(setupAgent(f, '--agent', 'codex,cursor', '--apply', '--json').status, 0)
+  assert.equal(existsSync(beside), false)
+  for (const agent of ['codex', 'cursor']) assert.equal(recordOf(f, agent).files[beside], undefined, agent)
+}))
+
+test('a file setup did not write at the .new path stops that agent and stays as it is, even with the wanted bytes (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  for (const held of ['Synthetic note of the person\n', wanted]) {
+    f.save(beside, held)
+    const result = f.install('--agent', 'codex', '--apply')
+    assert.notEqual(result.status, 0, result.stdout)
+    assert.deepEqual(JSON.parse(result.stdout).conflicts, [beside], result.stdout)
+    assert.equal(readFileSync(beside, 'utf8'), held)
+    assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  }
+}))
+
+test('a .new copy the person changed stays when their edit is undone, and setup stops naming it (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  f.save(beside, 'Synthetic note of the person\n')
+  f.save(f.skill, wanted)
+  const result = f.install('--agent', 'codex', '--apply')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
+  assert.equal(recordOf(f, 'codex').files[beside], undefined)
+}))
+
+test('removing an agent takes away the new version setup left, and an edited skill still blocks the removal (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const blocked = f.install('--agent', 'codex', '--remove', '--apply')
+  assert.notEqual(blocked.status, 0, blocked.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  f.save(f.skill, wanted)
+  const removed = f.install('--agent', 'codex', '--remove', '--apply')
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  assert.equal(existsSync(beside), false)
+  assert.equal(existsSync(f.skill), false)
+}))
+
+test('when one agent refreshes a shared .new copy, the other agent records the bytes now there (#1302)', () => fixture(f => {
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.equal(setupAgent(f, '--agent', 'codex,cursor', '--apply', '--json').status, 0)
+  f.save(beside, 'Synthetic older new version\n')
+  for (const agent of ['codex', 'cursor']) {
+    const record = recordOf(f, agent)
+    record.files[beside] = digest('Synthetic older new version\n')
+    saveRecord(f, agent, record)
+  }
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'cursor').files[beside], digest(wanted))
+}))
+
+// One setup run in which the write to a file of this name is refused, or the process ends right after that write lands.
+const stoppedSetup = (f, name, how, ...args) => {
+  const preload = join(f.home, 'stop-setup.cjs')
+  const stop = how === 'refuse' ? `throw Object.assign(new Error('synthetic refused write'), { code: 'EIO' })` : 'rename(from, to); process.exit(9)'
+  f.save(preload, `const fs = require('node:fs')\nconst rename = fs.renameSync\nfs.renameSync = (from, to) => { if (!String(to).endsWith(${JSON.stringify(name)})) return rename(from, to); ${stop} }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  try { return f.install(...args) } finally {
+    delete f.env.NODE_OPTIONS
+    // A process that ended here left its install lock, which the next setup takes over once it is old enough.
+    if (how === 'exit') { const past = new Date(Date.now() - 120000); lutimesSync(join(f.root, 'install.lock'), past, past) }
+  }
+}
+const pendingListOf = (f, agent) => join(f.root, `install-pending-${agent}.json`)
+
+test('a retry after an apply that stopped part-way takes back the .new copy setup wrote (#1302)', async () => {
+  for (const [name, how] of [['install-codex.json', 'refuse'], ['install-codex.json', 'exit'], ['SKILL.md.new', 'exit'], ['install-pending-codex.json', 'exit']]) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(f.skill, 'Synthetic edited skill\n')
+    assert.notEqual(stoppedSetup(f, name, how, '--agent', 'codex', '--apply').status, 0, `${name} ${how}`)
+    const retry = f.install('--agent', 'codex', '--apply')
+    assert.equal(retry.status, 0, `${name} ${how}: ${retry.stderr}${retry.stdout}`)
+    assert.deepEqual(JSON.parse(retry.stdout).conflicts, [], `${name} ${how}`)
+    assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n', `${name} ${how}`)
+    assert.equal(readFileSync(beside, 'utf8'), wanted, `${name} ${how}`)
+    assert.equal(recordOf(f, 'codex').files[beside], digest(wanted), `${name} ${how}`)
+    assert.equal(existsSync(pendingListOf(f, 'codex')), false, `${name} ${how}`)
+  })
+})
+
+test('a .new copy the person changed after an apply stopped part-way stops that agent and stays (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.notEqual(stoppedSetup(f, 'install-codex.json', 'refuse', '--agent', 'codex', '--apply').status, 0)
+  f.save(beside, 'Synthetic note of the person\n')
+  const retry = f.install('--agent', 'codex', '--apply')
+  assert.notEqual(retry.status, 0, retry.stdout)
+  assert.deepEqual(JSON.parse(retry.stdout).conflicts, [beside], retry.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
+}))
+
+test('a file under a pending list\'s name that setup did not write stays through setup and removal, and stops setup before it would write there (#1302)', async () => {
+  const notes = '# Progress\n\n- [ ] Synthetic note only the person holds\n'
+  // A board named like a pending list, by any name that reaches it, stops setup before it writes, with the board named.
+  await fixture(f => {
+    const linked = join(f.home, 'linked-data')
+    mkdirSync(f.root, { recursive: true })
+    symlinkSync(f.root, linked, process.platform === 'win32' ? 'junction' : 'dir')
+    const names = [pendingListOf(f, 'codex'), pendingListOf(f, 'hermes'), join(linked, 'install-pending-codex.json'), ...(process.platform === 'win32' ? [join(f.root, 'INSTALL-PENDING-codex.json')] : [])]
+    for (const board of names) {
+      f.save(board, notes)
+      const preview = f.install('--agent', 'codex', '--progress-file', board)
+      assert.deepEqual(JSON.parse(preview.stdout).conflicts, [board], preview.stdout)
+      const applied = f.install('--agent', 'codex', '--progress-file', board, '--apply')
+      assert.notEqual(applied.status, 0, `${board}: ${applied.stdout}`)
+      assert.deepEqual(JSON.parse(applied.stdout).conflicts, [board], applied.stdout)
+      assert.equal(readFileSync(board, 'utf8'), notes, board)
+      assert.equal(existsSync(join(f.root, 'install-codex.json')), false, board)
+      assert.equal(existsSync(f.script), false, board)
+      unlinkSync(board)
+    }
+    // The same before the board exists, through the linked folder too: nothing is written, the board included.
+    for (const board of [pendingListOf(f, 'codex'), join(linked, 'install-pending-codex.json')]) {
+      const fresh = f.install('--agent', 'codex', '--progress-file', board, '--apply')
+      assert.notEqual(fresh.status, 0, `${board}: ${fresh.stdout}`)
+      assert.deepEqual(JSON.parse(fresh.stdout).conflicts, [board], fresh.stdout)
+      assert.equal(existsSync(pendingListOf(f, 'codex')), false, board)
+      assert.equal(existsSync(join(f.root, 'install-codex.json')), false, board)
+      assert.equal(existsSync(f.script), false, board)
+    }
+  })
+  // A file of the person's own there that is not a board stays through setup and removal; when a .new copy is due,
+  // setup stops before it writes and names that file.
+  for (const own of ['{\n  "note": "synthetic note of the person"\n}\n', notes]) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const list = pendingListOf(f, 'codex'), wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    f.save(list, own)
+    const setup = f.install('--agent', 'codex', '--apply')
+    assert.equal(setup.status, 0, setup.stderr + setup.stdout)
+    assert.equal(readFileSync(list, 'utf8'), own)
+    f.save(f.skill, 'Synthetic edited skill\n')
+    const due = f.install('--agent', 'codex', '--apply')
+    assert.notEqual(due.status, 0, due.stdout)
+    assert.deepEqual(JSON.parse(due.stdout).conflicts, [list], due.stdout)
+    assert.equal(readFileSync(list, 'utf8'), own)
+    assert.equal(existsSync(beside), false)
+    f.save(f.skill, wanted)
+    const removed = f.install('--agent', 'codex', '--remove', '--apply')
+    assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+    assert.equal(readFileSync(list, 'utf8'), own)
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+  })
+  // A recorded board under that name stays when setup or a removal is given another board, by flag or by environment.
+  for (const how of ['setup by flag', 'removal by flag', 'setup by environment']) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const board = pendingListOf(f, 'codex'), other = join(f.home, 'other', 'progress.md')
+    f.save(board, notes)
+    saveRecord(f, 'codex', { ...recordOf(f, 'codex'), progress: board })
+    let result
+    if (how === 'setup by environment') {
+      f.env.CLAUDE_PROGRESS_FILE = other
+      try { result = f.install('--agent', 'codex', '--apply') } finally { delete f.env.CLAUDE_PROGRESS_FILE }
+    } else result = f.install('--agent', 'codex', ...(how === 'removal by flag' ? ['--remove'] : []), '--progress-file', other, '--apply')
+    assert.equal(result.status, 0, `${how}: ${result.stderr}${result.stdout}`)
+    assert.equal(readFileSync(board, 'utf8'), notes, how)
+  })
+  await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const board = pendingListOf(f, 'codex')
+    f.save(board, notes)
+    f.save(join(f.root, 'install-codex.json'), `${JSON.stringify({ ...recordOf(f, 'codex'), progress: board }, null, 2)}\n`)
+    const removed = f.command(['--codex-remove', '--agent', 'codex', '--apply', '--json'])
+    assert.equal(removed.status, 0, `${removed.stderr}${removed.stdout}`)
+    assert.equal(readFileSync(board, 'utf8'), notes)
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+  })
+})
+
+test('a pending list that cannot be read names nothing, so a copy no record holds stops that agent (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  f.save(beside, wanted)
+  // A list with one entry setup could have written and one it could not is not setup's list, so it names nothing at all.
+  const halfList = `${JSON.stringify({ [beside]: [digest(wanted)], [f.skill]: [digest(wanted)] })}\n`
+  for (const text of ['{ not json', '[]', `${JSON.stringify({ [beside]: digest(wanted) })}\n`, `${JSON.stringify({ [f.skill]: [digest(wanted)] })}\n`, halfList]) {
+    f.save(pendingListOf(f, 'codex'), text)
+    const result = f.install('--agent', 'codex', '--apply')
+    assert.notEqual(result.status, 0, `${text}: ${result.stdout}`)
+    assert.deepEqual(JSON.parse(result.stdout).conflicts, [beside], text)
+    assert.equal(readFileSync(beside, 'utf8'), wanted, text)
+  }
+}))
+
+test('a list under the pending name that names a relative path, or a path outside this agent\'s plan, stays through setup and removal, and stops setup when a copy is due (#1686)', async () => {
+  for (const which of ['relative', 'outside']) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const list = pendingListOf(f, 'codex'), wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    const own = `${JSON.stringify({ [which === 'relative' ? 'notes.new' : join(f.home, 'notes', 'synthetic.md.new')]: [digest('Synthetic note of the person\n')] }, null, 2)}\n`
+    f.save(list, own)
+    const setup = f.install('--agent', 'codex', '--apply')
+    assert.equal(setup.status, 0, `${which}: ${setup.stderr}${setup.stdout}`)
+    assert.equal(readFileSync(list, 'utf8'), own, which)
+    f.save(f.skill, 'Synthetic edited skill\n')
+    const due = f.install('--agent', 'codex', '--apply')
+    assert.notEqual(due.status, 0, `${which}: ${due.stdout}`)
+    assert.deepEqual(JSON.parse(due.stdout).conflicts, [list], which)
+    assert.equal(readFileSync(list, 'utf8'), own, which)
+    assert.equal(existsSync(beside), false, which)
+    f.save(f.skill, wanted)
+    const removed = f.install('--agent', 'codex', '--remove', '--apply')
+    assert.equal(removed.status, 0, `${which}: ${removed.stderr}${removed.stdout}`)
+    assert.equal(readFileSync(list, 'utf8'), own, which)
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false, which)
+  })
+})
+
+test('another agent\'s pending list names a copy only by the exact path setup writes, so any other spelling leaves a copy no record holds stopping this agent (#1686)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  f.save(beside, wanted)
+  const linked = join(f.home, 'linked-skill')
+  symlinkSync(dirname(beside), linked, process.platform === 'win32' ? 'junction' : 'dir')
+  // Every one of these reaches the same copy. Setup runs in the skill's folder here, so the bare name does too, and on
+  // Windows so does the path with no drive letter.
+  const spellings = [basename(beside), join(linked, basename(beside)), ...(process.platform === 'win32' ? [beside.slice(2), `${beside.slice(0, -4).toUpperCase()}.new`, `\\\\?\\${beside}`] : [])]
+  const apply = () => spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--agent', 'codex', '--apply'], { cwd: dirname(beside), env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  for (const key of spellings) {
+    f.save(pendingListOf(f, 'hermes'), `${JSON.stringify({ [key]: [digest(wanted)] })}\n`)
+    const other = apply()
+    assert.notEqual(other.status, 0, `${key}: ${other.stdout}`)
+    assert.deepEqual(JSON.parse(other.stdout).conflicts, [beside], key)
+    assert.equal(readFileSync(beside, 'utf8'), wanted, key)
+  }
+  // The same entry by the exact path setup writes is still read.
+  f.save(pendingListOf(f, 'hermes'), `${JSON.stringify({ [beside]: [digest(wanted)] })}\n`)
+  const full = apply()
+  assert.equal(full.status, 0, full.stderr + full.stdout)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+}))
+
+test('a removal leaves the pending list in place when a file is saved under its name during the removal (#1686)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), list = pendingListOf(f, 'codex')
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.notEqual(stoppedSetup(f, 'install-codex.json', 'refuse', '--agent', 'codex', '--apply').status, 0)
+  assert.equal(existsSync(list), true, 'the stopped apply left its pending list')
+  f.save(f.skill, wanted)
+  // The person saves a note under the list's name after the removal checked its files, while it deletes the skill.
+  const note = '{\n  "note": "synthetic note of the person"\n}\n'
+  const preload = join(f.home, 'save-during-removal.cjs')
+  f.save(preload, `const fs = require('node:fs')\nconst unlink = fs.unlinkSync\nfs.unlinkSync = file => { unlink(file); if (String(file).endsWith('SKILL.md')) fs.writeFileSync(${JSON.stringify(list)}, ${JSON.stringify(note)}) }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let removed
+  try { removed = f.install('--agent', 'codex', '--remove', '--apply') } finally { delete f.env.NODE_OPTIONS }
+  assert.notEqual(removed.status, 0, removed.stdout)
+  assert.equal(readFileSync(list, 'utf8'), note)
+  assert.equal(existsSync(join(f.root, 'install-codex.json')), true, 'the record stays for the next removal')
+  const again = f.install('--agent', 'codex', '--remove', '--apply')
+  assert.equal(again.status, 0, again.stderr + again.stdout)
+  assert.equal(readFileSync(list, 'utf8'), note)
+  assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+}))
+
+test('an edit undone after an apply stopped part-way takes the copy and the pending list away (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.notEqual(stoppedSetup(f, 'install-codex.json', 'refuse', '--agent', 'codex', '--apply').status, 0)
+  assert.equal(readFileSync(beside, 'utf8'), wanted, 'the stopped apply left its copy')
+  assert.equal(existsSync(pendingListOf(f, 'codex')), true, 'the stopped apply left its pending list')
+  f.save(f.skill, wanted)
+  const retry = f.install('--agent', 'codex', '--apply')
+  assert.equal(retry.status, 0, retry.stderr + retry.stdout)
+  assert.equal(existsSync(beside), false)
+  assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+  assert.equal(recordOf(f, 'codex').files[beside], undefined)
+}))
+
+test('removing an agent after an apply stopped part-way takes away the copy and the pending list (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.notEqual(stoppedSetup(f, 'install-codex.json', 'refuse', '--agent', 'codex', '--apply').status, 0)
+  assert.equal(readFileSync(beside, 'utf8'), wanted, 'the stopped apply left its copy')
+  assert.equal(existsSync(pendingListOf(f, 'codex')), true, 'the stopped apply left its pending list')
+  f.save(f.skill, wanted)
+  const removed = f.install('--agent', 'codex', '--remove', '--apply')
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  assert.equal(existsSync(beside), false)
+  assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+}))
+
+test('an agent that shares the skill accepts the copy an apply stopped part-way left for another agent (#1302)', () => fixture(f => {
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.notEqual(stoppedSetup(f, 'install-codex.json', 'refuse', '--agent', 'codex', '--apply').status, 0)
+  const other = f.install('--agent', 'cursor', '--apply')
+  assert.equal(other.status, 0, other.stderr + other.stdout)
+  assert.equal(recordOf(f, 'cursor').files[beside], digest(wanted))
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+  assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+}))
+
+test('an agent whose record was not brought up to date still accepts the shared .new copy, and the list left behind goes (#1302)', () => fixture(f => {
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.notEqual(stoppedSetup(f, 'install-codex.json', 'exit', '--agent', 'codex', '--apply').status, 0)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+  assert.equal(recordOf(f, 'cursor').files[beside], undefined)
+  const other = f.install('--agent', 'cursor', '--apply')
+  assert.equal(other.status, 0, other.stderr + other.stdout)
+  assert.equal(recordOf(f, 'cursor').files[beside], digest(wanted))
+  assert.equal(existsSync(pendingListOf(f, 'codex')), true)
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(existsSync(pendingListOf(f, 'codex')), false)
+}))
+
+test('a .new copy that cannot be written fails the apply and leaves the skill alone (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.notEqual(stoppedSetup(f, 'SKILL.md.new', 'refuse', '--agent', 'codex', '--apply').status, 0)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(existsSync(beside), false)
+  assert.equal(recordOf(f, 'codex').files[beside], undefined)
+  const retry = f.install('--agent', 'codex', '--apply')
+  assert.equal(retry.status, 0, retry.stderr + retry.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+}))
+
+test('a second stop before a refreshed copy lands still leaves the older copy as setup\'s own (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply', '--lang', 'en').status, 0)
+  const beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.notEqual(stoppedSetup(f, 'install-codex.json', 'refuse', '--agent', 'codex', '--apply', '--lang', 'en').status, 0)
+  const older = readFileSync(beside, 'utf8')
+  assert.notEqual(stoppedSetup(f, 'install-pending-codex.json', 'exit', '--agent', 'codex', '--apply', '--lang', 'zh-TW').status, 0)
+  assert.equal(readFileSync(beside, 'utf8'), older)
+  const retry = f.install('--agent', 'codex', '--apply', '--lang', 'zh-TW')
+  assert.equal(retry.status, 0, retry.stderr + retry.stdout)
+  assert.notEqual(readFileSync(beside, 'utf8'), older)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(readFileSync(beside, 'utf8')))
+}))
+
+// Every file under the fixture home and its bytes, to show that a refused run wrote nothing.
+const bytesOf = f => tree774(f.home).filter(file => !file.includes('.test-node-runtime') && statSync(file).isFile()).map(file => [file, readFileSync(file)])
+// One setup run that is not waited for, so a second run can start while it goes on.
+const startSetup = (f, env, ...args) => new Promise((done, fail) => {
+  const child = spawn(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), ...args], { env, encoding: 'utf8', windowsHide: true })
+  let stdout = '', stderr = ''
+  const timer = setTimeout(() => child.kill(), 30000)
+  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  child.once('error', fail)
+  child.once('close', status => { clearTimeout(timer); done({ status, stdout, stderr }) })
+})
+// An environment in which setup waits before it renames a file of this name into place, with the install lock held.
+const pausedEnv = (f, name, ms) => {
+  const preload = join(f.home, 'pause-setup.cjs')
+  f.save(preload, `const fs = require('node:fs')\nconst rename = fs.renameSync\nfs.renameSync = (from, to) => { if (String(to).endsWith(${JSON.stringify(name)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${ms}); return rename(from, to) }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  return { ...f.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+}
+// Waits for a file the other run writes as its signal; this is not a retry of the thing under test.
+const untilExists = async (file, what) => {
+  for (let tries = 0; tries < 500 && !existsSync(file); tries++) await new Promise(wake => setTimeout(wake, 20))
+  assert.ok(existsSync(file), what)
+}
+// A Codex install as an earlier release left it: its board script, hook runner and Stop hook line are older, and the record holds each as written.
+const olderCodex = f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const wanted = { script: readFileSync(f.script, 'utf8'), worker: readFileSync(worker, 'utf8'), hooks: readFileSync(f.hooks, 'utf8') }
+  const older = { script: '// synthetic older board script\n', worker: '// synthetic older hook runner\n' }
+  const hooks = JSON.parse(wanted.hooks)
+  hooks.hooks.Stop[0].hooks[0].command += ' --synthetic-older-flag'
+  const olderHooks = `${JSON.stringify(hooks, null, 2)}\n`
+  const record = recordOf(f, 'codex')
+  record.files[f.script] = digest(older.script)
+  record.files[worker] = digest(older.worker)
+  record.groups.Stop = hooks.hooks.Stop[0]
+  f.save(f.script, older.script)
+  f.save(worker, older.worker)
+  f.save(f.hooks, olderHooks)
+  saveRecord(f, 'codex', record)
+  return { worker, wanted, older, olderHooks, olderStop: hooks.hooks.Stop[0] }
+}
+
+test('a .new copy setup wrote and the person then changed stops that agent while the edit stays (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  f.save(beside, 'Synthetic note of the person\n')
+  const record = readFileSync(join(f.root, 'install-codex.json'), 'utf8')
+  const result = f.install('--agent', 'codex', '--apply')
+  assert.notEqual(result.status, 0, result.stdout)
+  assert.deepEqual(JSON.parse(result.stdout).conflicts, [beside], result.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(join(f.root, 'install-codex.json'), 'utf8'), record)
+}))
+
+test('a deleted edited skill is written again and its .new copy goes (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  unlinkSync(f.skill)
+  const result = f.install('--agent', 'codex', '--apply')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.deepEqual(JSON.parse(result.stdout).conflicts, [])
+  assert.equal(readFileSync(f.skill, 'utf8'), wanted)
+  assert.equal(existsSync(beside), false)
+  assert.equal(recordOf(f, 'codex').files[beside], undefined)
+  assert.equal(recordOf(f, 'codex').files[f.skill], digest(wanted))
+}))
+
+test('a .new copy the person deleted is written again (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  unlinkSync(beside)
+  const result = f.install('--agent', 'codex', '--apply')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.deepEqual(JSON.parse(result.stdout).conflicts, [])
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+}))
+
+test('a shared .new copy put back to bytes another agent\'s record still holds is refreshed, as those bytes are setup\'s own (#1302)', () => fixture(f => {
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`, older = 'Synthetic older new version\n'
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.equal(setupAgent(f, '--agent', 'codex,cursor', '--apply', '--json').status, 0)
+  // Cursor's record was not brought up to date and still holds the older hash; the person puts those bytes back.
+  const stale = recordOf(f, 'cursor')
+  stale.files[beside] = digest(older)
+  saveRecord(f, 'cursor', stale)
+  f.save(beside, older)
+  for (const agent of ['codex', 'cursor']) {
+    const result = f.install('--agent', agent, '--apply')
+    assert.equal(result.status, 0, `${agent}: ${result.stderr}${result.stdout}`)
+    assert.deepEqual(JSON.parse(result.stdout).conflicts, [], agent)
+    assert.equal(readFileSync(beside, 'utf8'), wanted, agent)
+    assert.equal(recordOf(f, agent).files[beside], digest(wanted), agent)
+  }
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+}))
+
+test('a skill edited between the preview and the apply is kept (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`, older = 'Synthetic older skill\n'
+  const record = recordOf(f, 'codex')
+  record.files[f.skill] = digest(older)
+  saveRecord(f, 'codex', record)
+  f.save(f.skill, older)
+  const preview = JSON.parse(f.install('--agent', 'codex').stdout)
+  assert.ok(preview.changes.some(change => change.file === f.skill && change.action === 'update'), 'the preview shows the skill as unedited, to be updated')
+  assert.equal(preview.keptText, undefined)
+  f.save(f.skill, 'Synthetic edited skill\n')
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(JSON.parse(applied.stdout).keptText, [{ file: f.skill, beside }])
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+}))
+
+test('a file that appears at the .new path after setup planned is not overwritten (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const beside = `${f.skill}.new`, person = 'Synthetic note of the person\n'
+  f.save(f.skill, 'Synthetic edited skill\n')
+  // The file lands when setup opens its temporary copy of the .new file, after the plan and the batch check.
+  const preload = join(f.home, 'appear-new.cjs')
+  f.save(preload, `const fs = require('node:fs')\nconst open = fs.openSync\nlet done = false\nfs.openSync = (file, ...rest) => {\n  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.indexOf('SKILL.md.new.') : -1\n  if (!done && at >= 0) { done = true; fs.writeFileSync(file.slice(0, at) + 'SKILL.md.new', ${JSON.stringify(person)}) }\n  return open(file, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let stopped
+  try { stopped = f.install('--agent', 'codex', '--apply') } finally { delete f.env.NODE_OPTIONS }
+  assert.notEqual(stopped.status, 0, stopped.stdout)
+  assert.match(stopped.stderr, /another setup was running/)
+  assert.equal(readFileSync(beside, 'utf8'), person)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  const next = f.install('--agent', 'codex', '--apply')
+  assert.notEqual(next.status, 0, next.stdout)
+  assert.deepEqual(JSON.parse(next.stdout).conflicts, [beside], next.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), person)
+}))
+
+test('two setup runs at once for one agent leave one whole .new copy and one record (#1302)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  // The first run waits with the install lock held, just before its .new copy lands; the second starts then.
+  const first = startSetup(f, pausedEnv(f, 'SKILL.md.new', 1500), '--agent', 'codex', '--apply')
+  await untilExists(pendingListOf(f, 'codex'), 'the first run reached its .new copy')
+  const second = await startSetup(f, f.env, '--agent', 'codex', '--apply')
+  const winner = await first
+  assert.equal(winner.status, 0, winner.stderr + winner.stdout)
+  assert.notEqual(second.status, 0, second.stdout)
+  assert.match(second.stderr, /another setup was running/)
+  assert.doesNotMatch(second.stderr + second.stdout, /INSTALL_CONFLICT/)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+  assert.deepEqual([...readdirSync(f.root), ...readdirSync(dirname(f.skill))].filter(name => name.endsWith('.tmp')), [])
+  const rerun = f.install('--agent', 'codex', '--apply')
+  assert.equal(rerun.status, 0, rerun.stderr + rerun.stdout)
+  assert.deepEqual(JSON.parse(rerun.stdout).changes, [])
+}))
+
+test('two agents set up at once both end up recording the shared .new copy (#1302)', () => fixture(async f => {
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  const first = startSetup(f, pausedEnv(f, 'SKILL.md.new', 1500), '--agent', 'codex', '--apply')
+  await untilExists(pendingListOf(f, 'codex'), 'the first run reached its .new copy')
+  const second = await startSetup(f, f.env, '--agent', 'cursor', '--apply')
+  const winner = await first
+  assert.equal(winner.status, 0, winner.stderr + winner.stdout)
+  // The second run stops as busy or takes the first run's copy; it never calls that copy a conflict.
+  if (second.status !== 0) assert.match(second.stderr, /another setup was running/)
+  assert.doesNotMatch(second.stderr + second.stdout, /INSTALL_CONFLICT/)
+  for (const agent of ['codex', 'cursor']) {
+    const rerun = f.install('--agent', agent, '--apply')
+    assert.equal(rerun.status, 0, `${agent}: ${rerun.stderr}${rerun.stdout}`)
+  }
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+  assert.equal(recordOf(f, 'cursor').files[beside], digest(wanted))
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+}))
+
+test('a text file setup has no record of is kept at first setup, and a later removal names it and removes nothing (#1302)', () => fixture(f => {
+  const own = 'Synthetic skill the person already had\n', beside = `${f.skill}.new`
+  f.save(f.skill, own)
+  const first = f.install('--agent', 'codex', '--apply')
+  assert.equal(first.status, 0, first.stderr + first.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), own)
+  assert.ok(existsSync(beside), 'the new version goes beside it')
+  assert.notEqual(readFileSync(beside, 'utf8'), own)
+  const before = bytesOf(f)
+  const removal = f.install('--agent', 'codex', '--remove', '--apply', '--json')
+  assert.notEqual(removal.status, 0, removal.stdout)
+  assert.ok(JSON.parse(removal.stdout).conflicts.includes(f.skill), removal.stdout)
+  assert.deepEqual(bytesOf(f), before)
+}))
+
+test('a kept runner whose edit is undone lets the script, the runner and the hooks update together (#1302)', async () => {
+  for (const held of ['script', 'worker']) await fixture(f => {
+    const state = olderCodex(f), file = held === 'script' ? f.script : state.worker
+    f.save(file, `${state.older[held]}// synthetic line the person added\n`)
+    const kept = f.install('--agent', 'codex', '--apply')
+    assert.equal(kept.status, 0, `${held}: ${kept.stderr}${kept.stdout}`)
+    assert.deepEqual(JSON.parse(kept.stdout).keptCode, [file], held)
+    assert.equal(readFileSync(f.hooks, 'utf8'), state.olderHooks, `${held}: the hook lines stay`)
+    f.save(file, state.older[held])
+    const result = f.install('--agent', 'codex', '--apply')
+    assert.equal(result.status, 0, `${held}: ${result.stderr}${result.stdout}`)
+    const plan = JSON.parse(result.stdout)
+    assert.deepEqual(plan.conflicts, [], held)
+    assert.equal(plan.keptCode, undefined, held)
+    assert.equal(plan.keptHeld, undefined, held)
+    assert.equal(readFileSync(f.script, 'utf8'), state.wanted.script, held)
+    assert.equal(readFileSync(state.worker, 'utf8'), state.wanted.worker, held)
+    assert.equal(readFileSync(f.hooks, 'utf8'), state.wanted.hooks, held)
+    assert.deepEqual(JSON.parse(f.install('--agent', 'codex', '--apply').stdout).changes, [], `${held}: a second run has nothing to do`)
+  })
+})
+
+test('a board script edited between the preview and the apply is held with its hooks (#1302)', () => fixture(f => {
+  const state = olderCodex(f)
+  const preview = JSON.parse(f.install('--agent', 'codex').stdout)
+  assert.ok(preview.changes.some(change => change.file === f.hooks), 'the preview shows the hooks to be updated')
+  assert.equal(preview.keptCode, undefined)
+  f.save(f.script, `${state.older.script}// synthetic line the person added\n`)
+  const result = f.install('--agent', 'codex', '--apply')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.deepEqual(JSON.parse(result.stdout).keptCode, [f.script])
+  assert.equal(readFileSync(f.script, 'utf8'), `${state.older.script}// synthetic line the person added\n`)
+  assert.equal(readFileSync(f.hooks, 'utf8'), state.olderHooks, 'no new hook line is written for the old script')
+  assert.deepEqual(recordOf(f, 'codex').groups.Stop, state.olderStop)
+}))
+
+test('a skill setup wrote waits with a kept 0.24.2 board script and updates once the edit is undone (#1302)', () => fixture(f => {
+  const state = olderCodex(f), olderSkill = 'Synthetic older skill\n', wanted = readFileSync(f.skill, 'utf8')
+  const record = recordOf(f, 'codex')
+  record.files[f.skill] = digest(olderSkill)
+  saveRecord(f, 'codex', record)
+  f.save(f.skill, olderSkill)
+  // The kept script is one that knows neither --json nor --days, which the current skill text asks for.
+  f.save(f.script, `${state.older.script}// synthetic line the person added\n`)
+  const kept = f.install('--agent', 'codex', '--apply')
+  assert.equal(kept.status, 0, kept.stderr + kept.stdout)
+  assert.ok(JSON.parse(kept.stdout).keptHeld.some(one => one.file === f.skill), kept.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), olderSkill)
+  assert.equal(existsSync(`${f.skill}.new`), false)
+  assert.equal(recordOf(f, 'codex').files[f.skill], digest(olderSkill))
+  f.save(f.script, state.older.script)
+  const updated = f.install('--agent', 'codex', '--apply')
+  assert.equal(updated.status, 0, updated.stderr + updated.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), wanted)
+}))
+
+test('an edited skill beside a kept board script keeps its edit and still gets a .new copy (#1302)', () => fixture(f => {
+  const state = olderCodex(f), wanted = readFileSync(f.skill, 'utf8')
+  f.save(f.skill, 'Synthetic edited skill\n')
+  f.save(f.script, `${state.older.script}// synthetic line the person added\n`)
+  const result = f.install('--agent', 'codex', '--apply')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.deepEqual(JSON.parse(result.stdout).keptText, [{ file: f.skill, beside: `${f.skill}.new` }])
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(`${f.skill}.new`, 'utf8'), wanted)
+}))
+
+test('a skill the person deleted is written again while a board script is kept (#1302)', () => fixture(f => {
+  const state = olderCodex(f), wanted = readFileSync(f.skill, 'utf8')
+  unlinkSync(f.skill)
+  f.save(f.script, `${state.older.script}// synthetic line the person added\n`)
+  const result = f.install('--agent', 'codex', '--apply')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), wanted)
+}))
+
+test('a removal leaves a .new copy the person changed (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  f.save(beside, 'Synthetic note of the person\n')
+  f.save(f.skill, wanted)
+  const removed = f.install('--agent', 'codex', '--remove', '--apply')
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), 'Synthetic note of the person\n')
+  assert.equal(existsSync(f.skill), false)
+  assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+}))
+
+test('a removal while an edited board script is kept stops with one retry command and removes nothing (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  f.save(f.script, `${readFileSync(f.script, 'utf8')}// synthetic line the person added\n`)
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const before = bytesOf(f)
+  const result = setupAgent(f, '--remove', '--agent', 'codex', '--apply', '--lang', 'en')
+  assert.ok(result.stdout.includes("agent-board.mjs"), `the output says which file to move\n${result.stdout}`)
+  assert.equal(result.stdout.split(/\r?\n/).filter(line => /--remove/.test(line)).length, 1, `one retry command\n${result.stdout}`)
+  assert.deepEqual(bytesOf(f), before)
+}))
+
+test('removing one of two agents that share a .new copy leaves it for the other (#1302)', () => fixture(f => {
+  for (const agent of ['codex', 'cursor']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.equal(setupAgent(f, '--agent', 'codex,cursor', '--apply', '--json').status, 0)
+  const first = f.install('--agent', 'codex', '--remove', '--apply')
+  assert.equal(first.status, 0, first.stderr + first.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'cursor').files[beside], digest(wanted))
+  f.save(f.skill, wanted)
+  const last = f.install('--agent', 'cursor', '--remove', '--apply')
+  assert.equal(last.status, 0, last.stderr + last.stdout)
+  assert.equal(existsSync(beside), false)
+  assert.equal(existsSync(f.skill), false)
+}))
+
+test('an edited hook runner stays, the code and hooks written for it stay too, and setup and the doctor say so (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const plugin = join(f.home, '.config', 'opencode', 'plugins', 'agent-board-local.js')
+  const command = join(f.home, '.config', 'opencode', 'commands', 'agent-board.md')
+  const record = recordOf(f, 'opencode')
+  for (const [file, text] of [[plugin, '// synthetic older plugin\n'], [command, 'Synthetic older command\n']]) {
+    f.save(file, text)
+    record.files[file] = digest(text)
+  }
+  saveRecord(f, 'opencode', record)
+  const edited = `${readFileSync(worker, 'utf8')}// synthetic line the person added\n`
+  f.save(worker, edited)
+
+  const result = f.install('--agent', 'opencode', '--apply')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  const plan = JSON.parse(result.stdout)
+  assert.deepEqual(plan.keptCode, [worker])
+  assert.deepEqual(plan.keptHeld, [{ file: plugin, by: 'agent-board-hook.mjs' }])
+  assert.equal(readFileSync(worker, 'utf8'), edited)
+  assert.equal(readFileSync(plugin, 'utf8'), '// synthetic older plugin\n')
+  assert.notEqual(readFileSync(command, 'utf8'), 'Synthetic older command\n', 'text a host only reads still updates')
+  assert.equal(recordOf(f, 'opencode').files[worker], record.files[worker])
+  assert.equal(recordOf(f, 'opencode').files[plugin], digest('// synthetic older plugin\n'))
+  assert.deepEqual(JSON.parse(f.install('--agent', 'opencode', '--apply').stdout).changes, [], 'a second run has nothing to do')
+
+  const doctor = f.command(['--codex-doctor', '--agent', 'opencode']).stdout
+  assert.match(doctor, /installed, but not the current version/)
+  assert.match(doctor, /Next: to update, move your edited files aside and run setup again\./)
+  const plain = f.command(['--codex-setup', '--agent', 'opencode', '--plain']).stdout
+  assert.ok(plain.includes(`Kept your edited file: ${worker}; the agent runs it`), plain)
+  assert.ok(plain.includes(`Not updated: ${plugin}; it works with your edited agent-board-hook.mjs`), plain)
+  const words = setupAgent(f, '--agent', 'opencode', '--lang', 'en').stdout
+  assert.match(words, /you edited it and the agent runs it/)
+  assert.match(words, /not updated: it works with your edited agent-board-hook\.mjs/)
+}))
+
+test('an edited board script keeps the hook config byte for byte, with the hook lines its record holds (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const hooks = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  hooks.hooks.Stop[0].hooks[0].command += ' --synthetic-older-flag'
+  const config = `${JSON.stringify(hooks, null, 2)}\n`
+  f.save(f.hooks, config)
+  const record = recordOf(f, 'codex')
+  record.groups.Stop = hooks.hooks.Stop[0]
+  saveRecord(f, 'codex', record)
+  const edited = `${readFileSync(f.script, 'utf8')}// synthetic line the person added\n`
+  f.save(f.script, edited)
+
+  const result = f.install('--agent', 'codex', '--apply')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.deepEqual(JSON.parse(result.stdout).keptHeld, [{ file: f.hooks, by: 'agent-board.mjs' }], result.stdout)
+  assert.equal(readFileSync(f.script, 'utf8'), edited)
+  assert.equal(readFileSync(f.hooks, 'utf8'), config)
+  assert.deepEqual(recordOf(f, 'codex').groups.Stop, hooks.hooks.Stop[0])
+}))
+
+test('a kept hook runner whose recorded file or hook is missing stops that agent and names what is missing (#1302)', () => fixture(f => {
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  const editWorker = () => f.save(worker, `${readFileSync(worker, 'utf8')}// synthetic line the person added\n`)
+  const missing = (agent, file) => {
+    const result = f.install('--agent', agent, '--apply')
+    assert.notEqual(result.status, 0, result.stdout)
+    assert.deepEqual(JSON.parse(result.stdout).missingHeld, [{ file, by: 'agent-board-hook.mjs' }], result.stdout)
+    assert.ok(JSON.parse(result.stdout).conflicts.includes(file), result.stdout)
+  }
+  for (const agent of ['opencode', 'codex', 'hermes']) assert.equal(f.install('--agent', agent, '--apply').status, 0)
+  editWorker()
+  // With everything in place the edit is simply kept; each loss below is what stops the agent.
+  assert.equal(f.install('--agent', 'opencode', '--apply').status, 0)
+  const plugin = join(f.home, '.config', 'opencode', 'plugins', 'agent-board-local.js')
+  rmSync(plugin)
+  missing('opencode', plugin)
+  assert.equal(existsSync(plugin), false)
+  assert.match(setupAgent(f, '--agent', 'opencode', '--lang', 'en').stdout, /missing: setup cannot put back the old version while your edited agent-board-hook\.mjs stays/)
+
+  const hooks = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  delete hooks.hooks.Stop
+  f.save(f.hooks, JSON.stringify(hooks))
+  missing('codex', f.hooks)
+  assert.deepEqual(JSON.parse(readFileSync(f.hooks, 'utf8')), hooks)
+
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const event = Object.keys(recordOf(f, 'hermes').groups.hooks)[0]
+  const lines = readFileSync(config, 'utf8').split('\n'), at = lines.findIndex(line => line.trim() === `${event}:`)
+  const end = lines.findIndex((line, index) => index > at && !/^\s{4,}/.test(line))
+  f.save(config, [...lines.slice(0, at), ...lines.slice(end)].join('\n'))
+  missing('hermes', config)
+}))
+
+test('a kept board script stops the agent when the board file is moved (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  f.save(f.script, `${readFileSync(f.script, 'utf8')}// synthetic line the person added\n`)
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const moved = f.install('--agent', 'codex', '--progress-file', join(f.home, 'moved', 'board.md'), '--apply')
+  assert.notEqual(moved.status, 0, moved.stdout)
+  assert.deepEqual(JSON.parse(moved.stdout).conflicts, [f.script], moved.stdout)
+}))
+
+test('an edited runner is kept for the agent that recorded it, and an agent new to the home is not installed beside it (#1302)', () => fixture(f => {
+  const worker = join(f.root, 'agent-board-hook.mjs')
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  f.save(worker, `${readFileSync(worker, 'utf8')}// synthetic line the person added\n`)
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const added = f.install('--agent', 'cursor', '--apply')
+  assert.notEqual(added.status, 0, added.stdout)
+  assert.deepEqual(JSON.parse(added.stdout).conflicts, [worker], added.stdout)
+  assert.equal(existsSync(join(f.root, 'install-cursor.json')), false)
+  assert.equal(existsSync(join(f.home, '.cursor', 'hooks.json')), false)
+}))
+
+test('an edited OpenClaw plugin with a record is kept, and the same file with no record is refused (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'openclaw', '--apply').status, 0)
+  const plugin = join(f.root, 'adapters', 'openclaw', 'agent-board-local.mjs')
+  const config = join(f.home, '.openclaw', 'openclaw.json')
+  f.save(plugin, '// synthetic plugin the person edited\n')
+  const kept = f.install('--agent', 'openclaw', '--apply')
+  assert.equal(kept.status, 0, kept.stderr + kept.stdout)
+  assert.deepEqual(JSON.parse(kept.stdout).keptCode, [plugin], kept.stdout)
+  assert.equal(readFileSync(plugin, 'utf8'), '// synthetic plugin the person edited\n')
+  const record = recordOf(f, 'openclaw')
+  delete record.files[plugin]
+  saveRecord(f, 'openclaw', record)
+  const before = readFileSync(config, 'utf8')
+  const refused = f.install('--agent', 'openclaw', '--apply')
+  assert.notEqual(refused.status, 0, refused.stdout)
+  assert.deepEqual(JSON.parse(refused.stdout).conflicts, [plugin], refused.stdout)
+  assert.equal(readFileSync(config, 'utf8'), before)
 }))
 
 test('Codex-only setup respects an explicit progress path and preserves its bytes', () => fixture(f => {
@@ -6792,6 +7635,7 @@ test('multi-agent removal preserves the shared board for an agent skipped by a c
   const textPreview = setupAgent(f, '--remove', '--agent', 'codex,antigravity', '--lang', 'en')
   assert.equal(textPreview.status, 0, textPreview.stderr + textPreview.stdout)
   assert.match(textPreview.stdout, /Antigravity: skipped:/)
+  assert.match(textPreview.stdout, /Retry after fixing the conflicting files: .*--remove --agent antigravity --apply/)
   const removed = setupAgent(f, ...args, '--apply')
   assert.equal(removed.status, 0, removed.stderr + removed.stdout)
   const result = JSON.parse(removed.stdout)

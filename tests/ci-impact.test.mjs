@@ -639,6 +639,8 @@ test('the time check passes the Windows times that failed pull requests after #1
   // #1366's receiver tests run in parts since 164.0 s on Windows Node 24 (run 43644841624): one part's share, estimated
   // from that run's test times (40.6 s at most, with the file's start about 44 s).
   slowest['tests/opencode-receiver.test.mjs'] = 44_000
+  // #1302 adds upgrade journeys: host-upgrade's slowest Windows Node 24 run with the first two of them (run 43181075103).
+  slowest['tests/host-upgrade.test.mjs'] = 57_600
   for (const [path, ms] of Object.entries(slowest)) assert.ok(budgetOf(path) * 7 / 10 >= ms * 13 / 10, path + ': ' + budgetOf(path))
 })
 
