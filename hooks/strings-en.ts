@@ -996,6 +996,8 @@ export const EN: Strings = {
   pgMoreStepsOne: (n: number): string => `${n} more step`,
   pgVersion: (board: string): string => `v${board}`,
   pgVersions: (board: string, pkg: string): string => `board script ${board}, package ${pkg}`,
+  serveOlderScriptSetup: (board: string, pkg: string, command: string): string => `The board script is from ${board}; the package is ${pkg}. To update it, preview: ${command}, then add --apply.`,
+  serveOlderScriptPlugin: (board: string, pkg: string): string => `The board script is from ${board}; the package is ${pkg}. The Claude Code plugin wrote it. To update it, update the agent-board plugin in Claude Code, then run /progress connect.`,
   pgUnreadable: (agent: string): string => `${agent}'s progress file could not be read, so some of its tasks may be missing.`,
   pgHowFix: 'How to fix',
   pgFixAdvice: 'Check that the progress file can be read, then ask the agent to report its progress again.',

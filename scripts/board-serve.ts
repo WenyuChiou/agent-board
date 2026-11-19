@@ -4,11 +4,12 @@
 // what a press does are worked out in hooks/serve.ts; the writes are the terminal board's own
 // (board-cli.ts passes them in), so the page changes progress.md the way the pane does.
 import { createHash, randomBytes } from 'node:crypto'
+import { readdirSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
-import { basename } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { deliveryTargets } from '../hooks/hook-messages'
 import { placeOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
@@ -145,6 +146,25 @@ export const boardVersion = RELEASED.reduce((highest, release) => {
 }, '0.0.0')
 const packageVersionValue = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
 const packageVersion = /^\d+\.\d+\.\d+$/.test(packageVersionValue) ? packageVersionValue : null
+
+// How to update this install, for the page notice when the package is newer than the board
+// script (#1304). An independent install names the setup preview, with the same agents and
+// data folder the launcher names; a plugin-written copy names the plugin update. The package
+// name is the published one: this bundle ships only in @wenyuchiou/agent-board.
+const olderScriptUpdate = (): { update: 'setup' | 'plugin'; command?: string } | undefined => {
+  if (packageVersion === null) return undefined
+  const prelude = (globalThis as { AGENT_BOARD?: { codexRoot?: unknown } }).AGENT_BOARD ?? {}
+  if (typeof prelude.codexRoot !== 'string') return { update: 'plugin' }
+  let root = resolve(prelude.codexRoot)
+  const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
+  const listed = (folder: string): string[] | undefined => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
+  let agents = listed(root)
+  // A moved data folder: the board script's own folder is where the board is now.
+  if (!agents) { root = dirname(process.argv[1] ?? ''); agents = listed(root) ?? [] }
+  const opts = (agents.length ? ` --agent ${agents.join(',')}` : '') + (root !== join(homedir(), '.agent-board') ? ` --data-dir ${/[^\w.:\\/~@+,=-]/.test(root) ? `"${root}"` : root}` : '')
+  return { update: 'setup', command: `npx @wenyuchiou/agent-board@${packageVersion} setup${opts}` }
+}
+const olderScript = olderScriptUpdate()
 
 const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { ...HEADERS, 'content-type': 'application/json; charset=utf-8' })
@@ -717,7 +737,7 @@ export const startServer = (o: ServeOptions): void => {
             const now = Date.now()
             const view = o.view()
             const state = messaging.snapshot(now, o.reports?.(false))
-            const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
+            const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [], ...(olderScript === undefined ? {} : { olderScript }) }
             // The page on the network learns only that an approval waits: no command, no button.
             const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, isApprovalOff)
             const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, isLan ? handledOnly(state) : state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now, ...(approvalsShown === undefined ? {} : { approvals: approvalsShown }) }
