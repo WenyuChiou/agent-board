@@ -463,7 +463,7 @@ export const setupFailure = (error: unknown, agent: string, s: Strings): { code:
   const code = isCode(detail?.code) ? detail.code : isCode(detail?.message) ? detail.message : 'UNKNOWN'
   const unknown = s.setupAgentUnknown.toLowerCase()
   const host = localAgents.includes(agent as LocalAgent) ? s.agentNames[agent] ?? unknown : unknown
-  const record = typeof detail?.record === 'string' && /^install-[a-z]+\.json$/.test(detail.record) ? detail.record : 'install-*.json'
+  const record = typeof detail?.record === 'string' && /^install-[a-z]+(?:-sidecar)?\.json$/.test(detail.record) ? detail.record : 'install-*.json'
   const message = code === 'MISSING_ARGUMENT' ? s.setupErrorMissingValue
     : code === 'INVALID_INSTALL_RECORD' ? s.setupErrorRecord(record)
     : code === 'INVALID_CONNECT_RECORD' ? s.setupErrorConnectRecord
@@ -585,11 +585,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (real !== null) ours.add(real)
   }
   const isAsPlanned = (file: string): boolean => same(take(file), before.get(file) ?? NO_PATH)
+  // A board run (a report, a hook event, a status, a hook recovery, the mailbox) only reads where the board is from the
+  // install records and writes none of them, so it reads them as main does (#1607).
+  const isInstallRun = mode === '--codex-setup' || mode === '--codex-remove' || mode === '--codex-trust' || mode === '--hermes-trust' || mode === '--codex-doctor'
   const jsonInitial = (file: string): Json => {
     try {
-      // An install record that is not valid UTF-8 stops the run, another agent's too: skipping it could let a
-      // removal delete a shared file that record still names (#1607).
-      if (isUnreadable(file)) throw new SyntaxError('not valid UTF-8')
+      // An install record that is not valid UTF-8 stops setup, removal, trust and doctor, another agent's record too:
+      // skipping it could let a removal delete a shared file that record still names (#1607).
+      if (isInstallRun && isUnreadable(file)) throw new SyntaxError('not valid UTF-8')
       const record = object(JSON.parse(initial(file) ?? '{}'))
       if (record.files !== undefined) object(record.files)
       if (record.groups !== undefined) object(record.groups)
@@ -1692,7 +1695,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const heads = Object.keys(STRINGS).flatMap(one => versions.flatMap(version => [undefined, root].map(folder => JSON.stringify({ hookVersion: version, path: progress, codexRoot: folder, lang: one }))))
     return !heads.some(line => boardRecords.includes(hash(`globalThis.AGENT_BOARD = ${line}\n${body}`)))
   }
-  const isOwnedFile = (file: string, existing: string): boolean => ownHash(file, existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === ownHash(file, existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing)))
+  // A file that is not valid UTF-8 is never setup's, even when its decoded text reads as a released board or skill (#1607).
+  const isOwnedFile = (file: string, existing: string): boolean => !isUnreadable(file) && (ownHash(file, existing) === manifest.files[file] || !remove && (otherManifests.some(one => object(one.files ?? {})[file] === ownHash(file, existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing)))
   // Text a host only reads can take a new version beside it. Everything else is code a host loads or a manifest it trusts.
   const isTextFile = (file: string): boolean => /\.(?:toml|md)$/.test(file)
   const isKeptRunner = (file: string): boolean => {
