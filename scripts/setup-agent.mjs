@@ -600,10 +600,10 @@ const main = () => {
   const boardPlan = available.length ? results[selected.indexOf(available[0])] : null
   const boardFile = boardPlan ? boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs') : ''
   // The package launcher cannot discover a custom install from the account's default locations.
-  const boardDirectory = boardFile ? dirname(resolve(boardFile)) : ''
-  const boardCommand = boardFile ? command
-    ? [command.replace(/\s+(?:setup|remove)\s*$/, ''), ...(boardDirectory !== resolve(homedir(), '.agent-board') ? ['--data-dir', quote(boardDirectory)] : [])].join(' ')
-    : nodeCommand(boardFile) : ''
+  const commandFor = file => command
+    ? [command.replace(/\s+(?:setup|remove)\s*$/, ''), ...(dirname(resolve(file)) !== resolve(homedir(), '.agent-board') ? ['--data-dir', quote(dirname(resolve(file)))] : [])].join(' ')
+    : nodeCommand(file)
+  const boardCommand = boardFile ? commandFor(boardFile) : ''
   if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
     const approvals = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
@@ -646,22 +646,25 @@ const main = () => {
       const completed = []
       // What each apply did. The files can change while setup waits for the answer, and the apply plans again (#1698).
       const appliedPlans = {}
+      // Every apply runs before any agent is called done: a later agent's apply can write back the board script an
+      // earlier agent with nothing to apply shares (#1698).
+      for (const [i, agent] of selected.entries()) {
+        if (plans[i].conflicts.length || !plans[i].changes.length) continue
+        try {
+          const applied = run(agent, true)
+          if (applied.applied === true && !applied.conflicts.length) appliedPlans[agent] = applied
+        } catch {}
+      }
       for (const [i, agent] of selected.entries()) {
         const plan = plans[i]
         // A skipped agent's preview line already names its files and the command to apply it.
         if (plan.conflicts.length) continue
-        let isDone = true
-        try {
-          if (plan.changes.length) {
-            const applied = run(agent, true)
-            isDone = applied.applied === true && !applied.conflicts.length
-            if (isDone) appliedPlans[agent] = applied
-          // With nothing to apply, the agent is done only while the board script every way runs is still there; else the
-          // line says to run setup for it again, which writes the script back (#1698).
-          } else isDone = isFile(plan.script ?? join(plan.data, 'agent-board.mjs'))
-          if (isDone) completed.push(agent)
-        } catch { isDone = false }
-        if (!isDone) process.exitCode = 1
+        // With nothing to apply, an agent setup writes for is done only while the board script every way runs is there
+        // after the applies; else the line says to run setup for it again, which writes the script back. An agent the
+        // connector manages has no file of setup's to look at (#1698).
+        const isDone = plan.changes.length ? appliedPlans[agent] !== undefined : plan.managedBy === 'connector' || isFile(join(plan.data, 'agent-board.mjs'))
+        if (isDone) completed.push(agent)
+        else process.exitCode = 1
         report(words('filesPart', { host: names[agent] }), isDone, setupCommand(['--agent', agent, '--apply']))
       }
       for (const agent of approvals) {
@@ -704,6 +707,8 @@ const main = () => {
       // the file it rests on; a way is named only while that file is there now, else the board opens from a terminal,
       // as it always does in Cursor, which has no command (#1698).
       const ways = new Map()
+      // The terminal line's command runs the board script of the agents it names; setup writes one for them all.
+      let terminalFile = ''
       for (const agent of completed) {
         const plan = appliedPlans[agent] ?? plans[selected.indexOf(agent)]
         if (plan.managedBy === 'connector') continue
@@ -716,6 +721,7 @@ const main = () => {
           const opens = plan.opens
           const isThere = opens !== undefined && isFile(opens.file)
           ways.set(names[agent], !isThere ? 'terminal' : opens.way === '/board' ? 'old' : opens.way === 'skill' && ['codex', 'hermes'].includes(agent) ? agent : 'slash')
+          if (!isThere) terminalFile = join(plan.data, 'agent-board.mjs')
         }
       }
       // One retry command for every agent that was skipped, here as in the run without a terminal.
@@ -736,7 +742,7 @@ const main = () => {
           if (named('codex')) next.push(words('thenBoardCodex'))
           if (named('hermes')) next.push(words('thenBoardHermes'))
           if (named('old')) next.push(words('thenBoardOld', { agents: named('old') }))
-          if (named('terminal')) next.push(words('thenBoardTerminal', { agents: named('terminal'), command: boardCommand }))
+          if (named('terminal')) next.push(words('thenBoardTerminal', { agents: named('terminal'), command: commandFor(terminalFile) }))
         }
       }
       if (next.length) process.stdout.write(`\n${words('next')}\n${next.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n`)

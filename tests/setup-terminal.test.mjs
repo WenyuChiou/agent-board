@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { bootstrap, locales, terminal, succeeded, claudeCalls, pluginCommands, assertTrusted } from './helpers/setup-fixture.mjs'
 
 // These behavioral cases retain fresh homes and the real setup command for every run.
@@ -51,16 +53,26 @@ const olderHome = (f, agents, { board = oldCommand, isEdited = true } = {}) => {
 }
 // The board skill an agent reads: Hermes Agent's and OpenClaw's own, else the shared one.
 const skillOf = (f, agent) => join(agent === 'hermes' ? f.env.HERMES_HOME : agent === 'openclaw' ? f.env.OPENCLAW_STATE_DIR : join(f.env.HOME, '.agents'), 'skills', 'agent-board', 'SKILL.md')
-// Runs setup and answers yes, with `change` (Node code, `fs` in scope) done once as setup reads the answer.
-const invokeChanging = (f, args, change) => {
+// Runs setup and answers yes, with `change` (Node code, `fs` in scope) done once as setup reads the answer; `run` is how
+// setup is started, by default with the fixture's progress file.
+const invokeChanging = (f, args, change, run = f.invoke) => {
   const preload = join(f.root, 'change-on-answer.cjs'), mark = join(f.root, 'changed')
   writeFileSync(preload, `const fs = require('node:fs')\nconst read = fs.readSync\nfs.readSync = (fd, ...rest) => {\n  if (fd === 0 && !fs.existsSync(${JSON.stringify(mark)})) { fs.writeFileSync(${JSON.stringify(mark)}, ''); ${change} }\n  return read(fd, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
   f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
   let result
-  try { result = f.invoke(args, 'yes\n') } finally { delete f.env.NODE_OPTIONS }
+  try { result = run(args, 'yes\n') } finally { delete f.env.NODE_OPTIONS }
   assert.ok(existsSync(mark), 'setup read the answer')
   return result
 }
+// The connector's record of the agent it manages, in the home's .agent-board folder, with the progress file it connected.
+const connectorManages = (f, agent, label, progress) => {
+  const control = join(realpathSync(f.env.HOME), '.agent-board')
+  mkdirSync(control, { recursive: true })
+  writeFileSync(join(control, 'legacy-connect.json'), JSON.stringify({ version: 1, revision: 1, disabled: false, owned: {}, notified: [], ...(progress ? { connectedProgress: progress } : {}), setup: { agents: [{ agent, label, hook: 'configured', board: 'none' }], problems: [], node: process.version } }))
+}
+// Setup started with no progress file named, as from a shell: the connector's record says where its board script is.
+const installer = fileURLToPath(new URL('../scripts/setup-agent.mjs', import.meta.url))
+const unnamed = f => (args, input) => spawnSync(process.execPath, [installer, '--home', f.env.HOME, '--data-dir', join(f.root, 'data'), ...args], { env: f.env, input, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
 
 test('setup\'s next steps name /board, not /agent-board, for an agent whose command waits (#1698)', () => terminal(f => {
   const { commands } = olderHome(f, ['opencode', 'cursor'])
@@ -221,6 +233,68 @@ test('setup does not say an agent\'s files are done, or name a way to open the b
     f.env.AGENT_BOARD_SETUP_TTY = '1'
     const script = join(f.root, 'data', 'agent-board.mjs')
     check(f, script, invokeChanging(f, ['--agent', 'openclaw', '--lang', 'en'], `fs.rmSync(${JSON.stringify(script)})`))
+  })
+  // OpenClaw and Cursor both set up, so no apply writes the script back: neither is done.
+  terminal(f => {
+    delete f.env.AGENT_BOARD_SETUP_TTY
+    succeeded(f.invoke(['--agent', 'openclaw,cursor', '--lang', 'en', '--apply']))
+    f.env.AGENT_BOARD_SETUP_TTY = '1'
+    const script = join(f.root, 'data', 'agent-board.mjs')
+    const result = invokeChanging(f, ['--agent', 'openclaw,cursor', '--lang', 'en'], `fs.rmSync(${JSON.stringify(script)})`)
+    check(f, script, result)
+    assert.match(result.stdout, /Cursor files: failed\. Run: \S[^\n]*--agent cursor --apply/, result.stdout)
+    assert.doesNotMatch(result.stdout.split('Next steps:')[1] ?? '', /Cursor/, result.stdout)
+  })
+})
+
+test('setup calls an agent with nothing to apply done when a later agent\'s apply writes the deleted board script back (#1698)', () => {
+  // OpenClaw is set up and has nothing to apply; Cursor's apply writes the board script they share, in either order.
+  for (const agents of ['openclaw,cursor', 'cursor,openclaw']) terminal(f => {
+    delete f.env.AGENT_BOARD_SETUP_TTY
+    succeeded(f.invoke(['--agent', 'openclaw', '--lang', 'en', '--apply']))
+    f.env.AGENT_BOARD_SETUP_TTY = '1'
+    const script = join(f.root, 'data', 'agent-board.mjs')
+    const result = invokeChanging(f, ['--agent', agents, '--lang', 'en'], `fs.rmSync(${JSON.stringify(script)})`)
+    succeeded(result)
+    assert.match(result.stdout, /OpenClaw files: done\./, `${agents}: ${result.stdout}`)
+    assert.match(result.stdout, /Cursor files: done\./, `${agents}: ${result.stdout}`)
+    assert.ok(statSync(script).isFile(), agents)
+    const next = result.stdout.split('Next steps:')[1] ?? ''
+    assert.match(next, /Then type \/agent-board in OpenClaw, Claude Code\./, `${agents}: ${result.stdout}`)
+    assert.match(next, /For Cursor, open the board from a terminal with \S/, `${agents}: ${result.stdout}`)
+    assert.ok(next.includes(script), `${agents}: ${result.stdout}`)
+  })
+})
+
+test('setup leaves an agent the connector manages as done and gives the next agent the command for its own board script (#1698)', () => {
+  // The connector manages Antigravity and saved no progress file, so no board script is where setup works it out.
+  terminal(f => {
+    connectorManages(f, 'antigravity', 'Antigravity')
+    const result = f.invoke(['--agent', 'antigravity,cursor', '--lang', 'en'], 'yes\n')
+    succeeded(result)
+    assert.match(result.stdout, /Antigravity files: done\./, result.stdout)
+    assert.doesNotMatch(result.stdout, /failed/, result.stdout)
+    assert.match(result.stdout, /Also write the Antigravity sidecar/, result.stdout)
+    const script = join(f.root, 'data', 'agent-board.mjs'), next = result.stdout.split('Next steps:')[1] ?? ''
+    assert.match(next, /For Cursor, open the board from a terminal with \S/, result.stdout)
+    assert.ok(next.includes(script) && statSync(script).isFile(), result.stdout)
+  })
+  // The connector manages Codex, whose board script goes while setup waits; Cursor's line names the data folder's own,
+  // from the node command and from the npm one.
+  for (const command of ['', 'npx @wenyuchiou/agent-board setup']) terminal(f => {
+    const conn = join(f.root, 'conn'), data = join(f.root, 'data')
+    mkdirSync(conn, { recursive: true })
+    writeFileSync(join(conn, 'agent-board.mjs'), '// synthetic connector board script\n')
+    connectorManages(f, 'codex', 'Codex', join(conn, 'progress.md'))
+    delete f.env.CLAUDE_PROGRESS_FILE
+    f.env.AGENT_BOARD_SETUP_COMMAND = command
+    const result = invokeChanging(f, ['--agent', 'codex,cursor', '--lang', 'en'], `fs.rmSync(${JSON.stringify(join(conn, 'agent-board.mjs'))})`, unnamed(f))
+    succeeded(result)
+    assert.match(result.stdout, /Codex files: done\./, result.stdout)
+    const next = result.stdout.split('Next steps:')[1] ?? ''
+    assert.ok(!next.includes(conn), result.stdout)
+    if (command) assert.ok(next.includes('For Cursor, open the board from a terminal with npx @wenyuchiou/agent-board --data-dir ') && next.includes(data), result.stdout)
+    else assert.ok(next.includes(join(data, 'agent-board.mjs')) && statSync(join(data, 'agent-board.mjs')).isFile(), result.stdout)
   })
 })
 
