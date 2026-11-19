@@ -1951,17 +1951,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // A progress file setup cannot read, a link to nothing, is planned as absent, so it would never match and is left out
     // while it still reads so (#1712): a new plan would read it the same way. One setup can read, setup's own record
     // included, is checked like every other path, so a target that appeared since the plan stops the run as busy. A link
-    // to the install lock reads only while this check holds the lock, a file the check itself writes, and is left out too.
+    // to the install lock reads only while this check holds the lock, a file the check itself writes, and is left out too,
+    // only then: without the lock, a file there is not this run's.
     const lockFile = join(installControlRoot(home), 'install.lock')
-    const isUnreadProgress = (file: string): boolean => {
+    const isUnreadProgress = (file: string, isLocked: boolean): boolean => {
       const now = file === progress && before.get(file)?.kind === 'none' ? take(file) : null
       if (now?.kind !== 'link') return false
-      const real = now.bytes === null ? null : realOf(file)
+      const real = isLocked && now.bytes !== null ? realOf(file) : null
       return now.bytes === null || real !== null && real === realOf(lockFile)
     }
-    const isChanged = (): void => { for (const file of before.keys()) if (!isUnreadProgress(file) && !isAsPlanned(file)) throw new Error('INSTALL_CHANGED') }
-    if (existsSync(installControlRoot(home))) withInstallLock(home, isChanged)
-    else isChanged()
+    const isChanged = (isLocked: boolean): void => { for (const file of before.keys()) if (!isUnreadProgress(file, isLocked) && !isAsPlanned(file)) throw new Error('INSTALL_CHANGED') }
+    if (existsSync(installControlRoot(home))) withInstallLock(home, () => isChanged(true))
+    else isChanged(false)
   }
   if (!args.includes('--apply')) { outputPlan(plan); return true }
   if (conflicts.length) {
