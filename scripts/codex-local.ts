@@ -1700,7 +1700,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       withInstallLock(home, () => {
         if (!isAsPlanned(allowlistFile)) throw new Error('INSTALL_CHANGED')
         const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-        atomic(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
+        // The allowlist is read again just before the rename and checked after it (put, as every other write in the
+        // batch does), so an edit made between the check above and the rename is never written over (#1606).
+        put(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
       })
     }
     output({ mode: 'trust', agent, file: allowlistFile, entries: wanted.map(([event, command]) => ({ event, command, trusted: isApplied || !missing.some(one => one[0] === event) })), changes: missing.length, ...(isApplied ? { applied: true } : {}) })
@@ -1786,6 +1788,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         const target = realpathSync(trustConfig)
         const mode = statSync(target).mode & 0o777
         put(trustConfig, nextTrust, target)
+        // A link further along config.toml's chain repointed after `target` was found leaves the write on a file
+        // config.toml no longer reaches (#1606): the write counts only where config.toml still points.
+        let resolved: string | null = null
+        try { resolved = realpathSync(trustConfig) } catch {}
+        if (resolved !== target) throw new Error('INSTALL_CHANGED')
         if (process.platform !== 'win32') chmodSync(target, mode)
       }
       else if (change.file === allowlistFile && nextAllowlist !== undefined) put(allowlistFile, nextAllowlist)
