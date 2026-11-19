@@ -214,17 +214,78 @@ export const approvalTitle = (view: View, agent: string, session: string, s: Str
   return place?.task || place?.project || agentLabel(agent, s)
 }
 
+// Where the board and Claude Code's hook write and read the off-switch and refusal record beside the address file.
+export const approvalsOffFile = (file: string): string => file.replace(/\.json$/, '-approvals-off.json')
+export const approvalsRefusedFile = (file: string): string => file.replace(/\.json$/, '-approvals-refused.json')
+
+// Why the hook refused to send a command to the board, matching the reason codes written by claude-approval.mjs.
+export const APPROVAL_REFUSAL_REASONS = [
+  'no-lookup',
+  'lookup-timeout',
+  'lookup-failed',
+  'not-listening',
+  'empty-command-line',
+  'not-node',
+  'not-board-script',
+] as const
+
+export type ApprovalRefusalReason = (typeof APPROVAL_REFUSAL_REASONS)[number]
+
+export type ApprovalRefusal =
+  | { reason: ApprovalRefusalReason; at: string; note: string }
+  | { reason: 'unreadable'; at: null; note: string }
+
+export type ApprovalsState = {
+  isLockdown?: boolean
+  isOff?: boolean
+  refusal?: ApprovalRefusal
+}
+
+const REFUSAL_NOTE_KEY: Readonly<Record<ApprovalRefusalReason | 'unreadable', { [K in keyof Strings]: Strings[K] extends string ? K : never }[keyof Strings]>> = {
+  'no-lookup': 'approvalRefusedNoLookup',
+  'lookup-timeout': 'approvalRefusedLookupTimeout',
+  'lookup-failed': 'approvalRefusedLookupFailed',
+  'not-listening': 'approvalRefusedNotListening',
+  'empty-command-line': 'approvalRefusedEmptyCommandLine',
+  'not-node': 'approvalRefusedNotNode',
+  'not-board-script': 'approvalRefusedNotBoardScript',
+  unreadable: 'approvalRefusedUnreadable',
+}
+
+// Plain-language note for a refusal reason code from claude-approval.mjs or an unreadable refusal file.
+export const approvalRefusalNote = (reason: ApprovalRefusalReason | 'unreadable', s: Strings = ZH_TW): string => s[REFUSAL_NOTE_KEY[reason]]
+
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
+const REFUSAL_REASON_SET = new Set<string>(APPROVAL_REFUSAL_REASONS)
+
+// Parses a refusal record from disk; malformed JSON, unknown reasons, or non-ISO timestamps count as unreadable.
+export const parseApprovalRefusal = (raw: string): { reason: ApprovalRefusalReason; at: string } | null => {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const record = parsed as Record<string, unknown>
+    if (typeof record.reason !== 'string' || !REFUSAL_REASON_SET.has(record.reason)) return null
+    if (typeof record.at !== 'string' || !ISO_TIMESTAMP_RE.test(record.at) || !Number.isFinite(Date.parse(record.at))) return null
+    return { reason: record.reason as ApprovalRefusalReason, at: record.at }
+  } catch {
+    return null
+  }
+}
+
 // What /api/board carries: nothing when nothing waits; on the page on the network only how many
-// wait and the line that says so, never the command and never a button. With approvals turned off
-// (a pairing key was used twice), the computer's page says so, and every request goes to its window.
-export const approvalsPayload = (items: readonly Approval[], view: View, isLan: boolean, isPaired: boolean, s: Strings = ZH_TW, isOff = false): { waiting: number; note: string } | { cards: ApprovalCard[]; note?: string } | undefined => {
+// wait and the line that says so, never the command, button, off-switch, or hook refusal. With
+// approvals turned off by key-replay lockdown, cards still shown carry no button, and one line says so.
+export const approvalsPayload = (items: readonly Approval[], view: View, isLan: boolean, isPaired: boolean, s: Strings = ZH_TW, state: boolean | ApprovalsState = false): { waiting: number; note: string } | { cards: ApprovalCard[]; note?: string; isOff?: true; refusal?: ApprovalRefusal } | undefined => {
   if (isLan) {
     const waiting = items.filter(one => one.state !== 'window').length
     return waiting === 0 ? undefined : { waiting, note: s.approvalLanWaiting(waiting) }
   }
-  if (isOff) return { cards: approvalCards(items, view, false, s), note: s.approvalOff }
+  const { isLockdown = false, isOff = false, refusal } = typeof state === 'boolean' ? { isLockdown: state } : state
+  const cards = approvalCards(items, view, isLockdown || isOff ? false : isPaired, s)
+  if (isLockdown) return { cards, note: s.approvalOff, ...(refusal === undefined ? {} : { refusal }) }
+  if (cards.length === 0 && !isOff && refusal === undefined) return undefined
 
-  return items.length === 0 ? undefined : { cards: approvalCards(items, view, isPaired, s) }
+  return { cards, ...(isOff ? { isOff: true } : {}), ...(refusal === undefined ? {} : { refusal }) }
 }
 
 export const approvalCards = (items: readonly Approval[], view: View, isPaired: boolean, s: Strings = ZH_TW): ApprovalCard[] =>

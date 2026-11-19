@@ -4,11 +4,12 @@
 // what a press does are worked out in hooks/serve.ts; the writes are the terminal board's own
 // (board-cli.ts passes them in), so the page changes progress.md the way the pane does.
 import { createHash, randomBytes } from 'node:crypto'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
-import { basename } from 'node:path'
+import { basename, dirname } from 'node:path'
 import { deliveryTargets } from '../hooks/hook-messages'
 import { placeOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
@@ -35,8 +36,8 @@ import type { BarStyle } from '../hooks/progress-bar'
 import { isSettingsLang } from '../hooks/board-settings'
 import type { SettingsLang } from '../hooks/board-settings'
 import type { SettingsAgentControl } from './settings-agents'
-import { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_KEY_MS, APPROVAL_MAX, APPROVAL_PAGE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, APPROVAL_WINDOW_MS, approvalOf, approvalPlace, approvalsPayload, approvalTitle, decisionOf, isAskingMode, journalStep, pressProblem, readAsk, readPress } from '../hooks/approvals'
-import type { Approval, ApprovalDecision } from '../hooks/approvals'
+import { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_KEY_MS, APPROVAL_MAX, APPROVAL_PAGE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, APPROVAL_WINDOW_MS, approvalOf, approvalPlace, approvalsOffFile, approvalsPayload, approvalsRefusedFile, approvalRefusalNote, approvalTitle, decisionOf, isAskingMode, journalStep, parseApprovalRefusal, pressProblem, readAsk, readPress } from '../hooks/approvals'
+import type { Approval, ApprovalDecision, ApprovalRefusal } from '../hooks/approvals'
 
 export type ServeOptions = {
   allowResume?: boolean
@@ -105,6 +106,10 @@ export type ServeOptions = {
   watch?: { progress: string; inbox: string; fs?: WatchFn }
   // The tests' shorter waits for an open board request; the board uses BOARD_HOLD_MS and BOARD_FALLBACK_MS.
   boardTimes?: { holdMs?: number; fallbackMs?: number }
+  // Address file path used to locate sibling approvals-off and approvals-refused state files.
+  addressFile?: string
+  // Wall clock override for deterministic hook-race ordering tests.
+  now?: () => number
 }
 
 type Result = { ok: boolean; note: string }
@@ -130,6 +135,97 @@ const BOARD_WAKE_MS = 25
 const BOARD_PROBE_MS = 1500
 
 const HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' }
+const REFUSAL_MAX_BYTES = 4096
+
+const isRealDir = (dir: string): boolean => {
+  try {
+    const stat = lstatSync(dir)
+    return stat.isDirectory() && !stat.isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+const isOffMarkerAt = (addressFile: string): boolean => {
+  try {
+    lstatSync(approvalsOffFile(addressFile))
+    return true
+  } catch (error) {
+    // Fail closed on unreadable/ambiguous paths, matching scripts/claude-approval.mjs.
+    return (error as NodeJS.ErrnoException)?.code !== 'ENOENT'
+  }
+}
+
+const writeOffMarker = (addressFile: string, atIso: string): boolean => {
+  const offPath = approvalsOffFile(addressFile)
+  if (!isRealDir(dirname(offPath))) return false
+  try {
+    writeFileSync(offPath, `${JSON.stringify({ at: atIso })}\n`, { flag: 'wx', mode: 0o600 })
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') return false
+    try {
+      const stat = lstatSync(offPath)
+      return stat.isFile() && !stat.isSymbolicLink()
+    } catch {
+      return false
+    }
+  }
+}
+
+const removeOffMarker = (addressFile: string): boolean => {
+  const offPath = approvalsOffFile(addressFile)
+  if (!isRealDir(dirname(offPath))) return false
+  try {
+    const stat = lstatSync(offPath)
+    if (!stat.isFile() || stat.isSymbolicLink()) return false
+    unlinkSync(offPath)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === 'ENOENT'
+  }
+}
+
+const readRefusal = (addressFile: string, lastPassedAskAt: number, s: Strings): ApprovalRefusal | undefined => {
+  const record = approvalsRefusedFile(addressFile)
+  const unreadable = (): ApprovalRefusal => ({ reason: 'unreadable', at: null, note: approvalRefusalNote('unreadable', s) })
+  let lst
+  try {
+    lst = lstatSync(record, { bigint: true })
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? undefined : unreadable()
+  }
+  if (!lst.isFile() || lst.isSymbolicLink() || lst.size > BigInt(REFUSAL_MAX_BYTES)) return unreadable()
+  let fd: number
+  try {
+    fd = openSync(record, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  } catch {
+    return unreadable()
+  }
+  let raw: string
+  try {
+    const fst = fstatSync(fd, { bigint: true })
+    if (!fst.isFile() || fst.size > BigInt(REFUSAL_MAX_BYTES) || (lst.ino !== 0n && (fst.dev !== lst.dev || fst.ino !== lst.ino))) return unreadable()
+    const buf = Buffer.allocUnsafe(REFUSAL_MAX_BYTES + 1)
+    let total = 0
+    while (total < buf.length) {
+      const n = readSync(fd, buf, total, buf.length - total, null)
+      if (n === 0) break
+      total += n
+    }
+    if (total > REFUSAL_MAX_BYTES) return unreadable()
+    raw = buf.toString('utf8', 0, total)
+  } catch {
+    return unreadable()
+  } finally {
+    try { closeSync(fd) } catch {}
+  }
+  const parsed = parseApprovalRefusal(raw)
+  if (parsed === null) return unreadable()
+  // Ignore a stale refusal stamped before or alongside a passing hook check.
+  if (Date.parse(parsed.at) <= lastPassedAskAt) return undefined
+  return { reason: parsed.reason, at: parsed.at, note: approvalRefusalNote(parsed.reason, s) }
+}
 
 const versionParts = (version: string): number[] => version.split('.').map(Number)
 const isNewerVersion = (candidate: string, current: string): boolean => {
@@ -385,6 +481,9 @@ export const startServer = (o: ServeOptions): void => {
   // A host asked for an approval since the board started: only then does an open page that cannot
   // answer one make the board script open another.
   let hasAsked = false
+  const clockNow = o.now ?? Date.now
+  let lastPassedAskAt = 0
+  const isUserSwitchedOff = (): boolean => o.addressFile !== undefined && isOffMarkerAt(o.addressFile)
   const secretMs = o.approvalTimes?.secretMs ?? APPROVAL_SECRET_MS
   const graceMs = o.approvalTimes?.graceMs ?? APPROVAL_GRACE_MS
   // The sessions whose first press the person confirmed on the page.
@@ -718,8 +817,9 @@ export const startServer = (o: ServeOptions): void => {
             const view = o.view()
             const state = messaging.snapshot(now, o.reports?.(false))
             const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-            // The page on the network learns only that an approval waits: no command, no button.
-            const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, isApprovalOff)
+            // The page on the network learns only that an approval waits: no command, no button, no off-switch or refusal.
+            const refusal = !isLan && o.addressFile !== undefined ? readRefusal(o.addressFile, lastPassedAskAt, o.s) : undefined
+            const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, { isLockdown: isApprovalOff, isOff: !isLan && isUserSwitchedOff(), refusal })
             const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, isLan ? handledOnly(state) : state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now, ...(approvalsShown === undefined ? {} : { approvals: approvalsShown }) }
             // The page already compares its clock at minute precision. Keep that refresh boundary
             // without treating each millisecond as changed content; replies and receipts stay exact.
@@ -774,7 +874,7 @@ export const startServer = (o: ServeOptions): void => {
       loadedAt = 0
       return json(res, 200, {})
     }
-    if (url.pathname === '/api/open' || url.pathname === '/api/approvals/ask' || url.pathname === '/api/approvals/pair' || url.pathname === '/api/approvals/drawn' || url.pathname === '/api/approvals/press') {
+    if (url.pathname === '/api/open' || url.pathname === '/api/approvals/ask' || url.pathname === '/api/approvals/pair' || url.pathname === '/api/approvals/switch' || url.pathname === '/api/approvals/drawn' || url.pathname === '/api/approvals/press') {
       // Never from the page on the network.
       if (isLan) return json(res, 403, {})
       const now = Date.now()
@@ -786,9 +886,9 @@ export const startServer = (o: ServeOptions): void => {
         // No decision where the host would not ask the person: refused, and nothing is shown.
         if (!isAskingMode(ask.mode)) return json(res, 403, {})
         hasAsked = true
-        // Approvals turned off, or too many kept: the host asks in its own window. Requests already
-        // answered in their windows make room first.
-        if (isApprovalOff) return json(res, 200, {})
+        lastPassedAskAt = Math.max(lastPassedAskAt, clockNow())
+        // Approvals turned off (by replay lockdown or the page switch), or too many kept: the host asks in its own window.
+        if (isApprovalOff || isUserSwitchedOff()) return json(res, 200, {})
         for (const [id, one] of [...approvals]) {
           if (approvals.size < APPROVAL_MAX) break
           if (one.answer !== undefined) continue
@@ -887,6 +987,18 @@ export const startServer = (o: ServeOptions): void => {
       }
       const secret = secretOf(req.headers, now)
       if (secret === '') return json(res, 403, { note: isApprovalOff ? o.s.approvalOff : o.s.approvalNoSecret })
+      if (url.pathname === '/api/approvals/switch') {
+        if (isApprovalOff) return json(res, 403, { note: o.s.approvalOff })
+        if (typeof body.enabled !== 'boolean') return json(res, 400, {})
+        if (o.addressFile === undefined) return json(res, 409, { note: o.s.approvalSwitchFailed })
+        if (body.enabled === false) {
+          if (!writeOffMarker(o.addressFile, new Date(clockNow()).toISOString())) return json(res, 409, { note: o.s.approvalSwitchFailed })
+          for (const [id, one] of [...approvals]) if (one.answer !== undefined) settleApproval(id, null)
+          return json(res, 200, { isOff: true, note: o.s.settingsChanged(o.s.settingsApprovals, o.s.settingsOff) })
+        }
+        if (!removeOffMarker(o.addressFile)) return json(res, 409, { note: o.s.approvalSwitchFailed })
+        return json(res, 200, { isOff: false, note: o.s.settingsChanged(o.s.settingsApprovals, o.s.settingsOn) })
+      }
       if (url.pathname === '/api/approvals/drawn') {
         // The page drew these, as they were: only then does the hook keep waiting for a press.
         const drawn: unknown[] = Array.isArray(body.items) ? body.items : []
