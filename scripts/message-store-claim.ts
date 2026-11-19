@@ -281,14 +281,14 @@ const liveHolder = (pid: number): boolean => {
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
 // #1721: on Linux a process that is exiting, or has exited and is not reaped yet, still answers a signal but reads an
-// empty command line. It holds nothing any more, so it is gone, not a process to name: the start tries again, as it
-// does for any holder that has gone. Flag 0x4 is the kernel's PF_EXITING.
-const isExiting = (pid: number): boolean => {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-    return fields[0] === 'Z' || fields[0] === 'X' || (Number(fields[6]) & 4) !== 0
-  } catch { return false }
+// empty command line. It holds nothing any more, so it is gone, not a process to name. Flag 0x4 is the kernel's
+// PF_EXITING; the command name in the stat line may hold ") ", so the fields are read after its last ")". A stat
+// file that is gone when read means the process is gone too.
+export const isExiting = (pid: number, read: (path: string) => string = path => readFileSync(path, 'utf8')): boolean => {
+  let stat: string
+  try { stat = read(`/proc/${pid}/stat`) } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' }
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+  return fields[0] === 'Z' || fields[0] === 'X' || (Number(fields[6]) & 4) !== 0
 }
 export const lookUpHolder = (pid: number, timeoutMs = 5000): StoreHolder | 'gone' | null => {
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null
