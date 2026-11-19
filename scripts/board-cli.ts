@@ -2741,6 +2741,8 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     // action. A page still starting, or a hub of a folder given with --messages-dir, is waited for as before.
     let refused: { pid: number; isBoard: boolean } | undefined
     let unproven: number | undefined
+    // #1721: a holder that has exited but still answers a signal (not reaped yet, or still exiting).
+    let exiting: number | undefined
     if (/^[1-9][0-9]*$/.test(held)) {
       const pid = Number(held)
       const page = await ownerPageState(pid, file)
@@ -2750,12 +2752,16 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
       if (page.kind === 'answers' && !existsSync(file)) return { url: page.url, port: page.port, isKept: true, isNew: false }
       if (page.kind !== 'answers') {
         const settled = await settleStoreHolder(pid, { ...holderDeps(holderAgeMs()), stillDead: async () => (await ownerPageState(pid, file)).kind === 'dead' }, page.kind === 'dead' ? page.proof : undefined)
-        if (settled.kind === 'gone' || settled.kind === 'ended') continue
+        // A holder that has exited but is not reaped yet still answers a signal, so the page's own claim still sees it:
+        // trying again at once would meet it again. Its lock moves below as a dead page's does, with no wait, as for a
+        // refused holder; otherwise the start tries again after a pause (#1721).
+        if (settled.kind === 'ended' || settled.kind === 'gone' && !isRunning(pid)) continue
+        if (settled.kind === 'gone') exiting = pid
         if (settled.kind === 'refused') refused = { pid, isBoard: settled.isBoard }
         if (settled.kind === 'unproven') unproven = pid
       }
     }
-    const until = refused !== undefined ? performance.now() : storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
+    const until = refused !== undefined || exiting !== undefined ? performance.now() : storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
     for (;;) {
       const other = await runningPage(true, false, replaced)
       if (other !== null) return { url: other.page.url, port: other.page.port, isKept: other.isKept, isNew: false, idleMs: other.idleMs }
@@ -2801,6 +2807,11 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     }
     // A holder that ended meanwhile (another start ended it) is no reason to refuse: try again.
     if (refused !== undefined && !isRunning(refused.pid) && performance.now() < deadline) continue
+    // An exiting holder is never named: it is tried again, after a pause, until it is gone or the deadline passes.
+    if (exiting !== undefined && performance.now() < deadline) {
+      await new Promise(done => setTimeout(done, 100))
+      continue
+    }
     const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
     if (failure !== undefined && code !== undefined) failure.storeCode = code
     if (failure !== undefined && code === 'MESSAGE_STORE_IN_USE' && refused !== undefined && !isTaken(lock, String(refused.pid))) failure.storeHolder = refused
