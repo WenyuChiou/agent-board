@@ -522,16 +522,26 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // deletes in that instant stops the removal instead of counting as removed by setup (#1611).
   const isHolding = (now: Snap, text: string): boolean => sameBytes(now.bytes, Buffer.from(text, 'utf8'))
   const ours = new Set<string>()
-  // The real paths of the files this batch removed, each recorded once its removal was checked: a regular file or a
-  // file link alike (#1610), so a second name of either finds its own removal and the batch finishes.
+  // The real paths of the entries this batch removed, each recorded once its removal was checked: a regular file by
+  // its own real path, a file link by the link entry's real path (its parent's real path plus its name), so a second
+  // name of either finds its own removal and the batch finishes (#1610). A link's target is never recorded here: the
+  // target still exists, and another link to it must not read as removed (F2).
   const gone = new Set<string>()
   const realOf = (file: string): string | null => { try { return realpathSync.native(file) } catch { return null } }
+  // The real path of a link entry itself: resolve the parent, keep the name. Two names of one link (a skills folder
+  // linked to the shared one) share it; two separate links to one target do not.
+  const entryReal = (file: string): string | null => { try { return join(realpathSync.native(dirname(file)), basename(file)) } catch { return null } }
   const isOurs = (file: string, now: Snap, next: string): boolean => now.kind === 'file' && isHolding(now, next) && ours.has(realOf(file) ?? '')
-  const unchanged = (file: string, next: string | null): void => {
+  const unchanged = (file: string, next: string | null): Snap => {
     const was = before.get(file) ?? NO_PATH, now = take(file)
     const isSecondName = next !== null && isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' || isOurs(file, now, next))
-    const isGone = next === null && was.real !== null && gone.has(was.real) && (now.kind === 'none' || was.kind === 'link' && now.kind === 'link' && now.link === was.link && now.bytes === null)
+    // A path already gone, or the same link with its target gone, only where this batch itself removed the entry or
+    // the target: a second name of a file this batch removed (its own real path), a second name of a link this batch
+    // removed (the link entry's real path, not its target), or a link whose target this batch removed.
+    const entry = was.kind === 'link' ? entryReal(file) : was.real
+    const isGone = next === null && ((now.kind === 'none' && entry !== null && gone.has(entry)) || (was.kind === 'link' && now.kind === 'link' && now.link === was.link && now.bytes === null && was.real !== null && gone.has(was.real)))
     if (!same(was, now) && !isSecondName && !isGone) throw new Error('INSTALL_CHANGED')
+    return now
   }
   const written = (file: string, text: string | null): void => {
     const now = take(file)
@@ -546,9 +556,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // unlinkSync, not an existsSync check first: a file link whose target this batch already removed reads as gone but
   // is still there, and must go too. A path already gone by this batch's own earlier removal needs no unlink; a path
   // that read as present when re-read, gone by the unlink, was taken by another program in that instant (#1611).
+  // Reuse the snapshot `unchanged` validated: a second read could see a deletion by another program and skip the
+  // unlink that would have caught it, crediting the outside deletion to setup (F1).
   const drop = (file: string): void => {
-    unchanged(file, null)
-    if (take(file).kind !== 'none') {
+    const now = unchanged(file, null)
+    if (now.kind !== 'none') {
       try { unlinkSync(file) } catch (error) {
         if ((error as { code?: string }).code === 'ENOENT') throw new Error('INSTALL_CHANGED')
         throw error
@@ -556,7 +568,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     written(file, null)
     const was = before.get(file)
-    if (was?.real !== null) gone.add(was.real)
+    // Record the entry this batch removed: for a link, the link entry itself (its parent's real path plus its name),
+    // not its target — the target still exists, and another link to it must not read as removed (F2).
+    if (was !== undefined && was.real !== null) {
+      const entry = was.kind === 'link' ? entryReal(file) : was.real
+      if (entry !== null) gone.add(entry)
+    }
   }
   const isAsPlanned = (file: string): boolean => same(take(file), before.get(file) ?? NO_PATH)
   const jsonInitial = (file: string): Json => {
