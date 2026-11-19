@@ -45,18 +45,18 @@ const newCommands = { opencode: '.config/opencode/commands/agent-board.md' }
 const skills = { codex: '.agents/skills/agent-board/SKILL.md', antigravity: '.gemini/config/skills/agent-board/SKILL.md' }
 const handKept = ['## Quarterly work', '### Prepare the quarterly report', '- [x] Collect the numbers', '- [ ] Write the summary', '- [?] Send it to Dana or to the whole team?']
 
-const oldRelease = t => {
-  const available = spawnSync('git', ['-C', repoRoot, 'cat-file', '-e', `${OLD}^{commit}`], { encoding: 'utf8', windowsHide: true })
+const oldRelease = (t, tag = OLD) => {
+  const available = spawnSync('git', ['-C', repoRoot, 'cat-file', '-e', `${tag}^{commit}`], { encoding: 'utf8', windowsHide: true })
   assert.ifError(available.error)
   if (available.status !== 0) {
-    assert.ok(!process.env.CI, `${OLD} is missing in CI; the board job fetches the whole history with its tags`)
-    t.skip(`${OLD} is missing locally; run git fetch --tags to run this journey`)
+    assert.ok(!process.env.CI, `${tag} is missing in CI; the board job fetches the whole history with its tags`)
+    t.skip(`${tag} is missing locally; run git fetch --tags to run this journey`)
     return null
   }
   const folder = tempFolder()
-  const archive = spawnSync('git', ['-C', repoRoot, 'archive', '--format=tar', OLD, 'scripts', 'hooks', 'bin', 'package.json'], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })
-  checked(archive, 'archive 0.24.2')
-  checked(spawnSync('tar', ['-x', '-f', '-'], { cwd: folder, input: archive.stdout, encoding: 'utf8', windowsHide: true }), 'extract 0.24.2')
+  const archive = spawnSync('git', ['-C', repoRoot, 'archive', '--format=tar', tag, 'scripts', 'hooks', 'bin', 'package.json'], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })
+  checked(archive, `archive ${tag}`)
+  checked(spawnSync('tar', ['-x', '-f', '-'], { cwd: folder, input: archive.stdout, encoding: 'utf8', windowsHide: true }), `extract ${tag}`)
   return folder
 }
 
@@ -162,4 +162,32 @@ test("an upgrade from 0.24.2 keeps a /board file the person changed and names it
   assert.ok(output.includes('board.md'), output)
   assert.ok(existsSync(join(f.home, newCommands.opencode)), 'the new /agent-board command is there beside it')
   await openPage(f, f.script, flagsIn(f, newCommands.opencode), 'new opencode command')
+})
+
+const codexHookSlots = async source => {
+  const f = fixture(['.codex'])
+  await apply(f, ['codex'], source)
+  const config = join(f.home, '.codex', 'hooks.json')
+  const before = JSON.parse(readFileSync(config, 'utf8'))
+  const events = Object.entries(before.hooks)
+  assert.equal(events.length, 7, 'All seven Codex hook events are covered')
+  for (const [index, [event, groups]] of events.entries()) {
+    assert.equal(groups.length, 1, `${event}: the initial install has one board group`)
+    const first = { hooks: [{ type: 'command', command: `synthetic-before-${event}`, timeout: 5 }] }
+    const last = { hooks: [{ type: 'command', command: `synthetic-after-${event}`, timeout: 5 }] }
+    before.hooks[event] = index % 2 === 0 ? [...groups, last] : [first, ...groups, last]
+  }
+  const text = JSON.stringify(before, null, 2) + '\n'
+  writeFileSync(config, text)
+  await apply(f, ['codex'])
+  assert.deepEqual(JSON.parse(readFileSync(config, 'utf8')), before, 'The board and every foreign hook keep their original slots and declarations')
+  assert.equal(readFileSync(config, 'utf8'), text, 'An unchanged hook configuration stays byte-identical')
+  assertRepeat(await repeatApply(f), ['codex'])
+}
+
+test('Codex setup keeps every hook group in its original slot', () => codexHookSlots(repoRoot))
+
+test('Codex 0.25.0 upgrade keeps every hook group in its original slot', async t => {
+  const old = oldRelease(t, 'agent-board--v0.25.0')
+  if (old) await codexHookSlots(old)
 })
