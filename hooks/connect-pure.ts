@@ -502,7 +502,7 @@ const hermesSetupItemOf = (lines: readonly string[]): HermesSetupItem | undefine
   return { command, isSimple }
 }
 
-type HermesSetupEdit = { text: string; hasOwned: boolean }
+type HermesSetupEdit = { text: string; hasOwned: boolean; refused: readonly string[] }
 
 // Only the top-level hooks map and the recorded event/command pair can identify a setup entry.
 // Ambiguous copies are left alone rather than claiming both.
@@ -514,6 +514,8 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
   const desired = new Map(events.map(([event, command, matcher]) => [event, { command, matcher }]))
   const seen = new Set<string>()
   const owned = new Map<string, { command: string; item: string }>()
+  const unrecognized = new Set<string>()
+  const refused = new Set<string>()
   const drop = new Set<number>()
   if (top !== undefined) {
     const stop = lines.findIndex((line, at) => at > top && isContent(line) && indentOf(line) === 0)
@@ -548,7 +550,19 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
         const { command } = parsed
         const item = parts.join('\n')
         if (command !== previous) {
-          if (command === wanted) return null
+          // An entry that already runs this release's command is the board's own (an earlier
+          // release wrote the same bytes), even when no install record names it: adopt it
+          // instead of refusing the whole file.
+          if (command === wanted) {
+            if (owned.has(event)) return null
+            owned.set(event, { command, item })
+            for (let at = start; at < after; at += 1) if (isContent(lines[at] ?? '')) drop.add(at)
+            continue
+          }
+          // Otherwise the entry matches neither the record nor this release's command: it is
+          // not the board's. Remember it; the event is refused below only when the board's own
+          // entry is gone, not when it sits beside the person's own hook.
+          unrecognized.add(event)
           continue
         }
         if (owned.has(event)) return null
@@ -556,6 +570,10 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
         for (let at = start; at < after; at += 1) if (isContent(lines[at] ?? '')) drop.add(at)
       }
       if (owned.has(event) && !lines.slice(key + 1, last).some((line, at) => isContent(line) && !drop.has(key + 1 + at))) drop.add(key)
+      // The board recorded an entry here, but none of the file's entries is the board's: the
+      // person changed the board's entry. Refuse only this event, named by the caller. When the
+      // board's entry sits beside the person's own hook, there is nothing to refuse.
+      if (!isRemoving && recorded.has(event) && !owned.has(event) && unrecognized.has(event)) refused.add(event)
     }
     if (isRemoving && owned.size > 0 && /^hooks\s*:\s*$/.test(lines[top] ?? '') &&
         !lines.slice(top + 1, end).some((line, at) => isContent(line) && !drop.has(top + 1 + at))) drop.add(top)
@@ -564,10 +582,10 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
   if (!isRemoving && events.every(([event, command, matcher]) => {
     const entry = owned.get(event)
     return entry?.command === command && hermesHasTimeout(entry.item) && hermesHasMatcher(entry.item, matcher)
-  })) return { text, hasOwned }
+  })) return { text, hasOwned, refused: [...refused] }
   const kept = lines.filter((_, at) => !drop.has(at)).join('\n')
   const next = isRemoving ? kept : addHermesHooks(kept, events, text.includes('\r\n'))
-  return next === null ? null : { text: next, hasOwned }
+  return next === null ? null : { text: next, hasOwned, refused: [...refused] }
 }
 
 export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
