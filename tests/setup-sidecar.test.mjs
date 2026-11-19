@@ -417,6 +417,24 @@ test('the sidecar-only removal keeps a one-byte edit to sidecar.mjs that decodes
   assert.deepEqual(readFileSync(file), withFF(old), 'sidecar.mjs stays with the byte the person put there')
 }))
 
+test('the sidecar-only removal keeps a sidecar.json holding a byte that is not valid UTF-8 where its record has a private-use character (#1607)', () => withHome(({ home, run, dir }) => {
+  const { root } = connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  // The record names a sidecar.json holding U+10FEFF; the person's file holds FF there instead.
+  const file = join(dir, 'sidecar.json')
+  const text = readFileSync(file, 'utf8')
+  const at = text.indexOf('"') + 1
+  const edited = Buffer.concat([Buffer.from(text.slice(0, at)), Buffer.from([0xff]), Buffer.from(text.slice(at))])
+  const named = Buffer.concat([Buffer.from(text.slice(0, at)), Buffer.from('\u{10FEFF}'), Buffer.from(text.slice(at))])
+  writeFileSync(file, edited)
+  const recordFile = join(root, 'install-antigravity-sidecar.json')
+  const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+  record.files[Object.keys(record.files).find(key => key.endsWith('sidecar.json'))] = createHash('sha256').update(named).digest('hex')
+  writeFileSync(recordFile, `${JSON.stringify(record, null, 2)}\n`)
+  run(['--remove', '--agent', 'antigravity', '--apply'])
+  assert.deepEqual(readFileSync(file), edited, 'sidecar.json stays with the byte the person put there')
+}))
+
 // The preload changes one other byte of hooks.json, a marker next to the person's FF byte, when setup opens its temporary copy.
 const markerEditOnOpen = (home, name) => seam(home, `const open = fs.openSync
 let done = false

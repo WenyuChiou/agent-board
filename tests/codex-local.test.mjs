@@ -2752,9 +2752,9 @@ const boardEntries1607 = (host, buffer) => {
   return config.hooks[hostEvent1607[host]].filter(entry => !JSON.stringify(entry).includes('echo '))
 }
 // A fixture whose home folder has Chinese characters in its name, built as `fixture` builds its home.
-const chineseFixture1607 = async fn => {
+const chineseFixture1607 = async (fn, name = '使用者家') => {
   const base = mkdtempSync(join(tmpdir(), 'codex local-'))
-  const home = join(base, '使用者家')
+  const home = join(base, name)
   mkdirSync(home)
   const root = join(home, '.agent-board')
   const env = { ...isolatedEnv(home), CODEX_THREAD_ID: session, NO_COLOR: '1' }
@@ -2964,6 +2964,85 @@ test('a board hook whose bytes are not the recorded ones is refused as an edit o
   })
 })
 
+test('an edit of the board hook that only reads like another hook the record knows is still refused as an edit (#1607)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const config = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  const good = config.hooks.Stop[0].hooks[0].command
+  const at = good.indexOf('e')
+  // The person's own group reads like setup's with U+FFFD in place of one letter; setup records it as the person's.
+  const theirs = structuredClone(config.hooks.Stop[0])
+  theirs.hooks[0].command = `${good.slice(0, at)}�${good.slice(at + 1)}`
+  config.hooks.Stop.push(theirs)
+  f.save(f.hooks, `${JSON.stringify(config, null, 2)}\n`)
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  // Then setup's own command gets FF in place of that letter, which a plain decode reads as the person's group.
+  const now = JSON.parse(readFileSync(f.hooks, 'utf8'))
+  const own = now.hooks.Stop.find(group => group.hooks?.[0]?.command === good)
+  assert.ok(own, 'setup\'s group is there')
+  own.hooks[0].command = `${good.slice(0, at)}@FF@${good.slice(at + 1)}`
+  const edited = bytes1607(`${JSON.stringify(now, null, 2)}\n`)
+  f.save(f.hooks, edited)
+  const recorded = readFileSync(join(f.root, 'install-codex.json'))
+  for (const [when, result] of [['--apply', f.install('--agent', 'codex', '--apply')], ['removal', f.command(['--codex-remove', '--agent', 'codex', '--apply', '--json'])]]) {
+    assert.notEqual(result.status, 0, `${when}: ${result.stdout}`)
+    assert.ok(JSON.parse(result.stdout).conflicts.includes(`${f.hooks}:Stop`), `${when}: ${result.stdout}`)
+    assert.deepEqual(readFileSync(f.hooks), edited, `${when}: the config stays`)
+    assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), recorded, `${when}: the record stays`)
+  }
+}))
+
+test('another agent\'s install record holding a byte that is not valid UTF-8 right before \\/ stays byte for byte when setup updates a shared file (#1607)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  // An older shared board script both records name, so this setup updates it and would bring Cursor's record up to date.
+  const old = '// an older board script\n'
+  f.save(f.script, old)
+  for (const agent of ['codex', 'cursor']) {
+    const record = recordOf(f, agent)
+    assert.ok(record.files[f.script] !== undefined, agent)
+    record.files[f.script] = digest(old)
+    saveRecord(f, agent, record)
+  }
+  const sibling = join(f.root, 'install-cursor.json')
+  const text = readFileSync(sibling, 'utf8')
+  const kept = bytes1607(text.replace(/^\{\n/, '{\n  "note": "caf@FF@\\/x",\n'))
+  f.save(sibling, kept)
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.notEqual(readFileSync(f.script, 'utf8'), old, 'the shared script is updated')
+  assert.deepEqual(readFileSync(sibling), kept, 'Cursor\'s record stays byte for byte')
+}))
+
+test('a valid hook config holding a private-use character of U+10FE80 to U+10FEFF, as text before \\/ and as a \\u escape, comes through setup as on main (#1607)', () => fixture(f => {
+  f.save(f.hooks, `{\n  "hooks": {\n    "Stop": [\n      { "hooks": [{ "type": "command", "command": "echo \u{10FEFF}\\/ \\udbff\\udeff" }] }\n    ]\n  }\n}\n`)
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(JSON.parse(applied.stdout).conflicts, [])
+  const now = readFileSync(f.hooks)
+  // As on main: the file is valid UTF-8, the escape is written as the character, and no byte FF appears.
+  assert.equal(Buffer.from(now.toString('utf8'), 'utf8').equals(now), true)
+  assert.equal(now.includes(FF1607), false)
+  assert.ok(JSON.parse(now.toString('utf8')).hooks.Stop.some(group => group.hooks?.[0]?.command === 'echo \u{10FEFF}/ \u{10FEFF}'))
+}))
+
+test('a home folder whose name holds a private-use character of U+10FE80 to U+10FEFF: setup writes it as valid UTF-8 (#1607)', () => chineseFixture1607(f => {
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  const now = readFileSync(f.hooks)
+  assert.equal(Buffer.from(now.toString('utf8'), 'utf8').equals(now), true)
+  assert.equal(now.includes(FF1607), false)
+  assert.ok(now.includes(Buffer.from('\u{10FEFF}', 'utf8')), 'setup\'s command names the folder')
+}, 'home \u{10FEFF}'))
+
+test('a home folder whose name holds a private-use character of U+10FE80 to U+10FEFF and a hook config holding a lone FF byte: setup stops and the config stays (#1607)', () => chineseFixture1607(f => {
+  const person = { hooks: [{ type: 'command', command: 'echo caf@FF@' }] }
+  const kept = bytes1607(`${JSON.stringify({ hooks: { Stop: [person] } }, null, 2)}\n`)
+  f.save(f.hooks, kept)
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.notEqual(applied.status, 0, applied.stdout)
+  assert.deepEqual(readFileSync(f.hooks), kept)
+}, 'home \u{10FEFF}'))
+
 test('a home folder with Chinese characters and a lone FF byte in an entry the person wrote both come through --apply and a second --apply (#1607)', () => chineseFixture1607(f => {
   const person = { hooks: [{ type: 'command', command: 'echo caf@FF@' }] }
   f.save(f.hooks, bytes1607(`${JSON.stringify({ hooks: { Stop: [person] } }, null, 2)}\n`))
@@ -3040,7 +3119,9 @@ test('a hook config where a byte that is not valid UTF-8 comes right before \\/ 
 })
 
 test('decode and encode give back every byte sequence, and lossy reads it as a plain decode does (#1607)', async () => {
-  const { decode, encode, lossy } = await importTs('../scripts/codex-local.ts')
+  const { decode, encode, isPlain, lossy } = await importTs('../scripts/codex-local.ts')
+  // Setup writes a file's text back as plain UTF-8 when its bytes were all valid, and through encode otherwise.
+  const write = (bytes, text) => isPlain(bytes) ? Buffer.from(text, 'utf8') : encode(text)
   const sequences = []
   for (let byte = 0; byte < 256; byte++) sequences.push(Buffer.of(byte))
   for (const hex of ['c080', 'eda080', 'edbfbf', 'e4b8', 'f48fba80', 'f48fbfbf', 'f4908080', 'f48fba7f', 'f48fba', 'e4b8ade69687', 'efbbbf7b7d', 'efbfbd', 'f48fba8041', 'a4a4a4e5a440', 'f09f9880', 'c280', 'e08080', 'f888808080']) sequences.push(Buffer.from(hex, 'hex'))
@@ -3051,11 +3132,11 @@ test('decode and encode give back every byte sequence, and lossy reads it as a p
   for (const bytes of sequences) {
     const label = bytes.toString('hex')
     const text = decode(bytes)
-    assert.deepEqual(encode(text), bytes, `encode(decode) ${label}`)
-    assert.equal(lossy(text), bytes.toString('utf8'), `lossy ${label}`)
-    assert.deepEqual(encode(JSON.parse(JSON.stringify(text))), bytes, `JSON ${label}`)
+    assert.deepEqual(write(bytes, text), bytes, `encode(decode) ${label}`)
+    if (!isPlain(bytes)) assert.equal(lossy(text), bytes.toString('utf8'), `lossy ${label}`)
+    assert.deepEqual(write(bytes, JSON.parse(JSON.stringify(text))), bytes, `JSON ${label}`)
     const plain = bytes.toString('utf8')
-    if (Buffer.from(plain, 'utf8').equals(bytes) && !/[\u{10fe80}-\u{10feff}]/u.test(plain)) assert.equal(text, plain, `valid ${label}`)
+    if (Buffer.from(plain, 'utf8').equals(bytes)) assert.equal(text, plain, `valid ${label}`)
   }
 })
 
