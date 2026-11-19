@@ -387,6 +387,101 @@ test('the sidecar-only writer keeps a one-byte edit to sidecar.mjs that decodes 
   assert.deepEqual(readFileSync(file), withFF(old))
 }))
 
+// The sidecar-only removal checks the file's bytes just before it unlinks (#1607). The preload swaps EF BF BD for FF in
+// sidecar.mjs when setup unlinks sidecar.json, which comes first, after the batch check and before sidecar.mjs's turn.
+const byteEditOnUnlink = home => seam(home, `const unlink = fs.unlinkSync
+let done = false
+fs.unlinkSync = (file, ...rest) => {
+  if (!done && typeof file === 'string' && file.endsWith('sidecar.json')) {
+    done = true
+    const other = file.slice(0, -'sidecar.json'.length) + 'sidecar.mjs'
+    const bytes = fs.readFileSync(other), i = bytes.indexOf(Buffer.from([0xef, 0xbf, 0xbd]))
+    fs.writeFileSync(other, Buffer.concat([bytes.subarray(0, i), Buffer.from([0xff]), bytes.subarray(i + 3)]))
+  }
+  return unlink(file, ...rest)
+}`)
+
+test('the sidecar-only removal keeps a one-byte edit to sidecar.mjs that decodes the same: setup fails instead of removing it (#1607)', () => withHome(({ home, run, dir }) => {
+  const { root } = connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  // An older sidecar.mjs holding U+FFFD, under the hash the sidecar's record keeps, so this removal plans to take it out.
+  const file = join(dir, 'sidecar.mjs')
+  const old = Buffer.concat([Buffer.from('// an older sidecar '), FFFD, Buffer.from('\n')])
+  writeFileSync(file, old)
+  const recordFile = join(root, 'install-antigravity-sidecar.json')
+  const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+  record.files[Object.keys(record.files).find(key => key.endsWith('sidecar.mjs'))] = createHash('sha256').update(old).digest('hex')
+  writeFileSync(recordFile, `${JSON.stringify(record, null, 2)}\n`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env: byteEditOnUnlink(home) })
+  stoppedOnChange(removed)
+  assert.deepEqual(readFileSync(file), withFF(old), 'sidecar.mjs stays with the byte the person put there')
+}))
+
+test('the sidecar-only removal keeps a sidecar.mjs that became a link to the same bytes: setup fails instead of removing the link (#1607)', t => withHome(({ home, run, dir }) => {
+  const probe = join(home, 'probe.txt')
+  writeFileSync(probe, '')
+  try { symlinkSync(probe, join(home, 'probe-link.txt'), 'file') } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  const file = join(dir, 'sidecar.mjs'), copy = join(home, 'sidecar-copy.mjs')
+  const bytes = readFileSync(file)
+  // When setup unlinks sidecar.json, which comes first, after the batch check: sidecar.mjs becomes a link to a copy of
+  // its own bytes. Main compared the text through the link, so it removed the link.
+  const env = seam(home, `const unlink = fs.unlinkSync
+let done = false
+fs.unlinkSync = (file, ...rest) => {
+  if (!done && typeof file === 'string' && file.endsWith('sidecar.json')) {
+    done = true
+    const other = file.slice(0, -'sidecar.json'.length) + 'sidecar.mjs'
+    fs.writeFileSync(${JSON.stringify(copy)}, fs.readFileSync(other))
+    unlink(other)
+    fs.symlinkSync(${JSON.stringify(copy)}, other, 'file')
+  }
+  return unlink(file, ...rest)
+}`)
+  const removed = run(['--remove', '--agent', 'antigravity', '--apply'], { env })
+  stoppedOnChange(removed)
+  assert.equal(lstatSync(file).isSymbolicLink(), true, 'sidecar.mjs is still the link')
+  assert.equal(readlinkSync(file), copy, 'the link still points at the copy')
+  assert.deepEqual(readFileSync(copy), bytes, 'the copy holds the same bytes')
+}))
+
+test('a sidecar record holding a byte that is not valid UTF-8 stops setup and removal, which name install-antigravity-sidecar.json (#1607)', () => withHome(({ home, run }) => {
+  const { root } = connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  const recordFile = join(root, 'install-antigravity-sidecar.json')
+  const kept = Buffer.concat([Buffer.from('{\n  "note": "caf'), Buffer.of(0xff), Buffer.from(readFileSync(recordFile, 'utf8').replace(/^\{\n/, '",\n'))])
+  writeFileSync(recordFile, kept)
+  // Each command is checked before the next one runs.
+  for (const [when, args] of [['--apply', ['--agent', 'antigravity', '--antigravity-sidecar', '--apply']], ['removal', ['--remove', '--agent', 'antigravity', '--apply']]]) {
+    const result = run(args)
+    assert.notEqual(result.status, 0, `${when}: ${result.stdout}`)
+    assert.match(result.stderr, /install-antigravity-sidecar\.json/, `${when}: names the record: ${result.stderr}`)
+    assert.deepEqual(readFileSync(recordFile), kept, `${when}: the record stays byte for byte`)
+  }
+}))
+
+test('the sidecar-only removal keeps a sidecar.json holding a byte that is not valid UTF-8 where its record has a private-use character (#1607)', () => withHome(({ home, run, dir }) => {
+  const { root } = connectorHome(home)
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  // The record names a sidecar.json holding U+10FEFF; the person's file holds FF there instead.
+  const file = join(dir, 'sidecar.json')
+  const text = readFileSync(file, 'utf8')
+  const at = text.indexOf('"') + 1
+  const edited = Buffer.concat([Buffer.from(text.slice(0, at)), Buffer.from([0xff]), Buffer.from(text.slice(at))])
+  const named = Buffer.concat([Buffer.from(text.slice(0, at)), Buffer.from('\u{10FEFF}'), Buffer.from(text.slice(at))])
+  writeFileSync(file, edited)
+  const recordFile = join(root, 'install-antigravity-sidecar.json')
+  const record = JSON.parse(readFileSync(recordFile, 'utf8'))
+  record.files[Object.keys(record.files).find(key => key.endsWith('sidecar.json'))] = createHash('sha256').update(named).digest('hex')
+  writeFileSync(recordFile, `${JSON.stringify(record, null, 2)}\n`)
+  run(['--remove', '--agent', 'antigravity', '--apply'])
+  assert.deepEqual(readFileSync(file), edited, 'sidecar.json stays with the byte the person put there')
+}))
+
 // A link to a path that is not there: on Windows a junction to a missing folder, which needs no privilege.
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'file'
 
