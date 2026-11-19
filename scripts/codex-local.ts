@@ -577,19 +577,24 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // object of .new paths, each with hashes. Its name alone says nothing, since a board named there or any note of the
   // person's can have it too. So setup reads, writes over and deletes the file only when it reads so; anything else names
   // nothing, a copy no record holds then stops that agent as any unknown file does, and the file stays.
+  // Setup writes into this agent's list only the .new path beside a text file of this run's plan, so its list may name
+  // only those. Another agent's list is only read here and its plan is not known, so its paths need only be full ones;
+  // an entry of it names a copy only under the exact path this run plans (isOurBeside). That is as far as setup can
+  // tell: a file naming this plan's own .new paths with hashes is its list, whoever wrote it.
   const pendingFile = (one: string): string => join(root, `install-pending-${one}.json`)
-  const listOf = (snap: Snap | undefined): Record<string, string[]> | null => {
+  const isOwnCopy = (path: string): boolean => isTextFile(path.slice(0, -4)) && Object.hasOwn(files, path.slice(0, -4))
+  const listOf = (snap: Snap | undefined, isNamed: (path: string) => boolean = isOwnCopy): Record<string, string[]> | null => {
     if (snap?.kind !== 'file' || snap.bytes === null) return null
     let held: unknown
     try { held = JSON.parse(snap.bytes.toString('utf8')) } catch { return null }
     if (typeof held !== 'object' || held === null || Array.isArray(held)) return null
     const entries = Object.entries(held)
-    const isList = entries.length > 0 && entries.every(([path, hashes]) => path.endsWith('.new') && Array.isArray(hashes) && hashes.length > 0 && hashes.every(value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)))
+    const isList = entries.length > 0 && entries.every(([path, hashes]) => path.endsWith('.new') && isNamed(path) && Array.isArray(hashes) && hashes.length > 0 && hashes.every(value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)))
     return isList ? Object.fromEntries(entries) as Record<string, string[]> : null
   }
   const pendingOf = (one: string): Record<string, string[]> => {
     initial(pendingFile(one))
-    return listOf(before.get(pendingFile(one))) ?? {}
+    return listOf(before.get(pendingFile(one)), one === agent ? isOwnCopy : isAbsolute) ?? {}
   }
   const control = join(installControlRoot(home), 'legacy-connect.json')
   const authority = join(installControlRoot(home), 'legacy-connect-authority')
@@ -1664,10 +1669,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const keptCode: string[] = []
   const keptHeld: { file: string; by: string }[] = []
   const missingHeld: { file: string; by: string }[] = []
-  // A file at the .new path is setup's only when a record or a pending list holds exactly those bytes for it, or for the
-  // same file reached by a second name (a skills folder linked to the shared one, or another letter case on Windows).
+  // The limit, as far as setup can tell: a record or a pending list that names a .new path with the SHA-256 of the bytes
+  // now at it makes that copy setup's, whoever wrote that file. A list entry counts only under the exact path this run
+  // plans; only a record also counts through a second name for the same file (a skills folder linked to the shared one,
+  // or another letter case on Windows).
   const pendingCopies = [agent, ...otherAgents].flatMap(one => Object.entries(pendingOf(one)).flatMap(([path, hashes]) => hashes.map((value): [string, unknown] => [path, value])))
-  const isOurBeside = (copy: string, text: string): boolean => [...records.flatMap(record => Object.entries(record)), ...pendingCopies].some(([path, value]) => value === hash(text) && (path === copy || path.endsWith('.new') && realOf(path) !== null && realOf(path) === realOf(copy)))
+  const isOurBeside = (copy: string, text: string): boolean => pendingCopies.some(([path, value]) => path === copy && value === hash(text))
+    || records.flatMap(record => Object.entries(record)).some(([path, value]) => value === hash(text) && (path === copy || path.endsWith('.new') && realOf(path) !== null && realOf(path) === realOf(copy)))
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
@@ -1938,8 +1946,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     local?.beforeApply?.(plan)
     // Each file setup writes is read again just before the write and checked after it (#1488, put, as runSidecarOnly
     // does), so an edit made before that last re-read is never overwritten, and a write that did not land is not reported
-    // as applied. A removal unlinks as on main, with no re-read. A mismatch stops the batch at once: files written or
-    // removed before it stay (no rollback, as in the connect transaction). This agent's install record changes after every
+    // as applied. A removal unlinks as on main, with no re-read, but a stale copy and the pending list go only as planned.
+    // A mismatch stops the batch at once: files written or removed before it stay (no rollback, as in the connect
+    // transaction). This agent's install record changes after every
     // planned file (on install, other agents' records are updated after it; on remove, the handover to another agent's
     // record comes first), so a mismatch among the planned files leaves the record as it was. The next setup plans again
     // from the files as they are. A .new copy is named in the pending list before any of them, and an older entry stays
@@ -1976,7 +1985,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       else if (change.file === progress) {
         mkdirSync(dirname(progress), { recursive: true })
         writeFileSync(progress, '', { flag: 'wx', mode: 0o600 })
-      } else if (staleBeside.has(change.file)) {
+      } else if (staleBeside.has(change.file) || change.file === pendingFile(agent)) {
+        // The list goes as planned or not at all, as a stale copy does. A file saved there between this read and the
+        // unlink is a gap no check closes, the same for every file a removal deletes.
         if (!isAsPlanned(change.file)) throw new Error('INSTALL_CHANGED')
         unlinkSync(change.file)
       } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
