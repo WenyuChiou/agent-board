@@ -5307,6 +5307,7 @@ export const LINES = [
 ".cards,.rows{list-style:none;margin:0;padding:0}",
 ".cards>li+li .card{border-top:1px solid var(--line)}",
 ".card{display:grid;grid-template-columns:24px minmax(0,1fr);gap:var(--s3);padding:var(--s4);min-width:0}",
+".approvals .card{grid-template-columns:minmax(0,1fr)}",
 ".arrived>.fx>.fx-in{animation:glow var(--dur-glow) var(--ease-out)}",
 ".c-body{min-width:0;display:flex;flex-direction:column;gap:var(--s2)}",
 ".approval-command{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--text-sm);max-height:40vh;overflow:auto}",
