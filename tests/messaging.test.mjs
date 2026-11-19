@@ -8244,8 +8244,11 @@ test('a stat line with the exiting flag reads as exiting, and a kernel thread\'s
 
 test('a holder reaped while its state is read is gone, not unreadable (#1721)', () => {
   const failing = code => () => { throw Object.assign(new Error(code), { code }) }
-  // No stat file any more: the process was reaped between the two reads, so it is gone.
-  assert.equal(isExiting(4242, failing('ENOENT')), true)
+  const reaped = path => { if (path === '/proc/self/stat') return '1 (node) R 0 1 1 0 -1 4194560'; return failing('ENOENT')() }
+  // No stat file any more while this process can read its own: the process was reaped between the two reads, so it is gone.
+  assert.equal(isExiting(4242, reaped), true)
+  // No stat file for this process either: there is no /proc to read, which proves nothing.
+  assert.equal(isExiting(4242, failing('ENOENT')), false)
   // A stat file this account cannot read proves nothing.
   assert.equal(isExiting(4242, failing('EACCES')), false)
 })

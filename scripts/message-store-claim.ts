@@ -180,7 +180,9 @@ export const claimMessageStore = (directory: string): MessageStoreClaim => {
         || !Number.isSafeInteger(value.pid) || Number(value.pid) > 2147483647) throw damaged()
       try {
         process.kill(Number(value.pid), 0)
-        throw new Error('MESSAGE_STORE_IN_USE')
+        // #1721: on Linux a writer that has exited and is not reaped yet, or is being ended, still answers a signal.
+        // It can start no write any more, so its claim goes as a dead writer's does.
+        if (process.platform !== 'linux' || !isExiting(Number(value.pid))) throw new Error('MESSAGE_STORE_IN_USE')
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
           if (error instanceof Error && error.message === 'MESSAGE_STORE_IN_USE') throw error
@@ -277,16 +279,19 @@ export const pageState = (facts: PageFacts): PageState => {
 // start time come from one read. 'gone' when no process has that number; null when it cannot be read
 // (another account's, or the lookup timed out), which never counts as proof of anything.
 export type StoreHolder = { commandLine: string; started: number }
-const liveHolder = (pid: number): boolean => {
+export const liveHolder = (pid: number): boolean => {
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
 // #1721: on Linux a process that is exiting, or has exited and is not reaped yet, still answers a signal but reads an
 // empty command line. It holds nothing any more, so it is gone, not a process to name. Flag 0x4 is the kernel's
 // PF_EXITING; the command name in the stat line may hold ") ", so the fields are read after its last ")". A stat
-// file that is gone when read means the process is gone too.
+// file that is gone when read means the process is gone too, but only where this process can read its own.
 export const isExiting = (pid: number, read: (path: string) => string = path => readFileSync(path, 'utf8')): boolean => {
   let stat: string
-  try { stat = read(`/proc/${pid}/stat`) } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' }
+  try { stat = read(`/proc/${pid}/stat`) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false
+    try { read('/proc/self/stat'); return true } catch { return false }
+  }
   const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
   return fields[0] === 'Z' || fields[0] === 'X' || (Number(fields[6]) & 4) !== 0
 }
