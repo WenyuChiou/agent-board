@@ -8207,6 +8207,26 @@ test('the process lookup returns command line and start time together', async ()
   } finally { if (child.exitCode === null) child.kill(); rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('a holder that has exited but is not yet reaped reads as gone, not as a process the board cannot stop (#1721)', { skip: process.platform !== 'linux' && 'needs Linux /proc' }, async () => {
+  // The shell starts a short child and then becomes a long sleep that never reaps it, so the child stays a zombie.
+  const parent = spawn('/bin/sh', ['-c', 'sleep 0 & echo $!; exec sleep 30'], { stdio: ['ignore', 'pipe', 'ignore'] })
+  try {
+    const pid = Number(await new Promise((done, fail) => {
+      let text = ''
+      parent.stdout.on('data', chunk => { text += chunk; if (text.includes('\n')) done(text.trim()) })
+      parent.once('exit', () => fail(new Error('the shell ended before it named its child')))
+    }))
+    const stateOf = () => { try { const stat = readFileSync(`/proc/${pid}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) } catch { return '' } }
+    const end = Date.now() + 10_000
+    while (stateOf() !== 'Z' && Date.now() < end) await new Promise(done => setTimeout(done, 20))
+    assert.equal(stateOf(), 'Z', 'the child never became a zombie')
+    // It still answers a signal, as a live process does, and its command line reads empty.
+    process.kill(pid, 0)
+    assert.equal(readFileSync(`/proc/${pid}/cmdline`, 'utf8'), '')
+    assert.equal(lookUpHolder(pid, 15_000), 'gone')
+  } finally { parent.kill() }
+})
+
 test('a page serving a folder given with --messages-dir is never ended', async () => {
   const { deps, kills } = holderDeps({ look: () => ({ commandLine: 'node /x/board.mjs --serve-child --messages-dir /x/store', started: Date.now() - 60_000 }) })
   assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'kept' })
