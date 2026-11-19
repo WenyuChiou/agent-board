@@ -81,7 +81,7 @@ const flag = (name: string): string | undefined => {
   return at === -1 ? undefined : args[at + 1]
 }
 const BOOL_FLAGS = new Set([
-  '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--awaits-ack', '--chat', '--codex-doctor',
+  '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--awaits-ack', '--chat', '--check-conflicts', '--codex-doctor',
   '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
   '--no-codex-send',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
