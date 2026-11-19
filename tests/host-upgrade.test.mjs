@@ -276,6 +276,12 @@ test('an upgrade from 0.24.2 keeps an edited board script with the runner and ho
   held.forEach((file, index) => assert.equal(readFileSync(file, 'utf8'), heldBytes[index], `${file} stays with the kept script`))
   for (const target of plan.plans) assert.deepEqual(target.keptCode, [f.script], `${target.agent}: the plan names the kept script`)
   assert.equal(read(f, skills.codex), olderSkill, 'the skill keeps the words the kept script can answer')
+  // The old /board command is the one the kept script answers, so it stays and still runs that script with the flag
+  // it knows; no /agent-board command is written for a script that may not know its options (#1698). The page itself
+  // is not opened here: a 0.24.2 page server does not close on request.
+  assert.ok(existsSync(join(f.home, oldCommands.opencode)), 'OpenCode keeps its /board command')
+  assert.deepEqual(flagsIn(f, oldCommands.opencode), ['--serve'], 'the kept /board command still runs the kept script')
+  assert.equal(existsSync(join(f.home, newCommands.opencode)), false, 'no /agent-board command is written for the kept script')
 
   const output = await setup(f, ['--apply'])
   assert.ok(output.includes('you edited it and the agent runs it'), `setup's output says the script was kept\n${output}`)
