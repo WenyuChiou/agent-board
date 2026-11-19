@@ -1036,20 +1036,23 @@ const server = createServer((req, res) => { req.resume(); req.on('end', () => { 
 server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'))
 `)
     const waitingChild = spawn(process.execPath, [waitingBoard, asked], { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true })
-    const waitingPort = await new Promise(done => waitingChild.stdout.once('data', chunk => done(Number(String(chunk).trim()))))
-    pressing.writeAddress(`http://127.0.0.1:${waitingPort}/?t=synthetic-token`, waitingChild.pid)
-    const asking = runHook(pressing, request('npm run synthetic-restarted'), noting)
-    for (let tries = 0; tries < 1_000 && !existsSync(asked); tries += 1) await pause(20)
-    assert.equal(existsSync(asked), true, 'the waiting board was never asked')
-    const waitingGone = new Promise(done => waitingChild.once('exit', done))
-    waitingChild.kill('SIGKILL')
-    await waitingGone
-    const restarted = await allowingBoard()
-    pressing.writeAddress(restarted.url)
-    const unanswered = await asking.done
-    assert.equal(unanswered.out, '', unanswered.err)
-    assert.deepEqual(restarted.seen, [], 'the board that came back was asked')
-    await restarted.close()
+    // Its open pipe would keep the whole run alive if a check below failed.
+    try {
+      const waitingPort = await new Promise(done => waitingChild.stdout.once('data', chunk => done(Number(String(chunk).trim()))))
+      pressing.writeAddress(`http://127.0.0.1:${waitingPort}/?t=synthetic-token`, waitingChild.pid)
+      const asking = runHook(pressing, request('npm run synthetic-restarted'), noting)
+      for (let tries = 0; tries < 1_000 && !existsSync(asked); tries += 1) await pause(20)
+      assert.equal(existsSync(asked), true, 'the waiting board was never asked')
+      const waitingGone = new Promise(done => waitingChild.once('exit', done))
+      waitingChild.kill('SIGKILL')
+      await waitingGone
+      const restarted = await allowingBoard()
+      pressing.writeAddress(restarted.url)
+      const unanswered = await asking.done
+      assert.equal(unanswered.out, '', unanswered.err)
+      assert.deepEqual(restarted.seen, [], 'the board that came back was asked')
+      await restarted.close()
+    } finally { waitingChild.kill('SIGKILL') }
   } finally {
     server.closeAllConnections()
     await new Promise(done => server.close(done))
@@ -1281,7 +1284,7 @@ const lookupOf = (found, isListener = true) => `{ lookup: { isSoleListener: () =
 // keeps every request it is sent and answers allow to all of them.
 const STAND_IN = `import { createServer } from 'node:http'
 import { appendFileSync, writeFileSync } from 'node:fs'
-const [file, progress, seen] = process.argv.slice(2)
+const [file, progress, seen] = process.argv.slice(-3)
 const server = createServer((req, res) => {
   let body = ''
   req.on('data', chunk => { body += chunk })
@@ -1296,12 +1299,13 @@ server.listen(0, '127.0.0.1', () => {
   process.stdout.write('listening\\n')
 })
 `
-const startStandIn = async (script, file, progress) => {
+// `words` follow the script on its command line: by default the word the board's launcher writes there.
+const startStandIn = async (script, file, progress, words = ['--serve-child']) => {
   mkdirSync(dirname(script), { recursive: true })
   writeFileSync(script, STAND_IN)
   const seenFile = `${script}.seen`
   writeFileSync(seenFile, '')
-  const child = spawn(process.execPath, [script, file, progress, seenFile], { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true })
+  const child = spawn(process.execPath, [script, ...words, file, progress, seenFile], { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true })
   await new Promise((resolve, reject) => {
     child.stdout.once('data', resolve)
     child.once('exit', code => reject(new Error(`the stand-in stopped with ${code}`)))
@@ -1356,9 +1360,10 @@ test('a listener that is not the board script never sees the command', async () 
     { script: join(place.root, 'elsewhere', 'agent-board.mjs'), file: place.file, env: place.env },
     { script: join(place.root, 'elsewhere', 'stand-in-run.mjs'), file: join(runtime, receiverFileName(receiverKey(place.progress))), env: { ...place.env, XDG_RUNTIME_DIR: own } },
   ]
-  for (const { script, file, env } of layouts) {
+  // F10's stand-in writes no board words; the same program that copies the launcher's word is refused by where it runs from.
+  for (const { script, file, env } of layouts) for (const words of [[], ['--serve-child']]) {
     rmSync(file, { force: true })
-    const stand = await startStandIn(script, file, place.progress)
+    const stand = await startStandIn(script, file, place.progress, words)
     try {
       const answer = await runScript({ env }, request('echo synthetic-f10-stand-in')).done
       assert.equal(answer.code, 0)
@@ -1366,22 +1371,31 @@ test('a listener that is not the board script never sees the command', async () 
       assert.deepEqual(stand.seen(), [], `${script} was sent the command`)
     } finally { await stand.stop() }
   }
-  // What each process would have to be, read from the same words the system gives.
+  // At an expected path, a program that does not write the launcher's word is still not the board.
   const installed = join(place.home, '.claude', 'agent-board.mjs')
+  rmSync(place.file, { force: true })
+  const plain = await startStandIn(installed, place.file, place.progress, [])
+  try {
+    const answer = await runScript({ env: place.env }, request('echo synthetic-f10-expected-path')).done
+    assert.equal(answer.out, '', answer.err)
+    assert.deepEqual(plain.seen(), [], 'a program with no board words was sent the command')
+  } finally { await plain.stop() }
+  // What each process would have to be, read from the same words the system gives.
   writeFileSync(installed, '// synthetic board\n')
   const other = join(place.root, 'elsewhere', 'agent-board.mjs')
   const node = process.execPath
   const cases = [
     [node, [node, installed, '--serve-child'], null],
     [node, [node, '--optimize-for-size', installed, '--serve-child'], null],
-    [node, [node, '--max-old-space-size=512', installed], null],
-    [node, [node, '--max-old-space-size', '512', installed], 'not-board-script'],
+    [node, [node, '--max-old-space-size=512', installed, '--serve-child'], null],
+    [node, [node, '--max-old-space-size', '512', installed, '--serve-child'], null],
     [node, [node, other, '--serve-child'], 'not-board-script'],
-    [node, [node, 'agent-board.mjs'], 'not-board-script'],
+    [node, [node, 'agent-board.mjs', '--serve-child'], 'not-board-script'],
     [node, [node], 'not-board-script'],
+    [node, [node, installed], 'not-board-script'],
     [node, [node, '--import=./synthetic.mjs', installed], 'not-board-script'],
     [node, [node, '-e', 'synthetic()', installed], 'not-board-script'],
-    [isWindows ? 'C:\\synthetic\\python.exe' : '/synthetic/python', [node, installed], 'not-node'],
+    [isWindows ? 'C:\\synthetic\\python.exe' : '/synthetic/python', [node, installed, '--serve-child'], 'not-node'],
   ]
   for (const [exe, argv, reason] of cases) assert.equal(hook.processRefusal({ exe, argv }, [installed], process.platform), reason, argv.join(' '))
 })
@@ -1479,8 +1493,8 @@ test('a plugin at 0.25.1 accepts a later board, and the same script anywhere els
     assert.equal(refused.out, '')
     assert.equal(refusalOf(place).reason, 'not-board-script')
     assert.equal(stand.seen.length, 1)
-    // A later board's own words come after its script. A new Node option before it waits for a plugin that knows it.
-    assert.equal(hook.processRefusal({ exe: process.execPath, argv: [process.execPath, '--a-later-node-option', installed] }, [installed], process.platform), 'not-board-script')
+    // A later board may start Node with an option this plugin has never heard of.
+    assert.equal(hook.processRefusal({ exe: process.execPath, argv: [process.execPath, '--a-later-node-option', installed, '--serve-child'] }, [installed], process.platform), null)
     const sep = isWindows ? '\\' : '/'
     const root = isWindows ? 'C:\\synthetic' : '/synthetic'
     assert.deepEqual(hook.boardScripts({ CLAUDE_PROGRESS_FILE: `${root}${sep}board${sep}progress.md`, CLAUDE_CONFIG_DIR: `${root}${sep}config${sep}` }, `${root}${sep}home`, process.platform), [
@@ -1648,12 +1662,10 @@ test('a command line that only mentions the board script is refused', async () =
     const { script } = boardAt(place)
     const node = process.execPath
     const starts = [
-      // Node runs other code here, and the board's path is only an argument to it.
-      ['-', script], ['--', script], ['--no-warnings', '123', script], ['--env-file=synthetic.env', script], ['--env-file', 'synthetic.env', script],
-      ['--inspect', script], ['--inspect-brk=0', script], ['--test', script], ['--run', 'synthetic', script], ['--a-later-node-option', script],
-      // Near misses of the board's own options. A word that starts `__` is a file Node would run.
-      ['--max-old-space-size', '123', script], ['--optimize-for-size=1', script], ['--a-later-node-option=512', script],
-      ['__max_old_space_size=512', script], ['-_max_old_space_size=512', script],
+      // The board's path with no launcher's word after it.
+      [script], ['-', script], ['--', script], ['--no-warnings', '123', script], ['--env-file=synthetic.env', script], ['--test', script],
+      // The word is there, and the board's path is not directly before it.
+      ['--serve-child', script], [script, 'synthetic', '--serve-child'], ['synthetic.mjs', '--serve-child', script, '--serve-child'],
     ]
     for (const words of starts) assert.equal(refusalFor([node, ...words], script), 'not-board-script', words.join(' '))
     const answer = await runHook(place, request('echo synthetic-only-mentioned'), hookWith(lookupOf({ exe: node, argv: [node, '-', script] }))).done
@@ -1663,26 +1675,25 @@ test('a command line that only mentions the board script is refused', async () =
   } finally { await stand.close() }
 })
 
-test('the options a board may start with are the ones serverMemoryArgs can pass on', () => {
-  // The names come from the source and what each one does from the function itself, so a new option there fails here.
+test('every form serverMemoryArgs can pass on leaves a board the hook accepts', () => {
+  // The names come from the source, so an option added there is covered here with no change to the hook.
   const source = readFileSync(new URL('../scripts/server-runtime.ts', import.meta.url), 'utf8')
   const named = [...new Set([...source.matchAll(/'(--[a-z][a-z-]*)'/g)].map(match => match[1]))]
-  const emits = (name, words) => JSON.stringify(serverMemoryArgs([name, '64'], '')) === JSON.stringify(words)
-  const values = named.filter(name => emits(name, [name, '64']))
-  const switches = named.filter(name => emits(name, [name]))
-  assert.deepEqual([...hook.HEAP_VALUE_OPTIONS].sort(), values.sort())
-  assert.deepEqual([...hook.HEAP_SWITCH_OPTIONS].sort(), switches.sort())
+  assert.ok(named.includes('--max-old-space-size-percentage'), named.join(' '))
+  const place = homeFor()
+  const { script } = boardAt(place)
   const node = process.execPath
-  const script = isWindows ? 'C:\\synthetic\\agent-board.mjs' : '/synthetic/agent-board.mjs'
   const underscored = name => `--${name.slice(2).replaceAll('-', '_')}`
-  const accepts = emitted => assert.equal(hook.scriptOf([node, ...emitted, script, '--serve-child']), script, emitted.join(' '))
-  for (const name of values) for (const spelled of [name, underscored(name)]) accepts(serverMemoryArgs([`${spelled}=64`], ''))
-  for (const name of switches) for (const spelled of [name, underscored(name)]) accepts(serverMemoryArgs([spelled], ''))
+  const accepts = emitted => assert.equal(refusalFor([node, ...emitted, script, '--serve-child'], script), null, emitted.join(' '))
+  for (const name of named) for (const spelled of [name, underscored(name)]) {
+    accepts(serverMemoryArgs([`${spelled}=64`], ''))
+    accepts(serverMemoryArgs([spelled, '64'], ''))
+    accepts(serverMemoryArgs([spelled], ''))
+  }
   accepts(serverMemoryArgs([], ''))
   accepts(serverMemoryArgs([], '--max-old-space-size=64'))
-  // serverMemoryArgs would copy the two-word form, but Node will not start with it, so no running board has it.
-  assert.throws(() => execFileSync(node, ['--max-old-space-size', '123', '-p', '1'], { stdio: 'pipe', windowsHide: true }))
-  for (const name of values) assert.equal(hook.scriptOf([node, name, '64', script]), null, name)
+  // Node takes this one option in two words, and the launcher hands both on.
+  assert.deepEqual(serverMemoryArgs(['--max-old-space-size-percentage', '10'], ''), ['--max-old-space-size-percentage', '10'])
 })
 
 test('a pass after a refusal clears what the page says', async () => {
@@ -2182,4 +2193,92 @@ test('a path check that outlasts the deadline is a refusal', async () => {
     assert.equal(refusalOf(place).reason, 'lookup-timeout')
     assert.deepEqual(stand.seen, [])
   } finally { await stand.close() }
+})
+
+test("a command line that copies the board's two words passes, and SECURITY.md names that limit", () => {
+  const place = homeFor()
+  const { script } = boardAt(place)
+  const node = process.execPath
+  // Plan section 4 accepts this: the other program chose its own command line.
+  for (const words of [['synthetic.mjs', script, '--serve-child'], ['--require=./synthetic.cjs', script, '--serve-child'], ['-e', 'synthetic()', script, '--serve-child']]) {
+    assert.equal(refusalFor([node, ...words], script), null, words.join(' '))
+  }
+  assert.match(readFileSync(new URL('../SECURITY.md', import.meta.url), 'utf8'), /names the board script directly before `--serve-child` while it runs other code/)
+})
+
+test('a command line is judged by the word before --serve-child, wherever the words start', () => {
+  const place = homeFor()
+  const { script } = boardAt(place)
+  const node = process.execPath
+  // The program's own word is never the script, and only the first --serve-child counts.
+  assert.equal(refusalFor([script, '--serve-child'], script), 'not-board-script')
+  assert.equal(refusalFor([node, 'synthetic.mjs', '--serve-child', script, '--serve-child'], script), 'not-board-script')
+  // Windows passes over a leading space, and an empty first word moves nothing.
+  const spaced = hook.splitWindowsCommand(` "${node}" "${script}" --serve-child`)
+  assert.equal(spaced.at(-1), '--serve-child')
+  assert.equal(refusalFor(spaced, script), null)
+  assert.equal(refusalFor(['', script, '--serve-child'], script), null)
+})
+
+test('two files that report one file number are taken as one, and SECURITY.md names that limit', () => {
+  const expected = 'C:\\synthetic\\.agent-board\\agent-board.mjs'
+  const found = { exe: 'C:\\synthetic\\node.exe', argv: ['node', 'C:\\synthetic\\other\\board.mjs', '--serve-child'] }
+  assert.equal(hook.processRefusal(found, [expected], 'win32', () => '7:1'), null)
+  assert.match(readFileSync(new URL('../SECURITY.md', import.meta.url), 'utf8'), /a file that reports the board script's file number/)
+})
+
+test('every line that starts the page server writes the board script directly before --serve-child', () => {
+  const source = readFileSync(new URL('../scripts/board-cli.ts', import.meta.url), 'utf8')
+  const starts = source.split('\n').filter(line => /\b(?:windowsStart|spawn)\(/.test(line) && line.includes("'--serve-child'"))
+  assert.equal(starts.length, 2, starts.join('\n'))
+  for (const line of starts) assert.match(line, /\bscript, '--serve-child'/, line)
+  // The two words as those lines write them are what the hook accepts.
+  const place = homeFor()
+  const { script } = boardAt(place)
+  assert.equal(refusalFor([process.execPath, ...serverMemoryArgs([], ''), script, '--serve-child', '--ready-file', 'synthetic'], script), null)
+})
+
+test('a refusal status with its body left open ends the wait when the headers arrive', async () => {
+  const server = createServer((req, res) => {
+    req.resume()
+    req.on('end', () => { res.writeHead(503, { 'content-type': 'application/json' }); res.flushHeaders() })
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  try {
+    const started = performance.now()
+    const answer = await hook.askBoard({ origin: `http://127.0.0.1:${server.address().port}`, token: 'synthetic-token' }, { tool: 'Bash' })
+    assert.equal(answer, null)
+    assert.ok(performance.now() - started < 20_000, 'the hook waited for a body that never ends')
+  } finally {
+    server.closeAllConnections()
+    await new Promise(done => server.close(done))
+  }
+})
+
+test('a slow removal of the old refusal record that spends the budget sends no request', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    let at = 0
+    const answer = await hook.run(place.env, process.platform, { input: request('npm run synthetic-slow-clear'), now: () => at, discoveryMs: 1_000, checkListener: () => null, clearRefusal: () => { at += 1_000 } })
+    assert.equal(answer, null)
+    assert.deepEqual(stand.seen, [])
+  } finally { await stand.close() }
+})
+
+test('a script spelled as an expected path is read from disk once', () => {
+  const script = 'C:\\synthetic\\.agent-board\\agent-board.mjs'
+  const read = []
+  const found = { exe: 'C:\\synthetic\\node.exe', argv: ['node', script, '--serve-child'] }
+  assert.equal(hook.processRefusal(found, [script], 'win32', path => { read.push(path); return '7:1' }), null)
+  assert.deepEqual(read, [script])
+})
+
+test('a script replaced between its two reads falls back once and the next request passes', () => {
+  const expected = 'C:\\synthetic\\.agent-board\\agent-board.mjs'
+  const spelled = 'C:\\SYNTHETIC\\.AGENT-BOARD\\AGENT-BOARD.MJS'
+  const found = { exe: 'C:\\synthetic\\node.exe', argv: ['node', spelled, '--serve-child'] }
+  const numbers = ['7:1', '7:2']
+  assert.equal(hook.processRefusal(found, [expected], 'win32', () => numbers.shift()), 'not-board-script')
+  assert.equal(hook.processRefusal(found, [expected], 'win32', () => '7:2'), null)
 })
