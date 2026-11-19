@@ -5134,6 +5134,71 @@ test('a pending list that cannot be read names nothing, so a copy no record hold
   }
 }))
 
+test('a list under the pending name that names a relative path, or a path outside this agent\'s plan, stays through setup and removal, and stops setup when a copy is due (#1686)', async () => {
+  for (const which of ['relative', 'outside']) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const list = pendingListOf(f, 'codex'), wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+    const own = `${JSON.stringify({ [which === 'relative' ? 'notes.new' : join(f.home, 'notes', 'synthetic.md.new')]: [digest('Synthetic note of the person\n')] }, null, 2)}\n`
+    f.save(list, own)
+    const setup = f.install('--agent', 'codex', '--apply')
+    assert.equal(setup.status, 0, `${which}: ${setup.stderr}${setup.stdout}`)
+    assert.equal(readFileSync(list, 'utf8'), own, which)
+    f.save(f.skill, 'Synthetic edited skill\n')
+    const due = f.install('--agent', 'codex', '--apply')
+    assert.notEqual(due.status, 0, `${which}: ${due.stdout}`)
+    assert.deepEqual(JSON.parse(due.stdout).conflicts, [list], which)
+    assert.equal(readFileSync(list, 'utf8'), own, which)
+    assert.equal(existsSync(beside), false, which)
+    f.save(f.skill, wanted)
+    const removed = f.install('--agent', 'codex', '--remove', '--apply')
+    assert.equal(removed.status, 0, `${which}: ${removed.stderr}${removed.stdout}`)
+    assert.equal(readFileSync(list, 'utf8'), own, which)
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false, which)
+  })
+})
+
+test('another agent\'s pending list names a copy only by its full path, so a relative one leaves a copy no record holds stopping this agent (#1686)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  f.save(f.skill, 'Synthetic edited skill\n')
+  f.save(beside, wanted)
+  // Setup runs in the skill's folder here, so the relative path reaches the copy from there.
+  const apply = () => spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--agent', 'codex', '--apply'], { cwd: dirname(beside), env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  f.save(pendingListOf(f, 'hermes'), `${JSON.stringify({ [basename(beside)]: [digest(wanted)] })}\n`)
+  const relative = apply()
+  assert.notEqual(relative.status, 0, relative.stdout)
+  assert.deepEqual(JSON.parse(relative.stdout).conflicts, [beside], relative.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  // The same entry by its full path, as setup writes it, is still read.
+  f.save(pendingListOf(f, 'hermes'), `${JSON.stringify({ [beside]: [digest(wanted)] })}\n`)
+  const full = apply()
+  assert.equal(full.status, 0, full.stderr + full.stdout)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+}))
+
+test('a removal leaves the pending list in place when a file is saved under its name during the removal (#1686)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), list = pendingListOf(f, 'codex')
+  f.save(f.skill, 'Synthetic edited skill\n')
+  assert.notEqual(stoppedSetup(f, 'install-codex.json', 'refuse', '--agent', 'codex', '--apply').status, 0)
+  assert.equal(existsSync(list), true, 'the stopped apply left its pending list')
+  f.save(f.skill, wanted)
+  // The person saves a note under the list's name after the removal checked its files, while it deletes the skill.
+  const note = '{\n  "note": "synthetic note of the person"\n}\n'
+  const preload = join(f.home, 'save-during-removal.cjs')
+  f.save(preload, `const fs = require('node:fs')\nconst unlink = fs.unlinkSync\nfs.unlinkSync = file => { unlink(file); if (String(file).endsWith('SKILL.md')) fs.writeFileSync(${JSON.stringify(list)}, ${JSON.stringify(note)}) }\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let removed
+  try { removed = f.install('--agent', 'codex', '--remove', '--apply') } finally { delete f.env.NODE_OPTIONS }
+  assert.notEqual(removed.status, 0, removed.stdout)
+  assert.equal(readFileSync(list, 'utf8'), note)
+  assert.equal(existsSync(join(f.root, 'install-codex.json')), true, 'the record stays for the next removal')
+  const again = f.install('--agent', 'codex', '--remove', '--apply')
+  assert.equal(again.status, 0, again.stderr + again.stdout)
+  assert.equal(readFileSync(list, 'utf8'), note)
+  assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+}))
+
 test('an edit undone after an apply stopped part-way takes the copy and the pending list away (#1302)', () => fixture(f => {
   assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
   const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
