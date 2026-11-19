@@ -1047,11 +1047,12 @@ server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address()
       waitingChild.kill('SIGKILL')
       await waitingGone
       const restarted = await allowingBoard()
-      pressing.writeAddress(restarted.url)
-      const unanswered = await asking.done
-      assert.equal(unanswered.out, '', unanswered.err)
-      assert.deepEqual(restarted.seen, [], 'the board that came back was asked')
-      await restarted.close()
+      try {
+        pressing.writeAddress(restarted.url)
+        const unanswered = await asking.done
+        assert.equal(unanswered.out, '', unanswered.err)
+        assert.deepEqual(restarted.seen, [], 'the board that came back was asked')
+      } finally { await restarted.close() }
     } finally { waitingChild.kill('SIGKILL') }
   } finally {
     server.closeAllConnections()
@@ -1063,15 +1064,20 @@ server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address()
 const allowingBoard = async () => {
   const seen = []
   const tokens = []
+  const bodies = []
   const server = createServer((req, res) => {
     seen.push(req.url)
     tokens.push(req.headers['x-board-token'])
-    req.resume()
-    req.on('end', () => res.writeHead(200, { 'content-type': 'application/json' }).end('{"decision":{"behavior":"allow"}}'))
+    const chunks = []
+    req.on('data', chunk => chunks.push(chunk))
+    req.on('end', () => {
+      bodies.push(Buffer.concat(chunks).toString('utf8'))
+      res.writeHead(200, { 'content-type': 'application/json' }).end('{"decision":{"behavior":"allow"}}')
+    })
   })
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   return {
-    seen, tokens, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token`,
+    seen, tokens, bodies, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token`,
     close: async () => { server.closeAllConnections(); await new Promise(done => server.close(done)) },
   }
 }
@@ -2246,7 +2252,7 @@ test('a refusal status with its body left open ends the wait when the headers ar
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   try {
     const started = performance.now()
-    const answer = await hook.askBoard({ origin: `http://127.0.0.1:${server.address().port}`, token: 'synthetic-token' }, { tool: 'Bash' })
+    const answer = await hook.askBoard({ origin: `http://127.0.0.1:${server.address().port}`, token: 'synthetic-token' }, '{"tool":"Bash"}')
     assert.equal(answer, null)
     assert.ok(performance.now() - started < 20_000, 'the hook waited for a body that never ends')
   } finally {
@@ -2264,6 +2270,68 @@ test('a slow removal of the old refusal record that spends the budget sends no r
     assert.equal(answer, null)
     assert.deepEqual(stand.seen, [])
   } finally { await stand.close() }
+})
+
+test('a slow preparation of the request body that spends the budget sends no request', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    let at = 0
+    const input = request('npm run synthetic-slow-body', { tool_input: { toJSON: () => { at = 1_000; return { command: 'npm run synthetic-slow-body' } } } })
+    const answer = await hook.run(place.env, process.platform, { input, now: () => at, discoveryMs: 1_000, checkListener: () => null, clearRefusal: () => {} })
+    assert.equal(answer, null)
+    assert.deepEqual(stand.seen, [])
+  } finally { await stand.close() }
+})
+
+test('a request body prepared inside the budget is sent as prepared', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    const input = request('npm run synthetic-prepared')
+    let cleared = 0
+    const answer = await hook.run(place.env, process.platform, { input, now: () => 0, discoveryMs: 1_000, checkListener: () => null, clearRefusal: () => { cleared += 1 } })
+    assert.deepEqual(answer, ALLOW)
+    assert.equal(cleared, 1)
+    assert.deepEqual(stand.bodies.map(text => JSON.parse(text)), [JSON.parse(JSON.stringify(hook.askBody(input)))])
+  } finally { await stand.close() }
+})
+
+test('the last clock read comes after the body is prepared and the old refusal record is removed', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    const events = []
+    const input = request('npm run synthetic-order', { tool_input: { toJSON: () => { events.push('body'); return { command: 'npm run synthetic-order' } } } })
+    const answer = await hook.run(place.env, process.platform, { input, now: () => { events.push('clock'); return 0 }, discoveryMs: 1_000, checkListener: () => null, clearRefusal: () => { events.push('clear') } })
+    assert.deepEqual(answer, ALLOW)
+    assert.equal(stand.seen.length, 1)
+    assert.ok(events.includes('clear') && events.includes('body'), events.join(' '))
+    assert.equal(events.at(-1), 'clock', events.join(' '))
+  } finally { await stand.close() }
+})
+
+test('a tool input at the size limit goes out cut, in a request under 64 KB', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    let cleared = 0
+    const input = request('x'.repeat(1024 * 1024 - 1024))
+    const answer = await hook.run(place.env, process.platform, { input, now: () => 0, discoveryMs: 1_000, checkListener: () => null, clearRefusal: () => { cleared += 1 } })
+    assert.deepEqual(answer, ALLOW)
+    assert.equal(cleared, 1)
+    assert.equal(stand.bodies.length, 1)
+    assert.ok(Buffer.byteLength(stand.bodies[0]) < 64 * 1024, String(Buffer.byteLength(stand.bodies[0])))
+    assert.equal(JSON.parse(stand.bodies[0]).isCut, true)
+  } finally { await stand.close() }
+})
+
+test("the discovery budget, the press window and the room to send add up to the hook's limit", () => {
+  const hooks = JSON.parse(readFileSync(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
+  const entry = hooks.hooks.PermissionRequest.flatMap(item => item.hooks).find(item => item.command.includes('claude-approval.mjs'))
+  const pressMs = Number(readFileSync(new URL('../hooks/approvals.ts', import.meta.url), 'utf8').match(/APPROVAL_PRESS_MS = ([\d_]+)/)[1].replaceAll('_', ''))
+  assert.equal(hook.SEND_ROOM_MS, 5_000)
+  assert.equal(hook.DISCOVERY_MS + pressMs + hook.SEND_ROOM_MS, entry.timeout * 1_000)
 })
 
 test('a script spelled as an expected path is read from disk once', () => {
