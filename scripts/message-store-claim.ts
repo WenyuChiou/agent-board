@@ -385,8 +385,9 @@ export const settleStoreHolder = async (pid: number, deps: HolderDeps, proof?: '
   if (typeof again !== 'number' || Math.abs(again - look.started) > 1000) return { kind: 'refused', isBoard: false }
   if (!(await deps.stillDead())) return { kind: 'unproven' }
   const pause = (ms: number) => new Promise(done => setTimeout(done, ms))
-  // Whether the holder is gone, as its number or as its identity: while waiting, the start time is read again every
-  // half second (macOS spends a ps start on each read), so a number another program took counts as the holder gone.
+  // Whether the number still belongs to the holder, by its start time. It is read right before every signal, after
+  // every await (the proof read again above may take seconds), and every half second while waiting (macOS spends
+  // a ps start on each read), so a number another program took meanwhile is never signalled.
   const isSame = (): boolean | 'unknown' => {
     const now = deps.started(pid, look)
     return typeof now === 'number' ? Math.abs(now - look.started) <= 1000 : now === null && !deps.isAlive(pid) ? false : 'unknown'
@@ -404,15 +405,12 @@ export const settleStoreHolder = async (pid: number, deps: HolderDeps, proof?: '
     }
     return true
   }
-  // SIGKILL goes only while the start time is still the holder's: a number another program took after the holder
-  // exited is left alone.
+  // Every signal goes only while the start time is still the holder's: a number another program took after the
+  // holder exited is left alone. Nothing is awaited between this read and the signal.
   for (const signal of deps.signals) {
-    if (signal !== deps.signals[0]) {
-      // Before each later signal the identity is read again; the first one follows the check above.
-      const same = isSame()
-      if (same === false) return { kind: 'gone' }
-      if (same === 'unknown') return { kind: 'refused', isBoard: true }
-    }
+    const same = isSame()
+    if (same === false) return { kind: 'gone' }
+    if (same === 'unknown') return { kind: 'refused', isBoard: true }
     try { deps.kill(pid, signal) } catch (error) {
       // Windows refuses to end a process that is already exiting (another start ended it first): that one is gone.
       if ((error as NodeJS.ErrnoException).code === 'ESRCH' || !deps.isAlive(pid)) return { kind: 'gone' }

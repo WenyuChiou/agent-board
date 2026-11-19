@@ -8216,8 +8216,9 @@ test('a page serving a folder given with --messages-dir is never ended', async (
 test('a number another program took after SIGTERM is never sent SIGKILL', async () => {
   const look = { commandLine: 'node /x/board.mjs --serve-child', started: Date.now() - 60_000 }
   let reads = 0
-  // The holder ignores SIGTERM for the wait; then its number shows another program's start time.
-  const { deps, kills } = holderDeps({ look: () => look, started: () => (++reads === 1 ? look.started : look.started + 5_000), isAlive: () => true, signals: ['SIGTERM', 'SIGKILL'] })
+  // The holder ignores SIGTERM for the wait (two reads: before the proof is read again, and right before SIGTERM);
+  // then its number shows another program's start time.
+  const { deps, kills } = holderDeps({ look: () => look, started: () => (++reads <= 2 ? look.started : look.started + 5_000), isAlive: () => true, signals: ['SIGTERM', 'SIGKILL'] })
   assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'gone' })
   assert.deepEqual(kills, ['SIGTERM'])
   const same = holderDeps({ look: () => look, isAlive: () => false, signals: ['SIGTERM', 'SIGKILL'] })
@@ -8236,8 +8237,8 @@ test('a command line joined with spaces, as macOS reports it, still finds the bo
 test('a number another program takes while the board waits after SIGTERM ends the wait without SIGKILL', async () => {
   const look = { commandLine: 'node /x/board.mjs --serve-child', started: Date.now() - 60_000 }
   let reads = 0
-  // The first read is the check before SIGTERM; a read during the wait shows another program's start time.
-  const { deps, kills } = holderDeps({ look: () => look, started: () => (++reads === 1 ? look.started : look.started + 5_000), isAlive: () => true, waitMs: 3000, signals: ['SIGTERM', 'SIGKILL'] })
+  // The first two reads are the checks before SIGTERM; a read during the wait shows another program's start time.
+  const { deps, kills } = holderDeps({ look: () => look, started: () => (++reads <= 2 ? look.started : look.started + 5_000), isAlive: () => true, waitMs: 3000, signals: ['SIGTERM', 'SIGKILL'] })
   const began = Date.now()
   assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'ended' })
   assert.deepEqual(kills, ['SIGTERM'])
@@ -8287,5 +8288,14 @@ test('an old board holder with no proof is never signalled', async () => {
 test('a proof that no longer holds before the first signal sends none', async () => {
   const { deps, kills } = holderDeps({ stillDead: () => false })
   assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'unproven' })
+  assert.deepEqual(kills, [])
+})
+
+test('a number another program takes while the proof is read again is never signalled', async () => {
+  const look = { commandLine: 'node /x/board.mjs --serve-child', started: Date.now() - 60_000 }
+  let isRead = false
+  // The proof read again takes a while; by its end the number shows another program's start time.
+  const { deps, kills } = holderDeps({ look: () => look, started: () => (isRead ? look.started + 5_000 : look.started), stillDead: async () => { await new Promise(done => setTimeout(done, 20)); isRead = true; return true }, isAlive: () => true, signals: ['SIGTERM', 'SIGKILL'] })
+  assert.deepEqual(await settleStoreHolder(4242, deps, 'refused'), { kind: 'gone' })
   assert.deepEqual(kills, [])
 })

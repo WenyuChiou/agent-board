@@ -30,7 +30,7 @@ import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
 import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
-import { claimMessageStore, hasLiveClaims, holderDeps, ownerRecordOf, pageState, patiently, settleStoreHolder, type OwnerRead, type PageProbe, type PageState } from './message-store-claim'
+import { claimMessageStore, hasLiveClaims, holderDeps, ownerRecordOf, pageState as storePageState, patiently, settleStoreHolder, type OwnerRead, type PageProbe, type PageState as StorePageState } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -2533,7 +2533,7 @@ const probePage = async (port: number, url: string): Promise<PageProbe> => {
     return { kind: 'error', code: typeof code === 'string' ? code : 'UNKNOWN' }
   }
 }
-const ownerPageState = async (pid: number, file: string): Promise<PageState> => {
+const ownerPageState = async (pid: number, file: string): Promise<StorePageState> => {
   const store = messagesDirectory()
   let record: OwnerRead
   try { record = { kind: 'text', text: readFileSync(join(store, 'server.owner'), 'utf8') } } catch (error) {
@@ -2543,7 +2543,7 @@ const ownerPageState = async (pid: number, file: string): Promise<PageState> => 
   const probe = 'port' in named ? await probePage(named.port, named.url) : undefined
   let hasOwnClaim = false
   try { hasOwnClaim = readdirSync(store).some(name => name.startsWith(`.message-claim-${pid}-`)) } catch {}
-  return pageState({ pid, store, record, probe, hasAddressFile: existsSync(file), hasOwnClaim })
+  return storePageState({ pid, store, record, probe, hasAddressFile: existsSync(file), hasOwnClaim })
 }
 
 const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | null> => {
