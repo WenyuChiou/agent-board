@@ -1517,6 +1517,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       else hasMissingGroup = true
     }
     if (patch === null) conflicts.push(nativeConfig)
+    // An entry the person changed is refused by its event, like the JSON agents' `${config}:${event}`,
+    // so the message names the exact lines instead of the whole file.
+    else for (const event of patch.refused) conflicts.push(`${nativeConfig}:${event}`)
     nextConfigText = patch?.text ?? text
     if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
     if (remove) {
