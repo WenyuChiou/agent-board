@@ -30,7 +30,7 @@ import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
 import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
-import { claimMessageStore, hasLiveClaims, holderDeps, liveHolder, ownerRecordOf, pageState as storePageState, patiently, settleStoreHolder, type OwnerRead, type PageProbe, type PageState as StorePageState } from './message-store-claim'
+import { claimMessageStore, hasLiveClaims, holderDeps, ownerRecordOf, retriesAtOnce, pageState as storePageState, patiently, settleStoreHolder, type OwnerRead, type PageProbe, type PageState as StorePageState } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -2755,7 +2755,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
         // A holder that has exited but is not reaped yet still answers a signal, so the page's own claim still sees it:
         // trying again at once would meet it again. Its lock moves below as a dead page's does, with no wait, as for a
         // refused holder; otherwise the start tries again after a pause (#1721).
-        if (settled.kind === 'ended' || settled.kind === 'gone' && !liveHolder(pid)) continue
+        if (retriesAtOnce(settled, pid)) continue
         if (settled.kind === 'gone') exiting = pid
         if (settled.kind === 'refused') refused = { pid, isBoard: settled.isBoard }
         if (settled.kind === 'unproven') unproven = pid
@@ -2808,9 +2808,10 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     // A holder that ended meanwhile (another start ended it) is no reason to refuse: try again.
     if (refused !== undefined && !isRunning(refused.pid) && performance.now() < deadline) continue
     // An exiting holder is never named: it is tried again, after a pause, until it is gone or the deadline passes.
-    if (exiting !== undefined && performance.now() + 100 < deadline) {
+    // A pause that ends past the deadline goes on below, so the store's reason is kept.
+    if (exiting !== undefined && performance.now() < deadline) {
       await new Promise(done => setTimeout(done, 100))
-      continue
+      if (performance.now() < deadline) continue
     }
     const code = storeCode ?? (isCheckTimeout ? 'ACL_CHECK_TIMEOUT' : undefined)
     if (failure !== undefined && code !== undefined) failure.storeCode = code

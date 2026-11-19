@@ -285,15 +285,19 @@ export const liveHolder = (pid: number): boolean => {
 // #1721: on Linux a process that is exiting, or has exited and is not reaped yet, still answers a signal but reads an
 // empty command line. It holds nothing any more, so it is gone, not a process to name. Flag 0x4 is the kernel's
 // PF_EXITING; the command name in the stat line may hold ") ", so the fields are read after its last ")". A stat
-// file that is gone when read means the process is gone too, but only where this process can read its own.
+// file that is gone when read means the process is gone too. Either is proof only from a /proc of this process's own
+// PID namespace, where its own stat line starts with its own number: a /proc mounted for another namespace describes
+// other processes under the same numbers, or none.
+const isOwnProc = (read: (path: string) => string): boolean => {
+  try { return read('/proc/self/stat').split(' ', 1)[0] === String(process.pid) } catch { return false }
+}
 export const isExiting = (pid: number, read: (path: string) => string = path => readFileSync(path, 'utf8')): boolean => {
   let stat: string
   try { stat = read(`/proc/${pid}/stat`) } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false
-    try { read('/proc/self/stat'); return true } catch { return false }
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' && isOwnProc(read)
   }
   const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-  return fields[0] === 'Z' || fields[0] === 'X' || (Number(fields[6]) & 4) !== 0
+  return (fields[0] === 'Z' || fields[0] === 'X' || (Number(fields[6]) & 4) !== 0) && isOwnProc(read)
 }
 export const lookUpHolder = (pid: number, timeoutMs = 5000): StoreHolder | 'gone' | null => {
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null
@@ -362,6 +366,11 @@ export const isBoardServe = (commandLine: string, head: (file: string) => string
 // program took meanwhile is never ended. messages.json is replaced whole, so a page ended mid-write
 // leaves a complete file.
 export type HolderOutcome = { kind: 'young' | 'kept' | 'unproven' | 'gone' | 'ended' } | { kind: 'refused'; isBoard: boolean }
+// #1721: a start tries again at once only after a holder it ended, or one that is gone and answers no signal at all.
+// One that still answers, exited and not reaped yet or another account's (EPERM), would only be met again: its lock
+// goes to the owner-record move and the pause instead.
+export const retriesAtOnce = (outcome: HolderOutcome, pid: number, answers: (pid: number) => boolean = liveHolder): boolean =>
+  outcome.kind === 'ended' || outcome.kind === 'gone' && !answers(pid)
 export type HolderDeps = {
   look: (pid: number) => StoreHolder | 'gone' | null
   started: (pid: number, look: StoreHolder) => ProcessStart

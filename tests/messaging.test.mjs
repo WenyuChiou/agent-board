@@ -8082,7 +8082,7 @@ test('a queued Codex CLI message stops waiting forever and offers Copy when a la
 })
 
 // M6 (#1596, #1587): the board ends a message store's holder only after proving it is an old board page.
-const { isBoardServe, isExiting, lookUpHolder, pageState, settleStoreHolder } = await import('../scripts/message-store-claim.ts')
+const { isBoardServe, isExiting, liveHolder, lookUpHolder, pageState, retriesAtOnce, settleStoreHolder } = await import('../scripts/message-store-claim.ts')
 const BOARD_HEAD = 'globalThis.AGENT_BOARD = {"path":"progress.md"}\n'
 const holderDeps = (overrides = {}) => {
   const kills = []
@@ -8228,7 +8228,11 @@ test('a holder that has exited but is not yet reaped reads as gone, not as a pro
 })
 
 test('a stat line with the exiting flag reads as exiting, and a kernel thread\'s does not (#1721)', () => {
-  const statOf = line => path => { assert.equal(path, '/proc/4242/stat'); return line }
+  const statOf = line => path => {
+    if (path === '/proc/self/stat') return `${process.pid} (node) R 1 1 1 0 -1 4194560 0 0 0 0\n`
+    assert.equal(path, '/proc/4242/stat')
+    return line
+  }
   // Flag 0x4 is the kernel's PF_EXITING; 4194560 is a live program's flags, 4194564 the same while it exits.
   assert.equal(isExiting(4242, statOf('4242 (node) S 1 4242 4242 0 -1 4194560 0 0 0 0\n')), false)
   assert.equal(isExiting(4242, statOf('4242 (node) R 1 4242 4242 0 -1 4194564 0 0 0 0\n')), true)
@@ -8244,13 +8248,43 @@ test('a stat line with the exiting flag reads as exiting, and a kernel thread\'s
 
 test('a holder reaped while its state is read is gone, not unreadable (#1721)', () => {
   const failing = code => () => { throw Object.assign(new Error(code), { code }) }
-  const reaped = path => { if (path === '/proc/self/stat') return '1 (node) R 0 1 1 0 -1 4194560'; return failing('ENOENT')() }
+  const reaped = path => { if (path === '/proc/self/stat') return `${process.pid} (node) R 0 1 1 0 -1 4194560`; return failing('ENOENT')() }
   // No stat file any more while this process can read its own: the process was reaped between the two reads, so it is gone.
   assert.equal(isExiting(4242, reaped), true)
   // No stat file for this process either: there is no /proc to read, which proves nothing.
   assert.equal(isExiting(4242, failing('ENOENT')), false)
   // A stat file this account cannot read proves nothing.
   assert.equal(isExiting(4242, failing('EACCES')), false)
+})
+
+test('a /proc of another PID namespace is no proof that a holder is exiting or gone (#1721)', () => {
+  // Mounted for another namespace, /proc names this process by another number, or not at all, and its stat files
+  // describe other processes under the same numbers.
+  const elsewhere = (self, line) => path => {
+    if (path === '/proc/self/stat') { if (self === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return self }
+    if (line === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    return line
+  }
+  const other = `${process.pid + 1} (node) R 1 1 1 0 -1 4194560 0 0 0 0\n`
+  const zombie = '4242 (node) Z 1 4242 4242 0 -1 4194560 0 0 0 0\n'
+  assert.equal(isExiting(4242, elsewhere(other, zombie)), false)
+  assert.equal(isExiting(4242, elsewhere(other, undefined)), false)
+  assert.equal(isExiting(4242, elsewhere(undefined, zombie)), false)
+  // The same reads from this process's own /proc are proof.
+  assert.equal(isExiting(4242, elsewhere(`${process.pid} (node) R 1 1 1 0 -1 4194560 0 0 0 0\n`, zombie)), true)
+})
+
+test('a gone holder that still answers a signal, or answers EPERM, is not tried again at once (#1721)', () => {
+  assert.equal(retriesAtOnce({ kind: 'ended' }, 4242, () => true), true)
+  assert.equal(retriesAtOnce({ kind: 'gone' }, 4242, () => false), true)
+  // Exited and not reaped yet, or another account's: it would only be met again.
+  assert.equal(retriesAtOnce({ kind: 'gone' }, 4242, () => true), false)
+  assert.equal(retriesAtOnce({ kind: 'refused', isBoard: false }, 4242, () => false), false)
+  // Process 1 is another account's for a start that is not root: signal zero answers EPERM, which counts as answering.
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    assert.equal(liveHolder(1), true)
+    assert.equal(retriesAtOnce({ kind: 'gone' }, 1), false)
+  }
 })
 
 const kernelThread = (() => {

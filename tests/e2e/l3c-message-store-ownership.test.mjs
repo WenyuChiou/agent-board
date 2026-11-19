@@ -502,6 +502,9 @@ test('a start still opens when the dead page is never reaped (#1721)', { timeout
   assert.ok(link, JSON.stringify(opened))
   assert.ok(opened.ms < 10_000, `took ${opened.ms} ms`)
   assert.equal((await h.pingOf(link))?.messagesDirectory, folder)
+  // The dead page's claim and lock are gone, and the store is the new page's.
+  assert.deepEqual(readdirSync(folder).filter(name => name.startsWith(`.message-claim-${pid}-`)), [])
+  assert.notEqual(readOr(join(folder, 'server.lock'), ''), String(pid))
 }))
 
 test('a folder given with --messages-dir is never looked up or taken over', { timeout: 120_000 }, () => withHolderWorld(1000, async h => {
