@@ -5157,19 +5157,25 @@ test('a list under the pending name that names a relative path, or a path outsid
   })
 })
 
-test('another agent\'s pending list names a copy only by its full path, so a relative one leaves a copy no record holds stopping this agent (#1686)', () => fixture(f => {
+test('another agent\'s pending list names a copy only by the exact path setup writes, so any other spelling leaves a copy no record holds stopping this agent (#1686)', () => fixture(f => {
   assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
   const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
   f.save(f.skill, 'Synthetic edited skill\n')
   f.save(beside, wanted)
-  // Setup runs in the skill's folder here, so the relative path reaches the copy from there.
+  const linked = join(f.home, 'linked-skill')
+  symlinkSync(dirname(beside), linked, process.platform === 'win32' ? 'junction' : 'dir')
+  // Every one of these reaches the same copy. Setup runs in the skill's folder here, so the bare name does too, and on
+  // Windows so does the path with no drive letter.
+  const spellings = [basename(beside), join(linked, basename(beside)), ...(process.platform === 'win32' ? [beside.slice(2), `${beside.slice(0, -4).toUpperCase()}.new`, `\\\\?\\${beside}`] : [])]
   const apply = () => spawnSync(process.execPath, [setup, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--agent', 'codex', '--apply'], { cwd: dirname(beside), env: f.env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
-  f.save(pendingListOf(f, 'hermes'), `${JSON.stringify({ [basename(beside)]: [digest(wanted)] })}\n`)
-  const relative = apply()
-  assert.notEqual(relative.status, 0, relative.stdout)
-  assert.deepEqual(JSON.parse(relative.stdout).conflicts, [beside], relative.stdout)
-  assert.equal(readFileSync(beside, 'utf8'), wanted)
-  // The same entry by its full path, as setup writes it, is still read.
+  for (const key of spellings) {
+    f.save(pendingListOf(f, 'hermes'), `${JSON.stringify({ [key]: [digest(wanted)] })}\n`)
+    const other = apply()
+    assert.notEqual(other.status, 0, `${key}: ${other.stdout}`)
+    assert.deepEqual(JSON.parse(other.stdout).conflicts, [beside], key)
+    assert.equal(readFileSync(beside, 'utf8'), wanted, key)
+  }
+  // The same entry by the exact path setup writes is still read.
   f.save(pendingListOf(f, 'hermes'), `${JSON.stringify({ [beside]: [digest(wanted)] })}\n`)
   const full = apply()
   assert.equal(full.status, 0, full.stderr + full.stdout)

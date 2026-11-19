@@ -576,8 +576,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // person's can have it too. So setup reads, writes over and deletes the file only when it reads so; anything else names
   // nothing, a copy no record holds then stops that agent as any unknown file does, and the file stays.
   // Setup writes into this agent's list only the .new path beside a text file of this run's plan, so its list may name
-  // only those. Another agent's list is only read here and its plan is not known, so its paths need only be full ones.
-  // That is as far as setup can tell: a file naming this plan's own .new paths with hashes is its list, whoever wrote it.
+  // only those. Another agent's list is only read here and its plan is not known, so its paths need only be full ones;
+  // an entry of it names a copy only under the exact path this run plans (isOurBeside). That is as far as setup can
+  // tell: a file naming this plan's own .new paths with hashes is its list, whoever wrote it.
   const pendingFile = (one: string): string => join(root, `install-pending-${one}.json`)
   const isOwnCopy = (path: string): boolean => isTextFile(path.slice(0, -4)) && Object.hasOwn(files, path.slice(0, -4))
   const listOf = (snap: Snap | undefined, isNamed: (path: string) => boolean = isOwnCopy): Record<string, string[]> | null => {
@@ -1666,10 +1667,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const keptCode: string[] = []
   const keptHeld: { file: string; by: string }[] = []
   const missingHeld: { file: string; by: string }[] = []
-  // A file at the .new path is setup's only when a record or a pending list holds exactly those bytes for it, or for the
-  // same file reached by a second name (a skills folder linked to the shared one, or another letter case on Windows).
+  // The limit, as far as setup can tell: a record or a pending list that names a .new path with the SHA-256 of the bytes
+  // now at it makes that copy setup's, whoever wrote that file. A list entry counts only under the exact path this run
+  // plans; only a record also counts through a second name for the same file (a skills folder linked to the shared one,
+  // or another letter case on Windows).
   const pendingCopies = [agent, ...otherAgents].flatMap(one => Object.entries(pendingOf(one)).flatMap(([path, hashes]) => hashes.map((value): [string, unknown] => [path, value])))
-  const isOurBeside = (copy: string, text: string): boolean => [...records.flatMap(record => Object.entries(record)), ...pendingCopies].some(([path, value]) => value === hash(text) && (path === copy || path.endsWith('.new') && realOf(path) !== null && realOf(path) === realOf(copy)))
+  const isOurBeside = (copy: string, text: string): boolean => pendingCopies.some(([path, value]) => path === copy && value === hash(text))
+    || records.flatMap(record => Object.entries(record)).some(([path, value]) => value === hash(text) && (path === copy || path.endsWith('.new') && realOf(path) !== null && realOf(path) === realOf(copy)))
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill

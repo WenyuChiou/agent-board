@@ -1850,7 +1850,7 @@ export const LINES = [
 "  const keptHeld = [];",
 "  const missingHeld = [];",
 "  const pendingCopies = [agent, ...otherAgents].flatMap((one) => Object.entries(pendingOf(one)).flatMap(([path, hashes]) => hashes.map((value) => [path, value])));",
-"  const isOurBeside = (copy, text) => [...records.flatMap((record) => Object.entries(record)), ...pendingCopies].some(([path, value]) => value === hash2(text) && (path === copy || path.endsWith(\".new\") && realOf(path) !== null && realOf(path) === realOf(copy)));",
+"  const isOurBeside = (copy, text) => pendingCopies.some(([path, value]) => path === copy && value === hash2(text)) || records.flatMap((record) => Object.entries(record)).some(([path, value]) => value === hash2(text) && (path === copy || path.endsWith(\".new\") && realOf(path) !== null && realOf(path) === realOf(copy)));",
 "  for (const [file, desired] of Object.entries(files)) {",
 "    const existing = initial(file);",
 "    const shared = file === script || file === worker || file === skill;",
