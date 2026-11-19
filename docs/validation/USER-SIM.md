@@ -107,9 +107,11 @@ Systems: Windows 11, PowerShell 7, Node 24.x; macOS 15, zsh, Node 22.x
 Summary: N PASS, N FRICTION (all with issues), 0 FAIL.
 ```
 
-Screenshots of each journey's last screen come from the clean home only. Upload them as assets on the GitHub Release for the version being checked, and link them from the record using Markdown image syntax with alt text that starts with "Synthetic" and says the data is synthetic. Do not commit screenshot files to the repository; the [PR image rules](../../CONTRIBUTING.md#images) stay unchanged.
+Screenshots of each journey's last screen come from the clean home only. Before release review, keep masked copies in a local folder, give their count in the record, and say in the release pull request's body who holds them (agent or GitHub login), following the [existing screenshot practice](PARITY-CHECKLIST.md#how-to-run-it-safely). The reviewer needs to inspect those copies before treating the screenshots as reviewed evidence. If the reviewer cannot access them, record that gap; a planned Release link is not evidence that a screenshot was uploaded or reviewed.
 
-The record and release assets are public ([RULES.md, R8](../dev/RULES.md#r8-what-stays-off-github)): before committing any record text or output, or uploading a screenshot, replace computer user names, email addresses, machine names, home-folder paths, session ids and tokens with placeholders such as `<home>`. Name the runner by agent or GitHub login only. The PR check fails a record that still holds a home-folder path, a session id, a token or an email address.
+Once the GitHub Release for that version is created at [RELEASING.md, checklist step 8](../RELEASING.md#checklist), upload the same masked copies as its permanent assets and link them from the record using Markdown image syntax with alt text that starts with "Synthetic" and says the data is synthetic. Until the assets exist, mark any planned asset links as pending. Do not create a Release early to host review evidence, or commit screenshot files to the repository; the [PR image rules](../../CONTRIBUTING.md#images) stay unchanged.
+
+The record and release assets are public ([RULES.md, R8](../dev/RULES.md#r8-what-stays-off-github)): before committing any record text or output, or sharing or uploading a screenshot, replace computer user names, email addresses, machine names, home-folder paths, session ids and tokens with placeholders such as `<home>`. Name the runner by agent or GitHub login only. The PR check fails a record that still holds a home-folder path, a session id, a token or an email address.
 
 ## Prompt to give an agent
 
