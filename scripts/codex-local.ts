@@ -560,8 +560,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const entry = was.kind === 'link' ? entryReal(file) : was.real
     // The entry the link text names: resolve it against the link's folder, then take that entry's real path. The
     // first removed entry in a chain explains the break; a target another program deleted is not named by the link
-    // text, so it still stops the batch (F2).
-    const linkEntry = was.kind === 'link' && was.link !== null ? entryReal(resolve(dirname(file), was.link)) : null
+    // text, so it still stops the batch (F2). `resolve` must not be used here: it collapses `hop/..` lexically
+    // before the OS follows `hop`, so the entry named is a file the link never read (Greptile 4627685622). Join
+    // the raw text instead, and let `entryReal` resolve the parent with realpath, so `..` goes up from the
+    // directory the OS reached through the link, not the lexical one.
+    const target = was.link !== null && isAbsolute(was.link) ? was.link : dirname(file) + sep + was.link
+    const linkEntry = was.kind === 'link' && was.link !== null ? entryReal(target) : null
     const isGone = next === null && ((now.kind === 'none' && entry !== null && gone.has(entry)) || (was.kind === 'link' && now.kind === 'link' && now.link === was.link && now.bytes === null && was.real !== null && (gone.has(was.real) || (linkEntry !== null && gone.has(linkEntry)))))
     if (!same(was, now) && !isSecondName && !isGone) throw new Error('INSTALL_CHANGED')
     return now
