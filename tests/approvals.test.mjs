@@ -5,7 +5,7 @@ import childProcess, { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import fs, { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -64,7 +64,7 @@ const homeFor = (url, pid = process.pid) => {
 
 // A board started from source, with the tests' shorter waits. No grace window unless a test asks.
 // `open` stands in for the browser opener; the default opens the page and says so.
-const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, pageMs, open, holdMs, isWatched = false, place = homeFor(), addressFile = place.file, now } = {}) => {
+const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, pageMs, open, holdMs, isWatched = false, watchFs, place = homeFor(), addressFile = place.file, now } = {}) => {
   let self
   const messages = join(place.root, `messages-${Date.now()}-${Math.random().toString(16).slice(2)}`)
   mkdirSync(messages)
@@ -83,7 +83,7 @@ const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, 
       ...(holdMs === undefined ? {} : { boardTimes: { holdMs } }),
       // A file watch as the shipped board has (#359), so no timer looks at the board while a request waits; its stand-in
       // never reports, and nothing in these tests writes the files, so only the board's own changes answer a request.
-      ...(isWatched ? { watch: { progress: place.progress, inbox: join(dirname(place.progress), 'progress-inbox'), fs: () => Object.assign(new EventEmitter(), { close: () => {} }) } } : {}),
+      ...(isWatched ? { watch: { progress: place.progress, inbox: join(dirname(place.progress), 'progress-inbox'), fs: watchFs ?? (() => Object.assign(new EventEmitter(), { close: () => {} })) } } : {}),
       // The browser stand-in: the address the board would open, with its one-time key.
       open: async url => { opened.push(url); return open === undefined ? true : open(url, self) },
       journal: entry => { journal.push(entry) },
@@ -3069,4 +3069,33 @@ test('during key-replay lockdown the approvals switch shows off and disabled whi
   toggle.click()
   assert.equal(dom.requests.length, 0)
   assert.equal(dom.board().textContent.includes(EN.approvalOff), true)
+})
+
+test('a watched board caches idle refusal and off-switch checks until the folder watcher signals a change', async () => {
+  const watchers = []
+  const watchFs = (path, listener) => {
+    const entry = Object.assign(new EventEmitter(), {
+      path,
+      listener,
+      closed: false,
+      close() { this.closed = true },
+    })
+    watchers.push(entry)
+    return entry
+  }
+  const board = await startBoard({ isWatched: true, watchFs })
+  const page = await openPage(board)
+  assert.equal(await page.look(), undefined)
+  const runtimeWatcher = watchers.find(one => one.path === dirname(board.file))
+  assert.ok(runtimeWatcher)
+  writeRefusalRecord(board, 'not-listening')
+  // An idle poll before the folder watcher signals reads the cached state without touching disk.
+  assert.equal(await page.look(), undefined)
+  runtimeWatcher.listener('change', basename(hook.approvalsRefusedFile(board.file)))
+  assert.equal((await page.look())?.refusal?.reason, 'not-listening')
+  rmSync(hook.approvalsRefusedFile(board.file))
+  runtimeWatcher.listener('rename', basename(hook.approvalsRefusedFile(board.file)))
+  assert.equal(await page.look(), undefined)
+  await board.close()
+  assert.equal(runtimeWatcher.closed, true)
 })

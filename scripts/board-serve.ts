@@ -4,7 +4,8 @@
 // what a press does are worked out in hooks/serve.ts; the writes are the terminal board's own
 // (board-cli.ts passes them in), so the page changes progress.md the way the pane does.
 import { createHash, randomBytes } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync, watch as fsWatch, writeFileSync } from 'node:fs'
+import type { FSWatcher } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -37,7 +38,7 @@ import { isSettingsLang } from '../hooks/board-settings'
 import type { SettingsLang } from '../hooks/board-settings'
 import type { SettingsAgentControl } from './settings-agents'
 import { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_KEY_MS, APPROVAL_MAX, APPROVAL_PAGE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, APPROVAL_WINDOW_MS, approvalOf, approvalPlace, approvalsOffFile, approvalsPayload, approvalsRefusedFile, approvalRefusalNote, approvalTitle, decisionOf, isAskingMode, journalStep, parseApprovalRefusal, pressProblem, readAsk, readPress } from '../hooks/approvals'
-import type { Approval, ApprovalDecision, ApprovalRefusal } from '../hooks/approvals'
+import type { Approval, ApprovalDecision, ApprovalRefusal, ApprovalRefusalReason } from '../hooks/approvals'
 
 export type ServeOptions = {
   allowResume?: boolean
@@ -136,6 +137,9 @@ const BOARD_PROBE_MS = 1500
 
 const HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' }
 const REFUSAL_MAX_BYTES = 4096
+const REFUSAL_PROBE_MS = 5000
+
+type RawRefusal = { reason: ApprovalRefusalReason; at: string } | 'unreadable' | null
 
 const isRealDir = (dir: string): boolean => {
   try {
@@ -186,26 +190,25 @@ const removeOffMarker = (addressFile: string): boolean => {
   }
 }
 
-const readRefusal = (addressFile: string, lastPassedAskAt: number, s: Strings): ApprovalRefusal | undefined => {
+const readRawRefusal = (addressFile: string): RawRefusal => {
   const record = approvalsRefusedFile(addressFile)
-  const unreadable = (): ApprovalRefusal => ({ reason: 'unreadable', at: null, note: approvalRefusalNote('unreadable', s) })
   let lst
   try {
     lst = lstatSync(record, { bigint: true })
   } catch (error) {
-    return (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? undefined : unreadable()
+    return (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? null : 'unreadable'
   }
-  if (!lst.isFile() || lst.isSymbolicLink() || lst.size > BigInt(REFUSAL_MAX_BYTES)) return unreadable()
+  if (!lst.isFile() || lst.isSymbolicLink() || lst.size > BigInt(REFUSAL_MAX_BYTES)) return 'unreadable'
   let fd: number
   try {
     fd = openSync(record, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
   } catch {
-    return unreadable()
+    return 'unreadable'
   }
   let raw: string
   try {
     const fst = fstatSync(fd, { bigint: true })
-    if (!fst.isFile() || fst.size > BigInt(REFUSAL_MAX_BYTES) || (lst.ino !== 0n && (fst.dev !== lst.dev || fst.ino !== lst.ino))) return unreadable()
+    if (!fst.isFile() || fst.size > BigInt(REFUSAL_MAX_BYTES) || (lst.ino !== 0n && (fst.dev !== lst.dev || fst.ino !== lst.ino))) return 'unreadable'
     const buf = Buffer.allocUnsafe(REFUSAL_MAX_BYTES + 1)
     let total = 0
     while (total < buf.length) {
@@ -213,18 +216,23 @@ const readRefusal = (addressFile: string, lastPassedAskAt: number, s: Strings): 
       if (n === 0) break
       total += n
     }
-    if (total > REFUSAL_MAX_BYTES) return unreadable()
+    if (total > REFUSAL_MAX_BYTES) return 'unreadable'
     raw = buf.toString('utf8', 0, total)
   } catch {
-    return unreadable()
+    return 'unreadable'
   } finally {
     try { closeSync(fd) } catch {}
   }
   const parsed = parseApprovalRefusal(raw)
-  if (parsed === null) return unreadable()
+  return parsed ?? 'unreadable'
+}
+
+const formatRefusal = (raw: RawRefusal, lastPassedAskAt: number, s: Strings): ApprovalRefusal | undefined => {
+  if (raw === null) return undefined
+  if (raw === 'unreadable') return { reason: 'unreadable', at: null, note: approvalRefusalNote('unreadable', s) }
   // Ignore a stale refusal stamped before or alongside a passing hook check.
-  if (Date.parse(parsed.at) <= lastPassedAskAt) return undefined
-  return { reason: parsed.reason, at: parsed.at, note: approvalRefusalNote(parsed.reason, s) }
+  if (Date.parse(raw.at) <= lastPassedAskAt) return undefined
+  return { reason: raw.reason, at: raw.at, note: approvalRefusalNote(raw.reason, s) }
 }
 
 const versionParts = (version: string): number[] => version.split('.').map(Number)
@@ -483,7 +491,39 @@ export const startServer = (o: ServeOptions): void => {
   let hasAsked = false
   const clockNow = o.now ?? Date.now
   let lastPassedAskAt = 0
-  const isUserSwitchedOff = (): boolean => o.addressFile !== undefined && isOffMarkerAt(o.addressFile)
+  let isUserOff = o.addressFile !== undefined && isOffMarkerAt(o.addressFile)
+  let rawRefusal: RawRefusal = null
+  let isApprovalFilesDirty = true
+  let lastApprovalFilesReadAt = 0
+  let isApprovalWatchLive = false
+  let approvalWatcher: FSWatcher | null = null
+  if (o.addressFile !== undefined && o.watch !== undefined) {
+    try {
+      const watchFn = o.watch.fs ?? fsWatch
+      const watcher = watchFn(dirname(o.addressFile), () => {
+        isApprovalFilesDirty = true
+        wakeAll()
+      })
+      watcher.on('error', () => {
+        isApprovalWatchLive = false
+        isApprovalFilesDirty = true
+        try { watcher.close() } catch {}
+        if (approvalWatcher === watcher) approvalWatcher = null
+      })
+      approvalWatcher = watcher
+      isApprovalWatchLive = true
+    } catch {
+      isApprovalWatchLive = false
+    }
+  }
+  const refreshApprovalFiles = (now: number): void => {
+    if (o.addressFile === undefined) return
+    if (isApprovalWatchLive && !isApprovalFilesDirty && now - lastApprovalFilesReadAt < REFUSAL_PROBE_MS) return
+    isUserOff = isOffMarkerAt(o.addressFile)
+    rawRefusal = readRawRefusal(o.addressFile)
+    isApprovalFilesDirty = false
+    lastApprovalFilesReadAt = now
+  }
   const secretMs = o.approvalTimes?.secretMs ?? APPROVAL_SECRET_MS
   const graceMs = o.approvalTimes?.graceMs ?? APPROVAL_GRACE_MS
   // The sessions whose first press the person confirmed on the page.
@@ -555,6 +595,8 @@ export const startServer = (o: ServeOptions): void => {
     }
     closeNonServer()
     boardWatch?.close()
+    try { approvalWatcher?.close() } catch {}
+    approvalWatcher = null
     if (wakeTimer !== null) clearTimeout(wakeTimer)
     for (const one of [...waiters]) one.drop()
     if (probeTimer !== null) clearInterval(probeTimer)
@@ -818,8 +860,9 @@ export const startServer = (o: ServeOptions): void => {
             const state = messaging.snapshot(now, o.reports?.(false))
             const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
             // The page on the network learns only that an approval waits: no command, no button, no off-switch or refusal.
-            const refusal = !isLan && o.addressFile !== undefined ? readRefusal(o.addressFile, lastPassedAskAt, o.s) : undefined
-            const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, { isLockdown: isApprovalOff, isOff: !isLan && isUserSwitchedOff(), refusal })
+            if (!isLan) refreshApprovalFiles(now)
+            const refusal = !isLan ? formatRefusal(rawRefusal, lastPassedAskAt, o.s) : undefined
+            const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, { isLockdown: isApprovalOff, isOff: !isLan && isUserOff, refusal })
             const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, isLan ? handledOnly(state) : state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now, ...(approvalsShown === undefined ? {} : { approvals: approvalsShown }) }
             // The page already compares its clock at minute precision. Keep that refresh boundary
             // without treating each millisecond as changed content; replies and receipts stay exact.
@@ -857,7 +900,7 @@ export const startServer = (o: ServeOptions): void => {
       // wantsKeyedPage: approvals are in use and no open page can answer them, so the board script
       // opens one with a key rather than pointing at a page that cannot. A paired page that is only
       // hidden still can; before any host asked, the page that is open is enough.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserSwitchedOff()) && !hasLiveSecret(Date.now()) })
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserOff) && !hasLiveSecret(Date.now()) })
       return json(res, 404, {})
     }
     const body = await readBody(req)
@@ -888,7 +931,7 @@ export const startServer = (o: ServeOptions): void => {
         hasAsked = true
         lastPassedAskAt = Math.max(lastPassedAskAt, clockNow())
         // Approvals turned off (by replay lockdown or the page switch), or too many kept: the host asks in its own window.
-        if (isApprovalOff || isUserSwitchedOff()) return json(res, 200, {})
+        if (isApprovalOff || isUserOff || (o.addressFile !== undefined && isOffMarkerAt(o.addressFile))) return json(res, 200, {})
         for (const [id, one] of [...approvals]) {
           if (approvals.size < APPROVAL_MAX) break
           if (one.answer !== undefined) continue
@@ -994,11 +1037,17 @@ export const startServer = (o: ServeOptions): void => {
         if (body.enabled === false) {
           if (!writeOffMarker(o.addressFile, new Date(clockNow()).toISOString())) return json(res, 409, { note: o.s.approvalSwitchFailed })
           hasAsked = true
+          isUserOff = true
+          isApprovalFilesDirty = false
+          lastApprovalFilesReadAt = now
           for (const [id, one] of [...approvals]) if (one.answer !== undefined) settleApproval(id, null)
           return json(res, 200, { isOff: true, note: o.s.settingsChanged(o.s.settingsApprovals, o.s.settingsOff) })
         }
         if (!removeOffMarker(o.addressFile)) return json(res, 409, { note: o.s.approvalSwitchFailed })
         hasAsked = true
+        isUserOff = false
+        isApprovalFilesDirty = false
+        lastApprovalFilesReadAt = now
         return json(res, 200, { isOff: false, note: o.s.settingsChanged(o.s.settingsApprovals, o.s.settingsOn) })
       }
       if (url.pathname === '/api/approvals/drawn') {
