@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -242,7 +242,12 @@ const sortedKeys = (value: unknown): unknown => Array.isArray(value) ? value.map
 const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), null, 2).replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
 // A root that is not a mapping (a list, a flow document) is not something to add a key to.
 const isYamlMapping = (text: string): boolean => text.split(/\r?\n/).every(line => !/^\S/.test(line) || /^(?:#|---|\.\.\.)/.test(line) || /^(?:"[^"\n]*"|'[^'\n]*'|[^\s#{[!&*|>%@`"'-][^\n]*?)\s*:(?:\s|$)/.test(line))
-const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false): void => {
+// A name that was free when setup planned (`isFresh`) is created, never written over (#1693): a rename would replace a
+// file that landed there after the last check. A hard link of the finished temporary file places it whole in one step
+// and fails when the name is taken, and setup then stops as busy. Where a link is refused for any other reason, as on a
+// disk with no hard links, setup checks once more and renames, as for any other file: a file that lands between that
+// check and the rename is written over there, a stated limit.
+const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false, isFresh = false): void => {
   mkdirSync(dirname(file), { recursive: true })
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   const fd = openSync(temporary, 'wx', 0o600)
@@ -251,13 +256,19 @@ const atomic = (file: string, text: string | Buffer, current: () => void = () =>
     writeFileSync(fd, text)
     closeSync(fd)
     isOpen = false
-    let delay = 10, waited = 0
+    let delay = 10, waited = 0, isFree = isFresh
     for (;;) {
       current()
       try {
-        renameSync(temporary, file)
+        if (isFree) linkSync(temporary, file)
+        else renameSync(temporary, file)
         break
       } catch (error) {
+        if (isFree) {
+          if ((error as { code?: string }).code === 'EEXIST') throw new Error('INSTALL_CHANGED')
+          isFree = false
+          continue
+        }
         if (!retryRecord || process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(String((error as { code?: string }).code)) || waited >= 250) throw error
         const wait = Math.min(delay, 250 - waited)
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait)
@@ -538,17 +549,23 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const ours = new Set<string>()
   const realOf = (file: string): string | null => { try { return realpathSync.native(file) } catch { return null } }
   const isOurs = (file: string, now: Snap, next: string): boolean => now.kind === 'file' && isHolding(now, next) && ours.has(realOf(file) ?? '')
+  // A .new path is the exception: a file that appeared there is a second name only when this batch wrote it, since bytes
+  // alone would also match a file another program put there (#1693).
   const unchanged = (file: string, next: string): void => {
     const was = before.get(file) ?? NO_PATH, now = take(file)
-    const isSecondName = isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' || isOurs(file, now, next))
+    const isSecondName = isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' && !file.endsWith('.new') || isOurs(file, now, next))
     if (!same(was, now) && !isSecondName) throw new Error('INSTALL_CHANGED')
   }
   const written = (file: string, text: string): void => {
     const now = take(file)
     if (now.kind !== 'file' || !isHolding(now, text)) throw new Error('INSTALL_CHANGED')
   }
+  // A .new copy where the plan found nothing is created, never written over (#1693). A name this batch already wrote as
+  // the same file through another name (a skills folder linked to the shared one) is not written again: it holds the
+  // bytes already, and a person's save there would be lost.
   const put = (file: string, text: string, target = file): void => {
-    atomic(target, text, () => unchanged(file, text))
+    if (isOurs(target, take(target), text)) return
+    atomic(target, text, () => unchanged(file, text), false, target.endsWith('.new') && (before.get(file) ?? NO_PATH).kind === 'none')
     written(target, text)
     const real = realOf(target)
     if (real !== null) ours.add(real)
@@ -1728,11 +1745,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // agent. It goes only as setup wrote it, and only when no other agent that stays still names it.
   const ownPending = pendingOf(agent)
   const staleBeside = new Set([...Object.keys(manifest.files), ...Object.keys(ownPending)].filter(file => file.endsWith('.new') && !(file in files) && file.slice(0, -4) in files))
+  // One copy can have two names, as through a Hermes skills folder linked to the shared one (#1695). Names are compared
+  // by real path, so another agent that names the copy by either name keeps it, and the copy is removed once.
+  const isSameCopy = (one: string, other: string): boolean => one === other || other.endsWith('.new') && realOf(one) !== null && realOf(one) === realOf(other)
+  const removedCopies = new Set<string>()
   for (const file of staleBeside) {
     const current = initial(file)
-    const isStillNamed = otherAgents.some((one, index) => !removingAgents.includes(one) && (object(otherManifests[index]?.files ?? {})[file] !== undefined || pendingOf(one)[file] !== undefined))
+    const isStillNamed = otherAgents.some((one, index) => !removingAgents.includes(one) && [...Object.keys(object(otherManifests[index]?.files ?? {})), ...Object.keys(pendingOf(one))].some(name => isSameCopy(file, name)))
     if (current === null) { if (remove && manifest.files[file] !== undefined) alreadyGone.push(file) }
-    else if ((hash(current) === manifest.files[file] || ownPending[file]?.includes(hash(current))) && !isStillNamed) changes.push({ file, action: 'remove' })
+    else if ((hash(current) === manifest.files[file] || ownPending[file]?.includes(hash(current))) && !isStillNamed && !removedCopies.has(realOf(file) ?? file)) {
+      removedCopies.add(realOf(file) ?? file)
+      changes.push({ file, action: 'remove' })
+    }
   }
   const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
   // The hook lines stay as the kept program knows them. A hook the person's program needs and no longer has cannot be
@@ -1937,6 +1961,30 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup', ['--plain']), host ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable!]) : undefined))
     return true
   }
+  // A copy another setup run is writing reads as a file setup did not write until that run's record names it (#1694).
+  // So before a conflict is reported for an apply, the public command's preview for one included, it is checked again
+  // under the install lock: a path this plan was built from that changed since means another setup ran, and a lock
+  // still held means one is running. Either stops as busy, and the next run plans again from the files as they are.
+  // The lock lives in the home's .agent-board folder. With no folder no run holds it, so the check runs at once without
+  // taking it: a refused run leaves no empty folder behind, as on main, and a removal that emptied and deleted the
+  // folder after another run wrote does not skip the check.
+  if (conflicts.length && (args.includes('--apply') || args.includes('--check-conflicts'))) {
+    // A progress file setup cannot read, a link to nothing, is planned as absent, so it would never match and is left out
+    // while it still reads so (#1712): a new plan would read it the same way. One setup can read, setup's own record
+    // included, is checked like every other path, so a target that appeared since the plan stops the run as busy. A link
+    // to the install lock reads only while this check holds the lock, a file the check itself writes, and is left out too,
+    // only then: without the lock, a file there is not this run's.
+    const lockFile = join(installControlRoot(home), 'install.lock')
+    const isUnreadProgress = (file: string, isLocked: boolean): boolean => {
+      const now = file === progress && before.get(file)?.kind === 'none' ? take(file) : null
+      if (now?.kind !== 'link') return false
+      const real = isLocked && now.bytes !== null ? realOf(file) : null
+      return now.bytes === null || real !== null && real === realOf(lockFile)
+    }
+    const isChanged = (isLocked: boolean): void => { for (const file of before.keys()) if (!isUnreadProgress(file, isLocked) && !isAsPlanned(file)) throw new Error('INSTALL_CHANGED') }
+    if (existsSync(installControlRoot(home))) withInstallLock(home, () => isChanged(true))
+    else isChanged(false)
+  }
   if (!args.includes('--apply')) { outputPlan(plan); return true }
   if (conflicts.length) {
     outputPlan(plan)
@@ -1960,7 +2008,21 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // beside the new one, since a stop right here leaves the older copy on disk.
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
     const copies = keptText.filter(one => changes.some(change => change.file === one.beside))
-    if (copies.length) put(pendingFile(agent), `${JSON.stringify({ ...ownPending, ...Object.fromEntries(copies.map(one => [one.beside, [...new Set([...(ownPending[one.beside] ?? []), hash(files[one.beside] ?? '')])]])) }, null, 2)}\n`)
+    const pendingWith = (named: typeof copies): string => `${JSON.stringify({ ...ownPending, ...Object.fromEntries(named.map(one => [one.beside, [...new Set([...(ownPending[one.beside] ?? []), hash(files[one.beside] ?? '')])]])) }, null, 2)}\n`
+    const pendingText = pendingWith(copies)
+    if (copies.length) put(pendingFile(agent), pendingText)
+    // A copy leaves the list only when its write stops on proof that someone else's file is at its name (#1693), and
+    // under every name of that file (a skills folder linked to the shared one): otherwise the next setup would take that
+    // file as its own. Any other failure leaves the list whole, as on main, so the next run still finds setup's copy.
+    // A list someone else changed in the meantime is left as it is.
+    const realName = (file: string): string => join(realOf(dirname(file)) ?? dirname(file), basename(file))
+    const dropPending = (file: string): void => {
+      const list = pendingFile(agent)
+      if (!isHolding(take(list), pendingText)) return
+      const kept = copies.filter(one => realName(one.beside) !== realName(file))
+      if (!kept.length && initial(list) === null) unlinkSync(list)
+      else atomic(list, pendingWith(kept), () => { if (!isHolding(take(list), pendingText)) throw new Error('INSTALL_CHANGED') })
+    }
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue
       if (change.file === trustConfig && nextTrust !== undefined) {
@@ -1984,7 +2046,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (!isAsPlanned(change.file)) throw new Error('INSTALL_CHANGED')
         unlinkSync(change.file)
       } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
-      else put(change.file, files[change.file] ?? '')
+      else {
+        try { put(change.file, files[change.file] ?? '') }
+        catch (error) {
+          if ((error as Error).message === 'INSTALL_CHANGED' && copies.some(one => one.beside === change.file)) try { dropPending(change.file) } catch {}
+          throw error
+        }
+      }
     }
     if (remove) {
       if (handover) put(handover.file, handover.text)
