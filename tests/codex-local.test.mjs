@@ -6166,6 +6166,24 @@ test('a progress file that is a link to nothing under a pending list\'s name is 
   }
 }))
 
+test('a setup run whose progress file is its own record stops as busy when another run\'s whole apply runs during its plan (#1694)', () => fixture(async f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`, record = join(f.root, 'install-codex.json')
+  f.save(f.skill, 'Synthetic edited skill\n')
+  // The first run names Codex's record as its progress file, has read it, and waits before its pending list; another
+  // run's whole apply writes the .new copy and the record then.
+  const hold = heldEnv(f, 'install-pending-codex.json')
+  const late = startSetup(f, hold.env, '--agent', 'codex', '--progress-file', record, '--apply')
+  await untilExists(hold.at, 'the first run reached its pending list')
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  f.save(hold.go, '')
+  const result = await late
+  assert.ok(isBusy(result), result.stderr + result.stdout)
+  assert.equal(readFileSync(f.skill, 'utf8'), 'Synthetic edited skill\n')
+  assert.equal(readFileSync(beside, 'utf8'), wanted)
+  assert.equal(recordOf(f, 'codex').files[beside], digest(wanted))
+}))
+
 test('a second agent stops as busy on the first run\'s .new copy when a removal deleted the home\'s empty .agent-board folder meanwhile (#1694)', () => fixture(async f => {
   // Codex and Cursor keep their data in one folder of the person's; the install lock still lives in the home's .agent-board.
   const data = join(f.home, 'synthetic data'), control = join(f.home, '.agent-board')
