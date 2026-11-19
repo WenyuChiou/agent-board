@@ -1,13 +1,13 @@
 // Approvals on the board (D3, #1318): the board's server from source, the page played by these
 // requests, and Claude Code's PermissionRequest hook (scripts/claude-approval.mjs) run as the host
 // would run it, with a synthetic request on its input. No model, no browser.
-import { execFileSync, spawn } from 'node:child_process'
+import childProcess, { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import fs, { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { EventEmitter } from 'node:events'
-import { registerHooks } from 'node:module'
+import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -2252,7 +2252,7 @@ test('a refusal status with its body left open ends the wait when the headers ar
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   try {
     const started = performance.now()
-    const answer = await hook.askBoard({ origin: `http://127.0.0.1:${server.address().port}`, token: 'synthetic-token' }, '{"tool":"Bash"}')
+    const answer = await hook.askBoard({ origin: `http://127.0.0.1:${server.address().port}`, token: 'synthetic-token' }, Buffer.from('{"tool":"Bash"}'))
     assert.equal(answer, null)
     assert.ok(performance.now() - started < 20_000, 'the hook waited for a body that never ends')
   } finally {
@@ -2308,6 +2308,59 @@ test('the last clock read comes after the body is prepared and the old refusal r
     assert.equal(stand.seen.length, 1)
     assert.ok(events.includes('clear') && events.includes('body'), events.join(' '))
     assert.equal(events.at(-1), 'clock', events.join(' '))
+  } finally { await stand.close() }
+})
+
+// Records the disk, process and text-reading calls made after the last clock read. The hook has no await between its
+// first read and the request, so a microtask queued at the first read ends the recording as the request is handed over.
+const watchAfterLastRead = () => {
+  const seen = []
+  const undo = []
+  let isRecording = false
+  const watch = (owner, name, label, isCounted = () => true) => {
+    const real = owner[name]
+    owner[name] = function (...args) {
+      if (isRecording && isCounted(args)) seen.push(label)
+      return Reflect.apply(real, this, args)
+    }
+    undo.push(() => { owner[name] = real })
+  }
+  const isLongText = args => typeof args[0] === 'string' && args[0].length >= 1_000
+  for (const [owner, tag] of [[fs, 'fs'], [childProcess, 'child_process']]) {
+    for (const name of Object.keys(owner)) if (/^[a-z]/.test(name) && typeof owner[name] === 'function') watch(owner, name, `${tag}.${name}`)
+  }
+  watch(JSON, 'stringify', 'JSON.stringify')
+  watch(Buffer, 'byteLength', 'Buffer.byteLength', isLongText)
+  watch(Buffer, 'from', 'Buffer.from', isLongText)
+  watch(TextEncoder.prototype, 'encode', 'TextEncoder.encode', isLongText)
+  syncBuiltinESMExports()
+  return {
+    seen,
+    clockRead: () => {
+      seen.length = 0
+      if (isRecording) return
+      isRecording = true
+      queueMicrotask(() => { isRecording = false })
+    },
+    stop: () => {
+      for (const step of undo) step()
+      syncBuiltinESMExports()
+    },
+  }
+}
+
+test('nothing after the last clock read touches the disk, starts a process or reads the request body as text', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    const wire = watchAfterLastRead()
+    let answer
+    try {
+      answer = await hook.run(place.env, process.platform, { input: request('x'.repeat(4_000)), now: () => { wire.clockRead(); return 0 }, discoveryMs: 1_000, checkListener: () => null, clearRefusal: () => {} })
+    } finally { wire.stop() }
+    assert.deepEqual(answer, ALLOW)
+    assert.equal(stand.seen.length, 1)
+    assert.deepEqual(wire.seen, [])
   } finally { await stand.close() }
 })
 
