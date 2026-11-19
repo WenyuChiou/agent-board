@@ -763,6 +763,7 @@ export const EN: Strings = {
   serveRuntimePrivate: "Couldn't protect the board page's address file for this account; no page was started.",
   serveRuntimeDenied: "This AI's sandbox can't write the board page's address folder, so no page was started. Open the board from a normal terminal; in DeepSeek Harness, use its agent_board tool.",
   serveRuntimeCheckTimeout: "Windows took too long to check the board page's address file for this account; the computer may be busy. Try again in a moment.",
+  serveJobLocked: 'this host stops background programs when a command ends, so the board page would close right away. Run agent-board in a normal terminal to open it.',
   serveLanAt: (url: string): string => `On a phone on the same network, open ${url} or scan this code:`,
   serveLanWarn: 'This link is not encrypted: use it only on a network you trust. It closes after 10 minutes without use.',
   serveLanNone: "This computer has no address on a local network, so a phone can't open the board.",

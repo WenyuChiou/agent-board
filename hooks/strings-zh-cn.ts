@@ -757,6 +757,7 @@ export const ZH_CN: Strings = {
   serveRuntimePrivate: '无法将看板网页的地址文件保护为仅此账号可用；没有启动网页。',
   serveRuntimeDenied: '这个 AI 的沙箱不能写入看板网页的地址文件夹，所以没有启动网页。请在普通的终端里打开看板；在 DeepSeek Harness 里则用它的 agent_board 工具。',
   serveRuntimeCheckTimeout: 'Windows 检查看板网页的地址文件花了太久；电脑可能正忙，请稍后再试一次。',
+  serveJobLocked: '这个环境会在命令结束时一并关闭后台程序，看板网页一开就会被关掉。请在普通的终端里运行 agent-board 来打开。',
   serveLanAt: (url: string): string => `同一网络上的手机，打开 ${url} 或扫这个二维码：`,
   serveLanWarn: '这个链接没有加密，只在你信任的网络上使用；10 分钟没人用就会自动关闭。',
   serveLanNone: '找不到这台电脑在局域网上的地址，手机打不开这个看板。',

@@ -37,7 +37,7 @@ import { recentInboxFiles } from './inbox-files'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder'
-import { dockArguments, dockCommand, probeOf, windowPath, windowPlaceOf } from '../hooks/board-dock'
+import { dockArguments, dockCommand, probeOf, windowsStartScript, windowPath, windowPlaceOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
 import { isReceiverRoutes } from '../hooks/messaging'
@@ -1108,10 +1108,14 @@ const windowsArgument = (value: string): string => `"${value.replace(/(\\*)"/g, 
 type WindowsStartOptions = { isHidden?: boolean; env?: NodeJS.ProcessEnv; isPiped?: boolean; graceMs?: number }
 const windowsStart = (bins: string | string[], argv: string[], options: WindowsStartOptions = {}): ChildProcess => {
   const programs = (Array.isArray(bins) ? bins : [bins]).map(bin => isAddress(bin) ? psLiteral(bin) : psWildcardLiteral(bin)).join(', ')
-  const argumentsPart = argv.length === 0 ? '' : ` -ArgumentList ${psLiteral(argv.map(windowsArgument).join(' '))}`
-  const hiddenPart = options.isHidden ? ' -WindowStyle Hidden' : ''
-  const gracePart = options.graceMs === undefined ? '' : ` if ($started.WaitForExit(${Math.round(options.graceMs)}) -and $started.ExitCode -ne 0) { [Console]::Error.WriteLine($program + ' exited with ' + $started.ExitCode); continue };`
-  const command = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'; Microsoft.PowerShell.Core\\Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1'); foreach ($program in @(${programs})) { $started = $null; try { $started = Microsoft.PowerShell.Management\\Start-Process -FilePath $program${argumentsPart} -WorkingDirectory ${psWildcardLiteral(dirname(path))} -PassThru${hiddenPart} } catch { [Console]::Error.WriteLine($_.Exception.Message); continue }; if ($started) {${gracePart} [Console]::Out.WriteLine($started.Id) }; exit 0 }; exit 1`
+  const command = windowsStartScript({
+    programs,
+    argumentExpression: argv.length === 0 ? "''" : psLiteral(argv.map(windowsArgument).join(' ')),
+    workingDirectory: psWildcardLiteral(dirname(path)),
+    isHidden: Boolean(options.isHidden),
+    graceMs: options.graceMs,
+    allowExternalEscape: !(process.env.AGENT_BOARD_TEST_PID && process.env.AGENT_BOARD_TEST_NO_JOB_ESCAPE === '1'),
+  })
   return spawn(system32('WindowsPowerShell\\v1.0\\powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
     cwd: dirname(path), stdio: options.isPiped ? ['ignore', 'pipe', 'pipe'] : 'ignore', windowsHide: true, env: options.env,
   })
@@ -1166,8 +1170,8 @@ const dockLaunch = (programs: string[], target: string, done: (isOpen: boolean) 
     clearTimeout(timer)
     done(isOpen)
   }
-  // PowerShell's start, the screen probe and the browser's grace: about 2 s on a slow machine.
-  const timer = setTimeout(() => { child.kill(); finish(false) }, 8000)
+  // PowerShell's start, the screen probe, optional WMI job-escape hop, and the browser's grace.
+  const timer = setTimeout(() => { child.kill(); finish(false) }, 12000)
   child.once('error', () => finish(false))
   child.once('exit', code => finish(code === 0))
   child.stdin?.on('error', () => {})
@@ -2498,16 +2502,17 @@ interface RunningServer {
   idleMs?: number | undefined
 }
 
-type ServeFailure = { invalidPort?: string; portError?: { code: 'EADDRINUSE' | 'EACCES'; port: number }; storeCode?: string; storeHolder?: { pid: number; isBoard: boolean }; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
+type ServeFailure = { invalidPort?: string; portError?: { code: 'EADDRINUSE' | 'EACCES'; port: number }; storeCode?: string; storeHolder?: { pid: number; isBoard: boolean }; isJobLocked?: boolean; isChildCheckTimeout?: boolean; isChildCheckDenied?: boolean; isChildCheckPrivate?: boolean }
 
-// The note a failed start prints: `--port` failures and message folder failures first, then the child's
-// own folder failure, then the generic line. The child prints its folder failure in the
-// command's language, so the parent matches the same words.
+// The note a failed start prints: `--port` failures and message folder failures first, then host
+// job lock or the child's own folder failure, then the generic line. The child prints its folder
+// failure in the command's language, so the parent matches the same words.
 const serveFailureNote = (failure: ServeFailure): string => {
   if (failure.invalidPort !== undefined) return s.serveFailed(s.serveInvalidPort(failure.invalidPort))
   if (failure.portError !== undefined) return s.serveFailed(failure.portError.code === 'EACCES' ? s.servePortDenied(failure.portError.port) : s.servePortInUse(failure.portError.port))
   if (failure.storeHolder !== undefined) return s.serveStoreHeld(failure.storeHolder.pid, failure.storeHolder.isBoard)
   if (failure.storeCode !== undefined) return s.serveStoreFailed(failure.storeCode, messagesDirectory())
+  if (failure.isJobLocked) return s.serveFailed(s.serveJobLocked)
   if (failure.isChildCheckTimeout) return s.serveFailed(s.serveRuntimeCheckTimeout)
   if (failure.isChildCheckDenied) return s.serveFailed(s.serveRuntimeDenied)
   if (failure.isChildCheckPrivate) return s.serveFailed(s.serveRuntimePrivate)
@@ -2630,6 +2635,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
       let child: ChildProcess | undefined
       let pid: number | undefined
       let isLauncherDone = false
+      let launcherCode: number | null = null
       let launcherOutput = ''
       let launcherError = ''
       let url: string | null = null
@@ -2642,12 +2648,16 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
           if (found?.[1] !== undefined) pid = Number(found[1])
         })
         child.stderr?.on('data', (chunk: Buffer) => { launcherError = (launcherError + chunk.toString('utf8')).slice(-16_384) })
-        child.once('close', () => { isLauncherDone = true })
-        child.once('error', () => { isLauncherDone = true })
+        child.once('close', code => { launcherCode = code; isLauncherDone = true })
+        child.once('error', () => { launcherCode = 1; isLauncherDone = true })
         while (performance.now() < readyBy) {
           const contents = readFileSync(ready, 'utf8')
           const text = contents.trim()
-          if (contents.endsWith('\n') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(text)) { url = text; break }
+          // Wait until the PowerShell launcher finishes cleanly (exit 0) before accepting a ready URL,
+          // so a child trapped in a job that writes the ready file before the launcher kills it never
+          // causes the command to report success (#1674).
+          if (isLauncherDone && launcherCode !== 0) break
+          if (isLauncherDone && launcherCode === 0 && contents.endsWith('\n') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(text)) { url = text; break }
           if (isLauncherDone && (pid === undefined || !isRunning(pid))) break
           await new Promise(done => setTimeout(done, 50))
         }
@@ -2655,10 +2665,14 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
         try { stderr = (stderr + '\n' + readFileSync(err, 'utf8')).slice(-16_384) } catch {}
         return { url, stderr, readyBy }
       } finally {
-        // In finally, so a server whose ready file could not be read is stopped too.
+        // In finally, so a server whose ready file could not be read, or whose child was stopped by
+        // the launcher after failing job escape, leaves no process or address file behind.
         if (url === null && pid !== undefined && isRunning(pid)) {
           try { process.kill(pid) } catch {}
         }
+        const trappedPid = Number(/(?:^|\r?\n)JOB_TRAP_PID:([1-9][0-9]*)(?:\r?\n|$)/.exec(launcherError)?.[1]) || undefined
+        const ownedPid = pid ?? trappedPid
+        if (url === null && ownedPid !== undefined) unlinkIf(file, () => readRunning(file)?.pid === ownedPid)
         if (url === null && child !== undefined && !isLauncherDone) child.kill()
         child?.stdout?.destroy()
         child?.stderr?.destroy()
@@ -2699,6 +2713,10 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   while (performance.now() < deadline) {
     const { url, stderr, readyBy } = await startPage()
     if (url !== null) return { url, port: Number(new URL(url).port), isKept: false, isNew: true }
+    if (/^JOB_ESCAPE_FAILED\b/m.test(stderr)) {
+      if (failure !== undefined) failure.isJobLocked = true
+      return null
+    }
     const portFailed = /^PORT_FAILED (EADDRINUSE|EACCES) (\d+)\r?$/m.exec(stderr)
     if (portFailed !== null) {
       if (failure !== undefined) failure.portError = { code: portFailed[1] as 'EADDRINUSE' | 'EACCES', port: Number(portFailed[2]) }
