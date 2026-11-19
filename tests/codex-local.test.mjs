@@ -2710,25 +2710,12 @@ test('setup still refuses a malformed host config that starts with a BOM', async
   })
 })
 
-// #1607: setup keeps a byte that is not valid UTF-8, a lone FF or a Big5 character, as the byte it was. A file is built from text
+// #1607: setup refuses a file whose bytes are not valid UTF-8, a lone FF or a Big5 character: it names the file in a conflict
+// and writes nothing, since reading such a file as text turns each of those bytes into EF BF BD. A file is built from text
 // with markers, so no test here depends on how a string is encoded: @FF@ is the byte FF, @B5@ is Big5 for three Chinese
-// characters (none of its second bytes is a backslash), @BOM@ is EF BB BF. Synthetic data only.
-const bytes1607 = text => Buffer.concat(text.split(/(@FF@|@B5@|@BOM@)/).map(part => part === '@FF@' ? Buffer.of(0xff) : part === '@B5@' ? Buffer.from([0xa4, 0xa4, 0xa4, 0xe5, 0xa4, 0x40]) : part === '@BOM@' ? Buffer.from([0xef, 0xbb, 0xbf]) : Buffer.from(part, 'utf8')))
-const FFFD1607 = Buffer.from([0xef, 0xbf, 0xbd])
-const BOM1607 = Buffer.from([0xef, 0xbb, 0xbf])
+// characters (none of its second bytes is a backslash). Synthetic data only.
+const bytes1607 = text => Buffer.concat(text.split(/(@FF@|@B5@)/).map(part => part === '@FF@' ? Buffer.of(0xff) : part === '@B5@' ? Buffer.from([0xa4, 0xa4, 0xa4, 0xe5, 0xa4, 0x40]) : Buffer.from(part, 'utf8')))
 const FF1607 = Buffer.of(0xff)
-const linesOf1607 = buffer => buffer.toString('latin1').split('\n')
-// Every line of `original` is in `now`, in the same order, byte for byte.
-const keepsLines1607 = (original, now) => {
-  const have = linesOf1607(now)
-  let at = 0
-  for (const line of linesOf1607(original)) {
-    at = have.indexOf(line, at)
-    if (at < 0) return false
-    at++
-  }
-  return true
-}
 const hosts1607 = [['codex', null], ...jsonHosts]
 const hostFile1607 = (f, host, relative) => host === 'codex' ? f.hooks : join(f.home, relative)
 const hostEvent1607 = { codex: 'Stop', cursor: 'stop', gemini: 'SessionEnd', grok: 'Stop', muse: 'Stop' }
@@ -2736,8 +2723,6 @@ const stringsOf1607 = value => Array.isArray(value) ? value.flatMap(stringsOf160
 const marked1607 = value => stringsOf1607(value).filter(text => /@(FF|B5)@|[^\x00-\x7f]/.test(text))
 const lone1607 = { key: '@B5@', value: '@B5@ @FF@', command: 'echo caf@FF@ @B5@', eventKey: 'Ev@FF@nt' }
 const chinese1607 = { key: '中文', value: '你好 世界', command: 'echo 你好', eventKey: '事件' }
-// What the person's config holds: a key and a value of the person's, and, where the host has hooks, a group of the person's in
-// the same event list setup writes to, and an event of the person's.
 const personConfig1607 = (host, { key, value, command, eventKey }) => {
   const group = host === 'cursor' ? { command } : { hooks: [{ type: 'command', command }] }
   if (host === 'antigravity') return { [key]: value, [eventKey]: { note: command } }
@@ -2769,303 +2754,142 @@ const chineseFixture1607 = async (fn, name = '使用者家') => {
   }
   try { return await fn(f) } finally { rmSync(base, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
+// A refused run: it fails, its conflict names the file, and the file is byte for byte as it was.
+const refusedAt1607 = (file, original, result, when) => {
+  assert.notEqual(result.status, 0, `${when}: ${result.stdout}`)
+  assert.ok(JSON.parse(result.stdout).conflicts.includes(file), `${when}: the conflict names ${file}: ${result.stdout}`)
+  assert.deepEqual(readFileSync(file), original, `${when}: byte for byte`)
+}
 
-test('a lone FF byte and Big5 text in the person\'s keys and values come through preview, --apply, a second --apply and removal byte for byte, for each JSON host (#1607)', async () => {
-  for (const [host, relative] of hosts1607) await fixture(f => {
-    const config = hostFile1607(f, host, relative)
-    const person = personConfig1607(host, lone1607)
-    const original = bytes1607(`${JSON.stringify(person, null, 2)}\n`)
-    const runs = marked1607(person).map(bytes1607)
-    f.save(config, original)
-    const isKept = (buffer, when) => {
-      for (const run of runs) assert.ok(buffer.includes(run), `${host} ${when}: ${run.toString('latin1')}`)
-      assert.equal(buffer.includes(FFFD1607), false, `${host} ${when}: EF BF BD`)
+test('a hook config holding a byte that is not valid UTF-8 is refused with a conflict naming it and stays byte for byte, for each JSON host (#1607)', async () => {
+  for (const [host, relative] of hosts1607) {
+    await fixture(f => {
+      const config = hostFile1607(f, host, relative)
+      const original = bytes1607(`${JSON.stringify(personConfig1607(host, lone1607), null, 2)}\n`)
+      f.save(config, original)
+      const preview = f.install('--agent', host)
+      assert.equal(preview.status, 0, `${host}: ${preview.stderr}`)
+      assert.ok(JSON.parse(preview.stdout).conflicts.includes(config), `${host}: preview names the config`)
+      refusedAt1607(config, original, f.install('--agent', host, '--apply', '--json'), `${host} --apply`)
+      assert.equal(existsSync(f.root), false, `${host}: no data folder`)
+    })
+    await fixture(f => {
+      // Removal of an install whose config now holds the byte: it stops and the record stays.
+      const config = hostFile1607(f, host, relative)
+      assert.equal(f.install('--agent', host, '--apply').status, 0, host)
+      const original = bytes1607(`${JSON.stringify(personConfig1607(host, lone1607), null, 2)}\n`)
+      f.save(config, original)
+      const record = readFileSync(join(f.root, `install-${host}.json`))
+      refusedAt1607(config, original, remove774(f, host), `${host} removal`)
+      assert.deepEqual(readFileSync(join(f.root, `install-${host}.json`)), record, `${host}: the record stays`)
+    })
+  }
+})
+
+test('config.yaml and cordis.patch.yml holding a byte that is not valid UTF-8 are refused and stay byte for byte (#1607)', async () => {
+  for (const agent of ['hermes', 'deepseek']) {
+    const where = f => {
+      if (agent === 'deepseek') f.env.DSH_HOME = join(f.home, '.dsh')
+      return agent === 'hermes' ? hermesConfig(f) : join(f.env.DSH_HOME, 'cordis.patch.yml')
     }
-    const preview = f.install('--agent', host)
-    assert.equal(preview.status, 0, `${host}: ${preview.stderr}`)
-    const plan = JSON.parse(preview.stdout)
-    assert.deepEqual(plan.conflicts, [], host)
-    assert.equal(plan.changes.find(change => change.file === config)?.action, 'update', host)
-    assert.deepEqual(readFileSync(config), original, `${host}: a preview leaves the file`)
+    await fixture(f => {
+      const file = where(f)
+      const original = bytes1607(agent === 'hermes' ? 'model: synthetic\n# a comment caf@FF@ @B5@\nhooks:\n  pre_tool_call:\n    - {command: "my-guard-@FF@.sh", timeout: 5}\n' : '# mine caf@FF@ @B5@\n- id: another-plugin\n  config:\n    note: x@FF@\n')
+      f.save(file, original)
+      refusedAt1607(file, original, f.install('--agent', agent, '--apply', '--json'), `${agent} --apply`)
+      assert.equal(existsSync(f.root), false, `${agent}: no data folder`)
+    })
+    await fixture(f => {
+      const file = where(f)
+      assert.equal(f.install('--agent', agent, '--apply').status, 0, agent)
+      const original = Buffer.concat([readFileSync(file), bytes1607('# note caf@FF@\n')])
+      f.save(file, original)
+      const record = readFileSync(join(f.root, `install-${agent}.json`))
+      refusedAt1607(file, original, remove774(f, agent), `${agent} removal`)
+      assert.deepEqual(readFileSync(join(f.root, `install-${agent}.json`)), record, `${agent}: the record stays`)
+    })
+  }
+})
 
-    const applied = f.install('--agent', host, '--apply')
-    assert.equal(applied.status, 0, `${host}: ${applied.stderr}${applied.stdout}`)
-    const installed = readFileSync(config)
-    isKept(installed, 'after --apply')
-    assert.ok(boardEntries1607(host, installed).length > 0, `${host}: setup's entry is there`)
-    const record = readFileSync(join(f.root, `install-${host}.json`))
-
-    const again = f.install('--agent', host, '--apply')
-    assert.equal(again.status, 0, `${host}: ${again.stderr}${again.stdout}`)
-    assert.deepEqual(JSON.parse(again.stdout).changes, [], host)
-    assert.deepEqual(readFileSync(config), installed, `${host}: a second --apply changes no byte of the config`)
-    assert.deepEqual(readFileSync(join(f.root, `install-${host}.json`)), record, `${host}: nor of the install record`)
-
-    const removed = f.command(['--codex-remove', '--agent', host, '--apply'])
-    assert.equal(removed.status, 0, `${host}: ${removed.stderr}${removed.stdout}`)
-    const remaining = readFileSync(config)
-    isKept(remaining, 'after removal')
-    assert.deepEqual(boardEntries1607(host, remaining), [], `${host}: setup's entry is gone`)
+test('removing Codex with a config.toml holding a byte that is not valid UTF-8, plain or linked, is refused and the file stays (#1607)', async () => {
+  for (const isLinked of [false, true]) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const toml = join(f.home, '.codex', 'config.toml')
+    const original = bytes1607(`# mine caf@FF@ @B5@\nmodel = "x"\n${trustTable774(trustKey774(f, 'SessionStart'))}${trustTable774(trustKey774(f, 'Stop'))}\n[after]\nk = "@FF@"\n`)
+    let target = toml
+    if (isLinked) {
+      target = join(f.home, 'linked-config.toml')
+      f.save(target, original)
+      try { symlinkSync(target, toml, 'file') } catch { return }
+    } else f.save(toml, original)
+    const hooks = readFileSync(f.hooks)
+    const record = readFileSync(join(f.root, 'install-codex.json'))
+    const removed = remove774(f, 'codex')
+    const when = isLinked ? 'linked' : 'plain'
+    assert.notEqual(removed.status, 0, `${when}: ${removed.stdout}`)
+    assert.ok(JSON.parse(removed.stdout).conflicts.includes(toml), `${when}: names config.toml: ${removed.stdout}`)
+    assert.deepEqual(readFileSync(target), original, `${when}: the config.toml bytes stay`)
+    assert.deepEqual(readFileSync(f.hooks), hooks, `${when}: nothing else is removed`)
+    assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), record, `${when}: the record stays`)
   })
 })
 
-test('a hook config with a BOM and a lone FF byte keeps the bytes of the person through --apply (#1607)', async () => {
-  const applied = lone => fixture(f => {
-    const text = `@BOM@${JSON.stringify({ other: { keep: true }, hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo caf@FF@' }] }] } }, null, 2).replaceAll('\n', '\r\n')}\r\n`
-    f.save(f.hooks, bytes1607(lone ? text : text.replaceAll('@FF@', 'x')))
-    const result = f.install('--agent', 'codex', '--apply')
-    assert.equal(result.status, 0, result.stderr + result.stdout)
-    return readFileSync(f.hooks)
-  })
-  const withFF = await applied(true)
-  const without = await applied(false)
-  assert.ok(withFF.includes(Buffer.concat([Buffer.from('echo caf'), FF1607])), 'the FF byte is kept')
-  assert.equal(withFF.includes(FFFD1607), false)
-  assert.equal(withFF.subarray(0, 3).equals(BOM1607), without.subarray(0, 3).equals(BOM1607), 'the BOM goes as it does for the same file without the FF')
-})
-
-test('an update of the board hook keeps a lone FF byte in the group beside it (#1607)', () => fixture(f => {
-  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-  const config = JSON.parse(readFileSync(f.hooks, 'utf8'))
-  const current = config.hooks.Stop[0]
-  const older = structuredClone(current)
-  older.hooks[0].command += ' --synthetic-older-flag'
-  const person = { hooks: [{ type: 'command', command: 'echo caf@FF@ @B5@' }] }
-  const record = recordOf(f, 'codex')
-  record.groups.Stop = older
-  saveRecord(f, 'codex', record)
-  f.save(f.hooks, bytes1607(`${JSON.stringify({ ...config, hooks: { ...config.hooks, Stop: [older, person] } }, null, 2)}\n`))
-
-  const applied = f.install('--agent', 'codex', '--apply')
-  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
-  assert.deepEqual(JSON.parse(applied.stdout).conflicts, [])
-  const now = readFileSync(f.hooks)
-  const stop = JSON.parse(now.toString('utf8')).hooks.Stop
-  assert.ok(stop.some(entry => JSON.stringify(entry) === JSON.stringify(current)), 'setup\'s entry is the current one again')
-  assert.equal(stop.some(entry => JSON.stringify(entry) === JSON.stringify(older)), false, 'the older entry is gone')
-  assert.ok(now.includes(bytes1607('echo caf@FF@ @B5@')), 'the person\'s group keeps its bytes')
-  assert.equal(now.includes(FFFD1607), false)
-}))
-
-test('Hermes config.yaml keeps a lone FF byte and Big5 text in lines the person wrote through setup, a second --apply and removal (#1607)', () => fixture(f => {
-  const original = bytes1607([
-    'model: synthetic/model @B5@',
-    '# a comment caf@FF@ @B5@',
-    'hooks_auto_accept: false',
-    'hooks:',
-    '  pre_tool_call:',
-    '    - {command: "my-guard-@FF@.sh @B5@", timeout: 5}',
-    '  on_session_start:',
-    '    - command: "my-start@FF@.sh"',
-    '      timeout: 3',
-    'display:',
-    '  skin: plain @FF@',
-    '',
-  ].join('\n'))
-  f.save(hermesConfig(f), original)
-  const applied = f.install('--agent', 'hermes', '--apply')
-  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
-  const installed = readFileSync(hermesConfig(f))
-  assert.ok(keepsLines1607(original, installed), 'every line of the person\'s is there byte for byte, in order')
-  assert.equal(installed.includes(FFFD1607), false)
-  assert.deepEqual(Object.keys(hermesHooksOf(installed.toString('utf8'))).sort(), [...hermesEvents].sort(), 'setup\'s lines are added')
-
-  const again = f.install('--agent', 'hermes', '--apply')
-  assert.equal(again.status, 0, again.stderr)
-  assert.deepEqual(JSON.parse(again.stdout).changes, [])
-  assert.deepEqual(readFileSync(hermesConfig(f)), installed)
-
-  const removed = remove774(f, 'hermes')
-  assert.equal(removed.status, 0, removed.stderr)
-  assert.deepEqual(readFileSync(hermesConfig(f)), original, 'removal leaves the file as the person had it')
-}))
-
-test('removing Hermes and hermes trust keep a lone FF byte in another approval of the allowlist (#1607)', () => fixture(f => {
+test('an allowlist holding a byte that is not valid UTF-8 is refused by hermes trust and removal and stays (#1607)', () => fixture(f => {
   assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
   const foreign = { approvals: [{ approved_at: '2026-01-01T00:00:00Z', command: 'my-guard-@FF@.sh', event: 'pre_tool_call', script_mtime_at_approval: null }] }
-  const run = bytes1607('my-guard-@FF@.sh')
-  f.save(hermesAllowlist(f), bytes1607(JSON.stringify(foreign, null, 2)))
-  const isKept = (buffer, when) => {
-    assert.ok(buffer.includes(run), `${when}: the other approval's command keeps its byte`)
-    assert.equal(buffer.includes(FFFD1607), false, `${when}: no EF BF BD`)
-    assert.equal(buffer.toString('latin1').includes('\\ufffd'), false, `${when}: no \\ufffd escape`)
-  }
-
-  const trusted = f.command(['--hermes-trust', '--apply', '--json'])
-  assert.equal(trusted.status, 0, trusted.stderr)
-  const added = readFileSync(hermesAllowlist(f))
-  isKept(added, 'after --hermes-trust')
-  assert.deepEqual(JSON.parse(added.toString('utf8')).approvals.slice(1).map(entry => entry.event), hermesEvents, 'setup\'s approvals are added')
-  const again = f.command(['--hermes-trust', '--apply', '--json'])
-  assert.equal(again.status, 0, again.stderr)
-  assert.equal(JSON.parse(again.stdout).changes, 0)
-  assert.deepEqual(readFileSync(hermesAllowlist(f)), added)
-
-  const removed = remove774(f, 'hermes')
-  assert.equal(removed.status, 0, removed.stderr)
-  const left = readFileSync(hermesAllowlist(f))
-  isKept(left, 'after removal')
-  assert.equal(JSON.parse(left.toString('utf8')).approvals.length, 1, 'setup\'s approvals are gone')
+  const original = bytes1607(JSON.stringify(foreign, null, 2))
+  f.save(hermesAllowlist(f), original)
+  const config = readFileSync(hermesConfig(f))
+  const record = readFileSync(join(f.root, 'install-hermes.json'))
+  const trusted = f.command(['--hermes-trust', '--apply'])
+  assert.notEqual(trusted.status, 0)
+  assert.match(trusted.stderr, /INVALID_HERMES_ALLOWLIST/)
+  assert.deepEqual(readFileSync(hermesAllowlist(f)), original, 'hermes trust leaves the file')
+  refusedAt1607(hermesAllowlist(f), original, remove774(f, 'hermes'), 'removal')
+  assert.deepEqual(readFileSync(hermesConfig(f)), config, 'nothing else is removed')
+  assert.deepEqual(readFileSync(join(f.root, 'install-hermes.json')), record, 'the record stays')
 }))
 
-test('removing Codex keeps a lone FF byte and Big5 text in config.toml outside the board trust tables (#1607)', () => fixture(f => {
-  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-  const toml = join(f.home, '.codex', 'config.toml')
-  const before = '# mine @B5@ caf@FF@\nmodel = "x@FF@"\n[tool@B5@]\nnote = "y@FF@"\n'
-  const after = '\n[after]\nk = "@FF@ @B5@"\n'
-  f.save(toml, bytes1607(before + trustTable774(trustKey774(f, 'SessionStart')) + trustTable774(trustKey774(f, 'Stop')) + after))
-  const removed = remove774(f, 'codex')
-  assert.equal(removed.status, 0, removed.stderr)
-  assert.deepEqual(readFileSync(toml), bytes1607(before + after), 'the board\'s tables are gone and every other byte is the same')
-}))
-
-test('DeepSeek cordis.patch.yml keeps a lone FF byte and Big5 text outside setup\'s block through setup and removal (#1607)', () => fixture(f => {
-  f.env.DSH_HOME = join(f.home, '.dsh')
-  const file = join(f.env.DSH_HOME, 'cordis.patch.yml')
-  const other = bytes1607('# Personal configuration @B5@\n- id: another-plugin\n  config:\n    enabled: true\n    note: caf@FF@ @B5@\n')
-  f.save(file, other)
-  const applied = f.install('--agent', 'deepseek', '--apply')
-  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
-  const installed = readFileSync(file)
-  assert.ok(installed.length > other.length, 'setup\'s block is added')
-  assert.deepEqual(installed.subarray(0, other.length), other, 'every byte outside the block is the same')
-  assert.equal(installed.includes(FFFD1607), false)
-  const again = f.install('--agent', 'deepseek', '--apply')
-  assert.equal(again.status, 0, again.stderr)
-  assert.deepEqual(JSON.parse(again.stdout).changes, [])
-  assert.deepEqual(readFileSync(file), installed)
-  const removed = f.command(['--codex-remove', '--agent', 'deepseek', '--apply'])
-  assert.equal(removed.status, 0, removed.stderr)
-  assert.deepEqual(readFileSync(file), other, 'removal leaves every byte of the person\'s')
-}))
-
-test('a board hook whose bytes are not the recorded ones is refused as an edit on --apply and on removal, even when they decode alike (#1607)', async () => {
-  // (a) a byte that is not valid UTF-8 inside setup's command in the config; (b) U+FFFD inside it in the record and FF at the same place in the config.
-  for (const variant of ['a', 'b']) await fixture(f => {
-    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-    const config = JSON.parse(readFileSync(f.hooks, 'utf8'))
-    const record = recordOf(f, 'codex')
-    const good = config.hooks.Stop[0].hooks[0].command
-    const at = good.indexOf('e')
-    config.hooks.Stop[0].hooks[0].command = `${good.slice(0, at)}@FF@${good.slice(at + 1)}`
-    if (variant === 'b') {
-      record.groups.Stop.hooks[0].command = `${good.slice(0, at)}\uFFFD${good.slice(at + 1)}`
-      saveRecord(f, 'codex', record)
-    }
-    const edited = bytes1607(`${JSON.stringify(config, null, 2)}\n`)
-    f.save(f.hooks, edited)
-    const recorded = readFileSync(join(f.root, 'install-codex.json'))
-    for (const [when, result] of [['--apply', f.install('--agent', 'codex', '--apply')], ['removal', f.command(['--codex-remove', '--agent', 'codex', '--apply', '--json'])]]) {
-      assert.notEqual(result.status, 0, `${variant} ${when}`)
-      assert.ok(JSON.parse(result.stdout).conflicts.includes(`${f.hooks}:Stop`), `${variant} ${when}: ${result.stdout}`)
-      assert.deepEqual(readFileSync(f.hooks), edited, `${variant} ${when}: the config stays`)
-      assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), recorded, `${variant} ${when}: the record stays`)
-    }
-  })
-})
-
-test('an edit of the board hook that only reads like another hook the record knows is still refused as an edit (#1607)', () => fixture(f => {
-  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-  const config = JSON.parse(readFileSync(f.hooks, 'utf8'))
-  const good = config.hooks.Stop[0].hooks[0].command
-  const at = good.indexOf('e')
-  // The person's own group reads like setup's with U+FFFD in place of one letter; setup records it as the person's.
-  const theirs = structuredClone(config.hooks.Stop[0])
-  theirs.hooks[0].command = `${good.slice(0, at)}�${good.slice(at + 1)}`
-  config.hooks.Stop.push(theirs)
-  f.save(f.hooks, `${JSON.stringify(config, null, 2)}\n`)
-  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-  // Then setup's own command gets FF in place of that letter, which a plain decode reads as the person's group.
-  const now = JSON.parse(readFileSync(f.hooks, 'utf8'))
-  const own = now.hooks.Stop.find(group => group.hooks?.[0]?.command === good)
-  assert.ok(own, 'setup\'s group is there')
-  own.hooks[0].command = `${good.slice(0, at)}@FF@${good.slice(at + 1)}`
-  const edited = bytes1607(`${JSON.stringify(now, null, 2)}\n`)
-  f.save(f.hooks, edited)
-  const recorded = readFileSync(join(f.root, 'install-codex.json'))
-  for (const [when, result] of [['--apply', f.install('--agent', 'codex', '--apply')], ['removal', f.command(['--codex-remove', '--agent', 'codex', '--apply', '--json'])]]) {
-    assert.notEqual(result.status, 0, `${when}: ${result.stdout}`)
-    assert.ok(JSON.parse(result.stdout).conflicts.includes(`${f.hooks}:Stop`), `${when}: ${result.stdout}`)
-    assert.deepEqual(readFileSync(f.hooks), edited, `${when}: the config stays`)
-    assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), recorded, `${when}: the record stays`)
-  }
-}))
-
-test('another agent\'s install record holding a byte that is not valid UTF-8 right before \\/ stays byte for byte when setup updates a shared file (#1607)', () => fixture(f => {
+test('another agent\'s install record holding a byte that is not valid UTF-8 stops setup before any write, on a shared update and on a removal handover (#1607)', () => fixture(f => {
   assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
   assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
-  // An older shared board script both records name, so this setup updates it and would bring Cursor's record up to date.
+  // An older shared board script both records name, so a codex setup would update it and Cursor's record with it. The
+  // removal runs through the setup script, since the shared board script is the old stand-in now.
   const old = '// an older board script\n'
   f.save(f.script, old)
   for (const agent of ['codex', 'cursor']) {
     const record = recordOf(f, agent)
-    assert.ok(record.files[f.script] !== undefined, agent)
     record.files[f.script] = digest(old)
     saveRecord(f, agent, record)
   }
   const sibling = join(f.root, 'install-cursor.json')
-  const text = readFileSync(sibling, 'utf8')
-  const kept = bytes1607(text.replace(/^\{\n/, '{\n  "note": "caf@FF@\\/x",\n'))
+  const kept = bytes1607(readFileSync(sibling, 'utf8').replace(/^\{\n/, '{\n  "note": "caf@FF@\\/x",\n'))
   f.save(sibling, kept)
-  const applied = f.install('--agent', 'codex', '--apply')
-  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
-  assert.notEqual(readFileSync(f.script, 'utf8'), old, 'the shared script is updated')
-  assert.deepEqual(readFileSync(sibling), kept, 'Cursor\'s record stays byte for byte')
+  const own = readFileSync(join(f.root, 'install-codex.json'))
+  const hooks = readFileSync(f.hooks)
+  for (const [when, result] of [['--apply', f.install('--agent', 'codex', '--apply')], ['removal', f.install('--remove', '--agent', 'codex', '--apply')]]) {
+    assert.notEqual(result.status, 0, `${when}: ${result.stdout}`)
+    assert.match(result.stderr, /install-cursor\.json/, `${when}: names the record`)
+    assert.deepEqual(readFileSync(sibling), kept, `${when}: Cursor's record stays byte for byte`)
+    assert.equal(readFileSync(f.script, 'utf8'), old, `${when}: the shared script is not touched`)
+    assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), own, `${when}: nor is Codex's record`)
+    assert.deepEqual(readFileSync(f.hooks), hooks, `${when}: nor the hook config`)
+  }
 }))
 
-test('a valid hook config holding a private-use character of U+10FE80 to U+10FEFF, as text before \\/ and as a \\u escape, comes through setup as on main (#1607)', () => fixture(f => {
-  f.save(f.hooks, `{\n  "hooks": {\n    "Stop": [\n      { "hooks": [{ "type": "command", "command": "echo \u{10FEFF}\\/ \\udbff\\udeff" }] }\n    ]\n  }\n}\n`)
-  const applied = f.install('--agent', 'codex', '--apply')
-  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
-  assert.deepEqual(JSON.parse(applied.stdout).conflicts, [])
-  const now = readFileSync(f.hooks)
-  // As on main: the file is valid UTF-8, the escape is written as the character, and no byte FF appears.
-  assert.equal(Buffer.from(now.toString('utf8'), 'utf8').equals(now), true)
-  assert.equal(now.includes(FF1607), false)
-  assert.ok(JSON.parse(now.toString('utf8')).hooks.Stop.some(group => group.hooks?.[0]?.command === 'echo \u{10FEFF}/ \u{10FEFF}'))
-}))
-
-test('a home folder whose name holds a private-use character of U+10FE80 to U+10FEFF: setup writes it as valid UTF-8 (#1607)', () => chineseFixture1607(f => {
-  const applied = f.install('--agent', 'codex', '--apply')
-  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
-  const now = readFileSync(f.hooks)
-  assert.equal(Buffer.from(now.toString('utf8'), 'utf8').equals(now), true)
-  assert.equal(now.includes(FF1607), false)
-  assert.ok(now.includes(Buffer.from('\u{10FEFF}', 'utf8')), 'setup\'s command names the folder')
-}, 'home \u{10FEFF}'))
-
-test('a home folder whose name holds a private-use character of U+10FE80 to U+10FEFF and a hook config holding a lone FF byte: setup stops and the config stays (#1607)', () => chineseFixture1607(f => {
+test('a record written before #1607 for a config holding a lone FF byte: setup refuses and the record stays (#1607)', () => fixture(f => {
   const person = { hooks: [{ type: 'command', command: 'echo caf@FF@' }] }
-  const kept = bytes1607(`${JSON.stringify({ hooks: { Stop: [person] } }, null, 2)}\n`)
-  f.save(f.hooks, kept)
-  const applied = f.install('--agent', 'codex', '--apply')
-  assert.notEqual(applied.status, 0, applied.stdout)
-  assert.deepEqual(readFileSync(f.hooks), kept)
-}, 'home \u{10FEFF}'))
-
-test('a home folder with Chinese characters and a lone FF byte in an entry the person wrote both come through --apply and a second --apply (#1607)', () => chineseFixture1607(f => {
-  const person = { hooks: [{ type: 'command', command: 'echo caf@FF@' }] }
-  f.save(f.hooks, bytes1607(`${JSON.stringify({ hooks: { Stop: [person] } }, null, 2)}\n`))
-  const applied = f.install('--agent', 'codex', '--apply')
-  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
-  const installed = readFileSync(f.hooks)
-  assert.ok(installed.includes(bytes1607('echo caf@FF@')), 'the FF byte is kept')
-  assert.equal(installed.includes(FFFD1607), false)
-  const name = '使用者家'
-  const config = JSON.parse(installed.toString('utf8'))
-  const reaches = command => command.includes(name) || [...command.matchAll(/[A-Za-z0-9+/=]{40,}/g)].some(one => Buffer.from(one[0], 'base64').toString('utf8').includes(name))
-  const own = Object.values(config.hooks).flatMap(list => list.filter(entry => !JSON.stringify(entry).includes('echo ')))
-  assert.ok(own.length > 0)
-  for (const entry of own) assert.equal(JSON.stringify(entry).includes('\uFFFD'), false, 'setup\'s commands are valid UTF-8')
-  assert.ok(own.some(entry => reaches(entry.hooks[0].command)), 'the Chinese folder is in setup\'s commands')
-  const record = readFileSync(join(f.root, 'install-codex.json'))
-  assert.ok(record.includes(Buffer.from(name)), 'and as UTF-8 in the record')
-
-  const again = f.install('--agent', 'codex', '--apply')
-  assert.equal(again.status, 0, again.stderr)
-  assert.deepEqual(JSON.parse(again.stdout).changes, [])
-  assert.deepEqual(readFileSync(f.hooks), installed)
-  assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), record)
+  f.save(f.hooks, `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo cafe' }] }] } }, null, 2)}\n`)
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  // The hash main wrote for the person's group: the FF read as U+FFFD. Setup's own group is gone from the config.
+  const record = recordOf(f, 'codex')
+  record.foreignGroups.Stop = [digest(JSON.stringify({ hooks: [{ type: 'command', command: 'echo caf�' }] }))]
+  saveRecord(f, 'codex', record)
+  const original = bytes1607(`${JSON.stringify({ hooks: { Stop: [person] } }, null, 2)}\n`)
+  f.save(f.hooks, original)
+  const recorded = readFileSync(join(f.root, 'install-codex.json'))
+  refusedAt1607(f.hooks, original, f.install('--agent', 'codex', '--apply', '--json'), '--apply')
+  assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), recorded, 'the record stays')
 }))
 
 test('a file that only decodes like the recorded one is not taken as a file setup wrote (#1607)', async () => {
@@ -3095,6 +2919,27 @@ test('a file that only decodes like the recorded one is not taken as a file setu
   })
 })
 
+test('a valid hook config holding a private-use character of U+10FE80 to U+10FEFF, as text before \\/ and as a \\u escape, comes through setup as on main (#1607)', () => fixture(f => {
+  f.save(f.hooks, `{\n  "hooks": {\n    "Stop": [\n      { "hooks": [{ "type": "command", "command": "echo \u{10FEFF}\\/ \\udbff\\udeff" }] }\n    ]\n  }\n}\n`)
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(JSON.parse(applied.stdout).conflicts, [])
+  const now = readFileSync(f.hooks)
+  // As on main: the file is valid UTF-8, the escape is written as the character, and no byte FF appears.
+  assert.equal(Buffer.from(now.toString('utf8'), 'utf8').equals(now), true)
+  assert.equal(now.includes(FF1607), false)
+  assert.ok(JSON.parse(now.toString('utf8')).hooks.Stop.some(group => group.hooks?.[0]?.command === 'echo \u{10FEFF}/ \u{10FEFF}'))
+}))
+
+test('a home folder whose name holds a private-use character of U+10FE80 to U+10FEFF: setup writes it as valid UTF-8 (#1607)', () => chineseFixture1607(f => {
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  const now = readFileSync(f.hooks)
+  assert.equal(Buffer.from(now.toString('utf8'), 'utf8').equals(now), true)
+  assert.equal(now.includes(FF1607), false)
+  assert.ok(now.includes(Buffer.from('\u{10FEFF}', 'utf8')), 'setup\'s command names the folder')
+}, 'home \u{10FEFF}'))
+
 test('a hook config where a byte that is not valid UTF-8 comes right before \\/ or \\u is refused as unreadable and stays byte for byte (#1607)', async () => {
   for (const original of [bytes1607('{"other":"a@FF@\\/b","hooks":{}}'), bytes1607('{"other":"a@FF@\\u0041","hooks":{}}')]) await fixture(f => {
     f.save(f.hooks, original)
@@ -3117,30 +2962,6 @@ test('a hook config where a byte that is not valid UTF-8 comes right before \\/ 
     assert.deepEqual(readFileSync(hermesAllowlist(f)), original)
   })
 })
-
-test('decode and encode give back every byte sequence, and lossy reads it as a plain decode does (#1607)', async () => {
-  const { decode, encode, isPlain, lossy } = await importTs('../scripts/codex-local.ts')
-  // Setup writes a file's text back as plain UTF-8 when its bytes were all valid, and through encode otherwise.
-  const write = (bytes, text) => isPlain(bytes) ? Buffer.from(text, 'utf8') : encode(text)
-  const sequences = []
-  for (let byte = 0; byte < 256; byte++) sequences.push(Buffer.of(byte))
-  for (const hex of ['c080', 'eda080', 'edbfbf', 'e4b8', 'f48fba80', 'f48fbfbf', 'f4908080', 'f48fba7f', 'f48fba', 'e4b8ade69687', 'efbbbf7b7d', 'efbfbd', 'f48fba8041', 'a4a4a4e5a440', 'f09f9880', 'c280', 'e08080', 'f888808080']) sequences.push(Buffer.from(hex, 'hex'))
-  const pool = [0x00, 0x22, 0x41, 0x5c, 0x7f, 0x80, 0x8f, 0xa0, 0xa4, 0xba, 0xbb, 0xbf, 0xc0, 0xc1, 0xc2, 0xdf, 0xe0, 0xe5, 0xed, 0xef, 0xf0, 0xf4, 0xf5, 0xff]
-  let seed = 1607
-  const next = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 2 ** 32
-  for (let i = 0; i < 400; i++) sequences.push(Buffer.from(Array.from({ length: 1 + Math.floor(next() * 12) }, () => pool[Math.floor(next() * pool.length)])))
-  for (const bytes of sequences) {
-    const label = bytes.toString('hex')
-    const text = decode(bytes)
-    assert.deepEqual(write(bytes, text), bytes, `encode(decode) ${label}`)
-    if (!isPlain(bytes)) assert.equal(lossy(text), bytes.toString('utf8'), `lossy ${label}`)
-    assert.deepEqual(write(bytes, JSON.parse(JSON.stringify(text))), bytes, `JSON ${label}`)
-    const plain = bytes.toString('utf8')
-    if (Buffer.from(plain, 'utf8').equals(bytes)) assert.equal(text, plain, `valid ${label}`)
-  }
-})
-
-// Guards: these hold on main too and keep it so.
 
 test('valid UTF-8 Chinese text in the person\'s files and a home folder with Chinese characters come through setup, a second --apply, hermes trust and removal as before (#1607)', async () => {
   for (const [host, relative] of hosts1607) await chineseFixture1607(f => {
@@ -3215,11 +3036,22 @@ test('valid UTF-8 Chinese text in the person\'s files and a home folder with Chi
   })
 })
 
+test('a skill file the person saved in Big5 stays byte for byte and gets a .new copy beside it (#1607)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill)
+  const edited = bytes1607('# my notes @B5@\n')
+  f.save(f.skill, edited)
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(readFileSync(f.skill), edited)
+  assert.deepEqual(readFileSync(`${f.skill}.new`), wanted)
+}))
+
 test('files setup cannot read or take as its own stay byte for byte (#1607)', async () => {
   const unreadable = [
     ['a Big5 character whose second byte is a backslash before a closing quote', Buffer.concat([Buffer.from('{"other":"'), Buffer.of(0xb3, 0x5c), Buffer.from('","hooks":{}}')])],
     ['a byte that is not valid UTF-8 outside any string', Buffer.concat([Buffer.from('{"hooks":'), FF1607, Buffer.from('{}}')])],
-    ['UTF-16', Buffer.from('\uFEFF{"hooks":{}}', 'utf16le')],
+    ['UTF-16', Buffer.from('﻿{"hooks":{}}', 'utf16le')],
   ]
   for (const [host, relative] of hosts1607) for (const [what, content] of unreadable) await fixture(f => {
     const config = hostFile1607(f, host, relative)
@@ -3244,7 +3076,7 @@ test('files setup cannot read or take as its own stay byte for byte (#1607)', as
     assert.equal(existsSync(join(f.root, 'install-codex.json')), true)
   })
   await fixture(f => {
-    const original = Buffer.from('\uFEFFmodel: x\nhooks:\n', 'utf16le')
+    const original = Buffer.from('﻿model: x\nhooks:\n', 'utf16le')
     f.save(hermesConfig(f), original)
     const preview = f.install('--agent', 'hermes')
     assert.equal(preview.status, 0, preview.stderr)
@@ -3256,7 +3088,7 @@ test('files setup cannot read or take as its own stay byte for byte (#1607)', as
   })
   await fixture(f => {
     assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
-    const original = bytes1607('not json @FF@\n')
+    const original = Buffer.from('not json at all\n')
     f.save(hermesAllowlist(f), original)
     const trusted = f.command(['--hermes-trust', '--apply'])
     assert.notEqual(trusted.status, 0)
@@ -3267,152 +3099,7 @@ test('files setup cannot read or take as its own stay byte for byte (#1607)', as
     assert.deepEqual(readFileSync(hermesAllowlist(f)), original, 'removal leaves the allowlist')
     assert.equal(existsSync(join(f.root, 'install-hermes.json')), false, 'and goes on with the rest')
   })
-  // An install record with a byte that is not valid UTF-8 inside a path or a command no longer matches, so that agent stops; outside a string it cannot be read.
-  for (const kind of ['a path', 'a command']) await fixture(f => {
-    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-    const record = recordOf(f, 'codex')
-    if (kind === 'a path') {
-      record.files[f.skill.replace('SKILL.md', 'SKILL@FF@.md')] = record.files[f.skill]
-      delete record.files[f.skill]
-    } else {
-      const command = record.groups.Stop.hooks[0].command
-      record.groups.Stop.hooks[0].command = `${command.slice(0, 3)}@FF@${command.slice(4)}`
-    }
-    const edited = bytes1607(`${JSON.stringify(record, null, 2)}\n`)
-    f.save(join(f.root, 'install-codex.json'), edited)
-    const applied = f.install('--agent', 'codex', '--apply')
-    assert.notEqual(applied.status, 0, kind)
-    assert.equal(JSON.parse(applied.stdout).conflicts.length, 1, `${kind}: ${applied.stdout}`)
-    assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), edited, `${kind}: the record is not rewritten`)
-    const removed = f.command(['--codex-remove', '--agent', 'codex', '--apply', '--json'])
-    assert.notEqual(removed.status, 0, kind)
-    assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), edited, `${kind}: nor by removal`)
-  })
-  await fixture(f => {
-    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-    const edited = bytes1607(`${JSON.stringify(recordOf(f, 'codex'), null, 2).replace('"progress"', '@FF@"progress"')}\n`)
-    f.save(join(f.root, 'install-codex.json'), edited)
-    const applied = f.install('--agent', 'codex', '--apply')
-    assert.notEqual(applied.status, 0)
-    assert.match(applied.stderr, /cannot read install-codex\.json/)
-    const removed = f.command(['--codex-remove', '--agent', 'codex', '--apply', '--json'])
-    assert.notEqual(removed.status, 0)
-    assert.match(removed.stderr, /INVALID_INSTALL_RECORD/)
-    assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), edited)
-  })
 })
-
-test('setup\'s own lines with a changed byte in config.yaml, cordis.patch.yml and config.toml are treated as on main (#1607)', async () => {
-  // Row 31: a comment at the end of setup's own line in config.yaml is read the same whether it is Big5 or valid UTF-8.
-  const outcome = comment => fixture(f => {
-    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
-    const lines = readFileSync(hermesConfig(f), 'latin1').split('\n')
-    const at = lines.findIndex(line => line.includes('agent-board-hook'))
-    lines[at] += ` # ${comment.toString('latin1')}`
-    const edited = Buffer.from(lines.join('\n'), 'latin1')
-    f.save(hermesConfig(f), edited)
-    const again = f.install('--agent', 'hermes', '--apply')
-    assert.equal(again.status, 0, again.stderr + again.stdout)
-    assert.deepEqual(JSON.parse(again.stdout).changes, [])
-    assert.deepEqual(readFileSync(hermesConfig(f)), edited, 'a second --apply changes no byte')
-    const removed = remove774(f, 'hermes')
-    assert.equal(removed.status, 0, removed.stderr)
-    return { conflicts: JSON.parse(removed.stdout).conflicts, left: existsSync(hermesConfig(f)) ? readFileSync(hermesConfig(f), 'latin1') : null }
-  })
-  assert.deepEqual(await outcome(bytes1607('@B5@')), await outcome(Buffer.from('備註')))
-  // Row 32: a byte inside setup's marked block in cordis.patch.yml that is no longer the recorded one.
-  await fixture(f => {
-    f.env.DSH_HOME = join(f.home, '.dsh')
-    const file = join(f.env.DSH_HOME, 'cordis.patch.yml')
-    assert.equal(f.install('--agent', 'deepseek', '--apply').status, 0)
-    const text = readFileSync(file, 'latin1')
-    const at = text.indexOf('- id: agent-board-local') + '- id: agent-board-loc'.length
-    const edited = Buffer.from(`${text.slice(0, at)}\xff${text.slice(at + 1)}`, 'latin1')
-    f.save(file, edited)
-    for (const [when, result] of [['--apply', f.install('--agent', 'deepseek', '--apply')], ['removal', f.command(['--codex-remove', '--agent', 'deepseek', '--apply', '--json'])]]) {
-      assert.notEqual(result.status, 0, when)
-      assert.ok(JSON.parse(result.stdout).conflicts.includes(file), `${when}: ${result.stdout}`)
-      assert.deepEqual(readFileSync(file), edited, `${when}: the file stays`)
-    }
-  })
-  // Row 33: a trust table whose key holds a byte that is not valid UTF-8 is not the board's table, so it stays.
-  await fixture(f => {
-    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-    const toml = join(f.home, '.codex', 'config.toml')
-    const key = trustKey774(f, 'SessionStart')
-    const at = key.indexOf('hooks.json')
-    const original = bytes1607(`# mine\n${trustTable774(`${key.slice(0, at)}@FF@${key.slice(at + 1)}`)}`)
-    f.save(toml, original)
-    const removed = remove774(f, 'codex')
-    assert.equal(removed.status, 0, removed.stderr)
-    assert.deepEqual(readFileSync(toml), original, 'config.toml is not written')
-    assert.equal(existsSync(join(f.root, 'install-codex.json')), false, 'the rest of the removal goes on')
-  })
-})
-
-test('a BOM at the start of config.yaml, config.toml and cordis.patch.yml stays through setup and removal (#1607)', async () => {
-  await fixture(f => {
-    const original = bytes1607('@BOM@model: synthetic/model\nhooks:\n  pre_tool_call:\n    - {command: "my-guard.sh", timeout: 5}\n')
-    f.save(hermesConfig(f), original)
-    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
-    const installed = readFileSync(hermesConfig(f))
-    assert.deepEqual(installed.subarray(0, 3), BOM1607)
-    assert.ok(keepsLines1607(original, installed))
-    assert.equal(remove774(f, 'hermes').status, 0)
-    assert.deepEqual(readFileSync(hermesConfig(f)), original)
-  })
-  await fixture(f => {
-    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-    const toml = join(f.home, '.codex', 'config.toml')
-    const retained = bytes1607('@BOM@# mine\n')
-    f.save(toml, Buffer.concat([retained, Buffer.from(trustTable774(trustKey774(f, 'SessionStart')))]))
-    assert.equal(remove774(f, 'codex').status, 0)
-    assert.deepEqual(readFileSync(toml), retained)
-  })
-  await fixture(f => {
-    f.env.DSH_HOME = join(f.home, '.dsh')
-    const file = join(f.env.DSH_HOME, 'cordis.patch.yml')
-    const other = bytes1607('@BOM@# Personal configuration\n- id: another-plugin\n  config:\n    enabled: true\n')
-    f.save(file, other)
-    assert.equal(f.install('--agent', 'deepseek', '--apply').status, 0)
-    const installed = readFileSync(file)
-    assert.deepEqual(installed.subarray(0, other.length), other)
-    assert.equal(f.command(['--codex-remove', '--agent', 'deepseek', '--apply']).status, 0)
-    assert.deepEqual(readFileSync(file), other)
-  })
-})
-
-test('a record written before #1607 for a config holding a lone FF byte puts the board hook back with no conflict (#1607)', () => fixture(f => {
-  const person = { hooks: [{ type: 'command', command: 'echo caf@FF@' }] }
-  f.save(f.hooks, bytes1607(`${JSON.stringify({ hooks: { Stop: [person] } }, null, 2)}\n`))
-  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-  // The hash main wrote for the person's group: the FF read as U+FFFD.
-  const record = recordOf(f, 'codex')
-  record.foreignGroups.Stop = [digest(JSON.stringify({ hooks: [{ type: 'command', command: 'echo caf\uFFFD' }] }))]
-  saveRecord(f, 'codex', record)
-  const config = JSON.parse(readFileSync(f.hooks, 'utf8'))
-  config.hooks.Stop = [person]
-  f.save(f.hooks, bytes1607(`${JSON.stringify(config, null, 2)}\n`))
-
-  const applied = f.install('--agent', 'codex', '--apply')
-  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
-  assert.deepEqual(JSON.parse(applied.stdout).conflicts, [])
-  const now = readFileSync(f.hooks)
-  assert.equal(JSON.parse(now.toString('utf8')).hooks.Stop.length, 2, 'setup\'s group is back')
-  assert.ok(now.includes(bytes1607('echo caf@FF@')), 'the FF byte is kept')
-  assert.equal(now.includes(FFFD1607), false)
-}))
-
-test('a skill file the person saved in Big5 stays byte for byte and gets a .new copy beside it (#1607)', () => fixture(f => {
-  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
-  const wanted = readFileSync(f.skill)
-  const edited = bytes1607('# my notes @B5@\n')
-  f.save(f.skill, edited)
-  const applied = f.install('--agent', 'codex', '--apply')
-  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
-  assert.deepEqual(readFileSync(f.skill), edited)
-  assert.deepEqual(readFileSync(`${f.skill}.new`), wanted)
-}))
 
 test('setup names the host with an unreadable config and still previews the others', async () => {
   await fixture(f => {

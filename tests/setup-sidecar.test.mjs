@@ -435,31 +435,6 @@ test('the sidecar-only removal keeps a sidecar.json holding a byte that is not v
   assert.deepEqual(readFileSync(file), edited, 'sidecar.json stays with the byte the person put there')
 }))
 
-// The preload changes one other byte of hooks.json, a marker next to the person's FF byte, when setup opens its temporary copy.
-const markerEditOnOpen = (home, name) => seam(home, `const open = fs.openSync
-let done = false
-fs.openSync = (file, ...rest) => {
-  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.lastIndexOf(${JSON.stringify(`${name}.`)}) : -1
-  if (!done && at >= 0) {
-    done = true
-    const real = file.slice(0, at) + ${JSON.stringify(name)}
-    const bytes = fs.readFileSync(real), i = bytes.indexOf(Buffer.from('mark-a'))
-    fs.writeFileSync(real, Buffer.concat([bytes.subarray(0, i), Buffer.from('mark-b'), bytes.subarray(i + 6)]))
-  }
-  return open(file, ...rest)
-}`)
-
-test('an edit made while setup runs to a hook config holding a lone FF byte stops setup and stays (#1607)', () => withHome(({ home, run }) => {
-  const hooks = join(home, '.gemini', 'config', 'hooks.json')
-  mkdirSync(join(home, '.gemini', 'config'), { recursive: true })
-  // The person's own entry, which setup keeps beside its own, holds a lone FF byte.
-  writeFileSync(hooks, Buffer.concat([Buffer.from('{\n  "my-hooks": { "note": "caf'), Buffer.from([0xff]), Buffer.from(' mark-a" }\n}\n')]))
-  const edited = Buffer.concat([Buffer.from('{\n  "my-hooks": { "note": "caf'), Buffer.from([0xff]), Buffer.from(' mark-b" }\n}\n')])
-  const install = run(['--agent', 'antigravity', '--apply'], { env: markerEditOnOpen(home, 'hooks.json') })
-  stoppedOnChange(install)
-  assert.deepEqual(readFileSync(hooks), edited, 'the file holds the person\'s later bytes, FF included')
-}))
-
 // A link to a path that is not there: on Windows a junction to a missing folder, which needs no privilege.
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'file'
 
