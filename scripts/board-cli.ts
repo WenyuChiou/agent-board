@@ -2637,10 +2637,9 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
         if (url === null && pid !== undefined && isRunning(pid)) {
           try { process.kill(pid) } catch {}
         }
-        if (url === null) unlinkIf(file, () => {
-          const cur = readRunning(file)
-          return Boolean(cur && (cur.pid === pid || !isRunning(cur.pid)))
-        })
+        const trappedPid = Number(/(?:^|\r?\n)JOB_TRAP_PID:([1-9][0-9]*)(?:\r?\n|$)/.exec(launcherError)?.[1]) || undefined
+        const ownedPid = pid ?? trappedPid
+        if (url === null && ownedPid !== undefined) unlinkIf(file, () => readRunning(file)?.pid === ownedPid)
         if (url === null && child !== undefined && !isLauncherDone) child.kill()
         child?.stdout?.destroy()
         child?.stderr?.destroy()
