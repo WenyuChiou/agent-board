@@ -5373,6 +5373,52 @@ test('Hermes removal preserves a foreign bare-dash list item after a recorded ho
   assert.equal(readFileSync(config, 'utf8'), `hooks:\n  post_tool_call:\n${sibling}\n`)
 }))
 
+test('Hermes setup refuses only the entry the person changed and names its event (#1588)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  const hooks = hermesHooksOf(text)
+  assert.deepEqual(Object.keys(hooks).sort(), [...hermesEvents].sort())
+  // The person changed the on_session_start entry to their own command; the other four stay the board's.
+  const changed = text.replace(JSON.stringify(hooks.on_session_start.command), '"my-start.sh"')
+  assert.notEqual(changed, text, 'the changed entry is replaced')
+  f.save(config, changed)
+  const result = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.ok(result.stdout.trimStart().startsWith('{'), `setup prints a JSON plan\n${result.stdout}\n${result.stderr}`)
+  // f.install runs setup-codex.mjs, which prints the plan itself, not setup-agent's wrapper.
+  const plan = JSON.parse(result.stdout)
+  assert.equal(plan.conflicts.length, 1, `one refused entry, not the whole file: ${JSON.stringify(plan.conflicts)}`)
+  assert.ok(plan.conflicts[0].includes('config.yaml'), `the refusal names the file: ${plan.conflicts[0]}`)
+  assert.ok(plan.conflicts[0].endsWith(':on_session_start'), `the refusal names the exact entry: ${plan.conflicts[0]}`)
+  assert.equal(readFileSync(config, 'utf8'), changed, 'the refused run writes nothing')
+  // Fixing that one entry unblocks the rest.
+  f.save(config, text)
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  assert.equal(readFileSync(config, 'utf8'), text)
+}))
+
+test('Hermes setup adopts an entry that already runs this release\'s command when no install record names it (#1588)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const config = hermesConfig(f)
+  const text = readFileSync(config, 'utf8')
+  // The install record is gone (a replaced marketplace entry, a copied config), but the
+  // entries still run this release's command: setup recognises them as its own.
+  const manifest = join(f.root, 'install-hermes.json')
+  const record = JSON.parse(readFileSync(manifest, 'utf8'))
+  assert.ok(record.groups?.hooks, 'the install recorded its hooks')
+  delete record.groups.hooks
+  writeFileSync(manifest, `${JSON.stringify(record, null, 2)}\n`)
+  const again = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.equal(again.status, 0, again.stderr)
+  // f.install runs setup-codex.mjs, which prints the plan itself, not setup-agent's wrapper.
+  const plan = JSON.parse(again.stdout)
+  assert.deepEqual(plan.conflicts, [], 'no conflict on the board\u2019s own entries')
+  assert.equal(readFileSync(config, 'utf8'), text, 'the entries already run this release\u2019s command')
+  const repaired = JSON.parse(readFileSync(manifest, 'utf8'))
+  assert.deepEqual(Object.keys(repaired.groups.hooks).sort(), [...hermesEvents].sort(), 'the install re-records the hooks')
+  assert.deepEqual(JSON.parse(f.install('--agent', 'hermes', '--apply', '--json').stdout).changes, [], 'a third apply reports no changes')
+}))
+
 test('Hermes refresh and removal recognize a recorded Unicode path after YAML escaping', () => fixture(f => {
   const data = join(f.home, 'caf\u00e9-\u{1f600}')
   const install = () => f.install('--agent', 'hermes', '--data-dir', data, '--apply')
