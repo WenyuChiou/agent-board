@@ -1743,6 +1743,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     Object.assign(groups, manifest.groups)
   }
   // The old /board command the kept older script answers stays with it, as setup wrote it or as the person edited it.
+  // The plan says so (boardKept), so setup's next steps name /board only while that file is there.
   const keptBoards = isOlderHeld ? retired.filter(file => initial(file) !== null) : []
   for (const file of keptBoards) keptHeld.push({ file, by: heldBy })
   for (const file of retired) {
@@ -1838,7 +1839,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), ...(isOlderHeld && keptFiles.has(commandFile) ? { commandWaits: true } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), ...(isOlderHeld && keptFiles.has(commandFile) ? { commandWaits: true, ...(keptBoards.length ? { boardKept: true } : {}) } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.

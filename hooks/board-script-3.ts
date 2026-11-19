@@ -2062,7 +2062,7 @@ export const LINES = [
 "    ...keptCode.length ? { keptCode } : {},",
 "    ...keptHeld.length ? { keptHeld } : {},",
 "    ...missingHeld.length ? { missingHeld } : {},",
-"    ...isOlderHeld && keptFiles.has(commandFile) ? { commandWaits: true } : {},",
+"    ...isOlderHeld && keptFiles.has(commandFile) ? { commandWaits: true, ...keptBoards.length ? { boardKept: true } : {} } : {},",
 "    notice: [agent === \"codex\" ? s.codexTrust : s.localHostReview, ...alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(\", \"))] : []].join(\" \"),",
 "    privacy: s.codexPrivacy,",
 "    capabilities: { ui: \"web-and-tui\", progress: \"explicit-reports\", lifecycle: lifecycleCapability(agent), turnBinding: agent === \"codex\" || agent === \"cursor\" || agent === \"openclaw\" ? \"host-event-id\" : \"unavailable-in-status-events\", liveReply: false }",

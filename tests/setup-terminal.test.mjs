@@ -18,19 +18,22 @@ test('terminal setup accepts one yes for files, Codex and Hermes trust, and both
   assert.deepEqual(claudeCalls(f), pluginCommands)
   const next = result.stdout.split('Next steps:')[1]
   assert.match(next, /1\. Open a new session in each of: Codex, Hermes Agent, Claude Code\./)
-  assert.match(next, /2\. Then type \/agent-board in any of them\./)
+  // Each agent is named with its own way to open the board: Codex by $agent-board, Hermes Agent by its skill.
+  assert.match(next, /2\. Then type \/agent-board in Claude Code\.\n3\. In Codex, type \$agent-board\.\n4\. In Hermes Agent, ask it to run the Agent Board skill\./)
+  assert.doesNotMatch(next, /in any of them/)
   assert.doesNotMatch(next, /--trust|--codex-trust|--hermes-trust|claude plugin/)
 }))
 
-test('setup\'s next steps name /board, not /agent-board, for an agent whose command waits (#1698)', () => terminal(f => {
+// The home as 0.24.2 left it for these agents, with an older board script: OpenCode has /board, not /agent-board.
+// `board` is the /board file, or null when the person deleted it; `isEdited` says whether the person edited the script.
+const olderScript = '// synthetic older board script\n', oldCommand = 'Synthetic /board command of an earlier version\n'
+const olderHome = (f, agents, { board = oldCommand, isEdited = true } = {}) => {
   delete f.env.AGENT_BOARD_SETUP_TTY
-  succeeded(f.invoke(['--agent', 'opencode,cursor', '--lang', 'en', '--apply']))
+  succeeded(f.invoke(['--agent', agents.join(','), '--lang', 'en', '--apply']))
   f.env.AGENT_BOARD_SETUP_TTY = '1'
-  // The home as 0.24.2 left it, with the board script the person then edited: OpenCode has /board, not /agent-board.
   const data = join(f.root, 'data'), script = join(data, 'agent-board.mjs'), commands = join(f.env.OPENCODE_CONFIG_DIR, 'commands')
   const digest = text => createHash('sha256').update(text).digest('hex')
-  const olderScript = '// synthetic older board script\n', oldCommand = 'Synthetic /board command of an earlier version\n'
-  for (const agent of ['opencode', 'cursor']) {
+  for (const agent of agents) {
     const file = join(data, `install-${agent}.json`), record = JSON.parse(readFileSync(file, 'utf8'))
     record.files[script] = digest(olderScript)
     if (agent === 'opencode') {
@@ -40,14 +43,51 @@ test('setup\'s next steps name /board, not /agent-board, for an agent whose comm
     writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`)
   }
   rmSync(join(commands, 'agent-board.md'))
-  writeFileSync(join(commands, 'board.md'), oldCommand)
-  writeFileSync(script, `${olderScript}// synthetic line the person added\n`)
+  if (board !== null) writeFileSync(join(commands, 'board.md'), board)
+  writeFileSync(script, isEdited ? `${olderScript}// synthetic line the person added\n` : olderScript)
+  return { script, commands }
+}
+
+test('setup\'s next steps name /board, not /agent-board, for an agent whose command waits (#1698)', () => terminal(f => {
+  const { commands } = olderHome(f, ['opencode', 'cursor'])
   const result = f.invoke(['--agent', 'opencode,cursor', '--lang', 'en'], 'yes\n')
   succeeded(result)
   const next = result.stdout.split('Next steps:')[1] ?? ''
-  assert.match(next, /Then type \/agent-board in Cursor, Claude Code\./, result.stdout)
+  assert.match(next, /Then type \/agent-board in Claude Code\./, result.stdout)
   assert.match(next, /In OpenCode, type \/board\. \/agent-board comes once you move your edited agent-board\.mjs aside and run setup again\./, result.stdout)
-  assert.doesNotMatch(next, /in any of them/)
+  // Cursor has no command: it gets the board command for a terminal.
+  assert.match(next, /Cursor has no board command: open the board from a terminal with \S/, result.stdout)
+  assert.doesNotMatch(next, /in any of them|\/agent-board in [^\n]*Cursor/)
+  assert.equal(existsSync(join(commands, 'agent-board.md')), false)
+  assert.equal(readFileSync(join(commands, 'board.md'), 'utf8'), oldCommand)
+}))
+
+test('setup\'s next steps give the board command for a terminal, not /board, when the /board file is gone and /agent-board waits (#1698)', () => {
+  for (const [index, lang] of locales.entries()) terminal(f => {
+    const { commands } = olderHome(f, ['opencode', 'cursor'], { board: null })
+    const result = f.invoke(['--agent', 'opencode,cursor', '--lang', lang], 'yes\n')
+    succeeded(result)
+    const words = bootstrap[index], next = result.stdout.split(words.next)[1] ?? ''
+    assert.ok(next.includes(words.thenBoardWait.replace('{agents}', 'OpenCode').split('{command}')[0]), `${lang}: ${result.stdout}`)
+    assert.doesNotMatch(next, /\/board(?!-)/, `${lang}: ${result.stdout}`)
+    assert.equal(existsSync(join(commands, 'board.md')), false)
+    assert.equal(existsSync(join(commands, 'agent-board.md')), false)
+  })
+})
+
+test('setup\'s next steps follow what the apply did when the board script is edited while setup waits for the yes (#1698)', () => terminal(f => {
+  const { script, commands } = olderHome(f, ['opencode', 'cursor'], { isEdited: false })
+  // The person edits the board script while setup waits for the answer, after the preview planned /agent-board.
+  const preload = join(f.root, 'edit-on-answer.cjs'), mark = join(f.root, 'edited')
+  writeFileSync(preload, `const fs = require('node:fs')\nconst read = fs.readSync\nfs.readSync = (fd, ...rest) => {\n  if (fd === 0 && !fs.existsSync(${JSON.stringify(mark)})) { fs.writeFileSync(${JSON.stringify(mark)}, ''); fs.appendFileSync(${JSON.stringify(script)}, '// synthetic line the person added\\n') }\n  return read(fd, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let result
+  try { result = f.invoke(['--agent', 'opencode,cursor', '--lang', 'en'], 'yes\n') } finally { delete f.env.NODE_OPTIONS }
+  succeeded(result)
+  assert.ok(existsSync(mark), 'setup read the answer')
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.match(next, /In OpenCode, type \/board\./, result.stdout)
+  assert.doesNotMatch(next, /\/agent-board in [^\n]*OpenCode/)
   assert.equal(existsSync(join(commands, 'agent-board.md')), false)
   assert.equal(readFileSync(join(commands, 'board.md'), 'utf8'), oldCommand)
 }))

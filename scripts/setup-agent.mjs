@@ -100,6 +100,10 @@ const summaries = [
     "thenBoardOne": "Then type /agent-board there.",
     "thenBoardIn": "Then type /agent-board in {agents}.",
     "thenBoardOld": "In {agents}, type /board. /agent-board comes once you move your edited agent-board.mjs aside and run setup again.",
+    "thenBoardCodex": "In Codex, type $agent-board.",
+    "thenBoardHermes": "In Hermes Agent, ask it to run the Agent Board skill.",
+    "thenBoardCursor": "Cursor has no board command: open the board from a terminal with {command}",
+    "thenBoardWait": "In {agents}, /agent-board comes once you move your edited agent-board.mjs aside and run setup again. Until then, open the board from a terminal with {command}",
     "appliedRemove": "removed {count} setup files",
     "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",
@@ -167,6 +171,10 @@ const summaries = [
     "thenBoardOne": "接著在那裡輸入 /agent-board。",
     "thenBoardIn": "接著在 {agents} 輸入 /agent-board。",
     "thenBoardOld": "在 {agents} 請輸入 /board。把你改過的 agent-board.mjs 移開、再執行一次 setup 後，就會有 /agent-board。",
+    "thenBoardCodex": "在 Codex 請輸入 $agent-board。",
+    "thenBoardHermes": "在 Hermes Agent 請它執行 Agent Board skill。",
+    "thenBoardCursor": "Cursor 沒有看板指令：請在終端機執行 {command} 開啟看板。",
+    "thenBoardWait": "在 {agents}，把你改過的 agent-board.mjs 移開、再執行一次 setup 後，就會有 /agent-board。在那之前，請在終端機執行 {command} 開啟看板。",
     "appliedRemove": "已移除 {count} 個設定檔案",
     "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
@@ -234,6 +242,10 @@ const summaries = [
     "thenBoardOne": "接着在那里输入 /agent-board。",
     "thenBoardIn": "接着在 {agents} 输入 /agent-board。",
     "thenBoardOld": "在 {agents} 请输入 /board。把你改过的 agent-board.mjs 移走、再运行一次 setup 后，就会有 /agent-board。",
+    "thenBoardCodex": "在 Codex 请输入 $agent-board。",
+    "thenBoardHermes": "在 Hermes Agent 请让它执行 Agent Board skill。",
+    "thenBoardCursor": "Cursor 没有看板命令：请在终端运行 {command} 打开看板。",
+    "thenBoardWait": "在 {agents}，把你改过的 agent-board.mjs 移走、再运行一次 setup 后，就会有 /agent-board。在那之前，请在终端运行 {command} 打开看板。",
     "appliedRemove": "已移除 {count} 个设置文件",
     "appliedRemoveOne": "已移除 {count} 个设置文件",
     "noInstalled": "没有已安装的 Agent Board 设置可供移除",
@@ -633,6 +645,8 @@ const main = () => {
     }
     if (hasConsent) {
       const completed = []
+      // What each apply did. The files can change while setup waits for the answer, and the apply plans again (#1698).
+      const appliedPlans = {}
       for (const [i, agent] of selected.entries()) {
         const plan = plans[i]
         // A skipped agent's preview line already names its files and the command to apply it.
@@ -642,6 +656,7 @@ const main = () => {
           if (plan.changes.length) {
             const applied = run(agent, true)
             isDone = applied.applied === true && !applied.conflicts.length
+            if (isDone) appliedPlans[agent] = applied
           }
           if (isDone) completed.push(agent)
         } catch { isDone = false }
@@ -683,10 +698,12 @@ const main = () => {
       if (completed.includes('antigravity')) offerSidecar()
       const next = []
       const sessions = []
-      // An agent whose /agent-board command waits with an edited older board script still answers /board (#1698).
-      const oldSessions = []
+      // How each agent opens the board (docs/SETUP.md, After setup): /agent-board, $agent-board in Codex, the skill in
+      // Hermes Agent, and a terminal in Cursor, which has no command. An agent whose /agent-board waits with an edited
+      // older board script answers /board while that file is there, and opens from a terminal when it is not (#1698).
+      const ways = new Map()
       for (const agent of completed) {
-        const plan = plans[selected.indexOf(agent)]
+        const plan = appliedPlans[agent] ?? plans[selected.indexOf(agent)]
         if (plan.managedBy === 'connector') continue
         if (plan.capabilities.lifecycle === 'adapter-pending') next.push(words('skill', { host: names[agent] }))
         else {
@@ -694,21 +711,29 @@ const main = () => {
           // Started from Git Bash, cursor-agent hands its PowerShell hook commands to bash and none runs (#1159).
           if (agent === 'cursor' && process.platform === 'win32') next.push(words('cursorWindows'))
           sessions.push(names[agent])
-          if (plan.commandWaits) oldSessions.push(names[agent])
+          ways.set(names[agent], plan.commandWaits ? plan.boardKept ? 'old' : 'wait' : ['codex', 'hermes', 'cursor'].includes(agent) ? agent : 'slash')
         }
       }
       // One retry command for every agent that was skipped, here as in the run without a terminal.
       const skippedAgents = selected.filter((agent, i) => plans[i].conflicts.length)
       if (skippedAgents.length) next.push(words('retry', { command: setupCommand(['--agent', skippedAgents.join(','), '--apply']) }))
       if (hasInstalledPlugin && isPluginDisabled(claudeDirectory)) next.push(enablePluginStep())
-      if (isPluginReady) sessions.push('Claude Code')
+      if (isPluginReady) {
+        sessions.push('Claude Code')
+        ways.set('Claude Code', 'slash')
+      }
       if (sessions.length) {
         next.push(words(sessions.length === 1 ? 'openOne' : 'open', { agents: sessions.join(message(', ', '、', '、')) }))
-        const newSessions = sessions.filter(one => !oldSessions.includes(one))
-        if (!oldSessions.length) next.push(words(sessions.length === 1 ? 'thenBoardOne' : 'thenBoard'))
+        // Agents are named only when they do not all open the board the same way.
+        const named = way => sessions.filter(one => ways.get(one) === way).join(message(', ', '、', '、'))
+        if (sessions.every(one => ways.get(one) === 'slash')) next.push(words(sessions.length === 1 ? 'thenBoardOne' : 'thenBoard'))
         else {
-          if (newSessions.length) next.push(words('thenBoardIn', { agents: newSessions.join(message(', ', '、', '、')) }))
-          next.push(words('thenBoardOld', { agents: oldSessions.join(message(', ', '、', '、')) }))
+          if (named('slash')) next.push(words('thenBoardIn', { agents: named('slash') }))
+          if (named('codex')) next.push(words('thenBoardCodex'))
+          if (named('hermes')) next.push(words('thenBoardHermes'))
+          if (named('cursor')) next.push(words('thenBoardCursor', { command: boardCommand }))
+          if (named('old')) next.push(words('thenBoardOld', { agents: named('old') }))
+          if (named('wait')) next.push(words('thenBoardWait', { agents: named('wait'), command: boardCommand }))
         }
       }
       if (next.length) process.stdout.write(`\n${words('next')}\n${next.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n`)
