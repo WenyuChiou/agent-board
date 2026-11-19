@@ -1234,9 +1234,11 @@ const lookAtStore = async ($: EngineInterface, path: string): Promise<void> => {
   const stat = dir === undefined || dir.isLink || dir.kind !== 'dir' ? undefined : await $.fs.stat(file).catch(() => undefined)
   const seen = stat === undefined ? '' : `${file}:${stat.mtimeMs}:${stat.size}`
   if (seen === queuedStoreSeen) return
-  const text = stat === undefined || stat.isLink || stat.kind !== 'file' ? '' : await readSettingsText($, file).catch(() => '')
-  queuedStoreSeen = seen
-  const kept = text === '' ? null : text
+  // A read that failed (the script exited badly or ran out of time) is not remembered as seen, so the next look reads
+  // again even when the file has not changed; until then every question waits.
+  const text = stat === undefined || stat.isLink || stat.kind !== 'file' ? '' : await readSettingsText($, file).catch(() => null)
+  queuedStoreSeen = text === null ? '' : seen
+  const kept = text === '' || text === null ? null : text
   if ((await read($, queuedStore)) === kept) return
   await update($, queuedStore, () => kept)
   $.ui.invalidate('ui.render')

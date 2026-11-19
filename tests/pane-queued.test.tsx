@@ -53,3 +53,22 @@ test('#1296: a store that is a link or not a plain file is not read, and every q
     expect(await ui.find({ type: 'Text', text: `◌ ${EN.boardQueuedCount(1)}` })).toBeUndefined()
   } finally { await ui.unmount() }
 })
+
+// A read of the store that fails (the guarded script exits badly or runs out of time) is tried again at the next inbox
+// look, with the file unchanged: before, the file's stat was remembered as seen and it was never read again (review of
+// #1717; Codex and Greptile on bcf5629b).
+test('#1296: a failed read of the store is tried again at the next look, with the file unchanged', async ($, on) => {
+  const world: World = { files: new Map([[FILE, BOARD], [STORE, stored()]]), failedReads: new Set([STORE]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await clock.advance(5100)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    expect(await ui.find({ type: 'Text', text: '● 2' })).toBeDefined()
+    world.failedReads = new Set()
+    await clock.advance(5100)
+    expect(await ui.find({ type: 'Text', text: '● 1' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: `◌ ${EN.boardQueuedCount(1)}` })).toBeDefined()
+  } finally { await ui.unmount() }
+})
+
