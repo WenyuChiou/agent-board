@@ -6006,23 +6006,27 @@ test('a file that takes one .new name leaves setup\'s other .new copy on the lis
   assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
   const second = join(f.home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
   assert.ok(existsSync(second) && !lstatSync(join(f.home, '.hermes', 'skills')).isSymbolicLink())
-  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`
+  const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`, secondBeside = `${second}.new`
   f.save(f.skill, 'Synthetic edited skill\n')
   f.save(second, 'Synthetic edited skill\n')
-  // Another program puts exactly the new version at the shared .new name the moment setup places it there.
-  const stopped = withFs(f, 'take-shared.cjs', `const { resolve } = require('node:path')
+  // Setup's shared copy lands first. Then another program puts exactly the new version at Hermes Agent's .new name the
+  // moment setup places its copy there.
+  const stopped = withFs(f, 'take-second.cjs', `const { resolve } = require('node:path')
 let done = false
 for (const name of ['renameSync', 'linkSync']) {
   const original = fs[name]
   fs[name] = (from, to, ...rest) => {
-    if (!done && resolve(String(to)) === resolve(${JSON.stringify(beside)})) { done = true; fs.writeFileSync(to, ${JSON.stringify(wanted)}) }
+    if (!done && resolve(String(to)) === resolve(${JSON.stringify(secondBeside)})) { done = true; fs.writeFileSync(to, ${JSON.stringify(wanted)}) }
     return original(from, to, ...rest)
   }
 }`, () => f.install('--agent', 'hermes', '--apply'))
   assert.ok(isBusy(stopped), stopped.stderr + stopped.stdout)
+  assert.equal(readFileSync(beside, 'utf8'), wanted, 'the shared copy landed first')
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(pendingListOf(f, 'hermes'), 'utf8'))), [beside])
+  // Only the file that took Hermes Agent's name stops the next run; the shared copy is still setup's.
   const next = f.install('--agent', 'hermes', '--apply')
   assert.notEqual(next.status, 0, next.stdout)
-  assert.deepEqual(JSON.parse(next.stdout).conflicts, [beside], next.stdout)
+  assert.deepEqual(JSON.parse(next.stdout).conflicts, [secondBeside], next.stdout)
 }))
 
 test('on a disk without hard links a stop while a .new copy is placed leaves no partial file and the next run finishes (#1693)', () => fixture(f => {
