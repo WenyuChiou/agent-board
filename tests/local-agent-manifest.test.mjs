@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
@@ -125,7 +125,7 @@ test('updating shared runtime files for one agent synchronizes sibling install m
   assert.equal(removeAg.status, 0, removeAg.stderr)
 }))
 
-test('recognized released boards upgrade while edited released boards conflict', () => fixture(f => {
+test('recognized released boards upgrade while an edited released board is kept (#1302)', () => fixture(f => {
   assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   recordOlderBoard(f)
@@ -138,8 +138,81 @@ test('recognized released boards upgrade while edited released boards conflict',
   assert.equal(JSON.parse(doctor.stdout).installed, true)
   writeFileSync(f.script, `${released}// mine\n`)
   const edited = f.install('--agent', 'codex', '--apply', '--json')
-  assert.notEqual(edited.status, 0)
-  assert.equal(JSON.parse(edited.stderr).error.code, 'INSTALL_CONFLICT')
+  assert.equal(edited.status, 0, edited.stderr + edited.stdout)
+  assert.deepEqual(JSON.parse(edited.stdout).keptCode, [f.script])
+  assert.equal(readFileSync(f.script, 'utf8'), `${released}// mine\n`)
+}))
+
+const boardWith = settings => `globalThis.AGENT_BOARD = ${typeof settings === 'string' ? settings : JSON.stringify(settings)}\n${RELEASE_0_20_5.board}`
+const digestOf = text => createHash('sha256').update(text).digest('hex')
+
+test('a released board keeps a settings line the person changed, and one setup or the connect wrote still upgrades (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const legacy = join(f.home, '.claude', 'progress.md')
+  const line = { path: f.progress, lang: 'en' }
+  const changed = {
+    'spaces in the line': `{ "path": ${JSON.stringify(f.progress)}, "lang": "en" }`,
+    'a key of the person': { ...line, note: 'mine' },
+    'a hook version no release used': { hookVersion: 99, ...line },
+    'a hook version that is not a number': { hookVersion: '1', ...line },
+    'another data folder': { path: f.progress, codexRoot: join(f.home, 'mine'), lang: 'en' },
+    'another board file': { path: join(f.home, 'mine.md'), lang: 'en' },
+    'a recognized older path, on an install with a record': { path: legacy, lang: 'en' },
+    'a language setup does not know': { path: f.progress, lang: 'fr' },
+  }
+  for (const [name, settings] of Object.entries(changed)) {
+    recordOlderBoard(f)
+    writeFileSync(f.script, boardWith(settings))
+    const result = f.install('--agent', 'codex', '--apply')
+    assert.equal(result.status, 0, `${name}: ${result.stderr}${result.stdout}`)
+    assert.deepEqual(JSON.parse(result.stdout).keptCode, [f.script], name)
+    assert.equal(readFileSync(f.script, 'utf8'), boardWith(settings), name)
+  }
+  const released = [line, { path: f.progress, codexRoot: f.root, lang: 'en' }, { hookVersion: 1, ...line }, { hookVersion: 1, path: f.progress, codexRoot: f.root, lang: 'zh-TW' }]
+  for (const settings of released) {
+    recordOlderBoard(f)
+    writeFileSync(f.script, boardWith(settings))
+    const result = f.install('--agent', 'codex', '--apply')
+    assert.equal(result.status, 0, `${JSON.stringify(settings)}: ${result.stderr}${result.stdout}`)
+    assert.equal(JSON.parse(result.stdout).keptCode, undefined, JSON.stringify(settings))
+    assert.notEqual(readFileSync(f.script, 'utf8'), boardWith(settings), JSON.stringify(settings))
+  }
+}))
+
+test('a released body the record held under another settings line was changed by the person, so it is kept (#1302)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const recorded = boardWith({ hookVersion: 1, path: f.progress, codexRoot: f.root, lang: 'en' })
+  const manifestPath = join(f.root, 'install-codex.json')
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  manifest.files[f.script] = digestOf(recorded)
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+  const edited = boardWith({ hookVersion: 1, path: f.progress, lang: 'en' })
+  writeFileSync(f.script, edited)
+  const result = f.install('--agent', 'codex', '--apply')
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.deepEqual(JSON.parse(result.stdout).keptCode, [f.script], result.stdout)
+  assert.equal(readFileSync(f.script, 'utf8'), edited)
+}))
+
+test('with no install record, a released board naming a known board file upgrades and one naming another file is refused (#1302)', () => fixture(f => {
+  const known = boardWith({ path: join(f.home, '.claude', 'progress.md'), lang: 'en' })
+  mkdirSync(f.root, { recursive: true })
+  writeFileSync(f.script, known)
+  const upgraded = f.install('--agent', 'codex', '--apply')
+  assert.equal(upgraded.status, 0, upgraded.stderr + upgraded.stdout)
+  assert.notEqual(readFileSync(f.script, 'utf8'), known)
+  const manifestPath = join(f.root, 'install-codex.json')
+  const removed = f.install('--agent', 'codex', '--remove', '--apply')
+  assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+  assert.equal(existsSync(manifestPath), false)
+  const other = boardWith({ path: join(f.home, 'mine.md'), lang: 'en' })
+  mkdirSync(f.root, { recursive: true })
+  writeFileSync(f.script, other)
+  const refused = f.install('--agent', 'codex', '--apply')
+  assert.notEqual(refused.status, 0, refused.stdout)
+  assert.deepEqual(JSON.parse(refused.stdout).conflicts, [f.script], refused.stdout)
+  assert.equal(readFileSync(f.script, 'utf8'), other)
 }))
 
 test('updating a released board repairs stale sibling manifests without adding unlisted files', () => fixture(f => {
