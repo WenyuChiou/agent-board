@@ -48,13 +48,16 @@ does `installers_os`. Pushes to main, the weekly run, a manual run and a release
 run Node 22 and 24 on both systems and plugin on both. Browser checks use
 Node 24/Chromium on both systems. Plugin checks keep the pinned offline Claude
 runner. Legacy installers and the Python reporter run without installing Claude.
-Board and messaging have separate ten-minute jobs. On Windows the board set runs in six parts
+Board and messaging have separate ten-minute jobs. On Windows the board set runs in seven parts
 and the journeys in two (#1059: Windows runners vary 1.5-1.9x between jobs of one commit, and
-four parts left `tests/codex-local.test.mjs` too close to its budget). Each Windows part runs its
+four parts left `tests/codex-local.test.mjs` too close to its budget; #1718: part 5 of six ran
+past its 480 s with every test passing). Each Windows part runs its
 files one at a time (`CI_TEST_SERIAL`), and the other Windows jobs run at most two files at once. When
 three spawn-heavy files ran side by side on the 4-vCPU runner, every test ran about 1.35x slower, and
-the tests with the tightest time limits failed, a different one each run (#910). Each part runs every
-sixth (or second) file in one Node run. `tests/codex-local.test.mjs` and `tests/board.test.mjs` take
+the tests with the tightest time limits failed, a different one each run (#910). Each part runs a share
+of the other files, dealt out slowest first by their time budgets, each to the part with the least time
+so far (`partFiles`, #1059): on Windows one file at a time, each in its own Node run, and on Ubuntu in one
+Node run. `tests/codex-local.test.mjs` and `tests/board.test.mjs` take
 far longer than the rest (about 8 and 5 minutes there), so every part runs them, each part taking an
 equal share of their tests. On Ubuntu the board set runs in two parts: files run side by side there, but
 Node runs one file's tests one after another, so a single part ran about as long as `codex-local` alone

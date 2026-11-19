@@ -6789,6 +6789,90 @@ test('a progress file that is a link to nothing under a pending list\'s name is 
   }
 }))
 
+test('a progress file under a pending list\'s name that links to setup\'s own install lock is reported as a conflict, not as another setup running (#1694)', t => fixture(f => {
+  // The link reads as a link to nothing when setup plans, and would read the lock once the check before a conflict takes it.
+  // It needs a file link: a Windows junction to a file never reads, and Windows refuses a file link without the right.
+  mkdirSync(f.root, { recursive: true })
+  const board = join(f.root, 'install-pending-codex.json'), lock = join(f.root, 'install.lock')
+  try { symlinkSync(lock, board, 'file') } catch (error) {
+    if (error.code !== 'EPERM') throw error
+    t.skip('this account cannot make a file link')
+    return
+  }
+  for (const mode of [['--apply'], ['--check-conflicts']]) {
+    const result = f.install('--agent', 'codex', '--progress-file', board, ...mode)
+    if (mode[0] === '--apply') assert.notEqual(result.status, 0, result.stdout)
+    assert.doesNotMatch(result.stderr + result.stdout, /another setup was running/)
+    assert.deepEqual(JSON.parse(result.stdout).conflicts, [board], result.stdout + result.stderr)
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+    assert.equal(existsSync(lock), false)
+  }
+  unlinkSync(board)
+}))
+
+test('a progress file under a pending list\'s name that is a link to nothing stops as busy when its target appears before the check (#1694)', t => fixture(f => {
+  // The link reads as a link to nothing when setup plans. Another program, a backup restore say, then puts a file at its
+  // target, here as the check takes the install lock: the plan no longer holds, so the run stops as busy, not with a
+  // conflict from that plan. It needs a file link: a Windows junction to a file never reads, and Windows refuses a file
+  // link without the right.
+  mkdirSync(f.root, { recursive: true })
+  const board = join(f.root, 'install-pending-codex.json'), target = join(f.home, 'synthetic restored')
+  try { symlinkSync(target, board, 'file') } catch (error) {
+    if (error.code !== 'EPERM') throw error
+    t.skip('this account cannot make a file link')
+    return
+  }
+  for (const mode of [['--apply'], ['--check-conflicts']]) {
+    const result = withFs(f, 'restore-target.cjs', `const open = fs.openSync
+let done = false
+fs.openSync = (file, ...rest) => {
+  if (!done && String(file).endsWith('install.lock')) { done = true; fs.writeFileSync(${JSON.stringify(target)}, ${JSON.stringify('Synthetic restored file\n')}) }
+  return open(file, ...rest)
+}`, () => f.install('--agent', 'codex', '--progress-file', board, ...mode))
+    assert.ok(isBusy(result), result.stderr + result.stdout)
+    assert.equal(readFileSync(target, 'utf8'), 'Synthetic restored file\n')
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false)
+    unlinkSync(target)
+  }
+  unlinkSync(board)
+}))
+
+test('a progress file that links to the home\'s install lock, with no .agent-board folder, stops as busy when a file appears there before the check (#1694)', t => fixture(f => {
+  // The data folder is outside the home and the home has no .agent-board folder, so the check runs without taking the
+  // lock. Another program, a backup restore say, puts the folder and a file named install.lock there right after setup
+  // finds no folder: that file is not this run's lock, so the link to it is checked like any other change and the run
+  // stops as busy. It needs a file link: a Windows junction to a file never reads, and Windows refuses a file link
+  // without the right.
+  const outside = join(f.home, 'synthetic data'), lock = join(f.root, 'install.lock')
+  mkdirSync(outside, { recursive: true })
+  const board = join(outside, 'install-pending-codex.json')
+  try { symlinkSync(lock, board, 'file') } catch (error) {
+    if (error.code !== 'EPERM') throw error
+    t.skip('this account cannot make a file link')
+    return
+  }
+  for (const mode of [['--apply'], ['--check-conflicts']]) {
+    assert.equal(existsSync(f.root), false)
+    // Setup asks once whether the home's .agent-board folder exists, just before the check.
+    const result = withFs(f, 'restore-lock.cjs', `const exists = fs.existsSync
+let done = false
+fs.existsSync = (file, ...rest) => {
+  const found = exists(file, ...rest)
+  if (!done && !found && String(file).endsWith('.agent-board')) {
+    done = true
+    fs.mkdirSync(String(file))
+    fs.writeFileSync(require('node:path').join(String(file), 'install.lock'), ${JSON.stringify('Synthetic restored file\n')})
+  }
+  return found
+}`, () => f.install('--agent', 'codex', '--data-dir', outside, '--progress-file', board, ...mode))
+    assert.ok(isBusy(result), result.stderr + result.stdout)
+    assert.equal(readFileSync(lock, 'utf8'), 'Synthetic restored file\n')
+    assert.equal(existsSync(join(outside, 'install-codex.json')), false)
+    rmSync(f.root, { recursive: true, force: true })
+  }
+  unlinkSync(board)
+}))
+
 test('a setup run whose progress file is its own record stops as busy when another run\'s whole apply runs during its plan (#1694)', () => fixture(async f => {
   assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
   const wanted = readFileSync(f.skill, 'utf8'), beside = `${f.skill}.new`, record = join(f.root, 'install-codex.json')
