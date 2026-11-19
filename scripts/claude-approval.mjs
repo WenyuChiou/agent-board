@@ -30,8 +30,9 @@ const ASK_MS = 35_000
 // whoami + PowerShell ACL checks) shares only what remains before the board's reply window.
 const HOOK_MS = 45_000
 // The discovery budget is a gate, not a promise about the instant the request starts. The hook reads the clock last,
-// directly before it hands a ready request to node:http, and starts no request when that read is at or past the
-// deadline. Nothing after that read touches the disk, starts a process, or does work that grows with the input.
+// with the request's bytes already encoded, and starts no request when that read is at or past the deadline. Between
+// that read and handing those bytes to node:http, the hook touches no disk, starts no process, and reads the body only
+// as its length. Sending the bytes is node:http's work and is not part of the gate.
 export const DISCOVERY_MS = HOOK_MS - ASK_MS
 // What is left of the hook's limit after discovery and the board's 30 s press window (APPROVAL_PRESS_MS).
 export const SEND_ROOM_MS = ASK_MS - 30_000
@@ -665,7 +666,7 @@ export const askBoard = (address, payload) => new Promise(done => {
     path: '/api/approvals/ask',
     method: 'POST',
     agent: new Agent(),
-    headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'x-board-token': address.token },
+    headers: { 'content-type': 'application/json', 'content-length': payload.length, 'x-board-token': address.token },
   }, answer => {
     // A refusal is known from its status, so a body left open cannot hold the person's prompt back.
     if (answer.statusCode < 200 || answer.statusCode >= 300) {
@@ -705,7 +706,7 @@ export const run = async (env = process.env, platform = process.platform, option
     return null
   }
   ;(options.clearRefusal ?? clearRefusal)(address.file)
-  const payload = JSON.stringify(askBody(input))
+  const payload = Buffer.from(JSON.stringify(askBody(input)))
   if (now() >= discoveryDeadline) return null
   const body = await askBoard(address, payload)
   return decisionOutput(body?.decision ?? null)
