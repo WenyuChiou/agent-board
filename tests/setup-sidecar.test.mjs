@@ -380,6 +380,27 @@ fs.unlinkSync = file => {
   assert.ok(existsSync(join(home, '.agent-board', 'install-hermes.json')))
 }))
 
+// A deletion between the validation read and the second snapshot is not setup's removal: the validated snapshot says
+// the file was there, so the unlink must catch it instead of skipping it (F1). The worker file is dropped after the
+// board script, so the first unlink marks the removal as started.
+test('a remove stops when another program deletes a file between setup\'s validation read and its unlink', () => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const first = join(home, '.agent-board', 'agent-board.mjs')
+  const victim = join(home, '.agent-board', 'agent-board-hook.mjs')
+  const env = seam(home, `const unlink = fs.unlinkSync, read = fs.readFileSync
+let started = false, done = false
+fs.unlinkSync = file => { unlink(file); if (String(file) === ${JSON.stringify(first)}) started = true }
+fs.readFileSync = (file, ...rest) => {
+  const out = read(file, ...rest)
+  if (!done && started && String(file) === ${JSON.stringify(victim)}) { done = true; unlink(${JSON.stringify(victim)}) }
+  return out
+}`)
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'], { env })
+  stoppedOnChange(removed)
+  // Setup stopped before its next removal: the install record is still there for the next run.
+  assert.ok(existsSync(join(home, '.agent-board', 'install-hermes.json')))
+}))
+
 // Hermes's skills folder linked to the shared one, and the shared SKILL.md a file link: setup plans both names as that
 // link, and its first write replaces the link with a regular file. The second name then finds this batch's own bytes in
 // a regular file, which loses nothing, so a language change updates both (Greptile on #1594). File links need a
@@ -536,6 +557,36 @@ test('a remove keeps a Hermes SKILL.md file link whose target another program de
   stoppedOnChange(removed)
   assert.ok(lstatSync(own).isSymbolicLink(), 'the link is still there')
   assert.equal(readlinkSync(own), copy)
+}))
+
+// Two separate links to one target: removing the shared link must not record the target as gone, or a later outside
+// deletion of the target would let setup remove the Hermes link too (F2). The shared link goes first, so the target
+// is deleted right after its unlink; the Hermes link must then stop the batch instead of going.
+test('a remove keeps a Hermes SKILL.md file link whose target another program deleted after a separate shared link to it went', t => withHome(({ home, run }) => {
+  assert.equal(run(['--agent', 'hermes', '--apply']).status, 0)
+  const shared = join(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+  const own = join(home, '.hermes', 'skills', 'agent-board', 'SKILL.md')
+  const copy = join(home, 'copy-skill.md')
+  writeFileSync(copy, readFileSync(shared))
+  rmSync(shared)
+  rmSync(own)
+  try {
+    symlinkSync(copy, shared, 'file')
+    symlinkSync(copy, own, 'file')
+  } catch (error) {
+    if (['EPERM', 'EACCES'].includes(error.code)) { t.skip('this account cannot make file links'); return }
+    throw error
+  }
+  const env = seam(home, `const unlink = fs.unlinkSync
+fs.unlinkSync = file => {
+  unlink(file)
+  if (String(file) === ${JSON.stringify(shared)}) unlink(${JSON.stringify(copy)})
+}`)
+  const removed = run(['--remove', '--agent', 'hermes', '--apply'], { env })
+  stoppedOnChange(removed)
+  assert.ok(lstatSync(own).isSymbolicLink(), 'the Hermes link is still there')
+  assert.equal(readlinkSync(own), copy)
+  assert.ok(existsSync(join(home, '.agent-board', 'install-hermes.json')))
 }))
 
 test('a remove stops when another program deleted a planned Hermes SKILL.md after setup planned', () => withHome(({ home, run }) => {
