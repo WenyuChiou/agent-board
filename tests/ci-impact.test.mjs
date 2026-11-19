@@ -599,6 +599,10 @@ test('the board time check fails a file over seventy percent of its budget and a
   assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/prompt-hooks.test.mjs', ms: 67_900 }] }), { ok: true, errors: [], warnings: [] })
   // merge-check's slowest Windows run so far, 46.4 s, failed the 60 s default budget (#1464); its own budget passes it.
   assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/merge-check.test.mjs', ms: 46_400 }] }), { ok: true, errors: [], warnings: [] })
+  // The Windows Node 24 times that failed #1709 with every test green (#1715) pass the files' new budgets.
+  for (const [path, ms] of [['tests/approvals.test.mjs', 47_100], ['tests/codex-local.test.mjs', 167_400], ['tests/host-upgrade.test.mjs', 80_600], ['tests/setup-terminal.test.mjs', 73_400]]) {
+    assert.deepEqual(checkBoardTimes({ ...base, files: [{ path, ms }] }), { ok: true, errors: [], warnings: [] }, path)
+  }
   const slowFile = { ...base, files: [{ path: 'tests/board.test.mjs', ms: 141_000 }] }
   const overFile = checkBoardTimes(slowFile)
   assert.equal(overFile.ok, false)
@@ -641,6 +645,8 @@ test('the time check passes the Windows times that failed pull requests after #1
   slowest['tests/opencode-receiver.test.mjs'] = 44_000
   // #1302 adds upgrade journeys: host-upgrade's slowest Windows Node 24 run with the first two of them (run 43181075103).
   slowest['tests/host-upgrade.test.mjs'] = 57_600
+  // #1715: the slowest Windows Node 24 times on #1709 (runs 44543091708, 44550262085, 44553112605).
+  Object.assign(slowest, { 'tests/approvals.test.mjs': 47_100, 'tests/codex-local.test.mjs': 167_400, 'tests/host-upgrade.test.mjs': 80_600, 'tests/setup-terminal.test.mjs': 73_400 })
   for (const [path, ms] of Object.entries(slowest)) assert.ok(budgetOf(path) * 7 / 10 >= ms * 13 / 10, path + ': ' + budgetOf(path))
 })
 
