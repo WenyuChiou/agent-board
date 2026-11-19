@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { bootstrap, locales, terminal, succeeded, claudeCalls, pluginCommands, assertTrusted } from './helpers/setup-fixture.mjs'
 
 // These behavioral cases retain fresh homes and the real setup command for every run.
@@ -17,8 +20,312 @@ test('terminal setup accepts one yes for files, Codex and Hermes trust, and both
   assert.deepEqual(claudeCalls(f), pluginCommands)
   const next = result.stdout.split('Next steps:')[1]
   assert.match(next, /1\. Open a new session in each of: Codex, Hermes Agent, Claude Code\./)
-  assert.match(next, /2\. Then type \/agent-board in any of them\./)
+  // Each agent is named with its own way to open the board: Codex by $agent-board, Hermes Agent by its skill.
+  assert.match(next, /2\. Then type \/agent-board in Claude Code\.\n3\. In Codex, type \$agent-board\.\n4\. In Hermes Agent, ask it to run the Agent Board skill\./)
+  assert.doesNotMatch(next, /in any of them/)
   assert.doesNotMatch(next, /--trust|--codex-trust|--hermes-trust|claude plugin/)
+}))
+
+// The home as 0.24.2 left it for these agents, with an older board script: OpenCode has /board, not /agent-board.
+// `board` is the /board file, or null when the person deleted it; `isEdited` says whether the person edited the script.
+const olderScript = '// synthetic older board script\n', oldCommand = 'Synthetic /board command of an earlier version\n'
+const olderHome = (f, agents, { board = oldCommand, isEdited = true } = {}) => {
+  delete f.env.AGENT_BOARD_SETUP_TTY
+  succeeded(f.invoke(['--agent', agents.join(','), '--lang', 'en', '--apply']))
+  f.env.AGENT_BOARD_SETUP_TTY = '1'
+  const data = join(f.root, 'data'), script = join(data, 'agent-board.mjs'), commands = join(f.env.OPENCODE_CONFIG_DIR, 'commands')
+  const digest = text => createHash('sha256').update(text).digest('hex')
+  for (const agent of agents) {
+    const file = join(data, `install-${agent}.json`), record = JSON.parse(readFileSync(file, 'utf8'))
+    record.files[script] = digest(olderScript)
+    if (agent === 'opencode') {
+      delete record.files[join(commands, 'agent-board.md')]
+      record.files[join(commands, 'board.md')] = digest(oldCommand)
+    }
+    writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`)
+  }
+  if (agents.includes('opencode')) {
+    rmSync(join(commands, 'agent-board.md'))
+    if (board !== null) writeFileSync(join(commands, 'board.md'), board)
+  }
+  writeFileSync(script, isEdited ? `${olderScript}// synthetic line the person added\n` : olderScript)
+  return { script, commands }
+}
+// The board skill an agent reads: Hermes Agent's and OpenClaw's own, else the shared one.
+const skillOf = (f, agent) => join(agent === 'hermes' ? f.env.HERMES_HOME : agent === 'openclaw' ? f.env.OPENCLAW_STATE_DIR : join(f.env.HOME, '.agents'), 'skills', 'agent-board', 'SKILL.md')
+// Runs setup and answers yes, with `change` (Node code, `fs` in scope) done once as setup reads the answer; `run` is how
+// setup is started, by default with the fixture's progress file.
+const invokeChanging = (f, args, change, run = f.invoke) => {
+  const preload = join(f.root, 'change-on-answer.cjs'), mark = join(f.root, 'changed')
+  writeFileSync(preload, `const fs = require('node:fs')\nconst read = fs.readSync\nfs.readSync = (fd, ...rest) => {\n  if (fd === 0 && !fs.existsSync(${JSON.stringify(mark)})) { fs.writeFileSync(${JSON.stringify(mark)}, ''); ${change} }\n  return read(fd, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let result
+  try { result = run(args, 'yes\n') } finally { delete f.env.NODE_OPTIONS }
+  assert.ok(existsSync(mark), 'setup read the answer')
+  return result
+}
+// The connector's record of the agent it manages, in the home's .agent-board folder, with the progress file it connected.
+const connectorManages = (f, agent, label, progress) => {
+  const control = join(realpathSync(f.env.HOME), '.agent-board')
+  mkdirSync(control, { recursive: true })
+  writeFileSync(join(control, 'legacy-connect.json'), JSON.stringify({ version: 1, revision: 1, disabled: false, owned: {}, notified: [], ...(progress ? { connectedProgress: progress } : {}), setup: { agents: [{ agent, label, hook: 'configured', board: 'none' }], problems: [], node: process.version } }))
+}
+// Whether a "then" line of the next steps names the agent, that is, gives it a way to open the board. An agent with no
+// way left, and Cursor, is named in none until #1714.
+const isNamedInThen = (next, host) => next.split('\n').some(line => /^\d+\. (?:Then|In|For) /.test(line) && line.includes(host))
+// Setup started with no progress file named, as from a shell: the connector's record says where its board script is.
+const installer = fileURLToPath(new URL('../scripts/setup-agent.mjs', import.meta.url))
+const unnamed = f => (args, input) => spawnSync(process.execPath, [installer, '--home', f.env.HOME, '--data-dir', join(f.root, 'data'), ...args], { env: f.env, input, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
+
+test('setup\'s next steps name /board, not /agent-board, for an agent whose command waits (#1698)', () => terminal(f => {
+  const { commands } = olderHome(f, ['opencode', 'cursor'])
+  const result = f.invoke(['--agent', 'opencode,cursor', '--lang', 'en'], 'yes\n')
+  succeeded(result)
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.match(next, /Then type \/agent-board in Claude Code\./, result.stdout)
+  assert.match(next, /In OpenCode, type \/board\. \/agent-board comes once you move your edited agent-board\.mjs aside and run setup again\./, result.stdout)
+  // Cursor has no command, so no way is named for it.
+  assert.ok(!isNamedInThen(next, 'Cursor'), result.stdout)
+  assert.doesNotMatch(next, /in any of them|\/agent-board in [^\n]*Cursor/)
+  assert.equal(existsSync(join(commands, 'agent-board.md')), false)
+  assert.equal(readFileSync(join(commands, 'board.md'), 'utf8'), oldCommand)
+}))
+
+test('setup\'s next steps name no way for OpenCode, not /board, when the /board file is gone and /agent-board waits (#1698)', () => {
+  for (const [index, lang] of locales.entries()) terminal(f => {
+    const { commands } = olderHome(f, ['opencode', 'cursor'], { board: null })
+    const result = f.invoke(['--agent', 'opencode,cursor', '--lang', lang], 'yes\n')
+    succeeded(result)
+    const words = bootstrap[index], next = result.stdout.split(words.next)[1] ?? ''
+    // OpenCode, whose /board is gone, and Cursor, which has no command, are named only in their own setup steps and
+    // where a new session opens.
+    assert.ok(next.includes(words.thenBoardIn.replace('{agents}', 'Claude Code')), `${lang}: ${result.stdout}`)
+    const open = words.open.replace('{agents}', ['OpenCode', 'Cursor', 'Claude Code'].join(lang === 'en' ? ', ' : '、'))
+    for (const line of next.split('\n').filter(line => /OpenCode|Cursor/.test(line))) assert.ok([open, words.opencode, words.cursorWindows].some(step => line.includes(step)), `${lang}: ${result.stdout}`)
+    assert.doesNotMatch(next, /\/board(?!-)/, `${lang}: ${result.stdout}`)
+    assert.equal(existsSync(join(commands, 'board.md')), false)
+    assert.equal(existsSync(join(commands, 'agent-board.md')), false)
+  })
+})
+
+test('setup\'s next steps follow what the apply did when the board script is edited while setup waits for the yes (#1698)', () => terminal(f => {
+  const { script, commands } = olderHome(f, ['opencode', 'cursor'], { isEdited: false })
+  // The person edits the board script while setup waits for the answer, after the preview planned /agent-board.
+  const preload = join(f.root, 'edit-on-answer.cjs'), mark = join(f.root, 'edited')
+  writeFileSync(preload, `const fs = require('node:fs')\nconst read = fs.readSync\nfs.readSync = (fd, ...rest) => {\n  if (fd === 0 && !fs.existsSync(${JSON.stringify(mark)})) { fs.writeFileSync(${JSON.stringify(mark)}, ''); fs.appendFileSync(${JSON.stringify(script)}, '// synthetic line the person added\\n') }\n  return read(fd, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let result
+  try { result = f.invoke(['--agent', 'opencode,cursor', '--lang', 'en'], 'yes\n') } finally { delete f.env.NODE_OPTIONS }
+  succeeded(result)
+  assert.ok(existsSync(mark), 'setup read the answer')
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.match(next, /In OpenCode, type \/board\./, result.stdout)
+  assert.doesNotMatch(next, /\/agent-board in [^\n]*OpenCode/)
+  assert.equal(existsSync(join(commands, 'agent-board.md')), false)
+  assert.equal(readFileSync(join(commands, 'board.md'), 'utf8'), oldCommand)
+}))
+
+test('setup\'s next steps do not name /board when /board is deleted while setup waits and the agent had nothing to apply (#1698)', () => terminal(f => {
+  // OpenCode's preview has nothing to do; the Claude plugin is what setup asks about.
+  const { commands } = olderHome(f, ['opencode'])
+  const record = join(f.root, 'data', 'install-opencode.json'), recorded = readFileSync(record, 'utf8')
+  const result = invokeChanging(f, ['--agent', 'opencode', '--lang', 'en'], `fs.rmSync(${JSON.stringify(join(commands, 'board.md'))})`)
+  succeeded(result)
+  assert.match(result.stdout, /OpenCode files: done\./)
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.doesNotMatch(next, /\/board(?!-)/, result.stdout)
+  assert.ok(!isNamedInThen(next, 'OpenCode'), result.stdout)
+  assert.equal(readFileSync(record, 'utf8'), recorded, 'nothing was written for OpenCode')
+  assert.equal(existsSync(join(commands, 'agent-board.md')), false)
+}))
+
+test('setup\'s next steps do not name $agent-board or the skill when the skill waits with an older kept script (#1698)', () => {
+  // The skills the person deleted stay absent beside the older script, so neither agent is told to use one.
+  terminal(f => {
+    olderHome(f, ['codex', 'hermes'])
+    for (const agent of ['codex', 'hermes']) rmSync(skillOf(f, agent))
+    const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'], 'yes\n')
+    succeeded(result)
+    const next = result.stdout.split('Next steps:')[1] ?? ''
+    assert.doesNotMatch(next, /\$agent-board|Agent Board skill/, result.stdout)
+    for (const host of ['Codex', 'Hermes Agent']) assert.ok(!isNamedInThen(next, host), result.stdout)
+    for (const agent of ['codex', 'hermes']) assert.equal(existsSync(skillOf(f, agent)), false, agent)
+  })
+  // Beside an edit of this version's script the deleted skill is written again.
+  terminal(f => {
+    delete f.env.AGENT_BOARD_SETUP_TTY
+    succeeded(f.invoke(['--agent', 'codex', '--lang', 'en', '--apply']))
+    f.env.AGENT_BOARD_SETUP_TTY = '1'
+    const script = join(f.root, 'data', 'agent-board.mjs')
+    writeFileSync(script, `${readFileSync(script, 'utf8')}// synthetic line the person added\n`)
+    rmSync(skillOf(f, 'codex'))
+    const result = f.invoke(['--agent', 'codex', '--lang', 'en'], 'yes\n')
+    succeeded(result)
+    assert.match(result.stdout.split('Next steps:')[1] ?? '', /In Codex, type \$agent-board\./, result.stdout)
+    assert.equal(existsSync(skillOf(f, 'codex')), true)
+  })
+  // Beside an older script the skill setup wrote stays, and it still opens the board.
+  terminal(f => {
+    olderHome(f, ['codex'])
+    const result = f.invoke(['--agent', 'codex', '--lang', 'en'], 'yes\n')
+    succeeded(result)
+    assert.match(result.stdout.split('Next steps:')[1] ?? '', /In Codex, type \$agent-board\./, result.stdout)
+  })
+})
+
+test('setup\'s next steps do not name $agent-board when the skill is deleted while setup waits and the agent had nothing to apply (#1698)', () => terminal(f => {
+  succeeded(f.invoke(['--agent', 'codex', '--lang', 'en'], 'yes\n'))
+  // The Claude plugin is gone again, so setup asks while Codex has nothing to apply.
+  rmSync(join(f.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json'))
+  const result = invokeChanging(f, ['--agent', 'codex', '--lang', 'en'], `fs.rmSync(${JSON.stringify(skillOf(f, 'codex'))})`)
+  succeeded(result)
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.doesNotMatch(next, /\$agent-board/, result.stdout)
+  assert.ok(!isNamedInThen(next, 'Codex'), result.stdout)
+  assert.match(next, /Then type \/agent-board in Claude Code\./, result.stdout)
+}))
+
+test('setup\'s next steps do not name /agent-board for OpenCode when its /agent-board is deleted while setup waits and it had nothing to apply (#1698)', () => terminal(f => {
+  delete f.env.AGENT_BOARD_SETUP_TTY
+  succeeded(f.invoke(['--agent', 'opencode', '--lang', 'en', '--apply']))
+  f.env.AGENT_BOARD_SETUP_TTY = '1'
+  const command = join(f.env.OPENCODE_CONFIG_DIR, 'commands', 'agent-board.md')
+  const result = invokeChanging(f, ['--agent', 'opencode', '--lang', 'en'], `fs.rmSync(${JSON.stringify(command)})`)
+  succeeded(result)
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.doesNotMatch(next, /\/agent-board in [^\n]*OpenCode|in any of them/, result.stdout)
+  assert.ok(!isNamedInThen(next, 'OpenCode'), result.stdout)
+  assert.match(next, /Then type \/agent-board in Claude Code\./, result.stdout)
+}))
+
+test('setup\'s next steps do not name $agent-board when a folder takes the skill\'s place while setup waits (#1698)', () => terminal(f => {
+  olderHome(f, ['codex'])
+  rmSync(skillOf(f, 'codex'))
+  const result = invokeChanging(f, ['--agent', 'codex', '--lang', 'en'], `fs.mkdirSync(${JSON.stringify(skillOf(f, 'codex'))})`)
+  succeeded(result)
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.doesNotMatch(next, /\$agent-board/, result.stdout)
+  assert.ok(!isNamedInThen(next, 'Codex'), result.stdout)
+  assert.match(next, /Then type \/agent-board in Claude Code\./, result.stdout)
+}))
+
+test('setup does not say an agent\'s files are done, or name a way to open the board, when the board script is deleted while setup waits and the agent had nothing to apply (#1698)', () => {
+  const check = (f, script, result) => {
+    assert.equal(result.status, 1, result.stderr + result.stdout)
+    assert.match(result.stdout, /OpenClaw files: failed\. Run: \S[^\n]*--agent openclaw --apply/, result.stdout)
+    assert.doesNotMatch(result.stdout, /OpenClaw files: done/)
+    const next = result.stdout.split('Next steps:')[1] ?? ''
+    assert.doesNotMatch(next, /OpenClaw|in any of them/, result.stdout)
+    assert.ok(!next.includes(script), result.stdout)
+    assert.match(next, /Open a new session in Claude Code\./, result.stdout)
+    assert.equal(existsSync(script), false)
+  }
+  // An older kept script with the skills deleted: the agent has nothing to apply, and the script goes while setup waits.
+  terminal(f => {
+    const { script } = olderHome(f, ['openclaw'])
+    for (const agent of ['openclaw', 'codex']) rmSync(skillOf(f, agent))
+    check(f, script, invokeChanging(f, ['--agent', 'openclaw', '--lang', 'en'], `fs.rmSync(${JSON.stringify(script)})`))
+    // The command the line gives writes the board script and the skill again.
+    delete f.env.AGENT_BOARD_SETUP_TTY
+    succeeded(f.invoke(['--agent', 'openclaw', '--lang', 'en', '--apply']))
+    assert.equal(existsSync(script), true)
+    assert.equal(existsSync(skillOf(f, 'openclaw')), true)
+  })
+  // A plain install, nothing kept: the same.
+  terminal(f => {
+    delete f.env.AGENT_BOARD_SETUP_TTY
+    succeeded(f.invoke(['--agent', 'openclaw', '--lang', 'en', '--apply']))
+    f.env.AGENT_BOARD_SETUP_TTY = '1'
+    const script = join(f.root, 'data', 'agent-board.mjs')
+    check(f, script, invokeChanging(f, ['--agent', 'openclaw', '--lang', 'en'], `fs.rmSync(${JSON.stringify(script)})`))
+  })
+  // OpenClaw and Cursor both set up, so no apply writes the script back: neither is done.
+  terminal(f => {
+    delete f.env.AGENT_BOARD_SETUP_TTY
+    succeeded(f.invoke(['--agent', 'openclaw,cursor', '--lang', 'en', '--apply']))
+    f.env.AGENT_BOARD_SETUP_TTY = '1'
+    const script = join(f.root, 'data', 'agent-board.mjs')
+    const result = invokeChanging(f, ['--agent', 'openclaw,cursor', '--lang', 'en'], `fs.rmSync(${JSON.stringify(script)})`)
+    check(f, script, result)
+    assert.match(result.stdout, /Cursor files: failed\. Run: \S[^\n]*--agent cursor --apply/, result.stdout)
+    assert.doesNotMatch(result.stdout.split('Next steps:')[1] ?? '', /Cursor/, result.stdout)
+  })
+})
+
+test('setup calls an agent with nothing to apply done when a later agent\'s apply writes the deleted board script back (#1698)', () => {
+  // OpenClaw is set up and has nothing to apply; Cursor's apply writes the board script they share, in either order.
+  for (const agents of ['openclaw,cursor', 'cursor,openclaw']) terminal(f => {
+    delete f.env.AGENT_BOARD_SETUP_TTY
+    succeeded(f.invoke(['--agent', 'openclaw', '--lang', 'en', '--apply']))
+    f.env.AGENT_BOARD_SETUP_TTY = '1'
+    const script = join(f.root, 'data', 'agent-board.mjs')
+    const result = invokeChanging(f, ['--agent', agents, '--lang', 'en'], `fs.rmSync(${JSON.stringify(script)})`)
+    succeeded(result)
+    assert.match(result.stdout, /OpenClaw files: done\./, `${agents}: ${result.stdout}`)
+    assert.match(result.stdout, /Cursor files: done\./, `${agents}: ${result.stdout}`)
+    assert.ok(statSync(script).isFile(), agents)
+    const next = result.stdout.split('Next steps:')[1] ?? ''
+    assert.match(next, /Then type \/agent-board in OpenClaw, Claude Code\./, `${agents}: ${result.stdout}`)
+    assert.ok(!isNamedInThen(next, 'Cursor'), `${agents}: ${result.stdout}`)
+  })
+})
+
+test('setup leaves an agent the connector manages as done, and no next step names the connector\'s board script (#1698)', () => {
+  // The connector manages Antigravity and saved no progress file, so no board script is where setup works it out.
+  terminal(f => {
+    connectorManages(f, 'antigravity', 'Antigravity')
+    const result = f.invoke(['--agent', 'antigravity,cursor', '--lang', 'en'], 'yes\n')
+    succeeded(result)
+    assert.match(result.stdout, /Antigravity files: done\./, result.stdout)
+    assert.doesNotMatch(result.stdout, /failed/, result.stdout)
+    assert.match(result.stdout, /Also write the Antigravity sidecar/, result.stdout)
+    const next = result.stdout.split('Next steps:')[1] ?? ''
+    assert.ok(statSync(join(f.root, 'data', 'agent-board.mjs')).isFile(), result.stdout)
+    assert.ok(!isNamedInThen(next, 'Cursor') && !isNamedInThen(next, 'Antigravity'), result.stdout)
+  })
+  // The connector manages Codex, whose board script goes while setup waits; no line names it, from the node command or
+  // the npm one.
+  for (const command of ['', 'npx @wenyuchiou/agent-board setup']) terminal(f => {
+    const conn = join(f.root, 'conn')
+    mkdirSync(conn, { recursive: true })
+    writeFileSync(join(conn, 'agent-board.mjs'), '// synthetic connector board script\n')
+    connectorManages(f, 'codex', 'Codex', join(conn, 'progress.md'))
+    delete f.env.CLAUDE_PROGRESS_FILE
+    f.env.AGENT_BOARD_SETUP_COMMAND = command
+    const result = invokeChanging(f, ['--agent', 'codex,cursor', '--lang', 'en'], `fs.rmSync(${JSON.stringify(join(conn, 'agent-board.mjs'))})`, unnamed(f))
+    succeeded(result)
+    assert.match(result.stdout, /Codex files: done\./, result.stdout)
+    const next = result.stdout.split('Next steps:')[1] ?? ''
+    assert.ok(!next.includes(conn), result.stdout)
+    assert.ok(!isNamedInThen(next, 'Cursor') && !isNamedInThen(next, 'Codex'), result.stdout)
+  })
+})
+
+test('setup\'s next steps name /board when the /board file is put back while setup waits and the agent had nothing to apply (#1698)', () => terminal(f => {
+  const { commands } = olderHome(f, ['opencode'], { board: null })
+  // One apply first, so OpenCode has nothing left to apply; the Claude plugin is what setup asks about.
+  delete f.env.AGENT_BOARD_SETUP_TTY
+  succeeded(f.invoke(['--agent', 'opencode', '--lang', 'en', '--apply']))
+  f.env.AGENT_BOARD_SETUP_TTY = '1'
+  const record = join(f.root, 'data', 'install-opencode.json'), recorded = readFileSync(record, 'utf8')
+  const result = invokeChanging(f, ['--agent', 'opencode', '--lang', 'en'], `fs.writeFileSync(${JSON.stringify(join(commands, 'board.md'))}, ${JSON.stringify(oldCommand)})`)
+  succeeded(result)
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.match(next, /In OpenCode, type \/board\./, result.stdout)
+  assert.equal(next.split('\n').filter(line => isNamedInThen(line, 'OpenCode')).length, 1, result.stdout)
+  assert.equal(readFileSync(record, 'utf8'), recorded, 'nothing was written for OpenCode')
+}))
+
+test('setup\'s next steps do not name /agent-board for an agent whose skill waits with an older kept script (#1698)', () => terminal(f => {
+  olderHome(f, ['openclaw'])
+  for (const agent of ['openclaw', 'codex']) rmSync(skillOf(f, agent))
+  const result = f.invoke(['--agent', 'openclaw', '--lang', 'en'], 'yes\n')
+  succeeded(result)
+  const next = result.stdout.split('Next steps:')[1] ?? ''
+  assert.match(next, /Then type \/agent-board in Claude Code\./, result.stdout)
+  assert.doesNotMatch(next, /\/agent-board in [^\n]*OpenClaw|in any of them/, result.stdout)
+  assert.ok(!isNamedInThen(next, 'OpenClaw'), result.stdout)
+  assert.equal(existsSync(skillOf(f, 'openclaw')), false)
 }))
 
 test('terminal Enter means yes and the question is translated in all three languages', () => {

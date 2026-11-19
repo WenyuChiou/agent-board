@@ -37,9 +37,15 @@ upgrade. A file the host only reads (a skill or command file) stays as you left 
 the new version is written beside it as `<file>.new`. Code the host loads (the board
 script, the hook runner or a plugin) stays as you left it, and setup says the new version
 was not installed. While your board script or hook runner stays, the other code and the
-hook lines written for it stay too, and `--codex-doctor` reports the agent as installed
-but not the current version. To take the new version, move your copy aside and run setup
-again. An agent is still skipped when `<file>.new` holds something setup did not write,
+hook lines written for it stay too. When it is the hook runner that stays, `--codex-doctor`
+reports the agent as installed but not the current version. A board script you kept
+answers `--codex-doctor` itself, as the version it came from, so it does not say this;
+setup's own output names the kept file, and the `agent-board` command says on one line
+that the installed board script is a different build. While an older board script of
+yours stays, setup also leaves your old `/board` command file in place and does not write
+the `/agent-board` command or a missing skill, because their words ask the board script
+for options an older one does not have. They arrive in the same run in which you take the
+new script. To take the new version, move your copy aside and run setup again. An agent is still skipped when `<file>.new` holds something setup did not write,
 when an edited code file has no install record, or when a file or hook your kept program
 needs is missing.
 
