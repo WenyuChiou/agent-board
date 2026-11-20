@@ -3335,6 +3335,14 @@ test('an ask sent after the off marker is removed, before the folder watcher sig
   assert.equal((await boardAs(board, page))?.isOff, true)
   assert.equal(hook.isSwitchedOff(board.file), false)
   const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-marker-removed')))
+  // The board admitted the ask: its card is there, asking, before Off is switched on again. With the cached Off in the
+  // ask admission no card is ever made, however fast or slow the ask arrives.
+  let card
+  for (let tries = 0; tries < 100 && card === undefined; tries++) {
+    card = (await boardAs(board, page))?.cards?.find(one => one.command === 'npm run synthetic-marker-removed' && one.state === 'asking')
+    if (card === undefined) await pause(50)
+  }
+  assert.ok(card, 'the ask was admitted and its card is asking')
   assert.equal(await Promise.race([waiting, pause(500).then(() => 'waiting')]), 'waiting')
   assert.equal((await switchApprovals(board, page, false)).status, 200)
   const answered = await waiting
