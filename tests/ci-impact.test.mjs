@@ -565,15 +565,25 @@ test('in seven Windows board parts each part starts from its self-parted share, 
   const { partFiles, selfPartedTests, BOARD_FILE_BUDGETS_MS } = await import('../scripts/ci-impact.mjs')
   // The board set main's run 44651103054 planned on 5419f63b, where Windows Node 22 part 1/7 took 483.2 s of its 480 s.
   const files = ['1317-repro', 'accepted-disconnect', 'answer-guidance', 'antigravity-ack', 'antigravity-sidecar', 'approvals', 'background-resume', 'board-dock', 'board-entry', 'board-json', 'board-status', 'board-storage', 'board-surfaces', 'board', 'checkbox-identity', 'classifier-exit-proof', 'codex-done-lifecycle', 'codex-fallback', 'codex-host', 'codex-local', 'codex-project-move', 'codex-resume-guidance', 'connect-worker', 'deepseek-receiver', 'delivery-states', 'folder-identity', 'folder-watchers', 'hook-declarations', 'host-upgrade', 'legacy-connect', 'local-agent-manifest', 'local-lock', 'mcp-tools', 'merge-check', 'messaging-matrix', 'opencode-receiver', 'page-look', 'page-regressions', 'page-state', 'page-titles', 'pane-queued', 'parity', 'path-journeys', 'performance-budgets', 'plugin-tests', 'preflight-lock-policy', 'prompt-hooks', 'question-clarity', 'queued-count', 'readme-codex-trust', 'report-tail', 'report-validation', 'row-keys', 'row-states-surfaces', 'runtime-folder', 'serve-opener', 'serve-watch', 'session-liveness', 'settings-agents', 'settings-symlink', 'setup-board-command', 'setup-guidance', 'setup-readme', 'setup-remove', 'setup-sidecar', 'setup-terminal', 'tidy', 'view-index-mutation', 'ws-stdio'].map(name => 'tests/' + name + '.test.mjs')
-  // What codex-local, board and opencode-receiver took together in each part, on average over eleven Windows Node 24 runs
-  // since 850ff067; and a file's slowest Windows time, read back from its budget (that time x 1.3 / 0.7), else 5 s.
-  const shares = [263, 220, 257, 215, 232, 223, 253]
+  // What codex-local, board, opencode-receiver and legacy-connect took together in each part, from nine Windows runs
+  // (44615703631 to 44697238483) and legacy-connect's 21 whole runs (#1741); and a file's slowest Windows time, read
+  // back from its budget (that time x 1.3 / 0.7), else 5 s.
+  const shares = [262, 255, 268, 268, 260, 252, 271]
   const slowest = path => BOARD_FILE_BUDGETS_MS[path] !== undefined ? BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3 / 1000 : 5
   const parts = Array.from({ length: 7 }, (_, i) => partFiles(files, (i + 1) + '/7'))
   const expected = parts.map((part, i) => Math.round(shares[i] + part.filter(path => !selfPartedTests.includes(path)).reduce((sum, path) => sum + slowest(path), 0)))
   // 400 s leaves a part 20% for a slow runner under its 480 s budget.
   assert.ok(expected.every(seconds => seconds <= 400), 'expected seconds per part: ' + expected.join(' '))
   assert.deepEqual(parts.flat().filter(path => !selfPartedTests.includes(path)).sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
+})
+
+test('every Windows and Ubuntu board part runs a share of legacy-connect, so no part holds the whole file beside its share of codex-local (#1741)', async () => {
+  const { partFiles, selfPartedTests } = await import('../scripts/ci-impact.mjs')
+  // Whole, legacy-connect took 101-179 s on Windows; the part that held it ran 483.2-505.0 s of its 480 s on main's
+  // runs 44642014114 and 44651103054 (part 1) and 44697238483 (part 4, twice), while the other parts stayed under.
+  assert.ok(selfPartedTests.includes('tests/legacy-connect.test.mjs'))
+  const files = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/host-upgrade.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/prompt-hooks.test.mjs']
+  for (const total of [2, 7]) for (let index = 1; index <= total; index++) assert.ok(partFiles(files, index + '/' + total).includes('tests/legacy-connect.test.mjs'), index + '/' + total)
 })
 
 test('the message-store journey gets a Windows journeys part to itself, and the three parts together run every journey once (#1722)', async () => {
