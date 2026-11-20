@@ -289,6 +289,8 @@ export const EN: Strings = {
   sessionStopped: (when: string): string => `session stopped, last active ${when}`,
   // A row quiet past 30 min with no live process: unsure, with its age (#1317).
   rowUnsure: (when: string): string => `unsure, last active ${when}`,
+  // A Codex card with no process record, quiet past two minutes (#1092): never says the window closed.
+  windowMayBeClosed: 'The window may be closed.',
   sessionEnded: 'session ended, can be taken over',
   uncategorized: '(uncategorized)',
   unnamed: '(unnamed)',

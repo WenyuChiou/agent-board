@@ -6,14 +6,14 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { installCommand, installContext } from './setup-command.mjs'
-import { blockClaimOf, boardConfirmedReport, claimText, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
+import { blockClaimOf, boardConfirmedReport, claimText, codexClaimOf, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, seenClaimOf, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { hermesHome } from '../hooks/hermes-home'
 import { agentHooks, BOARD_FOR, editHermesSetup, isReleased, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { parseProgress, STALE_MS } from '../hooks/parse'
-import { readingHostHash } from './session-liveness'
+import { codexProcessClaim, readingHostHash } from './session-liveness'
 import { reporterTail } from './reporter-tail'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
@@ -21,6 +21,7 @@ import type { RunSignal } from '../hooks/runs'
 import { antigravitySidecarConfig, antigravitySidecarSource, ANTIGRAVITY_SIDECAR_ID } from '../hooks/antigravity-sidecar'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, planEvents, planPlugins, statusEvents, windowsHookCommand } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
+import type { AgentClaim } from '../hooks/session-liveness'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
 import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
 import { discoverCodexBinary, inspectCodexConfigToml, trustCodex } from './codex-host'
@@ -973,6 +974,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       status: unknown; event?: string; folder?: string; folderDigest?: string; folderCanonicalDigest?: string; isBoardPrompt: boolean; isDelivery?: boolean; isPrompt: boolean; payload: Json
       // Who started the session, as far as the host's own words say (#399); absent when they say nothing.
       run?: RunSignal
+      // The Codex terminal this opening event's own hook found (#1092), null when it found none; kept with the
+      // event in the pending queue, removed with it once applied.
+      seenClaim?: AgentClaim | null
     }
     const reportSession = (targetAgent: LocalAgent = agent): string | undefined => {
       const identity = folderIdentity(process.cwd())
@@ -1063,7 +1067,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
     // The OpenCode process this event ran under (#1595), only for this process's own event from the hook worker.
-    const liveClaim = current !== undefined && agent === 'opencode' && flag('--hook-deadline') !== undefined ? hookParentClaim(process.env.AGENT_BOARD_HOOK_PARENT, readingHostHash()) : null
+    // The Codex terminal (#1092): only a live opening event from the hook walks to it, and only on Linux.
+    const isLiveHook = current !== undefined && flag('--hook-deadline') !== undefined
+    const codexEventName = agent === 'codex' && mode === '--codex-event' ? String(current?.payload.hook_event_name ?? '') : undefined
+    const liveClaim = !isLiveHook ? null
+      : agent === 'opencode' ? hookParentClaim(process.env.AGENT_BOARD_HOOK_PARENT, readingHostHash())
+        : codexEventName === 'SessionStart' || codexEventName === 'UserPromptSubmit' ? codexProcessClaim() : null
+    // A Codex opening event keeps what its walk found, so a replay from the pending queue applies the same record.
+    if (current !== undefined && isLiveHook && (codexEventName === 'SessionStart' || codexEventName === 'UserPromptSubmit')) current.seenClaim = liveClaim
     const isInferredReport = mode === '--codex-report' && flag('--session') === undefined && (agent === 'codex' ? process.env.CODEX_THREAD_ID === undefined : !(process.env.AGENT_BOARD_AGENT === agent && process.env.AGENT_BOARD_SESSION_ID !== undefined) && !(agent === 'hermes' && process.env.HERMES_SESSION_ID) && !(agent === 'grok' && process.env.GROK_SESSION_ID))
     const rawEntry = (raw: Json): Pending => {
       if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
@@ -1285,7 +1296,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A new hook event is not a replay even when the block reads the same: its record keeps the event.
       const repaired = reporterTail(bytes)
       const named = blockClaimOf(text, owner, agent, session)
-      const claim = entry === current && liveClaim !== null ? liveClaim : named
+      const claim = agent === 'codex'
+        ? codexClaimOf({ event: mode === '--codex-event' ? String(payload.hook_event_name ?? '') : undefined, seen: seenClaimOf(entry.seenClaim), named })
+        : entry === current && liveClaim !== null ? liveClaim : named
       if (repaired.fragment === null && mode !== '--codex-report' && claimText(named) === claimText(claim) && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? null) === JSON.stringify(report.askedOptions ?? null) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report

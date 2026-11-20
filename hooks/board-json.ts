@@ -34,6 +34,8 @@ type BoardNeed = {
   options: string[]
   askedAt: string | null
   age: string
+  // A Codex card with no process record, quiet past two minutes (#1092): the window may be closed. Never a proof.
+  mayBeClosed: boolean
 }
 
 type BoardRow = {
@@ -334,6 +336,7 @@ export const boardDocument = (
       options: (isStuck ? [] : one.answers ?? []).map(clean),
       askedAt: iso(one.at ?? ref.at),
       age: age(ref),
+      mayBeClosed: !isStuck && one.mayBeClosed === true,
     }
   }
   const needs = needsRefs.filter(ref => !handled.has(ref.key)).map(asNeed)

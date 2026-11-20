@@ -11,7 +11,7 @@ import type {
 } from '../types'
 import { sha256 } from './sha256.ts'
 import { splitLines } from './lines.ts'
-import { blockKey } from './session-liveness.ts'
+import { agentClaimOf, blockKey } from './session-liveness.ts'
 
 // `## project` / `### task` / `> note` / `- [x] step`, plus the auto markers a session's
 // mod writes around its own block. Everything else is ignored, so free text never breaks
@@ -467,6 +467,23 @@ export const isStale = (auto: ProgressAuto | null, now: number, updated = auto?.
 
 export const isStopped = (auto: ProgressAuto | null, now: number, updated = auto?.updated ?? 0, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): boolean =>
   isStale(auto, now, updated, staleMs) || (auto !== null && (auto.state === 'working' || auto.state === 'waiting') && gone.has(blockKey(auto)))
+
+// How long a Codex card with no process record waits, with no new event, before it
+// says the window may be closed (#1092, M7). Windows and the shared server give the
+// board no process to check; there SessionEnd arrived 61.4 s and 61.5 s after a close
+// (docs/validation/2026-11-18-c1-codex-terminal-process.md), so two minutes is past
+// the time a closed window normally takes to end its card by itself.
+export const CODEX_MAY_BE_CLOSED_MS = 120_000
+
+// A waiting Codex block with a question that names no process and has been quiet
+// past CODEX_MAY_BE_CLOSED_MS (#1092). Its card stays in Needs you and only adds the
+// may-be-closed line and Archive: it is never a proof that the window closed. A
+// block with a process record, even one from another machine, is the process
+// check's to judge; a future or unknown time never qualifies.
+export const isMaybeClosed = (auto: ProgressAuto | null, steps: readonly { status: string }[], now: number, updated = auto?.updated ?? 0, isFuture = false): boolean =>
+  auto !== null && auto.agent === 'codex' && auto.state === 'waiting' && auto.isRun !== true && !isFuture
+  && agentClaimOf(auto) === null && steps.some(step => step.status === 'waiting')
+  && Number.isFinite(updated) && updated > 0 && updated <= now && now - updated > CODEX_MAY_BE_CLOSED_MS
 
 // The key a finished hand-kept task is remembered by, to archive it a day later.
 export const doneKey = (project: string, title: string): string => `done:${project}::${title}`

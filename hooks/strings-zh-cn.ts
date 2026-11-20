@@ -289,6 +289,8 @@ export const ZH_CN: Strings = {
   sessionStopped: (when: string): string => `对话已停，${when}没动静`,
   // A row quiet past 30 min with no live process: unsure, with its age (#1317).
   rowUnsure: (when: string): string => `不确定，${when}没动静`,
+  // A Codex card with no process record, quiet past two minutes (#1092): never says the window closed.
+  windowMayBeClosed: '窗口可能已经关了。',
   sessionEnded: '对话已结束，可接手',
   uncategorized: '（未分类）',
   unnamed: '（未命名）',
