@@ -4,11 +4,13 @@
 // what a press does are worked out in hooks/serve.ts; the writes are the terminal board's own
 // (board-cli.ts passes them in), so the page changes progress.md the way the pane does.
 import { createHash, randomBytes } from 'node:crypto'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, unlinkSync, watch as fsWatch, writeSync } from 'node:fs'
+import type { FSWatcher } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
-import { basename } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { deliveryTargets } from '../hooks/hook-messages'
 import { placeOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
@@ -25,7 +27,10 @@ import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { isFolder, runSendPlan } from './background-resume'
 import { createMessaging } from './board-messaging'
+import { watchBoard } from './board-watch'
+import type { BoardWatch, WatchFn } from './board-watch'
 import { startCodexReceiver } from './codex-receiver.mjs'
+import { setupAgents } from './setup-discovery.mjs'
 import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
 import { isBarStyle } from '../hooks/progress-bar'
@@ -33,8 +38,8 @@ import type { BarStyle } from '../hooks/progress-bar'
 import { isSettingsLang } from '../hooks/board-settings'
 import type { SettingsLang } from '../hooks/board-settings'
 import type { SettingsAgentControl } from './settings-agents'
-import { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_KEY_MS, APPROVAL_MAX, APPROVAL_PAGE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, APPROVAL_WINDOW_MS, approvalOf, approvalPlace, approvalsPayload, approvalTitle, decisionOf, isAskingMode, journalStep, pressProblem, readAsk, readPress } from '../hooks/approvals'
-import type { Approval, ApprovalDecision } from '../hooks/approvals'
+import { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_KEY_MS, APPROVAL_MAX, APPROVAL_PAGE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS, APPROVAL_WINDOW_MS, approvalOf, approvalPlace, approvalsOffFile, approvalsPayload, approvalsRefusedFile, approvalRefusalNote, approvalTitle, decisionOf, isAskingMode, journalStep, parseApprovalRefusal, pressProblem, readAsk, readPress } from '../hooks/approvals'
+import type { Approval, ApprovalDecision, ApprovalRefusal, ApprovalRefusalReason } from '../hooks/approvals'
 
 export type ServeOptions = {
   allowResume?: boolean
@@ -93,11 +98,20 @@ export type ServeOptions = {
   open?: (url: string, asApp: boolean) => Promise<boolean | null>
   // A journal line for an approval answered on the board: its hash and first words only.
   journal?: (entry: { project: string; task: string; step: string }) => void
-  // The tests' shorter waits; the board uses APPROVAL_DRAW_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS
-  // and APPROVAL_GRACE_MS.
-  approvalTimes?: { drawMs: number; pressMs: number; secretMs?: number; graceMs?: number }
+  // The tests' shorter waits; the board uses APPROVAL_DRAW_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_MS,
+  // APPROVAL_GRACE_MS and APPROVAL_PAGE_MS.
+  approvalTimes?: { drawMs: number; pressMs: number; secretMs?: number; graceMs?: number; pageMs?: number }
   // How long a replaced server keeps HTTP open after dropping locks/receivers so an open tab can read `{ moved: true }` (#1335).
   movedGraceMs?: number
+  // progress.md and its inbox folder, watched so an open board request is answered as soon as either changes (#359).
+  // `fs` is the tests' stand-in for fs.watch. Absent: no watch, and waiting requests are checked on the timer.
+  watch?: { progress: string; inbox: string; fs?: WatchFn }
+  // The tests' shorter waits for an open board request; the board uses BOARD_HOLD_MS and BOARD_FALLBACK_MS.
+  boardTimes?: { holdMs?: number; fallbackMs?: number }
+  // Address file path used to locate sibling approvals-off and approvals-refused state files.
+  addressFile?: string
+  // Wall clock override for deterministic hook-race ordering tests.
+  now?: () => number
 }
 
 type Result = { ok: boolean; note: string }
@@ -109,7 +123,131 @@ const MAX_BODY = 64 * 1024
 // address a phone was given does not stay open for the page's whole life.
 const LAN_IDLE = 10 * 60 * 1000
 
+// An open board request (#359) is answered "no change" after this long, so the page's clock, ages and the
+// server's view of which page is visible stay as fresh as they were with the old 2 s poll.
+const BOARD_HOLD_MS = 10_000
+// Without a working file watch, waiting requests look at the board this often: a change still shows within 3 s, and
+// the board is built no more often than main's page asked for it (every 2 s), so idle cost cannot rise even when a
+// watch is judged deaf by mistake.
+const BOARD_FALLBACK_MS = 2000
+// Changes within this long of each other wake the waiting requests once.
+const BOARD_WAKE_MS = 25
+// While a request waits on a working watch, the two watched paths are stat-ed this often (no file is read), so a watch
+// that set up but never reports is found and the timer takes over: the change still shows within 3 s.
+const BOARD_PROBE_MS = 1500
+
 const HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' }
+const REFUSAL_MAX_BYTES = 4096
+const REFUSAL_PROBE_MS = 5000
+
+type RawRefusal = { reason: ApprovalRefusalReason; at: string } | 'unreadable' | null
+
+const isRealDir = (dir: string): boolean => {
+  try {
+    const stat = lstatSync(dir)
+    return stat.isDirectory() && !stat.isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+const isOffMarkerAt = (addressFile: string): boolean => {
+  try {
+    lstatSync(approvalsOffFile(addressFile))
+    return true
+  } catch (error) {
+    // Fail closed on unreadable/ambiguous paths, matching scripts/claude-approval.mjs.
+    return (error as NodeJS.ErrnoException)?.code !== 'ENOENT'
+  }
+}
+
+const writeOffMarker = (addressFile: string, atIso: string): boolean => {
+  const offPath = approvalsOffFile(addressFile)
+  if (!isRealDir(dirname(offPath))) return false
+  let fd: number
+  try {
+    fd = openSync(offPath, 'wx', 0o600)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') return false
+    try {
+      const stat = lstatSync(offPath)
+      return stat.isFile() && !stat.isSymbolicLink()
+    } catch {
+      return false
+    }
+  }
+  // The file is ours now. If it cannot be written or closed it goes again: an empty marker would turn
+  // approvals off for the hook while the page says the switch failed.
+  let isOpen = true
+  try {
+    writeSync(fd, `${JSON.stringify({ at: atIso })}\n`)
+    isOpen = false
+    closeSync(fd)
+    return true
+  } catch {
+    if (isOpen) try { closeSync(fd) } catch {}
+    try { unlinkSync(offPath) } catch {}
+    return false
+  }
+}
+
+const removeOffMarker = (addressFile: string): boolean => {
+  const offPath = approvalsOffFile(addressFile)
+  if (!isRealDir(dirname(offPath))) return false
+  try {
+    const stat = lstatSync(offPath)
+    if (!stat.isFile() || stat.isSymbolicLink()) return false
+    unlinkSync(offPath)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === 'ENOENT'
+  }
+}
+
+const readRawRefusal = (addressFile: string): RawRefusal => {
+  const record = approvalsRefusedFile(addressFile)
+  let lst
+  try {
+    lst = lstatSync(record, { bigint: true })
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? null : 'unreadable'
+  }
+  if (!lst.isFile() || lst.isSymbolicLink() || lst.size > BigInt(REFUSAL_MAX_BYTES)) return 'unreadable'
+  let fd: number
+  try {
+    fd = openSync(record, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  } catch {
+    return 'unreadable'
+  }
+  let raw: string
+  try {
+    const fst = fstatSync(fd, { bigint: true })
+    if (!fst.isFile() || fst.size > BigInt(REFUSAL_MAX_BYTES) || (lst.ino !== 0n && (fst.dev !== lst.dev || fst.ino !== lst.ino))) return 'unreadable'
+    const buf = Buffer.allocUnsafe(REFUSAL_MAX_BYTES + 1)
+    let total = 0
+    while (total < buf.length) {
+      const n = readSync(fd, buf, total, buf.length - total, null)
+      if (n === 0) break
+      total += n
+    }
+    if (total > REFUSAL_MAX_BYTES) return 'unreadable'
+    raw = buf.toString('utf8', 0, total)
+  } catch {
+    return 'unreadable'
+  } finally {
+    try { closeSync(fd) } catch {}
+  }
+  const parsed = parseApprovalRefusal(raw)
+  return parsed ?? 'unreadable'
+}
+
+const formatRefusal = (raw: RawRefusal, lastPassedAskAt: number, s: Strings): ApprovalRefusal | undefined => {
+  if (raw === null) return undefined
+  if (raw === 'unreadable') return { reason: 'unreadable', at: null, note: approvalRefusalNote('unreadable', s) }
+  // Ignore a stale refusal stamped before or alongside a passing hook check.
+  if (Date.parse(raw.at) <= lastPassedAskAt) return undefined
+  return { reason: raw.reason, at: raw.at, note: approvalRefusalNote(raw.reason, s) }
+}
 
 const versionParts = (version: string): number[] => version.split('.').map(Number)
 const isNewerVersion = (candidate: string, current: string): boolean => {
@@ -124,7 +262,54 @@ export const boardVersion = RELEASED.reduce((highest, release) => {
   return isNewerVersion(release.version, highest) ? release.version : highest
 }, '0.0.0')
 const packageVersionValue = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
-const packageVersion = /^\d+\.\d+\.\d+$/.test(packageVersionValue) ? packageVersionValue : null
+// A later launcher that reuses this server reports the package it runs from, so the page
+// notice follows the newest package (#1304). These change on that refresh, never on a request.
+let packageVersion: string | null = /^\d+\.\d+\.\d+$/.test(packageVersionValue) ? packageVersionValue : null
+
+// How to update this install, for the page notice when the package is newer than the board
+// script (#1304). An independent install names the setup preview, with the same agents and
+// data folder the launcher names; a plugin-written copy names the plugin update. The package
+// name is the published one: this bundle ships only in @wenyuchiou/agent-board.
+// The folder as a literal shell argument, quoted the way setup quotes its own commands
+// (scripts/setup-agent.mjs `quote`): bare when it holds only word, dot, slash, colon, at,
+// equals, comma or dash characters, else single-quoted, so `$`, backticks and double quotes in
+// a custom folder reach the shell unchanged. A double-quoted folder would let the shell expand
+// `$` and backticks. That helper lives in the setup script, which runs on import, so this is
+// the same rule written here, not an import.
+export const quoteArg = (value: string): string => /^[\w./:@=,-]+$/.test(value) ? value : process.platform === 'win32'
+  ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
+const olderScriptUpdate = (): { update: 'setup' | 'plugin'; command?: string; lanCommand?: string } | undefined => {
+  if (packageVersion === null) return undefined
+  const prelude = (globalThis as { AGENT_BOARD?: { codexRoot?: unknown } }).AGENT_BOARD ?? {}
+  if (typeof prelude.codexRoot !== 'string') return { update: 'plugin' }
+  let root = resolve(prelude.codexRoot)
+  // Only what setup sets up: setup refuses a retired agent in any selection that is
+  // not a removal (#1327), so a retained install-gemini.json from an earlier Gemini
+  // CLI setup must not put gemini back into the update command.
+  const targets = setupAgents
+  const listed = (folder: string): string[] | undefined => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
+  let agents = listed(root)
+  // A moved data folder: the board script's own folder is where the board is now.
+  if (!agents) { root = dirname(process.argv[1] ?? ''); agents = listed(root) ?? [] }
+  const agentOpts = agents.length ? ` --agent ${agents.join(',')}` : ''
+  const dataOpts = root !== join(homedir(), '.agent-board') ? ` --data-dir ${quoteArg(root)}` : ''
+  const base = `npx @wenyuchiou/agent-board@${packageVersion} setup`
+  // The page on the local network is plain HTTP: its advice is the same command without the
+  // data folder, built here beside the full one, so no path can survive redaction (#1304).
+  return { update: 'setup', command: `${base}${agentOpts}${dataOpts}`, lanCommand: `${base}${agentOpts}` }
+}
+let olderScript = olderScriptUpdate()
+
+// The package a later launcher reports, when it is newer than the one this server started
+// with: an older launcher reusing the server must not take the notice away, and a version
+// that is not three numbers is not a package at all. Pending messages are untouched: only
+// the two values the next /api/board answer reads change.
+const refreshPackageVersion = (version: string): boolean => {
+  if (!/^\d+\.\d+\.\d+$/.test(version) || (packageVersion !== null && !isNewerVersion(version, packageVersion))) return false
+  packageVersion = version
+  olderScript = olderScriptUpdate()
+  return true
+}
 
 const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { ...HEADERS, 'content-type': 'application/json; charset=utf-8' })
@@ -176,6 +361,103 @@ export const startServer = (o: ServeOptions): void => {
   const replies = new Map<string, Result & { at: number; key: string }>()
   let port = 0
   let lastSeen = Date.now()
+  // Open board requests (#359). A page that already has the board sends its etag and x-board-wait: 1; when
+  // nothing changed the answer waits here until the file watch, a press, an approval or a reply wakes it, or
+  // until BOARD_HOLD_MS passes (then 304). Nothing reads a file while a request waits and the watch works.
+  // Without a working watch, waiting requests are checked every BOARD_FALLBACK_MS instead.
+  // Who waits: the page's id ('' on the network), its approval secret, whether it said it was in sight, and on which side.
+  type WaitingPage = { id: string; secret: string; isVisible: boolean; isLan: boolean }
+  type Waiter = WaitingPage & { wake: () => void; drop: () => void }
+  const waiters = new Set<Waiter>()
+  let boardWatch: BoardWatch | null = null
+  let wakeTimer: ReturnType<typeof setTimeout> | null = null
+  let fallbackTimer: ReturnType<typeof setInterval> | null = null
+  let probeTimer: ReturnType<typeof setInterval> | null = null
+  // Several changes in a burst (a hook writes the inbox and progress.md) wake the waiting requests once.
+  const wakeAll = (): void => {
+    if (wakeTimer !== null || waiters.size === 0) return
+    wakeTimer = setTimeout(() => {
+      wakeTimer = null
+      for (const one of [...waiters]) one.wake()
+    }, BOARD_WAKE_MS)
+  }
+  const syncFallback = (): void => {
+    const isNeeded = waiters.size > 0 && !(boardWatch?.isWatching() ?? false)
+    if (isNeeded && fallbackTimer === null) fallbackTimer = setInterval(wakeAll, o.boardTimes?.fallbackMs ?? BOARD_FALLBACK_MS)
+    else if (!isNeeded && fallbackTimer !== null) {
+      clearInterval(fallbackTimer)
+      fallbackTimer = null
+    }
+    const isProbed = waiters.size > 0 && (boardWatch?.isWatching() ?? false)
+    if (isProbed && probeTimer === null) probeTimer = setInterval(() => boardWatch?.probe(), BOARD_PROBE_MS)
+    else if (!isProbed && probeTimer !== null) {
+      clearInterval(probeTimer)
+      probeTimer = null
+    }
+  }
+  // recheck answers when the board changed and says whether it did; last always answers.
+  // A page whose request waits here is still open, as it was while it asked every 2 s: the windows sized for that poll
+  // (an approval's watching page, APPROVAL_PAGE_MS; the board command's open-window check; the idle exit) see it as
+  // having asked just now. Only a page in sight counts as watching or as activity; a hidden one only stays open (#359).
+  const touchPage = (one: WaitingPage, now: number): void => {
+    if (!one.isLan && one.id !== '') {
+      const page = pages.get(one.id)
+      if (page !== undefined) page.at = now
+    }
+    const held = one.secret === '' ? undefined : pageSecrets.get(one.secret)
+    if (held !== undefined) {
+      held.seen = now
+      if (one.isVisible) held.watched = now
+    }
+    if (one.isVisible) {
+      if (one.isLan) { if (lan !== null) lan.lastSeen = now }
+      else lastSeen = now
+    }
+  }
+  const touchWaiting = (now: number): void => {
+    for (const one of waiters) touchPage(one, now)
+  }
+  const holdBoard = (res: ServerResponse, page: WaitingPage, recheck: () => boolean, last: () => boolean): void => {
+    const { id } = page
+    const seq = id === '' ? 0 : pages.get(id)?.seq ?? 0
+    let isDone = false
+    const done = (): void => {
+      if (isDone) return
+      isDone = true
+      clearTimeout(timer)
+      waiters.delete(waiter)
+      // The page asked until this moment, so it counts as having asked now: an approval that arrives before its next
+      // request (a round trip away) still finds it watching. A page already dropped (replaced, gone) is not brought back.
+      touchPage(page, Date.now())
+      syncFallback()
+    }
+    const settle = (answer: () => boolean): void => {
+      if (isDone) return
+      let isAnswered = true
+      try {
+        // A page replaced while it waited is told so, as its next request would be (#265).
+        const isSuperseded = id !== '' && !isMoved && (isRetiredPage(id) || (seq > 0 && activeMaxSeq > seq))
+        if (isSuperseded) {
+          pages.delete(id)
+          retirePage(id)
+          dropPageSecrets(id)
+        }
+        if (isMoved || isSuperseded) {
+          if (isMoved && id !== '') movedWaiting.delete(id)
+          if (isMoved) res.once('finish', () => { if (movedWaiting.size === 0 && movedReleased) setImmediate(finish) })
+          json(res, 200, { moved: true })
+        } else isAnswered = answer()
+      } catch {
+        if (!res.headersSent) json(res, 500, {})
+      }
+      if (isAnswered) done()
+    }
+    const waiter: Waiter = { ...page, wake: () => settle(recheck), drop: done }
+    const timer = setTimeout(() => settle(last), o.boardTimes?.holdMs ?? BOARD_HOLD_MS)
+    res.once('close', done)
+    waiters.add(waiter)
+    syncFallback()
+  }
   // Which board pages are open (#265). A page names itself in x-board-page on every poll; loading the page counts until its
   // first poll. The terminal board and other scripts read GET /api/board without that header and do not count. A page that
   // says it left is dropped alone, so another page that is still open stays counted. Only a page that reported itself visible
@@ -231,6 +513,7 @@ export const startServer = (o: ServeOptions): void => {
   }
   // How long ago a visible page last loaded or asked; null when none did.
   const pageAgo = (now: number): number | null => {
+    touchWaiting(now)
     let latest = loadedAt
     for (const one of pages.values()) if (one.visible && one.at > latest) latest = one.at
     return latest === 0 ? null : now - latest
@@ -267,6 +550,24 @@ export const startServer = (o: ServeOptions): void => {
   // A host asked for an approval since the board started: only then does an open page that cannot
   // answer one make the board script open another.
   let hasAsked = false
+  // A page that held no secret pressed the approvals switch: the next board command opens a keyed page.
+  let isSwitchWanted = false
+  const clockNow = o.now ?? Date.now
+  let lastPassedAskAt = 0
+  let isUserOff = o.addressFile !== undefined && isOffMarkerAt(o.addressFile)
+  let rawRefusal: RawRefusal = null
+  let isApprovalFilesDirty = true
+  let lastApprovalFilesReadAt = 0
+  let isApprovalWatchLive = false
+  let approvalWatcher: FSWatcher | null = null
+  const refreshApprovalFiles = (now: number): void => {
+    if (o.addressFile === undefined) return
+    if (isApprovalWatchLive && !isApprovalFilesDirty && now - lastApprovalFilesReadAt < REFUSAL_PROBE_MS) return
+    isUserOff = isOffMarkerAt(o.addressFile)
+    rawRefusal = readRawRefusal(o.addressFile)
+    isApprovalFilesDirty = false
+    lastApprovalFilesReadAt = now
+  }
   const secretMs = o.approvalTimes?.secretMs ?? APPROVAL_SECRET_MS
   const graceMs = o.approvalTimes?.graceMs ?? APPROVAL_GRACE_MS
   // The sessions whose first press the person confirmed on the page.
@@ -285,21 +586,22 @@ export const startServer = (o: ServeOptions): void => {
     if (held.page !== '' && pageIdOf(headers) !== held.page) return ''
     return secret
   }
-  const isWatched = (now: number): boolean => !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs && now - held.watched < APPROVAL_PAGE_MS)
+  const isWatched = (now: number): boolean => { touchWaiting(now); return !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs && now - held.watched < (o.approvalTimes?.pageMs ?? APPROVAL_PAGE_MS)) }
   // A page that can answer approvals is still open, if only behind another window.
-  const hasLiveSecret = (now: number): boolean => !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs)
+  const hasLiveSecret = (now: number): boolean => { touchWaiting(now); return !isApprovalOff && [...pageSecrets.values()].some(held => now - held.seen <= secretMs) }
   // The hook's answer: a decision, or none, and the host's own prompt asks. The request then stays
   // on its row a minute as asked in its window, with no button.
   const settleApproval = (id: string, decision: ApprovalDecision | null): void => {
     const pending = approvals.get(id)
     if (pending === undefined) return
+    wakeAll()
     pending.timers.forEach(clearTimeout)
     pending.timers = []
     const answer = pending.answer
     pending.answer = undefined
     if (decision === null) {
       pending.item = { ...pending.item, state: 'window' }
-      const gone = setTimeout(() => approvals.delete(id), APPROVAL_WINDOW_MS)
+      const gone = setTimeout(() => { approvals.delete(id); wakeAll() }, APPROVAL_WINDOW_MS)
       // Holds no process open: a board that stops forgets it anyway.
       gone.unref()
       pending.timers.push(gone)
@@ -336,6 +638,13 @@ export const startServer = (o: ServeOptions): void => {
       movedTimer = null
     }
     closeNonServer()
+    boardWatch?.close()
+    try { approvalWatcher?.close() } catch {}
+    approvalWatcher = null
+    if (wakeTimer !== null) clearTimeout(wakeTimer)
+    for (const one of [...waiters]) one.drop()
+    if (probeTimer !== null) clearInterval(probeTimer)
+    if (fallbackTimer !== null) clearInterval(fallbackTimer)
     server.close()
     server.closeAllConnections()
     o.onStop()
@@ -360,6 +669,8 @@ export const startServer = (o: ServeOptions): void => {
     }
     if (moved && movedWaiting.size > 0) {
       isMoved = true
+      // Pages waiting on the board hear at once that it moved.
+      for (const one of [...waiters]) one.wake()
       movedTimer = setTimeout(finish, o.movedGraceMs ?? 5_000)
       const released = (): void => {
         movedReleased = true
@@ -437,7 +748,7 @@ export const startServer = (o: ServeOptions): void => {
     runSendPlan(plan, o.s, label)
       .then(result => replies.set(key, { ...result, at: Date.now(), key: cardKey }))
       .catch((error: unknown) => replies.set(key, { ok: false, note: o.s.serveSendFailed(label, String(error)), at: Date.now(), key: cardKey }))
-      .finally(() => { sending.delete(key); sending.delete(cardSendKey(cardKey)) })
+      .finally(() => { sending.delete(key); sending.delete(cardSendKey(cardKey)); wakeAll() })
     return { status: 202, note: o.s.serveQueued(label) }
   }
 
@@ -459,10 +770,17 @@ export const startServer = (o: ServeOptions): void => {
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
+    // A press, a send, a message or a tidy can change the board: an open board request looks again once it is answered.
+    // A connector's poll comes every 2 s per connector; only one that hands out a message wakes it (replyMessage).
+    if (req.method !== 'GET' && url.pathname !== '/api/messages/poll') res.once('finish', wakeAll)
     const replyMessage = (action: string, payload: Record<string, unknown>): void => {
       // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
       if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
-      try { return json(res, 200, messaging.act(action, payload, Date.now(), action === 'expect' ? o.reports?.() : undefined)) }
+      try {
+        const result = messaging.act(action, payload, Date.now(), action === 'expect' ? o.reports?.() : undefined)
+        if (action === 'poll' && ((result as { messages?: unknown[] }).messages?.length ?? 0) > 0) res.once('finish', wakeAll)
+        return json(res, 200, result)
+      }
       catch (error) {
         // A temporary file lock is storage unavailability, not a stale binding.
         // Only the owner's lease-bounded poller retries; sends and receipts do not.
@@ -524,7 +842,8 @@ export const startServer = (o: ServeOptions): void => {
           dropPageSecrets(id)
         } else {
           pages.set(id, { seq: mine, at: now, visible: req.headers['x-board-visible'] !== '0' })
-          if (mine > activeMaxSeq) activeMaxSeq = mine
+          // A newer page: an older one waiting on the board hears now that it was replaced.
+          if (mine > activeMaxSeq) { activeMaxSeq = mine; wakeAll() }
           // Any secret bound to an older page is retired once a newer page asks for the board (#1378).
           dropOlderSecrets(id, mine, now)
         }
@@ -542,7 +861,11 @@ export const startServer = (o: ServeOptions): void => {
       // Pages that stopped asking long ago (a crashed window) are forgotten.
       if (pages.size > 32) for (const [other, one] of pages) if (now - one.at > 300_000) pages.delete(other)
     }
-    if (!url.pathname.startsWith('/api/messages/')) {
+    // A hidden tab waiting on the board (#359) is not someone using it: a tab left open behind others does not keep an idle
+    // server, or the address a phone was given, alive. A tab in sight still counts while it waits, so the server does not
+    // go while someone reads the board; so do loading the page, a request for the whole board and every press.
+    const isWaitingAsk = req.method === 'GET' && url.pathname === '/api/board' && req.headers['x-board-wait'] === '1' && req.headers['x-board-visible'] === '0'
+    if (!url.pathname.startsWith('/api/messages/') && !isWaitingAsk) {
       lastSeen = Date.now()
       if (side !== null) side.lastSeen = lastSeen
     }
@@ -571,41 +894,57 @@ export const startServer = (o: ServeOptions): void => {
         if (isReplaced) return json(res, 200, { moved: true })
         // A file the board cannot read is named on the page, which would otherwise say it is offline. The page
         // is always the grouped one; the old ?group=agent address asks for what every address gets now.
-        try {
-          const now = Date.now()
-          const view = o.view()
-          const state = messaging.snapshot(now, o.reports?.(false))
-          const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
-          // The page on the network learns only that an approval waits: no command, no button.
-          const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, isApprovalOff)
-          const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, isLan ? handledOnly(state) : state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now, ...(approvalsShown === undefined ? {} : { approvals: approvalsShown }) }
-          // The page already compares its clock at minute precision. Keep that refresh boundary
-          // without treating each millisecond as changed content; replies and receipts stay exact.
-          const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
-          const etag = `W/"${createHash('sha256').update(fingerprint).digest('hex')}"`
-          const matches = req.headers['if-none-match']?.split(',').some(value => value.trim() === '*' || value.trim().replace(/^W\//, '') === etag.slice(2))
-          if (matches) {
-            res.writeHead(304, { ...HEADERS, etag })
-            res.end()
-            return
+        const ifNoneMatch = req.headers['if-none-match']
+        // Answers with the board, or with the note of a file it could not read; an unchanged board is
+        // answered (304) only when isLast, and otherwise left waiting. Says whether it answered.
+        const answer = (isLast: boolean): boolean => {
+          try {
+            const now = Date.now()
+            const view = o.view()
+            const state = messaging.snapshot(now, o.reports?.(false))
+            const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [], ...(olderScript === undefined ? {} : { olderScript }) }
+            // The page on the network learns only that an approval waits: no command, no button, no off-switch or refusal.
+            if (!isLan) refreshApprovalFiles(now)
+            const refusal = !isLan ? formatRefusal(rawRefusal, lastPassedAskAt, o.s) : undefined
+            const approvalsShown = approvalsPayload([...approvals.values()].map(one => one.item), view, isLan, !isLan && secretOf(req.headers, now) !== '', o.s, { isLockdown: isApprovalOff, isOff: !isLan && isUserOff, refusal })
+            const payload = { model: serveModel(view, o.pending(false), o.s, sending, isLan, isLan ? handledOnly(state) : state, o.allowResume, group, o.routes), replies: [...replies.values()], messaging: isLan ? undefined : state, barStyle: o.barStyle?.() ?? 'ink', lang: o.language?.() ?? 'auto', now, ...(approvalsShown === undefined ? {} : { approvals: approvalsShown }) }
+            // The page already compares its clock at minute precision. Keep that refresh boundary
+            // without treating each millisecond as changed content; replies and receipts stay exact.
+            const fingerprint = JSON.stringify(payload, (key, value) => key === 'now' ? Math.floor(value / 60000) : value)
+            const etag = `W/"${createHash('sha256').update(fingerprint).digest('hex')}"`
+            const matches = ifNoneMatch?.split(',').some(value => value.trim() === '*' || value.trim().replace(/^W\//, '') === etag.slice(2))
+            if (matches) {
+              if (!isLast) return false
+              res.writeHead(304, { ...HEADERS, etag })
+              res.end()
+              return true
+            }
+            res.writeHead(200, { ...HEADERS, etag, 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify(payload))
+            return true
+          } catch (error) {
+            const note = o.failure(error, isLan)
+            if (note === null) {
+              process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
+              json(res, 500, { note: o.s.pressFailed })
+              return true
+            }
+            json(res, 409, { note })
+            return true
           }
-          res.writeHead(200, { ...HEADERS, etag, 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify(payload))
-          return
-        } catch (error) {
-          const note = o.failure(error, isLan)
-          if (note === null) {
-            process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
-            return json(res, 500, { note: o.s.pressFailed })
-          }
-          return json(res, 409, { note })
         }
+        // Only a page that holds the board it would be answered with waits; the terminal board and scripts never do.
+        const wantsWait = req.headers['x-board-wait'] === '1' && ifNoneMatch !== undefined && !isStopping
+        if (answer(!wantsWait)) return
+        const waitingNow = Date.now()
+        holdBoard(res, { id: isLan ? '' : pageIdOf(req.headers), secret: isLan ? '' : secretOf(req.headers, waitingNow), isVisible: req.headers['x-board-visible'] !== '0', isLan }, () => answer(false), () => answer(true))
+        return
       }
       // Only the board script on the computer asks; the answer names progress.md's path.
       // wantsKeyedPage: approvals are in use and no open page can answer them, so the board script
       // opens one with a key rather than pointing at a page that cannot. A paired page that is only
       // hidden still can; before any host asked, the page that is open is enough.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && hasAsked && !hasLiveSecret(Date.now()) })
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserOff || isSwitchWanted) && !hasLiveSecret(Date.now()) })
       return json(res, 404, {})
     }
     const body = await readBody(req)
@@ -622,7 +961,7 @@ export const startServer = (o: ServeOptions): void => {
       loadedAt = 0
       return json(res, 200, {})
     }
-    if (url.pathname === '/api/open' || url.pathname === '/api/approvals/ask' || url.pathname === '/api/approvals/pair' || url.pathname === '/api/approvals/drawn' || url.pathname === '/api/approvals/press') {
+    if (url.pathname === '/api/open' || url.pathname === '/api/approvals/ask' || url.pathname === '/api/approvals/pair' || url.pathname === '/api/approvals/switch' || url.pathname === '/api/approvals/drawn' || url.pathname === '/api/approvals/press') {
       // Never from the page on the network.
       if (isLan) return json(res, 403, {})
       const now = Date.now()
@@ -634,9 +973,9 @@ export const startServer = (o: ServeOptions): void => {
         // No decision where the host would not ask the person: refused, and nothing is shown.
         if (!isAskingMode(ask.mode)) return json(res, 403, {})
         hasAsked = true
-        // Approvals turned off, or too many kept: the host asks in its own window. Requests already
-        // answered in their windows make room first.
-        if (isApprovalOff) return json(res, 200, {})
+        lastPassedAskAt = Math.max(lastPassedAskAt, clockNow())
+        // Approvals turned off (by replay lockdown or the page switch), or too many kept: the host asks in its own window.
+        if (isApprovalOff || (o.addressFile !== undefined && isOffMarkerAt(o.addressFile))) return json(res, 200, {})
         for (const [id, one] of [...approvals]) {
           if (approvals.size < APPROVAL_MAX) break
           if (one.answer !== undefined) continue
@@ -647,6 +986,7 @@ export const startServer = (o: ServeOptions): void => {
         const item = approvalOf(ask, randomBytes(12).toString('base64url'), now, homedir(), isWindows, o.s)
         const pending: Pending = { item, timers: [] }
         approvals.set(item.id, pending)
+        wakeAll()
         // No turn, or no page in front of the person that can answer it: the host asks at once.
         if (item.state === 'window' || !isWatched(now)) {
           settleApproval(item.id, null)
@@ -675,6 +1015,8 @@ export const startServer = (o: ServeOptions): void => {
             if (left !== undefined) {
               left.timers.forEach(clearTimeout)
               approvals.delete(item.id)
+              // Its buttons leave the page now.
+              wakeAll()
             }
             done()
           })
@@ -731,7 +1073,40 @@ export const startServer = (o: ServeOptions): void => {
         return json(res, 200, { secret })
       }
       const secret = secretOf(req.headers, now)
-      if (secret === '') return json(res, 403, { note: isApprovalOff ? o.s.approvalOff : o.s.approvalNoSecret })
+      if (secret === '') {
+        // The switch is drawn on every local page, so one that holds no secret asks for a keyed page.
+        if (url.pathname === '/api/approvals/switch' && !isApprovalOff) {
+          isSwitchWanted = true
+          return json(res, 403, { note: o.s.approvalSwitchNoSecret })
+        }
+        return json(res, 403, { note: isApprovalOff ? o.s.approvalOff : o.s.approvalNoSecret })
+      }
+      if (url.pathname === '/api/approvals/switch') {
+        // A switch that failed leaves the marker as the hook reads it: if it is there, the hook is off, so the board is too.
+        const failedSwitch = (addressFile: string): void => {
+          isUserOff = isOffMarkerAt(addressFile)
+          if (isUserOff) for (const [id, one] of [...approvals]) if (one.answer !== undefined) settleApproval(id, null)
+          json(res, 409, { note: o.s.approvalSwitchFailed })
+        }
+        if (isApprovalOff) return json(res, 403, { note: o.s.approvalOff })
+        if (typeof body.enabled !== 'boolean') return json(res, 400, {})
+        if (o.addressFile === undefined) return json(res, 409, { note: o.s.approvalSwitchFailed })
+        if (body.enabled === false) {
+          if (!writeOffMarker(o.addressFile, new Date(clockNow()).toISOString())) return failedSwitch(o.addressFile)
+          hasAsked = true
+          isUserOff = true
+          isApprovalFilesDirty = false
+          lastApprovalFilesReadAt = now
+          for (const [id, one] of [...approvals]) if (one.answer !== undefined) settleApproval(id, null)
+          return json(res, 200, { isOff: true, note: o.s.settingsChanged(o.s.settingsApprovals, o.s.settingsOff) })
+        }
+        if (!removeOffMarker(o.addressFile)) return failedSwitch(o.addressFile)
+        hasAsked = true
+        isUserOff = false
+        isApprovalFilesDirty = false
+        lastApprovalFilesReadAt = now
+        return json(res, 200, { isOff: false, note: o.s.settingsChanged(o.s.settingsApprovals, o.s.settingsOn) })
+      }
       if (url.pathname === '/api/approvals/drawn') {
         // The page drew these, as they were: only then does the hook keep waiting for a press.
         const drawn: unknown[] = Array.isArray(body.items) ? body.items : []
@@ -896,6 +1271,16 @@ export const startServer = (o: ServeOptions): void => {
       const opened = await openLan(wanted === '' ? null : wanted)
       return json(res, 'url' in opened ? 200 : 409, opened)
     }
+    // Only the board script on the computer tells the server the package a later launcher runs
+    // from: a reused server learns the newer package, and its page shows the notice (#1304).
+    // A web page always sends an Origin, and the phone's page never sends this.
+    if (url.pathname === '/api/package') {
+      if (isLan || req.headers.origin !== undefined) return json(res, 403, {})
+      const version = text(body.version)
+      if (!/^\d+\.\d+\.\d+$/.test(version)) return json(res, 400, {})
+      refreshPackageVersion(version)
+      return json(res, 200, { package: packageVersion })
+    }
     if (url.pathname === '/api/close') {
       // Closing would cut a reply off halfway: on Windows the agent goes with the server.
       if (isBusySending()) return json(res, 409, { note: o.s.serveCloseBusy })
@@ -915,6 +1300,8 @@ export const startServer = (o: ServeOptions): void => {
   let isListening = false
   server.on('error', (error: NodeJS.ErrnoException) => {
     try { messaging.close() } catch {}
+    try { approvalWatcher?.close() } catch {}
+    approvalWatcher = null
     if (!isListening && o.onListenError !== undefined) o.onListenError(error)
     else o.onStop()
   })
@@ -942,6 +1329,29 @@ export const startServer = (o: ServeOptions): void => {
       return
     }
     messaging.markPublished()
+    if (o.watch !== undefined) {
+      const { progress, inbox, fs } = o.watch
+      boardWatch = watchBoard({ progress, inbox, onChange: wakeAll, onFail: () => { syncFallback(); wakeAll() }, ...(fs === undefined ? {} : { watch: fs }) })
+      if (o.addressFile !== undefined) {
+        try {
+          const watchFn = fs ?? fsWatch
+          const watcher = watchFn(dirname(o.addressFile), () => {
+            isApprovalFilesDirty = true
+            wakeAll()
+          })
+          watcher.on('error', () => {
+            isApprovalWatchLive = false
+            isApprovalFilesDirty = true
+            try { watcher.close() } catch {}
+            if (approvalWatcher === watcher) approvalWatcher = null
+          })
+          approvalWatcher = watcher
+          isApprovalWatchLive = true
+        } catch {
+          isApprovalWatchLive = false
+        }
+      }
+    }
     // Preparing a private address can block; inactivity starts once that address is ready.
     lastSeen = Date.now()
     if (o.codex?.executable) {
@@ -953,10 +1363,12 @@ export const startServer = (o: ServeOptions): void => {
     // The idle timer starts only once the server is listening: a listen failure
     // throws before this point, and a timer made earlier would keep the failed
     // child alive instead of letting it exit.
-    // The page asks every 3 seconds while it is open; the server goes once nobody has asked for
-    // `idleMs` and no reply is on its way.
+    // An open page keeps a board request open and asks again when it is answered (#359); a hidden tab's waiting requests
+    // are not counted, so the server goes once no tab in sight has asked and nobody has loaded the page or pressed
+    // anything for `idleMs`, and no reply is on its way.
     const idle = setInterval(() => {
       if (isStopping) return
+      touchWaiting(Date.now())
       if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
       if (o.idleMs > 0 && !isBusySending() && Date.now() - lastSeen > o.idleMs) stop()
     }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)

@@ -375,11 +375,19 @@ test('an idle Codex card says its message starts within about 10 minutes, not ri
   }
   // The start waits on the receiver reading a person's Codex on the thread, so the line names that, and that the message stays
   // queued until then, in each language (codex_392, codex_393).
-  assert.equal(EN.serveLineSoon('Codex'), 'Codex is waiting. It starts on this once the board has seen your Codex open on this thread for about 10 minutes, or longer if your Codex config keeps threads loaded longer. Until then it stays queued here.')
-  assert.ok(ZH_TW.serveLineSoon('Codex').endsWith('在那之前，這則訊息會留在看板排隊。'))
+  assert.ok(EN.serveLineSoon('Codex').startsWith('Codex is waiting. It starts on this once the board has seen your Codex open on this thread for about 10 minutes, or longer if your Codex config keeps threads loaded longer. Until then it stays queued here.'))
+  assert.ok(ZH_TW.serveLineSoon('Codex').includes('在那之前，這則訊息會留在看板排隊。'))
   assert.ok(ZH_TW.serveLineSoon('Codex').includes('約 10 分鐘'))
   assert.ok(ZH_CN.serveLineSoon('Codex').includes('约 10 分钟'))
-  assert.ok(ZH_CN.serveLineSoon('Codex').endsWith('在那之前，这条消息会留在看板排队。'))
+  assert.ok(ZH_CN.serveLineSoon('Codex').includes('在那之前，这条消息会留在看板排队。'))
+})
+
+// Codex has no idle-only turn/start, so a turn the person starts in the same moment can take the message; the owner kept that
+// window (2026-11-18), and the card says so plainly.
+test('a Codex card says a message sent while the person starts a turn may join that turn, in en, zh-TW and zh-CN (#1370)', () => {
+  assert.ok(EN.serveLineSoon('Codex').endsWith(' If you start a turn in Codex just as it goes in, it may join your turn.'))
+  assert.ok(ZH_TW.serveLineSoon('Codex').endsWith('如果它送出的同時你在 Codex 裡開始了一輪，它可能會併進你這一輪。'))
+  assert.ok(ZH_CN.serveLineSoon('Codex').endsWith('如果它发出的同时你在 Codex 里开始了一轮，它可能会并进你这一轮。'))
 })
 
 test('card wording explains turn runs/ran in background and to open the AI window in EN, ZH_TW, and ZH_CN', async () => {

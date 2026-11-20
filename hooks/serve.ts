@@ -96,6 +96,8 @@ export const sessionState = (view: View, agent: string, session: string): RowSta
   return states.length > 0 && states.every(state => state === states[0]) ? states[0] : undefined
 }
 const codexResumeHint = (agent: string, state: RowState | undefined, s: Strings): string => agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : ''
+// Enrollment can lag the board opening; Copy-only active Codex cards explain the same next-turn limit either way.
+const codexCopyHint = (agent: string, state: RowState | undefined, s: Strings): string => agent === 'codex' && (state === 'idle' || state === 'working') ? s.serveCodexCopyHint : ''
 
 // One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route
 // the record has not shown live also says only Copy is offered.
@@ -104,6 +106,7 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   if (reason === 'STATE_UNKNOWN') return s.serveLineStateUnknown
   if (reason === 'SHADOWED') return s.serveLineShadowed
   if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
+  if (!canSend && line === 'nextTurn' && codexCopyHint(agent, state, s)) return s.serveCodexCopyHint
   if (line === 'none' && !canSend && agent === 'codex' && state === 'ended') return codexResumeHint(agent, state, s)
   // Codex's daemon receiver starts a message only once it has watched the thread for at least 10 minutes, or one unload delay
   // when Codex's config sets a longer one (#1578), and so has read a person's own Codex on it (docs/MESSAGING.md, "How long it
@@ -241,6 +244,9 @@ export type ServeAsk = {
   // That session has ended, as its progress record says: the page shows its agent as offline when no other
   // session of it is open.
   isClosed?: true
+  // A Codex card with no process record, quiet past two minutes (#1092): the card says the window may be closed
+  // and offers Archive of its task. It still counts, and the session is not marked closed.
+  mayBeClosed?: true
 }
 
 export type ServeRow = {
@@ -312,7 +318,7 @@ export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string;
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
-export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[] }
+export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[]; olderScript?: { update: 'setup' | 'plugin'; command?: string; lanCommand?: string } }
 type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
 type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
 type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
@@ -506,6 +512,17 @@ const handledKeys = (model: ServeModel, cards: readonly PageRef[], held: Readonl
     .map(card => card.key)
 }
 
+// Whether a version number is newer than another (three numeric parts, as the launcher compares releases).
+const isNewerVersion = (candidate: string, current: string): boolean => {
+  const next = candidate.split('.').map(Number)
+  const held = current.split('.').map(Number)
+  for (let index = 0; index < 3; index += 1) {
+    if ((next[index] ?? 0) !== (held[index] ?? 0)) return (next[index] ?? 0) > (held[index] ?? 0)
+  }
+  return false
+}
+
+
 // `routes`: the receivers' records, which say on each card when a message arrives and whether Send is offered.
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
@@ -602,13 +619,14 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (ask.target?.dir ?? '') : '',
         archiveNote: isManual ? '' : s.archiveLive,
-        info: found || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? infoOf(send, ask.agent, ask.task, '', s)),
+        info: found || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? ((!isLan ? codexCopyHint(ask.agent, askState, s) : '') || infoOf(send, ask.agent, ask.task, '', s))),
         ...lineOf,
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
         reopen: hint.reopen,
         isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !isUncertainEnded(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
+        ...(ask.mayBeClosed === true && ask.archive !== undefined ? { mayBeClosed: true as const } : {}),
       })
       continue
     }
@@ -687,13 +705,14 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (row.target?.dir ?? '') : '',
         // A row says why only when a reply could otherwise be expected here.
-        info: found ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
+        info: found ? '' : lanInfo(baseMode, row.agent) ?? ((!isLan ? codexCopyHint(row.agent, state, s) : '') || (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : '')),
         ...lineOf,
         isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !isUncertainEnded(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
         hasCopyBox: !(row.auto === 'ended' && row.question === null && send === 'none') && (isContested || lanInfo(baseMode, row.agent) !== null || isOpenClaude || !allowResume && row.auto !== null && connection === undefined || found !== undefined && connection === undefined),
-        // A Claude row has no target, so its closed session is the block's own state=ended.
-        ...(row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true ? { isClosed: true as const } : {}),
+        // A Claude row has no target, so its closed session is the block's own state=ended. A row whose process the board
+        // found gone is closed too, so the Agents list stops saying open (#1595).
+        ...(row.target?.isClosed === true || row.target === null && row.isRecordedEnded === true || row.isProcessGone === true ? { isClosed: true as const } : {}),
       })
       continue
     }
@@ -777,6 +796,17 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     all: { ...bucket(grouped.all), isHidden: grouped.all.isHidden },
     own: bucket(grouped.own),
     projects: grouped.projects,
+  }
+  // The installed script is older than the package that started this server: the page says so and
+  // how to update it (#1304). An edited script, or a newer one, shows nothing. The page on the
+  // local network is plain HTTP, so its advice carries the command the board script built
+  // without the data folder, beside the full command the local page shows (#1304).
+  if (group?.olderScript !== undefined && group.versions.package !== null && isNewerVersion(group.versions.package, group.versions.board)) {
+    const command = isLan ? group.olderScript.lanCommand ?? '' : group.olderScript.command ?? ''
+    const notice = group.olderScript.update === 'plugin'
+      ? s.serveOlderScriptPlugin(group.versions.board, group.versions.package)
+      : s.serveOlderScriptSetup(group.versions.board, group.versions.package, command)
+    model.health = [...(model.health ?? []), notice]
   }
   // Repository names are computed locally before folder paths are removed for a phone.
   if (isLan) {
@@ -865,6 +895,8 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'hide') return item.type === 'ask' && item.ask.hideKey !== '' && item.ask.canHide !== false ? { type: 'hide', key: item.ask.hideKey, text: item.ask.text } : { type: 'refuse', note: '' }
   if (request.type === 'archive') {
     if (item.type === 'row' && item.row.archive !== null) return { type: 'archive', ref: item.row.archive, title: item.row.title }
+    // A card that says the window may be closed archives its task (#1092); the write guard checks again.
+    if (item.type === 'ask' && item.ask.archive !== undefined) return { type: 'archive', ref: item.ask.archive, title: item.ask.task }
     const isLive = item.type === 'row' && (item.row.auto === 'working' || item.row.auto === 'waiting') || item.type === 'ask' && item.ask.where !== 'manual'
     return { type: 'refuse', note: isLive ? s.archiveLive : s.archiveGone }
   }
@@ -971,7 +1003,7 @@ const PAGE_WORDS = [
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
   'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesSentUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
-  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure',
+  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
   'archiveNow', 'cleanUp', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
@@ -984,7 +1016,7 @@ const PAGE_WORDS = [
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
-  'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent',
+  'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent', 'settingsApprovals', 'approvalSwitchFailed',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
@@ -1047,6 +1079,7 @@ ${sheetCss}
 .cards,.rows{list-style:none;margin:0;padding:0}
 .cards>li+li .card{border-top:1px solid var(--line)}
 .card{display:grid;grid-template-columns:24px minmax(0,1fr);gap:var(--s3);padding:var(--s4);min-width:0}
+.approvals .card{grid-template-columns:minmax(0,1fr)}
 .arrived>.fx>.fx-in{animation:glow var(--dur-glow) var(--ease-out)}
 .c-body{min-width:0;display:flex;flex-direction:column;gap:var(--s2)}
 .approval-command{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--font-mono);font-size:var(--text-sm);max-height:40vh;overflow:auto}
@@ -1473,6 +1506,9 @@ const PAGE_SCRIPT = String.raw`
     return box;
   }
   var timer = null;
+  // The open board request (#359): its number, so an answer to one that was replaced is dropped, and what aborts it.
+  var boardAsk = 0;
+  var boardAbort = null;
   var isClosed = false;
   var isUnreachable = false;
   var offlineButtons = [];
@@ -1624,6 +1660,7 @@ const PAGE_SCRIPT = String.raw`
     document.querySelectorAll('button[data-static]').forEach(function (node) { node.disabled = false; });
     offlineButtons.forEach(function (node) { node.disabled = false; });
     offlineButtons = [];
+    if (approvalsToggle && isApprovalsLocked) approvalsToggle.disabled = true;
     // A press that met the offline server keeps its failure, no longer the offline advice.
     Object.keys(results).forEach(function (key) { if (results[key].text === w('serveOffline')) { results[key].text = w('pressFailed'); paintResult(key); } });
     // Redraw even an unchanged model to restore each action's own sending state.
@@ -1655,14 +1692,17 @@ const PAGE_SCRIPT = String.raw`
   // Names this page to the board, so it can tell one open page from another (#265).
   function newPageId() { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } }
   var pageId = newPageId();
-  function call(path, body) {
+  function call(path, body, signal, isNow) {
     if (isUnreachable && body !== undefined) return Promise.reject();
     var requestPage = pageId;
     var headers = { 'x-board-token': token, 'x-board-page': requestPage, 'x-board-visible': document.hidden ? '0' : '1' };
     if (approveSecret) headers['x-board-approve'] = approveSecret;
-    if (path === '/api/board' && body === undefined && boardEtag) headers['if-none-match'] = boardEtag;
+    // A page that holds the board asks the server to answer when it changes, instead of at once (#359).
+    if (path === '/api/board' && body === undefined && boardEtag) { headers['if-none-match'] = boardEtag; if (!isNow) headers['x-board-wait'] = '1'; }
     if (body !== undefined) headers['content-type'] = 'application/json';
-    return fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' }).then(function (res) {
+    var init = { method: body === undefined ? 'GET' : 'POST', headers: headers, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store' };
+    if (signal) init.signal = signal;
+    return fetch(path, init).then(function (res) {
       if (path === '/api/board' && res.status === 304) return { ok: true, unchanged: true };
       return res.json().catch(function () { return {}; }).then(function (data) {
         data.ok = res.ok && data.ok !== false;
@@ -1671,7 +1711,8 @@ const PAGE_SCRIPT = String.raw`
       });
     }).catch(function (error) {
       // A request started under an earlier pageId (before persisted pageshow switched ids) must not mark the restored page offline (#1475).
-      if (requestPage === pageId) unreachable();
+      // Nor does an open board request this page replaced and aborted.
+      if (requestPage === pageId && !(signal && signal.aborted)) unreachable();
       throw error;
     });
   }
@@ -2251,6 +2292,11 @@ const PAGE_SCRIPT = String.raw`
     if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
     var mode = ask.send;
     var answers = el('div', 'answers');
+    // A Codex card with no process to check, quiet past two minutes (#1092): it may be closed, never closed.
+    if (!isStuck && !isOlder && ask.mayBeClosed === true) {
+      add(body, el('p', 'note', w('windowMayBeClosed')));
+      add(answers, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', ask.fp); }));
+    }
     var choiceArea = answers;
     var pickerSend = null;
     var others = [];
@@ -3352,6 +3398,34 @@ const PAGE_SCRIPT = String.raw`
   var latestApprovals = null;
   var drawnSent = {};
   var reasonOpen = {};
+  var approvalsToggle = document.getElementById('settings-approvals-toggle');
+  var isApprovalsOff = false;
+  var isApprovalsLocked = false;
+  var isApprovalsSwitching = false;
+  function approvalsSwitchShown(approvals) {
+    isApprovalsOff = Boolean(approvals && approvals.isOff);
+    isApprovalsLocked = Boolean(approvals && approvals.isLockdown);
+    if (!approvalsToggle) return;
+    var nextOn = !isApprovalsOff && !isApprovalsLocked;
+    approvalsToggle.setAttribute('aria-checked', String(nextOn));
+    approvalsToggle.textContent = w(nextOn ? 'settingsOn' : 'settingsOff');
+    approvalsToggle.disabled = isApprovalsLocked || isApprovalsSwitching || isUnreachable;
+  }
+  if (approvalsToggle) approvalsToggle.addEventListener('click', function () {
+    if (isApprovalsLocked || isApprovalsSwitching) return;
+    var nextEnabled = isApprovalsOff;
+    isApprovalsSwitching = true;
+    approvalsToggle.disabled = true;
+    call('/api/approvals/switch', { enabled: nextEnabled }).then(function (data) {
+      if (!data.ok) { settingsSay(data.note || w('approvalSwitchFailed'), true); return; }
+      approvalsSwitchShown({ isOff: Boolean(data.isOff), isLockdown: false });
+      settingsSay(data.note || w('settingsChanged', w('settingsApprovals'), w(data.isOff ? 'settingsOff' : 'settingsOn')));
+      refresh(true);
+    }, function () { settingsSay(w('approvalSwitchFailed'), true); }).finally(function () {
+      isApprovalsSwitching = false;
+      approvalsToggle.disabled = isApprovalsLocked || isUnreachable;
+    });
+  });
   function approvalsWaiting(approvals) {
     if (!approvals) return 0;
     if (!approvals.cards) return approvals.waiting || 0;
@@ -3381,12 +3455,26 @@ const PAGE_SCRIPT = String.raw`
   }
   function approvalSection(approvals) {
     if (!approvals) return null;
+    if (!approvals.cards) {
+      var lanWrap = el('section', 'needs-wrap approvals');
+      lanWrap.setAttribute('data-sec', 'needs');
+      add(lanWrap, el('h2', 'flag', w('approvalHead')));
+      return add(lanWrap, el('p', 't-quiet', approvals.note));
+    }
+    var hasCards = approvals.cards.length > 0;
+    var showNote = Boolean(approvals.note && (approvals.isLockdown || !approvals.isOff));
+    if (!hasCards && !approvals.refusal && !showNote) return null;
     var wrap = el('section', 'needs-wrap approvals');
     wrap.setAttribute('data-sec', 'needs');
     add(wrap, el('h2', 'flag', w('approvalHead')));
-    if (!approvals.cards) return add(wrap, el('p', 't-quiet', approvals.note));
-    // Approvals turned off on the board: said once, above what still waits in its window.
-    if (approvals.note) add(wrap, el('p', 't-alert', approvals.note));
+    // Approvals turned off on key-replay lockdown: said once above any waiting cards or hook refusal.
+    if (showNote) add(wrap, el('p', 't-alert', approvals.note));
+    if (approvals.refusal) {
+      var refusal = el('p', 't-alert', approvals.refusal.note);
+      refusal.setAttribute('data-approval-refusal', approvals.refusal.reason);
+      add(wrap, refusal);
+    }
+    if (!hasCards) return wrap;
     var list = el('ul', 'cards');
     var drawn = [];
     approvals.cards.forEach(function (card) {
@@ -3579,12 +3667,18 @@ const PAGE_SCRIPT = String.raw`
       lostResults.push(card);
     });
   }
-  function refresh() {
+  // isNow: the answer is wanted at once (a tab coming back), not when the board next changes.
+  function refresh(isNow) {
     if (isClosed) return;
     clearTimeout(timer);
     var pollPage = pageId;
-    call('/api/board').then(function (data) {
-      if (isClosed || pollPage !== pageId) return;
+    // One open board request at a time: a refresh after a press replaces the waiting one, so held requests never
+    // use up the browser's few connections to the board.
+    var ask = ++boardAsk;
+    if (boardAbort) boardAbort.abort();
+    boardAbort = typeof AbortController === 'function' ? new AbortController() : null;
+    call('/api/board', undefined, boardAbort ? boardAbort.signal : undefined, isNow === true).then(function (data) {
+      if (isClosed || pollPage !== pageId || ask !== boardAsk) return;
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) { showMoved(); return; }
       if (data.unchanged) { reachable(); maybeShowAway(); return; }
@@ -3599,6 +3693,7 @@ const PAGE_SCRIPT = String.raw`
       notifyWaiting(data.model);
       connections = data.messaging && data.messaging.connections || [];
       latestApprovals = data.approvals || null;
+      approvalsSwitchShown(latestApprovals);
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; }), latestApprovals], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
       // Under a press this answer is not drawn, and the next poll asks for the whole board again (#1468).
       if (text !== last && isHeld()) {
@@ -3631,10 +3726,12 @@ const PAGE_SCRIPT = String.raw`
         if (reply.at > seenAt) { since = Math.max(since, reply.at); say(reply.note, reply.ok ? 'done' : 'alert', reply.key, undefined, !reply.ok); }
       });
     }, function () {
-      if (pollPage === pageId) unreachable();
+      if (pollPage === pageId && ask === boardAsk) unreachable();
     }).then(function () {
-      // Leave room for the response and paint inside the three-second ask deadline.
-      if (!isClosed && pollPage === pageId) timer = setTimeout(refresh, 2000);
+      if (isClosed || pollPage !== pageId || ask !== boardAsk) return;
+      // Holding the board, the page asks again at once and the server answers when it changes (#359). Without it
+      // (offline, a file it could not read, a press under way) it asks again in 2 s, inside the three-second ask deadline.
+      timer = setTimeout(refresh, boardEtag ? 0 : 2000);
     });
   }
   // Wider than the parser's start marker, so a block it would take is never dropped here.
@@ -3730,13 +3827,18 @@ const PAGE_SCRIPT = String.raw`
   // Going away starts a new away period: the line from before is gone, and the world as
   // it stands now is the snapshot the return is compared with.
   if (typeof document.addEventListener === 'function') document.addEventListener('visibilitychange', function () {
+    // The open request told the board whether this tab was in sight; a new one tells it now, and a tab coming back
+    // gets its away line at once instead of when the board next changes (#359).
     if (!document.hidden) {
       if (awaySnap && !awaySnap.back) awaySnap.back = Date.now();
+      // Answered at once, not held, so the away line comes with it as before.
+      refresh(true);
       return;
     }
     clearAwayLine();
     var snap = awaySnapshot();
     if (snap) awaySnap = snap;
+    refresh();
   });
   if (typeof ResizeObserver === 'function' && document.documentElement) {
     var head = document.getElementById('head');
@@ -3844,6 +3946,6 @@ const PAGE_SCRIPT = String.raw`
       approveSecret = data.secret;
     }, function () {});
   }
-  pairApprovals().then(refresh);
+  pairApprovals().then(function () { refresh(); });
 })();
 `

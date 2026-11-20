@@ -184,7 +184,8 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     assert.equal(receiver.received.length, 0)
     await hub.fallback(receiver, text)
     const card = (await hub.card(receiver)).textContent
-    assert.match(card, /isn't connected|disconnected|offline|Could not send/i)
+    // The Copy-only card says the board can't send to this conversation (#1643), not that it is still sending.
+    assert.match(card, /board can't send to this|isn't connected|disconnected|offline|Could not send/i)
   }))
 
   test('messages: a message typed on the page reaches a live session while the board is at its size cap', { timeout: 40000 }, async () => withHub([

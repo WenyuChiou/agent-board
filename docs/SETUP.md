@@ -27,10 +27,27 @@ run. You can also select a known target with `--agent <name>`.
 Setup prints a short summary in the board's language (`--lang en`, `zh-TW` or `zh-CN`):
 one line per agent, in a preview with the files it would change under that line, followed by numbered next steps. The lines say what would change,
 what changed, what is already set up, or which conflicting files caused an agent to be
-skipped. With `--apply`, agents without conflicts are still set up; a skipped agent's
-line gives the `--agent <name>` command to retry after fixing its files. Setup exits
-nonzero when every selected agent has a conflict. A second run with nothing to change
-says each agent is already set up and writes nothing.
+skipped. With `--apply`, agents without conflicts are still set up; the next steps give
+one `--agent <names>` command that retries every skipped agent after you fix its files.
+Setup exits nonzero when every selected agent has a conflict. A second run with nothing
+to change says each agent is already set up and writes nothing.
+
+Setup never overwrites a generated file you edited, and your edit does not stop the
+upgrade. A file the host only reads (a skill or command file) stays as you left it and
+the new version is written beside it as `<file>.new`. Code the host loads (the board
+script, the hook runner or a plugin) stays as you left it, and setup says the new version
+was not installed. While your board script or hook runner stays, the other code and the
+hook lines written for it stay too. When it is the hook runner that stays, `--codex-doctor`
+reports the agent as installed but not the current version. A board script you kept
+answers `--codex-doctor` itself, as the version it came from, so it does not say this;
+setup's own output names the kept file, and the `agent-board` command says on one line
+that the installed board script is a different build. While an older board script of
+yours stays, setup also leaves your old `/board` command file in place and does not write
+the `/agent-board` command or a missing skill, because their words ask the board script
+for options an older one does not have. They arrive in the same run in which you take the
+new script. To take the new version, move your copy aside and run setup again. An agent is still skipped when `<file>.new` holds something setup did not write,
+when an edited code file has no install record, or when a file or hook your kept program
+needs is missing.
 
 When several selected agents share files, apply also counts the files an earlier agent
 already updated as already current. The next steps name each host's actual action:
@@ -81,6 +98,11 @@ The installed skill opens the interactive web board. Reopen with:
 node "$HOME/.agent-board/agent-board.mjs"
 ```
 
+This direct path works only while its script is installed. If `remove --apply`
+removes it, use `npx @wenyuchiou/agent-board` instead: the package entry gives setup
+guidance (and offers setup in an interactive terminal), rather than running a
+missing file.
+
 On Windows use the exact Node and script paths printed by setup. Closing a browser tab
 leaves the local service running. Close the board (the red power button) stops it;
 `--idle-minutes 30` opts into idle shutdown. No startup service is installed.
@@ -90,6 +112,9 @@ To run the normal archive sweep without a Claude session:
 ```sh
 node "$HOME/.agent-board/agent-board.mjs" --tidy
 ```
+
+If `remove --apply` removes that script, use `npx @wenyuchiou/agent-board --tidy`
+instead. With no board installed, it gives setup guidance and runs no sweep.
 
 Use the exact installed Node and script paths for a scheduler, including on Windows.
 The flag performs one sweep and exits; it installs no schedule or service and opens no
@@ -136,6 +161,10 @@ problem, run an explicit pass with the exact installed Node and script paths:
 ```sh
 node "$HOME/.agent-board/agent-board.mjs" --recover-hooks
 ```
+
+This direct path also stops working if `remove --apply` removes its script. Use
+`npx @wenyuchiou/agent-board --recover-hooks` instead; with no board installed, it
+gives setup guidance and runs no recovery.
 
 The JSON result names the processed and remaining metadata counts for the selected
 progress file. This command reads no stdin, starts no model, and changes no hook
@@ -331,8 +360,11 @@ the old scoped installation first, so an orphan plugin cannot continue reporting
 OpenCode sends no session end for a one-shot `opencode run`, so as OpenCode exits the
 plugin ends the top-level sessions it reported that had finished their reply, within 2 s
 plus the worker's 500 ms grace.
-A session still replying is left as it is and goes stale by age. Quitting OpenCode ends
-its rows too; a resumed session reopens its row. New OpenCode blocks are filed under the
+That exit step leaves a session still replying as it is. Quitting OpenCode ends
+its rows too; a resumed session reopens its row. Each row also names the OpenCode process
+it ran under, so once that process is gone the board ends its rows on its next read, a
+replying one included, even if the exit step did not run. Rows written before 0.25.1 name no process and
+keep the 12-hour rule. New OpenCode blocks are filed under the
 folder the session ran in. The progress tool takes each step as one Markdown task line
 (`- [~] Current step`); a refused report names the board's reason, such as `INVALID_STEP`.
 

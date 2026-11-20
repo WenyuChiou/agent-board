@@ -1314,8 +1314,8 @@ test('the board page shows the whole file: counts, questions, folded work, steps
   // The shipped DOM's title safety is checked in page-titles.test.mjs, outside the SDK sandbox.
   expect(html).toContain('textContent')
   expect(html).not.toContain('<script>alert(1)')
-  expect(html).toContain("call('/api/board')")
-  expect(html).toContain('timer = setTimeout(refresh, 2000)')
+  expect(html).toContain("call('/api/board', undefined, boardAbort ? boardAbort.signal : undefined, isNow === true)")
+  expect(html).toContain('timer = setTimeout(refresh, boardEtag ? 0 : 2000)')
   expect(servePage(STRINGS.en, 'synthetic')).toContain('<html lang="en">')
 })
 
@@ -3698,7 +3698,7 @@ test('with explicit legacy opt-in the page offers a send only into a Grok or Cod
   const row = (title: string) => [...model.groups.flatMap(group => group.rows), ...model.stopped].find(one => one.title === title)
   expect(row('Pick the cache')).toMatchObject({ send: 'send', where: '/w/api-gateway', info: '', isSending: false })
   const codex = model.asks.find(ask => ask.agent === 'codex')
-  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('Codex'), where: '' })
+  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveCodexCopyHint, where: '' })
   expect(codex?.answers.length).toBeGreaterThan(0)
   // A hand-kept question is the person's own: ticking it is the answer, with nothing to copy.
   expect(model.asks.find(ask => ask.project === 'docs-site')).toMatchObject({ send: 'none', answers: [], canTick: true, info: '' })
@@ -4317,7 +4317,10 @@ test('the board you work in marks the chosen line and lists only the keys that d
   const onAsk = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
   expect(onAsk).toContain('› [Choose] Per-key limit')
   expect(onAsk).toContain('    2 300 a minute')
-  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · ↑↓/jk select')
+  // The Codex question has been quiet past two minutes with no process record: the window may be closed, so a archives it (#1092).
+  // At 100 columns the footer clips that last key's word ("a…").
+  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · a')
+  expect(onAsk).toContain('↑↓/jk select')
   const onJob = boardScreen(view, [], { selected: job, key: null, open: items[job]?.key ?? null, note: 'Copied: 300' }, STRINGS.en, { width: 100, isColor: false })
   expect(onJob).toContain('› Fabrikam fellowship')
   expect(onJob).toContain('    ✓ 1 Draft the statement')
