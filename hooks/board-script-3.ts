@@ -2716,7 +2716,7 @@ export const LINES = [
 "import { closeSync as closeSync11, constants as constants5, fstatSync as fstatSync9, lstatSync as lstatSync10, openSync as openSync11, readSync as readSync7, readdirSync as readdirSync7, unlinkSync as unlinkSync11, watch as fsWatch2, writeSync } from \"node:fs\";",
 "import { createServer } from \"node:http\";",
 "import { homedir as homedir4, networkInterfaces } from \"node:os\";",
-"import { basename as basename8, dirname as dirname10, join as join18, resolve as resolve13 } from \"node:path\";",
+"import { basename as basename8, dirname as dirname10, join as join19, resolve as resolve14 } from \"node:path\";",
 "",
 "// hooks/board-dock.ts",
 "var DOCK_MIN_WORK = 1280;",

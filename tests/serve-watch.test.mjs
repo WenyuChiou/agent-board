@@ -423,3 +423,32 @@ test('serve: the update command quotes a $ folder literally, and the phone gets 
     }
   } finally { await board.close() }
 })
+
+test('serve: the update command leaves a retired agent out, even with its record kept (#1304)', async () => {
+  const board = await startBoard()
+  try {
+    const folder = join(board.root, 'data')
+    mkdirSync(folder)
+    writeFileSync(join(folder, 'install-codex.json'), '{}\n')
+    // A record from an earlier Gemini CLI setup, kept in the data folder: setup refuses
+    // gemini in any selection that is not a removal (#1327), so the advice must not
+    // name it.
+    writeFileSync(join(folder, 'install-gemini.json'), '{}\n')
+    const before = globalThis.AGENT_BOARD
+    globalThis.AGENT_BOARD = { codexRoot: folder }
+    try {
+      const refreshed = await board.post('/api/package', { version: '9.9.11' })
+      assert.equal(refreshed.status, 200, refreshed.text)
+      assert.deepEqual(JSON.parse(refreshed.text), { package: '9.9.11' })
+      const after = await board.ask()
+      assert.equal(after.status, 200, after.text)
+      const afterModel = JSON.parse(after.text).model
+      assert.equal(afterModel.view.versions.package, '9.9.11')
+      const command = 'npx @wenyuchiou/agent-board@9.9.11 setup --agent codex --data-dir ' + folder
+      assert.deepEqual(afterModel.health, [EN.serveOlderScriptSetup(boardVersion, '9.9.11', command)])
+    } finally {
+      if (before === undefined) delete globalThis.AGENT_BOARD
+      else globalThis.AGENT_BOARD = before
+    }
+  } finally { await board.close() }
+})

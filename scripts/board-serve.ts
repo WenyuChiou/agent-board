@@ -30,6 +30,7 @@ import { createMessaging } from './board-messaging'
 import { watchBoard } from './board-watch'
 import type { BoardWatch, WatchFn } from './board-watch'
 import { startCodexReceiver } from './codex-receiver.mjs'
+import { setupAgents } from './setup-discovery.mjs'
 import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
 import { isBarStyle } from '../hooks/progress-bar'
@@ -282,7 +283,10 @@ const olderScriptUpdate = (): { update: 'setup' | 'plugin'; command?: string; la
   const prelude = (globalThis as { AGENT_BOARD?: { codexRoot?: unknown } }).AGENT_BOARD ?? {}
   if (typeof prelude.codexRoot !== 'string') return { update: 'plugin' }
   let root = resolve(prelude.codexRoot)
-  const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
+  // Only what setup sets up: setup refuses a retired agent in any selection that is
+  // not a removal (#1327), so a retained install-gemini.json from an earlier Gemini
+  // CLI setup must not put gemini back into the update command.
+  const targets = setupAgents
   const listed = (folder: string): string[] | undefined => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
   let agents = listed(root)
   // A moved data folder: the board script's own folder is where the board is now.
