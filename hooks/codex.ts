@@ -465,10 +465,27 @@ export const blockClaimOf = (text: string, owner: string, agent: string, session
   const attrs = parseAttrs(lines[span.start] ?? '')
   return agentClaimOf({ agentPid: Number(attrs.agentpid), ...(attrs.agentstarted === undefined ? {} : { agentStarted: Number(attrs.agentstarted) }), host: attrs.host })
 }
+// The process a Codex block names after this event (#1092, M7). A SessionStart or UserPromptSubmit replaces the
+// block's record with the one its own hook saw (`seen`): the Codex terminal its walk found, or null where the walk
+// named none (Windows, macOS, the shared server), so a session that moved to the shared server is never judged by a
+// process it no longer runs in. `seen` travels with the event when it waits in the pending queue, so a resume
+// replayed by a later hook keeps the new window's process, not the old one (review of #1731, P1 1). An opening event
+// with no `seen` (a raw event the board script never ran for) clears the record: the card then keeps the two-minute
+// line, never a dead process's verdict. Every other event and a report keep what the block names.
+export const codexClaimOf = ({ event, seen, named }: { event: string | undefined; seen: AgentClaim | null | undefined; named: AgentClaim | null }): AgentClaim | null =>
+  event === 'SessionStart' || event === 'UserPromptSubmit' ? seen ?? null : named
+// The record an event carried through the pending queue, validated again as any read of a file is: anything else is
+// none. Only a Codex opening event the board script ran for carries the field.
+export const seenClaimOf = (value: unknown): AgentClaim | null | undefined => {
+  if (value === undefined) return undefined
+  if (value === null || typeof value !== 'object') return null
+  const one = value as { pid?: unknown; started?: unknown; host?: unknown }
+  return agentClaimOf({ agentPid: Number(one.pid), ...(one.started === undefined ? {} : { agentStarted: Number(one.started) }), host: typeof one.host === 'string' ? one.host : undefined })
+}
 export const claimText = (claim: AgentClaim | null): string => claim === null ? '' : `${claim.pid}:${claim.started ?? ''}:${claim.host}`
 
 // The full digest prevents an eight-character collision or a pasted block from acquiring ownership.
-// `claim` is the OpenCode process the block names (#1595): only an OpenCode block carries it, and only in progress.md.
+// `claim` is the OpenCode (#1595) or Codex (#1092) process the block names: only those blocks carry it, and only in progress.md.
 export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false, contextLine?: string, encode: (value: string) => string = value => value, claim: AgentClaim | null = null): string => {
   if (!/^[a-f0-9]{64}$/.test(owner)) throw new Error('INVALID_OWNER')
   const id = owner.slice(0, 8)
@@ -478,7 +495,7 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   // Only a run is marked: a person's session is the default, so its block stays as it was.
   const run = report.origin === 'run' ? ` origin=run${report.parent !== undefined && RESUME.test(report.parent) ? ` parent=${report.parent}` : ''}` : ''
   const replied = report.replied ? ` replied=${report.replied}` : ''
-  const valid = agent === 'opencode' ? agentClaimOf(claim === null ? null : { agentPid: claim.pid, agentStarted: claim.started, host: claim.host }) : null
+  const valid = agent === 'opencode' || agent === 'codex' ? agentClaimOf(claim === null ? null : { agentPid: claim.pid, agentStarted: claim.started, host: claim.host }) : null
   const liveness = valid === null ? '' : ` agentpid=${valid.pid}${valid.started === undefined ? '' : ` agentstarted=${valid.started}`} host=${valid.host}`
   const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${replied}${resume}${run}${liveness} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'

@@ -241,6 +241,9 @@ export type ServeAsk = {
   // That session has ended, as its progress record says: the page shows its agent as offline when no other
   // session of it is open.
   isClosed?: true
+  // A Codex card with no process record, quiet past two minutes (#1092): the card says the window may be closed
+  // and offers Archive of its task. It still counts, and the session is not marked closed.
+  mayBeClosed?: true
 }
 
 export type ServeRow = {
@@ -609,6 +612,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         reopen: hint.reopen,
         isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !isUncertainEnded(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
+        ...(ask.mayBeClosed === true && ask.archive !== undefined ? { mayBeClosed: true as const } : {}),
       })
       continue
     }
@@ -866,6 +870,8 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'hide') return item.type === 'ask' && item.ask.hideKey !== '' && item.ask.canHide !== false ? { type: 'hide', key: item.ask.hideKey, text: item.ask.text } : { type: 'refuse', note: '' }
   if (request.type === 'archive') {
     if (item.type === 'row' && item.row.archive !== null) return { type: 'archive', ref: item.row.archive, title: item.row.title }
+    // A card that says the window may be closed archives its task (#1092); the write guard checks again.
+    if (item.type === 'ask' && item.ask.archive !== undefined) return { type: 'archive', ref: item.ask.archive, title: item.ask.task }
     const isLive = item.type === 'row' && (item.row.auto === 'working' || item.row.auto === 'waiting') || item.type === 'ask' && item.ask.where !== 'manual'
     return { type: 'refuse', note: isLive ? s.archiveLive : s.archiveGone }
   }
@@ -972,7 +978,7 @@ const PAGE_WORDS = [
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
   'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesSentUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
-  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure',
+  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
   'archiveNow', 'cleanUp', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
@@ -985,7 +991,7 @@ const PAGE_WORDS = [
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
   'awayFinished', 'awayFinishedOne', 'awayOfflineNamed', 'awayOffline', 'awayOfflineOne', 'awayUnreadableNamed', 'awayUnreadable', 'awayUnreadableOne', 'awayDismiss',
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
-  'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent',
+  'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent', 'settingsApprovals', 'approvalSwitchFailed',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
 ] as const satisfies ReadonlyArray<keyof Strings>
@@ -1629,6 +1635,7 @@ const PAGE_SCRIPT = String.raw`
     document.querySelectorAll('button[data-static]').forEach(function (node) { node.disabled = false; });
     offlineButtons.forEach(function (node) { node.disabled = false; });
     offlineButtons = [];
+    if (approvalsToggle && isApprovalsLocked) approvalsToggle.disabled = true;
     // A press that met the offline server keeps its failure, no longer the offline advice.
     Object.keys(results).forEach(function (key) { if (results[key].text === w('serveOffline')) { results[key].text = w('pressFailed'); paintResult(key); } });
     // Redraw even an unchanged model to restore each action's own sending state.
@@ -2260,6 +2267,11 @@ const PAGE_SCRIPT = String.raw`
     if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
     var mode = ask.send;
     var answers = el('div', 'answers');
+    // A Codex card with no process to check, quiet past two minutes (#1092): it may be closed, never closed.
+    if (!isStuck && !isOlder && ask.mayBeClosed === true) {
+      add(body, el('p', 'note', w('windowMayBeClosed')));
+      add(answers, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', ask.fp); }));
+    }
     var choiceArea = answers;
     var pickerSend = null;
     var others = [];
@@ -3361,6 +3373,34 @@ const PAGE_SCRIPT = String.raw`
   var latestApprovals = null;
   var drawnSent = {};
   var reasonOpen = {};
+  var approvalsToggle = document.getElementById('settings-approvals-toggle');
+  var isApprovalsOff = false;
+  var isApprovalsLocked = false;
+  var isApprovalsSwitching = false;
+  function approvalsSwitchShown(approvals) {
+    isApprovalsOff = Boolean(approvals && approvals.isOff);
+    isApprovalsLocked = Boolean(approvals && approvals.isLockdown);
+    if (!approvalsToggle) return;
+    var nextOn = !isApprovalsOff && !isApprovalsLocked;
+    approvalsToggle.setAttribute('aria-checked', String(nextOn));
+    approvalsToggle.textContent = w(nextOn ? 'settingsOn' : 'settingsOff');
+    approvalsToggle.disabled = isApprovalsLocked || isApprovalsSwitching || isUnreachable;
+  }
+  if (approvalsToggle) approvalsToggle.addEventListener('click', function () {
+    if (isApprovalsLocked || isApprovalsSwitching) return;
+    var nextEnabled = isApprovalsOff;
+    isApprovalsSwitching = true;
+    approvalsToggle.disabled = true;
+    call('/api/approvals/switch', { enabled: nextEnabled }).then(function (data) {
+      if (!data.ok) { settingsSay(data.note || w('approvalSwitchFailed'), true); return; }
+      approvalsSwitchShown({ isOff: Boolean(data.isOff), isLockdown: false });
+      settingsSay(data.note || w('settingsChanged', w('settingsApprovals'), w(data.isOff ? 'settingsOff' : 'settingsOn')));
+      refresh(true);
+    }, function () { settingsSay(w('approvalSwitchFailed'), true); }).finally(function () {
+      isApprovalsSwitching = false;
+      approvalsToggle.disabled = isApprovalsLocked || isUnreachable;
+    });
+  });
   function approvalsWaiting(approvals) {
     if (!approvals) return 0;
     if (!approvals.cards) return approvals.waiting || 0;
@@ -3390,12 +3430,26 @@ const PAGE_SCRIPT = String.raw`
   }
   function approvalSection(approvals) {
     if (!approvals) return null;
+    if (!approvals.cards) {
+      var lanWrap = el('section', 'needs-wrap approvals');
+      lanWrap.setAttribute('data-sec', 'needs');
+      add(lanWrap, el('h2', 'flag', w('approvalHead')));
+      return add(lanWrap, el('p', 't-quiet', approvals.note));
+    }
+    var hasCards = approvals.cards.length > 0;
+    var showNote = Boolean(approvals.note && (approvals.isLockdown || !approvals.isOff));
+    if (!hasCards && !approvals.refusal && !showNote) return null;
     var wrap = el('section', 'needs-wrap approvals');
     wrap.setAttribute('data-sec', 'needs');
     add(wrap, el('h2', 'flag', w('approvalHead')));
-    if (!approvals.cards) return add(wrap, el('p', 't-quiet', approvals.note));
-    // Approvals turned off on the board: said once, above what still waits in its window.
-    if (approvals.note) add(wrap, el('p', 't-alert', approvals.note));
+    // Approvals turned off on key-replay lockdown: said once above any waiting cards or hook refusal.
+    if (showNote) add(wrap, el('p', 't-alert', approvals.note));
+    if (approvals.refusal) {
+      var refusal = el('p', 't-alert', approvals.refusal.note);
+      refusal.setAttribute('data-approval-refusal', approvals.refusal.reason);
+      add(wrap, refusal);
+    }
+    if (!hasCards) return wrap;
     var list = el('ul', 'cards');
     var drawn = [];
     approvals.cards.forEach(function (card) {
@@ -3614,6 +3668,7 @@ const PAGE_SCRIPT = String.raw`
       notifyWaiting(data.model);
       connections = data.messaging && data.messaging.connections || [];
       latestApprovals = data.approvals || null;
+      approvalsSwitchShown(latestApprovals);
       var text = JSON.stringify([data.model, data.messaging && data.messaging.sessions, connections.map(function (one) { return one.agent; }), latestApprovals], function (key, value) { return key === 'now' ? Math.floor(value / 60000) : value; });
       // Under a press this answer is not drawn, and the next poll asks for the whole board again (#1468).
       if (text !== last && isHeld()) {
