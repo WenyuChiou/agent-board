@@ -3325,7 +3325,11 @@ test('a watched board caches idle refusal and off-switch checks until the folder
   assert.equal(runtimeWatcher.closed, true)
 })
 
-test('an ask sent after the off marker is removed, before the folder watcher signals, is admitted and waits for the page', { timeout: 60_000 }, async () => {
+test('an ask sent after the off marker is removed, before the folder watcher signals, is admitted and waits for the page', { timeout: 60_000 }, async t => {
+  // The board reads its Off files again once 5 s have passed since the switch, by the clock (`Date.now()`) of its page poll,
+  // which the board's `now` option does not set. The clock stands still for this test, so that read never comes due however
+  // slowly the machine runs: the cached Off this test needs cannot clear before the ask, and the test cannot fail on correct code.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
   const watchFs = (path, listener) => Object.assign(new EventEmitter(), { path, listener, close() {} })
   const board = await startBoard({ isWatched: true, watchFs, drawMs: 15_000, pressMs: 30_000 })
   const page = await openPage(board)
