@@ -408,9 +408,18 @@ test('L5 locked file: the Codex hook keeps a locked Stop event, exits 0, and the
     // Any later run replays what was kept, oldest first, before its own event.
     const next = await hook(world, 'codex', 'UserPromptSubmit', { session_id: 'codex-locked-next-session', prompt: 'Review the synthetic metrics', cwd: world.root })
     assert.equal(next.status, 0, whyFailed(next))
+    // Read the queue before the board: a recovery writes the board entry before unlinking
+    // its pending file (scripts/codex-local.ts replay loop), so an event that is no longer
+    // queued has already landed. Reading the board first could miss both if the transfer
+    // lands between the two reads (#1747 round 1).
+    const kept = keptHookEvents(world)
     const after = world.read('progress.md')
     assert.match(after, new RegExp(`state=waiting [^>]*resume=${session} `), 'the Stop event landed')
-    assert.equal(occurrences(after, 'resume=codex-locked-next-session '), 1, 'the next run wrote its own event too')
+    // On a slow runner the next run spends its 3 s budget replaying the kept Stop event first,
+    // so its own event stays in the pending queue instead of landing at once (#1738). Either way
+    // it is not lost: it is written now, or kept for the next run, which is the hook's own
+    // contract — the kept event lands on a later run, as the Stop event just did.
+    assert.ok(occurrences(after, 'resume=codex-locked-next-session ') === 1 || kept.includes('codex-locked-next-session'), `the next run wrote its own event or kept it for a later run (kept: ${kept.join(', ') || 'none'})`)
   } finally { await world.close() }
 })
 
