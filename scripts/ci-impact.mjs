@@ -162,7 +162,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // Grew with #1302's two upgrade tests: 57.6 s on Windows Node 24 with the same two journeys on #1328 (run 43181075103).
   // Re-derived by the same rule (#1715): up to 80.6 s on Windows Node 24 on #1709, which changes these tests; 65.9 s on
   // Node 24 and 83.8 s on Node 22 on main after #1686 (run 44523734737).
-  'tests/host-upgrade.test.mjs': 150_000, // slowest 80.6 s
+  // Grew with #1730's three Windows tests that start setup from a copied Node: 109.1 s on Windows Node 24 (run
+  // 44681768984), over the 105 s line of 150 s. By the rule of #1715: 109.1 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/host-upgrade.test.mjs': 205_000, // slowest 109.1 s
   // Re-derived by the same rule (#1715): 60.6-73.4 s on Windows Node 24 on #1709, which adds terminal setup tests here.
   'tests/setup-terminal.test.mjs': 140_000, // slowest 73.4 s
   // Over the 42 s line (70%) of the 60 s default: up to 47.1 s on Windows Node 24 on #1709, which does not touch it, and
@@ -176,6 +178,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/opencode-receiver.test.mjs': 85_000, // one part's share, about 44 s
   // New with #1438 (merge-check runs git in temporary repositories): 46.1 and 46.4 s on Windows Node 24 (#1464).
   'tests/merge-check.test.mjs': 90_000, // slowest 46.4 s
+  // Grew with #1680's eleven removal re-read tests: up to 49.0 s on Windows Node 24 (run 44650276536), over the 42 s
+  // line of the 60 s default. By the rule of #1715: 49 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/setup-sidecar.test.mjs': 95_000, // slowest 49.0 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
@@ -419,16 +424,28 @@ export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
 export const testArgs = (files, { isSerial = false, isWindows = false } = {}) => ['--test', ...(isSerial ? ['--test-concurrency=1'] : isWindows ? ['--test-concurrency=2'] : []), ...files]
 
 // Taking every nth file by its place in the list put all four budgeted files in Windows part 2 of 6, which ran
-// 445-497 s while the other parts ran 145-250 s (#1059, run 42281474369). So the files go out slowest first, by
-// their budget, each to the part with the least so far; a file with no budget counts as 15 s (the slowest of
-// them, mcp-tools, took 12.6 s on Linux). When every file weighs the same, this is the old every-nth split. Every job works out
-// the same split, so the parts together still run each file once.
-// A file with no budget that runs far longer than 15 s weighs its slowest Windows time instead, rounded up to five
+// 445-497 s while the other parts ran 145-250 s (#1059, run 42281474369). So the files go out slowest first, each
+// to the part with the least so far. When every file weighs the same, this is the old every-nth split. Every job works
+// out the same split, so the parts together still run each file once.
+// A file weighs about its slowest Windows time (#1733): a budget is that time x 1.3 / 0.7 (above), so the weight is the
+// budget x 0.7 / 1.3, and a file with no budget weighs 5 s (on main 5419f63b half of them took under 2 s on Windows
+// Node 24, 4.2 s on average). Weighed by their budgets, the slow files counted about 1.9 times their time and the rest
+// 15 s each, so the split did not follow the times.
+// A file with no budget that runs far longer than that weighs its slowest Windows time instead, rounded up to five
 // seconds. l3c took 294.4 s in the Node 22 journeys part 2/2 that main's run 44601640119 cancelled at ten minutes
 // (#1722), and 289.1 s of a 529 s part 2/2 on main 7685f8ed (run 44615703631), where no other journey in that part
 // took more than 61.3 s. At this weight it gets a part to itself.
 const PART_WEIGHTS_MS = Object.freeze({ 'tests/e2e/l3c-message-store-ownership.test.mjs': 295_000 })
-const partWeight = path => BOARD_FILE_BUDGETS_MS[path] ?? PART_WEIGHTS_MS[path] ?? 15_000
+const partWeight = path => BOARD_FILE_BUDGETS_MS[path] !== undefined ? Math.round(BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3) : PART_WEIGHTS_MS[path] ?? 5_000
+
+// Every Windows board part also runs its share of the self-parted board files, and the shares are not equal: partTest
+// deals tests by their place in the file, not by time. Over eleven Windows Node 24 runs since 850ff067 (main 44635858111,
+// 44642014114, 44651103054 and pull request runs), codex-local, board and opencode-receiver together took on average
+// 263, 220, 257, 215, 232, 223 and 253 s in parts 1 to 7. The split starts each part from its share, so the other files
+// fill the lighter parts first. Starting every part from zero put legacy-connect, the slowest of them, in part 1, the part
+// with the largest share, and part 1 ran 383-520 s of its 480 s, against 302-357 s on average for parts 4 to 6 (#1733). Measure the
+// shares again when one of these files gains or loses many tests.
+export const BOARD_SELF_PARTED_SHARES_MS = Object.freeze({ 7: Object.freeze([263_000, 220_000, 257_000, 215_000, 232_000, 223_000, 253_000]) })
 
 // The Node run of one part: its share of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
@@ -436,7 +453,8 @@ export const partFiles = (files, part = '') => {
   const { index, total } = parsePart(part)
   if (total === 1) return [...files]
   const rest = files.filter(path => !selfPartedTests.includes(path))
-  const loads = Array(total).fill(0)
+  const shares = files.includes('tests/codex-local.test.mjs') ? BOARD_SELF_PARTED_SHARES_MS[total] : undefined
+  const loads = shares ? [...shares] : Array(total).fill(0)
   const mine = new Set()
   for (const path of [...rest].sort((a, b) => partWeight(b) - partWeight(a))) {
     const lightest = loads.indexOf(Math.min(...loads))

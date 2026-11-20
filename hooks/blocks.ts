@@ -14,7 +14,7 @@ import { sha256 } from './sha256'
 import { isOutranked, pickParent } from './runs'
 import { cutLine, oneLine, plain } from './step-words'
 import { isSilenceTask, isWorkingTask } from './grouping'
-import { isStopped, observedTime } from './parse'
+import { isMaybeClosed, isStopped, observedTime } from './parse'
 import type { JournalEntry } from './journal'
 
 // Each session's mod owns one block of the file, between its own markers, and rewrites
@@ -731,7 +731,10 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       // The quiet-time path needs a readable time: unknown age never archives (#1000).
       // A session whose agent process is gone has certainly stopped, so its archive
       // goes through even when the silence check would keep the row for review (#1092).
-      const stopped = isTwin || isStopped(auto, now, updated, staleMs, gone) || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
+      // A Codex card that says the window may be closed offers Archive (#1092): the person's press
+      // is the decision, and the question is kept as for any archive.
+      const isMaybe = task !== undefined && isMaybeClosed(auto, task.steps, now, updated, auto === null ? false : observedTime(auto, now, observations).isFuture)
+      const stopped = isTwin || isStopped(auto, now, updated, staleMs, gone) || isMaybe || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
       if (auto === null || !stopped) return null
     }
 

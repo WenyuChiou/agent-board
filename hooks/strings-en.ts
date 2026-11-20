@@ -287,6 +287,8 @@ export const EN: Strings = {
   sessionStopped: (when: string): string => `session stopped, last active ${when}`,
   // A row quiet past 30 min with no live process: unsure, with its age (#1317).
   rowUnsure: (when: string): string => `unsure, last active ${when}`,
+  // A Codex card with no process record, quiet past two minutes (#1092): never says the window closed.
+  windowMayBeClosed: 'The window may be closed.',
   sessionEnded: 'session ended, can be taken over',
   uncategorized: '(uncategorized)',
   unnamed: '(unnamed)',
@@ -936,7 +938,7 @@ export const EN: Strings = {
   serveQueuingNextOpen: (agent: string): string => `Queuing for when ${agent} reopens this chat…`,
   serveQueuedNextOpen: (agent: string): string => `Queued · ${agent} reads this when it next opens this chat.`,
   serveLineNow: (agent: string): string => `${agent} is waiting. It starts on this right away.`,
-  serveLineSoon: (agent: string): string => `${agent} is waiting. It starts on this once the board has seen your Codex open on this thread for about 10 minutes, or longer if your Codex config keeps threads loaded longer. Until then it stays queued here.`,
+  serveLineSoon: (agent: string): string => `${agent} is waiting. It starts on this once the board has seen your Codex open on this thread for about 10 minutes, or longer if your Codex config keeps threads loaded longer. Until then it stays queued here. If you start a turn in Codex just as it goes in, it may join your turn.`,
   serveLineNowWorking: (agent: string): string => `${agent} is working. This goes into the turn in progress right away.`,
   serveLineStepEnd: (agent: string): string => `${agent} is working. It gets this when this step ends.`,
   serveLineReopen: (agent: string): string => `Sending runs the turn in the background; open ${agent}'s window to see it there.`,

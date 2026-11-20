@@ -287,6 +287,8 @@ export const ZH_CN: Strings = {
   sessionStopped: (when: string): string => `对话已停，${when}没动静`,
   // A row quiet past 30 min with no live process: unsure, with its age (#1317).
   rowUnsure: (when: string): string => `不确定，${when}没动静`,
+  // A Codex card with no process record, quiet past two minutes (#1092): never says the window closed.
+  windowMayBeClosed: '窗口可能已经关了。',
   sessionEnded: '对话已结束，可接手',
   uncategorized: '（未分类）',
   unnamed: '（未命名）',
@@ -929,7 +931,7 @@ export const ZH_CN: Strings = {
   serveQueuingNextOpen: (agent: string): string => `正在排入 ${agent} 下次打开此会话时…`,
   serveQueuedNextOpen: (agent: string): string => `已排入 · ${agent} 会在下次打开此会话时读到这条消息。`,
   serveLineNow: (agent: string): string => `${agent} 正在等，会马上收到。`,
-  serveLineSoon: (agent: string): string => `${agent} 正在等。看板要先看到你的 Codex 开着这个对话约 10 分钟才会发出；若你的 Codex 配置让对话保留更久，会再晚一点。在那之前，这条消息会留在看板排队。`,
+  serveLineSoon: (agent: string): string => `${agent} 正在等。看板要先看到你的 Codex 开着这个对话约 10 分钟才会发出；若你的 Codex 配置让对话保留更久，会再晚一点。在那之前，这条消息会留在看板排队。如果它发出的同时你在 Codex 里开始了一轮，它可能会并进你这一轮。`,
   serveLineNowWorking: (agent: string): string => `${agent} 正在工作，这条会马上加进当前这一轮。`,
   serveLineStepEnd: (agent: string): string => `${agent} 正在工作，这一步结束后会收到。`,
   serveLineReopen: (agent: string): string => `发送会在后台执行这一轮；打开 ${agent} 窗口就能看到。`,

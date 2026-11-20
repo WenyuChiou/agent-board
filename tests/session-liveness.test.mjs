@@ -106,14 +106,30 @@ test('a session whose host hash differs from the reading machine is never in gon
   assert.deepEqual([...goneBlocksOf(parseProgress(text))], [])
 })
 
-test('a non-Claude session is never in goneBlocksOf, even when its block carries pid fields', async () => {
+test('an agent that names no process of its own is never in goneBlocksOf, even when its block carries pid fields', async () => {
   const { parseProgress } = await import('../hooks/parse.ts')
   const { goneBlocksOf } = await import('../scripts/session-liveness.ts')
   const { readingHostHash } = await import('../scripts/session-liveness.ts')
   const host = readingHostHash()
   const pid = deadPid()
-  const text = file(block('b8c9d0e1', 'codex', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid, started: aliveStarted, host }))
+  const text = file(block('b8c9d0e1', 'grok', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid, started: aliveStarted, host }))
   assert.deepEqual([...goneBlocksOf(parseProgress(text))], [])
+})
+
+test('a Codex session with a process record is judged like Claude Code: a dead process is gone, a live one stays (#1092)', async () => {
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { blockKey } = await import('../hooks/session-liveness.ts')
+  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const host = readingHostHash()
+  const pid = deadPid()
+  // Same short id as an OpenCode block: only the Codex block whose process is dead is gone.
+  const text = file(
+    block('b8c9d0e1', 'codex', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid, started: aliveStarted, host }),
+    block('c9d0e1f2', 'codex', 'waiting', '- [?] Continue with the synthetic plan, OK?', { pid: alivePid, started: aliveStarted, host }),
+    block('b8c9d0e1', 'opencode', 'waiting', '- [?] Keep the synthetic notes, OK?', { pid: alivePid, started: aliveStarted, host }),
+  )
+  const projects = parseProgress(text)
+  assert.deepEqual([...goneBlocksOf(projects, host, new Map())], [blockKey(projects[0].tasks[0].auto)])
 })
 
 test('a dead pid deletes its cached ClaimStart, so a later session reusing the pid is looked up again', async () => {
