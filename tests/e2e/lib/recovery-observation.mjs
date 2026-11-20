@@ -19,14 +19,16 @@ const stateOf = (read, sessions) => {
 
 const sameState = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
-export const observeHookRecovery = async ({ read, sessions, withinMs = 10000, pollMs = 40 }) => {
-  const started = performance.now()
+export const observeHookRecovery = async ({ read, sessions, withinMs = 10000, pollMs = 40, clock }) => {
+  const now = clock?.now ?? (() => performance.now())
+  const sleep = clock?.sleep ?? (ms => new Promise(done => setTimeout(done, ms)))
+  const started = now()
   const snapshots = []
   let previous
 
   while (true) {
     const state = stateOf(read, sessions)
-    const elapsedMs = performance.now() - started
+    const elapsedMs = now() - started
     const diagnostic = { counts: state.counts, pending: state.pending, files: state.files }
     if (previous === undefined || !sameState(diagnostic, previous)) {
       snapshots.push({ elapsedMs, ...diagnostic })
@@ -43,6 +45,6 @@ export const observeHookRecovery = async ({ read, sessions, withinMs = 10000, po
       return { ...state, snapshots, isSettled: false, hasTimedOut: true }
     }
 
-    await new Promise(done => setTimeout(done, Math.max(0, Math.min(pollMs, withinMs - elapsedMs))))
+    await sleep(Math.max(0, Math.min(pollMs, withinMs - elapsedMs)))
   }
 }
