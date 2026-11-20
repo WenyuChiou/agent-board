@@ -304,12 +304,16 @@ test('a Hermes config that cannot be changed keeps the worker and board script u
 }))
 
 // Connected at A, then a move to B that cannot write Hermes' config (#1664 review): Hermes still
-// runs A's hooks, so the next connect or remove must still count them as ours.
+// runs A's hooks, so the next connect or remove must still count them as ours. The person's own
+// hooks are #1202's: one with the board's hook file name, one without.
 const failedHermesMove = fn => fixture(async f => {
   mkdirSync(join(f.home, '.hermes'))
   const config = join(f.home, '.hermes', 'config.yaml')
-  const foreign = '    - {command: "node ./tools/keep-this.mjs", timeout: 5}'
-  writeFileSync(config, `model: synthetic\nhooks:\n  on_session_start:\n${foreign}\n`)
+  const foreign = [
+    '    - {command: "node ./tools/progress-hook.mjs --hook-version 1 --hook-event post_tool_call --plan-event --agent hermes --progress-file ./synthetic-progress.md", matcher: external, timeout: 5}',
+    '    - {command: "node ./tools/keep-this.mjs", timeout: 5}',
+  ]
+  writeFileSync(config, `model: synthetic\nhooks:\n  post_tool_call:\n${foreign[0]}\n  on_session_start:\n${foreign[1]}\n`)
   f.run(f.request('connect'))
   const atA = readFileSync(config, 'utf8')
   const count = (text, folder) => text.split(folder).length - 1
@@ -339,7 +343,7 @@ test('a retry after a failed Hermes move replaces the old hooks instead of addin
   const after = readFileSync(config, 'utf8')
   assert.equal(count(after, 'data-a'), 0, 'no hook names the old data folder')
   assert.equal(count(after, 'data-b'), count(atA, 'data-a'), 'one set of hooks names the new data folder')
-  assert.ok(after.includes(foreign), 'the foreign hook stays')
+  for (const line of foreign) assert.ok(after.includes(line), `the person's hook stays: ${line}`)
   assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).hermesProgress, undefined)
 }))
 
@@ -348,7 +352,7 @@ test('a removal after a failed Hermes move takes out the old hooks and keeps the
   const after = readFileSync(config, 'utf8')
   assert.equal(count(after, 'data-a'), 0, 'no hook names the old data folder')
   assert.equal(count(after, 'data-b'), 0, 'no hook names the new data folder')
-  assert.ok(after.includes(foreign), 'the foreign hook stays')
+  for (const line of foreign) assert.ok(after.includes(line), `the person's hook stays: ${line}`)
   assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).hermesProgress, undefined)
 }))
 
