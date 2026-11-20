@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -252,4 +253,355 @@ test('source-scan pins every buildView, views.view, takeTask and confirmTask cal
   assert.match(boardCli, /confirmTask\(text, action\.ref, now, s, lastSeen, staleTimeoutMs\(\), gone\)/)
   assert.match(boardCli, /takeTask\(text, action\.ref, now, s, lastSeen, staleTimeoutMs\(\), gone\)/)
   assert.match(boardCli, /takeTask\(text, fresh\.ref, now, s, \{\}, staleMs, gone\)/)
+})
+
+// #1589 Test 1: Stop extracts closing question after tool-call PLANNER_RESPONSE entries without content.
+test('Antigravity Stop extracts the closing question after tool-call PLANNER_RESPONSE entries without content (#1589)', async () => {
+  const { BOARD_SCRIPT } = await import('../hooks/board-script.ts')
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { buildView } = await import('../hooks/view.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  const home = mkdtempSync(join(tmpdir(), 'ab-1589-q-'))
+  try {
+    const root = join(home, '.agent-board')
+    const progress = join(root, 'progress.md')
+    const script = join(root, 'agent-board.mjs')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(progress, '')
+    writeFileSync(script, BOARD_SCRIPT)
+    const transcript = join(home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-conv-q', '.system_generated', 'logs', 'transcript_full.jsonl')
+    mkdirSync(dirname(transcript), { recursive: true })
+    const entries = [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'Synthetic ask\nPRIVATE-PROMPT-LINE' },
+      { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', tool_calls: [{ id: '1', name: 'ask_question' }] },
+      { step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'User did not answer via tool.' },
+      { step_index: 3, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'SYNTHETIC-REPLY-BODY\n\nBlue or green?' },
+    ]
+    writeFileSync(transcript, entries.map(entry => JSON.stringify(entry)).join('\n') + '\n')
+    const env = { ...process.env, HOME: home, USERPROFILE: home, LANG: 'en', CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
+    const ran = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'waiting', '--event', 'Stop'], {
+      cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+      input: JSON.stringify({ conversationId: 'synthetic-agy-tool-question', transcriptPath: transcript }),
+    })
+    assert.equal(ran.status, 0, ran.stderr)
+    const progressText = readFileSync(progress, 'utf8')
+    assert.match(progressText, /- \[\?\] Blue or green\?/)
+    assert.equal(progressText.includes('PRIVATE-PROMPT-LINE'), false)
+    assert.equal(progressText.includes('SYNTHETIC-REPLY-BODY'), false)
+    const view = buildView(parseProgress(progressText), [], null, Date.now(), 0, {}, EN)
+    assert.deepEqual(view.waiting.map(item => item.text), ['Blue or green?'])
+    assert.deepEqual(view.waiting[0].options, ['Blue', 'green'])
+    assert.equal(view.groups.flatMap(group => group.rows).filter(row => row.auto === 'working').length, 0)
+
+    // Non-string object content on PLANNER_RESPONSE remains rejected as malformed.
+    const badTranscript = join(home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-conv-bad', '.system_generated', 'logs', 'transcript.jsonl')
+    mkdirSync(dirname(badTranscript), { recursive: true })
+    writeFileSync(badTranscript, [
+      { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Synthetic bad' },
+      { source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Old question?' },
+      { source: 'MODEL', type: 'PLANNER_RESPONSE', content: { text: 'Invalid reply shape' } },
+    ].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+    const badRan = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'waiting', '--event', 'Stop'], {
+      cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+      input: JSON.stringify({ conversationId: 'synthetic-agy-bad-reply-1589', transcriptPath: badTranscript }),
+    })
+    assert.equal(badRan.status, 0, badRan.stderr)
+    const badRecord = JSON.parse(readFileSync(join(root, 'sessions', createHash('sha256').update('antigravity:synthetic-agy-bad-reply-1589').digest('hex') + '.json'), 'utf8'))
+    assert.equal(badRecord.asked, undefined)
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// #1589 Test 2: Windows Antigravity CLI working row ends when presence lock is unlocked, stays live while locked/missing or foreign-host.
+test('Windows Antigravity CLI working row ends when its presence lock is unlocked and stays live while locked or missing (#1589)', async () => {
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { isWorkingTask } = await import('../hooks/grouping.ts')
+  const { takeTask } = await import('../hooks/blocks.ts')
+  const { blockKey } = await import('../hooks/session-liveness.ts')
+  const { deriveRowState, livenessOf } = await import('../hooks/row-state.ts')
+  const { buildView } = await import('../hooks/view.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  const { sha256 } = await import('../hooks/sha256.ts')
+  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const home = mkdtempSync(join(tmpdir(), 'ab-1589-win-'))
+  try {
+    const host = readingHostHash()
+    assert.notEqual(host, null)
+    const otherHost = sha256('win32:another-host')
+    const resume = '11111111-2222-4333-8444-555555555555'
+    const text = file(`<!-- auto session=a1b2c3d4 agent=antigravity state=working updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${resume} -->\n### Ship a1b2c3d4\n- [~] Working in progress\n<!-- /auto session=a1b2c3d4 -->\n`)
+    const projects = parseProgress(text)
+    const auto = projects[0].tasks[0].auto
+    const noopLookup = () => new Map()
+    assert.equal(isWorkingTask(projects[0].tasks[0].steps, auto.updated, NOW), true)
+
+    for (const state of ['locked', 'missing']) {
+      const gone = goneBlocksOf(projects, host, new Map(), 2000, noopLookup, { home, platform: 'win32', presenceProbe: () => state })
+      assert.deepEqual([...gone], [], `${state} lock keeps working row alive`)
+      assert.equal(livenessOf(auto, gone), 'unknown')
+      const view = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, gone)
+      assert.equal(view.groups.flatMap(g => g.rows).find(r => r.title === 'Ship a1b2c3d4')?.auto, 'working')
+      assert.equal(view.stopped.length, 0)
+    }
+
+    const foreignText = file(`<!-- auto session=a1b2c3d4 agent=antigravity state=working updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${resume} host=${otherHost} -->\n### Ship a1b2c3d4\n- [~] Working in progress\n<!-- /auto session=a1b2c3d4 -->\n`)
+    const foreignGone = goneBlocksOf(parseProgress(foreignText), host, new Map(), 2000, noopLookup, { home, platform: 'win32', presenceProbe: () => 'unlocked' })
+    assert.deepEqual([...foreignGone], [])
+
+    const probedPaths = []
+    const gone = goneBlocksOf(projects, host, new Map(), 2000, noopLookup, {
+      home,
+      platform: 'win32',
+      presenceProbe: (lockPath) => { probedPaths.push(lockPath); return 'unlocked' },
+    })
+    assert.deepEqual(probedPaths, [join(home, '.gemini', 'antigravity-cli', 'presence', `${resume}.lock`)])
+    assert.deepEqual([...gone], [blockKey(auto)])
+    assert.equal(livenessOf(auto, gone), 'dead')
+    assert.equal(deriveRowState({ auto, steps: projects[0].tasks[0].steps, mirror: null, events: { hasSessionEnd: false, lastEventAt: NOW - 5 * 60_000, host: 'antigravity' }, liveness: livenessOf(auto, gone), now: NOW, hasOpenAsk: false }), 'ended')
+    const view = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, gone)
+    const stoppedRow = view.stopped.find(r => r.title === 'Ship a1b2c3d4')
+    assert.ok(stoppedRow, 'unlocked lock moves working row to stopped')
+    assert.equal(stoppedRow.auto, 'ended')
+    assert.equal(stoppedRow.isProcessGone, true)
+    assert.notEqual(stoppedRow.archive, null)
+    assert.equal(takeTask(text, stoppedRow.archive, NOW, EN, {}, undefined, new Set()), null)
+    const archived = takeTask(text, stoppedRow.archive, NOW, EN, {}, undefined, gone)
+    assert.notEqual(archived, null)
+    assert.equal(archived.text.includes('Ship a1b2c3d4'), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// #1589 Test 3: Exited agy run ends a question-free waiting row while keeping a closing question card in Needs you.
+test('exited Antigravity CLI run ends a question-free waiting row while keeping a closing question card in Needs you (#1589)', async () => {
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { blockKey } = await import('../hooks/session-liveness.ts')
+  const { buildView } = await import('../hooks/view.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const home = mkdtempSync(join(tmpdir(), 'ab-1589-wait-'))
+  try {
+    const host = readingHostHash()
+    const dead = deadPid()
+    const plainResume = '22222222-3333-4444-8555-666666666666'
+    const askResume = '33333333-4444-4555-8666-777777777777'
+
+    // Windows presence-lock mode
+    const winText = file(
+      `<!-- auto session=a1b2c3d4 agent=antigravity state=waiting updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${plainResume} -->\n### Ship plain\n- [ ] Waiting for the next instruction\n<!-- /auto session=a1b2c3d4 -->\n`,
+      `<!-- auto session=b2c3d4e5 agent=antigravity state=waiting updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${askResume} -->\n### Ship question\n- [?] Blue or green?\n<!-- /auto session=b2c3d4e5 -->\n`,
+    )
+    const winProjects = parseProgress(winText)
+    const winGone = goneBlocksOf(winProjects, host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })
+    assert.deepEqual([...winGone], [blockKey(winProjects[0].tasks[0].auto)])
+    const winView = buildView(winProjects, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, winGone)
+    assert.deepEqual(winView.waiting.map(item => item.text), ['Blue or green?'])
+    assert.equal(winView.stopped.find(row => row.title === 'Ship plain')?.auto, 'ended')
+    assert.equal(winView.groups.flatMap(g => g.rows).filter(row => row.auto === 'working').length, 0)
+
+    // Linux dead-PID claim mode
+    const linuxText = file(
+      block('c3d4e5f6', 'antigravity', 'waiting', '- [ ] Waiting for the next instruction', { pid: dead, started: aliveStarted, host }, 5, plainResume),
+      block('d4e5f6a7', 'antigravity', 'waiting', '- [?] Blue or green?', { pid: dead, started: aliveStarted, host }, 5, askResume),
+    )
+    const linuxProjects = parseProgress(linuxText)
+    const linuxGone = goneBlocksOf(linuxProjects, host, new Map(), 2000, () => new Map(), { platform: 'linux' })
+    assert.deepEqual([...linuxGone], [blockKey(linuxProjects[0].tasks[0].auto)])
+    const linuxView = buildView(linuxProjects, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, linuxGone)
+    assert.deepEqual(linuxView.waiting.map(item => item.text), ['Blue or green?'])
+    assert.equal(linuxView.stopped.find(row => row.title === 'Ship c3d4e5f6')?.auto, 'ended')
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// #1589 Test 4: Linux /proc parent walk finds agy without spawning and stops on shared daemons or non-agy executables.
+test('findAgyProcess finds an agy parent without spawning and stops on shared daemons or non-agy executables (#1589)', async () => {
+  const { parseLinuxProcStat, findAgyProcess } = await import('../scripts/antigravity-meta.ts')
+
+  const parsed = parseLinuxProcStat('123 (my (proc) 1) S 45 67 89 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 987654 12345')
+  assert.deepEqual(parsed, { ppid: 45, startTicks: 987654 })
+  assert.equal(parseLinuxProcStat('broken line'), null)
+
+  const readerFrom = (table) => (pid) => table[pid] ?? null
+  assert.deepEqual(findAgyProcess(200, readerFrom({
+    200: { ppid: 150, startTicks: 20, comm: 'sh', exe: '/bin/sh' },
+    150: { ppid: 1, startTicks: 10, comm: 'agy', exe: '/usr/local/bin/agy' },
+  })), { pid: 150, startTicks: 10 })
+
+  assert.deepEqual(findAgyProcess(200, readerFrom({
+    200: { ppid: 150, startTicks: 20, comm: 'sh', exe: '/bin/sh' },
+    150: { ppid: 1, startTicks: 11, comm: 'agy', exe: '/usr/local/bin/agy (deleted)' },
+  })), { pid: 150, startTicks: 11 })
+
+  // Shared daemon stops the walk even if an agy ancestor sits above it.
+  assert.equal(findAgyProcess(300, readerFrom({
+    300: { ppid: 200, startTicks: 30, comm: 'sh', exe: '/bin/sh' },
+    200: { ppid: 100, startTicks: 20, comm: 'language_server_linux_x64', exe: '/opt/antigravity/language_server_linux_x64' },
+    100: { ppid: 1, startTicks: 10, comm: 'agy', exe: '/usr/local/bin/agy' },
+  })), null)
+
+  assert.equal(findAgyProcess(200, readerFrom({
+    200: { ppid: 100, startTicks: 20, comm: 'antigravity', exe: '/usr/bin/antigravity' },
+  })), null)
+
+  // Node script whose comm was spoofed to 'agy' is rejected by exe basename.
+  assert.equal(findAgyProcess(200, readerFrom({
+    200: { ppid: 100, startTicks: 20, comm: 'sh', exe: '/bin/sh' },
+    100: { ppid: 1, startTicks: 10, comm: 'agy', exe: '/usr/bin/node', cmdline: ['/usr/bin/node', '/tmp/agy'] },
+  })), null)
+
+  // Cycle, pid 1, unreadable entry, and chain > 16 steps all return null safely.
+  assert.equal(findAgyProcess(10, readerFrom({
+    10: { ppid: 11, startTicks: 1, comm: 'sh', exe: '/bin/sh' },
+    11: { ppid: 10, startTicks: 2, comm: 'bash', exe: '/bin/bash' },
+  })), null)
+  assert.equal(findAgyProcess(1, readerFrom({ 1: { ppid: 0, startTicks: 1, comm: 'agy', exe: '/usr/bin/agy' } })), null)
+  assert.equal(findAgyProcess(200, readerFrom({ 200: { ppid: 199, startTicks: 1, comm: 'sh', exe: '/bin/sh' } })), null)
+  const deep = { 1: { ppid: 0, startTicks: 1, comm: 'agy', exe: '/usr/bin/agy' } }
+  for (let p = 2; p <= 20; p += 1) deep[p] = { ppid: p - 1, startTicks: p, comm: 'sh', exe: '/bin/sh' }
+  deep[2].comm = 'agy'
+  deep[2].exe = '/usr/bin/agy'
+  assert.equal(findAgyProcess(20, readerFrom(deep)), null)
+})
+
+// #1589 Test 5: probeAntigravityPresenceLock safety and Antigravity claim persistence vs Desktop App clearing.
+test('probeAntigravityPresenceLock handles missing, directory and unlocked files safely, and antigravity claims persist and clear on desktop events (#1589)', async () => {
+  const { BOARD_SCRIPT } = await import('../hooks/board-script.ts')
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { blockClaimOf, putCodexBlock } = await import('../hooks/codex.ts')
+  const { agentClaimOf } = await import('../hooks/session-liveness.ts')
+  const { probeAntigravityPresenceLock, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const home = mkdtempSync(join(tmpdir(), 'ab-1589-claim-'))
+  try {
+    const dirLock = join(home, 'dir.lock')
+    mkdirSync(dirLock, { recursive: true })
+    assert.equal(probeAntigravityPresenceLock(join(home, 'nonexistent.lock')), 'missing')
+    assert.equal(probeAntigravityPresenceLock(dirLock), 'missing')
+    const emptyLock = join(home, 'empty.lock')
+    writeFileSync(emptyLock, '')
+    assert.equal(probeAntigravityPresenceLock(emptyLock), 'unlocked')
+    assert.equal(readFileSync(emptyLock, 'utf8'), '')
+
+    const host = readingHostHash()
+    assert.notEqual(host, null)
+    const session = 'synthetic-agy-claim-1589'
+    const owner = createHash('sha256').update(`antigravity:${session}`).digest('hex')
+    const claimedMd = putCodexBlock('', {
+      session,
+      agent: 'antigravity',
+      project: 'antigravity',
+      title: 'Local Antigravity task',
+      state: 'working',
+      updated: new Date(NOW).toISOString(),
+      steps: ['- [~] Working in progress'],
+    }, owner, false, undefined, v => v, { pid: alivePid, started: aliveStarted, host })
+    assert.deepEqual(blockClaimOf(claimedMd, owner, 'antigravity', session), { pid: alivePid, started: aliveStarted, host })
+    assert.deepEqual(agentClaimOf(parseProgress(claimedMd)[0].tasks[0].auto), { pid: alivePid, started: aliveStarted, host })
+
+    const root = join(home, '.agent-board')
+    const progress = join(root, 'progress.md')
+    const script = join(root, 'agent-board.mjs')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(progress, claimedMd)
+    writeFileSync(script, BOARD_SCRIPT)
+    const desktopTranscript = join(home, '.gemini', 'antigravity', 'brain', session, '.system_generated', 'logs', 'transcript.jsonl')
+    mkdirSync(dirname(desktopTranscript), { recursive: true })
+    writeFileSync(desktopTranscript, JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Desktop resume' }) + '\n')
+    const env = { ...process.env, HOME: home, USERPROFILE: home, LANG: 'en', CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
+
+    // Non-deadline replay preserves the existing claim.
+    const replay = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'working', '--event', 'PreInvocation'], {
+      cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+      input: JSON.stringify({ conversationId: session, transcriptPath: desktopTranscript }),
+    })
+    assert.equal(replay.status, 0, replay.stderr)
+    assert.deepEqual(blockClaimOf(readFileSync(progress, 'utf8'), owner, 'antigravity', session), { pid: alivePid, started: aliveStarted, host })
+
+    // Live Desktop App PreInvocation (--hook-deadline set) clears the older CLI PID claim.
+    const liveDesktop = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'working', '--event', 'PreInvocation', '--hook-deadline', String(Date.now() + 30_000)], {
+      cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+      input: JSON.stringify({ conversationId: session, transcriptPath: desktopTranscript }),
+    })
+    assert.equal(liveDesktop.status, 0, liveDesktop.stderr)
+    assert.equal(blockClaimOf(readFileSync(progress, 'utf8'), owner, 'antigravity', session), null)
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// #1589 Test 6: End-to-end board-cli --json shows the question card and ends an exited working agy -p row.
+test('board-cli --json shows the agy -p question card and ends an exited working agy -p row end-to-end (#1589)', async () => {
+  const { BOARD_SCRIPT } = await import('../hooks/board-script.ts')
+  const { readingHostHash } = await import('../scripts/session-liveness.ts')
+  const home = mkdtempSync(join(tmpdir(), 'ab-1589-e2e-'))
+  try {
+    const host = readingHostHash()
+    assert.notEqual(host, null)
+    const root = join(home, '.agent-board')
+    const progress = join(root, 'progress.md')
+    const script = join(root, 'agent-board.mjs')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(script, BOARD_SCRIPT)
+
+    const deniedId = 'synthetic-agy-1589-denied'
+    const deniedOwner = createHash('sha256').update(`antigravity:${deniedId}`).digest('hex')
+    const recentIso = new Date(Date.now() - 60_000).toISOString()
+    let seed = ''
+    if (process.platform === 'win32') {
+      const presDir = join(home, '.gemini', 'antigravity-cli', 'presence')
+      mkdirSync(presDir, { recursive: true })
+      writeFileSync(join(presDir, `${deniedId}.lock`), '')
+      seed = `## antigravity\n\n<!-- auto session=${deniedOwner.slice(0, 8)} agent=antigravity source=antigravity-local owner=${deniedOwner} state=working updated=${recentIso} resume=${deniedId} -->\n### Denied agy run\n- [~] Working in progress\n<!-- /auto session=${deniedOwner.slice(0, 8)} -->\n`
+    } else {
+      const dead = deadPid()
+      seed = `## antigravity\n\n<!-- auto session=${deniedOwner.slice(0, 8)} agent=antigravity source=antigravity-local owner=${deniedOwner} state=working updated=${recentIso} resume=${deniedId} agentpid=${dead} agentstarted=${aliveStarted} host=${host} -->\n### Denied agy run\n- [~] Working in progress\n<!-- /auto session=${deniedOwner.slice(0, 8)} -->\n`
+    }
+    writeFileSync(progress, seed)
+
+    const askId = 'synthetic-agy-1589-ask'
+    const transcript = join(home, '.gemini', 'antigravity-cli', 'brain', askId, '.system_generated', 'logs', 'transcript_full.jsonl')
+    mkdirSync(dirname(transcript), { recursive: true })
+    writeFileSync(transcript, [
+      { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Choose a color' },
+      { source: 'MODEL', type: 'PLANNER_RESPONSE', tool_calls: [{ id: 'call_1', name: 'ask_question' }] },
+      { source: 'MODEL', type: 'GENERIC', content: 'Tool skipped' },
+      { source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Blue or green?' },
+    ].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+
+    const env = { ...process.env, HOME: home, USERPROFILE: home, LANG: 'en', CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
+    const stopRes = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'waiting', '--event', 'Stop'], {
+      cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+      input: JSON.stringify({ conversationId: askId, transcriptPath: transcript }),
+    })
+    assert.equal(stopRes.status, 0, stopRes.stderr)
+
+    if (process.platform === 'win32') {
+      const presDir = join(home, '.gemini', 'antigravity-cli', 'presence')
+      mkdirSync(presDir, { recursive: true })
+      writeFileSync(join(presDir, `${askId}.lock`), '')
+    } else {
+      const deadAsk = deadPid()
+      const askOwner = createHash('sha256').update(`antigravity:${askId}`).digest('hex')
+      const current = readFileSync(progress, 'utf8').replace(
+        new RegExp(`owner=${askOwner} state=waiting([^>]*)-->`),
+        `owner=${askOwner} state=waiting$1 agentpid=${deadAsk} agentstarted=${aliveStarted} host=${host} -->`,
+      )
+      writeFileSync(progress, current)
+    }
+
+    const jsonRes = spawnSync(process.execPath, [script, '--json', '--lang', 'en', '--progress-file', progress], {
+      cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+    })
+    assert.equal(jsonRes.status, 0, jsonRes.stderr)
+    const doc = JSON.parse(jsonRes.stdout)
+    assert.ok(doc.needs.some(item => item.kind === 'question' && item.text === 'Blue or green?'), `expected question card in needs: ${jsonRes.stdout}`)
+    assert.equal(doc.counts.working, 0, `expected 0 working rows: ${jsonRes.stdout}`)
+    assert.equal(doc.working.length, 0)
+    assert.equal(doc.stopped.find(row => row.title === 'Denied agy run')?.state, 'ended')
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
 })
