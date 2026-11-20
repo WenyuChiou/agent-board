@@ -4741,10 +4741,11 @@ test('a Codex receiver joins a thread only to deliver, and leaves it once the tu
     writeFileSync(ackFlag, '')
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
     await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
-    // Up to its leave: the receiver goes on reading the thread's status on later board polls, so the log can grow past it.
+    // Up to its leave: the receiver goes on reading the thread's status on later board polls, so the log can grow past it. It
+    // reads the thread before it says starting and again after the board's answer, so turn/start follows a fresh read (#1370).
     const methods = codexMethods(daemon).filter(method => /^(thread\/(resume|read|unsubscribe)|turn\/start)$/.test(method))
     const joined = methods.indexOf('thread/resume')
-    assert.deepEqual(methods.slice(joined, methods.indexOf('thread/unsubscribe', joined) + 1), ['thread/resume', 'thread/read', 'turn/start', 'thread/unsubscribe'])
+    assert.deepEqual(methods.slice(joined, methods.indexOf('thread/unsubscribe', joined) + 1), ['thread/resume', 'thread/read', 'thread/read', 'turn/start', 'thread/unsubscribe'])
   } finally { await receiver.close() }
 }))
 
