@@ -51,8 +51,8 @@ jobs:
       # about 1.35x and failed the tightest timing budgets in turn (#910). The board set takes about
       # 21 minutes there one file at a time, and Windows runners vary 1.5-1.9x between jobs of one
       # commit, so six parts kept each file and part under its time budget (#1059); the journeys
-      # take about 7, so two, and three since part 2/2 ran up to 545 s, 289 s of it in
-      # l3c-message-store-ownership, which now has a part to itself (#1722). The board set is in seven parts since part 5 of six ran 479.7-489.5 s
+      # take about 7, so two, and three since part 2/2 ran up to 545 s and was once cancelled at ten
+      # minutes; l3c-message-store-ownership took up to 294.4 s of such a part and now has one to itself (#1722). The board set is in seven parts since part 5 of six ran 479.7-489.5 s
       # of its 480 s with every test passing, on pull requests and on main's own push (#1718). Ubuntu runs files side by side, but Node runs one file's tests one
       # after another, so one Ubuntu part ran about as long as codex-local alone: 449.9 s of that
       # file in a 498.5 s run on main 11eabfae, over the 480 s part budget. In two parts each runs
