@@ -3698,7 +3698,7 @@ test('with explicit legacy opt-in the page offers a send only into a Grok or Cod
   const row = (title: string) => [...model.groups.flatMap(group => group.rows), ...model.stopped].find(one => one.title === title)
   expect(row('Pick the cache')).toMatchObject({ send: 'send', where: '/w/api-gateway', info: '', isSending: false })
   const codex = model.asks.find(ask => ask.agent === 'codex')
-  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('Codex'), where: '' })
+  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveCodexCopyHint, where: '' })
   expect(codex?.answers.length).toBeGreaterThan(0)
   // A hand-kept question is the person's own: ticking it is the answer, with nothing to copy.
   expect(model.asks.find(ask => ask.project === 'docs-site')).toMatchObject({ send: 'none', answers: [], canTick: true, info: '' })

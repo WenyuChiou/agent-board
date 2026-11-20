@@ -96,6 +96,8 @@ export const sessionState = (view: View, agent: string, session: string): RowSta
   return states.length > 0 && states.every(state => state === states[0]) ? states[0] : undefined
 }
 const codexResumeHint = (agent: string, state: RowState | undefined, s: Strings): string => agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : ''
+// Enrollment can lag the board opening; Copy-only active Codex cards explain the same next-turn limit either way.
+const codexCopyHint = (agent: string, state: RowState | undefined, s: Strings): string => agent === 'codex' && (state === 'idle' || state === 'working') ? s.serveCodexCopyHint : ''
 
 // One honest line for a route: when the message arrives, chosen from the receiver's record (#1351). A route
 // the record has not shown live also says only Copy is offered.
@@ -104,6 +106,7 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   if (reason === 'STATE_UNKNOWN') return s.serveLineStateUnknown
   if (reason === 'SHADOWED') return s.serveLineShadowed
   if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
+  if (!canSend && line === 'nextTurn' && codexCopyHint(agent, state, s)) return s.serveCodexCopyHint
   if (line === 'none' && !canSend && agent === 'codex' && state === 'ended') return codexResumeHint(agent, state, s)
   // Codex's daemon receiver starts a message only once it has watched the thread for at least 10 minutes, or one unload delay
   // when Codex's config sets a longer one (#1578), and so has read a person's own Codex on it (docs/MESSAGING.md, "How long it
@@ -616,7 +619,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (ask.target?.dir ?? '') : '',
         archiveNote: isManual ? '' : s.archiveLive,
-        info: found || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? infoOf(send, ask.agent, ask.task, '', s)),
+        info: found || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? ((!isLan ? codexCopyHint(ask.agent, askState, s) : '') || infoOf(send, ask.agent, ask.task, '', s))),
         ...lineOf,
         back: wayBackText(hint),
         sessionId: ask.where === 'other' ? ask.sessionId : null,
@@ -702,7 +705,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (row.target?.dir ?? '') : '',
         // A row says why only when a reply could otherwise be expected here.
-        info: found ? '' : lanInfo(baseMode, row.agent) ?? (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : ''),
+        info: found ? '' : lanInfo(baseMode, row.agent) ?? ((!isLan ? codexCopyHint(row.agent, state, s) : '') || (send === 'open' || isOpenClaude ? infoOf(send, row.agent, row.title, '', s) : '')),
         ...lineOf,
         isSending: isSending(row.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !isUncertainEnded(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         // A stopped task with no question and no way to reach it has nothing to answer and nobody to take a reply (#260).
