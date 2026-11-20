@@ -722,12 +722,22 @@ test('a later launcher that reuses a server without its address record still ref
       assert.equal((await board()).health, undefined)
       // The address record is gone, so the next launcher run reaches the server through its
       // owner record, not the file: it must still tell the server its package version.
-      const records = readdirSync(runDir).filter(name => name.startsWith('agent-board-') && name.endsWith('.json'))
+      // On Windows the record lives in the account-only `agent-board` child of the runtime
+      // folder; elsewhere it is in the runtime folder itself (board-cli.ts runFolder).
+      const recordDirs = [runDir, join(runDir, 'agent-board')]
+      const records = recordDirs.flatMap(dir => {
+        try { return readdirSync(dir).filter(name => name.startsWith('agent-board-') && name.endsWith('.json')).map(name => join(dir, name)) } catch { return [] }
+      })
       assert.equal(records.length, 1, JSON.stringify(records))
-      unlinkSync(join(runDir, records[0]))
-      const second = f.run(pkg, [])
+      unlinkSync(records[0])
+      // CI keeps a text read for scripts (hooks/surface.ts pickSurface), so under CI the plain
+      // call prints the text board and no address. This test is about the reuse, not the
+      // surface: run the launcher as a non-CI call so it opens the page and prints its address.
+      const second = f.run(pkg, [], { CI: '0' })
       success(second)
-      const secondUrl = new URL(second.stdout.match(/https?:\/\/\S+/)?.[0] ?? '')
+      const found = second.stdout.match(/https?:\/\/\S+/)
+      assert.ok(found, `the launcher printed no address: ${second.stdout}`)
+      const secondUrl = new URL(found[0])
       assert.equal(secondUrl.href, firstUrl.href)
       const after = await board()
       assert.equal(after.view.versions.package, manifest.version)
