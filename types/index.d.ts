@@ -291,6 +291,8 @@ declare module 'claude-code' {
       isLegendOpen: boolean
       // The progress bar's style (#1085), as the board's settings file last said.
       barStyle: 'ink' | 'blue' | 'green'
+      // The page's message store as text, as the last poll read it (#1296); null when there is none.
+      queuedStore: string | null
       opened: string[]
       doneSeen: Record<string, number>
       hiddenAsks: string[]

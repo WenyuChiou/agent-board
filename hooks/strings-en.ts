@@ -107,6 +107,12 @@ export const EN: Strings = {
     setupWritten: (file: string): string => `Wrote: ${file}`,
     setupApply: (command: string): string => `Next: apply this repair: ${command}`,
     setupCheck: (command: string): string => `Next: check it again: ${command}`,
+    keptText: (file: string, beside: string): string => `Kept your edited file: ${file}; the new version is in ${beside}`,
+    keptCode: (file: string): string => `Kept your edited file: ${file}; the agent runs it, so the new version was not installed`,
+    keptHeld: (file: string, by: string): string => `Not updated: ${file}; it works with your edited ${by}, which setup kept`,
+    heldMissing: (file: string, by: string): string => `Missing: ${file}; setup cannot put back the old version while your edited ${by} stays. Restore or move your ${by}, then run setup again.`,
+    outdated: 'installed, but not the current version',
+    outdatedNext: 'Next: to update, move your edited files aside and run setup again.',
     connectRepair: 'Next: run /progress connect in Claude Code to repair it.',
   },
   setupSummary: {
@@ -124,8 +130,12 @@ export const EN: Strings = {
     "shared": "Shared",
     "retire": "{file} (the old /board command; setup removes it)",
     "keptEdited": "{file} (your edited old /board command; setup leaves it; the command is now /agent-board)",
+    "keptText": "{file} (you edited it, so setup leaves your copy as it is; the new version goes in {beside})",
+    "keptCode": "{file} (you edited it and the agent runs it, so setup kept your copy and did not install the new version; to get the new one, move your copy aside and run setup again)",
+    "keptHeld": "{file} (not updated: it works with your edited {by}, which setup kept; to update both, move that file aside and run setup again)",
+    "heldMissing": "{file} (missing: setup cannot put back the old version while your edited {by} stays; restore or move your {by}, then run setup again)",
     "ready": "already set up",
-    "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry with {command}.",
+    "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry.",
     "retry": "Retry after fixing the conflicting files: {command}",
     "skillOnly": "board skill only; automatic reporting is unavailable",
     "claude": "connects through its plugin",
@@ -161,6 +171,10 @@ export const EN: Strings = {
     "open": "Open a new session in each of: {agents}.",
     "openOne": "Open a new session in {agents}.",
     "thenBoardOne": "Then type /agent-board there.",
+    "thenBoardIn": "Then type /agent-board in {agents}.",
+    "thenBoardOld": "In {agents}, type /board. /agent-board comes once you move your edited agent-board.mjs aside and run setup again.",
+    "thenBoardCodex": "In Codex, type $agent-board.",
+    "thenBoardHermes": "In Hermes Agent, ask it to run the Agent Board skill.",
     "appliedRemove": "removed {count} setup files",
     "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",
@@ -803,6 +817,10 @@ export const EN: Strings = {
     : `port ${port} is not a valid port (1–65535). Try another --port, or omit --port to pick one automatically.`,
   servePortInUse: (port: number): string => `port ${port} is already in use. Try another --port, or omit --port to pick one automatically.`,
   servePortDenied: (port: number): string => `port ${port} cannot be used (permission denied). Try another --port above 1023, or omit --port to pick one automatically.`,
+  // M6 (#1596): one sentence an agent repeats when another process holds the message folder.
+  serveStoreHeld: (pid: number, isBoard: boolean): string => isBoard
+    ? `Agent Board did not open: an Agent Board page (process ${pid}) holds its message folder, and the board could not confirm that it has stopped serving. End process ${pid}, then open the board again.`
+    : `Agent Board did not open: process ${pid} holds its message folder and is not an Agent Board page this board can stop. End process ${pid}, then open the board again.`,
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `The board could not open its message folder (${code}): ${folder}. Stop all board servers and check server.lock, server.owner and .message-claim-*.json together. Remove only ownership metadata verified to be stale, after confirming no hub is running. Keep messages.json and uncertain delivery evidence; do not resend uncertain messages.`
     : code === 'MESSAGE_STORE_CLOSED'

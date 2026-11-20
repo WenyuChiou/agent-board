@@ -18,6 +18,14 @@ export type BoardCounts = {
 // What the store holds for the board to count queued answers by; the page builds the same shape from its server.
 export type QueuedMessaging = NonNullable<Parameters<typeof serveModel>[5]>
 
+const pageView = (view: View, pending: readonly PendingTurn[], s: Strings, now: number, messaging?: QueuedMessaging) =>
+  serveModel(view, pending, s, new Set(), false, messaging, false, {
+    now,
+    repoOf: () => null,
+    versions: { board: '', package: null },
+    unreadable: [],
+  })
+
 // Single counting source for Needs you and Working now across the page, the terminal board and --status (#832).
 export const boardCounts = (
   view: View,
@@ -26,12 +34,7 @@ export const boardCounts = (
   now = view.now,
   messaging?: QueuedMessaging,
 ): BoardCounts => {
-  const model = serveModel(view, pending, s, new Set(), false, messaging, false, {
-    now,
-    repoOf: () => null,
-    versions: { board: '', package: null },
-    unreadable: [],
-  })
+  const model = pageView(view, pending, s, now, messaging)
 
   const queued = model.view!.needs.handled.length
 
@@ -65,4 +68,15 @@ export const boardStatus = (
   const counts = boardCounts(view, pending, s, now, messaging)
 
   return s.boardStatusLine(counts.needs, counts.working) + (counts.queued > 0 ? ` · ${s.boardQueuedCount(counts.queued)}` : '')
+}
+
+// The Claude Code pane's view with the questions whose answer is queued for the session's next turn taken out of its
+// waiting count and counted as queued (#1296): the same question cards the page lists as handled. The pane counts
+// questions only, so a stuck row the page counts is left as it was. With nothing queued the view is returned as it is.
+export const withQueuedAnswers = (view: View, pending: readonly PendingTurn[], s: Strings, messaging: QueuedMessaging | undefined): View => {
+  if (messaging === undefined || !messaging.messages.some(one => one.from === 'board')) return view
+  const page = pageView(view, pending, s, view.now, messaging).view!
+  const handled = new Set(page.needs.handled)
+  const queued = page.needs.cards.filter(card => card.kind === 'question' && handled.has(card.key)).length
+  return queued === 0 ? view : { ...view, overview: { ...view.overview, waiting: Math.max(0, view.overview.waiting - queued), queued } }
 }

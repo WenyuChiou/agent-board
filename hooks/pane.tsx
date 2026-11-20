@@ -666,7 +666,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
 
   // The counts at the top; each opens what it counts. A zero stays, in the muted colour.
   const overview = () => {
-    const { waiting, active, due, today } = view.overview
+    const { waiting, active, due, today, queued = 0 } = view.overview
     const counts = [
       { id: 'waiting', glyph: '●', n: waiting, word: s.countWaiting, hue: palette.waiting },
       { id: 'others', glyph: '▸', n: active, word: s.countActive, hue: palette.accent },
@@ -692,6 +692,8 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         {fits && (
           <Box flexDirection="row" flexWrap="wrap" columnGap={2} marginTop={1}>
             {counts.map(({ id, glyph, n, word, hue }) => count(id, glyph, n, word, hue))}
+            {/* An answer queued for the session's next turn is handled for the person (#1296): out of waiting, shown here. */}
+            {queued > 0 && <Text color={palette.muted}>{`◌ ${s.boardQueuedCount(queued)}`}</Text>}
           </Box>
         )}
         {['waiting', 'others', 'due', 'recent'].map(id => cardResult(`count::${id}`))}
