@@ -18,7 +18,7 @@ registerHooks({ resolve(specifier, context, next) {
     return next(`${specifier}.ts`, context)
   }
 } })
-const { startServer } = await import('../scripts/board-serve.ts')
+const { startServer, boardVersion } = await import('../scripts/board-serve.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
 const { EN } = await import('../hooks/strings-en.ts')
@@ -340,4 +340,34 @@ test('serve: when the file watch fails, the page still updates within 3 s from a
     assert.ok(later.at - laterAt <= PAGE_FALLBACK_MS, `from the timer the change took ${Math.round(later.at - laterAt)} ms`)
     await board.close()
   }
+})
+
+test('serve: a later launcher that reuses the server refreshes its package version (#1304)', async () => {
+  const board = await startBoard()
+  // Started with no package version: the board says nothing about an update.
+  const before = await board.ask()
+  assert.equal(before.status, 200, before.text)
+  const beforeModel = JSON.parse(before.text).model
+  assert.equal(beforeModel.view.versions.package, null)
+  assert.equal(beforeModel.health, undefined)
+  // A later launcher reusing this server reports its package: the board now names it and
+  // the update advice. The server runs in this process with no plugin prelude, so the
+  // advice is the plugin one.
+  const refreshed = await board.post('/api/package', { version: '9.9.9' })
+  assert.equal(refreshed.status, 200, refreshed.text)
+  assert.deepEqual(JSON.parse(refreshed.text), { package: '9.9.9' })
+  const after = await board.ask()
+  assert.equal(after.status, 200, after.text)
+  const afterModel = JSON.parse(after.text).model
+  assert.equal(afterModel.view.versions.package, '9.9.9')
+  assert.deepEqual(afterModel.health, [EN.serveOlderScriptPlugin(boardVersion, '9.9.9')])
+  // An older launcher must not take the notice away, and a version that is not three
+  // numbers is not a package at all.
+  const stale = await board.post('/api/package', { version: '0.0.1' })
+  assert.equal(stale.status, 200, stale.text)
+  assert.deepEqual(JSON.parse(stale.text), { package: '9.9.9' })
+  const bad = await board.post('/api/package', { version: 'next' })
+  assert.equal(bad.status, 400, bad.text)
+  const kept = await board.ask()
+  assert.equal(JSON.parse(kept.text).model.view.versions.package, '9.9.9')
 })

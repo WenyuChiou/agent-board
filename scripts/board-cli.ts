@@ -2494,6 +2494,22 @@ const showLan = async (url: string): Promise<void> => {
   process.stdout.write(`\n${s.serveLanAt(lanUrl)}\n${modules === null ? '' : `${qrText(modules, options().isColor)}\n`}${s.serveLanWarn}\n`)
 }
 
+// A later launcher that reuses a running page tells it the package it runs from, so the page
+// notice follows the newest package (#1304). A server from before this endpoint answers 404;
+// that is not a failure, and the page keeps whatever it knew.
+const refreshServerPackage = async (url: string): Promise<void> => {
+  const version = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
+  if (!/^\d+\.\d+\.\d+$/.test(version)) return
+  try {
+    await fetch(`http://127.0.0.1:${new URL(url).port}/api/package`, {
+      method: 'POST',
+      headers: { 'x-board-token': tokenOf(url), 'content-type': 'application/json' },
+      body: JSON.stringify({ version }),
+      signal: AbortSignal.timeout(5000),
+    })
+  } catch { /* a server that cannot hear the version keeps its own */ }
+}
+
 interface RunningServer {
   url: string
   port: number
@@ -2566,11 +2582,17 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   // is reused as it is, even when it would not match a new start.
   if (runtimeUnprotected) {
     const kept = (await keptPage(oldServeFile)) ?? (await keptPage(file))
-    if (kept !== null) return { url: kept.url, port: kept.port, isKept: true, isNew: false }
+    if (kept !== null) {
+      await refreshServerPackage(kept.url)
+      return { url: kept.url, port: kept.port, isKept: true, isNew: false }
+    }
     throw runtimeFolderFailure()
   }
   const old = readRunning(oldServeFile)
-  if (old !== null && (await stays(old, oldServeFile, replacementMove(old)))) return { url: old.url, port: old.port, isKept: true, isNew: false }
+  if (old !== null && (await stays(old, oldServeFile, replacementMove(old)))) {
+    await refreshServerPackage(old.url)
+    return { url: old.url, port: old.port, isKept: true, isNew: false }
+  }
   // A page this launch lets go of that was started with `--no-codex-send` and is replaced for another reason (a new build,
   // another setting): a command with no switch gives the new page the same switch, so the replacement does not turn the
   // receiver back on (#318). It is this launch's own, so a long-running command (`--watch`) never carries it to a later
@@ -2578,7 +2600,10 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   const replaced = { isCodexSendOff: false }
   const codexSwitch = (): string[] => (args.includes('--no-codex-send') || (replaced.isCodexSendOff && !args.includes('--codex-send')) ? ['--no-codex-send'] : [])
   const found = await runningPage(false, true, replaced)
-  if (found !== null) return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
+  if (found !== null) {
+    await refreshServerPackage(found.page.url)
+    return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
+  }
   if (args.includes('--port')) {
     const requestedPort = parseServePort(flag('--port'))
     if (requestedPort === null) {

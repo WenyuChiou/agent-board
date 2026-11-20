@@ -11936,6 +11936,32 @@ test('the page says the installed script is older and how to update it (#1304)',
   }
 })
 
+test('the page on the local network gets update advice without the data folder (#1304)', async () => {
+  const runtime = await sourceBoard()
+  const view = (words) => runtime.buildView([], [], null, groupedNow, 0, {}, words)
+  const model = (words, isLan, olderScript) => runtime.serveModel(view(words), [], words, new Set(), isLan, undefined, false, { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: '9.9.9' }, unreadable: [], olderScript })
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    // A custom data folder, bare and quoted: the phone's page keeps the advice but loses the path.
+    for (const [command, lanCommand] of [
+      ['npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir /home/person/custom-data', 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ['npx @wenyuchiou/agent-board@9.9.9 setup --data-dir "/home/person/my data"', 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+    ]) {
+      const lan = model(words, true, { update: 'setup', command })
+      assert.equal(lan.health?.length, 1, JSON.stringify(lan.health))
+      assert.equal(lan.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', lanCommand))
+      assert.equal(lan.health[0].includes('/home/person'), false, lan.health[0])
+      // The computer's own page keeps the full command, so the person can run it as written.
+      const local = model(words, false, { update: 'setup', command })
+      assert.equal(local.health?.length, 1, JSON.stringify(local.health))
+      assert.equal(local.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', command))
+    }
+    // A plugin copy has no folder in its advice, so the phone's page is unchanged.
+    const plugin = model(words, true, { update: 'plugin' })
+    assert.equal(plugin.health?.length, 1, JSON.stringify(plugin.health))
+    assert.equal(plugin.health[0], words.serveOlderScriptPlugin('1.2.3', '9.9.9'))
+  }
+})
+
 test('the empty page lists the connected agents and how their work appears', async () => {
   const runtime = await sourceBoard()
   const options = { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null } }

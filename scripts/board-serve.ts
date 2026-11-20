@@ -145,7 +145,9 @@ export const boardVersion = RELEASED.reduce((highest, release) => {
   return isNewerVersion(release.version, highest) ? release.version : highest
 }, '0.0.0')
 const packageVersionValue = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
-const packageVersion = /^\d+\.\d+\.\d+$/.test(packageVersionValue) ? packageVersionValue : null
+// A later launcher that reuses this server reports the package it runs from, so the page
+// notice follows the newest package (#1304). These change on that refresh, never on a request.
+let packageVersion: string | null = /^\d+\.\d+\.\d+$/.test(packageVersionValue) ? packageVersionValue : null
 
 // How to update this install, for the page notice when the package is newer than the board
 // script (#1304). An independent install names the setup preview, with the same agents and
@@ -164,7 +166,18 @@ const olderScriptUpdate = (): { update: 'setup' | 'plugin'; command?: string } |
   const opts = (agents.length ? ` --agent ${agents.join(',')}` : '') + (root !== join(homedir(), '.agent-board') ? ` --data-dir ${/[^\w.:\\/~@+,=-]/.test(root) ? `"${root}"` : root}` : '')
   return { update: 'setup', command: `npx @wenyuchiou/agent-board@${packageVersion} setup${opts}` }
 }
-const olderScript = olderScriptUpdate()
+let olderScript = olderScriptUpdate()
+
+// The package a later launcher reports, when it is newer than the one this server started
+// with: an older launcher reusing the server must not take the notice away, and a version
+// that is not three numbers is not a package at all. Pending messages are untouched: only
+// the two values the next /api/board answer reads change.
+const refreshPackageVersion = (version: string): boolean => {
+  if (!/^\d+\.\d+\.\d+$/.test(version) || (packageVersion !== null && !isNewerVersion(version, packageVersion))) return false
+  packageVersion = version
+  olderScript = olderScriptUpdate()
+  return true
+}
 
 const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { ...HEADERS, 'content-type': 'application/json; charset=utf-8' })
@@ -1070,6 +1083,16 @@ export const startServer = (o: ServeOptions): void => {
       const wanted = text(body.address)
       const opened = await openLan(wanted === '' ? null : wanted)
       return json(res, 'url' in opened ? 200 : 409, opened)
+    }
+    // Only the board script on the computer tells the server the package a later launcher runs
+    // from: a reused server learns the newer package, and its page shows the notice (#1304).
+    // A web page always sends an Origin, and the phone's page never sends this.
+    if (url.pathname === '/api/package') {
+      if (isLan || req.headers.origin !== undefined) return json(res, 403, {})
+      const version = text(body.version)
+      if (!/^\d+\.\d+\.\d+$/.test(version)) return json(res, 400, {})
+      refreshPackageVersion(version)
+      return json(res, 200, { package: packageVersion })
     }
     if (url.pathname === '/api/close') {
       // Closing would cut a reply off halfway: on Windows the agent goes with the server.

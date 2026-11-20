@@ -516,6 +516,12 @@ const isNewerVersion = (candidate: string, current: string): boolean => {
   return false
 }
 
+// The setup command names its data folder with --data-dir; a reader on the local network must
+// not get that path, since the folder sits under the account's home. The folder is quoted
+// exactly when it holds a character outside the launcher's bare set, so a quoted segment or
+// one bare word is removed whole, and the rest of the command stays.
+const withoutDataDir = (command: string): string => command.replace(/ --data-dir (?:"[^"]*"|\S+)/, '')
+
 // `routes`: the receivers' records, which say on each card when a message arrives and whether Send is offered.
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeModel => {
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
@@ -790,11 +796,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     projects: grouped.projects,
   }
   // The installed script is older than the package that started this server: the page says so and
-  // how to update it (#1304). An edited script, or a newer one, shows nothing.
+  // how to update it (#1304). An edited script, or a newer one, shows nothing. The page on the
+  // local network is plain HTTP, so its advice carries the command without the data folder.
   if (group?.olderScript !== undefined && group.versions.package !== null && isNewerVersion(group.versions.package, group.versions.board)) {
+    const command = group.olderScript.command ?? ''
     const notice = group.olderScript.update === 'plugin'
       ? s.serveOlderScriptPlugin(group.versions.board, group.versions.package)
-      : s.serveOlderScriptSetup(group.versions.board, group.versions.package, group.olderScript.command ?? '')
+      : s.serveOlderScriptSetup(group.versions.board, group.versions.package, isLan ? withoutDataDir(command) : command)
     model.health = [...(model.health ?? []), notice]
   }
   // Repository names are computed locally before folder paths are removed for a phone.

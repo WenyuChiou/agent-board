@@ -521,6 +521,31 @@ test('--json through an older script prints the notice on stderr and exits 1', (
   assert.ok(result.stderr.includes(`npx ${manifest.name}@${manifest.version} setup, then add --apply.`), result.stderr)
 }))
 
+test('--json with --chat or --status through an older script prints the notice on stderr and exits 1', () => fixture(f => {
+  const pkg = packed(f)
+  // The same text-printing older script, read with a mixed output flag: the launcher must
+  // still fail with the notice instead of handing the text board to an agent that expects JSON.
+  const text = `${prelude(f)}process.stdout.write('the text board\\n')\n`
+  save(boardPath(f), text)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.0.1', board: ['${bodyHash(text)}'] }]\n`)
+  for (const args of [['--json', '--chat'], ['--chat', '--json'], ['--json', '--status'], ['--status', '--json']]) {
+    const result = f.run(pkg, args)
+    assert.ifError(result.error)
+    assert.equal(result.status, 1, `${args.join(' ')}: ${result.stderr}`)
+    assert.equal(result.stdout, '', args.join(' '))
+    assert.equal(result.stderr.trim().split('\n').length, 1, result.stderr)
+    assert.ok(result.stderr.includes('is from 0.0.1.'), result.stderr)
+    assert.ok(result.stderr.includes(`npx ${manifest.name}@${manifest.version} setup, then add --apply.`), result.stderr)
+  }
+  // Without --json the old text behaviour is unchanged: --chat and --status still run the script.
+  for (const args of [['--chat'], ['--status']]) {
+    const result = f.run(pkg, args)
+    assert.ifError(result.error)
+    assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr}`)
+    assert.equal(result.stdout, 'the text board\n', args.join(' '))
+  }
+}))
+
 test("--data-dir runs that folder's board without CLAUDE_PROGRESS_FILE", () => fixture(f => {
   const pkg = packed(f)
   const root = join(f.home, 'data dir')

@@ -261,7 +261,11 @@ try { prelude = JSON.parse(readFileSync(installed, 'utf8').split('\n', 1)[0].rep
 language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? systemLang(process.env.LANG) ?? 'en'
 // The first line holds account settings, so it must not affect build comparisons.
 const hash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
-if (!isChat && !args.includes('--status')) {
+// --chat and --status read the board through the installed script, so on their own they skip
+// this comparison. With --json they read it as data, and the older-script guard covers them
+// too: a mixed --json --chat or --json --status through an older script must fail the same
+// way plain --json does (#1304).
+if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
   try {
     // The bundle is kept in hooks/board-script.ts and its parts; the shared reader joins them.
     const bundled = bundleFromDir(pkg)
