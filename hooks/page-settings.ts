@@ -13,6 +13,7 @@ export const settingsPanel = (s: Strings, language: SettingsLang, isLan = false,
   (['auto', 'en', 'zh-TW', 'zh-CN'] as const).map(lang => `<option value="${lang}"${language === lang ? ' selected' : ''}>${esc(lang === 'auto' ? s.settingsAutomatic : lang === 'en' ? s.settingsEnglish : lang === 'zh-TW' ? s.settingsTraditional : s.settingsSimplified)}</option>`).join('') +
   `</select>${isLangOverridden ? `<p class="settings-label" id="settings-lang-override">${esc(s.settingsLanguageOverridden)}</p>` : ''}</section><section><h3>${esc(s.themeMenu)}</h3>${themeControls(s)}</section>` +
   `<section id="settings-notifications"><h3>${esc(s.settingsNotifications)}</h3><button type="button" id="settings-notify" data-local role="switch" aria-checked="false" aria-label="${esc(s.settingsNotifications)}">${esc(s.settingsOff)}</button></section>` +
+  (isLan ? '' : `<section id="settings-approvals"><h3>${esc(s.settingsApprovals)}</h3><button type="button" id="settings-approvals-toggle" role="switch" aria-checked="true" aria-label="${esc(s.settingsApprovals)}">${esc(s.settingsOn)}</button></section>`) +
   `<section id="settings-agents"><h3 id="settings-agents-title">${esc(s.settingsAgents)}</h3><ul id="settings-agent-list" aria-labelledby="settings-agents-title"></ul>` +
   (isLan ? '' : `<div id="settings-agent-confirm" hidden><p id="settings-agent-question"></p><div class="settings-choices"><button type="button" id="settings-agent-yes">${esc(s.settingsAgentConfirm)}</button><button type="button" id="settings-agent-cancel">${esc(s.settingsAgentCancel)}</button></div></div>`) + `</section>` +
   `<p id="settings-result" role="status" aria-live="polite" aria-atomic="true"></p></div></div>`
@@ -27,8 +28,8 @@ export const settingsCss = `
 .settings-panel button,.settings-panel select{min-width:48px;min-height:48px;max-width:100%;font:inherit}
 .settings-panel select{width:100%;padding:0 var(--s2);background:var(--surface);color:var(--ink);border:1px solid var(--btn-line);border-radius:var(--radius-s)}
 .settings-choices{display:flex;flex-wrap:wrap;gap:var(--s2)}
-.settings-choices button,#settings-notifications button{display:flex;align-items:center;gap:var(--s2);padding:var(--s2) var(--s3);background:var(--surface);border:1px solid var(--btn-line);border-radius:var(--radius-s);cursor:pointer}
-.settings-choices button[aria-checked="true"],#settings-notifications button[aria-checked="true"]{background:var(--current);border-color:var(--ink)}
+.settings-choices button,#settings-notifications button,#settings-approvals button{display:flex;align-items:center;gap:var(--s2);padding:var(--s2) var(--s3);background:var(--surface);border:1px solid var(--btn-line);border-radius:var(--radius-s);cursor:pointer}
+.settings-choices button[aria-checked="true"],#settings-notifications button[aria-checked="true"],#settings-approvals button[aria-checked="true"]{background:var(--current);border-color:var(--ink)}
 .settings-label{margin:var(--s3) 0 var(--s2);color:var(--muted)}
 #settings-result{margin:var(--s3) 0 0;min-height:1.5em}
 #settings-result.alert{color:var(--alert)}
