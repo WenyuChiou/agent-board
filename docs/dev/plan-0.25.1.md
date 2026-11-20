@@ -1,6 +1,6 @@
 # Plan for 0.25.1
 
-**Status:** in force since 2026-11-18. Amended the same day with the results of checks C1 to C5 and C8 and the owner's decisions on them. The issues live in milestone 14, "0.25.1 It updates itself". The roadmap is #209.
+**Status:** in force since 2026-11-18. Amended the same day with the results of checks C1 to C5 and C8 and the owner's decisions on them, and on 2026-11-19 with decision 7 (section 14). The issues live in milestone 14, "0.25.1 It updates itself". The roadmap is #209.
 
 **Where it comes from:** a Fable 5.2 review of the whole project after 0.25.0, a draft plan, two outside reviews of that draft (21 must-fix findings, answered in section 15), and the owner's decisions of 2026-11-18.
 
@@ -80,7 +80,7 @@ Each check takes about half a day and ends in a dated note under `docs/validatio
 - **Work:** an edited generated file is never overwritten. Text a host reads gets the new file beside it. Code a host loads keeps the old files and says so. Files a release stops writing are removed only when their bytes are still ours, re-read just before the removal (#1488). A file with bytes that are not valid UTF-8 keeps them (#1607). Hermes is not skipped when `config.yaml` holds an earlier release's hooks (#1588). `--json` through an older script fails with a notice, and the page notice of #1304 ships with this work.
 - **Done when:** on Windows and on Linux, the upgrade case of the 11-10 walk passes with the person's line still on disk; a home with Gemini and Antigravity ends with Antigravity byte-equal; a Big5 config survives byte for byte.
 - **Covers:** every setup agent. **Test:** `tests/host-upgrade.test.mjs`: edited skill, edited hook runner, dropped file, changed-just-before-removal, invalid UTF-8, Hermes config of an earlier release. `tests/npm-package.test.mjs`: an older script with `--json`.
-- **Issues:** #1302, #1304, #1327, #1488, #1588, #1607. Takes over #1328 and #1337. **R7:** no hook.
+- **Issues:** #1302, #1304, #1488, #1588, #1607. Takes over #1328. #1327 and #1337 moved to 0.26.0 (decision 7). **R7:** no hook.
 
 ### M2. One update entry, and when it asks
 
@@ -248,7 +248,7 @@ The READMEs use `@next`, so both tags must end on the version that is promoted. 
 | Milestone | Issues |
 |---|---|
 | M0 | #557, and in part #286, #1321, #1322 |
-| M1 | #1302, #1304, #1327, #1488, #1588, #1607 |
+| M1 | #1302, #1304, #1488, #1588, #1607 |
 | M2 | #1303, #1314, #1661, #1662, and in part #1305 |
 | M3 | #1312, #1315 |
 | M4 | #1651 |
@@ -299,7 +299,7 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 
 **Taken over or closed, each checked first.**
 - **#1328:** lane A re-cuts it into two pull requests, edited files and `--json`. It carries six rounds of review; the new pull requests say so and do not treat the count as reset.
-- **#1337:** lane A takes it over, less what #1382 already merged.
+- **#1337:** moved to 0.26.0 with #1327 (decision 7), where two pull requests replace it.
 - **#1288:** lane B1 takes it over once #1092's lock question is answered.
 
 ## 10. If it runs late, or a check fails
@@ -347,7 +347,7 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 
 | Version | Theme |
 |---|---|
-| 0.26.0 | Every hook change in one release, the first to arrive by itself: remaining receivers, desktop apps through the vendor's own door, Codex and OpenCode approvals, six states, notices that open a card, agent sending (#317), one MCP route (#685, #722, #723) |
+| 0.26.0 | Every hook change in one release, the first to arrive by itself: retiring Gemini CLI on upgrade (#1327), remaining receivers, desktop apps through the vendor's own door, Codex and OpenCode approvals, six states, notices that open a card, agent sending (#317), one MCP route (#685, #722, #723) |
 | 0.27.0 | Agents use the board: hand-off; the cloud-bot bridge plan |
 | 0.28.0 | Away from the desk: the phone sends and answers; the server starts at login |
 | 0.29.0 | The first cloud bot reads what the person shared |
@@ -368,6 +368,12 @@ The owner took the proposed answer on all six, 2026-11-18: 「都按照预设吧
 | 4 | On delivery, setup and launch changes, may the first review round read only the case table and tests? | Not tried in 0.25.1; review stays as it is |
 | 5 | macOS has no process lookup here, so board approvals fall back to Claude Code's own prompt there. Accept this for 0.25.1? | Accepted, and the release notes say so |
 | 6 | Claude Code does not update a third-party plugin by itself, so a person with only the plugin does 2 steps each release. Accept this bar for 0.25.1? | Accepted. If C5 finds the person can turn on automatic updates, the notes say how |
+
+A later decision, 2026-11-19: 「按照你的建議」 ([#1327](https://github.com/WenyuChiou/agent-board/issues/1327#issuecomment-7024987371)).
+
+| # | Question | Decision |
+|---|---|---|
+| 7 | Retiring Gemini CLI on upgrade (#1327, #1337) takes out hook lines setup wrote, which R7 keeps out of a patch release. Move it to 0.26.0, or make an exception for 0.25.1? | 0.26.0, where two pull requests replace #1337 |
 
 ## 15. How the review findings were answered
 
