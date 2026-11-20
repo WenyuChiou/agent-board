@@ -423,7 +423,11 @@ export const testArgs = (files, { isSerial = false, isWindows = false } = {}) =>
 // their budget, each to the part with the least so far; a file with no budget counts as 15 s (the slowest of
 // them, mcp-tools, took 12.6 s on Linux). When every file weighs the same, this is the old every-nth split. Every job works out
 // the same split, so the parts together still run each file once.
-const partWeight = path => BOARD_FILE_BUDGETS_MS[path] ?? 15_000
+// A file with no budget that runs far longer than 15 s weighs its slowest time instead. l3c took 289.1 s of the
+// 529 s Windows journeys part 2/2 on main 7685f8ed (run 44615703631), where no other journey in that part took more than
+// 61.3 s, and part 2/2's job reached 545 s of its ten minutes. At this weight it gets a part to itself (#1722).
+const PART_WEIGHTS_MS = Object.freeze({ 'tests/e2e/l3c-message-store-ownership.test.mjs': 290_000 })
+const partWeight = path => BOARD_FILE_BUDGETS_MS[path] ?? PART_WEIGHTS_MS[path] ?? 15_000
 
 // The Node run of one part: its share of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
