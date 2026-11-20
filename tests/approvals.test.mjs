@@ -2,7 +2,7 @@
 // requests, and Claude Code's PermissionRequest hook (scripts/claude-approval.mjs) run as the host
 // would run it, with a synthetic request on its input. No model, no browser.
 import childProcess, { execFileSync, spawn } from 'node:child_process'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import fs, { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -2410,6 +2410,48 @@ test('a script replaced between its two reads falls back once and the next reque
 const switchApprovals = (board, page, enabled) =>
   board.call('/api/approvals/switch', { enabled }, page.headers)
 
+// The board as the page asks for it: the status is the page's too, and the approvals part of the answer comes back.
+const boardAs = async (board, page) => {
+  const res = await board.call('/api/board', undefined, page.headers)
+  assert.equal(res.status, 200)
+  return res.body.approvals
+}
+
+// Counts the asks that reach the board: the hook's address file points at this forwarder until it is closed.
+const askCounter = async board => {
+  const target = new URL(board.origin)
+  const asks = []
+  const forwarder = createServer((req, res) => {
+    if (req.method === 'POST' && req.url.startsWith('/api/approvals/ask')) asks.push(req.url)
+    const up = httpRequest({ host: target.hostname, port: target.port, path: req.url, method: req.method, headers: { ...req.headers, host: target.host } }, answer => {
+      res.writeHead(answer.statusCode, answer.headers)
+      answer.pipe(res)
+    })
+    up.on('error', () => res.destroy())
+    req.pipe(up)
+  })
+  await new Promise(done => forwarder.listen(0, '127.0.0.1', done))
+  board.place.writeAddress(`http://127.0.0.1:${forwarder.address().port}/?t=${board.token}`)
+  return {
+    asks,
+    close: () => new Promise(done => { forwarder.close(done); forwarder.closeAllConnections() }),
+  }
+}
+
+// Makes one fs call fail for as long as `body` runs, as a full disk or a locked file would.
+const withFsFault = async (name, isTarget, body) => {
+  const real = fs[name]
+  fs[name] = function (...args) {
+    if (isTarget(args)) throw Object.assign(new Error(`synthetic ${name} fault`), { code: 'EIO' })
+    return Reflect.apply(real, this, args)
+  }
+  syncBuiltinESMExports()
+  try { return await body() } finally {
+    fs[name] = real
+    syncBuiltinESMExports()
+  }
+}
+
 const writeRefusalRecord = (board, reason, at = new Date().toISOString()) =>
   writeFileSync(hook.approvalsRefusedFile(board.file), `${JSON.stringify({ at, reason })}\n`, { mode: 0o600 })
 
@@ -2539,7 +2581,7 @@ const approvalPageDom = async ({ html, approvals, post }) => {
       const task = (async () => {
         if (target.startsWith('/api/board')) return { ok: true, status: 200, headers: { get: () => 'W/"s"' }, json: async () => ({ model, approvals: currentApprovals, now: 1 }) }
         if (target === '/api/agents') return { ok: true, status: 200, json: async () => ({ rows: [] }) }
-        const req = { path: target, body: options.body ? JSON.parse(options.body) : {} }
+        const req = { path: target, method: options.method, body: options.body ? JSON.parse(options.body) : {} }
         requests.push(req)
         return post ? post(req) : { ok: true, status: 200, json: async () => ({}) }
       })()
@@ -2570,17 +2612,21 @@ test('switching approvals off writes the off marker, sets isOff and stops the ho
   assert.equal(off.status, 200)
   assert.equal(off.body.isOff, true)
   assert.equal(existsSync(hook.approvalsOffFile(board.file)), true)
-  const shown = await page.look()
+  const shown = await boardAs(board, page)
   assert.equal(shown?.isOff, true)
-  let checkedListener = 0
-  const decision = await hook.run(board.env, process.platform, {
-    input: request('echo synthetic-off'),
-    now: () => 0,
-    discoveryMs: 1_000,
-    checkListener: () => { checkedListener += 1; return null },
-  })
-  assert.equal(decision, null)
-  assert.equal(checkedListener, 0)
+  const counter = await askCounter(board)
+  try {
+    let checkedListener = 0
+    const decision = await hook.run(board.env, process.platform, {
+      input: request('echo synthetic-off'),
+      now: () => 0,
+      discoveryMs: 1_000,
+      checkListener: () => { checkedListener += 1; return null },
+    })
+    assert.equal(decision, null)
+    assert.equal(checkedListener, 0)
+    assert.equal(counter.asks.length, 0)
+  } finally { await counter.close() }
 })
 
 test('switching approvals off again when already off succeeds idempotently', async () => {
@@ -2601,15 +2647,19 @@ test('approvals switched off persists across a board restart', async () => {
   await board.close()
   const restarted = await startBoard({ place: board.place })
   const reopened = await openPage(restarted)
-  assert.equal((await reopened.look())?.isOff, true)
+  assert.equal((await boardAs(restarted, reopened))?.isOff, true)
   assert.equal(existsSync(hook.approvalsOffFile(restarted.file)), true)
-  const decision = await hook.run(restarted.env, process.platform, {
-    input: request('echo synthetic-restart'),
-    now: () => 0,
-    discoveryMs: 1_000,
-    checkListener: () => null,
-  })
-  assert.equal(decision, null)
+  const counter = await askCounter(restarted)
+  try {
+    const decision = await hook.run(restarted.env, process.platform, {
+      input: request('echo synthetic-restart'),
+      now: () => 0,
+      discoveryMs: 1_000,
+      checkListener: () => null,
+    })
+    assert.equal(decision, null)
+    assert.equal(counter.asks.length, 0)
+  } finally { await counter.close() }
 })
 
 test('switching approvals on removes the off marker, clears isOff and lets hook asks reach the page', { timeout: 60_000 }, async () => {
@@ -2621,10 +2671,14 @@ test('switching approvals on removes the off marker, clears isOff and lets hook 
   assert.equal(on.body.isOff, false)
   assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
   assert.equal((await page.look())?.isOff, undefined)
-  const waiting = runHook(board, request('npm run synthetic-back-on'))
-  const card = await page.show('npm run synthetic-back-on')
-  assert.equal((await page.press(card, 'allow', { confirmed: true })).status, 200)
-  assert.equal((await waiting.done).decision?.hookSpecificOutput?.decision?.behavior, 'allow')
+  const counter = await askCounter(board)
+  try {
+    const waiting = runHook(board, request('npm run synthetic-back-on'))
+    const card = await page.show('npm run synthetic-back-on')
+    assert.equal((await page.press(card, 'allow', { confirmed: true })).status, 200)
+    assert.equal((await waiting.done).decision?.hookSpecificOutput?.decision?.behavior, 'allow')
+    assert.equal(counter.asks.length, 1)
+  } finally { await counter.close() }
 })
 
 test('switching approvals on again when already on succeeds idempotently', async () => {
@@ -2664,15 +2718,15 @@ test('a switch request without an Origin header is refused', async () => {
   assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
 })
 
-test('a switch request without a valid page secret is refused with approvalNoSecret', async () => {
+test('a switch request without a valid page secret is refused with approvalSwitchNoSecret', async () => {
   const board = await startBoard()
   await openPage(board)
   const missing = await board.call('/api/approvals/switch', { enabled: false }, { origin: board.origin, 'x-board-page': 'p-synthetic' })
   assert.equal(missing.status, 403)
-  assert.equal(missing.body.note, EN.approvalNoSecret)
+  assert.equal(missing.body.note, EN.approvalSwitchNoSecret)
   const forged = await board.call('/api/approvals/switch', { enabled: false }, { origin: board.origin, 'x-board-page': 'p-synthetic', 'x-board-approve': board.token })
   assert.equal(forged.status, 403)
-  assert.equal(forged.body.note, EN.approvalNoSecret)
+  assert.equal(forged.body.note, EN.approvalSwitchNoSecret)
   assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
 })
 
@@ -2700,6 +2754,14 @@ test('key-replay lockdown rejects switch requests with approvalOff until restart
   const ask = await board.call('/api/approvals/ask', hook.askBody(request('echo synthetic-lockdown')))
   assert.equal(ask.status, 200)
   assert.deepEqual(ask.body, {})
+  await board.close()
+  const restarted = await startBoard({ place: board.place })
+  const reopened = await openPage(restarted)
+  assert.notEqual((await boardAs(restarted, reopened))?.isLockdown, true)
+  const off = await switchApprovals(restarted, reopened, false)
+  assert.equal(off.status, 200)
+  assert.equal(off.body.isOff, true)
+  assert.equal((await switchApprovals(restarted, reopened, true)).status, 200)
 })
 
 test('a symlink at the off-marker path fails switch with 409 approvalSwitchFailed and stays untouched', async () => {
@@ -2736,13 +2798,17 @@ test('a directory at the off-marker path fails switch with 409 approvalSwitchFai
 test('switching approvals off immediately settles a waiting asking request as window', { timeout: 60_000 }, async () => {
   const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
   const page = await openPage(board)
-  const waiting = runHook(board, request('npm run synthetic-asking-switch'))
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-asking-switch')))
   const card = await page.card('npm run synthetic-asking-switch', 'asking')
   assert.equal(card.state, 'asking')
+  const started = Date.now()
   const off = await switchApprovals(board, page, false)
   assert.equal(off.status, 200)
-  const result = await waiting.done
-  assert.equal(result.decision, null)
+  const result = await waiting
+  // The long approval timers stay: only the switch can have answered this soon.
+  assert.ok(Date.now() - started < 3_000, `answered after ${Date.now() - started} ms`)
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.body, {})
   const settled = await page.card('npm run synthetic-asking-switch', 'window')
   assert.equal(settled.state, 'window')
   assert.equal((await page.look())?.isOff, true)
@@ -2751,25 +2817,30 @@ test('switching approvals off immediately settles a waiting asking request as wi
 test('switching approvals off immediately settles a drawn shown request as window', { timeout: 60_000 }, async () => {
   const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
   const page = await openPage(board)
-  const waiting = runHook(board, request('npm run synthetic-shown-switch'))
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-shown-switch')))
   await page.show('npm run synthetic-shown-switch')
+  const started = Date.now()
   const off = await switchApprovals(board, page, false)
   assert.equal(off.status, 200)
-  const result = await waiting.done
-  assert.equal(result.decision, null)
+  const result = await waiting
+  assert.ok(Date.now() - started < 3_000, `answered after ${Date.now() - started} ms`)
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.body, {})
   const settled = await page.card('npm run synthetic-shown-switch', 'window')
   assert.equal(settled.state, 'window')
 })
 
 test('an ask that passed isSwitchedOff before switch off receives 200 empty at once', async () => {
-  const board = await startBoard()
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
   const page = await openPage(board)
   assert.equal(hook.isSwitchedOff(board.file), false)
   assert.equal((await switchApprovals(board, page, false)).status, 200)
+  const started = Date.now()
   const res = await board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-crossing-switch')))
+  assert.ok(Date.now() - started < 3_000, `answered after ${Date.now() - started} ms`)
   assert.equal(res.status, 200)
   assert.deepEqual(res.body, {})
-  assert.deepEqual((await page.look())?.cards, [])
+  assert.deepEqual((await boardAs(board, page))?.cards, [])
 })
 
 for (const [reason, key] of [
@@ -2785,7 +2856,7 @@ for (const [reason, key] of [
     const page = await openPage(board)
     const at = '2026-11-20T00:00:00.000Z'
     writeRefusalRecord(board, reason, at)
-    const shown = await page.look()
+    const shown = await boardAs(board, page)
     assert.deepEqual(shown?.refusal, { reason, at, note: EN[key] })
   })
 }
@@ -2795,7 +2866,7 @@ test('refusal record with reason not-board-script instructs updating the Claude 
   const page = await openPage(board)
   const at = '2026-11-20T00:00:00.000Z'
   writeRefusalRecord(board, 'not-board-script', at)
-  const shown = await page.look()
+  const shown = await boardAs(board, page)
   assert.equal(shown?.refusal?.reason, 'not-board-script')
   assert.equal(shown?.refusal?.at, at)
   assert.match(shown?.refusal?.note ?? '', /claude plugin marketplace update agent-board/)
@@ -2810,7 +2881,10 @@ test('all refusal reasons, unreadable note and switch strings appear in EN, ZH_T
     'approvalRefusedNotBoardScript', 'approvalRefusedUnreadable',
   ]
   for (const s of [EN, ZH_TW, ZH_CN]) {
-    for (const key of keys) assert.equal(typeof s[key], 'string', key)
+    for (const key of [...keys, 'approvalSwitchNoSecret']) {
+      assert.equal(typeof s[key], 'string', key)
+      assert.notEqual(s[key].trim(), '', key)
+    }
     assert.match(s.approvalRefusedNotBoardScript, /claude plugin marketplace update agent-board/)
     assert.match(s.approvalRefusedNotBoardScript, /claude plugin update agent-board@agent-board/)
   }
@@ -2842,9 +2916,9 @@ test('removing the refusal record clears refusal from the board payload', async 
   const board = await startBoard()
   const page = await openPage(board)
   writeRefusalRecord(board, 'not-node')
-  assert.equal((await page.look())?.refusal?.reason, 'not-node')
+  assert.equal((await boardAs(board, page))?.refusal?.reason, 'not-node')
   rmSync(hook.approvalsRefusedFile(board.file))
-  assert.equal(await page.look(), undefined)
+  assert.equal(await boardAs(board, page), undefined)
 })
 
 test('a malformed JSON refusal record returns 200 with reason unreadable and clears when removed', async () => {
@@ -2852,9 +2926,9 @@ test('a malformed JSON refusal record returns 200 with reason unreadable and cle
   const page = await openPage(board)
   const record = hook.approvalsRefusedFile(board.file)
   writeFileSync(record, '{not-json')
-  assert.deepEqual((await page.look())?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
   rmSync(record)
-  assert.equal(await page.look(), undefined)
+  assert.equal(await boardAs(board, page), undefined)
 })
 
 test('a refusal record with an unknown reason returns 200 with reason unreadable and clears when removed', async () => {
@@ -2862,19 +2936,21 @@ test('a refusal record with an unknown reason returns 200 with reason unreadable
   const page = await openPage(board)
   const record = hook.approvalsRefusedFile(board.file)
   writeRefusalRecord(board, 'synthetic-unknown-reason')
-  assert.deepEqual((await page.look())?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
   rmSync(record)
-  assert.equal(await page.look(), undefined)
+  assert.equal(await boardAs(board, page), undefined)
 })
 
 test('a refusal record with a bad timestamp returns 200 with reason unreadable and clears when removed', async () => {
   const board = await startBoard()
   const page = await openPage(board)
   const record = hook.approvalsRefusedFile(board.file)
-  writeFileSync(record, JSON.stringify({ at: 'not-a-timestamp', reason: 'not-node' }))
-  assert.deepEqual((await page.look())?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
-  rmSync(record)
-  assert.equal(await page.look(), undefined)
+  for (const content of [{ at: 'not-a-timestamp', reason: 'not-node' }, { reason: 'not-node' }]) {
+    writeFileSync(record, JSON.stringify(content))
+    assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+    rmSync(record)
+    assert.equal(await boardAs(board, page), undefined)
+  }
 })
 
 test('an oversized refusal record over 4 KiB returns 200 with reason unreadable and clears when removed', async () => {
@@ -2882,9 +2958,9 @@ test('an oversized refusal record over 4 KiB returns 200 with reason unreadable 
   const page = await openPage(board)
   const record = hook.approvalsRefusedFile(board.file)
   writeFileSync(record, JSON.stringify({ at: new Date().toISOString(), reason: 'not-node', extra: 'x'.repeat(5_000) }))
-  assert.deepEqual((await page.look())?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
   rmSync(record)
-  assert.equal(await page.look(), undefined)
+  assert.equal(await boardAs(board, page), undefined)
 })
 
 test('a symlink at the refusal record path returns 200 with reason unreadable and clears when removed', async () => {
@@ -2896,9 +2972,9 @@ test('a symlink at the refusal record path returns 200 with reason unreadable an
   writeFileSync(targetFile, JSON.stringify({ at: new Date().toISOString(), reason: 'not-node' }))
   const record = hook.approvalsRefusedFile(board.file)
   placeLink(targetDir, targetFile, record)
-  assert.deepEqual((await page.look())?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
   rmSync(record, { recursive: true, force: true })
-  assert.equal(await page.look(), undefined)
+  assert.equal(await boardAs(board, page), undefined)
 })
 
 test('a directory at the refusal record path returns 200 with reason unreadable and clears when removed', async () => {
@@ -2906,9 +2982,9 @@ test('a directory at the refusal record path returns 200 with reason unreadable 
   const page = await openPage(board)
   const record = hook.approvalsRefusedFile(board.file)
   mkdirSync(record)
-  assert.deepEqual((await page.look())?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
   rmSync(record, { recursive: true, force: true })
-  assert.equal(await page.look(), undefined)
+  assert.equal(await boardAs(board, page), undefined)
 })
 
 test('a refusal record with unreadable permissions returns 200 with reason unreadable and clears when removed', async () => {
@@ -2918,12 +2994,12 @@ test('a refusal record with unreadable permissions returns 200 with reason unrea
   writeRefusalRecord(board, 'not-node')
   const restore = denyRead(record)
   try {
-    assert.deepEqual((await page.look())?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+    assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
   } finally {
     restore()
   }
   rmSync(record)
-  assert.equal(await page.look(), undefined)
+  assert.equal(await boardAs(board, page), undefined)
 })
 
 test('a stale refusal older than the latest passing ask is not reported while a newer refusal is', async () => {
@@ -2962,18 +3038,20 @@ test('a genuine refusal newer than the latest passing ask is reported on the boa
   fakeNow += 2_000
   const t3 = new Date(fakeNow).toISOString()
   writeRefusalRecord(board, 'lookup-timeout', t3)
-  assert.deepEqual((await page.look())?.refusal, { reason: 'lookup-timeout', at: t3, note: EN.approvalRefusedLookupTimeout })
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'lookup-timeout', at: t3, note: EN.approvalRefusedLookupTimeout })
 })
 
 test('the local page renders the approvals switch toggle with role switch and wires it to the switch route', async () => {
   const html = servePage(EN, 'synthetic', false)
   let switchedTo = null
+  let switchMethod = null
   const dom = await approvalPageDom({
     html,
     approvals: undefined,
     post: req => {
       if (req.path === '/api/approvals/switch') {
         switchedTo = req.body.enabled
+        switchMethod = req.method
         return { ok: true, status: 200, json: async () => ({ isOff: !req.body.enabled, note: EN.settingsChanged(EN.settingsApprovals, req.body.enabled ? EN.settingsOn : EN.settingsOff) }) }
       }
       return { ok: true, status: 200, json: async () => ({}) }
@@ -2985,6 +3063,7 @@ test('the local page renders the approvals switch toggle with role switch and wi
   toggle.click()
   await dom.redraw({ cards: [], isOff: true, note: EN.approvalSwitchedOff })
   assert.equal(switchedTo, false)
+  assert.equal(switchMethod, 'POST')
   assert.equal(toggle.getAttribute('aria-checked'), 'false')
 })
 
@@ -3026,9 +3105,11 @@ test('approvalSection stays quiet when switched off with zero cards and no refus
     html,
     approvals: { cards: [], isOff: true, note: 'Synthetic switched off note' },
   })
+  assert.equal(dom.board().querySelectorAll('.approvals').length, 0)
   assert.equal(dom.board().querySelectorAll('[data-approval-refusal]').length, 0)
   assert.equal(dom.board().querySelectorAll('.cards').length, 0)
   assert.equal(dom.board().textContent.includes('Synthetic switched off note'), false)
+  assert.equal(dom.board().textContent.includes(EN.approvalHead), false)
 })
 
 test('switching approvals off on a fresh board followed by reload requests a keyed page so reopening can switch back on', async () => {
@@ -3038,7 +3119,7 @@ test('switching approvals off on a fresh board followed by reload requests a key
   await board.call('/api/board', undefined, { 'x-board-page': 'p-reloaded' })
   const reloadedTry = await board.call('/api/approvals/switch', { enabled: true }, { origin: board.origin, 'x-board-page': 'p-reloaded' })
   assert.equal(reloadedTry.status, 403)
-  assert.equal(reloadedTry.body.note, EN.approvalNoSecret)
+  assert.equal(reloadedTry.body.note, EN.approvalSwitchNoSecret)
   assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
   const reopened = await openPage(board, { pageId: 'p-reopened' })
   assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
@@ -3046,6 +3127,66 @@ test('switching approvals off on a fresh board followed by reload requests a key
   assert.equal(backOn.status, 200)
   assert.equal(backOn.body.isOff, false)
   assert.equal(await reopened.look(), undefined)
+})
+
+test('a page that holds no secret and presses the switch makes the next board command open a keyed page', async () => {
+  const board = await startBoard()
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  const bare = { origin: board.origin, 'x-board-page': 'p-bare' }
+  // Another refusal for a missing secret keeps its own words and asks for nothing.
+  const drawn = await board.call('/api/approvals/drawn', { items: [] }, bare)
+  assert.equal(drawn.status, 403)
+  assert.equal(drawn.body.note, EN.approvalNoSecret)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  const refused = await board.call('/api/approvals/switch', { enabled: false }, bare)
+  assert.equal(refused.status, 403)
+  assert.equal(refused.body.note, EN.approvalSwitchNoSecret)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
+  const keyed = await openPage(board, { pageId: 'p-keyed' })
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  const off = await switchApprovals(board, keyed, false)
+  assert.equal(off.status, 200)
+  assert.equal(off.body.isOff, true)
+})
+
+test('a marker write that fails after the file was created removes the file, answers 409 and leaves waiting asks alone', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-failed-write')))
+  await page.card('npm run synthetic-failed-write', 'asking')
+  const refused = await withFsFault('writeSync', args => typeof args[1] === 'string' && args[1].startsWith('{"at"'), () => switchApprovals(board, page, false))
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.note, EN.approvalSwitchFailed)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
+  assert.equal(hook.isSwitchedOff(board.file), false)
+  assert.equal((await boardAs(board, page))?.isOff, undefined)
+  // Still waiting for the page: a failed switch changed nothing.
+  assert.equal(await Promise.race([waiting, pause(500).then(() => 'waiting')]), 'waiting')
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  assert.equal((await waiting).status, 200)
+})
+
+test('a marker write that fails and leaves the file behind settles waiting asks as the hook already is off', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-stuck-marker')))
+  await page.card('npm run synthetic-stuck-marker', 'asking')
+  const offFile = hook.approvalsOffFile(board.file)
+  const fails = args => typeof args[1] === 'string' && args[1].startsWith('{"at"')
+  const refused = await withFsFault('writeSync', fails, () => withFsFault('unlinkSync', args => args[0] === offFile, async () => {
+    const started = Date.now()
+    const res = await switchApprovals(board, page, false)
+    const answered = await waiting
+    assert.ok(Date.now() - started < 3_000, `answered after ${Date.now() - started} ms`)
+    assert.equal(answered.status, 200)
+    assert.deepEqual(answered.body, {})
+    return res
+  }))
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.note, EN.approvalSwitchFailed)
+  assert.equal(existsSync(offFile), true)
+  assert.equal((await boardAs(board, page))?.isOff, true)
 })
 
 test('during key-replay lockdown the approvals switch shows off and disabled while keeping the lockdown banner and user off state', async () => {
@@ -3097,6 +3238,15 @@ test('a watched board caches idle refusal and off-switch checks until the folder
   rmSync(hook.approvalsRefusedFile(board.file))
   runtimeWatcher.listener('rename', basename(hook.approvalsRefusedFile(board.file)))
   assert.equal(await page.look(), undefined)
+  const offFile = hook.approvalsOffFile(board.file)
+  writeFileSync(offFile, `${JSON.stringify({ at: new Date().toISOString() })}\n`, { mode: 0o600 })
+  assert.equal((await boardAs(board, page))?.isOff, undefined)
+  runtimeWatcher.listener('rename', basename(offFile))
+  assert.equal((await boardAs(board, page))?.isOff, true)
+  rmSync(offFile)
+  assert.equal((await boardAs(board, page))?.isOff, true)
+  runtimeWatcher.listener('rename', basename(offFile))
+  assert.equal(await boardAs(board, page), undefined)
   const busyPort = Number(new URL(board.origin).port)
   const busyWatchers = []
   await assert.rejects(
