@@ -2746,12 +2746,12 @@ const pollingProxy = async (board, mode, onClaim, onStarting, isStarted = () => 
       // A starting receipt (#1507). starting-busy: the first is answered as a busy store that saved nothing (503); starting-lost:
       // each reaches the board and its answer is lost; forbidden-after-starting: once the fake daemon has turn/start (isStarted),
       // every later poll of the connection that said it is refused for good, and the polls of any other connection reach the
-      // board, counted (offers) when they may take a message, with the messages the board hands them (handed).
+      // board. Those that may take a message are counted (offers) once the board has answered them with a list of messages,
+      // together with what it handed them (handed), so the two counts never disagree.
       const isStarting = req.url === '/api/messages/receipt' && JSON.parse(body || '{}').status === 'starting'
       if (isStarting) startings += 1
       const isOffer = isPoll && mode === 'forbidden-after-starting' && startedBy !== null && isStarted() && JSON.parse(body).connection !== startedBy && JSON.parse(body).receive !== false
       if (isPoll && mode === 'forbidden-after-starting' && startedBy !== null && isStarted() && JSON.parse(body).connection === startedBy) return fail(403)
-      if (isOffer) offers += 1
       if (isStarting && mode === 'starting-busy' && faults === 0) {
         faults += 1
         res.writeHead(503, { 'content-type': 'application/json' })
@@ -2785,7 +2785,7 @@ const pollingProxy = async (board, mode, onClaim, onStarting, isStarted = () => 
       if (isStarting && mode === 'starting-lost') { faults += 1; req.socket.destroy(); return }
       // unsent-lost: an unsent receipt reaches the board, and its answer is lost on the way back.
       if (mode === 'unsent-lost' && req.url === '/api/messages/receipt' && JSON.parse(body).status === 'unsent') { faults += 1; req.socket.destroy(); return }
-      if (isOffer) handed += JSON.parse(text).messages?.length ?? 0
+      if (isOffer && Array.isArray(JSON.parse(text).messages)) { offers += 1; handed += JSON.parse(text).messages.length }
       if (isPoll && mode === 'forbidden-after-claim' && JSON.parse(text).messages?.length) hasClaimed = true
       if (isPoll && faults === 0 && mode === 'after-claim' && JSON.parse(text).messages?.length) return fail(503)
       if (isPoll && onClaim && JSON.parse(text).messages?.length) await onClaim()
@@ -7361,20 +7361,24 @@ test('a turn heard to start while the Codex receiver says starting holds the cla
 
 test('a Codex thread that turns busy while the board hears starting gets no turn/start, and the message starts once that turn ends (#1370)', () => codexFixture(async (board, dir) => {
   // The person's turn begins while the starting receipt is out, and its notices reach the receiver only once the test has seen
-  // that nothing was started: only a fresh read of the thread shows that turn, whatever the machine's speed.
+  // the receiver act on the board's answer: only a fresh read of the thread shows that turn, whatever the machine's speed.
   const beginFlag = join(dir, 'begin-turn'), endFlag = join(dir, 'end-turn'), noticeFlag = join(dir, 'turn-notices')
   const daemon = codexDaemon(dir, { beginFlag, endFlag, beginLate: noticeFlag })
-  let isFirst = true
+  const leaves = () => codexMethods(daemon).filter(method => method === 'thread/unsubscribe').length
+  let isFirst = true, leavesAtStarting = 0
   const held = await m5aReceiver(board, daemon, 'pass', async () => {
     if (!isFirst) return
     isFirst = false
+    leavesAtStarting = leaves()
     writeFileSync(beginFlag, '')
     await waitFor(async () => !existsSync(beginFlag))
   })
   try {
     assert.equal(await codexSend(board, await codexConnection(board)), 200)
     await waitFor(() => !isFirst)
-    await pause(1200)
+    // The receiver left the thread after the board's answer, which only its fresh read showing the person's turn leads to. A
+    // receiver that trusts what it heard before sends turn/start into that turn and never leaves, so this wait times out.
+    await waitFor(() => leaves() > leavesAtStarting)
     assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
     writeFileSync(noticeFlag, '')
     await waitFor(async () => !existsSync(noticeFlag))
