@@ -303,6 +303,55 @@ test('a Hermes config that cannot be changed keeps the worker and board script u
   assert.equal(existsSync(board), false)
 }))
 
+// Connected at A, then a move to B that cannot write Hermes' config (#1664 review): Hermes still
+// runs A's hooks, so the next connect or remove must still count them as ours.
+const failedHermesMove = fn => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const foreign = '    - {command: "node ./tools/keep-this.mjs", timeout: 5}'
+  writeFileSync(config, `model: synthetic\nhooks:\n  on_session_start:\n${foreign}\n`)
+  f.run(f.request('connect'))
+  const atA = readFileSync(config, 'utf8')
+  const count = (text, folder) => text.split(folder).length - 1
+  assert.ok(count(atA, 'data-a') > 0, 'the first connect wrote hooks that name data-a')
+  const moved = join(f.home, 'data-b', 'progress.md')
+  const lock = isLocked => process.platform === 'win32'
+    ? execFileSync('attrib', [isLocked ? '+R' : '-R', config])
+    : chmodSync(join(f.home, '.hermes'), isLocked ? 0o555 : 0o755)
+  lock(true)
+  let output
+  try { output = f.run(f.request('connect', { progress: moved })) } finally { lock(false) }
+  assert.equal(readFileSync(config, 'utf8'), atA, 'the failed move left the config as it was')
+  assert.ok(output.result.problems.length > 0, 'the failed move is named')
+  return fn({ f, config, foreign, atA, moved, count })
+})
+
+const lockSkip = { skip: process.getuid?.() === 0 ? 'root ignores the read-only folder this test needs' : false }
+
+test('a move that cannot write the Hermes config keeps its old data folder for Hermes', lockSkip, () => failedHermesMove(({ f, moved }) => {
+  const record = JSON.parse(readFileSync(f.control, 'utf8'))
+  assert.equal(record.connectedProgress, moved)
+  assert.equal(record.hermesProgress, f.progress)
+}))
+
+test('a retry after a failed Hermes move replaces the old hooks instead of adding a second set', lockSkip, () => failedHermesMove(({ f, config, foreign, atA, moved, count }) => {
+  f.run(f.request('connect', { progress: moved }))
+  const after = readFileSync(config, 'utf8')
+  assert.equal(count(after, 'data-a'), 0, 'no hook names the old data folder')
+  assert.equal(count(after, 'data-b'), count(atA, 'data-a'), 'one set of hooks names the new data folder')
+  assert.ok(after.includes(foreign), 'the foreign hook stays')
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).hermesProgress, undefined)
+}))
+
+test('a removal after a failed Hermes move takes out the old hooks and keeps the foreign one', lockSkip, () => failedHermesMove(({ f, config, foreign, moved, count }) => {
+  f.run(f.request('remove', { progress: moved }))
+  const after = readFileSync(config, 'utf8')
+  assert.equal(count(after, 'data-a'), 0, 'no hook names the old data folder')
+  assert.equal(count(after, 'data-b'), 0, 'no hook names the new data folder')
+  assert.ok(after.includes(foreign), 'the foreign hook stays')
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).hermesProgress, undefined)
+}))
+
 test('a config that cannot be parsed is named when its hook cannot be taken out', () => withBothHooks('muse', ({ f, run }) => {
   const config = join(f.home, '.config', 'muse', 'settings.json')
   writeFileSync(config, `// mine\n${readFileSync(config, 'utf8')}`)
