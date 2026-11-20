@@ -634,6 +634,14 @@ test('the board time check fails a file over seventy percent of its budget and a
   assert.deepEqual(checkBoardTimes(unjudged), { ok: true, errors: [], warnings: [] })
 })
 
+test('setup-sidecar has a budget of its own: the 49.0 s that failed #1680 on Windows Node 24 passes it', async () => {
+  const { checkBoardTimes } = await import('../scripts/ci-impact.mjs')
+  // #1680 adds eleven removal re-read tests to the file: up to 49.0 s on Windows Node 24 (run 44650276536), over the 42 s
+  // line of the 60 s default. 49 049 ms is the slowest time that run could have printed as 49.0 s.
+  const timings = { part: '7/7', totalMs: 300_000, files: [{ path: 'tests/setup-sidecar.test.mjs', ms: 49_049 }] }
+  assert.deepEqual(checkBoardTimes(timings), { ok: true, errors: [], warnings: [] })
+})
+
 test('the time check passes the Windows times that failed pull requests after #1361, and its 70% line is at least 1.3x each file\'s slowest recent run (#1364)', async () => {
   const { checkBoardTimes, BOARD_FILE_BUDGETS_MS, BOARD_FILE_BUDGET_DEFAULT_MS } = await import('../scripts/ci-impact.mjs')
   const budgetOf = path => BOARD_FILE_BUDGETS_MS[path] ?? BOARD_FILE_BUDGET_DEFAULT_MS
@@ -660,6 +668,8 @@ test('the time check passes the Windows times that failed pull requests after #1
   slowest['tests/host-upgrade.test.mjs'] = 57_600
   // #1715: the slowest Windows Node 24 times on #1709 (runs 44543091708, 44550262085, 44553112605).
   Object.assign(slowest, { 'tests/approvals.test.mjs': 47_100, 'tests/codex-local.test.mjs': 167_400, 'tests/host-upgrade.test.mjs': 80_600, 'tests/setup-terminal.test.mjs': 73_400 })
+  // #1680: setup-sidecar's slowest Windows Node 24 time with its eleven removal re-read tests (run 44650276536).
+  slowest['tests/setup-sidecar.test.mjs'] = 49_000
   for (const [path, ms] of Object.entries(slowest)) assert.ok(budgetOf(path) * 7 / 10 >= ms * 13 / 10, path + ': ' + budgetOf(path))
 })
 

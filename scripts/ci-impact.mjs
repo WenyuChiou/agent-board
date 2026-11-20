@@ -176,6 +176,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/opencode-receiver.test.mjs': 85_000, // one part's share, about 44 s
   // New with #1438 (merge-check runs git in temporary repositories): 46.1 and 46.4 s on Windows Node 24 (#1464).
   'tests/merge-check.test.mjs': 90_000, // slowest 46.4 s
+  // Grew with #1680's eleven removal re-read tests: up to 49.0 s on Windows Node 24 (run 44650276536), over the 42 s
+  // line of the 60 s default. By the rule of #1715: 49 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/setup-sidecar.test.mjs': 95_000, // slowest 49.0 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
