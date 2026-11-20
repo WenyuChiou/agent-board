@@ -444,7 +444,7 @@ test('serve: the update command leaves a retired agent out, even with its record
       assert.equal(after.status, 200, after.text)
       const afterModel = JSON.parse(after.text).model
       assert.equal(afterModel.view.versions.package, '9.9.11')
-      const command = 'npx @wenyuchiou/agent-board@9.9.11 setup --agent codex --data-dir ' + folder
+      const command = 'npx @wenyuchiou/agent-board@9.9.11 setup --agent codex --data-dir ' + quoteArg(folder)
       assert.deepEqual(afterModel.health, [EN.serveOlderScriptSetup(boardVersion, '9.9.11', command)])
     } finally {
       if (before === undefined) delete globalThis.AGENT_BOARD
