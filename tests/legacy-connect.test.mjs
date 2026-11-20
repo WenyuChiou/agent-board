@@ -13,8 +13,8 @@ import { bundleFromDir, bundleFromRef } from '../scripts/bundle-text.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
 import { partTest } from '../scripts/ci-impact.mjs'
 
-// CI's board jobs run this file in parts, each part its share of the tests: whole, it took up to 167.0 s on Windows
-// Node 22 and sat in one part beside that part's share of codex-local, which then ran over its 480 s (#1741).
+// CI's board jobs run this file in parts, each part its share of the tests: whole, it took 101-179 s on Windows and
+// sat in one part beside that part's share of codex-local, which then ran over its 480 s (#1741).
 const test = partTest(nodeTest)
 
 const bundle = bundleFromDir(new URL('..', import.meta.url))
