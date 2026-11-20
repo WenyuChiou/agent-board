@@ -8777,7 +8777,8 @@ test('multi-agent removal preserves the shared board for an agent skipped by a c
   const textPreview = setupAgent(f, '--remove', '--agent', 'codex,antigravity', '--lang', 'en')
   assert.equal(textPreview.status, 0, textPreview.stderr + textPreview.stdout)
   assert.match(textPreview.stdout, /Antigravity: skipped:/)
-  assert.match(textPreview.stdout, /Retry after fixing the conflicting files: .*--remove --agent antigravity --apply/)
+  // The retry step is built as every next step is (`installCommand`): the agent, then the mode, then --apply.
+  assert.match(textPreview.stdout, /Retry after fixing the conflicting files: .*--agent antigravity --remove --apply/)
   const removed = setupAgent(f, ...args, '--apply')
   assert.equal(removed.status, 0, removed.stderr + removed.stdout)
   const result = JSON.parse(removed.stdout)
