@@ -61,7 +61,8 @@ of the other files, dealt out slowest first, each to the part with the least tim
 on Windows one file at a time, each in its own Node run, and on Ubuntu in one Node run. A file weighs about
 its slowest Windows time, read back from its time budget, and a file with no budget 5 s. `tests/codex-local.test.mjs` and `tests/board.test.mjs` take
 far longer than the rest (about 8 and 5 minutes there), so every part runs them, each part taking an
-equal number of their tests. Those shares do not take equal time, so in the seven Windows board parts each part
+equal number of their tests. `tests/legacy-connect.test.mjs` is split the same way (#1741): whole, it took
+101-179 s on Windows, and whichever part held it was the one that ran over its 480 s on a slow runner. Those shares do not take equal time, so in the seven Windows board parts each part
 starts from its measured share of the self-parted files (`BOARD_SELF_PARTED_SHARES_MS`): before that, the slowest
 other file went to part 1, the part with the largest share, and part 1 ran over its 480 s (#1733). On Ubuntu the board set runs in two parts: files run side by side there, but
 Node runs one file's tests one after another, so a single part ran about as long as `codex-local` alone
