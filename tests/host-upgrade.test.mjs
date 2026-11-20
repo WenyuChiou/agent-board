@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { join, resolve } from 'node:path'
 import { after, test } from 'node:test'
@@ -449,5 +449,77 @@ test('setup from a Node in another folder keeps the Codex hook commands and the 
   const trust = await run(f, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--agent', 'codex', '--codex-trust', '--json'], { timeoutMs: 60000 })
   assert.notEqual(trust.status, 0)
   assert.match(trust.stderr, /CODEX_BINARY_REQUIRED/)
+  assertRepeat(await repeatApply(f), ['codex'])
+})
+
+// The commands of the board's hooks in a Codex hooks.json.
+const hookCommands = config => Object.values(JSON.parse(readFileSync(config, 'utf8')).hooks).flat().flatMap(group => group.hooks.map(hook => hook.command))
+// A copy of the test's Node in its own folder of the fixture's world.
+const copyNode = (f, folder) => {
+  const node = join(f.world.root, folder, process.platform === 'win32' ? 'node.exe' : 'node')
+  mkdirSync(join(f.world.root, folder), { recursive: true })
+  copyFileSync(process.execPath, node)
+  if (process.platform !== 'win32') chmodSync(node, 0o755)
+  return node
+}
+const sharedSkill = f => join(f.home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+
+test('setup for Codex and OpenCode from a Node in another folder keeps the shared skill and the hook commands (#1662)', async () => {
+  const f = fixture(['.codex', '.config/opencode'])
+  await apply(f, ['codex', 'opencode'])
+  const config = join(f.home, '.codex', 'hooks.json')
+  const before = { config: readFileSync(config, 'utf8'), skill: readFileSync(sharedSkill(f), 'utf8') }
+  // OpenCode has no hook commands to read a Node from, so it reads the one the shared skill names.
+  const plan = await setupFrom(f, copyNode(f, 'moved-node'), ['--apply', '--json'])
+  assert.deepEqual(plan.targets, ['codex', 'opencode'])
+  for (const target of plan.plans) assert.deepEqual(target.changes, [], `${target.agent}: the moved Node reports no changes`)
+  assert.equal(readFileSync(config, 'utf8'), before.config, 'the hook commands stay byte-identical')
+  assert.equal(readFileSync(sharedSkill(f), 'utf8'), before.skill, 'the shared skill still names the Node it was set up from')
+  assertRepeat(await repeatApply(f), ['codex', 'opencode'])
+})
+
+test('setup from another name for the Node it was set up from keeps the hook commands and the skill as written (#1662)', async () => {
+  const f = fixture(['.codex'])
+  const firstNode = copyNode(f, 'first-node')
+  await setupFrom(f, firstNode, ['--apply', '--json'])
+  const config = join(f.home, '.codex', 'hooks.json')
+  const before = { config: readFileSync(config, 'utf8'), skill: readFileSync(sharedSkill(f), 'utf8') }
+  // A hard link is the same file under another name, as process.execPath reports it.
+  const linked = join(f.world.root, 'linked-node', process.platform === 'win32' ? 'node.exe' : 'node')
+  mkdirSync(join(f.world.root, 'linked-node'))
+  linkSync(firstNode, linked)
+  const plan = await setupFrom(f, linked, ['--apply', '--json'])
+  assert.deepEqual(plan.plans[0].changes, [], 'the other name reports no changes')
+  assert.equal(readFileSync(config, 'utf8'), before.config, 'the hook commands keep the name they were written with')
+  assert.equal(readFileSync(sharedSkill(f), 'utf8'), before.skill, 'the skill keeps the name it was written with')
+  assert.ok(hookCommands(config).every(command => !command.includes(linked)), 'no hook command names the other name')
+  assertRepeat(await repeatApply(f), ['codex'])
+})
+
+test('setup does not keep a file that is not Node in the place of the Node it was set up from (#1662)', async () => {
+  const f = fixture(['.codex'])
+  const firstNode = copyNode(f, 'first-node')
+  await setupFrom(f, firstNode, ['--apply', '--json'])
+  // Windows may still hold the program's file open for a moment after it ends, but it lets the name move.
+  renameSync(firstNode, join(f.world.root, 'first-node', 'moved-away'))
+  writeFileSync(firstNode, 'not a program\n')
+  const movedNode = copyNode(f, 'moved-node')
+  const plan = await setupFrom(f, movedNode, ['--apply', '--json'])
+  assert.ok(plan.plans[0].changes.length > 0, 'the hooks and the skill are written again')
+  const config = join(f.home, '.codex', 'hooks.json')
+  assert.ok(hookCommands(config).every(command => !command.includes(firstNode)), 'no hook command starts the file that is not Node')
+  assert.ok(readFileSync(sharedSkill(f), 'utf8').includes(`"${movedNode}"`), 'the skill names the Node that ran setup')
+})
+
+test('on Windows setup from a Node in another folder keeps the encoded launch it wrote for a Node whose path needs one (#1662)', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
+  const f = fixture(['.codex'])
+  // Brackets are not among the characters a hook may start a program by, so the first install encodes the launch.
+  await setupFrom(f, copyNode(f, 'node (first)'), ['--apply', '--json'])
+  const config = join(f.home, '.codex', 'hooks.json')
+  const before = readFileSync(config, 'utf8')
+  assert.ok(hookCommands(config).every(command => command.startsWith('powershell.exe ')), 'the first install starts Node inside an encoded launch')
+  const plan = await setupFrom(f, copyNode(f, 'moved-node'), ['--apply', '--json'])
+  assert.deepEqual(plan.plans[0].changes, [], 'the moved Node reports no changes')
+  assert.equal(readFileSync(config, 'utf8'), before, 'the encoded launches stay byte-identical')
   assertRepeat(await repeatApply(f), ['codex'])
 })
