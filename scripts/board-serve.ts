@@ -153,7 +153,15 @@ let packageVersion: string | null = /^\d+\.\d+\.\d+$/.test(packageVersionValue) 
 // script (#1304). An independent install names the setup preview, with the same agents and
 // data folder the launcher names; a plugin-written copy names the plugin update. The package
 // name is the published one: this bundle ships only in @wenyuchiou/agent-board.
-const olderScriptUpdate = (): { update: 'setup' | 'plugin'; command?: string } | undefined => {
+// The folder as a literal shell argument, quoted the way setup quotes its own commands
+// (scripts/setup-agent.mjs `quote`): bare when it holds only word, dot, slash, colon, at,
+// equals, comma or dash characters, else single-quoted, so `$`, backticks and double quotes in
+// a custom folder reach the shell unchanged. A double-quoted folder would let the shell expand
+// `$` and backticks. That helper lives in the setup script, which runs on import, so this is
+// the same rule written here, not an import.
+export const quoteArg = (value: string): string => /^[\w./:@=,-]+$/.test(value) ? value : process.platform === 'win32'
+  ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
+const olderScriptUpdate = (): { update: 'setup' | 'plugin'; command?: string; lanCommand?: string } | undefined => {
   if (packageVersion === null) return undefined
   const prelude = (globalThis as { AGENT_BOARD?: { codexRoot?: unknown } }).AGENT_BOARD ?? {}
   if (typeof prelude.codexRoot !== 'string') return { update: 'plugin' }
@@ -163,8 +171,12 @@ const olderScriptUpdate = (): { update: 'setup' | 'plugin'; command?: string } |
   let agents = listed(root)
   // A moved data folder: the board script's own folder is where the board is now.
   if (!agents) { root = dirname(process.argv[1] ?? ''); agents = listed(root) ?? [] }
-  const opts = (agents.length ? ` --agent ${agents.join(',')}` : '') + (root !== join(homedir(), '.agent-board') ? ` --data-dir ${/[^\w.:\\/~@+,=-]/.test(root) ? `"${root}"` : root}` : '')
-  return { update: 'setup', command: `npx @wenyuchiou/agent-board@${packageVersion} setup${opts}` }
+  const agentOpts = agents.length ? ` --agent ${agents.join(',')}` : ''
+  const dataOpts = root !== join(homedir(), '.agent-board') ? ` --data-dir ${quoteArg(root)}` : ''
+  const base = `npx @wenyuchiou/agent-board@${packageVersion} setup`
+  // The page on the local network is plain HTTP: its advice is the same command without the
+  // data folder, built here beside the full one, so no path can survive redaction (#1304).
+  return { update: 'setup', command: `${base}${agentOpts}${dataOpts}`, lanCommand: `${base}${agentOpts}` }
 }
 let olderScript = olderScriptUpdate()
 

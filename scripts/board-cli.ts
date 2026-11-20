@@ -2795,7 +2795,8 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
       // Only a start that finds no address file reaches the page through its store. An address file this
       // start would not use (one another account may have written) never leads to the page behind it, and
       // a page that answers is never ended: it is waited for as before.
-      if (page.kind === 'answers' && !existsSync(file)) return { result: { url: page.url, port: page.port, isKept: true, isNew: false } }
+      // The server it reuses may predate this launcher: tell it the package before returning its URL.
+      if (page.kind === 'answers' && !existsSync(file)) { await refreshServerPackage(page.url); return { result: { url: page.url, port: page.port, isKept: true, isNew: false } } }
       if (page.kind !== 'answers') {
         const settled = await settleStoreHolder(pid, { ...holderDeps(holderAgeMs()), stillDead: async () => (await ownerPageState(pid, file)).kind === 'dead' }, page.kind === 'dead' ? page.proof : undefined)
         if (settled.kind === 'gone' || settled.kind === 'ended') return again()
@@ -2810,7 +2811,8 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     const until = refused !== undefined || exiting !== undefined ? performance.now() : storeCode === 'MESSAGE_STORE_IN_USE' ? Math.min(deadline, performance.now() + (held ? 10_000 : 2_000)) : readyBy
     for (;;) {
       const other = await runningPage(true, false, replaced)
-      if (other !== null) return { result: { url: other.page.url, port: other.page.port, isKept: other.isKept, isNew: false, idleMs: other.idleMs } }
+      // The server it reuses may predate this launcher: tell it the package before returning its URL.
+      if (other !== null) { await refreshServerPackage(other.page.url); return { result: { url: other.page.url, port: other.page.port, isKept: other.isKept, isNew: false, idleMs: other.idleMs } } }
       if (performance.now() >= until) break
       // A protected Windows address may still be publishing within this launch deadline.
       if (storeCode !== 'MESSAGE_STORE_IN_USE' && (process.platform !== 'win32' || !existsSync(file))) break
@@ -2848,7 +2850,8 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
       // Collision in claims or another start is in flight: back off with randomized jitter, then retry or wait for its page
       await new Promise(done => setTimeout(done, Math.floor(Math.random() * 150) + 50))
       const afterWait = await runningPage(true, false, replaced)
-      if (afterWait !== null) return { result: { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs } }
+      // The server it reuses may predate this launcher: tell it the package before returning its URL.
+      if (afterWait !== null) { await refreshServerPackage(afterWait.page.url); return { result: { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs } } }
       return again()
     }
     // A holder that ended meanwhile (another start ended it) is no reason to refuse: try again.

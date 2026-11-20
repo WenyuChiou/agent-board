@@ -312,7 +312,7 @@ export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string;
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
-export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[]; olderScript?: { update: 'setup' | 'plugin'; command?: string } }
+export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[]; olderScript?: { update: 'setup' | 'plugin'; command?: string; lanCommand?: string } }
 type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
 type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
 type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
@@ -516,11 +516,6 @@ const isNewerVersion = (candidate: string, current: string): boolean => {
   return false
 }
 
-// The setup command names its data folder with --data-dir; a reader on the local network must
-// not get that path, since the folder sits under the account's home. The folder is quoted
-// exactly when it holds a character outside the launcher's bare set, so a quoted segment or
-// one bare word is removed whole, and the rest of the command stays.
-const withoutDataDir = (command: string): string => command.replace(/ --data-dir (?:"[^"]*"|\S+)/, '')
 
 // `routes`: the receivers' records, which say on each card when a message arrives and whether Send is offered.
 export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strings = ZH_TW, sending: ReadonlySet<string> = new Set(), isLan = false, messaging?: Messaging, allowResume = false, group?: GroupOptions, routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeModel => {
@@ -797,12 +792,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   }
   // The installed script is older than the package that started this server: the page says so and
   // how to update it (#1304). An edited script, or a newer one, shows nothing. The page on the
-  // local network is plain HTTP, so its advice carries the command without the data folder.
+  // local network is plain HTTP, so its advice carries the command the board script built
+  // without the data folder, beside the full command the local page shows (#1304).
   if (group?.olderScript !== undefined && group.versions.package !== null && isNewerVersion(group.versions.package, group.versions.board)) {
-    const command = group.olderScript.command ?? ''
+    const command = isLan ? group.olderScript.lanCommand ?? '' : group.olderScript.command ?? ''
     const notice = group.olderScript.update === 'plugin'
       ? s.serveOlderScriptPlugin(group.versions.board, group.versions.package)
-      : s.serveOlderScriptSetup(group.versions.board, group.versions.package, isLan ? withoutDataDir(command) : command)
+      : s.serveOlderScriptSetup(group.versions.board, group.versions.package, command)
     model.health = [...(model.health ?? []), notice]
   }
   // Repository names are computed locally before folder paths are removed for a phone.

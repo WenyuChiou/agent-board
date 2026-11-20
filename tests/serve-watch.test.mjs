@@ -18,7 +18,7 @@ registerHooks({ resolve(specifier, context, next) {
     return next(`${specifier}.ts`, context)
   }
 } })
-const { startServer, boardVersion } = await import('../scripts/board-serve.ts')
+const { startServer, boardVersion, quoteArg } = await import('../scripts/board-serve.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
 const { EN } = await import('../hooks/strings-en.ts')
@@ -342,6 +342,17 @@ test('serve: when the file watch fails, the page still updates within 3 s from a
   }
 })
 
+test('serve: a custom folder is quoted literally, so $ and backticks reach the shell unchanged (#1304)', () => {
+  // Bare folders stay bare; anything else is single-quoted, the way setup quotes its own
+  // commands, so a `$` or backtick in the folder never expands in the shell.
+  assert.equal(quoteArg('/home/person/custom-data'), '/home/person/custom-data')
+  assert.equal(quoteArg('/home/person/my data'), "'/home/person/my data'")
+  assert.equal(quoteArg('/home/person/data$cache'), "'/home/person/data$cache'")
+  assert.equal(quoteArg('/home/person/data`x`'), "'/home/person/data`x`'")
+  assert.equal(quoteArg('/home/person/board"private"/sensitive-project'), "'/home/person/board\"private\"/sensitive-project'")
+  assert.equal(quoteArg("/home/person/it's"), process.platform === 'win32' ? "'/home/person/it''s'" : "'/home/person/it'\\''s'")
+})
+
 test('serve: a later launcher that reuses the server refreshes its package version (#1304)', async () => {
   const board = await startBoard()
   // Started with no package version: the board says nothing about an update.
@@ -370,4 +381,45 @@ test('serve: a later launcher that reuses the server refreshes its package versi
   assert.equal(bad.status, 400, bad.text)
   const kept = await board.ask()
   assert.equal(JSON.parse(kept.text).model.view.versions.package, '9.9.9')
+})
+
+test('serve: the update command quotes a $ folder literally, and the phone gets it without the folder (#1304)', async t => {
+  const board = await startBoard()
+  try {
+    const folder = join(board.root, 'data$cache`x')
+    mkdirSync(folder)
+    writeFileSync(join(folder, 'install-codex.json'), '{}\n')
+    const before = globalThis.AGENT_BOARD
+    globalThis.AGENT_BOARD = { codexRoot: folder }
+    try {
+      const refreshed = await board.post('/api/package', { version: '9.9.10' })
+      assert.equal(refreshed.status, 200, refreshed.text)
+      assert.deepEqual(JSON.parse(refreshed.text), { package: '9.9.10' })
+      const after = await board.ask()
+      assert.equal(after.status, 200, after.text)
+      const afterModel = JSON.parse(after.text).model
+      assert.equal(afterModel.view.versions.package, '9.9.10')
+      // The folder holds a `$` and backticks: the command quotes it singly, so the shell
+      // passes it literally, and the local page shows the whole command.
+      const command = 'npx @wenyuchiou/agent-board@9.9.10 setup --agent codex --data-dir \'' + folder + '\''
+      assert.deepEqual(afterModel.health, [EN.serveOlderScriptSetup(boardVersion, '9.9.10', command)])
+      // The phone's page gets the same advice without the folder, built beside the full
+      // command, so no path can leak through it whatever the folder holds.
+      const opened = await board.post('/api/lan', {})
+      if (opened.status !== 200) {
+        t.diagnostic(`No private network address: LAN advice untested; local command still checked. (${opened.text})`)
+      } else {
+        const lan = new URL(JSON.parse(opened.text).url)
+        const response = await fetch(new URL('/api/board', lan), { headers: { 'x-board-token': lan.searchParams.get('t'), 'x-board-page': 'p-watch', 'x-board-visible': '1' } })
+        const text = await response.text()
+        assert.equal(response.status, 200, text)
+        const lanModel = JSON.parse(text).model
+        assert.deepEqual(lanModel.health, [EN.serveOlderScriptSetup(boardVersion, '9.9.10', 'npx @wenyuchiou/agent-board@9.9.10 setup --agent codex')])
+        assert.equal(lanModel.health[0].includes('data$cache'), false, lanModel.health[0])
+      }
+    } finally {
+      if (before === undefined) delete globalThis.AGENT_BOARD
+      else globalThis.AGENT_BOARD = before
+    }
+  } finally { await board.close() }
 })

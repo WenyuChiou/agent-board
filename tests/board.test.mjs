@@ -11941,17 +11941,23 @@ test('the page on the local network gets update advice without the data folder (
   const view = (words) => runtime.buildView([], [], null, groupedNow, 0, {}, words)
   const model = (words, isLan, olderScript) => runtime.serveModel(view(words), [], words, new Set(), isLan, undefined, false, { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: '9.9.9' }, unreadable: [], olderScript })
   for (const words of [EN, ZH_TW, ZH_CN]) {
-    // A custom data folder, bare and quoted: the phone's page keeps the advice but loses the path.
+    // A custom data folder, bare, quoted, or holding a `$`, a backtick or a double quote: the
+    // phone's page keeps the advice the board script built without the folder, and no path
+    // survives in it, whatever the folder holds.
     for (const [command, lanCommand] of [
       ['npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir /home/person/custom-data', 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
       ['npx @wenyuchiou/agent-board@9.9.9 setup --data-dir "/home/person/my data"', 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir '/home/person/data$cache'", 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir '/home/person/data`x`'", 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '/home/person/board\"private\"/sensitive-project'", 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '/home/person/data$cache more'", 'npx @wenyuchiou/agent-board@9.9.9 setup'],
     ]) {
-      const lan = model(words, true, { update: 'setup', command })
+      const lan = model(words, true, { update: 'setup', command, lanCommand })
       assert.equal(lan.health?.length, 1, JSON.stringify(lan.health))
       assert.equal(lan.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', lanCommand))
       assert.equal(lan.health[0].includes('/home/person'), false, lan.health[0])
       // The computer's own page keeps the full command, so the person can run it as written.
-      const local = model(words, false, { update: 'setup', command })
+      const local = model(words, false, { update: 'setup', command, lanCommand })
       assert.equal(local.health?.length, 1, JSON.stringify(local.health))
       assert.equal(local.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', command))
     }

@@ -1,6 +1,6 @@
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
@@ -20,7 +20,7 @@ const filesUnder = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entr
   const path = join(dir, entry.name)
   return entry.isDirectory() ? filesUnder(path) : [path]
 }).sort()
-const fixture = fn => {
+const makeBox = () => {
   const box = mkdtempSync(join(tmpdir(), 'agent-board npm-'))
   const home = join(box, 'home')
   const tmp = join(box, 'tmp')
@@ -46,14 +46,24 @@ const fixture = fn => {
   const run = (pkg, args = [], extraEnv = {}, input) => spawnSync(process.execPath, [join(pkg, 'bin/agent-board.mjs'), ...args], {
     cwd: box, env: { ...env, ...extraEnv }, input, encoding: 'utf8', windowsHide: true, timeout: 30000,
   })
-  try { return fn({ box, home, tmp, env, run }) }
-  finally {
+  const cleanup = () => {
     try {
       rmSync(box, { recursive: true, force: true, maxRetries: 25, retryDelay: 100 })
     } catch {
       // Windows transient file lock
     }
   }
+  return { box, home, tmp, env, run, cleanup }
+}
+const fixture = fn => {
+  const f = makeBox()
+  try { return fn(f) }
+  finally { f.cleanup() }
+}
+const asyncFixture = async fn => {
+  const f = makeBox()
+  try { return await fn(f) }
+  finally { f.cleanup() }
 }
 const success = result => {
   assert.ifError(result.error)
@@ -676,3 +686,57 @@ test('setup forwards stderr and exit status while hiding the package folder on f
     assert.deepEqual(filesUnder(f.home), [])
   }
 }))
+
+test('a later launcher that reuses a server without its address record still refreshes its package version (#1304)', { timeout: 60_000 }, async () => {
+  await asyncFixture(async f => {
+    const pkg = packed(f)
+    save(boardPath(f), `${prelude(f)}${bundle(pkg)}`)
+    save(join(f.home, '.agent-board/progress.md'), '# Progress\n')
+    // Start the server directly, with no package version: the board says nothing about an update.
+    // The runtime folder must exist and be account-only, or the server falls back to ~/.cache.
+    const runDir = join(f.tmp, 'run')
+    mkdirSync(runDir, { mode: 0o700 })
+    const child = spawn(process.execPath, [boardPath(f), '--serve-child'], {
+      cwd: f.box, env: { ...f.env, AGENT_BOARD_PACKAGE_VERSION: '' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', chunk => { stderr += chunk })
+    const exited = new Promise(done => child.once('exit', code => done(code)))
+    const firstUrl = await new Promise((done, fail) => {
+      let out = ''
+      child.stdout.setEncoding('utf8')
+      child.stdout.on('data', chunk => {
+        out += chunk
+        if (out.includes('\n')) done(new URL(out.split('\n')[0].trim()))
+      })
+      exited.then(code => fail(new Error(`the server exited with ${code}: ${stderr}`)))
+    })
+    const token = firstUrl.searchParams.get('t')
+    const board = async () => {
+      const response = await fetch(new URL('/api/board', firstUrl), { headers: { 'x-board-token': token, 'x-board-page': 'p-test', 'x-board-visible': '1' } })
+      return JSON.parse(await response.text()).model
+    }
+    try {
+      assert.equal((await board()).view.versions.package, null)
+      assert.equal((await board()).health, undefined)
+      // The address record is gone, so the next launcher run reaches the server through its
+      // owner record, not the file: it must still tell the server its package version.
+      const records = readdirSync(runDir).filter(name => name.startsWith('agent-board-') && name.endsWith('.json'))
+      assert.equal(records.length, 1, JSON.stringify(records))
+      unlinkSync(join(runDir, records[0]))
+      const second = f.run(pkg, [])
+      success(second)
+      const secondUrl = new URL(second.stdout.match(/https?:\/\/\S+/)?.[0] ?? '')
+      assert.equal(secondUrl.href, firstUrl.href)
+      const after = await board()
+      assert.equal(after.view.versions.package, manifest.version)
+      // The package is the board's own version, so there is no update to name.
+      assert.equal(after.health, undefined)
+    } finally {
+      await fetch(new URL('/api/close', firstUrl), { method: 'POST', headers: { 'x-board-token': token, 'content-type': 'application/json' }, body: '{}' }).catch(() => undefined)
+      await Promise.race([exited, new Promise(done => setTimeout(done, 5000))])
+      if (child.exitCode === null) child.kill()
+    }
+  })
+})
