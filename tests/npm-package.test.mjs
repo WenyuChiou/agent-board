@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash, randomBytes } from 'node:crypto'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, watch, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
@@ -556,6 +557,35 @@ test('--json with --chat or --status through an older script prints the notice o
   }
 }))
 
+test('management commands with --json through an older script return JSON and exit 0, while a board read still exits 1', () => fixture(f => {
+  const pkg = packed(f)
+  // An older script that answers its management commands with JSON, as a released 0.24.2
+  // script does, and prints the text board for a board read: the guard ends JSON board
+  // reads only, so a management command still runs and still returns its JSON, with the
+  // older-script notice on stderr as on main. The board-read half pins the other side of
+  // that scope: a test that only checked the management commands would also pass with the
+  // guard deleted outright, and it is the board-read half that fails on the merge base.
+  const script = `${prelude(f)}const args = process.argv.slice(2)\n` +
+    `process.stdout.write(args.includes('--codex-doctor') ? '{"doctor":"ok"}\\n' : args.includes('--codex-remove') ? '{"remove":"preview"}\\n' : 'the text board\\n')\n`
+  save(boardPath(f), script)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.0.1', board: ['${bodyHash(script)}'] }]\n`)
+  for (const args of [['--codex-doctor', '--json'], ['--json', '--codex-doctor'], ['--codex-remove', '--json'], ['--json', '--codex-remove']]) {
+    const result = f.run(pkg, args)
+    assert.ifError(result.error)
+    assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr}`)
+    assert.doesNotThrow(() => JSON.parse(result.stdout), `${args.join(' ')}: ${result.stdout}`)
+    assert.equal(result.stderr.trim().split('\n').length, 1, result.stderr)
+    assert.ok(result.stderr.includes('is from 0.0.1.'), result.stderr)
+  }
+  // The guard still ends a plain JSON board read through the same older script.
+  const read = f.run(pkg, ['--json'])
+  assert.ifError(read.error)
+  assert.equal(read.status, 1, read.stderr)
+  assert.equal(read.stdout, '')
+  assert.equal(read.stderr.trim().split('\n').length, 1, read.stderr)
+  assert.ok(read.stderr.includes('is from 0.0.1.'), read.stderr)
+}))
+
 test("--data-dir runs that folder's board without CLAUDE_PROGRESS_FILE", () => fixture(f => {
   const pkg = packed(f)
   const root = join(f.home, 'data dir')
@@ -747,6 +777,172 @@ test('a later launcher that reuses a server without its address record still ref
       await fetch(new URL('/api/close', firstUrl), { method: 'POST', headers: { 'x-board-token': token, 'content-type': 'application/json' }, body: '{}' }).catch(() => undefined)
       await Promise.race([exited, new Promise(done => setTimeout(done, 5000))])
       if (child.exitCode === null) child.kill()
+    }
+  })
+})
+
+test('a later launcher that reuses a server through the retry wait or the claim backoff still refreshes its package version (#1304)', { timeout: 120_000 }, async () => {
+  await asyncFixture(async f => {
+    const pkg = packed(f)
+    save(boardPath(f), `${prelude(f)}${bundle(pkg)}`)
+    const progressPath = join(f.home, '.agent-board/progress.md')
+    save(progressPath, '# Progress\n')
+    // The runtime folder must exist and be account-only, or the server falls back to ~/.cache.
+    const runDir = join(f.tmp, 'run')
+    mkdirSync(runDir, { mode: 0o700 })
+    // The address file the launcher reads for this board, and the messages folder beside it.
+    // On Windows the record lives in the account-only `agent-board` child of the runtime
+    // folder; elsewhere it is in the runtime folder itself (board-cli.ts runFolder).
+    const recordDir = process.platform === 'win32' ? join(runDir, 'agent-board') : runDir
+    mkdirSync(recordDir, { mode: 0o700, recursive: true })
+    const recordName = `agent-board-${createHash('sha256').update(resolve(progressPath)).digest('hex').slice(0, 16)}.json`
+    const recordPath = join(recordDir, recordName)
+    const messagesDir = recordPath.replace(/\.json$/, '-messages')
+    mkdirSync(messagesDir, { mode: 0o700, recursive: true })
+    const built = String(statSync(boardPath(f)).mtimeMs)
+    // The message store is held by this test process: the launcher's child cannot claim it
+    // and fails with MESSAGE_STORE_IN_USE, so onePass takes the retry path. No lock file, so
+    // the owner block is skipped and the two retry returns are the only way back.
+    const nonce = randomBytes(16).toString('hex')
+    const claimName = `.message-claim-${process.pid}-${nonce}.json`
+    writeFileSync(join(messagesDir, claimName), `${JSON.stringify({ version: 1, pid: process.pid, nonce })}\n`, { mode: 0o600 })
+    // A stand-in for another launch's page: it answers the launcher's probe and records the
+    // package version the launcher tells it. A hanging /api/ping stands in for a page still
+    // starting, so the launcher's wait loop cannot find it until the test lets it answer.
+    const posts = []
+    let answerPing = true
+    const sockets = new Set()
+    const fake = createServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+      if (req.method === 'GET' && url.pathname === '/api/ping') {
+        if (!answerPing) return
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ path: resolve(progressPath), built, allowResume: false, codexSend: true, messagesDirectory: resolve(messagesDir) }))
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/api/package') {
+        let body = ''
+        req.on('data', chunk => { body += chunk })
+        req.on('end', () => {
+          try { posts.push(JSON.parse(body)) } catch { posts.push(null) }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end('{}')
+        })
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/api/close') {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end('{}')
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    })
+    fake.on('connection', socket => {
+      sockets.add(socket)
+      socket.on('close', () => sockets.delete(socket))
+    })
+    await new Promise(done => fake.listen(0, '127.0.0.1', done))
+    const port = fake.address().port
+    const fakeUrl = `http://127.0.0.1:${port}/?t=retrytesttoken`
+    const writeRecord = () => writeFileSync(recordPath, JSON.stringify({ pid: 2147483647, port, url: fakeUrl, path: resolve(progressPath), built }), { mode: 0o600 })
+    const sleep = ms => new Promise(done => setTimeout(done, ms))
+    const waitFor = async (check, timeoutMs, what) => {
+      const until = Date.now() + timeoutMs
+      while (Date.now() < until) {
+        if (check()) return
+        await sleep(5)
+      }
+      throw new Error(`timed out waiting for ${what}`)
+    }
+    // The child's claim appears and is released within milliseconds, so the signal is the
+    // messages folder changing, not the file itself. It also proves ensureServer's first
+    // lookup already ran, since the child starts only after it.
+    let baselineMtime = statSync(messagesDir).mtimeMs
+    const childClaimed = () => {
+      try {
+        if (statSync(messagesDir).mtimeMs !== baselineMtime) return true
+        return readdirSync(messagesDir).some(name => name.startsWith('.message-claim-') && name !== claimName)
+      } catch { return false }
+    }
+    // How many pages the launcher started: a retry after the backoff would start a second
+    // child, and a return from that retry's wait would prove the wrong return, so more than
+    // one claim per scenario fails the test. The watcher may miss a claim, so zero is allowed.
+    let claimCreates = 0
+    let watcher = null
+    try {
+      watcher = watch(messagesDir, (event, filename) => {
+        if (event !== 'rename' || typeof filename !== 'string' || !filename.startsWith('.message-claim-') || filename === claimName) return
+        try { if (existsSync(join(messagesDir, filename))) claimCreates++ } catch {}
+      })
+    } catch {}
+    // The launcher, run in the background so this test can publish the address while it waits.
+    let launcher = null
+    const runLauncher = () => new Promise((resolvePromise, rejectPromise) => {
+      launcher = spawn(process.execPath, [join(pkg, 'bin/agent-board.mjs')], { cwd: f.box, env: { ...f.env, CI: '0' }, windowsHide: true })
+      let stdout = ''
+      let stderr = ''
+      launcher.stdout.setEncoding('utf8')
+      launcher.stdout.on('data', chunk => { stdout += chunk })
+      launcher.stderr.setEncoding('utf8')
+      launcher.stderr.on('data', chunk => { stderr += chunk })
+      const timer = setTimeout(() => {
+        launcher.kill()
+        rejectPromise(new Error(`the launcher did not exit in time: ${stderr}`))
+      }, 25000)
+      launcher.once('error', error => {
+        clearTimeout(timer)
+        rejectPromise(error)
+      })
+      launcher.once('close', code => {
+        clearTimeout(timer)
+        resolvePromise({ code, stdout, stderr })
+      })
+    })
+    try {
+      // The wait loop: the page answers from the start, so the loop's poll finds it.
+      answerPing = true
+      baselineMtime = statSync(messagesDir).mtimeMs
+      let before = claimCreates
+      let run = runLauncher()
+      await waitFor(childClaimed, 15000, 'the launcher child to claim the message store')
+      writeRecord()
+      const waited = await run
+      assert.equal(waited.code, 0, waited.stderr)
+      assert.ok(waited.stdout.includes(fakeUrl), waited.stdout)
+      assert.equal(posts.length, 1, JSON.stringify(posts))
+      assert.equal(posts[0]?.version, manifest.version)
+      assert.ok(claimCreates - before <= 1, `the launcher started ${claimCreates - before} children in the wait scenario`)
+      // The record stays after a reuse, so the next launch must not find it in its first lookup.
+      unlinkSync(recordPath)
+      posts.length = 0
+      // The claim-collision backoff: the page hangs while the wait loop runs, so the loop
+      // cannot find it and its poll deletes the record; the backoff then finds the address
+      // the test publishes after that deletion. The record is published half a second after
+      // the child's claim, so the hanging poll starts well before the loop's two-second wait
+      // ends and deletes the record well after it: the deletion marks the loop's end, and a
+      // loop poll can never see the page answering.
+      answerPing = false
+      baselineMtime = statSync(messagesDir).mtimeMs
+      before = claimCreates
+      run = runLauncher()
+      await waitFor(childClaimed, 15000, 'the launcher child to claim the message store')
+      await sleep(500)
+      writeRecord()
+      await waitFor(() => !existsSync(recordPath), 15000, 'the wait loop to delete the address record')
+      answerPing = true
+      writeRecord()
+      const backedOff = await run
+      assert.equal(backedOff.code, 0, backedOff.stderr)
+      assert.ok(backedOff.stdout.includes(fakeUrl), backedOff.stdout)
+      assert.equal(posts.length, 1, JSON.stringify(posts))
+      assert.equal(posts[0]?.version, manifest.version)
+      assert.ok(claimCreates - before <= 1, `the launcher started ${claimCreates - before} children in the backoff scenario`)
+    } finally {
+      if (launcher !== null && launcher.exitCode === null) launcher.kill()
+      watcher?.close()
+      for (const socket of sockets) socket.destroy()
+      await new Promise(done => fake.close(done))
     }
   })
 })

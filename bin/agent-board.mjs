@@ -171,6 +171,9 @@ Without installing: npx ${name} <the same options>`,
 ][at]
 const message = (en, tw, cn) => [en, tw, cn][['en', 'zh-TW', 'zh-CN'].indexOf(language)]
 const isChat = args.includes('--chat')
+// Management commands return their own JSON (doctor, removal, setup, trust, recovery):
+// the older-script guard ends JSON board reads only, as scripts/board-cli.ts isJsonBoard does (#1304).
+const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'].includes(arg))
 const home = homedir()
 const isWin = process.platform === 'win32'
 // --chat output may be pasted into a chat app, so it shows the home folder as ~, as the board's own --chat does.
@@ -297,8 +300,9 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
           : message(`agent-board ${v}: the board script at ${path} is a different build (newer, or edited). It runs as it is.`, `agent-board ${v}：${path} 的看板程式是另一個版本（較新，或被改過），照原樣執行。`, `agent-board ${v}：${path} 的看板程序是另一个版本（较新，或被改过），照原样运行。`))
       }
       // --json through an older script must not hand its text board to an agent that expects JSON:
-      // the notice above is the whole answer, and the run ends here (#1304).
-      if (old !== undefined && args.includes('--json')) process.exit(1)
+      // the notice above is the whole answer, and the run ends here (#1304). Management
+      // commands return their own JSON, so they still run: only a JSON board read ends here.
+      if (old !== undefined && isJsonBoard) process.exit(1)
     }
   } catch (error) {
     console.error(message(`agent-board ${v}: could not compare the board script at ${installed} with this package (${code(error)}). It runs as it is.`, `agent-board ${v}：無法比對 ${installed} 的看板程式與這個套件（${code(error)}），照原樣執行。`, `agent-board ${v}：无法比对 ${installed} 的看板程序与这个包（${code(error)}），照原样运行。`))
