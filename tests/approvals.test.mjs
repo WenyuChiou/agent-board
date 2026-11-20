@@ -3335,14 +3335,18 @@ test('an ask sent after the off marker is removed, before the folder watcher sig
   assert.equal((await boardAs(board, page))?.isOff, true)
   assert.equal(hook.isSwitchedOff(board.file), false)
   const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-marker-removed')))
-  // The board admitted the ask: its card is there, asking, before Off is switched on again. With the cached Off in the
-  // ask admission no card is ever made, however fast or slow the ask arrives.
-  let card
-  for (let tries = 0; tries < 100 && card === undefined; tries++) {
-    card = (await boardAs(board, page))?.cards?.find(one => one.command === 'npm run synthetic-marker-removed' && one.state === 'asking')
-    if (card === undefined) await pause(50)
+  // The board admitted the ask: its card is there, asking, before Off is switched on again, and the same read still shows
+  // the board's own cached Off. That cache only clears (the marker is gone), so the ask was admitted while the board read
+  // Off: with the cached Off in the ask admission it is refused and no card is made. Should the board's 5 s probe read
+  // the disk first, the read shows On and the test fails; it cannot pass that way.
+  let seen
+  for (let tries = 0; tries < 100 && seen === undefined; tries++) {
+    const approvals = await boardAs(board, page)
+    if (approvals?.cards?.some(one => one.command === 'npm run synthetic-marker-removed' && one.state === 'asking')) seen = approvals
+    else await pause(50)
   }
-  assert.ok(card, 'the ask was admitted and its card is asking')
+  assert.ok(seen, 'the ask was admitted and its card is asking')
+  assert.equal(seen.isOff, true, 'the board still read its cached Off when the ask was admitted')
   assert.equal(await Promise.race([waiting, pause(500).then(() => 'waiting')]), 'waiting')
   assert.equal((await switchApprovals(board, page, false)).status, 200)
   const answered = await waiting
