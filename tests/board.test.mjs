@@ -5879,6 +5879,52 @@ test('/progress looks for the board script beside a Windows or a POSIX progress 
   assert.equal(liveBoardScript('C:/Users/me/.agent-board/progress.md'), 'C:/Users/me/.agent-board/agent-board.mjs')
 })
 
+// A zombie has already exited and released its files, but kill(pid, 0) still finds it.
+// Unknown state keeps the cleanup waiting rather than deleting a live server's folder.
+const isFixtureServerAlive = (pid, {
+  probe = one => process.kill(one, 0),
+  readStat = one => readFileSync(`/proc/${one}/stat`, 'utf8'),
+  platform = process.platform,
+} = {}) => {
+  try { probe(pid) } catch (error) { return error.code !== 'ESRCH' }
+  if (platform !== 'linux') return true
+  try {
+    const stat = readStat(pid)
+    const close = stat.lastIndexOf(')')
+    return !stat.startsWith(`${pid} (`) || close < 0 || stat.slice(close + 1, close + 4) !== ' Z '
+  }
+  catch (error) { return error.code !== 'ENOENT' }
+}
+
+test('fixture cleanup distinguishes an exited zombie from a running server (#1647)', () => {
+  const options = state => ({ platform: 'linux', probe: () => {}, readStat: () => `42 (synthetic ) server) ${state} 1 0 0` })
+  assert.equal(isFixtureServerAlive(42, options('Z')), false)
+  for (const state of ['R', 'S', 'D', 'T']) assert.equal(isFixtureServerAlive(42, options(state)), true)
+  assert.equal(isFixtureServerAlive(42, { platform: 'linux', probe: () => {}, readStat: () => '42 (synthetic ) Z trap) S 1 0 0' }), true)
+  assert.equal(isFixtureServerAlive(42, { platform: 'linux', probe: () => {}, readStat: () => '43 (synthetic) Z 1 0 0' }), true)
+})
+
+test('fixture cleanup keeps unreadable or unknown process state alive and accepts a vanished process (#1647)', () => {
+  const failure = code => Object.assign(new Error('synthetic process state'), { code })
+  for (const code of ['EACCES', 'EIO']) {
+    assert.equal(isFixtureServerAlive(42, { platform: 'linux', probe: () => {}, readStat: () => { throw failure(code) } }), true)
+  }
+  for (const text of ['', 'not a process state', '42 (synthetic) ? 1 0 0']) {
+    assert.equal(isFixtureServerAlive(42, { platform: 'linux', probe: () => {}, readStat: () => text }), true)
+  }
+  assert.equal(isFixtureServerAlive(42, { platform: 'linux', probe: () => {}, readStat: () => { throw failure('ENOENT') } }), false)
+  assert.equal(isFixtureServerAlive(42, { probe: () => { throw failure('ESRCH') } }), false)
+  assert.equal(isFixtureServerAlive(42, { probe: () => { throw failure('EPERM') } }), true)
+})
+
+test('fixture cleanup retains native liveness checks outside Linux (#1647)', () => {
+  for (const platform of ['win32', 'darwin']) {
+    const readStat = () => { throw new Error('must not read procfs on this platform') }
+    assert.equal(isFixtureServerAlive(42, { platform, probe: () => {}, readStat }), true)
+    assert.equal(isFixtureServerAlive(42, { platform, probe: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) }, readStat }), false)
+  }
+})
+
 // A synthetic board for --serve runs, with its own folder for running programs.
 const serveIn = () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
@@ -5930,7 +5976,7 @@ const serveIn = () => {
     for (let tries = 0; existsSync(served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
     // Windows can still hold the process's working folder after its address file is
     // removed. Wait for that owned server to exit before deleting the fixture.
-    const alive = () => { try { process.kill(pid, 0); return true } catch { return false } }
+    const alive = () => isFixtureServerAlive(pid)
     if (typeof pid === 'number' && pid !== process.pid) {
       for (let tries = 0; alive() && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
       assert.ok(!alive(), 'the fixture server must exit before cleanup')
