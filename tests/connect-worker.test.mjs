@@ -155,6 +155,16 @@ test("every generated board module stays under Claude Code's module limit counti
   }
 })
 
+test('the board bundle has a fourth part, listed in package.json files, so no part is near the build stop (#1676)', () => {
+  // hooks/board-script-3.ts reached 996,805 of 1,000,000 bytes with CRLF line endings; the split at
+  // "// hooks/board-status.ts" moves its second half into hooks/board-script-4.ts.
+  const files = bundleFiles(repo)
+  assert.deepEqual(files, ['hooks/board-script.ts', 'hooks/board-script-1.ts', 'hooks/board-script-2.ts', 'hooks/board-script-3.ts', 'hooks/board-script-4.ts'])
+  const listed = JSON.parse(readText('package.json')).files
+  for (const path of files) assert.ok(listed.includes(path), `${path} is in package.json files`)
+  assert.ok(readText('hooks/board-script-4.ts').includes('"// hooks/board-status.ts"'), 'the fourth part starts at hooks/board-status.ts')
+})
+
 test('the build refuses a bundle part over 1,000,000 bytes and names the file, its size and how to add a split point', () => {
   // Built in memory: no 1 MB fixture in git.
   const line = `${'x'.repeat(99)}\n`
