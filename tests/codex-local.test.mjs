@@ -640,6 +640,55 @@ test('#774 a linked config.toml stays a link and keeps its permissions', { skip:
   assert.equal(statSync(target).mode & 0o777, 0o644)
 }))
 
+// After the Codex hook trust write, setup checks that config.toml still resolves to the file it wrote: a link
+// further along the chain repointed after `target` was found leaves the write on a file config.toml no longer
+// reaches, and setup stops instead of reporting success (#1606). The repointed-to file holds the same bytes, so
+// the re-read before the write (which sees only the first link) does not catch it; only the resolution check does.
+test('a link further along config.toml\'s chain repointed after setup resolved it stops the Codex trust write', { skip: process.platform === 'win32' }, () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  const groups = JSON.parse(readFileSync(join(f.root, 'install-codex.json'), 'utf8')).groups
+  const planned = '# User settings\nmodel = "synthetic"\n\n[hooks.state]\n' + Object.keys(groups).map(event => trustTable774(trustKey774(f, event))).join('')
+  const target = join(f.home, 'dotfiles', 'config.toml')
+  const other = join(f.home, 'dotfiles', 'config-alt.toml')
+  const mid = join(f.home, 'dotfiles', 'mid.toml')
+  const toml = join(f.home, '.codex', 'config.toml')
+  f.save(target, planned)
+  chmodSync(target, 0o644)
+  f.save(other, planned)
+  symlinkSync(target, mid)
+  rmSync(toml, { force: true })
+  symlinkSync(mid, toml)
+  // The repoint lands when setup opens the trust write's temporary copy, after `target` was found and before the rename.
+  const preload = join(f.home, 'seam.mjs')
+  f.save(preload, `import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+const open = fs.openSync
+let done = false
+fs.openSync = (file, ...rest) => {
+  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.lastIndexOf('config.toml.') : -1
+  if (!done && at >= 0) {
+    done = true
+    fs.unlinkSync(${JSON.stringify(mid)})
+    fs.symlinkSync(${JSON.stringify(other)}, ${JSON.stringify(mid)}, 'file')
+  }
+  return open(file, ...rest)
+}
+syncBuiltinESMExports()
+`)
+  const removed = f.command(['--codex-remove', '--agent', 'codex', '--json', '--apply'], undefined, { NODE_OPTIONS: `--import ${pathToFileURL(preload).href}`, XDG_RUNTIME_DIR: join(f.home, 'runtime') })
+  assert.notEqual(removed.status, 0, removed.stdout)
+  assert.match(removed.stderr, /INSTALL_CHANGED/)
+  // config.toml still reaches the file the write did not land on: its trust entries are still there.
+  assert.equal(readFileSync(toml, 'utf8'), planned)
+  assert.equal(readFileSync(other, 'utf8'), planned)
+  // Only the row's event passes these two: the repoint ran, and the write landed on the original target before
+  // the resolution check stopped it.
+  assert.equal(readlinkSync(mid), other)
+  assert.equal(readFileSync(target, 'utf8'), '# User settings\nmodel = "synthetic"\n')
+  // The failed write replaced the original target, so its permissions must stay the person's.
+  assert.equal(statSync(target).mode & 0o777, 0o644)
+}))
+
 test('#774 a --data-dir folder the person made stays when empty', () => fixture(f => {
   const own = join(f.home, 'my data')
   mkdirSync(own)
@@ -7583,6 +7632,33 @@ test('Hermes trust is only what the person asks for: the board\'s exact commands
   assert.equal(removed.status, 0, removed.stderr)
   assert.deepEqual(JSON.parse(readFileSync(hermesAllowlist(f), 'utf8')), foreign)
   assert.ok(isAscii(), 'the trust file stays ASCII after removal')
+}))
+
+// --hermes-trust --apply re-reads the allowlist just before the rename and checks it after (put, as every other
+// write in the batch does), so an edit made before that last re-read is kept; an edit saved after the re-read and
+// before the rename is still written over (#1606).
+test('an edit to Hermes\'s allowlist made after setup planned is kept: --hermes-trust --apply fails instead of writing over it', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const foreign = { approvals: [{ approved_at: '2026-01-01T00:00:00Z', command: 'C:/person/my-guard.sh', event: 'pre_tool_call', script_mtime_at_approval: null }] }
+  f.save(hermesAllowlist(f), JSON.stringify(foreign, null, 2))
+  // The edit lands when setup opens the allowlist's temporary copy, after the plan check and before the rename.
+  const edit = '// the person edited this file\n'
+  const preload = join(f.home, 'seam.mjs')
+  f.save(preload, `import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+const open = fs.openSync
+let done = false
+fs.openSync = (file, ...rest) => {
+  const at = typeof file === 'string' && file.endsWith('.tmp') ? file.lastIndexOf('shell-hooks-allowlist.json.') : -1
+  if (!done && at >= 0) { done = true; fs.writeFileSync(file.slice(0, at) + 'shell-hooks-allowlist.json', ${JSON.stringify(edit)}) }
+  return open(file, ...rest)
+}
+syncBuiltinESMExports()
+`)
+  const applied = f.command(['--hermes-trust', '--apply', '--json'], undefined, { NODE_OPTIONS: `--import ${pathToFileURL(preload).href}` })
+  assert.notEqual(applied.status, 0, applied.stdout)
+  assert.match(applied.stderr, /INSTALL_CHANGED/)
+  assert.equal(readFileSync(hermesAllowlist(f), 'utf8'), edit)
 }))
 
 test('a Hermes upgrade previews trust for the new todo hook without disturbing old approvals', () => fixture(f => {
