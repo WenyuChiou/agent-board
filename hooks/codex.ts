@@ -471,6 +471,39 @@ export const blockHostOf = (text: string, owner: string, agent: string, session:
   const host = localBlockAttrs(text, owner, agent, session)?.host
   return host !== undefined && HOST_HASH.test(host) ? host : null
 }
+export type AntigravityIdentity =
+  | { kind: 'claim'; claim: AgentClaim }
+  | { kind: 'host'; host: string }
+  | { kind: 'clear' }
+
+export const cleanAntigravityIdentity = (value: unknown): AntigravityIdentity | null | undefined => {
+  if (value === undefined) return undefined
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  if (raw.kind === 'clear') return { kind: 'clear' }
+  if (raw.kind === 'host') return typeof raw.host === 'string' && HOST_HASH.test(raw.host) ? { kind: 'host', host: raw.host } : null
+  if (raw.kind === 'claim' && typeof raw.claim === 'object' && raw.claim !== null && !Array.isArray(raw.claim)) {
+    const claim = raw.claim as Record<string, unknown>
+    const valid = agentClaimOf({
+      agentPid: typeof claim.pid === 'number' ? claim.pid : undefined,
+      agentStarted: typeof claim.started === 'number' ? claim.started : undefined,
+      host: typeof claim.host === 'string' ? claim.host : undefined,
+    })
+    return valid === null ? null : { kind: 'claim', claim: valid }
+  }
+  return null
+}
+
+export const resolveAntigravityIdentity = (
+  decision: AntigravityIdentity | undefined,
+  named: AgentClaim | null,
+  namedHost: string | null,
+): { claim: AgentClaim | null; hostOnly: string | null } => {
+  if (decision === undefined) return { claim: named, hostOnly: named === null ? namedHost : null }
+  if (decision.kind === 'claim') return { claim: decision.claim, hostOnly: null }
+  if (decision.kind === 'host') return { claim: null, hostOnly: decision.host }
+  return { claim: null, hostOnly: null }
+}
 export const claimText = (claim: AgentClaim | null): string => claim === null ? '' : `${claim.pid}:${claim.started ?? ''}:${claim.host}`
 
 // The full digest prevents an eight-character collision or a pasted block from acquiring ownership.

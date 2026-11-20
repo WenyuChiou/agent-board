@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -308,6 +308,22 @@ test('Antigravity Stop extracts the closing question after tool-call PLANNER_RES
     assert.equal(badRan.status, 0, badRan.stderr)
     const badRecord = JSON.parse(readFileSync(join(root, 'sessions', createHash('sha256').update('antigravity:synthetic-agy-bad-reply-1589').digest('hex') + '.json'), 'utf8'))
     assert.equal(badRecord.asked, undefined)
+
+    // Trailing content-less tool-call PLANNER_RESPONSE clears an earlier question.
+    const trailingToolTranscript = join(home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-conv-trailing-tool', '.system_generated', 'logs', 'transcript_full.jsonl')
+    mkdirSync(dirname(trailingToolTranscript), { recursive: true })
+    writeFileSync(trailingToolTranscript, [
+      { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Synthetic tool tail' },
+      { source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Earlier question?' },
+      { source: 'MODEL', type: 'PLANNER_RESPONSE', tool_calls: [{ id: '2', name: 'run_command' }] },
+    ].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+    const trailingRan = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'waiting', '--event', 'Stop'], {
+      cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+      input: JSON.stringify({ conversationId: 'synthetic-agy-trailing-tool-1589', transcriptPath: trailingToolTranscript }),
+    })
+    assert.equal(trailingRan.status, 0, trailingRan.stderr)
+    const trailingRecord = JSON.parse(readFileSync(join(root, 'sessions', createHash('sha256').update('antigravity:synthetic-agy-trailing-tool-1589').digest('hex') + '.json'), 'utf8'))
+    assert.equal(trailingRecord.asked, undefined)
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
@@ -741,6 +757,194 @@ test('duplicate blocks keep the newest Antigravity closing question in Needs you
     const dupView = buildView(dupProjects, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, dupGone)
     assert.equal(dupView.groups.flatMap(g => g.rows).find(r => r.title === 'Desktop copy')?.auto, 'working')
     assert.equal(dupView.stopped.some(row => !row.archive?.isDuplicate), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// #1589 Test 8: Queued Antigravity Desktop and Windows CLI hooks preserve their liveness identity decision through pending recovery.
+test('queued Antigravity Desktop and Windows CLI hooks preserve their liveness identity decision through pending recovery (#1589)', async () => {
+  const { BOARD_SCRIPT } = await import('../hooks/board-script.ts')
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { blockHostOf, cleanAntigravityIdentity, putCodexBlock } = await import('../hooks/codex.ts')
+  const { blockKey } = await import('../hooks/session-liveness.ts')
+  const { buildView } = await import('../hooks/view.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const home = mkdtempSync(join(tmpdir(), 'ab-1589-queue-'))
+  try {
+    const host = readingHostHash()
+    assert.notEqual(host, null)
+    const root = join(home, '.agent-board')
+    const progress = join(root, 'progress.md')
+    const script = join(root, 'agent-board.mjs')
+    const pendingDir = join(root, 'pending')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(script, BOARD_SCRIPT)
+
+    const sessionA = '77777777-8888-4999-8aaa-111111111111'
+    const ownerA = createHash('sha256').update(`antigravity:${sessionA}`).digest('hex')
+    const recentIso = new Date(Date.now() - 60_000).toISOString()
+    const seedA = putCodexBlock('', {
+      session: sessionA,
+      agent: 'antigravity',
+      project: 'antigravity',
+      title: 'Queued Desktop resume task',
+      state: 'working',
+      updated: recentIso,
+      steps: ['- [~] Working in progress'],
+    }, ownerA, false, undefined, v => v, null, host)
+    assert.equal(blockHostOf(seedA, ownerA, 'antigravity', sessionA), host)
+    writeFileSync(progress, seedA)
+
+    const presDir = join(home, '.gemini', 'antigravity-cli', 'presence')
+    mkdirSync(presDir, { recursive: true })
+    writeFileSync(join(presDir, `${sessionA}.lock`), '')
+    assert.deepEqual([...goneBlocksOf(parseProgress(seedA), host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })], [blockKey(parseProgress(seedA)[0].tasks[0].auto)])
+
+    const marker = join(home, 'progress-locked')
+    const preload = join(home, 'locked-progress.cjs')
+    writeFileSync(marker, '')
+    writeFileSync(preload, [
+      "const fs = require('node:fs')",
+      `const isLocked = path => path === ${JSON.stringify(progress)} && fs.existsSync(${JSON.stringify(marker)})`,
+      "const busy = () => { throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }) }",
+      "for (const method of ['readFileSync', 'openSync']) {",
+      '  const original = fs[method]',
+      '  fs[method] = (path, ...args) => { if (isLocked(path)) busy(); return original(path, ...args) }',
+      '}',
+      'const rename = fs.renameSync',
+      'fs.renameSync = (from, to) => { if (isLocked(to)) busy(); return rename(from, to) }',
+      "require('node:module').syncBuiltinESMExports()",
+    ].join('\n'))
+
+    const baseEnv = { ...process.env, HOME: home, USERPROFILE: home, LANG: 'en', CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
+    const lockedEnv = { ...baseEnv, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
+    const desktopTranscript = join(home, '.gemini', 'antigravity', 'brain', sessionA, '.system_generated', 'logs', 'transcript.jsonl')
+    mkdirSync(dirname(desktopTranscript), { recursive: true })
+    writeFileSync(desktopTranscript, JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Desktop resume queued' }) + '\n')
+
+    // Part A: Live Desktop PreInvocation hits busy progress.md -> queues with antigravityIdentity: { kind: 'clear' }.
+    const queuedRes = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'working', '--event', 'PreInvocation', '--hook-deadline', String(Date.now() + 5000)], {
+      cwd: home, env: lockedEnv, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+      input: JSON.stringify({ conversationId: sessionA, transcriptPath: desktopTranscript }),
+    })
+    assert.equal(queuedRes.status, 0, queuedRes.stderr)
+    const pendingJson = readdirSync(pendingDir).filter(name => name.endsWith('.json'))
+    assert.equal(pendingJson.length, 1)
+    const queuedDoc = JSON.parse(readFileSync(join(pendingDir, pendingJson[0]), 'utf8'))
+    assert.deepEqual(queuedDoc.antigravityIdentity, { kind: 'clear' })
+
+    unlinkSync(marker)
+    const drain = () => spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'working', '--event', 'PreInvocation', '--hook-deadline', String(Date.now() + 30_000)], {
+      cwd: home, env: baseEnv, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+      input: JSON.stringify({ conversationId: 'synthetic-agy-other-drain-1589' }),
+    })
+    const drainA = drain()
+    assert.equal(drainA.status, 0, drainA.stderr)
+    assert.deepEqual(readdirSync(pendingDir).filter(name => name.endsWith('.json')), [])
+    const afterQueueA = readFileSync(progress, 'utf8')
+    assert.equal(blockHostOf(afterQueueA, ownerA, 'antigravity', sessionA), null)
+    const projectsA = parseProgress(afterQueueA)
+    const goneA = goneBlocksOf(projectsA, host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })
+    assert.deepEqual([...goneA], [])
+    const viewA = buildView(projectsA, [], null, Date.now(), 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, goneA)
+    assert.equal(viewA.groups.flatMap(g => g.rows).some(row => row.title === 'Desktop resume queued' && row.auto === 'working'), true)
+    assert.equal(viewA.stopped.length, 0)
+
+    // Part B: .raw.json Desktop App recovery clears CLI host too.
+    const seededAgainA = putCodexBlock('', {
+      session: sessionA,
+      agent: 'antigravity',
+      project: 'antigravity',
+      title: 'Queued Desktop resume task',
+      state: 'working',
+      updated: recentIso,
+      steps: ['- [~] Working in progress'],
+    }, ownerA, false, undefined, v => v, null, host)
+    writeFileSync(progress, seededAgainA)
+    const prevRecordA = JSON.parse(readFileSync(join(root, 'sessions', `${ownerA}.json`), 'utf8'))
+    const rawAt = Math.max(Date.now(), Number(prevRecordA.appliedAt ?? 0) + 10)
+    writeFileSync(join(pendingDir, '000000000000001-desktop.raw.json'), JSON.stringify({
+      version: 1,
+      kind: 'raw',
+      at: rawAt,
+      argv: ['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PreInvocation', '--progress-file', progress],
+      env: {},
+      payload: { conversationId: sessionA, transcriptPath: desktopTranscript },
+    }))
+    const drainB = drain()
+    assert.equal(drainB.status, 0, drainB.stderr)
+    assert.equal(blockHostOf(readFileSync(progress, 'utf8'), ownerA, 'antigravity', sessionA), null)
+    assert.deepEqual([...goneBlocksOf(parseProgress(readFileSync(progress, 'utf8')), host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })], [])
+
+    // Part C: cleanAntigravityIdentity validation + Windows CLI queued host + tampered drop.
+    assert.equal(cleanAntigravityIdentity(undefined), undefined)
+    assert.deepEqual(cleanAntigravityIdentity({ kind: 'clear' }), { kind: 'clear' })
+    assert.deepEqual(cleanAntigravityIdentity({ kind: 'host', host }), { kind: 'host', host })
+    assert.deepEqual(cleanAntigravityIdentity({ kind: 'claim', claim: { pid: alivePid, started: aliveStarted, host } }), { kind: 'claim', claim: { pid: alivePid, started: aliveStarted, host } })
+    for (const bad of [null, 'clear', [], { kind: 'unknown' }, { kind: 'host', host: 'bad' }, { kind: 'claim', claim: { pid: -1, host } }]) {
+      assert.equal(cleanAntigravityIdentity(bad), null)
+    }
+
+    const sessionB = '88888888-9999-4aaa-8bbb-222222222222'
+    const ownerB = createHash('sha256').update(`antigravity:${sessionB}`).digest('hex')
+    writeFileSync(join(presDir, `${sessionB}.lock`), '')
+    const baseB = putCodexBlock(readFileSync(progress, 'utf8'), {
+      session: sessionB,
+      agent: 'antigravity',
+      project: 'antigravity',
+      title: 'Queued CLI host task',
+      state: 'working',
+      updated: recentIso,
+      steps: ['- [~] Working in progress'],
+    }, ownerB, false, undefined, v => v, null, null)
+    writeFileSync(progress, baseB)
+    if (process.platform === 'win32') {
+      const cliTranscriptB = join(home, '.gemini', 'antigravity-cli', 'brain', sessionB, '.system_generated', 'logs', 'transcript_full.jsonl')
+      mkdirSync(dirname(cliTranscriptB), { recursive: true })
+      writeFileSync(cliTranscriptB, JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'CLI queued' }) + '\n')
+      writeFileSync(marker, '')
+      const queuedCliRes = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'working', '--event', 'PreInvocation', '--hook-deadline', String(Date.now() + 5000)], {
+        cwd: home, env: lockedEnv, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+        input: JSON.stringify({ conversationId: sessionB, transcriptPath: cliTranscriptB }),
+      })
+      assert.equal(queuedCliRes.status, 0, queuedCliRes.stderr)
+      const cliFiles = readdirSync(pendingDir).filter(name => name.endsWith('.json'))
+      assert.equal(cliFiles.length, 1)
+      const cliPending = JSON.parse(readFileSync(join(pendingDir, cliFiles[0]), 'utf8'))
+      assert.deepEqual(cliPending.antigravityIdentity, { kind: 'host', host })
+      unlinkSync(marker)
+    } else {
+      const nowIso = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+      writeFileSync(join(pendingDir, `${String(Date.now()).padStart(15, '0')}-cli.json`), JSON.stringify({
+        version: 1, progress, mode: '--agent-status', agent: 'antigravity', session: sessionB, now: nowIso, at: Date.now(),
+        status: 'working', event: 'PreInvocation', isBoardPrompt: false, isPrompt: false,
+        payload: { title: 'Queued CLI host task', titleSource: 'prompt' },
+        antigravityIdentity: { kind: 'host', host },
+      }))
+    }
+    const drainC = drain()
+    assert.equal(drainC.status, 0, drainC.stderr)
+    const afterC = readFileSync(progress, 'utf8')
+    assert.equal(blockHostOf(afterC, ownerB, 'antigravity', sessionB), host)
+    const taskB = parseProgress(afterC).flatMap(p => p.tasks).find(t => t.auto?.resume === sessionB)
+    assert.ok(taskB)
+    const goneC = goneBlocksOf(parseProgress(afterC), host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })
+    assert.equal(goneC.has(blockKey(taskB.auto)), true)
+
+    // Tampered antigravityIdentity in pending/*.json is rejected and dropped without mutating progress.md.
+    const sessionC = '99999999-aaaa-4bbb-8ccc-333333333333'
+    const nowIsoBad = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+    writeFileSync(join(pendingDir, `${String(Date.now()).padStart(15, '0')}-tampered.json`), JSON.stringify({
+      version: 1, progress, mode: '--agent-status', agent: 'antigravity', session: sessionC, now: nowIsoBad, at: Date.now(),
+      status: 'working', event: 'PreInvocation', isBoardPrompt: false, isPrompt: false, payload: {},
+      antigravityIdentity: { kind: 'host', host: 'invalid' },
+    }))
+    const drainBad = drain()
+    assert.equal(drainBad.status, 0, drainBad.stderr)
+    assert.deepEqual(readdirSync(pendingDir).filter(name => name.endsWith('.json')), [])
+    assert.equal(readFileSync(progress, 'utf8').includes(sessionC), false)
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }

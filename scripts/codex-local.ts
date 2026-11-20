@@ -5,8 +5,8 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { blockClaimOf, blockHostOf, boardConfirmedReport, claimText, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
-import type { CodexReport } from '../hooks/codex'
+import { blockClaimOf, blockHostOf, boardConfirmedReport, claimText, cleanAntigravityIdentity, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, resolveAntigravityIdentity, sessionTitle, validateCodexReport } from '../hooks/codex'
+import type { AntigravityIdentity, CodexReport } from '../hooks/codex'
 import { hermesHome } from '../hooks/hermes-home'
 import { agentHooks, BOARD_FOR, editHermesSetup, isReleased, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
@@ -116,6 +116,7 @@ const antigravityQuestion = (path: unknown): string | null => {
         else if (entry.source === 'MODEL' && entry.type === 'PLANNER_RESPONSE') {
           if (entry.content !== undefined && typeof entry.content !== 'string') return null
           if (typeof entry.content === 'string' && entry.content.trim() !== '') reply = entry.content
+          else if (entry.content === undefined) reply = null
         }
       }
       return reply === null ? null : lastQuestion(reply)
@@ -961,6 +962,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       status: unknown; event?: string; folder?: string; folderDigest?: string; folderCanonicalDigest?: string; isBoardPrompt: boolean; isDelivery?: boolean; isPrompt: boolean; payload: Json
       // Who started the session, as far as the host's own words say (#399); absent when they say nothing.
       run?: RunSignal
+      antigravityIdentity?: AntigravityIdentity
     }
     const reportSession = (targetAgent: LocalAgent = agent): string | undefined => {
       const identity = folderIdentity(process.cwd())
@@ -1050,18 +1052,28 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
-    const isAntigravityHook = current !== undefined && agent === 'antigravity' && mode === '--agent-status' && flag('--hook-deadline') !== undefined
-    const antigravityHookSurface = isAntigravityHook ? antigravitySurface(raw.transcriptPath, raw.artifactDirectoryPath) : SURFACE_IDS.unknown
-    const isAntigravityCliHook = isAntigravityHook && antigravityHookSurface === SURFACE_IDS.antigravityTui
-    const isAntigravityDesktopHook = isAntigravityHook && antigravityHookSurface === SURFACE_IDS.antigravityIde
-    const isAntigravityOpen = isAntigravityHook && (current.event === 'SessionStart' || current.event === 'PreInvocation')
-    // The OpenCode or Linux Antigravity CLI process this event ran under (#1595, #1589), only for live hook worker events.
-    const liveClaim = current !== undefined && flag('--hook-deadline') !== undefined
-      ? agent === 'opencode' ? hookParentClaim(process.env.AGENT_BOARD_HOOK_PARENT, readingHostHash())
-        : isAntigravityCliHook ? antigravityProcessClaim(readingHostHash())
-          : null
-      : null
-    const liveHost = isAntigravityCliHook && liveClaim === null && process.platform === 'win32' ? readingHostHash() : null
+    // The OpenCode process this event ran under (#1595), only for live hook worker events.
+    const liveClaim = current !== undefined && agent === 'opencode' && flag('--hook-deadline') !== undefined ? hookParentClaim(process.env.AGENT_BOARD_HOOK_PARENT, readingHostHash()) : null
+    const antigravityDecision = (entry: Pending, payloadRaw: Json, allowProcWalk: boolean): AntigravityIdentity | undefined => {
+      if (entry.agent !== 'antigravity' || entry.mode !== '--agent-status') return undefined
+      const surface = antigravitySurface(payloadRaw.transcriptPath, payloadRaw.artifactDirectoryPath)
+      if (surface === SURFACE_IDS.antigravityIde) return { kind: 'clear' }
+      if (surface === SURFACE_IDS.antigravityTui) {
+        if (allowProcWalk) {
+          const found = antigravityProcessClaim(readingHostHash())
+          if (found !== null) return { kind: 'claim', claim: found }
+        }
+        if (process.platform === 'win32') {
+          const host = readingHostHash()
+          if (host !== null) return { kind: 'host', host }
+        }
+      }
+      return entry.event === 'SessionStart' || entry.event === 'PreInvocation' ? { kind: 'clear' } : undefined
+    }
+    if (current !== undefined && flag('--hook-deadline') !== undefined) {
+      const agyId = antigravityDecision(current, raw, true)
+      if (agyId !== undefined) current.antigravityIdentity = agyId
+    }
     const isInferredReport = mode === '--codex-report' && flag('--session') === undefined && (agent === 'codex' ? process.env.CODEX_THREAD_ID === undefined : !(process.env.AGENT_BOARD_AGENT === agent && process.env.AGENT_BOARD_SESSION_ID !== undefined) && !(agent === 'hermes' && process.env.HERMES_SESSION_ID) && !(agent === 'grok' && process.env.GROK_SESSION_ID))
     const rawEntry = (raw: Json): Pending => {
       if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
@@ -1088,7 +1100,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
       const env = object(raw.env)
       if (Object.entries(env).some(([name, value]) => !(HOOK_SESSION_ENV[entryAgent] ?? []).includes(name) || typeof value !== 'string')) throw new Error('INVALID_RAW_ENV')
-      return buildEntry(entryMode, entryAgent, object(raw.payload), name => flags.get(name), env as NodeJS.ProcessEnv, resolve(flags.get('--progress-file')!), Number(raw.at))
+      const payload = object(raw.payload)
+      const entry = buildEntry(entryMode, entryAgent, payload, name => flags.get(name), env as NodeJS.ProcessEnv, resolve(flags.get('--progress-file')!), Number(raw.at))
+      const agyId = antigravityDecision(entry, payload, false)
+      if (agyId !== undefined) entry.antigravityIdentity = agyId
+      return entry
     }
     // A program holding progress.md open makes Windows refuse its read (EBUSY) and the rename
     // onto it (EPERM). A read-only progress.md fails the rename with the same EPERM, so its
@@ -1284,9 +1300,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const repaired = reporterTail(bytes)
       const named = blockClaimOf(text, owner, agent, session)
       const namedHost = agent === 'antigravity' ? blockHostOf(text, owner, agent, session) : null
-      const clearIdentity = entry === current && (isAntigravityDesktopHook || isAntigravityOpen)
-      const claim = entry === current && liveClaim !== null ? liveClaim : entry === current && liveHost !== null ? null : clearIdentity ? null : named
-      const hostOnly = claim !== null ? null : entry === current && liveHost !== null ? liveHost : clearIdentity ? null : namedHost
+      const { claim, hostOnly } = agent === 'antigravity'
+        ? resolveAntigravityIdentity(cleanAntigravityIdentity(entry.antigravityIdentity) ?? undefined, named, namedHost)
+        : { claim: entry === current && liveClaim !== null ? liveClaim : named, hostOnly: null }
       const namedHostOnly = named === null ? namedHost : null
       if (repaired.fragment === null && mode !== '--codex-report' && claimText(named) === claimText(claim) && namedHostOnly === hostOnly && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? null) === JSON.stringify(report.askedOptions ?? null) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
@@ -1331,6 +1347,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.
       && (entry.mode !== '--codex-event' || [undefined, entry.session].includes(object(entry.payload).session_id as string | undefined))
+      && (entry.antigravityIdentity === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && cleanAntigravityIdentity(entry.antigravityIdentity) !== null)
       && (object(entry.payload).options === undefined || Array.isArray(object(entry.payload).options) && (object(entry.payload).options as unknown[]).every(value => typeof value === 'string'))
     // Raw Codex events can precede a newer turn too. Milliseconds settle events in
     // the same second; older records and pending entries retain their timestamp fallback.
