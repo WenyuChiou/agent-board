@@ -80,7 +80,10 @@ export const removeCodexTrustEntries = (text: string, keys: string[]): { text: s
   return { text: lines.filter((_, index) => !deleted.has(index)).join(''), removed }
 }
 
-const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
+const hash = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex')
+// A file is plain when its bytes survive a read as UTF-8 and a write back. One that does not (a lone FF, Big5) would
+// come back as EF BF BD, so setup refuses it instead of rewriting it (#1607).
+export const isPlain = (bytes: Buffer): boolean => Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes)
 
 // Antigravity hooks name their own transcript but do not carry the reply text.
 // agy 1.5.2 names transcript_full.jsonl, which has the same line shape as transcript.jsonl.
@@ -231,8 +234,9 @@ const object = (value: unknown): Json => {
 // Hermes Agent's trust file: {"approvals": [{event, command, approved_at, script_mtime_at_approval}]}, written with sorted keys.
 // An absent file is an empty list; one this cannot read as that shape is left alone (null).
 type Approval = Json & { event?: unknown; command?: unknown }
-const readAllowlist = (text: string | null): { data: Json; list: Approval[] } | null => {
+const readAllowlist = (text: string | null, isUnreadable = false): { data: Json; list: Approval[] } | null => {
   if (text === null) return { data: {}, list: [] }
+  if (isUnreadable) return null
   try {
     const data = object(JSON.parse(text))
     const list = data.approvals ?? []
@@ -465,7 +469,7 @@ export const setupFailure = (error: unknown, agent: string, s: Strings): { code:
   const code = isCode(detail?.code) ? detail.code : isCode(detail?.message) ? detail.message : 'UNKNOWN'
   const unknown = s.setupAgentUnknown.toLowerCase()
   const host = localAgents.includes(agent as LocalAgent) ? s.agentNames[agent] ?? unknown : unknown
-  const record = typeof detail?.record === 'string' && /^install-[a-z]+\.json$/.test(detail.record) ? detail.record : 'install-*.json'
+  const record = typeof detail?.record === 'string' && /^install-[a-z]+(?:-sidecar)?\.json$/.test(detail.record) ? detail.record : 'install-*.json'
   const message = code === 'MISSING_ARGUMENT' ? s.setupErrorMissingValue
     : code === 'INVALID_INSTALL_RECORD' ? s.setupErrorRecord(record)
     : code === 'INVALID_CONNECT_RECORD' ? s.setupErrorConnectRecord
@@ -536,6 +540,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (!before.has(file)) before.set(file, take(file))
     return before.get(file)!.bytes?.toString('utf8') ?? null
   }
+  // A file whose bytes are not valid UTF-8 is never written over or taken as setup's (#1607). The plan still compares its
+  // decoded text with what setup would write; ownership asks isUnreadable, and put refuses such bytes before a write.
+  const isUnreadable = (file: string): boolean => {
+    initial(file)
+    const bytes = before.get(file)!.bytes
+    return bytes !== null && !isPlain(bytes)
+  }
+  // The hash of the bytes setup saw. For valid UTF-8 it is the hash of the text, so a record written earlier still
+  // matches; FF and the EF BF BD it would decode to differ, so one is never taken for the other.
+  const ownHash = (file: string, text: string): string => hash(before.get(file)?.bytes ?? text)
   // Every re-read after planning compares a path with what setup saw there (#1488): the batch check, the re-read just
   // before each change and the read-back after it, in both writers. Before a write the path must be as planned, or
   // already hold exactly the new bytes as the same kind of path, or as a new regular file where there was none: one
@@ -550,6 +564,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // After a write the rename target must be a regular file holding exactly the bytes; after a removal the path is gone.
   // A plain rename or unlink cannot close the instant between the last re-read and the change: a file another program
   // deletes in that instant stops the removal instead of counting as removed by setup (#1611).
+  // A stale .new copy and the pending list are read again just before the unlink, as planned, not through the re-read removal.
   const isHolding = (now: Snap, text: string): boolean => sameBytes(now.bytes, Buffer.from(text, 'utf8'))
   const ours = new Set<string>()
   // The real paths of the entries this batch removed, each recorded once its removal was checked: a regular file by
@@ -593,7 +608,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // the same file through another name (a skills folder linked to the shared one) is not written again: it holds the
   // bytes already, and a person's save there would be lost.
   const put = (file: string, text: string, target = file): void => {
-    if (isOurs(target, take(target), text)) return
+    const now = take(target)
+    // Last line of defence: whatever the plan, a path holding bytes that are not valid UTF-8 is not written over (#1607).
+    if (now.bytes !== null && !isPlain(now.bytes)) throw new Error('INSTALL_CHANGED')
+    if (isOurs(target, now, text)) return
     atomic(target, text, () => unchanged(file, text), false, target.endsWith('.new') && (before.get(file) ?? NO_PATH).kind === 'none')
     written(target, text)
     const real = realOf(target)
@@ -622,8 +640,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
   }
   const isAsPlanned = (file: string): boolean => same(take(file), before.get(file) ?? NO_PATH)
+  // A board run (a report, a hook event, a status, a hook recovery, the mailbox) only reads where the board is from the
+  // install records and writes none of them, so it reads them as main does (#1607).
+  const isInstallRun = mode === '--codex-setup' || mode === '--codex-remove' || mode === '--codex-trust' || mode === '--hermes-trust' || mode === '--codex-doctor'
   const jsonInitial = (file: string): Json => {
     try {
+      // An install record that is not valid UTF-8 stops setup, removal, trust and doctor, another agent's record too:
+      // skipping it could let a removal delete a shared file that record still names (#1607).
+      if (isInstallRun && isUnreadable(file)) throw new SyntaxError('not valid UTF-8')
       const record = object(JSON.parse(initial(file) ?? '{}'))
       if (record.files !== undefined) object(record.files)
       if (record.groups !== undefined) object(record.groups)
@@ -652,7 +676,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const pendingFile = (one: string): string => join(root, `install-pending-${one}.json`)
   const isOwnCopy = (path: string): boolean => isTextFile(path.slice(0, -4)) && Object.hasOwn(files, path.slice(0, -4))
   const listOf = (snap: Snap | undefined, isNamed: (path: string) => boolean = isOwnCopy): Record<string, string[]> | null => {
-    if (snap?.kind !== 'file' || snap.bytes === null) return null
+    if (snap?.kind !== 'file' || snap.bytes === null || !isPlain(snap.bytes)) return null
     let held: unknown
     try { held = JSON.parse(snap.bytes.toString('utf8')) } catch { return null }
     if (typeof held !== 'object' || held === null || Array.isArray(held)) return null
@@ -851,7 +875,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const sidecarConflicts: string[] = []
     sidecarOnlyFiles.forEach((file, i) => {
       const existing = initial(file)
-      const isOwned = existing !== null && hash(existing) === recorded[file]
+      const isOwned = existing !== null && ownHash(file, existing) === recorded[file]
       if (existing !== null && !isOwned && (isRemoving || existing !== desired[i])) sidecarConflicts.push(file)
       else if (isRemoving ? isOwned : existing !== desired[i]) sidecarChanges.push({ file, action: isRemoving ? 'remove' : existing === null ? 'create' : 'update' })
     })
@@ -1473,7 +1497,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     return true
   }
-  const read = hasHooks && agent !== 'hermes' || agent === 'openclaw' ? readConfig(configText) : {}
+  const read = hasHooks && agent !== 'hermes' || agent === 'openclaw' ? isUnreadable(nativeConfig) ? null : readConfig(configText) : {}
   // Wrong shapes are the same one conflict as unreadable JSON, so other agents still preview (#465).
   const parsedConfig = read !== null && !isShaped(read) ? null : read
   const hookConfig = parsedConfig ?? {}
@@ -1497,7 +1521,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     })
     try {
       const text = initial(trustConfig)
-      if (text !== null) {
+      // A config.toml that is not valid UTF-8 is not edited, a linked one included: the snapshot reads through the link.
+      if (text !== null && isUnreadable(trustConfig)) conflicts.push(trustConfig)
+      else if (text !== null) {
         const result = removeCodexTrustEntries(text, keys)
         if (result.text !== text) { nextTrust = result.text; changes.push({ file: trustConfig, action: 'update' }) }
       }
@@ -1600,10 +1626,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (remove) alreadyGone.push(`${nativeConfig}:agent-board-local`)
       else hasMissingGroup = true
     }
-    const patch = deepseekPatch(text, manifest.groups.patch, pathToFileURL(join(root, 'adapters', 'deepseek.mjs')).href, remove)
-    if (patch.conflict) conflicts.push(nativeConfig)
-    nextConfigText = patch.text
-    if (patch.group) groups.patch = patch.group
+    if (isUnreadable(nativeConfig)) { if (!conflicts.includes(nativeConfig)) conflicts.push(nativeConfig) }
+    else {
+      const patch = deepseekPatch(text, manifest.groups.patch, pathToFileURL(join(root, 'adapters', 'deepseek.mjs')).href, remove)
+      if (patch.conflict) conflicts.push(nativeConfig)
+      nextConfigText = patch.text
+      if (patch.group) groups.patch = patch.group
+    }
   }
   // The trust file Hermes keeps beside config.yaml: an approval is an (event, command) pair, and only ours are touched here.
   const allowlistFile = join(hermesDir, 'shell-hooks-allowlist.json')
@@ -1620,7 +1649,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const text = initial(nativeConfig) ?? ''
     const events = hermesEvents()
     const recorded = new Map(Object.entries(object(manifest.groups.hooks ?? {})).filter((pair): pair is [string, string] => typeof pair[1] === 'string'))
-    const patch = isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove) : null
+    const patch = !isUnreadable(nativeConfig) && isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove) : null
     if (manifest.groups.hooks !== undefined && patch !== null && !patch.hasOwned) {
       if (remove) alreadyGone.push(`${nativeConfig}:hooks`)
       else hasMissingGroup = true
@@ -1633,8 +1662,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     nextConfigText = patch?.text ?? text
     if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
     if (remove) {
-      const approvals = readAllowlist(initial(allowlistFile))
+      const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
       const mine = Object.entries(object(manifest.groups.hooks ?? {}))
+      // A trust file that is not valid UTF-8 is not rewritten, so a removal stops on it (#1607).
+      if (approvals === null && isUnreadable(allowlistFile)) conflicts.push(allowlistFile)
       if (approvals !== null) {
         const kept = approvals.list.filter(entry => !mine.some(([event, command]) => entry.event === event && entry.command === command))
         if (kept.length !== approvals.list.length) {
@@ -1714,7 +1745,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const heads = Object.keys(STRINGS).flatMap(one => versions.flatMap(version => [undefined, root].map(folder => JSON.stringify({ hookVersion: version, path: progress, codexRoot: folder, lang: one }))))
     return !heads.some(line => boardRecords.includes(hash(`globalThis.AGENT_BOARD = ${line}\n${body}`)))
   }
-  const isOwnedFile = (file: string, existing: string): boolean => hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing)))
+  // A file that is not valid UTF-8 is never setup's, even when its decoded text reads as a released board or skill (#1607).
+  const isOwnedFile = (file: string, existing: string): boolean => !isUnreadable(file) && (ownHash(file, existing) === manifest.files[file] || !remove && (otherManifests.some(one => object(one.files ?? {})[file] === ownHash(file, existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing)))
   // Text a host only reads can take a new version beside it. Everything else is code a host loads or a manifest it trusts.
   const isTextFile = (file: string): boolean => /\.(?:toml|md)$/.test(file)
   const isKeptRunner = (file: string): boolean => {
@@ -1742,8 +1774,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // plans; only a record also counts through a second name for the same file (a skills folder linked to the shared one,
   // or another letter case on Windows).
   const pendingCopies = [agent, ...otherAgents].flatMap(one => Object.entries(pendingOf(one)).flatMap(([path, hashes]) => hashes.map((value): [string, unknown] => [path, value])))
-  const isOurBeside = (copy: string, text: string): boolean => pendingCopies.some(([path, value]) => path === copy && value === hash(text))
-    || records.flatMap(record => Object.entries(record)).some(([path, value]) => value === hash(text) && (path === copy || path.endsWith('.new') && realOf(path) !== null && realOf(path) === realOf(copy)))
+  const isOurBeside = (copy: string, text: string): boolean => pendingCopies.some(([path, value]) => path === copy && value === ownHash(copy, text))
+    || records.flatMap(record => Object.entries(record)).some(([path, value]) => value === ownHash(copy, text) && (path === copy || path.endsWith('.new') && realOf(path) !== null && realOf(path) === realOf(copy)))
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
@@ -1799,7 +1831,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const current = initial(file)
     const isStillNamed = otherAgents.some((one, index) => !removingAgents.includes(one) && [...Object.keys(object(otherManifests[index]?.files ?? {})), ...Object.keys(pendingOf(one))].some(name => isSameCopy(file, name)))
     if (current === null) { if (remove && manifest.files[file] !== undefined) alreadyGone.push(file) }
-    else if ((hash(current) === manifest.files[file] || ownPending[file]?.includes(hash(current))) && !isStillNamed && !removedCopies.has(realOf(file) ?? file)) {
+    else if ((ownHash(file, current) === manifest.files[file] || ownPending[file]?.includes(ownHash(file, current))) && !isStillNamed && !removedCopies.has(realOf(file) ?? file)) {
       removedCopies.add(realOf(file) ?? file)
       changes.push({ file, action: 'remove' })
     }
@@ -1829,7 +1861,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (keptBoards.includes(file)) continue
     if (existing === null) {
       if (remove && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
-    } else if (hash(existing) === manifest.files[file] || [script, ...legacyBoards].some(board => isReleased(agent === 'gemini' ? 'gemini' : 'opencode', existing, { board }))) changes.push({ file, action: 'remove' })
+    } else if (ownHash(file, existing) === manifest.files[file] || [script, ...legacyBoards].some(board => isReleased(agent === 'gemini' ? 'gemini' : 'opencode', existing, { board }))) changes.push({ file, action: 'remove' })
     else keptEdited.push(file)
   }
   // A host-directory override must not strand an old active plugin outside the
@@ -1940,7 +1972,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // Hermes asks the person at a terminal, and a chat gateway cannot ask: this adds only the board's own commands to its trust file, on request.
     if (agent !== 'hermes' || conflicts.length || changes.length || readLocal(manifestFile) === null) throw new Error('OWNED_HERMES_INSTALL_REQUIRED')
     const wanted = Object.entries(object(manifest.groups.hooks ?? {})).filter((pair): pair is [string, string] => typeof pair[1] === 'string')
-    const approvals = readAllowlist(initial(allowlistFile))
+    const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
     if (approvals === null) throw new Error('INVALID_HERMES_ALLOWLIST')
     const missing = wanted.filter(([event, command]) => !approvals.list.some(entry => entry.event === event && entry.command === command))
     const isApplied = args.includes('--apply')
@@ -1973,7 +2005,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     let hooksTrusted: boolean | 'unknown' = 'unknown'
     if (agent === 'hermes' && installed) {
-      const approvals = readAllowlist(initial(allowlistFile))
+      const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
       const wanted = Object.entries(object(manifest.groups.hooks ?? {}))
       hooksTrusted = approvals === null ? 'unknown' : wanted.length > 0 && wanted.every(([event, command]) => approvals.list.some(entry => entry.event === event && entry.command === command))
     }

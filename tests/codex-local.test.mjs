@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test as nodeTest } from 'node:test'
@@ -18,6 +18,7 @@ import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { HOOK_INPUT_TIMEOUT, REPORT_TOOL_REPLY, hookBootstrap, hookGuardSource, hookWorker } from '../hooks/hook-safety.ts'
 import { classifierDiagnostic, observeClassifier } from './fixtures/classifier-diagnostic.mjs'
+import { RELEASE_0_20_5 } from './fixtures/released.ts'
 import { assertNativeProbeReturned, nativeProbeDiagnostic } from './fixtures/native-probe-diagnostic.mjs'
 import { withDeniedCreation } from './fixtures/windows-create-denied.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
@@ -2707,6 +2708,460 @@ test('setup still refuses a malformed host config that starts with a BOM', async
       assert.deepEqual(readFileSync(config), original)
       assert.equal(existsSync(f.root), false)
     }
+  })
+})
+
+// #1607: setup refuses a file whose bytes are not valid UTF-8, a lone FF or a Big5 character: it names the file in a conflict
+// and writes nothing, since reading such a file as text turns each of those bytes into EF BF BD. A file is built from text
+// with markers, so no test here depends on how a string is encoded: @FF@ is the byte FF, @B5@ is Big5 for three Chinese
+// characters (none of its second bytes is a backslash). Synthetic data only.
+const bytes1607 = text => Buffer.concat(text.split(/(@FF@|@B5@)/).map(part => part === '@FF@' ? Buffer.of(0xff) : part === '@B5@' ? Buffer.from([0xa4, 0xa4, 0xa4, 0xe5, 0xa4, 0x40]) : Buffer.from(part, 'utf8')))
+const FF1607 = Buffer.of(0xff)
+const hosts1607 = [['codex', null], ...jsonHosts]
+const hostFile1607 = (f, host, relative) => host === 'codex' ? f.hooks : join(f.home, relative)
+const hostEvent1607 = { codex: 'Stop', cursor: 'stop', gemini: 'SessionEnd', grok: 'Stop', muse: 'Stop' }
+const stringsOf1607 = value => Array.isArray(value) ? value.flatMap(stringsOf1607) : value !== null && typeof value === 'object' ? Object.entries(value).flatMap(([key, one]) => [key, ...stringsOf1607(one)]) : typeof value === 'string' ? [value] : []
+const marked1607 = value => stringsOf1607(value).filter(text => /@(FF|B5)@|[^\x00-\x7f]/.test(text))
+const lone1607 = { key: '@B5@', value: '@B5@ @FF@', command: 'echo caf@FF@ @B5@', eventKey: 'Ev@FF@nt' }
+const chinese1607 = { key: '中文', value: '你好 世界', command: 'echo 你好', eventKey: '事件' }
+const personConfig1607 = (host, { key, value, command, eventKey }) => {
+  const group = host === 'cursor' ? { command } : { hooks: [{ type: 'command', command }] }
+  if (host === 'antigravity') return { [key]: value, [eventKey]: { note: command } }
+  if (host === 'openclaw') return { [key]: value, plugins: { entries: { other: { enabled: true, note: command } } } }
+  return { [key]: value, hooks: { [hostEvent1607[host]]: [group], [eventKey]: [group] } }
+}
+// The entries of setup's own that a hook config holds (the person's group says `echo`).
+const boardEntries1607 = (host, buffer) => {
+  const config = JSON.parse(buffer.toString('utf8'))
+  if (host === 'antigravity') return config['agent-board-local'] === undefined ? [] : [config['agent-board-local']]
+  if (host === 'openclaw') return config.plugins.entries['agent-board-local'] === undefined ? [] : [config.plugins.entries['agent-board-local']]
+  return config.hooks[hostEvent1607[host]].filter(entry => !JSON.stringify(entry).includes('echo '))
+}
+// A fixture whose home folder has Chinese characters in its name, built as `fixture` builds its home.
+const chineseFixture1607 = async (fn, name = '使用者家') => {
+  const base = mkdtempSync(join(tmpdir(), 'codex local-'))
+  const home = join(base, name)
+  mkdirSync(home)
+  const root = join(home, '.agent-board')
+  const env = { ...isolatedEnv(home), CODEX_THREAD_ID: session, NO_COLOR: '1' }
+  const isolated = ['--home', home, '--codex-dir', join(home, '.codex'), '--grok-dir', join(home, '.grok'), '--hermes-dir', join(home, '.hermes')]
+  const run = (file, args) => spawnSync(process.execPath, [file, ...args], { env, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+  const script = join(root, 'agent-board.mjs')
+  const f = {
+    home, root, script, env, hooks: join(home, '.codex', 'hooks.json'), skill: join(home, '.agents', 'skills', 'agent-board', 'SKILL.md'),
+    install: (...args) => run(setup, [...isolated, ...args]),
+    command: args => run(script, [...isolated, ...args]),
+    save: (file, data) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, data) },
+  }
+  try { return await fn(f) } finally { rmSync(base, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
+}
+// A refused run: it fails, its conflict names the file, and the file is byte for byte as it was.
+const refusedAt1607 = (file, original, result, when) => {
+  assert.notEqual(result.status, 0, `${when}: ${result.stdout}`)
+  assert.ok(JSON.parse(result.stdout).conflicts.includes(file), `${when}: the conflict names ${file}: ${result.stdout}`)
+  assert.deepEqual(readFileSync(file), original, `${when}: byte for byte`)
+}
+// Every path under a folder with what it holds, to show that a refused run wrote and removed nothing there.
+const tree1607 = dir => Object.fromEntries(readdirSync(dir, { recursive: true }).sort().map(path => {
+  const full = join(dir, path), stat = lstatSync(full)
+  return [path, stat.isSymbolicLink() ? `link ${readlinkSync(full)}` : stat.isDirectory() ? 'folder' : readFileSync(full)]
+}))
+const FFFD1607 = Buffer.from('�', 'utf8')
+// Text as bytes, with each U+FFFD written as the single byte FF.
+const withFF1607 = text => {
+  const bytes = Buffer.from(text, 'utf8'), parts = []
+  let at = 0
+  for (let i = bytes.indexOf(FFFD1607); i >= 0; i = bytes.indexOf(FFFD1607, at)) { parts.push(bytes.subarray(at, i), FF1607); at = i + 3 }
+  return Buffer.concat([...parts, bytes.subarray(at)])
+}
+
+test('a hook config holding a byte that is not valid UTF-8 is refused with a conflict naming it and stays byte for byte, for each JSON host (#1607)', async () => {
+  for (const [host, relative] of hosts1607) {
+    await fixture(f => {
+      const config = hostFile1607(f, host, relative)
+      const original = bytes1607(`${JSON.stringify(personConfig1607(host, lone1607), null, 2)}\n`)
+      f.save(config, original)
+      const preview = f.install('--agent', host)
+      assert.equal(preview.status, 0, `${host}: ${preview.stderr}`)
+      assert.ok(JSON.parse(preview.stdout).conflicts.includes(config), `${host}: preview names the config`)
+      refusedAt1607(config, original, f.install('--agent', host, '--apply', '--json'), `${host} --apply`)
+      assert.equal(existsSync(f.root), false, `${host}: no data folder`)
+    })
+    await fixture(f => {
+      // Removal of an install whose config now holds the byte: it stops and the record stays.
+      const config = hostFile1607(f, host, relative)
+      assert.equal(f.install('--agent', host, '--apply').status, 0, host)
+      const original = bytes1607(`${JSON.stringify(personConfig1607(host, lone1607), null, 2)}\n`)
+      f.save(config, original)
+      const record = readFileSync(join(f.root, `install-${host}.json`))
+      refusedAt1607(config, original, remove774(f, host), `${host} removal`)
+      assert.deepEqual(readFileSync(join(f.root, `install-${host}.json`)), record, `${host}: the record stays`)
+    })
+  }
+})
+
+test('config.yaml and cordis.patch.yml holding a byte that is not valid UTF-8 are refused and stay byte for byte (#1607)', async () => {
+  for (const agent of ['hermes', 'deepseek']) {
+    const where = f => {
+      if (agent === 'deepseek') f.env.DSH_HOME = join(f.home, '.dsh')
+      return agent === 'hermes' ? hermesConfig(f) : join(f.env.DSH_HOME, 'cordis.patch.yml')
+    }
+    await fixture(f => {
+      const file = where(f)
+      const original = bytes1607(agent === 'hermes' ? 'model: synthetic\n# a comment caf@FF@ @B5@\nhooks:\n  pre_tool_call:\n    - {command: "my-guard-@FF@.sh", timeout: 5}\n' : '# mine caf@FF@ @B5@\n- id: another-plugin\n  config:\n    note: x@FF@\n')
+      f.save(file, original)
+      refusedAt1607(file, original, f.install('--agent', agent, '--apply', '--json'), `${agent} --apply`)
+      assert.equal(existsSync(f.root), false, `${agent}: no data folder`)
+    })
+    await fixture(f => {
+      const file = where(f)
+      assert.equal(f.install('--agent', agent, '--apply').status, 0, agent)
+      const original = Buffer.concat([readFileSync(file), bytes1607('# note caf@FF@\n')])
+      f.save(file, original)
+      const record = readFileSync(join(f.root, `install-${agent}.json`))
+      refusedAt1607(file, original, remove774(f, agent), `${agent} removal`)
+      assert.deepEqual(readFileSync(join(f.root, `install-${agent}.json`)), record, `${agent}: the record stays`)
+    })
+  }
+})
+
+test('removing Codex with a config.toml holding a byte that is not valid UTF-8, plain or linked, is refused and the file stays (#1607)', async () => {
+  for (const isLinked of [false, true]) await fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const toml = join(f.home, '.codex', 'config.toml')
+    const original = bytes1607(`# mine caf@FF@ @B5@\nmodel = "x"\n${trustTable774(trustKey774(f, 'SessionStart'))}${trustTable774(trustKey774(f, 'Stop'))}\n[after]\nk = "@FF@"\n`)
+    let target = toml
+    if (isLinked) {
+      target = join(f.home, 'linked-config.toml')
+      f.save(target, original)
+      // Only Windows without the right to make a link skips this leg; anywhere else a failure to make it fails the test.
+      try { symlinkSync(target, toml, 'file') } catch (error) {
+        if (process.platform === 'win32' && error.code === 'EPERM') return
+        throw error
+      }
+    } else f.save(toml, original)
+    const home = tree1607(f.home)
+    const removed = remove774(f, 'codex')
+    const when = isLinked ? 'linked' : 'plain'
+    assert.notEqual(removed.status, 0, `${when}: ${removed.stdout}`)
+    assert.ok(JSON.parse(removed.stdout).conflicts.includes(toml), `${when}: names config.toml: ${removed.stdout}`)
+    assert.deepEqual(readFileSync(target), original, `${when}: the config.toml bytes stay`)
+    // The board script, the hook runner, the skill, the hook config and the record included: nothing under the home changes.
+    assert.deepEqual(tree1607(f.home), home, `${when}: nothing is removed or written`)
+  })
+})
+
+test('an allowlist holding a byte that is not valid UTF-8 is refused by hermes trust and removal and stays (#1607)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+  const foreign = { approvals: [{ approved_at: '2026-01-01T00:00:00Z', command: 'my-guard-@FF@.sh', event: 'pre_tool_call', script_mtime_at_approval: null }] }
+  const original = bytes1607(JSON.stringify(foreign, null, 2))
+  f.save(hermesAllowlist(f), original)
+  const config = readFileSync(hermesConfig(f))
+  const record = readFileSync(join(f.root, 'install-hermes.json'))
+  const trusted = f.command(['--hermes-trust', '--apply'])
+  assert.notEqual(trusted.status, 0)
+  assert.match(trusted.stderr, /INVALID_HERMES_ALLOWLIST/)
+  assert.deepEqual(readFileSync(hermesAllowlist(f)), original, 'hermes trust leaves the file')
+  refusedAt1607(hermesAllowlist(f), original, remove774(f, 'hermes'), 'removal')
+  assert.deepEqual(readFileSync(hermesConfig(f)), config, 'nothing else is removed')
+  assert.deepEqual(readFileSync(join(f.root, 'install-hermes.json')), record, 'the record stays')
+}))
+
+test('another agent\'s install record holding a byte that is not valid UTF-8 stops setup before any write, on a shared update and on a removal handover (#1607)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  // An older shared board script both records name, so a codex setup would update it and Cursor's record with it. The
+  // removal runs through the setup script, since the shared board script is the old stand-in now.
+  const old = '// an older board script\n'
+  f.save(f.script, old)
+  for (const agent of ['codex', 'cursor']) {
+    const record = recordOf(f, agent)
+    record.files[f.script] = digest(old)
+    saveRecord(f, agent, record)
+  }
+  const sibling = join(f.root, 'install-cursor.json')
+  const kept = bytes1607(readFileSync(sibling, 'utf8').replace(/^\{\n/, '{\n  "note": "caf@FF@\\/x",\n'))
+  f.save(sibling, kept)
+  const home = tree1607(f.home)
+  // Each command is checked before the next one runs.
+  for (const [when, run] of [['--apply', () => f.install('--agent', 'codex', '--apply')], ['removal', () => f.install('--remove', '--agent', 'codex', '--apply')]]) {
+    const result = run()
+    assert.notEqual(result.status, 0, `${when}: ${result.stdout}`)
+    assert.match(result.stderr, /install-cursor\.json/, `${when}: names the record`)
+    assert.deepEqual(readFileSync(sibling), kept, `${when}: Cursor's record stays byte for byte`)
+    assert.equal(readFileSync(f.script, 'utf8'), old, `${when}: the shared script is not touched`)
+    // Both records, the shared script, the hook config and every other file: nothing under the home is written.
+    assert.deepEqual(tree1607(f.home), home, `${when}: nothing under the home changes`)
+  }
+}))
+
+test('another agent\'s install record holding a byte that is not valid UTF-8 does not stop a report, as on main (#1607)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  assert.equal(f.install('--agent', 'cursor', '--apply').status, 0)
+  const sibling = join(f.root, 'install-cursor.json')
+  f.save(sibling, bytes1607(readFileSync(sibling, 'utf8').replace(/^\{\n/, '{\n  "note": "caf@FF@",\n')))
+  const reported = f.report('working', ['- [~] Reported past the record'])
+  assert.equal(reported.status, 0, reported.stderr)
+  assert.match(readFileSync(f.progress, 'utf8'), /Reported past the record/)
+}))
+
+test('a released board whose settings line holds a byte that is not valid UTF-8 is named as a conflict and stays byte for byte (#1607)', () => chineseFixture1607(f => {
+  // The progress path holds U+FFFD and the person's board holds FF there: read as UTF-8, it is a released board for this
+  // install, which setup would replace.
+  const head = withFF1607(`globalThis.AGENT_BOARD = ${JSON.stringify({ path: join(f.root, 'progress.md'), lang: 'en' })}\n`)
+  const original = Buffer.concat([head, Buffer.from(RELEASE_0_20_5.board, 'utf8')])
+  f.save(f.script, original)
+  const preview = f.install('--agent', 'codex')
+  assert.equal(preview.status, 0, preview.stderr)
+  assert.ok(JSON.parse(preview.stdout).conflicts.includes(f.script), `preview names the board: ${preview.stdout}`)
+  refusedAt1607(f.script, original, f.install('--agent', 'codex', '--apply', '--json'), '--apply')
+}, 'home �'))
+
+test('a pending list whose .new path holds a byte that is not valid UTF-8 is not taken as setup\'s, by --apply or removal, and stays byte for byte (#1607)', async () => {
+  // The home folder's name holds U+FFFD and the list holds FF there: read as UTF-8, it names setup's own .new copy of the skill.
+  const listed = f => {
+    const file = join(f.root, 'install-pending-codex.json')
+    const original = withFF1607(`${JSON.stringify({ [`${f.skill}.new`]: ['0'.repeat(64)] }, null, 2)}\n`)
+    f.save(file, original)
+    return [file, original]
+  }
+  await chineseFixture1607(f => {
+    const [file, original] = listed(f)
+    const applied = f.install('--agent', 'codex', '--apply')
+    assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+    assert.deepEqual(readFileSync(file), original, '--apply leaves the list')
+  }, 'home �')
+  await chineseFixture1607(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const [file, original] = listed(f)
+    const removed = remove774(f, 'codex')
+    assert.equal(removed.status, 0, removed.stderr + removed.stdout)
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), false, 'the install is removed')
+    assert.deepEqual(readFileSync(file), original, 'removal leaves the list')
+  }, 'home �')
+})
+
+test('a record written before #1607 for a config holding a lone FF byte: setup refuses and the record stays (#1607)', () => fixture(f => {
+  const person = { hooks: [{ type: 'command', command: 'echo caf@FF@' }] }
+  f.save(f.hooks, `${JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo cafe' }] }] } }, null, 2)}\n`)
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  // The hash main wrote for the person's group: the FF read as U+FFFD. Setup's own group is gone from the config.
+  const record = recordOf(f, 'codex')
+  record.foreignGroups.Stop = [digest(JSON.stringify({ hooks: [{ type: 'command', command: 'echo caf�' }] }))]
+  saveRecord(f, 'codex', record)
+  const original = bytes1607(`${JSON.stringify({ hooks: { Stop: [person] } }, null, 2)}\n`)
+  f.save(f.hooks, original)
+  const recorded = readFileSync(join(f.root, 'install-codex.json'))
+  refusedAt1607(f.hooks, original, f.install('--agent', 'codex', '--apply', '--json'), '--apply')
+  assert.deepEqual(readFileSync(join(f.root, 'install-codex.json')), recorded, 'the record stays')
+}))
+
+test('a file that only decodes like the recorded one is not taken as a file setup wrote (#1607)', async () => {
+  // The record holds the hash of a skill with EF BF BD in it, and the file on disk holds FF there instead.
+  const staged = check => fixture(f => {
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const wanted = readFileSync(f.skill)
+    const recorded = Buffer.from('synthetic skill \uFFFD end\n')
+    f.save(f.skill, recorded)
+    const record = recordOf(f, 'codex')
+    record.files[f.skill] = digest(recorded)
+    saveRecord(f, 'codex', record)
+    const edited = bytes1607('synthetic skill @FF@ end\n')
+    f.save(f.skill, edited)
+    return check(f, edited, wanted)
+  })
+  await staged((f, edited, wanted) => {
+    const applied = f.install('--agent', 'codex', '--apply')
+    assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+    assert.deepEqual(readFileSync(f.skill), edited, '--apply keeps the file')
+    assert.deepEqual(readFileSync(`${f.skill}.new`), wanted, 'and puts a .new copy beside it')
+  })
+  await staged((f, edited) => {
+    const removed = remove774(f, 'codex')
+    assert.notEqual(removed.status, 0, removed.stdout)
+    assert.deepEqual(readFileSync(f.skill), edited, 'removal keeps the file')
+    assert.ok(JSON.parse(removed.stdout).conflicts.includes(f.skill), removed.stdout)
+  })
+})
+
+test('a valid hook config holding a private-use character of U+10FE80 to U+10FEFF, as text before \\/ and as a \\u escape, comes through setup as on main (#1607)', () => fixture(f => {
+  f.save(f.hooks, `{\n  "hooks": {\n    "Stop": [\n      { "hooks": [{ "type": "command", "command": "echo \u{10FEFF}\\/ \\udbff\\udeff" }] }\n    ]\n  }\n}\n`)
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(JSON.parse(applied.stdout).conflicts, [])
+  const now = readFileSync(f.hooks)
+  // As on main: the file is valid UTF-8, the escape is written as the character, and no byte FF appears.
+  assert.equal(Buffer.from(now.toString('utf8'), 'utf8').equals(now), true)
+  assert.equal(now.includes(FF1607), false)
+  assert.ok(JSON.parse(now.toString('utf8')).hooks.Stop.some(group => group.hooks?.[0]?.command === 'echo \u{10FEFF}/ \u{10FEFF}'))
+}))
+
+test('a home folder whose name holds a private-use character of U+10FE80 to U+10FEFF: setup writes it as valid UTF-8 (#1607)', () => chineseFixture1607(f => {
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  const now = readFileSync(f.hooks)
+  assert.equal(Buffer.from(now.toString('utf8'), 'utf8').equals(now), true)
+  assert.equal(now.includes(FF1607), false)
+  assert.ok(now.includes(Buffer.from('\u{10FEFF}', 'utf8')), 'setup\'s command names the folder')
+}, 'home \u{10FEFF}'))
+
+test('a hook config where a byte that is not valid UTF-8 comes right before \\/ or \\u is refused as unreadable and stays byte for byte (#1607)', async () => {
+  for (const original of [bytes1607('{"other":"a@FF@\\/b","hooks":{}}'), bytes1607('{"other":"a@FF@\\u0041","hooks":{}}')]) await fixture(f => {
+    f.save(f.hooks, original)
+    const preview = f.install('--agent', 'codex')
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.deepEqual(JSON.parse(preview.stdout).conflicts.filter(one => one.startsWith(f.hooks)), [f.hooks], original.toString('latin1'))
+    const applied = f.install('--agent', 'codex', '--apply')
+    assert.notEqual(applied.status, 0, original.toString('latin1'))
+    assert.deepEqual(JSON.parse(applied.stdout).conflicts.filter(one => one.startsWith(f.hooks)), [f.hooks])
+    assert.deepEqual(readFileSync(f.hooks), original)
+    assert.equal(existsSync(f.root), false)
+  })
+  for (const original of [bytes1607('{"approvals":[{"command":"@FF@\\u0041","event":"pre_tool_call"}]}'), bytes1607('{"approvals":[{"command":"@FF@\\/x","event":"pre_tool_call"}]}')]) await fixture(f => {
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    f.save(hermesAllowlist(f), original)
+    const trusted = f.command(['--hermes-trust', '--apply'])
+    assert.notEqual(trusted.status, 0, original.toString('latin1'))
+    assert.match(trusted.stderr, /INVALID_HERMES_ALLOWLIST/)
+    assert.deepEqual(readFileSync(hermesAllowlist(f)), original, original.toString('latin1'))
+  })
+})
+
+test('valid UTF-8 Chinese text in the person\'s files and a home folder with Chinese characters come through setup, a second --apply, hermes trust and removal as before (#1607)', async () => {
+  for (const [host, relative] of hosts1607) await chineseFixture1607(f => {
+    const config = hostFile1607(f, host, relative)
+    const person = personConfig1607(host, chinese1607)
+    f.save(config, Buffer.from(`${JSON.stringify(person, null, 2)}\n`))
+    const runs = marked1607(person).map(text => Buffer.from(text))
+    const isKept = (buffer, when) => {
+      for (const run of runs) assert.ok(buffer.includes(run), `${host} ${when}: ${run.toString()}`)
+      assert.equal(buffer.toString('utf8').includes('\\u4f60'), false, `${host} ${when}: no \\u escape`)
+    }
+    const applied = f.install('--agent', host, '--apply')
+    assert.equal(applied.status, 0, `${host}: ${applied.stderr}${applied.stdout}`)
+    const installed = readFileSync(config)
+    isKept(installed, 'after --apply')
+    assert.ok(boardEntries1607(host, installed).length > 0, host)
+    const record = readFileSync(join(f.root, `install-${host}.json`))
+    const again = f.install('--agent', host, '--apply')
+    assert.equal(again.status, 0, `${host}: ${again.stderr}`)
+    assert.deepEqual(JSON.parse(again.stdout).changes, [], host)
+    assert.deepEqual(readFileSync(config), installed, host)
+    assert.deepEqual(readFileSync(join(f.root, `install-${host}.json`)), record, host)
+    const removed = f.command(['--codex-remove', '--agent', host, '--apply'])
+    assert.equal(removed.status, 0, `${host}: ${removed.stderr}`)
+    isKept(readFileSync(config), 'after removal')
+    assert.deepEqual(boardEntries1607(host, readFileSync(config)), [], host)
+  })
+  await chineseFixture1607(f => {
+    // Hermes: config.yaml with Chinese text, then the board's approvals once each, then removal.
+    const original = '# 備註 你好\nmodel: 模型\nhooks:\n  pre_tool_call:\n    - {command: "my-guard.sh", timeout: 5}\n'
+    f.save(hermesConfig(f), original)
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    const installed = readFileSync(hermesConfig(f), 'utf8')
+    assert.ok(installed.startsWith('# 備註 你好\nmodel: 模型\n'))
+    const again = f.install('--agent', 'hermes', '--apply')
+    assert.deepEqual(JSON.parse(again.stdout).changes, [])
+    assert.equal(readFileSync(hermesConfig(f), 'utf8'), installed)
+    const foreign = { approvals: [{ approved_at: '2026-01-01T00:00:00Z', command: 'C:/使用者/my-guard.sh', event: 'pre_tool_call', script_mtime_at_approval: null }] }
+    f.save(hermesAllowlist(f), JSON.stringify(foreign, null, 2))
+    const trusted = f.command(['--hermes-trust', '--apply', '--json'])
+    assert.equal(trusted.status, 0, trusted.stderr)
+    const list = readFileSync(hermesAllowlist(f))
+    assert.ok(list.every(byte => byte < 0x80), 'the allowlist stays ASCII')
+    assert.ok(list.toString('utf8').includes('\\u4f7f'), 'Chinese text is written as \\u escapes')
+    const approvals = JSON.parse(list.toString('utf8')).approvals
+    for (const event of hermesEvents) assert.equal(approvals.filter(entry => entry.event === event).length, 1, event)
+    assert.equal(JSON.parse(f.command(['--hermes-trust', '--apply', '--json']).stdout).changes, 0)
+    assert.deepEqual(readFileSync(hermesAllowlist(f)), list)
+    const removed = remove774(f, 'hermes')
+    assert.equal(removed.status, 0, removed.stderr)
+    assert.equal(readFileSync(hermesConfig(f), 'utf8'), original)
+    assert.deepEqual(JSON.parse(readFileSync(hermesAllowlist(f), 'utf8')), foreign)
+  })
+  await chineseFixture1607(f => {
+    // Codex: the board's trust tables are found under that home and removed, the person's Chinese comment stays.
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    const toml = join(f.home, '.codex', 'config.toml')
+    const retained = '# 備註 我的\nnote = "你好"\n'
+    f.save(toml, retained + trustTable774(trustKey774(f, 'SessionStart')))
+    assert.equal(remove774(f, 'codex').status, 0)
+    assert.equal(readFileSync(toml, 'utf8'), retained)
+  })
+  await chineseFixture1607(f => {
+    f.env.DSH_HOME = join(f.home, '.dsh')
+    const file = join(f.env.DSH_HOME, 'cordis.patch.yml')
+    const other = '# 個人設定 你好\n- id: another-plugin\n  config:\n    note: 你好\n'
+    f.save(file, other)
+    assert.equal(f.install('--agent', 'deepseek', '--apply').status, 0)
+    assert.ok(readFileSync(file, 'utf8').startsWith(other))
+    assert.equal(f.command(['--codex-remove', '--agent', 'deepseek', '--apply']).status, 0)
+    assert.equal(readFileSync(file, 'utf8'), other)
+  })
+})
+
+test('a skill file the person saved in Big5 stays byte for byte and gets a .new copy beside it (#1607)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+  const wanted = readFileSync(f.skill)
+  const edited = bytes1607('# my notes @B5@\n')
+  f.save(f.skill, edited)
+  const applied = f.install('--agent', 'codex', '--apply')
+  assert.equal(applied.status, 0, applied.stderr + applied.stdout)
+  assert.deepEqual(readFileSync(f.skill), edited)
+  assert.deepEqual(readFileSync(`${f.skill}.new`), wanted)
+}))
+
+test('files setup cannot read or take as its own stay byte for byte (#1607)', async () => {
+  const unreadable = [
+    ['a Big5 character whose second byte is a backslash before a closing quote', Buffer.concat([Buffer.from('{"other":"'), Buffer.of(0xb3, 0x5c), Buffer.from('","hooks":{}}')])],
+    ['a byte that is not valid UTF-8 outside any string', Buffer.concat([Buffer.from('{"hooks":'), FF1607, Buffer.from('{}}')])],
+    ['UTF-16', Buffer.from('﻿{"hooks":{}}', 'utf16le')],
+  ]
+  for (const [host, relative] of hosts1607) for (const [what, content] of unreadable) await fixture(f => {
+    const config = hostFile1607(f, host, relative)
+    f.save(config, content)
+    const preview = f.install('--agent', host)
+    assert.equal(preview.status, 0, `${host} ${what}: ${preview.stderr}`)
+    assert.ok(JSON.parse(preview.stdout).conflicts.includes(config), `${host} ${what}`)
+    const applied = f.install('--agent', host, '--apply')
+    assert.notEqual(applied.status, 0, `${host} ${what}`)
+    assert.ok(JSON.parse(applied.stdout).conflicts.includes(config), `${host} ${what}`)
+    assert.deepEqual(readFileSync(config), content, `${host} ${what}: the bytes stay`)
+    assert.equal(existsSync(f.root), false, `${host} ${what}`)
+  })
+  await fixture(f => {
+    // Removal of an agent whose config became unreadable leaves it, and the record.
+    assert.equal(f.install('--agent', 'codex', '--apply').status, 0)
+    f.save(f.hooks, unreadable[0][1])
+    const removed = f.command(['--codex-remove', '--agent', 'codex', '--apply', '--json'])
+    assert.notEqual(removed.status, 0)
+    assert.ok(JSON.parse(removed.stdout).conflicts.includes(f.hooks))
+    assert.deepEqual(readFileSync(f.hooks), unreadable[0][1])
+    assert.equal(existsSync(join(f.root, 'install-codex.json')), true)
+  })
+  await fixture(f => {
+    const original = Buffer.from('﻿model: x\nhooks:\n', 'utf16le')
+    f.save(hermesConfig(f), original)
+    const preview = f.install('--agent', 'hermes')
+    assert.equal(preview.status, 0, preview.stderr)
+    assert.deepEqual(JSON.parse(preview.stdout).conflicts, [hermesConfig(f)])
+    const applied = f.install('--agent', 'hermes', '--apply')
+    assert.notEqual(applied.status, 0)
+    assert.deepEqual(readFileSync(hermesConfig(f)), original)
+    assert.equal(existsSync(f.root), false)
+  })
+  await fixture(f => {
+    assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
+    const original = Buffer.from('not json at all\n')
+    f.save(hermesAllowlist(f), original)
+    const trusted = f.command(['--hermes-trust', '--apply'])
+    assert.notEqual(trusted.status, 0)
+    assert.match(trusted.stderr, /INVALID_HERMES_ALLOWLIST/)
+    assert.deepEqual(readFileSync(hermesAllowlist(f)), original)
+    const removed = remove774(f, 'hermes')
+    assert.equal(removed.status, 0, removed.stderr)
+    assert.deepEqual(readFileSync(hermesAllowlist(f)), original, 'removal leaves the allowlist')
+    assert.equal(existsSync(join(f.root, 'install-hermes.json')), false, 'and goes on with the rest')
   })
 })
 
